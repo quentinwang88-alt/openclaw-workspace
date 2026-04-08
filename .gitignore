@@ -1,0 +1,114 @@
+# =========================
+# 环境变量与敏感配置
+# =========================
+.env
+.env.local
+.env.*.local
+!.env.example
+**/config/api_config.json
+**/config/api_config.backup*.json
+**/config/alert_config.json
+**/config/*secret*.json
+**/config/*token*.json
+**/secrets/
+**/secret/
+**/tokens/
+test_api_connectivity.py
+
+# =========================
+# Python / Node / tooling
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+venv/
+env/
+ENV/
+node_modules/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# =========================
+# IDE / editor
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# =========================
+# 系统文件
+# =========================
+.DS_Store
+Thumbs.db
+*.bak
+
+# =========================
+# 本机状态 / OpenClaw 运行态
+# =========================
+.openclaw/
+memory/*.md
+!memory/.gitkeep
+MEMORY.md
+notes/
+
+# =========================
+# 日志、缓存、输出、临时目录
+# =========================
+*.log
+*.tmp
+cache/
+logs/
+output/
+screenshots/
+shared_data/
+skills/output/
+skills/**/cache/
+skills/**/logs/
+skills/**/output/
+skills/**/temp/
+skills/**/tmp/
+
+# =========================
+# 数据库 / 本地数据
+# =========================
+*.db
+*.sqlite
+*.sqlite3
+skills/**/data/
+!skills/**/data/.gitkeep
+
+# =========================
+# 本机下载 / 上传 / 中间文件
+# =========================
+downloads/
+uploads/
+
+# =========================
+# 自动生成报告与历史产物
+# =========================
+*数据分析报告*.md
+*商业洞察报告*.md
+*新品洞察报告*.md
+*销售分析报告*.md
+*补货建议*.md

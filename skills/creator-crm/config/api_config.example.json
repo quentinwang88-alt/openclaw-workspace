@@ -1,0 +1,36 @@
+{
+  "kalodata": {
+    "cookie": "请在这里填入你的完整 Cookie",
+    "api_url": "https://www.kalodata.com/creator/detail/video/queryList",
+    "headers": {
+      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      "Accept": "application/json, text/plain, */*",
+      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+      "Content-Type": "application/json",
+      "Origin": "https://www.kalodata.com",
+      "Referer": "https://www.kalodata.com/creator/detail",
+      "country": "TH",
+      "currency": "CNY",
+      "language": "zh-CN"
+    },
+    "comment": "Cookie 示例格式（请替换为你的实际 Cookie）：page_session=xxx; SESSION=xxx; tc=baidu01; ..."
+  },
+  "feishu": {
+    "app_token": "YOUR_FEISHU_APP_TOKEN",
+    "table_id": "YOUR_FEISHU_TABLE_ID",
+    "field_mapping": {
+      "tk_handle": ["tk_handle", "TikTok账号", "账号"],
+      "tk_url": ["tk_url", "TikTok链接", "主页链接"],
+      "kalodata_url": ["kalodata_url", "Kalodata链接"],
+      "video_screenshots": ["视频截图", "宫格图"]
+    }
+  },
+  "processing": {
+    "max_videos": 48,
+    "date_range_days": [30, 90],
+    "grid_count": 3,
+    "videos_per_grid": 18,
+    "cell_size": [300, 400],
+    "show_stats": true
+  }
+}
