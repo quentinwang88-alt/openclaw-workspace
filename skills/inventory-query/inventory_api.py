@@ -269,6 +269,7 @@ class InventoryAPI:
                     return {
                         "sku": sku,
                         "error": "未找到数据",
+                        "error_type": "no_match",
                         "available": 0,
                         "timestamp": datetime.now().isoformat()
                     }
@@ -343,6 +344,7 @@ class InventoryAPI:
                     return {
                         "sku": sku,
                         "error": "未找到数据",
+                        "error_type": "no_match",
                         "available": 0,
                         "timestamp": datetime.now().isoformat()
                     }
