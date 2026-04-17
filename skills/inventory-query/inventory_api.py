@@ -38,6 +38,7 @@ class InventoryAPI:
         """
         self.profile_manager = InventoryProfileManager(Path(__file__).parent / "config")
         self.profile = profile
+        self.alias_map = self._load_alias_map()
         if config_path is None:
             config_path = self.profile_manager.get_config_path(profile)
         
@@ -52,6 +53,17 @@ class InventoryAPI:
         if auto_refresh_token:
             self._check_and_refresh_token()
     
+    def _load_alias_map(self) -> dict:
+        """加载前台展示名到实际 SKU 的别名映射"""
+        alias_path = Path(__file__).parent / 'title_sku_aliases.json'
+        if not alias_path.exists():
+            return {}
+        try:
+            with open(alias_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
     def _load_config(self, config_path: Path) -> dict:
         """加载配置文件"""
         if not config_path.exists():
@@ -148,66 +160,32 @@ class InventoryAPI:
         api_config = self.config['api']
         url = api_config['base_url'] + api_config['endpoints']['query']
         
-        # 分页查询，直到找到匹配的 SKU
-        for page_no in range(1, max_pages + 1):
-            self._apply_rate_limit()
-            
-            try:
-                # 准备请求参数
-                if api_config['method'].upper() == 'POST':
-                    payload = self._build_payload(sku, country, page_no=page_no)
-                    # 根据 Content-Type 决定使用 json 还是 data
-                    content_type = api_config['headers'].get('content-type', 'application/json')
-                    if 'application/x-www-form-urlencoded' in content_type:
-                        response = self.session.post(url, data=payload, timeout=self.timeout)
-                    else:
-                        response = self.session.post(url, json=payload, timeout=self.timeout)
-                else:
-                    params = self._build_params(sku, country, page_no=page_no)
-                    response = self.session.get(url, params=params, timeout=self.timeout)
-                
-                response.raise_for_status()
-                response_data = response.json()
-                
-                # 检查是否是认证错误（401006）
-                if response_data.get('code') == 401006:
-                    return {
-                        "sku": sku,
-                        "error": "Token 已过期（错误代码：401006）",
-                        "error_type": "auth_error",
-                        "suggestion": "请运行: python token_manager.py refresh",
-                        "available": 0,
-                        "timestamp": datetime.now().isoformat()
-                    }
-                
-                result = self._parse_response(response_data, sku, fuzzy=fuzzy, match_field='sku')
-            
-            except requests.exceptions.HTTPError as e:
-                # HTTP 错误，可能是认证问题
-                if e.response.status_code == 401:
-                    return {
-                        "sku": sku,
-                        "error": "认证失败，Token 可能已过期",
-                        "error_type": "auth_error",
-                        "suggestion": "请运行: python token_manager.py refresh",
-                        "available": 0,
-                        "timestamp": datetime.now().isoformat()
-                    }
-                raise
-            
-            # 如果找到匹配或出错，直接返回
-            if 'error' not in result or 'no_match' not in result.get('error_type', ''):
-                return result
-            
-            # 如果 sku 字段没查到，最后一页时回退按 title 字段再查一次
-            if page_no == max_pages:
-                title_result = self._query_by_title(sku, country, fuzzy=fuzzy, max_pages=max_pages)
-                if 'error' not in title_result:
-                    title_result['fallback_used'] = True
-                    title_result['query_input'] = sku
-                    return title_result
-                result['error'] = f"未找到匹配的 SKU 或前台名称（已搜索 {max_pages * 50} 条记录）"
-                return result
+        # 先按系统库存编码 sku 查询
+        primary_result = self._query_by_field(sku, country, fuzzy=fuzzy, max_pages=max_pages, match_field='sku')
+        if 'error' not in primary_result or primary_result.get('error_type') != 'no_match':
+            return primary_result
+
+        # 如果存在本地别名映射，优先用映射后的真实 SKU 再查一次
+        alias_sku = self.alias_map.get(sku)
+        if alias_sku and alias_sku != sku:
+            alias_result = self._query_by_field(alias_sku, country, fuzzy=False, max_pages=max_pages, match_field='sku')
+            if 'error' not in alias_result:
+                alias_result['fallback_used'] = True
+                alias_result['fallback_type'] = 'alias_map'
+                alias_result['query_input'] = sku
+                alias_result['alias_sku'] = alias_sku
+                return alias_result
+
+        # 如果按 sku 没查到，再回退按前台展示名称 title 查询
+        title_result = self._query_by_title(sku, country, fuzzy=fuzzy, max_pages=max_pages)
+        if 'error' not in title_result:
+            title_result['fallback_used'] = True
+            title_result['fallback_type'] = 'title_query'
+            title_result['query_input'] = sku
+            return title_result
+
+        primary_result['error'] = f"未找到匹配的 SKU、别名映射或前台名称（已搜索 {max_pages * 50} 条记录）"
+        return primary_result
         
         # 默认返回未找到
         return {
@@ -411,8 +389,8 @@ class InventoryAPI:
         
         return value
     
-    def _query_by_title(self, sku: str, country: Optional[str] = None, fuzzy: bool = True, max_pages: int = 10) -> dict:
-        """按前台展示名称 title 回退查询"""
+    def _query_by_field(self, keyword: str, country: Optional[str] = None, fuzzy: bool = True, max_pages: int = 10, match_field: str = 'sku') -> dict:
+        """按指定字段查询。注意：后端接口会先按传入关键词过滤结果。"""
         if not country:
             country = self.config.get('default_country', 'thailand')
 
@@ -423,36 +401,66 @@ class InventoryAPI:
             self._apply_rate_limit()
             try:
                 if api_config['method'].upper() == 'POST':
-                    payload = self._build_payload(sku, country, page_no=page_no)
+                    payload = self._build_payload(keyword, country, page_no=page_no)
                     content_type = api_config['headers'].get('content-type', 'application/json')
                     if 'application/x-www-form-urlencoded' in content_type:
                         response = self.session.post(url, data=payload, timeout=self.timeout)
                     else:
                         response = self.session.post(url, json=payload, timeout=self.timeout)
                 else:
-                    params = self._build_params(sku, country, page_no=page_no)
+                    params = self._build_params(keyword, country, page_no=page_no)
                     response = self.session.get(url, params=params, timeout=self.timeout)
 
                 response.raise_for_status()
                 response_data = response.json()
-                result = self._parse_response(response_data, sku, fuzzy=fuzzy, match_field='title')
+
+                if response_data.get('code') == 401006:
+                    return {
+                        "sku": keyword,
+                        "error": "Token 已过期（错误代码：401006）",
+                        "error_type": "auth_error",
+                        "suggestion": "请运行: python token_manager.py refresh",
+                        "available": 0,
+                        "timestamp": datetime.now().isoformat()
+                    }
+
+                result = self._parse_response(response_data, keyword, fuzzy=fuzzy, match_field=match_field)
                 if 'error' not in result or 'no_match' not in result.get('error_type', ''):
                     return result
+
+                if page_no == max_pages:
+                    return result
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 401:
+                    return {
+                        "sku": keyword,
+                        "error": "认证失败，Token 可能已过期",
+                        "error_type": "auth_error",
+                        "suggestion": "请运行: python token_manager.py refresh",
+                        "available": 0,
+                        "timestamp": datetime.now().isoformat()
+                    }
+                raise
             except Exception as e:
+                label = '前台名称' if match_field == 'title' else 'SKU'
                 return {
-                    "sku": sku,
-                    "error": f"按前台名称回退查询失败: {e}",
+                    "sku": keyword,
+                    "error": f"按{label}查询失败: {e}",
                     "available": 0,
                     "timestamp": datetime.now().isoformat()
                 }
 
         return {
-            "sku": sku,
-            "error": "按前台名称未找到匹配数据",
+            "sku": keyword,
+            "error": f"按字段 {match_field} 未找到匹配数据",
             "error_type": "no_match",
             "available": 0,
             "timestamp": datetime.now().isoformat()
         }
+
+    def _query_by_title(self, sku: str, country: Optional[str] = None, fuzzy: bool = True, max_pages: int = 10) -> dict:
+        """按前台展示名称 title 回退查询"""
+        return self._query_by_field(sku, country=country, fuzzy=fuzzy, max_pages=max_pages, match_field='title')
 
     def query_multiple(self, sku_list: List[str], country: Optional[str] = None, fuzzy: bool = True) -> Dict[str, dict]:
         """

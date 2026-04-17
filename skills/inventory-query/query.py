@@ -54,7 +54,11 @@ def main():
                 print(f"  🔁 匹配方式: 前台名称回退匹配")
             if data.get('fallback_used'):
                 print(f"  🔎 原始查询: {data.get('query_input', sku)}")
-                print(f"  🔗 实际库存编码: {data.get('sku', sku)}")
+                if data.get('fallback_type') == 'alias_map':
+                    print(f"  🗂️ 回退方式: 本地别名映射")
+                    print(f"  🔗 映射库存编码: {data.get('alias_sku', data.get('sku', sku))}")
+                else:
+                    print(f"  🔗 实际库存编码: {data.get('sku', sku)}")
             if 'matched_count' in data and data['matched_count'] > 1:
                 print(f"  🔍 匹配了 {data['matched_count']} 个 SKU:")
                 for matched_sku in data.get('matched_skus', []):
