@@ -145,20 +145,39 @@ def now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def build_prompt_with_anchor(task: ScriptSyncTask) -> str:
-    anchor_lines: List[str] = []
-    if task.product_type:
-        anchor_lines.append(f"产品类型：{task.product_type}")
-    if task.business_category:
-        anchor_lines.append(f"一级类目：{task.business_category}")
-    if task.product_params:
-        anchor_lines.append(f"产品参数信息：{task.product_params}")
+def compact_anchor_text(raw_value: Any, max_length: int = 80) -> str:
+    text = normalize_text(raw_value)
+    if not text:
+        return ""
 
-    if not anchor_lines:
+    text = text.replace("\r", "\n")
+    segments = [segment.strip() for segment in text.splitlines() if segment.strip()]
+    text = "；".join(segments) if segments else text
+    text = " ".join(text.split())
+    if len(text) <= max_length:
+        return text
+    return text[: max_length - 1].rstrip("，,；;、 ") + "…"
+
+
+def build_prompt_with_anchor(task: ScriptSyncTask) -> str:
+    anchor_parts: List[str] = []
+    product_type = compact_anchor_text(task.product_type, max_length=24)
+    business_category = compact_anchor_text(task.business_category, max_length=16)
+    product_params = compact_anchor_text(task.product_params, max_length=80)
+
+    if product_type:
+        anchor_parts.append(product_type)
+    elif business_category:
+        anchor_parts.append(business_category)
+
+    if product_params:
+        anchor_parts.append(product_params)
+
+    if not anchor_parts:
         return task.prompt_text
 
-    anchor_block = "\n".join(anchor_lines)
-    return f"【产品锚点】\n{anchor_block}\n\n【脚本内容】\n{task.prompt_text}"
+    anchor_text = "｜".join(anchor_parts)
+    return f"产品锚点：{anchor_text}\n{task.prompt_text}"
 
 
 DEFAULT_DIRECTION_LABELS = {

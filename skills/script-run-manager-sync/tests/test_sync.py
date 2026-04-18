@@ -8,6 +8,7 @@ from core.sync import (
     SOURCE_FIELD_ALIASES,
     SCRIPT_FIELD_SPECS,
     TARGET_FIELD_ALIASES,
+    compact_anchor_text,
     build_prompt_with_anchor,
     build_target_fields,
     build_source_failure_fields,
@@ -121,11 +122,8 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
         fields = build_target_fields(tasks[0], self.target_mapping)
 
         self.assertEqual(fields["任务名"], "ABC001.S1")
-        self.assertIn("【产品锚点】", fields["提示词"])
-        self.assertIn("产品类型：手镯", fields["提示词"])
-        self.assertIn("一级类目：配饰", fields["提示词"])
-        self.assertIn("产品参数信息：细手圈，内径约56mm，圈宽2mm，开口可微调", fields["提示词"])
-        self.assertIn("【脚本内容】\nscript one", fields["提示词"])
+        self.assertTrue(fields["提示词"].startswith("产品锚点：手镯｜细手圈，内径约56mm，圈宽2mm，开口可微调\n"))
+        self.assertTrue(fields["提示词"].endswith("script one"))
         self.assertEqual(fields["脚本ID"], "003_M1_M")
 
     def test_build_prompt_with_anchor_falls_back_to_raw_script_without_anchor_fields(self) -> None:
@@ -148,6 +146,15 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
         )
 
         self.assertEqual(prompt, "plain script")
+
+    def test_compact_anchor_text_flattens_multiline_and_truncates(self) -> None:
+        text = compact_anchor_text(
+            "细手圈\n内径约56mm\n圈宽2mm\n开口可微调\n适合日常轻佩戴\n避免过度拉伸",
+            max_length=24,
+        )
+
+        self.assertIn("细手圈；内径约56mm", text)
+        self.assertTrue(text.endswith("…"))
 
     def test_source_backwrite_fields(self) -> None:
         ts = now_text()
