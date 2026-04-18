@@ -226,10 +226,37 @@ class ProductDescriptionGenerator:
         except Exception as e:
             print(f"    ⚠️ LLM 调用失败: {e}")
             return None
-    
+
+    @staticmethod
+    def _build_anchor_info_block(
+        product_type: str,
+        business_category: str,
+        product_params: str = "",
+    ) -> str:
+        """构建产品锚点信息区块。"""
+        lines = [
+            f"- 表格产品类型：{product_type or '未填写'}",
+            f"- 业务大类：{business_category or '未填写'}",
+        ]
+        if product_params and str(product_params).strip():
+            lines.extend(
+                [
+                    f"- 产品参数信息：{str(product_params).strip()}",
+                    "",
+                    "参数锚点规则：",
+                    "1. 参数信息属于高优先级产品锚点，不得与之冲突。",
+                    "2. 若图片存在尺度模糊、白底单拍、缺少参照物等情况，优先依据参数信息描述。",
+                    "3. 不得擅自扩写未提供的参数。",
+                    "4. 输出时可以自然吸收参数信息，但不要机械堆砌参数字段。",
+                ]
+            )
+
+        return "\n".join(lines)
+
     def generate_description(self, image_paths: List[str], product_type: str,
                             target_country: str, target_language: str,
-                            business_category: str = "") -> Optional[str]:
+                            business_category: str = "",
+                            product_params: str = "") -> Optional[str]:
         """
         生成产品描述
         
@@ -260,13 +287,19 @@ class ProductDescriptionGenerator:
             business_category=business_category,
         )
         prompt_contract = build_prompt_contract(resolved_context)
+        anchor_info_block = self._build_anchor_info_block(
+            product_type=product_type,
+            business_category=business_category,
+            product_params=product_params,
+        )
 
         # 构建 Prompt
         prompt = f"""你是一位跨境电商产品文案专家。请分析这张产品图片，为{target_country}市场生成产品描述。
 
-表格原始产品类型：{product_type or '未填写'}
-业务大类：{business_category or '未填写'}
 目标语言：{target_language}
+
+产品锚点信息：
+{anchor_info_block}
 
 类型约束（必须严格遵守）：
 {prompt_contract}
@@ -365,6 +398,7 @@ class ProductDescriptionPipeline:
         task_id = fields.get('任务编号', 'unknown')
         product_type = fields.get('产品类型', '')
         business_category = fields.get('一级类目', '')
+        product_params = fields.get('产品参数信息', '')
         target_country = fields.get('目标国家', '')
         target_language = fields.get('目标语言', '')
         
@@ -378,6 +412,8 @@ class ProductDescriptionPipeline:
 
         print(f"  产品类型: {product_type}")
         print(f"  业务大类: {business_category}")
+        if str(product_params).strip():
+            print(f"  产品参数: {product_params}")
         print(f"  标准类型: {resolved_context.canonical_family}/{resolved_context.canonical_slot}/{resolved_context.canonical_type}")
         print(f"  目标国家: {target_country}")
         print(f"  目标语言: {target_language}")
@@ -399,6 +435,7 @@ class ProductDescriptionPipeline:
             target_country=target_country,
             target_language=target_language,
             business_category=business_category,
+            product_params=product_params,
         )
         
         if not description:
