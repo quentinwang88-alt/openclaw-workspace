@@ -28,6 +28,7 @@ from core.sync import (  # noqa: E402
     normalize_checkbox,
     now_text,
     resolve_field_mapping,
+    summarize_sync_scope,
     validate_required_fields,
     validate_script_fields,
 )
@@ -237,6 +238,7 @@ def main() -> None:
                     source_mapping,
                     synced_count=len(source_tasks),
                     synced_at=synced_at,
+                    sync_scope=summarize_sync_scope(source_tasks),
                     cleared_legacy=legacy_enabled,
                     cleared_master=master_enabled,
                     cleared_variant=variant_enabled,

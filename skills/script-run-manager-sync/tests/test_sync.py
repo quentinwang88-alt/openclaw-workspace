@@ -18,6 +18,7 @@ from core.sync import (
     build_sync_tasks,
     now_text,
     resolve_field_mapping,
+    summarize_sync_scope,
 )
 
 
@@ -151,6 +152,26 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
         self.assertFalse(is_variant_slot("S1"))
         self.assertTrue(is_variant_slot("S1V1"))
 
+    def test_summarize_sync_scope(self) -> None:
+        tasks = build_sync_tasks(
+            [
+                TableRecord(
+                    record_id="rec_scope",
+                    fields={
+                        "产品编码": "ABC012",
+                        "是否可同步": True,
+                        "产品图片": [{"file_token": "file_1"}],
+                        "脚本方向一": "master one",
+                        "脚本1变体1": "variant one",
+                        "脚本4变体5": "variant four v5",
+                    },
+                ),
+            ],
+            self.mapping,
+        )
+
+        self.assertEqual(summarize_sync_scope(tasks), "母版+子变体（母版 1 条，子变体 2 条）")
+
     def test_build_target_fields_includes_script_id(self) -> None:
         records = [
             TableRecord(
@@ -214,6 +235,7 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
             self.mapping,
             synced_count=24,
             synced_at=ts,
+            sync_scope="母版（4 条）",
             cleared_legacy=True,
             cleared_master=True,
             cleared_variant=True,
@@ -223,6 +245,7 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
         self.assertFalse(success_fields["是否可同步"])
         self.assertFalse(success_fields["是否可同步母版"])
         self.assertFalse(success_fields["是否可同步子变体"])
+        self.assertIn("母版（4 条）", success_fields["同步状态"])
         self.assertIn("新增 24 条", success_fields["同步状态"])
         self.assertEqual(success_fields["同步时间"], ts)
         self.assertIn("同步失败", failure_fields["同步状态"])

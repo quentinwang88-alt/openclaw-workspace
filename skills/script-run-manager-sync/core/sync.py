@@ -126,6 +126,19 @@ def has_any_sync_enabled(fields: Dict[str, Any], mapping: Dict[str, Optional[str
     )
 
 
+def summarize_sync_scope(tasks: Sequence[ScriptSyncTask]) -> str:
+    master_count = sum(1 for task in tasks if not is_variant_slot(task.script_slot))
+    variant_count = sum(1 for task in tasks if is_variant_slot(task.script_slot))
+
+    if master_count and variant_count:
+        return f"母版+子变体（母版 {master_count} 条，子变体 {variant_count} 条）"
+    if master_count:
+        return f"母版（{master_count} 条）"
+    if variant_count:
+        return f"子变体（{variant_count} 条）"
+    return "未识别同步范围"
+
+
 def resolve_field_mapping(field_names: Sequence[str], aliases: Dict[str, List[str]]) -> Dict[str, Optional[str]]:
     mapping: Dict[str, Optional[str]] = {}
     for logical_name, candidates in aliases.items():
@@ -384,6 +397,7 @@ def build_source_success_fields(
     synced_count: int,
     synced_at: str,
     *,
+    sync_scope: str = "",
     cleared_master: bool = False,
     cleared_variant: bool = False,
     cleared_legacy: bool = False,
@@ -396,7 +410,8 @@ def build_source_success_fields(
     if mapping.get("sync_variant_enabled") and cleared_variant:
         fields[mapping["sync_variant_enabled"]] = False
     if mapping.get("sync_status"):
-        status_text = f"同步成功：新增 {synced_count} 条；同步时间：{synced_at}"
+        scope_text = f"{sync_scope}；" if sync_scope else ""
+        status_text = f"同步成功：{scope_text}新增 {synced_count} 条；同步时间：{synced_at}"
         fields[mapping["sync_status"]] = status_text
     if mapping.get("sync_time"):
         fields[mapping["sync_time"]] = synced_at
