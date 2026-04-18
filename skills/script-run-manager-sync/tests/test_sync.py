@@ -240,7 +240,12 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
             cleared_master=True,
             cleared_variant=True,
         )
-        failure_fields = build_source_failure_fields(self.mapping, error_message="boom", synced_at=ts)
+        failure_fields = build_source_failure_fields(
+            self.mapping,
+            error_message="boom",
+            synced_at=ts,
+            sync_scope="子变体（20 条）",
+        )
 
         self.assertFalse(success_fields["是否可同步"])
         self.assertFalse(success_fields["是否可同步母版"])
@@ -248,6 +253,7 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
         self.assertIn("母版（4 条）", success_fields["同步状态"])
         self.assertIn("新增 24 条", success_fields["同步状态"])
         self.assertEqual(success_fields["同步时间"], ts)
+        self.assertIn("子变体（20 条）", failure_fields["同步状态"])
         self.assertIn("同步失败", failure_fields["同步状态"])
 
 

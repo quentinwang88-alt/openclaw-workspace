@@ -250,7 +250,12 @@ def main() -> None:
             synced_at = now_text()
             source_client.update_record_fields(
                 source_record_id,
-                build_source_failure_fields(source_mapping, error_message=str(exc), synced_at=synced_at),
+                build_source_failure_fields(
+                    source_mapping,
+                    error_message=str(exc),
+                    synced_at=synced_at,
+                    sync_scope=summarize_sync_scope(source_tasks),
+                ),
             )
             print(f"   ❌ source_record_id={source_record_id} 同步失败: {exc}")
 

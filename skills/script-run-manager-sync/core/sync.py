@@ -422,10 +422,13 @@ def build_source_failure_fields(
     mapping: Dict[str, Optional[str]],
     error_message: str,
     synced_at: str,
+    *,
+    sync_scope: str = "",
 ) -> Dict[str, Any]:
     fields: Dict[str, Any] = {}
     if mapping.get("sync_status"):
-        fields[mapping["sync_status"]] = f"同步失败：{error_message}；失败时间：{synced_at}"
+        scope_text = f"{sync_scope}；" if sync_scope else ""
+        fields[mapping["sync_status"]] = f"同步失败：{scope_text}{error_message}；失败时间：{synced_at}"
     if mapping.get("sync_time"):
         fields[mapping["sync_time"]] = synced_at
     return fields
