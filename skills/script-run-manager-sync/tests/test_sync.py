@@ -9,6 +9,8 @@ from core.sync import (
     SCRIPT_FIELD_SPECS,
     TARGET_FIELD_ALIASES,
     compact_anchor_text,
+    has_any_sync_enabled,
+    is_variant_slot,
     build_prompt_with_anchor,
     build_target_fields,
     build_source_failure_fields,
@@ -29,6 +31,8 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
             "任务编号",
             "产品图片",
             "是否可同步",
+            "是否可同步母版",
+            "是否可同步子变体",
             "同步状态",
             "同步时间",
             "所属母版1",
@@ -83,6 +87,46 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
         self.assertEqual(tasks[2].script_id, "003_M2_M")
         self.assertEqual(tasks[3].script_id, "003_M4_V5")
 
+    def test_split_sync_checkboxes_only_sync_master_slots_when_master_checked(self) -> None:
+        records = [
+            TableRecord(
+                record_id="rec_master",
+                fields={
+                    "产品编码": "ABC010",
+                    "是否可同步母版": True,
+                    "是否可同步子变体": False,
+                    "产品图片": [{"file_token": "file_1"}],
+                    "脚本方向一": "master one",
+                    "脚本1变体1": "variant one",
+                    "脚本方向二": "master two",
+                },
+            ),
+        ]
+
+        tasks = build_sync_tasks(records, self.mapping)
+
+        self.assertEqual([task.task_name for task in tasks], ["ABC010.S1", "ABC010.S2"])
+
+    def test_split_sync_checkboxes_only_sync_variant_slots_when_variant_checked(self) -> None:
+        records = [
+            TableRecord(
+                record_id="rec_variant",
+                fields={
+                    "产品编码": "ABC011",
+                    "是否可同步母版": False,
+                    "是否可同步子变体": True,
+                    "产品图片": [{"file_token": "file_1"}],
+                    "脚本方向一": "master one",
+                    "脚本1变体1": "variant one",
+                    "脚本4变体5": "variant four v5",
+                },
+            ),
+        ]
+
+        tasks = build_sync_tasks(records, self.mapping)
+
+        self.assertEqual([task.task_name for task in tasks], ["ABC011.S1V1", "ABC011.S4V5"])
+
     def test_build_sync_tasks_respects_checkbox(self) -> None:
         records = [
             TableRecord(
@@ -98,6 +142,14 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
 
         tasks = build_sync_tasks(records, self.mapping)
         self.assertEqual(tasks, [])
+
+    def test_has_any_sync_enabled_supports_split_fields(self) -> None:
+        fields = {"是否可同步母版": True}
+        self.assertTrue(has_any_sync_enabled(fields, self.mapping))
+
+    def test_is_variant_slot(self) -> None:
+        self.assertFalse(is_variant_slot("S1"))
+        self.assertTrue(is_variant_slot("S1V1"))
 
     def test_build_target_fields_includes_script_id(self) -> None:
         records = [
@@ -158,10 +210,19 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
 
     def test_source_backwrite_fields(self) -> None:
         ts = now_text()
-        success_fields = build_source_success_fields(self.mapping, synced_count=24, synced_at=ts)
+        success_fields = build_source_success_fields(
+            self.mapping,
+            synced_count=24,
+            synced_at=ts,
+            cleared_legacy=True,
+            cleared_master=True,
+            cleared_variant=True,
+        )
         failure_fields = build_source_failure_fields(self.mapping, error_message="boom", synced_at=ts)
 
         self.assertFalse(success_fields["是否可同步"])
+        self.assertFalse(success_fields["是否可同步母版"])
+        self.assertFalse(success_fields["是否可同步子变体"])
         self.assertIn("新增 24 条", success_fields["同步状态"])
         self.assertEqual(success_fields["同步时间"], ts)
         self.assertIn("同步失败", failure_fields["同步状态"])

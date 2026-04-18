@@ -55,6 +55,8 @@ SOURCE_FIELD_ALIASES: Dict[str, List[str]] = {
     "direction_4": ["母版方向4"],
     "product_images": ["产品图片", "商品图片", "图片"],
     "sync_enabled": ["是否可同步", "是否可同步脚本"],
+    "sync_master_enabled": ["是否可同步母版"],
+    "sync_variant_enabled": ["是否可同步子变体"],
     "sync_status": ["同步状态", "同步结果"],
     "sync_time": ["同步时间", "最近同步时间"],
 }
@@ -94,6 +96,34 @@ class ScriptSyncTask:
     parent_slot: str = ""
     direction_label: str = ""
     variant_strength: str = ""
+
+
+def is_variant_slot(task_suffix: str) -> bool:
+    return "V" in str(task_suffix or "").strip().upper()
+
+
+def should_sync_slot(fields: Dict[str, Any], mapping: Dict[str, Optional[str]], task_suffix: str) -> bool:
+    legacy_enabled = normalize_checkbox(fields.get(mapping["sync_enabled"])) if mapping.get("sync_enabled") else False
+    master_enabled = normalize_checkbox(fields.get(mapping["sync_master_enabled"])) if mapping.get("sync_master_enabled") else False
+    variant_enabled = normalize_checkbox(fields.get(mapping["sync_variant_enabled"])) if mapping.get("sync_variant_enabled") else False
+
+    if legacy_enabled:
+        return True
+
+    if is_variant_slot(task_suffix):
+        return variant_enabled
+
+    return master_enabled
+
+
+def has_any_sync_enabled(fields: Dict[str, Any], mapping: Dict[str, Optional[str]]) -> bool:
+    return any(
+        [
+            normalize_checkbox(fields.get(mapping["sync_enabled"])) if mapping.get("sync_enabled") else False,
+            normalize_checkbox(fields.get(mapping["sync_master_enabled"])) if mapping.get("sync_master_enabled") else False,
+            normalize_checkbox(fields.get(mapping["sync_variant_enabled"])) if mapping.get("sync_variant_enabled") else False,
+        ]
+    )
 
 
 def resolve_field_mapping(field_names: Sequence[str], aliases: Dict[str, List[str]]) -> Dict[str, Optional[str]]:
@@ -287,12 +317,13 @@ def build_sync_tasks(
         if not product_code_value:
             continue
 
-        sync_enabled = normalize_checkbox(fields.get(mapping["sync_enabled"])) if mapping.get("sync_enabled") else False
-        if not sync_enabled:
+        if not has_any_sync_enabled(fields, mapping):
             continue
 
         attachments = extract_attachments(fields.get(mapping["product_images"])) if mapping.get("product_images") else []
         for spec in SCRIPT_FIELD_SPECS:
+            if not should_sync_slot(fields, mapping, spec["task_suffix"]):
+                continue
             field_name = mapping.get(spec["logical_name"])
             prompt_text = normalize_text(fields.get(field_name)) if field_name else ""
             if not prompt_text:
@@ -352,10 +383,18 @@ def build_source_success_fields(
     mapping: Dict[str, Optional[str]],
     synced_count: int,
     synced_at: str,
+    *,
+    cleared_master: bool = False,
+    cleared_variant: bool = False,
+    cleared_legacy: bool = False,
 ) -> Dict[str, Any]:
     fields: Dict[str, Any] = {}
-    if mapping.get("sync_enabled"):
+    if mapping.get("sync_enabled") and cleared_legacy:
         fields[mapping["sync_enabled"]] = False
+    if mapping.get("sync_master_enabled") and cleared_master:
+        fields[mapping["sync_master_enabled"]] = False
+    if mapping.get("sync_variant_enabled") and cleared_variant:
+        fields[mapping["sync_variant_enabled"]] = False
     if mapping.get("sync_status"):
         status_text = f"同步成功：新增 {synced_count} 条；同步时间：{synced_at}"
         fields[mapping["sync_status"]] = status_text
