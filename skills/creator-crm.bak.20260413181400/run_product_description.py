@@ -29,6 +29,7 @@ sys.path.insert(0, str(SKILL_DIR))
 
 from core.feishu_url_parser import extract_from_feishu_url
 from core.product_type_resolution import build_prompt_contract, resolve_product_context
+from core.script_type_validator import validate_generated_text
 
 
 # ============================================================================
@@ -404,6 +405,14 @@ class ProductDescriptionPipeline:
             self.generator.stats['failed'] += 1
             return False
         
+        validation = validate_generated_text(description, resolved_context)
+        if validation.warnings:
+            print(f"  ⚠️ 质检警告: {' | '.join(validation.warnings)}")
+        if not validation.is_valid:
+            print(f"  ❌ 类型质检失败: {' | '.join(validation.violations)}")
+            self.generator.stats['failed'] += 1
+            return False
+
         # 更新飞书记录
         print(f"  💾 更新飞书记录...")
         
