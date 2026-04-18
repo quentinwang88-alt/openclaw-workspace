@@ -5,11 +5,8 @@ from pathlib import Path
 SKILL_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SKILL_DIR))
 
-from core.product_type_resolution import (  # noqa: E402
-    build_prompt_contract,
-    normalize_product_type,
-    resolve_product_context,
-)
+from core.product_type_resolution import normalize_product_type, resolve_product_context  # noqa: E402
+from core.prompt_contract_builder import build_prompt_contract  # noqa: E402
 
 
 class ProductTypeResolutionTests(unittest.TestCase):

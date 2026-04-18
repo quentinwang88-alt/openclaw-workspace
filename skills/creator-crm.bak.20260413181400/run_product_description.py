@@ -28,7 +28,8 @@ SKILL_DIR = Path(__file__).parent.absolute()
 sys.path.insert(0, str(SKILL_DIR))
 
 from core.feishu_url_parser import extract_from_feishu_url
-from core.product_type_resolution import build_prompt_contract, resolve_product_context
+from core.product_type_resolution import resolve_product_context
+from core.prompt_contract_builder import build_prompt_contract
 from core.script_type_validator import validate_generated_text
 
 
