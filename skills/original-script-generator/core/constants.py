@@ -91,3 +91,17 @@ HOME_SHARE_SCENE_KEYWORDS = [
     "window",
     "natural light",
 ]
+
+SCRIPT_ROLES = [
+    "cognitive_reframing",
+    "result_delivery",
+    "risk_resolution",
+    "aura_enhancement",
+]
+
+SCRIPT_ROLE_DEFAULTS_BY_STRATEGY = {
+    "S1": "cognitive_reframing",
+    "S2": "aura_enhancement",
+    "S3": "risk_resolution",
+    "S4": "result_delivery",
+}

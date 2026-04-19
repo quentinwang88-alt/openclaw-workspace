@@ -12,6 +12,7 @@ from core.constants import (
     SEA_COUNTRY_ALIASES,
     SEA_HOME_PRIORITY_SCENES,
     SEA_HOME_SCENE_MIN_COUNT,
+    SCRIPT_ROLES,
 )
 
 
@@ -103,6 +104,9 @@ def strategies_too_similar(strategies: List[Dict[str, object]]) -> bool:
 
     signatures = {
         (
+            _field_value(strategy, "script_role"),
+            _field_value(strategy, "primary_focus"),
+            _field_value(strategy, "secondary_focus"),
             _field_value(strategy, "opening_mode"),
             _field_value(strategy, "proof_mode"),
             _field_value(strategy, "ending_mode"),
@@ -136,6 +140,9 @@ def validate_strategy_distribution(
 
     if len({_field_value(item, "opening_mode") for item in strategies}) < 2:
         return "4 套策略的 opening_mode 区分度不足"
+    script_roles = {_field_value(item, "script_role") for item in strategies if _field_value(item, "script_role")}
+    if script_roles and script_roles != {normalize_text(item) for item in SCRIPT_ROLES}:
+        return "script_role 需要完整覆盖 4 种固定角色"
     if len({_field_value(item, "proof_mode") for item in strategies}) < 3:
         return "proof_mode 少于 3 种"
     if len({_field_value(item, "ending_mode") for item in strategies}) < 3:

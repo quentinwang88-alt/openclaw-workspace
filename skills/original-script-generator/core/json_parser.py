@@ -7,6 +7,8 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
+from core.constants import SCRIPT_ROLES
+
 
 class JSONParseError(Exception):
     """LLM JSON 解析失败。"""
@@ -952,6 +954,8 @@ def _validate_spoken_structure_summary(summary: Dict[str, Any], label: str) -> N
 
 def validate_strategy_payload(payload: Any) -> None:
     container = _require_dict(payload, "策略输出")
+    if "difference_check" in container:
+        _ensure_string_field(container, "difference_check", "策略输出", allow_empty=True)
     strategies = _require_list(container.get("strategies"), "strategies")
     if len(strategies) != 4:
         raise JSONParseError(f"strategies 数量必须为 4，当前为 {len(strategies)}")
@@ -987,6 +991,9 @@ def validate_strategy_payload(payload: Any) -> None:
         "strategy_id",
         "final_strategy_id",
         "strategy_name",
+        "script_role",
+        "primary_focus",
+        "secondary_focus",
         "primary_selling_point",
         "dominant_user_question",
         "proof_thesis",
@@ -1038,16 +1045,26 @@ def validate_strategy_payload(payload: Any) -> None:
         for key, value in default_light_control.items():
             if not str(strategy.get(key, "") or "").strip():
                 strategy[key] = value
+        if strategy.get("secondary_focus") is None:
+            strategy["secondary_focus"] = ""
         _require_fields(strategy, required_fields, f"strategies 第 {index} 项")
         for key in required_fields:
             if key in {"styling_base_constraints", "realism_principles", "forbidden_patterns"}:
                 _ensure_string_list_field(strategy, key, f"strategies 第 {index} 项")
             else:
-                _ensure_string_field(strategy, key, f"strategies 第 {index} 项")
+                _ensure_string_field(strategy, key, f"strategies 第 {index} 项", allow_empty=(key == "secondary_focus"))
         if str(strategy.get("strategy_id", "") or "").strip() not in {"S1", "S2", "S3", "S4"}:
             raise JSONParseError(f"strategies 第 {index} 项 strategy_id 必须为 S1/S2/S3/S4")
         if str(strategy.get("final_strategy_id", "") or "").strip() != f"Final_{strategy.get('strategy_id')}":
             raise JSONParseError(f"strategies 第 {index} 项 final_strategy_id 与 strategy_id 不一致")
+        if str(strategy.get("script_role", "") or "").strip() not in set(SCRIPT_ROLES):
+            raise JSONParseError(
+                f"strategies 第 {index} 项 script_role 必须为 {'/'.join(SCRIPT_ROLES)}"
+            )
+        primary_focus = str(strategy.get("primary_focus", "") or "").strip()
+        secondary_focus = str(strategy.get("secondary_focus", "") or "").strip()
+        if secondary_focus and primary_focus == secondary_focus:
+            raise JSONParseError(f"strategies 第 {index} 项 secondary_focus 不能与 primary_focus 相同")
 
 
 def validate_expression_plan_payload(payload: Any) -> None:

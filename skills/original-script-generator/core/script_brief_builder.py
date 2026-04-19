@@ -3,7 +3,13 @@
 代码侧 script_brief 构建器。
 """
 
+import json
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+
+_AI_SHOT_RISK_REGISTRY_CACHE: Optional[Dict[str, Any]] = None
+_AI_SHOT_RISK_REGISTRY_PATH = Path(__file__).resolve().parent.parent / "config" / "ai_shot_risk_registry.json"
 
 
 def _non_empty_text(value: Any) -> str:
@@ -44,6 +50,49 @@ def _take_dict_items(values: Any, limit: int, keys: List[str]) -> List[Dict[str,
         if len(items) >= limit:
             break
     return items
+
+
+def _load_ai_shot_risk_registry() -> Dict[str, Any]:
+    global _AI_SHOT_RISK_REGISTRY_CACHE
+    if _AI_SHOT_RISK_REGISTRY_CACHE is not None:
+        return _AI_SHOT_RISK_REGISTRY_CACHE
+    try:
+        _AI_SHOT_RISK_REGISTRY_CACHE = json.loads(_AI_SHOT_RISK_REGISTRY_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        _AI_SHOT_RISK_REGISTRY_CACHE = {}
+    return _AI_SHOT_RISK_REGISTRY_CACHE
+
+
+def _ai_shot_risk_profile_key(product_type: str) -> str:
+    text = _non_empty_text(product_type)
+    if any(token in text for token in ("发饰", "发夹", "抓夹", "边夹", "发箍", "发圈", "头绳", "头箍")):
+        return "hair_accessory"
+    if any(token in text for token in ("耳", "项链", "戒指", "手链", "手镯", "饰品", "首饰", "包", "帽", "围巾", "墨镜")):
+        return "accessory"
+    return "clothing"
+
+
+def _build_ai_shot_risk_profile(product_type: str) -> Dict[str, Any]:
+    registry = _load_ai_shot_risk_registry()
+    profile_key = _ai_shot_risk_profile_key(product_type)
+    profile = registry.get(profile_key)
+    if not isinstance(profile, dict):
+        profile = registry.get("default") if isinstance(registry.get("default"), dict) else {}
+    if not isinstance(profile, dict):
+        profile = {}
+    return {
+        "profile_key": profile_key,
+        "forbidden": _take_string_items(profile.get("forbidden"), 6),
+        "high_risk": _take_string_items(profile.get("high_risk"), 6),
+        "medium_risk": _take_string_items(profile.get("medium_risk"), 6),
+        "low_risk": _take_string_items(profile.get("low_risk"), 6),
+        "replacement_templates": _take_dict_items(
+            profile.get("replacement_templates"),
+            6,
+            ["template_id", "when_to_use", "replacement_shot"],
+        ),
+        "candidate_failures": _take_string_items(profile.get("candidate_failures"), 6),
+    }
 
 
 def _pick_candidate_selling_point(anchor_card: Dict[str, Any], primary_selling_point: str) -> Dict[str, str]:
@@ -164,6 +213,7 @@ def build_script_brief(
         final_strategy.get("emotion_arc_tag"),
         persona_style_emotion_pack.get("emotion_arc_tag"),
     )
+    ai_shot_risk_profile = _build_ai_shot_risk_profile(product_type)
     return {
         "product_type": _non_empty_text(product_type),
         "product_positioning_one_liner": _non_empty_text(anchor_card.get("product_positioning_one_liner")),
@@ -179,11 +229,22 @@ def build_script_brief(
         "fixation_result_anchors": _take_string_items(anchor_card.get("fixation_result_anchors"), 4),
         "before_after_result_anchors": _take_string_items(anchor_card.get("before_after_result_anchors"), 4),
         "selected_opening_strategy": _pick_opening_strategy(opening_strategies, final_strategy),
+        "focus_control": {
+            "script_role": _non_empty_text(final_strategy.get("script_role")),
+            "primary_focus": _non_empty_text(final_strategy.get("primary_focus")),
+            "secondary_focus": _non_empty_text(final_strategy.get("secondary_focus")),
+        },
+        "ai_shot_risk_profile": ai_shot_risk_profile,
         "persona_pack": {
             "persona_state": _non_empty_text(persona_style_emotion_pack.get("persona_state") or final_strategy.get("persona_state")),
+            "appearance_anchor": _non_empty_text(persona_style_emotion_pack.get("appearance_anchor")),
+            "attractiveness_boundary": _non_empty_text(persona_style_emotion_pack.get("attractiveness_boundary")),
             "hairstyle_rule": _non_empty_text(persona_style_emotion_pack.get("hairstyle_rule")),
+            "makeup_rule": _non_empty_text(persona_style_emotion_pack.get("makeup_rule")),
             "clothing_rule": _non_empty_text(persona_style_emotion_pack.get("clothing_rule")),
+            "accessory_rule": _non_empty_text(persona_style_emotion_pack.get("accessory_rule")),
             "emotion_progression": _non_empty_text(persona_style_emotion_pack.get("emotion_progression")),
+            "movement_style": _non_empty_text(persona_style_emotion_pack.get("movement_style")),
             "anti_template_warnings": _take_string_items(persona_style_emotion_pack.get("anti_template_warnings"), 4),
         },
         "light_control_fields": {
@@ -206,22 +267,53 @@ def build_script_brief(
         },
         "final_strategy": {
             "strategy_id": _non_empty_text(final_strategy.get("strategy_id")),
+            "final_strategy_id": _non_empty_text(final_strategy.get("final_strategy_id")),
             "strategy_name": _non_empty_text(final_strategy.get("strategy_name")),
+            "script_role": _non_empty_text(final_strategy.get("script_role")),
+            "primary_focus": _non_empty_text(final_strategy.get("primary_focus")),
+            "secondary_focus": _non_empty_text(final_strategy.get("secondary_focus")),
             "primary_selling_point": primary_selling_point,
             "dominant_user_question": _non_empty_text(final_strategy.get("dominant_user_question")),
             "proof_thesis": _non_empty_text(final_strategy.get("proof_thesis")),
             "decision_thesis": _non_empty_text(final_strategy.get("decision_thesis")),
+            "main_attention_mechanism": _non_empty_text(final_strategy.get("main_attention_mechanism")),
+            "main_shooting_method": _non_empty_text(final_strategy.get("main_shooting_method")),
+            "aux_shooting_method": _non_empty_text(final_strategy.get("aux_shooting_method")),
+            "selected_opening_strategy_name": _non_empty_text(final_strategy.get("selected_opening_strategy_name")),
             "opening_mode": _non_empty_text(final_strategy.get("opening_mode")),
+            "opening_strategy": _non_empty_text(final_strategy.get("opening_strategy")),
+            "opening_first_line_type": _non_empty_text(final_strategy.get("opening_first_line_type")),
+            "opening_first_shot": _non_empty_text(final_strategy.get("opening_first_shot")),
             "visual_entry_mode": _non_empty_text(final_strategy.get("visual_entry_mode")),
             "proof_mode": _non_empty_text(final_strategy.get("proof_mode")),
+            "selling_point_proof_method": _non_empty_text(final_strategy.get("selling_point_proof_method")),
+            "core_proof_method": _non_empty_text(final_strategy.get("core_proof_method")),
             "ending_mode": _non_empty_text(final_strategy.get("ending_mode")),
+            "purchase_bridge_method": _non_empty_text(final_strategy.get("purchase_bridge_method")),
+            "decision_style": _non_empty_text(final_strategy.get("decision_style")),
+            "scene_suggestion": _non_empty_text(final_strategy.get("scene_suggestion")),
             "scene_subspace": _non_empty_text(final_strategy.get("scene_subspace")),
+            "scene_function": _non_empty_text(final_strategy.get("scene_function")),
+            "persona_state_suggestion": _non_empty_text(final_strategy.get("persona_state_suggestion")),
+            "persona_state": _non_empty_text(final_strategy.get("persona_state")),
+            "persona_presence_role": _non_empty_text(final_strategy.get("persona_presence_role")),
+            "persona_polish_level": _non_empty_text(final_strategy.get("persona_polish_level")),
             "rhythm_signature": _non_empty_text(final_strategy.get("rhythm_signature")),
             "action_entry_mode": _non_empty_text(final_strategy.get("action_entry_mode")),
+            "styling_base_logic": _non_empty_text(final_strategy.get("styling_base_logic")),
+            "styling_base_constraints": _take_string_items(final_strategy.get("styling_base_constraints"), 6),
             "styling_completion_tag": styling_completion_tag,
             "persona_visual_tone": persona_visual_tone,
             "styling_key_anchor": styling_key_anchor,
             "emotion_arc_tag": emotion_arc_tag,
+            "opening_emotion": _non_empty_text(final_strategy.get("opening_emotion")),
+            "middle_emotion": _non_empty_text(final_strategy.get("middle_emotion")),
+            "ending_emotion": _non_empty_text(final_strategy.get("ending_emotion")),
+            "voiceover_style": _non_empty_text(final_strategy.get("voiceover_style")),
+            "product_dominance_rule": _non_empty_text(final_strategy.get("product_dominance_rule")),
+            "realism_principles": _take_string_items(final_strategy.get("realism_principles"), 6),
+            "forbidden_patterns": _take_string_items(final_strategy.get("forbidden_patterns"), 6),
+            "risk_note": _non_empty_text(final_strategy.get("risk_note")),
         },
         "expression_plan": {
             "native_expression_entry": _non_empty_text(expression_plan.get("native_expression_entry")),

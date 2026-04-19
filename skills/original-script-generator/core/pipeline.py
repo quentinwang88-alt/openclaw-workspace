@@ -325,21 +325,25 @@ VARIANT_FOCUS_OPTIONS = {
 
 DIRECTION_ALLOWED_POOLS = {
     "S1": {
+        "script_role": ["cognitive_reframing"],
         "opening_mode": ["轻顾虑冲突型", "轻判断型"],
         "proof_mode": ["顾虑化解型", "结果证明型"],
         "ending_mode": ["顾虑化解收尾", "轻安利收尾"],
     },
     "S2": {
+        "script_role": ["aura_enhancement"],
         "opening_mode": ["轻顾虑冲突型", "轻判断型", "结果先给型"],
         "proof_mode": ["结果证明型", "搭配成立型", "细节证明型"],
         "ending_mode": ["适合谁收尾", "结果感收尾", "场景代入收尾"],
     },
     "S3": {
+        "script_role": ["risk_resolution"],
         "opening_mode": ["轻判断型", "结果先给型"],
         "proof_mode": ["顾虑化解型", "结果证明型"],
         "ending_mode": ["适合谁收尾", "顾虑化解收尾", "轻安利收尾"],
     },
     "S4": {
+        "script_role": ["result_delivery"],
         "opening_mode": ["高惊艳首镜型"],
         "proof_mode": ["结果证明型", "细节证明型"],
         "ending_mode": ["结果感收尾", "顾虑化解收尾"],
@@ -1995,10 +1999,12 @@ class OriginalScriptPipeline:
         print(f"  ⚠️ 内容强策略卡校验未通过，触发策略修复重试: {validation_error}")
         repair_instruction = (
             "请重做 4 套内容强策略卡，并严格满足差异化约束。"
+            "4 条 script_role 必须完整覆盖 cognitive_reframing、result_delivery、risk_resolution、aura_enhancement。"
             "至少保证 3 种 proof_mode、3 种 ending_mode、3 种 visual_entry_mode、"
             "2 种 persona_state、3 种 action_entry_mode。"
             "同时拉开 dominant_user_question、proof_thesis、decision_thesis 三组语义字段，"
             "不要只是同一句轻改写。"
+            "每条都要明确 primary_focus；secondary_focus 可为空，但若为空，proof 仍要更集中服务 primary_focus。"
             "同时至少拉开 2 种 styling_completion_tag、2 种 persona_visual_tone、2 种 emotion_arc_tag，"
             "并确保 styling_key_anchor 不要 4 条完全相同。"
             "S4 必须与 S1 在首镜逻辑上明确拉开。"
