@@ -4,12 +4,19 @@
 """
 
 import json
+import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
 _AI_SHOT_RISK_REGISTRY_CACHE: Optional[Dict[str, Any]] = None
 _AI_SHOT_RISK_REGISTRY_PATH = Path(__file__).resolve().parent.parent / "config" / "ai_shot_risk_registry.json"
+_CONTROL_LAYER_NON_CHINESE_RUN_RE = re.compile(r"[^\u4e00-\u9fff]{11,}")
+_ENGINEERING_TOKEN_RE = re.compile(r"^[A-Za-z0-9_./|:-]{1,64}$")
+_CONTROL_LAYER_CONTENT_KEYS = {"native_expression_entry", "suggested_short_line", "ending"}
+
+logger = logging.getLogger(__name__)
 
 
 def _non_empty_text(value: Any) -> str:
@@ -50,6 +57,47 @@ def _take_dict_items(values: Any, limit: int, keys: List[str]) -> List[Dict[str,
         if len(items) >= limit:
             break
     return items
+
+
+def _format_path(path_segments: List[str]) -> str:
+    return ".".join(segment for segment in path_segments if segment)
+
+
+def _should_skip_control_layer_warning(path_segments: List[str], value: str) -> bool:
+    if not value:
+        return True
+    last_key = path_segments[-1] if path_segments else ""
+    if last_key in _CONTROL_LAYER_CONTENT_KEYS:
+        return True
+    if _ENGINEERING_TOKEN_RE.fullmatch(value):
+        return True
+    return False
+
+
+def _log_control_layer_language_warnings(payload: Any, path_segments: Optional[List[str]] = None) -> None:
+    path_segments = path_segments or []
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            _log_control_layer_language_warnings(value, [*path_segments, str(key)])
+        return
+    if isinstance(payload, list):
+        for index, value in enumerate(payload):
+            _log_control_layer_language_warnings(value, [*path_segments, f"[{index}]"])
+        return
+    if not isinstance(payload, str):
+        return
+    text = payload.strip()
+    if _should_skip_control_layer_warning(path_segments, text):
+        return
+    match = _CONTROL_LAYER_NON_CHINESE_RUN_RE.search(text)
+    if not match:
+        return
+    logger.warning(
+        "script_brief_builder 控制层字段疑似语言混用: path=%s run=%s value=%s",
+        _format_path(path_segments),
+        match.group(0)[:40],
+        text[:120],
+    )
 
 
 def _load_ai_shot_risk_registry() -> Dict[str, Any]:
@@ -214,7 +262,7 @@ def build_script_brief(
         persona_style_emotion_pack.get("emotion_arc_tag"),
     )
     ai_shot_risk_profile = _build_ai_shot_risk_profile(product_type)
-    return {
+    script_brief = {
         "product_type": _non_empty_text(product_type),
         "product_positioning_one_liner": _non_empty_text(anchor_card.get("product_positioning_one_liner")),
         "hard_anchors": _take_dict_items(anchor_card.get("hard_anchors"), 5, ["anchor", "reason_not_changeable", "confidence"]),
@@ -324,3 +372,5 @@ def build_script_brief(
         },
         "avoid_same_as_existing_scripts": _summarize_existing_scripts(existing_scripts),
     }
+    _log_control_layer_language_warnings(script_brief)
+    return script_brief

@@ -23,6 +23,11 @@ def _optional_note_text(value: str) -> str:
 
 
 ACCOUNT_STYLE_BOUNDARY = "真实、轻精致、自然、可挂主页、不硬广、有审美完成度、商品必须是主角"
+CONTROL_LAYER_LANGUAGE_RULE = (
+    "统一规则：本流程中，所有策略说明、角色分类、质检说明、执行约束、字段描述等控制性文本必须使用中文；"
+    "字幕、口播、本地化表达等面向最终用户的内容层文本使用 target_language；"
+    "工程枚举值可保留英文 key，但面向模型的自然语言解释必须中文。"
+)
 TYPE_GUARD_FAMILY_LABELS = {
     "apparel": "服装",
     "jewelry": "首饰",
@@ -337,6 +342,7 @@ def _build_type_guard_block(type_guard_json: Optional[Dict[str, Any]] = None) ->
 
 
 def _append_type_guard_block(prompt: str, type_guard_json: Optional[Dict[str, Any]] = None) -> str:
+    prompt = f"{prompt}\n\n{CONTROL_LAYER_LANGUAGE_RULE}"
     block = _build_type_guard_block(type_guard_json)
     if not block:
         return prompt
