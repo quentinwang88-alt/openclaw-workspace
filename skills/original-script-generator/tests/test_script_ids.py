@@ -79,6 +79,7 @@ class ScriptIdsTest(unittest.TestCase):
     def test_render_script_outputs_seedance_six_section_format(self) -> None:
         rendered = render_script(
             {
+                "content_id": "003_M1_M",
                 "storyboard": [
                     {
                         "duration": "2.5s",
@@ -114,6 +115,7 @@ class ScriptIdsTest(unittest.TestCase):
             }
         )
         self.assertTrue(rendered.startswith("【整体】"))
+        self.assertIn("脚本ID:003_M1_M", rendered)
         self.assertIn("【商品】", rendered)
         self.assertIn("【镜头1|3s|hook】", rendered)
         self.assertIn("口播:无", render_script({"storyboard": [{"duration": "3s"}], "execution_constraints": {}, "negative_constraints": []}))

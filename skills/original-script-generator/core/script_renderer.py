@@ -462,6 +462,7 @@ def _build_forbidden_line(script_json: Dict[str, Any], constraints: Dict[str, An
 def _render_seedance_script_pass(script_json: Dict[str, Any], limits: Dict[str, int]) -> str:
     storyboard = script_json.get("storyboard", []) or []
     constraints = script_json.get("execution_constraints", {}) or {}
+    content_id = _compact_text(script_json.get("content_id", ""))
     boundary_text = _merge_brief_parts(
         constraints.get("visual_style", ""),
         constraints.get("person_constraints", ""),
@@ -484,8 +485,12 @@ def _render_seedance_script_pass(script_json: Dict[str, Any], limits: Dict[str, 
             )
         )
 
+    overall_line = _build_overall_line(constraints, limits)
+    if content_id:
+        overall_line = f"脚本ID:{content_id};{overall_line}" if overall_line else f"脚本ID:{content_id}"
+
     sections = [
-        f"【整体】{_build_overall_line(constraints, limits)}",
+        f"【整体】{overall_line}",
         f"【商品】{_build_product_line(script_json, constraints, limits)}",
         "\n\n".join(shot_blocks),
         f"【情绪】{_build_emotion_line(script_json, constraints)}",
