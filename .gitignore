@@ -134,3 +134,7 @@ uploads/
 batch_data.json
 remaining_creators_list.py
 run_pipeline_wrapper.sh
+ski.md
+skills/restock_analysis_*.md
+skills/inventory-alert/IN_TRANSIT_GUIDE.md
+skills/inventory-query/debug_response*.json
