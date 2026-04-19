@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "BigSeller Token Auto Sync",
+  "version": "1.0.0",
+  "description": "自动同步 BigSeller Token 到本地配置",
+  "permissions": [
+    "cookies",
+    "storage"
+  ],
+  "host_permissions": [
+    "*://*.bigseller.pro/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+}

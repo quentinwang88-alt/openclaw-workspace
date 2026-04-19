@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""诊断 API 认证问题"""
+import sys
+import json
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent))
+
+from inventory_api import InventoryAPI
+
+api = InventoryAPI()
+
+print("=" * 60)
+print("API 认证诊断")
+print("=" * 60)
+
+# 检查配置
+cookie = api.config['api']['headers'].get('Cookie', '')
+print(f"\nCookie 配置:")
+if cookie == "YOUR_COOKIE_HERE":
+    print("  ✗ Cookie 未配置（仍是占位符）")
+elif not cookie:
+    print("  ✗ Cookie 为空")
+elif len(cookie) < 50:
+    print(f"  ⚠️  Cookie 可能不完整（长度: {len(cookie)}）")
+else:
+    print(f"  ✓ Cookie 已配置（长度: {len(cookie)}）")
+    # 显示前50个字符
+    print(f"  预览: {cookie[:50]}...")
+
+# 测试请求
+print(f"\n测试 API 请求:")
+url = api.config['api']['base_url'] + api.config['api']['endpoints']['query']
+payload = api._build_payload("TEST", "thailand")
+
+try:
+    response = api.session.post(url, json=payload, timeout=api.timeout)
+    response_data = response.json()
+    
+    code = response_data.get('code')
+    msg = response_data.get('msg', '')
+    
+    print(f"  HTTP 状态: {response.status_code}")
+    print(f"  API 状态码: {code}")
+    print(f"  错误信息: '{msg}'")
+    
+    print(f"\n诊断结果:")
+    if code == 2001:
+        print("  ✗ 认证失败（状态码 2001）")
+        print("\n可能的原因:")
+        print("  1. Cookie 已过期")
+        print("  2. Cookie 格式不正确")
+        print("  3. 需要重新登录获取新的 Cookie")
+        print("\n解决方案:")
+        print("  1. 打开浏览器，登录 https://www.bigseller.pro")
+        print("  2. 打开开发者工具（F12）")
+        print("  3. 进入 Network 标签")
+        print("  4. 访问库存页面，找到 pageList.json 请求")
+        print("  5. 复制 Request Headers 中的完整 Cookie")
+        print("  6. 更新 config/api_config.json 中的 Cookie 字段")
+    elif code == 0:
+        print("  ✓ 认证成功！")
+    else:
+        print(f"  ⚠️  未知状态码: {code}")
+        
+except Exception as e:
+    print(f"  ✗ 请求失败: {e}")
+
+print("\n" + "=" * 60)

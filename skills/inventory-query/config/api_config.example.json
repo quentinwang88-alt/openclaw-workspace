@@ -1,0 +1,70 @@
+{
+  "default_country": "thailand",
+  
+  "api": {
+    "base_url": "https://www.bigseller.pro",
+    "method": "POST",
+    
+    "endpoints": {
+      "query": "/api/inventory/query",
+      "batch": "/api/inventory/batch"
+    },
+    
+    "headers": {
+      "Content-Type": "application/json",
+      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+      "Referer": "https://www.bigseller.pro/web/inventory/index.htm",
+      "Authorization": "Bearer YOUR_TOKEN_HERE"
+    },
+    
+    "payload_template": {
+      "sku_code": "{sku}",
+      "country": "{country}",
+      "warehouse": "default"
+    },
+    
+    "params_template": {
+      "sku": "{sku}",
+      "country": "{country}"
+    },
+    
+    "response_format": {
+      "status_path": "code",
+      "success_value": 0,
+      "error_path": "message",
+      "data_path": "data",
+      "fields": {
+        "available": "available",
+        "total": "total",
+        "reserved": "reserved",
+        "status": "status"
+      }
+    },
+    
+    "timeout": 10
+  },
+  
+  "rate_limit": {
+    "enabled": true,
+    "delay_between_queries": 0.5
+  },
+  
+  "retry": {
+    "enabled": true,
+    "max_retries": 3,
+    "backoff_factor": 1
+  },
+  
+  "test_sku": "bu0010",
+  
+  "_comments": {
+    "setup_instructions": [
+      "1. 使用 Chrome DevTools 找到真实的 API 端点",
+      "2. 更新 api.base_url 和 api.endpoints.query",
+      "3. 从浏览器复制 Authorization token 到 api.headers.Authorization",
+      "4. 根据实际 API 调整 payload_template 和 response_format",
+      "5. 运行 'python inventory_api.py' 测试连接",
+      "详细步骤请参考 docs/API_DISCOVERY_GUIDE.md"
+    ]
+  }
+}
