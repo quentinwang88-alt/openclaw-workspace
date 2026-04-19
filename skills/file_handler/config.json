@@ -1,0 +1,16 @@
+{
+  "name": "file_handler",
+  "version": "1.0.0",
+  "description": "自动处理飞书群聊中的文件附件",
+  "author": "OpenClaw",
+  "auto_read": true,
+  "max_file_size_mb": 30,
+  "supported_formats": [".xlsx", ".xls", ".csv", ".txt", ".json", ".md"],
+  "watch_dirs": [
+    "~/.openclaw/media/inbound",
+    "/tmp/openclaw",
+    "~/.openclaw/tmp",
+    "/tmp"
+  ],
+  "max_wait_time": 60
+}

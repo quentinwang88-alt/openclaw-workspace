@@ -1,0 +1,29 @@
+{
+  "tools": [
+    {
+      "name": "read_feishu_file",
+      "description": "读取飞书群聊中发送的文件（Excel、CSV、文本等）",
+      "command": "python3 ~/.openclaw/workspace/skills/file_handler/auto_file_handler.py",
+      "parameters": {
+        "file_path": {
+          "type": "string",
+          "description": "文件路径（可选，不指定则自动查找最新文件）",
+          "required": false
+        }
+      }
+    },
+    {
+      "name": "wait_feishu_file",
+      "description": "等待并读取飞书新文件",
+      "command": "python3 ~/.openclaw/workspace/skills/file_handler/auto_file_handler.py --wait",
+      "parameters": {
+        "timeout": {
+          "type": "integer",
+          "description": "等待超时时间（秒）",
+          "default": 60,
+          "required": false
+        }
+      }
+    }
+  ]
+}
