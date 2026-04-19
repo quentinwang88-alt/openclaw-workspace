@@ -125,3 +125,12 @@ uploads/
 *新品洞察报告*.md
 *销售分析报告*.md
 *补货建议*.md
+*深度分析报告*.md
+*双周期对比*.md
+
+# =========================
+# 本机批处理/包装脚本与中间数据
+# =========================
+batch_data.json
+remaining_creators_list.py
+run_pipeline_wrapper.sh
