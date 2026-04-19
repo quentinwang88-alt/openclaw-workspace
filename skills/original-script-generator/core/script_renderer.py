@@ -226,6 +226,24 @@ def _dedupe_preserve(items: List[str]) -> List[str]:
     return deduped
 
 
+def _split_text_units(value: Any, split_commas: bool = False) -> List[str]:
+    text = _compact_text(value)
+    if not text:
+        return []
+    parts = re.split(r"[；;。\n]+", text)
+    units: List[str] = []
+    for part in parts:
+        part = _compact_text(part)
+        if not part:
+            continue
+        subparts = re.split(r"[，,]+", part) if split_commas else [part]
+        for subpart in subparts:
+            unit = _compact_text(subpart)
+            if unit:
+                units.append(unit)
+    return _dedupe_preserve(units)
+
+
 def _extract_negative_clauses(value: Any) -> List[str]:
     if isinstance(value, list):
         negatives: List[str] = []
@@ -235,18 +253,251 @@ def _extract_negative_clauses(value: Any) -> List[str]:
     text = _compact_text(value)
     if not text:
         return []
-    negatives = re.findall(r"(?:不要|禁止|避免|不可|不能|不用|不做|勿)[^；;。]+", text)
+    negatives = re.findall(r"(?:不要让|不要把|不要|不让|禁止|避免|不可|不能|不用|不做|勿)[^；;。]+", text)
     if not negatives:
         for segment in _semantic_segments(value):
-            if any(token in segment for token in ("不要", "禁止", "避免", "不可", "不能", "不用", "不做", "勿")):
+            if any(token in segment for token in ("不要", "不让", "禁止", "避免", "不可", "不能", "不用", "不做", "勿")):
                 negatives.append(segment)
     return _dedupe_preserve(negatives)
 
 
 def _clean_negative_clause(value: str) -> str:
     text = _compact_text(value)
-    text = re.sub(r"^(不要|禁止|避免|不可|不能|不用|不做|勿)", "", text)
+    text = re.sub(r"^(不要让|不要把|不要|不让|禁止|避免|不可|不能|不用|不做|勿)", "", text)
     return text.strip(" ，；;。") or _compact_text(value)
+
+
+def _normalize_age_text(value: str) -> str:
+    text = _compact_text(value)
+    text = text.replace("20+到30岁", "20-30岁")
+    text = text.replace("20+至30岁", "20-30岁")
+    return text
+
+
+def _constraint_semantic_key(value: str) -> str:
+    text = _compact_text(value)
+    if not text:
+        return ""
+    groups = [
+        (("喧宾夺主", "抢商品", "压过耳饰", "压过商品", "不抢商品", "强过耳饰", "强过商品"), "人物抢戏"),
+        (("夸张笑容", "大动作"), "夸张表演"),
+        (("多余晃动",), "多余晃动"),
+        (("过曝", "高光"), "局部过曝"),
+        (("流苏", "一团"), "流苏粘连"),
+        (("流苏", "粘连"), "流苏粘连"),
+        (("耳部", "遮挡"), "耳部遮挡"),
+        (("耳部", "遮住"), "耳部遮挡"),
+        (("耳垂", "遮挡"), "耳部遮挡"),
+        (("强滤镜", "闪烁", "转场", "特效"), "过强特效"),
+        (("氛围镜", "静物镜", "佩戴结果"), "缺少佩戴结果"),
+        (("首镜", "下垂部分"), "首镜缺完整结构"),
+        (("包装主导", "无关环境"), "无关环境包装"),
+        (("强网感推荐",), "强网感推荐"),
+    ]
+    for keywords, key in groups:
+        if all(keyword in text for keyword in keywords):
+            return key
+        if len(keywords) == 1 and keywords[0] in text:
+            return key
+    return re.sub(r"[\s；;，,。:：、\-｜|]", "", text)
+
+
+def _harden_negative_clause(value: str) -> str:
+    text = _compact_text(value)
+    if not text:
+        return ""
+    if any(keyword in text for keyword in ("喧宾夺主", "抢商品", "压过耳饰", "压过商品", "强过耳饰", "强过商品")):
+        return "人物不得抢过耳饰"
+    if "夸张笑容" in text or "大动作" in text:
+        return "禁止夸张笑容和大动作"
+    if "多余晃动" in text:
+        return "禁止多余晃动"
+    if ("过曝" in text or "高光" in text) and any(keyword in text for keyword in ("透明心形", "双翼", "心形")):
+        return "透明心形和浅色双翼禁止过曝"
+    if "流苏" in text and any(keyword in text for keyword in ("一团", "粘连", "成束")):
+        return "多股流苏必须保持分丝，禁止粘连成一束"
+    if any(keyword in text for keyword in ("耳部", "耳垂", "小环连接处")) and any(
+        keyword in text for keyword in ("遮挡", "遮住", "无遮挡")
+    ):
+        return "禁止遮挡耳部、耳垂与小环连接处"
+    if any(keyword in text for keyword in ("强滤镜", "强闪烁", "特效转场", "夸张转场")):
+        return "禁止强滤镜、夸张闪烁和特效转场"
+    if any(keyword in text for keyword in ("氛围镜", "静物镜")) and "佩戴结果" in text:
+        return "禁止只拍氛围或静物而缺少佩戴结果"
+    if "首镜" in text and "下垂部分" in text:
+        return "首镜不得只拍下垂部分，必须先交代完整结构"
+    if "包装主导" in text or "无关环境" in text:
+        return "禁止无关环境和包装主导画面"
+    if "强网感推荐" in text:
+        return "禁止强网感推荐"
+    cleaned = _clean_negative_clause(text)
+    if text.startswith(("禁止", "不得", "不允许")):
+        return text
+    return f"禁止{cleaned}"
+
+
+def _extract_scene_label(visual_style: str, scene_constraints: str) -> str:
+    merged = _compact_text(f"{visual_style} {scene_constraints}")
+    patterns = [
+        (r"家中窗边", "家中窗边"),
+        (r"玄关镜前", "玄关镜前"),
+        (r"衣柜区", "衣柜区"),
+        (r"穿衣区", "穿衣区"),
+        (r"梳妆台", "梳妆台"),
+        (r"桌边窗前", "桌边窗前"),
+        (r"窗边", "窗边"),
+        (r"镜前", "镜前"),
+    ]
+    for pattern, label in patterns:
+        if re.search(pattern, merged):
+            return label
+    source = _compact_text((visual_style or scene_constraints).split("，")[0])
+    source = re.sub(r"^(限定在|固定在|场景固定在)", "", source)
+    source = re.sub(r"(自然软光|自然光|柔光|奶油白.*|浅米背景.*)$", "", source)
+    source = re.sub(r"(近距离分享场景|真实生活空间|场景)$", "", source)
+    return _compact_text(source)
+
+
+def _extract_lighting_label(visual_style: str, scene_constraints: str) -> str:
+    merged = _compact_text(f"{visual_style} {scene_constraints}")
+    patterns = ["自然软光", "窗边自然光", "自然光", "柔光", "暖光", "冷光", "日光"]
+    for pattern in patterns:
+        if pattern in merged:
+            return pattern
+    return ""
+
+
+def _extract_background_label(visual_style: str) -> str:
+    units = _split_text_units(visual_style, split_commas=True)
+    for unit in units:
+        if "背景" in unit:
+            return unit
+    return ""
+
+
+def _extract_persona_label(person_constraints: str, tone_constraints: str) -> str:
+    units = _split_text_units(person_constraints, split_commas=True)
+    persona_parts: List[str] = []
+    for unit in units:
+        if any(keyword in unit for keyword in ("耳部", "耳垂", "发丝", "无遮挡", "露出", "比例", "不抢商品")):
+            continue
+        persona_parts.append(_normalize_age_text(unit))
+    tone_map = ["轻分享型", "轻判断型", "问题解决型", "轻发现型"]
+    tone_label = ""
+    for item in tone_map:
+        if item in tone_constraints:
+            tone_label = f"{item}状态"
+            break
+    if tone_label and tone_label not in persona_parts:
+        persona_parts.append(tone_label)
+    return ",".join(_dedupe_preserve(persona_parts[:4]))
+
+
+def _extract_wardrobe_label(styling_constraints: str) -> str:
+    text = _compact_text(styling_constraints)
+    if not text:
+        return ""
+    colors = []
+    for color in ["奶白", "浅米", "雾粉", "浅灰蓝", "奶油白", "浅灰", "米白", "浅粉"]:
+        if color in text and color not in colors and not any(color in existing for existing in colors):
+            colors.append(color)
+    garment = "低饱和纯色上衣" if "上衣" in text else "低饱和纯色穿搭"
+    if "纯色" not in text and "低饱和" not in text:
+        garment = _compress_descriptor(text, max_segments=1, max_chars=20)
+    result = garment
+    if colors:
+        result = f"{garment}({ '/'.join(colors[:5]) })"
+    if "领口干净利落" in text:
+        result = f"{result},领口干净利落"
+    return result
+
+
+def _extract_hair_label(*values: Any) -> str:
+    merged = _compact_text(" ".join(str(value or "") for value in values))
+    match = re.search(r"(发丝[^，；;。]*耳后)", merged)
+    if match:
+        text = match.group(1).replace("必须", "").replace("已", "")
+        return _compact_text(text)
+    for token in ("低马尾", "半扎", "盘发", "耳后"):
+        if token in merged:
+            return token if token != "耳后" else "发丝拨到耳后"
+    return ""
+
+
+def _extract_critical_constraint(*values: Any) -> str:
+    merged = _compact_text(" ".join(str(value or "") for value in values))
+    match = re.search(r"(至少一侧[^，；;。]*(?:露出|无遮挡))", merged)
+    if match:
+        return _compact_text(match.group(1)).replace("必须", "")
+    if "耳部" in merged and "无遮挡" in merged:
+        return "耳部关键结构无遮挡"
+    return ""
+
+
+def _extract_exclusion_label(*values: Any) -> str:
+    merged = _compact_text(" ".join(str(value or "") for value in values))
+    match = re.search(r"(除当前[^，；;。]*首饰)", merged)
+    if match:
+        text = match.group(1).replace("不再", "不").replace("叠加", "叠加")
+        return _compact_text(text)
+    if "无其他首饰" in merged:
+        return "无其他首饰"
+    return ""
+
+
+def _extract_material_tone(*values: Any) -> str:
+    merged = _compact_text("；".join(str(value or "") for value in values))
+    if not merged:
+        return ""
+    if "金色" in merged:
+        if "橘红" in merged:
+            return "金色保持真实暖调不偏橘红"
+        return "金色保持真实暖调"
+    if "银色" in merged:
+        return "银色保持真实冷调"
+    units = _split_text_units(merged)
+    for unit in units:
+        if any(keyword in unit for keyword in ("材质", "色调", "透明", "珠尾")) and not any(
+            keyword in unit for keyword in ("窗边", "摆动", "镜头", "耳部")
+        ):
+            return unit
+    return ""
+
+
+def _extract_known_structure_chain(*values: Any) -> str:
+    merged = _compact_text(" ".join(str(value or "") for value in values))
+    known = [
+        ("小环", "小环"),
+        ("透明心形", "透明心形"),
+        ("浅色双翼", "浅色双翼"),
+        ("双翼", "浅色双翼"),
+        ("多股流苏", "多股流苏"),
+        ("流苏", "多股流苏"),
+        ("透明珠尾", "透明珠尾"),
+        ("透明珠", "透明珠尾"),
+        ("珠尾", "透明珠尾"),
+    ]
+    hits: List[str] = []
+    for token, label in known:
+        if token in merged and label not in hits:
+            hits.append(label)
+    if len(hits) >= 2:
+        return "→".join(hits)
+    return ""
+
+
+def _collect_negative_keys_from_rendered_text(text: str) -> List[str]:
+    keys: List[str] = []
+    for clause in _extract_negative_clauses(text):
+        key = _constraint_semantic_key(_harden_negative_clause(clause))
+        if key:
+            keys.append(key)
+    for unit in _split_text_units(text):
+        if any(keyword in unit for keyword in ("禁止", "不得", "不做", "不允许", "不能")):
+            key = _constraint_semantic_key(unit)
+            if key:
+                keys.append(key)
+    return _dedupe_preserve(keys)
 
 
 def _extract_progression(value: Any) -> str:
@@ -342,15 +593,24 @@ def _extract_action_keywords(storyboard: List[Dict[str, Any]]) -> List[str]:
 
 
 def _build_overall_line(constraints: Dict[str, Any], limits: Dict[str, int]) -> str:
+    visual_style = _compact_text(constraints.get("visual_style", ""))
+    scene_constraints = _compact_text(constraints.get("scene_constraints", ""))
+    person_constraints = _compact_text(constraints.get("person_constraints", ""))
+    styling_constraints = _compact_text(constraints.get("styling_constraints", ""))
+    tone_constraints = _compact_text(constraints.get("tone_completion_constraints", ""))
+
     head = [
         "15秒",
-        _compress_descriptor(constraints.get("scene_constraints", ""), max_segments=2, max_chars=limits["scene"]),
-        _compress_descriptor(constraints.get("visual_style", ""), max_segments=2, max_chars=limits["visual"]),
-        _compress_descriptor(constraints.get("person_constraints", ""), max_segments=2, max_chars=limits["person"]),
+        _truncate_text(_extract_scene_label(visual_style, scene_constraints), limits["scene"]),
+        _truncate_text(_extract_lighting_label(visual_style, scene_constraints), limits["visual"]),
+        _truncate_text(_extract_background_label(visual_style), limits["visual"]),
+        _truncate_text(_extract_persona_label(person_constraints, tone_constraints), limits["person"]),
     ]
     tail = [
-        _compress_descriptor(constraints.get("styling_constraints", ""), max_segments=2, max_chars=limits["styling"]),
-        _compress_descriptor(constraints.get("tone_completion_constraints", ""), max_segments=1, max_chars=limits["tone"]),
+        _truncate_text(_extract_wardrobe_label(styling_constraints), limits["styling"]),
+        _truncate_text(_extract_hair_label(person_constraints, styling_constraints), limits["tone"]),
+        _truncate_text(_extract_critical_constraint(person_constraints, styling_constraints), limits["tone"]),
+        _truncate_text(_extract_exclusion_label(person_constraints, styling_constraints), limits["tone"]),
     ]
     return "|".join(part for part in head if part) + (
         ";" + ";".join(part for part in tail if part) if any(tail) else ""
@@ -366,21 +626,25 @@ def _build_product_line(script_json: Dict[str, Any], constraints: Dict[str, Any]
         first_shot.get("shot_content", ""),
     )
     quantity = _infer_quantity(first_shot.get("shot_content", ""), constraints.get("camera_focus", ""))
-    structure = _extract_structure_chain(
+    structure = _extract_known_structure_chain(
+        constraints.get("camera_focus", ""),
+        constraints.get("product_priority_principle", ""),
+        constraints.get("realism_principle", ""),
+        " ".join(str(item.get("shot_content", "") or "") for item in storyboard),
+    ) or _extract_structure_chain(
         constraints.get("camera_focus", ""),
         constraints.get("product_priority_principle", ""),
         first_shot.get("anchor_reference", ""),
         first_shot.get("shot_content", ""),
     )
-    realism = _compress_descriptor(
-        _merge_brief_parts(constraints.get("realism_principle", ""), constraints.get("product_priority_principle", "")),
-        max_segments=2,
-        max_chars=limits["realism"],
+    material_tone = _truncate_text(
+        _extract_material_tone(constraints.get("realism_principle", ""), constraints.get("product_priority_principle", "")),
+        limits["realism"],
     )
     prefix = f"{category}{quantity}" if quantity else category
     parts = [f"{prefix}:{_truncate_text(structure, limits['structure'])}"]
-    if realism:
-        parts.append(realism)
+    if material_tone:
+        parts.append(material_tone)
     parts.append("结构从上到下必须连续可读")
     return ";".join(part for part in parts if part)
 
@@ -394,23 +658,42 @@ def _build_shot_requirement(item: Dict[str, Any], boundary_text: str, limits: Di
         max_chars=limits["requirement"],
     )
     if style_note:
-        return style_note
-    fallback = _compress_descriptor(item.get("anchor_reference", ""), max_segments=1, max_chars=limits["requirement"])
-    return fallback or "无"
+        positive_units = [unit for unit in _split_text_units(style_note, split_commas=True) if not _extract_negative_clauses(unit)]
+        style_note = _truncate_text("，".join(_dedupe_preserve(positive_units)), limits["requirement"])
+    parts: List[str] = []
+    if style_note:
+        parts.append(style_note)
+    local_negatives: List[str] = []
+    for source in (item.get("style_note", ""), item.get("person_action", ""), item.get("shot_content", "")):
+        for clause in _extract_negative_clauses(source):
+            local_negatives.append(_harden_negative_clause(clause))
+    for clause in _dedupe_preserve(local_negatives):
+        key = _constraint_semantic_key(clause)
+        if key == "人物抢戏":
+            continue
+        parts.append(clause)
+    if not parts:
+        fallback = _compress_descriptor(item.get("anchor_reference", ""), max_segments=1, max_chars=limits["requirement"])
+        parts.append(fallback or "无")
+    return _truncate_text("；".join(_dedupe_preserve(parts)), limits["requirement"] * 2) or "无"
 
 
 def _build_emotion_line(script_json: Dict[str, Any], constraints: Dict[str, Any]) -> str:
     storyboard = script_json.get("storyboard", []) or []
     progression = _extract_progression(constraints.get("emotion_progression_constraints", "")) or "情绪平稳推进"
     allowed_actions = _extract_action_keywords(storyboard)
-    disallowed = _dedupe_preserve(
-        [_clean_negative_clause(item) for item in _extract_negative_clauses(constraints.get("emotion_progression_constraints", ""))]
-    )
+    disallowed: List[str] = []
+    for item in _extract_negative_clauses(constraints.get("emotion_progression_constraints", "")):
+        key = _constraint_semantic_key(item)
+        if key == "夸张表演":
+            disallowed.append("夸张笑容和大动作")
+        elif key == "人物抢戏":
+            disallowed.append("人物抢过耳饰")
     parts = [progression]
     if allowed_actions:
         parts.append(f"只做{'/'.join(allowed_actions[:4])}")
     if disallowed:
-        parts.append(f"不做{'/'.join(disallowed[:4])}")
+        parts.append(f"不做{'/'.join(_dedupe_preserve(disallowed)[:4])}")
     return ";".join(parts)
 
 
@@ -440,22 +723,37 @@ def _build_rhythm_line(storyboard: List[Dict[str, Any]]) -> str:
     if proof_start is not None and proof_end is not None:
         start_no = max(1, int(proof_start + 0.5))
         end_no = max(start_no, int(proof_end + 0.5))
-        parts.append(f"核心proof起始点在第{start_no}-{end_no}秒")
+        parts.append(f"proof镜头在第{start_no}-{end_no}秒之间展开")
     if decision_start is not None:
         parts.append(f"decision信号在第{max(1, int(decision_start + 0.5))}秒前出现")
     return ";".join(parts) or "按15秒单条节奏推进"
 
 
-def _build_forbidden_line(script_json: Dict[str, Any], constraints: Dict[str, Any], max_chars: int) -> str:
+def _build_forbidden_line(
+    script_json: Dict[str, Any],
+    constraints: Dict[str, Any],
+    used_negative_keys: List[str],
+    max_chars: int,
+) -> str:
     negatives: List[str] = []
     negatives.extend(_extract_negative_clauses(script_json.get("negative_constraints", [])))
-    for value in constraints.values():
-        negatives.extend(_extract_negative_clauses(value))
-    for item in script_json.get("storyboard", []) or []:
-        negatives.extend(_extract_negative_clauses(item.get("style_note", "")))
-        negatives.extend(_extract_negative_clauses(item.get("person_action", "")))
-        negatives.extend(_extract_negative_clauses(item.get("shot_content", "")))
-    forbidden = "；".join(_dedupe_preserve(negatives))
+    for key, value in constraints.items():
+        if key in {"visual_style", "person_constraints", "styling_constraints"}:
+            negatives.extend(_extract_negative_clauses(value))
+            continue
+        if key in {"tone_completion_constraints", "scene_constraints", "emotion_progression_constraints", "realism_principle"}:
+            negatives.extend(_extract_negative_clauses(value))
+
+    rendered: List[str] = []
+    seen_keys = set(used_negative_keys)
+    for clause in negatives:
+        hardened = _harden_negative_clause(clause)
+        key = _constraint_semantic_key(hardened)
+        if not key or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        rendered.append(hardened)
+    forbidden = "；".join(_dedupe_preserve(rendered))
     return _truncate_text(forbidden, max_chars) or "无"
 
 
@@ -471,15 +769,18 @@ def _render_seedance_script_pass(script_json: Dict[str, Any], limits: Dict[str, 
     )
 
     shot_blocks: List[str] = []
+    shot_requirements: List[str] = []
     for idx, item in enumerate(storyboard, 1):
         task = _compact_text(item.get("spoken_line_task", "") or item.get("task_type", "")) or "none"
+        requirement = _build_shot_requirement(item, boundary_text, limits)
+        shot_requirements.append(requirement)
         shot_blocks.append(
             "\n".join(
                 [
                     f"【镜头{idx}|{_format_seedance_duration(item.get('duration', ''))}|{task}】",
                     f"画面:{_compress_descriptor(item.get('shot_content', ''), max_segments=2, max_chars=limits['shot_content']) or '无'}",
                     f"动作:{_compress_descriptor(item.get('person_action', ''), max_segments=1, max_chars=limits['shot_action']) or '无'}",
-                    f"要求:{_build_shot_requirement(item, boundary_text, limits)}",
+                    f"要求:{requirement}",
                     f"口播:{_compress_voiceover(item.get('voiceover_text_target_language', ''), max_chars=limits['voiceover']) or '无'}",
                 ]
             )
@@ -489,13 +790,18 @@ def _render_seedance_script_pass(script_json: Dict[str, Any], limits: Dict[str, 
     if content_id:
         overall_line = f"脚本ID:{content_id};{overall_line}" if overall_line else f"脚本ID:{content_id}"
 
+    emotion_line = _build_emotion_line(script_json, constraints)
+    used_negative_keys = _collect_negative_keys_from_rendered_text(emotion_line)
+    for requirement in shot_requirements:
+        used_negative_keys.extend(_collect_negative_keys_from_rendered_text(requirement))
+
     sections = [
         f"【整体】{overall_line}",
         f"【商品】{_build_product_line(script_json, constraints, limits)}",
         "\n\n".join(shot_blocks),
-        f"【情绪】{_build_emotion_line(script_json, constraints)}",
+        f"【情绪】{emotion_line}",
         f"【节奏】{_build_rhythm_line(storyboard)}",
-        f"【禁止】{_build_forbidden_line(script_json, constraints, limits['forbidden'])}",
+        f"【禁止】{_build_forbidden_line(script_json, constraints, _dedupe_preserve(used_negative_keys), limits['forbidden'])}",
     ]
     return "\n\n".join(section for section in sections if section).strip()
 
