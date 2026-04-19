@@ -7,6 +7,10 @@
 !.env.example
 **/config/api_config.json
 **/config/api_config.backup*.json
+**/config/backups/*.json
+**/config/profiles/backups/*.json
+**/config/profile_state.json
+**/config/profiles/*.json
 **/config/alert_config.json
 **/config/*secret*.json
 **/config/*token*.json
@@ -68,6 +72,7 @@ Thumbs.db
 # =========================
 .openclaw/
 memory/*.md
+memory/.dreams/
 !memory/.gitkeep
 MEMORY.md
 notes/
@@ -77,6 +82,7 @@ notes/
 # =========================
 *.log
 *.tmp
+tmp/
 cache/
 logs/
 output/
