@@ -40,6 +40,7 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
             "所属母版2",
             "母版方向1",
             "母版方向2",
+            "最终视频提示词_S1",
             "脚本方向一",
             "脚本1变体1",
             "脚本方向二",
@@ -87,6 +88,27 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
         self.assertEqual(tasks[1].script_id, "003_M1_V1")
         self.assertEqual(tasks[2].script_id, "003_M2_M")
         self.assertEqual(tasks[3].script_id, "003_M4_V5")
+
+    def test_build_sync_tasks_prefers_final_video_prompt_for_master_slot(self) -> None:
+        records = [
+            TableRecord(
+                record_id="rec_master_prompt",
+                fields={
+                    "产品编码": "ABC099",
+                    "任务编号": "099",
+                    "是否可同步": True,
+                    "最终视频提示词_S1": "final prompt one",
+                    "脚本方向一": "original script one",
+                    "脚本1变体1": "variant one",
+                },
+            ),
+        ]
+
+        tasks = build_sync_tasks(records, self.mapping)
+
+        self.assertEqual(tasks[0].task_name, "ABC099.S1")
+        self.assertEqual(tasks[0].prompt_text, "final prompt one")
+        self.assertEqual(tasks[1].prompt_text, "variant one")
 
     def test_split_sync_checkboxes_only_sync_master_slots_when_master_checked(self) -> None:
         records = [

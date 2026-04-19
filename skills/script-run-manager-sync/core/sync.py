@@ -37,6 +37,13 @@ SCRIPT_FIELD_SPECS: List[Dict[str, Any]] = [
     {"logical_name": "script_s4_v5", "task_suffix": "S4V5", "aliases": ["脚本4变体5"]},
 ]
 
+MASTER_PROMPT_FALLBACKS: Dict[str, List[str]] = {
+    "script_s1": ["video_prompt_s1", "script_s1"],
+    "script_s2": ["video_prompt_s2", "script_s2"],
+    "script_s3": ["video_prompt_s3", "script_s3"],
+    "script_s4": ["video_prompt_s4", "script_s4"],
+}
+
 SOURCE_FIELD_ALIASES: Dict[str, List[str]] = {
     "product_code": ["产品编码", "商品编码", "SKU", "Product Code"],
     "product_type": ["产品类型", "商品类型", "类目类型"],
@@ -54,6 +61,10 @@ SOURCE_FIELD_ALIASES: Dict[str, List[str]] = {
     "direction_3": ["母版方向3"],
     "direction_4": ["母版方向4"],
     "product_images": ["产品图片", "商品图片", "图片"],
+    "video_prompt_s1": ["视频提示词_S1", "最终视频提示词_S1", "视频S1"],
+    "video_prompt_s2": ["视频提示词_S2", "最终视频提示词_S2", "视频S2"],
+    "video_prompt_s3": ["视频提示词_S3", "最终视频提示词_S3", "视频S3"],
+    "video_prompt_s4": ["视频提示词_S4", "最终视频提示词_S4", "视频S4"],
     "sync_enabled": ["是否可同步", "是否可同步脚本"],
     "sync_master_enabled": ["是否可同步母版"],
     "sync_variant_enabled": ["是否可同步子变体"],
@@ -182,6 +193,16 @@ def normalize_text(raw_value: Any) -> str:
     if raw_value is None:
         return ""
     return str(raw_value).strip()
+
+
+def resolve_prompt_text(fields: Dict[str, Any], mapping: Dict[str, Optional[str]], logical_name: str) -> str:
+    preferred_fields = MASTER_PROMPT_FALLBACKS.get(logical_name, [logical_name])
+    for candidate in preferred_fields:
+        field_name = mapping.get(candidate)
+        text = normalize_text(fields.get(field_name)) if field_name else ""
+        if text:
+            return text
+    return ""
 
 
 def now_text() -> str:
@@ -337,8 +358,7 @@ def build_sync_tasks(
         for spec in SCRIPT_FIELD_SPECS:
             if not should_sync_slot(fields, mapping, spec["task_suffix"]):
                 continue
-            field_name = mapping.get(spec["logical_name"])
-            prompt_text = normalize_text(fields.get(field_name)) if field_name else ""
+            prompt_text = resolve_prompt_text(fields, mapping, spec["logical_name"])
             if not prompt_text:
                 continue
             tasks.append(

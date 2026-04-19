@@ -48,6 +48,7 @@ class MetadataTest(unittest.TestCase):
             "产品类型",
             "所属母版1",
             "母版方向1",
+            "最终视频提示词_S1",
             "脚本方向一",
             "脚本1变体1",
         ]
@@ -79,6 +80,43 @@ class MetadataTest(unittest.TestCase):
         self.assertEqual(items[1].canonical_script_key, "rec_1:S1V1")
         self.assertEqual(items[1].variant_strength, "轻变体")
         self.assertTrue(items[0].short_video_title)
+
+    def test_build_script_metadata_records_prefers_final_video_prompt_for_master_slot(self) -> None:
+        field_names = [
+            "任务编号",
+            "店铺ID",
+            "产品ID",
+            "目标国家",
+            "产品类型",
+            "所属母版1",
+            "母版方向1",
+            "最终视频提示词_S1",
+            "脚本方向一",
+            "脚本1变体1",
+        ]
+        mapping = resolve_field_mapping(field_names, SOURCE_FIELD_ALIASES)
+        records = [
+            Record(
+                record_id="rec_prefinal",
+                fields={
+                    "任务编号": "009",
+                    "店铺ID": "SHOP-09",
+                    "产品ID": "P9001",
+                    "目标国家": "Thailand",
+                    "产品类型": "耳环",
+                    "所属母版1": "M1",
+                    "母版方向1": "日常轻分享流",
+                    "最终视频提示词_S1": "整体：final prompt",
+                    "脚本方向一": "【脚本定位】\n- 脚本标题：原脚本",
+                    "脚本1变体1": "variant one",
+                },
+            )
+        ]
+
+        items = build_script_metadata_records(records, mapping, title_generator=HeuristicTitleGenerator())
+
+        self.assertEqual(items[0].script_text, "整体：final prompt")
+        self.assertEqual(items[1].script_text, "variant one")
 
     def test_sanitize_title_removes_leading_title_label(self) -> None:
         self.assertEqual(sanitize_title("视频标题：นี่คือชุดที่หยิบใส่ง่ายมาก"), "นี่คือชุดที่หยิบใส่ง่ายมาก")
