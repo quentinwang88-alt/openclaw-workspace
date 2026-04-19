@@ -37,13 +37,13 @@ description: |
 手动触发：
 
 ```bash
-python3 /Users/likeu3/Desktop/skills/workspace/skills/script-run-manager-sync/run_pipeline.py --mode manual
+python3 /Users/likeu3/.openclaw/workspace/skills/script-run-manager-sync/run_pipeline.py --mode manual
 ```
 
 定时触发：
 
 ```bash
-python3 /Users/likeu3/Desktop/skills/workspace/skills/script-run-manager-sync/run_pipeline.py --mode scheduled
+python3 /Users/likeu3/.openclaw/workspace/skills/script-run-manager-sync/run_pipeline.py --mode scheduled
 ```
 
 ## 常用参数

@@ -31,7 +31,7 @@ description: |
 优先直接执行：
 
 ```bash
-python3 /Users/likeu3/Desktop/skills/workspace/skills/short-video-auto-publisher/run_pipeline.py run-all \
+python3 /Users/likeu3/.openclaw/workspace/skills/short-video-auto-publisher/run_pipeline.py run-all \
   --publish-mode geelark
 ```
 
