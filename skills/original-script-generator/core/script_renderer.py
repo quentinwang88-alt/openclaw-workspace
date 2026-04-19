@@ -3,6 +3,7 @@
 脚本 JSON 渲染与摘要生成。
 """
 
+import logging
 import re
 from typing import Any, Dict, List
 
@@ -11,6 +12,11 @@ from core.json_parser import _normalize_video_prompt_payload
 
 FINAL_VIDEO_PROMPT_PREFERRED_CHARS = 1800
 FINAL_VIDEO_PROMPT_MAX_CHARS = 2000
+SEEDANCE_SCRIPT_PREFERRED_CHARS = 1900
+SEEDANCE_SCRIPT_MAX_CHARS = 2000
+
+
+logger = logging.getLogger(__name__)
 
 
 def _stringify_lines(items: List[str]) -> str:
@@ -205,6 +211,345 @@ def _merge_proof_shots(shots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for shot_no, shot in enumerate(merged, 1):
         shot["shot_no"] = shot_no
     return merged
+
+
+def _dedupe_preserve(items: List[str]) -> List[str]:
+    deduped: List[str] = []
+    seen = set()
+    for item in items:
+        text = _compact_text(item)
+        key = re.sub(r"[\s；;，,。:：、\-｜|]", "", text)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(text)
+    return deduped
+
+
+def _extract_negative_clauses(value: Any) -> List[str]:
+    if isinstance(value, list):
+        negatives: List[str] = []
+        for item in value:
+            negatives.extend(_extract_negative_clauses(item))
+        return _dedupe_preserve(negatives)
+    text = _compact_text(value)
+    if not text:
+        return []
+    negatives = re.findall(r"(?:不要|禁止|避免|不可|不能|不用|不做|勿)[^；;。]+", text)
+    if not negatives:
+        for segment in _semantic_segments(value):
+            if any(token in segment for token in ("不要", "禁止", "避免", "不可", "不能", "不用", "不做", "勿")):
+                negatives.append(segment)
+    return _dedupe_preserve(negatives)
+
+
+def _clean_negative_clause(value: str) -> str:
+    text = _compact_text(value)
+    text = re.sub(r"^(不要|禁止|避免|不可|不能|不用|不做|勿)", "", text)
+    return text.strip(" ，；;。") or _compact_text(value)
+
+
+def _extract_progression(value: Any) -> str:
+    text = _compact_text(value)
+    if not text:
+        return ""
+    text = re.sub(r"^(严格执行|执行|保持|维持)", "", text)
+    match = re.search(r"([^；;。:：]{1,12}\s*→\s*[^；;。:：]{1,12}(?:\s*→\s*[^；;。:：]{1,12}){1,3})", text)
+    if match:
+        return _compact_text(match.group(1)).replace(" ", "")
+    return _compress_descriptor(text, max_segments=2, max_chars=40)
+
+
+def _infer_product_category(*values: Any) -> str:
+    text = _compact_text(" ".join(str(value or "") for value in values))
+    patterns = [
+        (r"耳环|耳饰|耳钉|耳夹|耳坠", "耳饰"),
+        (r"发夹|抓夹|鲨鱼夹|香蕉夹", "发夹"),
+        (r"发饰|发箍|发圈|头箍|头绳|发带", "发饰"),
+        (r"项链|吊坠", "项链"),
+        (r"戒指", "戒指"),
+        (r"手链|手环|手镯|手串", "手饰"),
+        (r"包包|手提包|斜挎包|单肩包|托特包", "包包"),
+    ]
+    for pattern, label in patterns:
+        if re.search(pattern, text):
+            return label
+    return "商品"
+
+
+def _infer_quantity(*values: Any) -> str:
+    text = _compact_text(" ".join(str(value or "") for value in values))
+    if any(token in text for token in ("一对", "双只", "两只", "双耳", "一双")):
+        return "一对"
+    if any(token in text for token in ("单只", "一只")):
+        return "单只"
+    return ""
+
+
+def _extract_structure_chain(*values: Any) -> str:
+    candidates: List[str] = []
+    for value in values:
+        text = _compact_text(value)
+        if not text:
+            continue
+        direct = re.findall(r"([^；;。]{1,18}(?:→[^；;。]{1,18}){1,6})", text)
+        candidates.extend(direct)
+
+        ordered = re.findall(r"按([^。；;]{2,50})的顺序", text)
+        candidates.extend(ordered)
+
+    for candidate in sorted(candidates, key=len, reverse=True):
+        candidate = re.sub(r"^.*?按", "", candidate)
+        candidate = re.sub(r"^(hook段|proof段|decision段)", "", candidate)
+        candidate = re.sub(r"的顺序(?:读取|展示|呈现)?$", "", candidate)
+        normalized = re.sub(r"再到|再往下|往下|然后|以及|并且|并", "→", candidate)
+        normalized = re.sub(r"[、，,/和]\s*", "→", normalized)
+        tokens = [
+            _compact_text(token).strip("- ")
+            for token in normalized.split("→")
+            if _compact_text(token).strip("- ")
+        ]
+        tokens = _dedupe_preserve(tokens)
+        if len(tokens) >= 2:
+            return "→".join(tokens[:6])
+    fallback = _compress_descriptor(_merge_brief_parts(*values), max_segments=2, max_chars=48)
+    return fallback or "结构需连续可读"
+
+
+def _format_seedance_duration(value: Any) -> str:
+    seconds = _parse_duration_seconds(value)
+    if seconds > 0:
+        rounded = max(1, int(seconds + 0.5))
+        return f"{rounded}s"
+    return _truncate_text(value, 6) or "3s"
+
+
+def _extract_action_keywords(storyboard: List[Dict[str, Any]]) -> List[str]:
+    merged = " ".join(_compact_text(item.get("person_action", "")) for item in storyboard)
+    keyword_specs = [
+        ("轻转头", ["转头", "侧头"]),
+        ("微点头", ["点头"]),
+        ("平静观察", ["观察", "确认", "看"]),
+        ("稳定持物", ["提起", "持", "拿", "托"]),
+        ("轻微摆动", ["摆动", "晃动"]),
+        ("平稳停留", ["停留", "静置"]),
+    ]
+    hits: List[str] = []
+    for label, tokens in keyword_specs:
+        if any(token in merged for token in tokens):
+            hits.append(label)
+    return _dedupe_preserve(hits)
+
+
+def _build_overall_line(constraints: Dict[str, Any], limits: Dict[str, int]) -> str:
+    head = [
+        "15秒",
+        _compress_descriptor(constraints.get("scene_constraints", ""), max_segments=2, max_chars=limits["scene"]),
+        _compress_descriptor(constraints.get("visual_style", ""), max_segments=2, max_chars=limits["visual"]),
+        _compress_descriptor(constraints.get("person_constraints", ""), max_segments=2, max_chars=limits["person"]),
+    ]
+    tail = [
+        _compress_descriptor(constraints.get("styling_constraints", ""), max_segments=2, max_chars=limits["styling"]),
+        _compress_descriptor(constraints.get("tone_completion_constraints", ""), max_segments=1, max_chars=limits["tone"]),
+    ]
+    return "|".join(part for part in head if part) + (
+        ";" + ";".join(part for part in tail if part) if any(tail) else ""
+    )
+
+
+def _build_product_line(script_json: Dict[str, Any], constraints: Dict[str, Any], limits: Dict[str, int]) -> str:
+    storyboard = script_json.get("storyboard", []) or []
+    first_shot = storyboard[0] if storyboard else {}
+    category = _infer_product_category(
+        constraints.get("product_priority_principle", ""),
+        constraints.get("camera_focus", ""),
+        first_shot.get("shot_content", ""),
+    )
+    quantity = _infer_quantity(first_shot.get("shot_content", ""), constraints.get("camera_focus", ""))
+    structure = _extract_structure_chain(
+        constraints.get("camera_focus", ""),
+        constraints.get("product_priority_principle", ""),
+        first_shot.get("anchor_reference", ""),
+        first_shot.get("shot_content", ""),
+    )
+    realism = _compress_descriptor(
+        _merge_brief_parts(constraints.get("realism_principle", ""), constraints.get("product_priority_principle", "")),
+        max_segments=2,
+        max_chars=limits["realism"],
+    )
+    prefix = f"{category}{quantity}" if quantity else category
+    parts = [f"{prefix}:{_truncate_text(structure, limits['structure'])}"]
+    if realism:
+        parts.append(realism)
+    parts.append("结构从上到下必须连续可读")
+    return ";".join(part for part in parts if part)
+
+
+def _build_shot_requirement(item: Dict[str, Any], boundary_text: str, limits: Dict[str, int]) -> str:
+    style_note = _compress_style_note(
+        item.get("style_note", ""),
+        boundary_text,
+        _compact_text(item.get("shot_content", "")),
+        _compact_text(item.get("person_action", "")),
+        max_chars=limits["requirement"],
+    )
+    if style_note:
+        return style_note
+    fallback = _compress_descriptor(item.get("anchor_reference", ""), max_segments=1, max_chars=limits["requirement"])
+    return fallback or "无"
+
+
+def _build_emotion_line(script_json: Dict[str, Any], constraints: Dict[str, Any]) -> str:
+    storyboard = script_json.get("storyboard", []) or []
+    progression = _extract_progression(constraints.get("emotion_progression_constraints", "")) or "情绪平稳推进"
+    allowed_actions = _extract_action_keywords(storyboard)
+    disallowed = _dedupe_preserve(
+        [_clean_negative_clause(item) for item in _extract_negative_clauses(constraints.get("emotion_progression_constraints", ""))]
+    )
+    parts = [progression]
+    if allowed_actions:
+        parts.append(f"只做{'/'.join(allowed_actions[:4])}")
+    if disallowed:
+        parts.append(f"不做{'/'.join(disallowed[:4])}")
+    return ";".join(parts)
+
+
+def _build_rhythm_line(storyboard: List[Dict[str, Any]]) -> str:
+    cursor = 0.0
+    hook_end = 0.0
+    proof_start = None
+    proof_end = None
+    decision_start = None
+    for item in storyboard:
+        duration = _parse_duration_seconds(item.get("duration"))
+        task_text = str(item.get("spoken_line_task", "") or item.get("task_type", "")).strip().lower()
+        start = cursor
+        end = cursor + duration
+        if "hook" in task_text and end > hook_end:
+            hook_end = end
+        if "proof" in task_text:
+            proof_start = start if proof_start is None else min(proof_start, start)
+            proof_end = end if proof_end is None else max(proof_end, end)
+        if "decision" in task_text and decision_start is None:
+            decision_start = start
+        cursor = end
+
+    parts: List[str] = []
+    if hook_end > 0:
+        parts.append(f"hook在前{max(1, int(hook_end + 0.5))}秒内完成")
+    if proof_start is not None and proof_end is not None:
+        start_no = max(1, int(proof_start + 0.5))
+        end_no = max(start_no, int(proof_end + 0.5))
+        parts.append(f"核心proof起始点在第{start_no}-{end_no}秒")
+    if decision_start is not None:
+        parts.append(f"decision信号在第{max(1, int(decision_start + 0.5))}秒前出现")
+    return ";".join(parts) or "按15秒单条节奏推进"
+
+
+def _build_forbidden_line(script_json: Dict[str, Any], constraints: Dict[str, Any], max_chars: int) -> str:
+    negatives: List[str] = []
+    negatives.extend(_extract_negative_clauses(script_json.get("negative_constraints", [])))
+    for value in constraints.values():
+        negatives.extend(_extract_negative_clauses(value))
+    for item in script_json.get("storyboard", []) or []:
+        negatives.extend(_extract_negative_clauses(item.get("style_note", "")))
+        negatives.extend(_extract_negative_clauses(item.get("person_action", "")))
+        negatives.extend(_extract_negative_clauses(item.get("shot_content", "")))
+    forbidden = "；".join(_dedupe_preserve(negatives))
+    return _truncate_text(forbidden, max_chars) or "无"
+
+
+def _render_seedance_script_pass(script_json: Dict[str, Any], limits: Dict[str, int]) -> str:
+    storyboard = script_json.get("storyboard", []) or []
+    constraints = script_json.get("execution_constraints", {}) or {}
+    boundary_text = _merge_brief_parts(
+        constraints.get("visual_style", ""),
+        constraints.get("person_constraints", ""),
+        constraints.get("styling_constraints", ""),
+        constraints.get("realism_principle", ""),
+    )
+
+    shot_blocks: List[str] = []
+    for idx, item in enumerate(storyboard, 1):
+        task = _compact_text(item.get("spoken_line_task", "") or item.get("task_type", "")) or "none"
+        shot_blocks.append(
+            "\n".join(
+                [
+                    f"【镜头{idx}|{_format_seedance_duration(item.get('duration', ''))}|{task}】",
+                    f"画面:{_compress_descriptor(item.get('shot_content', ''), max_segments=2, max_chars=limits['shot_content']) or '无'}",
+                    f"动作:{_compress_descriptor(item.get('person_action', ''), max_segments=1, max_chars=limits['shot_action']) or '无'}",
+                    f"要求:{_build_shot_requirement(item, boundary_text, limits)}",
+                    f"口播:{_compress_voiceover(item.get('voiceover_text_target_language', ''), max_chars=limits['voiceover']) or '无'}",
+                ]
+            )
+        )
+
+    sections = [
+        f"【整体】{_build_overall_line(constraints, limits)}",
+        f"【商品】{_build_product_line(script_json, constraints, limits)}",
+        "\n\n".join(shot_blocks),
+        f"【情绪】{_build_emotion_line(script_json, constraints)}",
+        f"【节奏】{_build_rhythm_line(storyboard)}",
+        f"【禁止】{_build_forbidden_line(script_json, constraints, limits['forbidden'])}",
+    ]
+    return "\n\n".join(section for section in sections if section).strip()
+
+
+def _render_seedance_script(script_json: Dict[str, Any]) -> str:
+    passes = [
+        {
+            "scene": 56,
+            "visual": 56,
+            "person": 72,
+            "styling": 64,
+            "tone": 42,
+            "structure": 56,
+            "realism": 72,
+            "shot_content": 84,
+            "shot_action": 42,
+            "requirement": 42,
+            "voiceover": 90,
+            "forbidden": 220,
+        },
+        {
+            "scene": 44,
+            "visual": 44,
+            "person": 58,
+            "styling": 50,
+            "tone": 32,
+            "structure": 46,
+            "realism": 56,
+            "shot_content": 68,
+            "shot_action": 32,
+            "requirement": 28,
+            "voiceover": 78,
+            "forbidden": 180,
+        },
+        {
+            "scene": 36,
+            "visual": 36,
+            "person": 46,
+            "styling": 40,
+            "tone": 26,
+            "structure": 38,
+            "realism": 42,
+            "shot_content": 56,
+            "shot_action": 24,
+            "requirement": 18,
+            "voiceover": 68,
+            "forbidden": 150,
+        },
+    ]
+
+    rendered = ""
+    for limits in passes:
+        rendered = _render_seedance_script_pass(script_json, limits)
+        if len(rendered) <= SEEDANCE_SCRIPT_PREFERRED_CHARS:
+            return rendered
+    if len(rendered) > SEEDANCE_SCRIPT_MAX_CHARS:
+        raise ValueError(f"render_script output too long: {len(rendered)} > {SEEDANCE_SCRIPT_MAX_CHARS}")
+    logger.warning("render_script output exceeded preferred chars: %s", len(rendered))
+    return rendered
 
 
 def _render_final_video_prompt_core(prompt_json: Dict[str, Any]) -> str:
@@ -544,7 +889,7 @@ def render_internal_script(script_json: Dict[str, Any]) -> str:
 
 
 def render_script_v2(script_json: Dict[str, Any]) -> str:
-    return render_internal_script(script_json)
+    return _render_seedance_script(script_json)
 
 
 def render_variant_script(variant: Dict[str, Any]) -> str:
@@ -615,7 +960,7 @@ def render_skipped_video_prompt(reason: str) -> str:
 
 
 def render_script(script_json: Dict[str, Any]) -> str:
-    return render_internal_script(script_json)
+    return _render_seedance_script(script_json)
 
 
 def build_summary(

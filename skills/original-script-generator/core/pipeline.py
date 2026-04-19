@@ -4665,8 +4665,6 @@ class OriginalScriptPipeline:
             f"script_s{script_index}_json": self._dump_json(script_bundle["script_json"]),
             f"review_s{script_index}_json": self._dump_json(script_bundle["review_json"]),
             f"script_s{script_index}": script_bundle["rendered_script"],
-            f"video_prompt_s{script_index}_json": self._dump_json(script_bundle["video_prompt_json"]),
-            f"video_prompt_s{script_index}": script_bundle["rendered_video_prompt"],
             "output_summary": build_summary(anchor_card, final_s1, final_s2, final_s3, final_s4),
             "last_run_at": self._now_string(),
             "error_message": "",

@@ -27,7 +27,7 @@ from core.bitable import (  # noqa: E402
 )
 from core.feishu_url_parser import parse_feishu_bitable_url  # noqa: E402
 from core.script_ids import build_script_id_from_fields  # noqa: E402
-from core.script_renderer import render_script, render_variant_script, render_video_prompt  # noqa: E402
+from core.script_renderer import render_script, render_variant_script  # noqa: E402
 from core.storage import PipelineStorage  # noqa: E402
 
 
@@ -38,22 +38,11 @@ SCRIPT_STAGE_MAP = {
     "script_s4": "script_s4",
 }
 
-VIDEO_PROMPT_STAGE_MAP = {
-    "video_prompt_s1": "video_prompt_s1",
-    "video_prompt_s2": "video_prompt_s2",
-    "video_prompt_s3": "video_prompt_s3",
-    "video_prompt_s4": "video_prompt_s4",
-}
-
 SCRIPT_TEXT_SLOTS: List[Tuple[str, str]] = [
     ("script_s1", "script_s1"),
     ("script_s2", "script_s2"),
     ("script_s3", "script_s3"),
     ("script_s4", "script_s4"),
-    ("video_prompt_s1", "video_prompt_s1"),
-    ("video_prompt_s2", "video_prompt_s2"),
-    ("video_prompt_s3", "video_prompt_s3"),
-    ("video_prompt_s4", "video_prompt_s4"),
 ]
 
 VARIANT_TEXT_SLOTS: List[Tuple[str, str, int, int]] = [
@@ -142,7 +131,7 @@ def rewrite_selected_tasks(feishu_url: str, task_nos: Iterable[str]) -> Dict[str
             field_name = mapping.get(logical_name)
             if not field_name:
                 continue
-            stage_name = SCRIPT_STAGE_MAP.get(logical_name) or VIDEO_PROMPT_STAGE_MAP.get(logical_name)
+            stage_name = SCRIPT_STAGE_MAP.get(logical_name)
             if not stage_name:
                 continue
             stage_output = storage.get_latest_stage_output_json(
@@ -162,11 +151,7 @@ def rewrite_selected_tasks(feishu_url: str, task_nos: Iterable[str]) -> Dict[str
                 record_id=record.record_id,
             )
             stage_output["content_id"] = content_id
-            rendered = (
-                render_script(stage_output)
-                if logical_name.startswith("script_")
-                else render_video_prompt(stage_output)
-            )
+            rendered = render_script(stage_output)
             current_text = normalize_cell_value(record.fields.get(field_name))
             if rendered and rendered != current_text:
                 update_values[logical_name] = rendered
