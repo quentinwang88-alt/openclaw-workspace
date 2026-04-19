@@ -71,6 +71,13 @@ Thumbs.db
 # 本机状态 / OpenClaw 运行态
 # =========================
 .openclaw/
+BOOTSTRAP.md
+HEARTBEAT.md
+IDENTITY.md
+MACHINE_SPECIFIC_ITEMS.md
+SOUL.md
+TOOLS.md
+USER.md
 memory/*.md
 memory/.dreams/
 !memory/.gitkeep
