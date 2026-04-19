@@ -1,0 +1,5 @@
+interface:
+  display_name: "短视频自动发布"
+  short_description: "短视频自动发布、GeeLark排期、发布结果同步"
+  brand_color: "#0F766E"
+  default_prompt: "当用户说“跑一遍短视频自动发布”“执行短视频自动发布”“视频自动发布”“GeeLark排期发布”时，使用 $short-video-auto-publisher；默认执行全量真实流程，不要自行添加 --limit，不要先 dry-run，除非用户明确要求测试。不要误匹配到达人宫格图或 creator-crm。"
