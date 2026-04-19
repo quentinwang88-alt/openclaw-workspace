@@ -1,0 +1,4 @@
+# 库存预警定时任务
+# 每天上午 8:30 运行
+
+30 8 * * * cd /Users/likeu3/.openclaw/workspace/skills/inventory-alert && /usr/bin/python3 alert.py

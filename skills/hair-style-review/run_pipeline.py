@@ -17,9 +17,13 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+SKILL_DIR = Path(__file__).resolve().parent
+if str(SKILL_DIR) not in sys.path:
+    sys.path.insert(0, str(SKILL_DIR))
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+    sys.path.append(str(REPO_ROOT))
 
 from workspace_support import load_repo_env
 
@@ -47,11 +51,9 @@ from core.feishu import (
     FeishuBitableClient,
     TableRecord,
     parse_feishu_bitable_url,
-    resolve_wiki_bitable_app_token,
+    resolve_bitable_app_token,
 )
 
-
-SKILL_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = SKILL_DIR / "output"
 CREATOR_CRM_DIR = REPO_ROOT / "skills" / "creator-crm"
 
@@ -290,52 +292,63 @@ class StyleAnalyzer:
 
 def build_style_analysis_prompt(product_title: str, image_url: Optional[str], basic_info: str) -> str:
     styles = "\n".join(f"- {name}" for name in RECOMMENDED_STYLE_OPTIONS)
-    return f"""你是一个发饰风格分析助手。
+    return f"""你是一个发夹选品风格分析助手。
 
 任务：
-根据我提供的【商品标题】【商品图片】【商品基础信息】，判断该商品的主风格，并判断是否推荐纳入当前发饰备选池。
+根据我提供的【商品标题】【商品图片】【商品基础信息】，判断该商品的发夹子类、主风格，并判断是否推荐纳入当前发夹首发备选池。
 
-当前重点目标风格：
-1. 轻韩系基础温柔风
-2. 韩系功能风
-3. 轻韩系甜美风
-4. 简约通勤风
-5. 轻精致风
+当前重点方向：
+1. 轻韩系基础造型抓夹
+2. 功能结构型抓夹
+3. 简约韩系装饰夹
+4. 轻韩系甜美发夹（仅适合作为测试池，不宜过重）
 
-非重点风格包括：
-- 重甜少女风
-- 儿童幼态风
-- 重礼物感/重拍照风
-- 夸张个性设计风
+非重点方向：
+- 儿童卡通风
+- IP感明显风格
+- 重甜礼物风
+- 公主拍照风
+- 过度夸张装饰风
+- 低价杂货套组风
+
+请先在内部判断该商品更接近哪一类：
+- 抓夹类
+- 小发卡/刘海夹/边夹类
+- 装饰发夹类
+- 儿童/卡通小夹类
+- 其他发夹类
 
 风格判断标准：
 1. 轻韩系基础温柔风：
-配色柔和，常见米白、奶油色、浅咖、雾粉、透明茶色；轮廓圆润；装饰少；整体干净、温柔、日常、好搭，像韩系基础日常款。
+配色柔和，常见米白、奶油色、浅咖、雾粉、透明茶色；轮廓圆润；装饰少；整体干净、温柔、日常、好搭。
 
 2. 韩系功能风：
-偏实用整理型，常见小抓夹、3齿/5齿/6齿、多件套、小号日常款；结构简单，佩戴方式一眼能懂；重点是方便、稳、日常使用，而不是强装饰。
+偏实用整理型，常见3齿/5齿/6齿、小中号抓夹、半扎/盘发/高马尾适用结构；重点是方便、稳、日常使用。
 
 3. 轻韩系甜美风：
-整体偏韩系，带少量蝴蝶结、小花朵、软糯布艺、轻珍珠等元素；配色柔和；有甜感和女生感，但不过分夸张，不明显儿童化。
+整体偏韩系，带少量蝴蝶结、小花朵、轻纱、软糯布艺等元素；甜但不过分，不明显儿童化。
 
 4. 简约通勤风：
-配色克制，常见黑白灰棕金银等；线条简洁利落；装饰少；整体低调、成熟、百搭，适合通勤和轻熟日常。
+配色克制，线条简洁利落，装饰少，整体低调、成熟、百搭。
 
 5. 轻精致风：
-有少量金属、少量钻、少量珍珠、小亮点等细节；整体精致但不浮夸；更像有一点打扮感的小配饰，适合轻熟和日常精致路线。
+有少量金属、少量钻、少量珍珠、小亮点细节；整体精致但不浮夸。
 
 允许输出的产品风格只能从以下列表中选 1 个：
 {styles}
 
+推荐标准：
+- 推荐：适合当前首发备选池，属于当前重点方向，或虽非主推但适合进入测试池。
+- 不推荐：不适合当前首发备选池，明显偏儿童、卡通、礼物、公主、夸张、低价杂货感，或受众过窄。
+
 判断原则：
 - 优先看图片整体视觉，不要只看标题
 - 只判断一个最接近的主风格
-- 如果明显偏夸张、儿童、礼物感、拍照感，应优先判为非重点风格
-- “推荐”用于重点目标风格中较匹配的商品
-- “不推荐”用于非重点风格，或虽然可归入重点风格但明显不适合当前备选池的商品
+- 如果明显偏儿童、卡通、礼物感、拍照感，应优先判为非重点方向
+- 是否推荐不是只看好不好看，而是看是否适合纳入当前首发备选池
 - 如果没有图片，仅可基于标题和基础信息判断，并在详细原因中明确说明准确度有限
 
-请严格输出 JSON，不要输出任何额外说明，格式如下：
+请严格输出 JSON，不要输出任何额外说明：
 {{
   "product_style": "",
   "is_recommended": "",
@@ -394,7 +407,7 @@ class HairStyleReviewJob:
         info = parse_feishu_bitable_url(self.options.feishu_url)
         if info is None:
             raise ValueError(f"无法解析飞书表格链接: {self.options.feishu_url}")
-        app_token = resolve_wiki_bitable_app_token(info.app_token) if info.is_wiki else info.app_token
+        app_token = resolve_bitable_app_token(info)
         client = FeishuBitableClient(app_token=app_token, table_id=info.table_id)
 
         fields = client.list_fields()
@@ -408,8 +421,6 @@ class HairStyleReviewJob:
         candidate_field = mapping["candidate"]
         title_field = mapping["title"]
         image_field = mapping["image"]
-        if not candidate_field:
-            raise ValueError("表格缺少 `是否纳入备选` 或 `是否列入备选` 字段")
         if not title_field and not image_field:
             raise ValueError("表格至少需要标题或图片字段之一")
 

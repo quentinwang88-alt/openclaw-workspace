@@ -1,0 +1,22 @@
+{
+  "threshold_days": 10,
+  "feishu": {
+    "enabled": true,
+    "user_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_USER_WEBHOOK",
+    "group_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_GROUP_WEBHOOK",
+    "app_id": "cli_xxxxxxxxxx",
+    "app_secret": "xxxxxxxxxxxxxx",
+    "_app_comment": "飞书应用凭证，用于调用开放平台 API（创建文档、操作多维表格等）",
+    "create_doc": true,
+    "bitable": {
+      "app_token": "YOUR_BITABLE_APP_TOKEN",
+      "table_id": "YOUR_BITABLE_TABLE_ID"
+    },
+    "_bitable_comment": "多维表格配置。需要先创建多维表格，然后填入 app_token 和 table_id",
+    "in_transit_bitable": {
+      "app_token": "",
+      "table_id": ""
+    },
+    "_in_transit_comment": "在途库存飞书表格配置（可选）。表格需包含 SKU编码 和 在途数量 字段"
+  }
+}
