@@ -4,7 +4,7 @@
 """
 
 import re
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from core.constants import (
     HOME_SHARE_SCENE_KEYWORDS,
@@ -83,6 +83,110 @@ def _contains_unwanted_ad_expression(text: str) -> bool:
                 continue
             return True
     return False
+
+
+def _parse_duration_seconds(value: Any) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    matches = re.findall(r"(\d+(?:\.\d+)?)", text)
+    if not matches:
+        return 0.0
+    try:
+        numbers = [float(item) for item in matches]
+    except ValueError:
+        return 0.0
+    if not numbers:
+        return 0.0
+    if len(numbers) >= 2 and any(token in text for token in ("-", "~", "至", "到")):
+        return max(numbers[:2])
+    return numbers[0]
+
+
+def _expand_spoken_task(task: str) -> List[str]:
+    normalized = str(task or "").strip()
+    if normalized == "proof+decision":
+        return ["proof", "decision"]
+    if normalized:
+        return [normalized]
+    return []
+
+
+def _extract_timed_storyboard_nodes(script_json: Dict[str, object]) -> List[Dict[str, object]]:
+    storyboard = _collect_storyboard_shots(script_json)
+    nodes: List[Dict[str, object]] = []
+    current_start = 0.0
+    for index, shot in enumerate(storyboard, 1):
+        duration = _parse_duration_seconds(shot.get("duration"))
+        end_time = current_start + duration if duration > 0 else current_start
+        nodes.append(
+            {
+                "shot_no": index,
+                "start": current_start,
+                "end": end_time,
+                "tasks": _expand_spoken_task(str(shot.get("spoken_line_task", "") or "")),
+            }
+        )
+        current_start = end_time
+    return nodes
+
+
+def validate_script_time_nodes(
+    final_strategy: Dict[str, object],
+    script_json: Dict[str, object],
+) -> Tuple[List[str], List[str]]:
+    warnings: List[str] = []
+    violations: List[str] = []
+
+    nodes = _extract_timed_storyboard_nodes(script_json)
+    if not nodes:
+        return warnings, ["脚本缺少可用于 15 秒硬节点校验的 storyboard 时序"]
+
+    hook_completion: Optional[float] = None
+    proof_starts: List[float] = []
+    decision_starts: List[float] = []
+
+    contiguous_hook = True
+    for node in nodes:
+        tasks = node.get("tasks") if isinstance(node.get("tasks"), list) else []
+        start = float(node.get("start") or 0.0)
+        end = float(node.get("end") or start)
+        task_set = {str(item or "").strip() for item in tasks if str(item or "").strip()}
+
+        if contiguous_hook and "hook" in task_set:
+            hook_completion = end
+        elif task_set - {"none"}:
+            contiguous_hook = False
+
+        if "proof" in task_set:
+            proof_starts.append(start)
+        if "decision" in task_set:
+            decision_starts.append(start)
+
+    if hook_completion is None:
+        violations.append("未检测到 hook 时序，无法完成前 3 秒停留校验")
+    elif hook_completion > 3.0:
+        warnings.append(f"hook 完成时间约 {hook_completion:.1f}s，超过前 3 秒节点")
+
+    if not proof_starts:
+        violations.append("未检测到 proof 起始节点，无法完成 4–8 秒 proof 校验")
+    elif not any(4.0 <= item <= 8.0 for item in proof_starts):
+        earliest_proof = min(proof_starts)
+        warnings.append(f"核心 proof 起始时间约 {earliest_proof:.1f}s，未落在 4–8 秒区间")
+
+    decision_deadline = 9.0 if str(final_strategy.get("script_role", "") or "").strip() == "risk_resolution" else 12.0
+    if not decision_starts:
+        violations.append("未检测到 decision 信号，无法完成决策收束节点校验")
+    else:
+        earliest_decision = min(decision_starts)
+        if earliest_decision > decision_deadline:
+            message = f"decision 信号约在 {earliest_decision:.1f}s 出现，晚于 {decision_deadline:.0f}s 节点"
+            if decision_deadline <= 9.0 or earliest_decision - decision_deadline >= 1.0:
+                violations.append(message)
+            else:
+                warnings.append(message)
+
+    return warnings, violations
 
 
 def count_home_share_strategies(strategies: List[Dict[str, object]]) -> int:

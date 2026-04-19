@@ -26,6 +26,7 @@ from core.business_rules import (
     is_sea_market,
     preferred_sea_scene_order,
     validate_script_direction_separation,
+    validate_script_time_nodes,
     validate_strategy_distribution,
 )
 from core.business_rules import is_home_share_scene
@@ -1709,6 +1710,22 @@ class OriginalScriptPipeline:
             review_json["minor_issues"] = self._merge_unique_issue_texts(existing_minor, validation.warnings)
         return review_json, [str(item or "").strip() for item in validation.violations if str(item or "").strip()]
 
+    def _augment_review_with_timing_feedback(
+        self,
+        review_json: Dict[str, Any],
+        final_strategy: Dict[str, Any],
+        script_json: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], List[str]]:
+        warnings, violations = validate_script_time_nodes(final_strategy, script_json)
+        if not warnings and not violations:
+            return review_json, []
+
+        review_json = dict(review_json)
+        if warnings:
+            existing_minor = self._review_issue_texts(review_json, "minor_issues")
+            review_json["minor_issues"] = self._merge_unique_issue_texts(existing_minor, warnings)
+        return review_json, [str(item or "").strip() for item in violations if str(item or "").strip()]
+
     def _validate_inputs(self, context: Dict[str, str], attachments: List[Dict[str, Any]]) -> None:
         missing = []
         if not attachments:
@@ -2299,14 +2316,20 @@ class OriginalScriptPipeline:
             context=context,
             script_json=script_json,
         )
+        review_json, timing_violations = self._augment_review_with_timing_feedback(
+            review_json=review_json,
+            final_strategy=final_strategy,
+            script_json=script_json,
+        )
         blocking_reason = self._blocking_script_issue_after_review(
             context=context,
             final_strategy=final_strategy,
             script_json=script_json,
             existing_scripts=existing_scripts,
         )
-        if not blocking_reason and type_guard_violations:
-            blocking_reason = "；".join(type_guard_violations[:3])
+        local_violations = type_guard_violations + timing_violations
+        if not blocking_reason and local_violations:
+            blocking_reason = "；".join(local_violations[:3])
         review_json, passed_review, failure_reason = self._promote_light_review_if_safe(
             review_json=review_json,
             script_json=script_json,
