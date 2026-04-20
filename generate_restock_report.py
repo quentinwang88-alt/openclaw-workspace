@@ -46,12 +46,13 @@ def generate_report():
         total_available = available + in_transit_qty
         days_with_transit = total_available / avg_sales if avg_sales > 0 else 999
         
-        # 只处理需要补货的SKU
-        if purchase_sale_days <= THRESHOLD_DAYS:
-            # 计算建议采购量
-            target_qty = avg_sales * PURCHASE_CYCLE_DAYS
-            suggested_qty = max(0, target_qty - total_available)
-            
+        # 计算建议采购量
+        target_qty = avg_sales * PURCHASE_CYCLE_DAYS
+        suggested_qty = max(0, target_qty - total_available)
+
+        # 只要 suggested_qty > 0，就说明低于补货周期，需要进入补货清单
+        # THRESHOLD_DAYS 仅用于预警和优先级分层
+        if suggested_qty > 0 or purchase_sale_days <= THRESHOLD_DAYS:
             restock_list.append({
                 'sku': sku,
                 'available': available,
@@ -100,7 +101,8 @@ def generate_markdown(restock_list, cycle_days, threshold_days):
 
 **生成时间**: {now.strftime('%Y-%m-%d %H:%M')}  
 **补货周期**: {cycle_days}天（采购3天 + 物流12天 + 安全2天）  
-**预警阈值**: {threshold_days}天可售
+**预警阈值**: {threshold_days}天可售  
+**补货判定**: 总可售覆盖低于补货周期即计算建议采购量  
 
 ---
 
@@ -110,6 +112,7 @@ def generate_markdown(restock_list, cycle_days, threshold_days):
     urgent = [x for x in restock_list if x['purchase_sale_days'] <= 3]
     high = [x for x in restock_list if 4 <= x['purchase_sale_days'] <= 7]
     medium = [x for x in restock_list if 8 <= x['purchase_sale_days'] <= 10]
+    routine = [x for x in restock_list if x['purchase_sale_days'] > 10]
     
     # 紧急补货
     if urgent:
@@ -131,6 +134,12 @@ def generate_markdown(restock_list, cycle_days, threshold_days):
         for i, item in enumerate(medium, len(urgent) + len(high) + 1):
             md += format_sku_item(i, item)
         md += "\n---\n\n"
+
+    if routine:
+        md += "## 📦 提前补货（高于10天预警阈值，但低于补货周期）\n\n"
+        for i, item in enumerate(routine, len(urgent) + len(high) + len(medium) + 1):
+            md += format_sku_item(i, item)
+        md += "\n---\n\n"
     
     # 汇总
     md += "## 📊 补货汇总\n\n"
@@ -148,6 +157,10 @@ def generate_markdown(restock_list, cycle_days, threshold_days):
     if medium:
         total_medium = sum(x['suggested_qty'] for x in medium)
         md += f"| 🟡 中（8-10天） | {len(medium)} | 约 {total_medium:,} 件 |\n"
+
+    if routine:
+        total_routine = sum(x['suggested_qty'] for x in routine)
+        md += f"| 📦 提前补货（>10天） | {len(routine)} | 约 {total_routine:,} 件 |\n"
     
     total_qty = sum(x['suggested_qty'] for x in restock_list)
     md += f"| **合计** | **{len(restock_list)}** | **约 {total_qty:,} 件** |\n\n"

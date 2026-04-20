@@ -12,8 +12,9 @@
 1. 从 BigSeller API 获取当前库存和日均销量
 2. 从飞书在途库存表格读取在途数据（支持多批次累加）
 3. 计算建议采购量 = max(0, 日均销量 × 补货周期 - (当前库存 + 在途库存))
-4. 默认优先输出“建议采购 > 0”的实际补货 SKU，避免大量仅预警但无需采购的噪音
-5. 按可售天数排序并输出报告
+4. 只要建议采购量 > 0，就纳入补货清单；预警阈值仅用于紧急程度分层
+5. 默认优先输出“建议采购 > 0”的实际补货 SKU，避免大量仅预警但无需采购的噪音
+6. 按可售天数排序并输出报告
 
 在途库存来源：
 - 飞书多维表格：App Token=TiykbignraDkSOshIKNcfZ9vnlg, Table ID=tblbe4xbZQ56LS55
@@ -119,12 +120,13 @@ def generate_restock_report(
         total_available = available + in_transit_qty
         days_with_transit = total_available / avg_sales if avg_sales > 0 else 999
         
-        # 只处理需要补货的SKU
-        if purchase_sale_days <= threshold_days:
-            # 计算建议采购量
-            target_qty = avg_sales * purchase_cycle_days
-            suggested_qty = max(0, target_qty - total_available)
-            
+        # 计算建议采购量
+        target_qty = avg_sales * purchase_cycle_days
+        suggested_qty = max(0, target_qty - total_available)
+
+        # 补货清单口径：只要低于补货周期导致 suggested_qty > 0，就应该纳入
+        # threshold_days 仅用于预警/优先级分层，不应拦截实际需要补货的 SKU
+        if suggested_qty > 0 or purchase_sale_days <= threshold_days:
             restock_list.append({
                 'sku': sku,
                 'title': sku_data.get('title', ''),
@@ -176,6 +178,7 @@ def format_markdown_report(report_data: Dict[str, Any]) -> str:
 **生成时间**: {now.strftime('%Y-%m-%d %H:%M')}  
 **补货周期**: {cycle_days}天（采购3天 + 物流12天 + 安全2天）  
 **预警阈值**: {threshold_days}天可售  
+**补货判定**: 总可售覆盖低于补货周期即计算建议采购量  
 **报告口径**: {'仅展示建议采购 > 0 的实际补货SKU' if only_actionable else '展示全部预警SKU（含建议采购为0）'}
 
 ---
@@ -185,6 +188,7 @@ def format_markdown_report(report_data: Dict[str, Any]) -> str:
     urgent = [x for x in restock_list if x['purchase_sale_days'] <= 3]
     high = [x for x in restock_list if 4 <= x['purchase_sale_days'] <= 7]
     medium = [x for x in restock_list if 8 <= x['purchase_sale_days'] <= threshold_days]
+    routine = [x for x in restock_list if x['purchase_sale_days'] > threshold_days]
     
     # 紧急补货
     if urgent:
@@ -206,6 +210,13 @@ def format_markdown_report(report_data: Dict[str, Any]) -> str:
         for i, item in enumerate(medium, len(urgent) + len(high) + 1):
             md += _format_sku_item(i, item)
         md += "\n---\n\n"
+
+    # 提前补货
+    if routine:
+        md += f"## 📦 提前补货（高于{threshold_days}天预警阈值，但低于补货周期）\n\n"
+        for i, item in enumerate(routine, len(urgent) + len(high) + len(medium) + 1):
+            md += _format_sku_item(i, item)
+        md += "\n---\n\n"
     
     # 汇总
     md += "## 📊 补货汇总\n\n"
@@ -225,6 +236,10 @@ def format_markdown_report(report_data: Dict[str, Any]) -> str:
     if medium:
         total_medium = sum(x['suggested_qty'] for x in medium)
         md += f"| 🟡 中（8-{threshold_days}天） | {len(medium)} | 约 {total_medium:,} 件 |\n"
+
+    if routine:
+        total_routine = sum(x['suggested_qty'] for x in routine)
+        md += f"| 📦 提前补货（>{threshold_days}天） | {len(routine)} | 约 {total_routine:,} 件 |\n"
     
     total_qty = sum(x['suggested_qty'] for x in restock_list)
     md += f"| **合计** | **{len(restock_list)}** | **约 {total_qty:,} 件** |\n\n"
@@ -325,9 +340,9 @@ class RestockSuggestionSkillAdapter(BaseSkill):
                 "threshold_days": {
                     "type": "integer",
                     "description": (
-                        "预警阈值天数，预计可售天数低于此值的 SKU 会被纳入补货建议。"
+                        "预警阈值天数，用于标记紧急程度和报告分层。"
                         "默认值为 10 天。"
-                        "例如：设置为 10 天，则可售天数 ≤10 天的 SKU 都会被列入补货建议。"
+                        "注意：实际是否需要补货，优先由补货周期决定，即 suggested_qty > 0 就应纳入补货建议。"
                     )
                 },
                 "output_format": {
