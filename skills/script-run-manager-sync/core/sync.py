@@ -325,9 +325,10 @@ def build_sync_tasks(
 
         fields = record.fields
         product_code_value = normalize_text(fields.get(mapping["product_code"])) if mapping.get("product_code") else ""
-        if product_code and product_code_value != product_code:
+        task_name_base = product_code_value or _fallback_task_no(fields, mapping, record.record_id)
+        if product_code and task_name_base != product_code:
             continue
-        if not product_code_value:
+        if not task_name_base:
             continue
 
         if not has_any_sync_enabled(fields, mapping):
@@ -344,9 +345,9 @@ def build_sync_tasks(
             tasks.append(
                 ScriptSyncTask(
                     source_record_id=record.record_id,
-                    product_code=product_code_value,
+                    product_code=task_name_base,
                     script_slot=spec["task_suffix"],
-                    task_name=f"{product_code_value}.{spec['task_suffix']}",
+                    task_name=f"{task_name_base}.{spec['task_suffix']}",
                     prompt_text=prompt_text,
                     reference_images=attachments,
                     product_type=normalize_text(fields.get(mapping.get("product_type"))) if mapping.get("product_type") else "",

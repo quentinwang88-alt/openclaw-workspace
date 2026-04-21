@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
 """同步逻辑单元测试。"""
 
+from pathlib import Path
+import sys
 import unittest
+
+TESTS_DIR = Path(__file__).resolve().parent
+SKILL_DIR = TESTS_DIR.parent
+if str(SKILL_DIR) not in sys.path:
+    sys.path.insert(0, str(SKILL_DIR))
 
 from core.bitable import TableRecord
 from core.sync import (
@@ -107,6 +114,26 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
         self.assertEqual(tasks[0].task_name, "ABC099.S1")
         self.assertEqual(tasks[0].prompt_text, "original script one")
         self.assertEqual(tasks[1].prompt_text, "variant one")
+
+    def test_build_sync_tasks_falls_back_to_task_no_when_product_code_missing(self) -> None:
+        records = [
+            TableRecord(
+                record_id="rec_missing_code",
+                fields={
+                    "任务编号": "053",
+                    "是否可同步母版": True,
+                    "产品图片": [{"file_token": "file_1"}],
+                    "脚本方向一": "master one",
+                    "脚本方向二": "master two",
+                },
+            ),
+        ]
+
+        tasks = build_sync_tasks(records, self.mapping)
+
+        self.assertEqual([task.task_name for task in tasks], ["053.S1", "053.S2"])
+        self.assertTrue(all(task.product_code == "053" for task in tasks))
+        self.assertEqual(tasks[0].script_id, "053_M1_M")
 
     def test_split_sync_checkboxes_only_sync_master_slots_when_master_checked(self) -> None:
         records = [
