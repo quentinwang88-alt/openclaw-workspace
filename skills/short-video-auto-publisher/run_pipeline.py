@@ -8,7 +8,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Iterable, Tuple
 
 
 SKILL_DIR = Path(__file__).parent.absolute()
@@ -63,6 +63,41 @@ DEFAULT_REPORT_FEISHU_URL = (
     "QjAWwBMPSiwajkkNXROc3SiVnrg?table=tblflJ8MuATv1Duk&view=vewo3uicWW"
 )
 DEFAULT_CONFIG_PATH = Path("/Users/likeu3/.openclaw/shared/data/short_video_auto_publisher_config.json")
+
+
+def ensure_video_storage_ready(video_dir: str | Path, *, sample_paths: Iterable[str] | None = None) -> Path:
+    requested = Path(video_dir).expanduser()
+    resolved = requested.resolve(strict=False)
+
+    if requested.is_symlink() and not requested.exists():
+        raise RuntimeError(
+            f"本地视频目录软链已断开: {requested} -> {resolved}。请先挂载移动存储空间1，再执行发布任务。"
+        )
+
+    if not requested.exists():
+        raise RuntimeError(f"本地视频目录不存在: {requested}。请先检查视频存储目录或挂载移动存储空间1。")
+
+    if not requested.is_dir():
+        raise RuntimeError(f"本地视频目录不是文件夹: {requested}")
+
+    test_file = requested / ".openclaw_storage_probe"
+    try:
+        test_file.write_text("ok", encoding="utf-8")
+        test_file.unlink()
+    except OSError as exc:
+        raise RuntimeError(f"本地视频目录不可写: {requested}，请检查移动盘权限或挂载状态。原始错误: {exc}") from exc
+
+    if sample_paths:
+        for raw_path in sample_paths:
+            candidate = Path(str(raw_path or "").strip())
+            if not candidate:
+                continue
+            if str(candidate).strip() and not candidate.exists():
+                raise RuntimeError(
+                    f"检测到数据库中的视频文件不可访问: {candidate}。通常表示移动存储空间1未挂载或路径失效。"
+                )
+
+    return requested
 
 
 def load_local_config(config_path: str | Path = DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
@@ -192,6 +227,7 @@ def command_sync_script_db(args: argparse.Namespace) -> None:
 
 
 def command_sync_videos(args: argparse.Namespace) -> None:
+    ensure_video_storage_ready(args.video_dir)
     db = AutoPublishDB(Path(args.db_path))
     app_token, table_id = resolve_feishu_config(args.run_manager_feishu_url)
     client = FeishuBitableClient(app_token=app_token, table_id=table_id)
@@ -220,13 +256,17 @@ def command_sync_accounts(args: argparse.Namespace) -> None:
 
 
 def command_schedule(args: argparse.Namespace) -> None:
+    video_dir = ensure_video_storage_ready(args.video_dir)
     db = AutoPublishDB(Path(args.db_path))
+    sample_paths = [str(row["local_file_path"] or "") for row in db.list_scheduled_tasks()[:10]]
+    ensure_video_storage_ready(video_dir, sample_paths=sample_paths)
     publisher = build_publish_adapter(args)
     stats = schedule_slots(db, publisher)
     print(stats.__dict__)
 
 
 def command_sync_results(args: argparse.Namespace) -> None:
+    ensure_video_storage_ready(args.video_dir)
     db = AutoPublishDB(Path(args.db_path))
     publisher = build_publish_adapter(args)
     stats = sync_publish_results(db, publisher)
@@ -301,6 +341,7 @@ def command_sync_report_table(args: argparse.Namespace) -> None:
 
 
 def command_cleanup_published_videos(args: argparse.Namespace) -> None:
+    ensure_video_storage_ready(args.video_dir)
     db = AutoPublishDB(Path(args.db_path))
     stats = db.cleanup_published_videos(
         older_than_days=args.retention_days,
@@ -311,6 +352,7 @@ def command_cleanup_published_videos(args: argparse.Namespace) -> None:
 
 def command_run_all(args: argparse.Namespace) -> None:
     summary = {}
+    video_dir = ensure_video_storage_ready(args.video_dir)
 
     db = AutoPublishDB(Path(args.db_path))
     title_generator = build_title_generator(args.title_mode, args.llm_route)
@@ -359,12 +401,14 @@ def command_run_all(args: argparse.Namespace) -> None:
         run_manager_records,
         run_manager_mapping,
         db,
-        download_dir=Path(args.video_dir),
+        download_dir=video_dir,
         client=run_manager_client,
     )
     print(f"[run-all] sync_videos done {summary['sync_videos']}", flush=True)
 
     print("[run-all] schedule start", flush=True)
+    sample_paths = [str(row["local_file_path"] or "") for row in db.list_scheduled_tasks()[:10]]
+    ensure_video_storage_ready(video_dir, sample_paths=sample_paths)
     publisher = build_publish_adapter(args)
     summary["schedule"] = schedule_slots(db, publisher).__dict__
     print(f"[run-all] schedule done {summary['schedule']}", flush=True)
@@ -376,7 +420,7 @@ def command_run_all(args: argparse.Namespace) -> None:
     print("[run-all] cleanup_videos start", flush=True)
     summary["cleanup_videos"] = db.cleanup_published_videos(
         older_than_days=args.cleanup_published_days,
-        base_dir=Path(args.video_dir),
+        base_dir=video_dir,
     )
     print(f"[run-all] cleanup_videos done {summary['cleanup_videos']}", flush=True)
 
@@ -393,6 +437,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(func=None)
     parser.add_argument("--db-path", default=str(default_db_path()), help="SQLite 路径")
     parser.add_argument("--config-path", default=str(DEFAULT_CONFIG_PATH), help="本地配置文件路径")
+    parser.add_argument("--video-dir", default=str(default_video_dir()), help="本地视频目录")
 
     subparsers = parser.add_subparsers(dest="command")
 
@@ -407,7 +452,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     sync_video = subparsers.add_parser("sync-videos", help="从运行管理表同步成功视频并下载落地")
     sync_video.add_argument("--run-manager-feishu-url", default=DEFAULT_RUN_MANAGER_FEISHU_URL, help="运行管理表飞书 URL")
-    sync_video.add_argument("--video-dir", default=str(default_video_dir()), help="本地视频目录")
     sync_video.add_argument("--limit", type=int, help="限制处理数量")
     sync_video.set_defaults(func=command_sync_videos)
 
@@ -421,7 +465,6 @@ def build_parser() -> argparse.ArgumentParser:
     sync_report.set_defaults(func=command_sync_report_table)
 
     cleanup_videos = subparsers.add_parser("cleanup-published-videos", help="清理已发布超过保留期的本地视频")
-    cleanup_videos.add_argument("--video-dir", default=str(default_video_dir()), help="本地视频目录")
     cleanup_videos.add_argument("--retention-days", type=int, default=30, help="保留天数，默认 30")
     cleanup_videos.set_defaults(func=command_cleanup_published_videos)
 
