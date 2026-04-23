@@ -141,6 +141,13 @@ def sync_videos(
             continue
         resolved_canonical_key = normalize_text(metadata["canonical_script_key"])
         resolved_script_id = normalize_text(metadata["script_id"]) or script_id
+        existing_asset = db.get_video_asset(resolved_canonical_key or resolved_script_id)
+        if existing_asset is not None:
+            existing_publish_status = normalize_text(existing_asset["publish_status"])
+            existing_download_status = normalize_text(existing_asset["download_status"])
+            if existing_publish_status == "已发布" and existing_download_status == "已清理":
+                stats["skipped"] += 1
+                continue
 
         attachment = extract_attachment(fields.get(mapping.get("video_attachment")))
         video_link = normalize_text(fields.get(mapping.get("video_link")))

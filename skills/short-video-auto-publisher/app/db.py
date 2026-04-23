@@ -358,7 +358,8 @@ class AutoPublishDB:
             rows = conn.execute(
                 """
                 SELECT canonical_script_key, source_record_id, script_slot, script_id, store_id, product_id,
-                       parent_slot, direction_label, variant_strength, short_video_title
+                       parent_slot, direction_label, variant_strength, short_video_title,
+                       title_source, script_text, target_country, product_type, content_family_key, task_no
                 FROM script_metadata
                 """
             ).fetchall()
@@ -372,6 +373,12 @@ class AutoPublishDB:
                 "direction_label": str(row["direction_label"] or ""),
                 "variant_strength": str(row["variant_strength"] or ""),
                 "short_video_title": str(row["short_video_title"] or ""),
+                "title_source": str(row["title_source"] or ""),
+                "script_text": str(row["script_text"] or ""),
+                "target_country": str(row["target_country"] or ""),
+                "product_type": str(row["product_type"] or ""),
+                "content_family_key": str(row["content_family_key"] or ""),
+                "task_no": str(row["task_no"] or ""),
             }
             for row in rows
         }
@@ -772,7 +779,8 @@ class AutoPublishDB:
                 """
                 UPDATE video_assets
                 SET script_id = ?, publish_status = '已排期',
-                    account_id = ?, account_name = ?, planned_publish_at = ?, publish_task_id = ?, updated_at = ?
+                    account_id = ?, account_name = ?, planned_publish_at = ?, published_at = NULL,
+                    publish_task_id = ?, publish_result = NULL, error_message = NULL, updated_at = ?
                 WHERE canonical_script_key = ?
                 """,
                 (script_id, account_id, account_name, planned_text, publish_task_id, now, resolved_key),
@@ -829,6 +837,84 @@ class AutoPublishDB:
                 """
             ).fetchall()
 
+    def cleanup_published_videos(
+        self,
+        *,
+        older_than_days: int = 30,
+        base_dir: Optional[Path] = None,
+        now: Optional[datetime] = None,
+    ) -> Dict[str, int]:
+        retention_days = max(int(older_than_days or 0), 0)
+        if retention_days <= 0:
+            return {"candidates": 0, "deleted": 0, "missing": 0, "cleared": 0, "skipped": 0}
+
+        current_time = now or datetime.now()
+        cutoff = (current_time - timedelta(days=retention_days)).strftime("%Y-%m-%d %H:%M:%S")
+        scope_dir = Path(base_dir).resolve(strict=False) if base_dir else None
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT canonical_script_key, local_file_path
+                FROM video_assets
+                WHERE publish_status = '已发布'
+                  AND COALESCE(local_file_path, '') <> ''
+                  AND COALESCE(published_at, '') <> ''
+                  AND published_at <= ?
+                ORDER BY published_at ASC, canonical_script_key ASC
+                """,
+                (cutoff,),
+            ).fetchall()
+
+            deleted = 0
+            missing = 0
+            cleared = 0
+            skipped = 0
+            updated_at = self._now_text()
+
+            for row in rows:
+                canonical_key = str(row["canonical_script_key"] or "").strip()
+                raw_path = str(row["local_file_path"] or "").strip()
+                if not canonical_key or not raw_path:
+                    skipped += 1
+                    continue
+
+                file_path = Path(raw_path)
+                resolved_path = file_path.resolve(strict=False)
+                if scope_dir is not None and not resolved_path.is_relative_to(scope_dir):
+                    skipped += 1
+                    continue
+
+                if file_path.exists():
+                    try:
+                        file_path.unlink()
+                        deleted += 1
+                    except OSError:
+                        skipped += 1
+                        continue
+                else:
+                    missing += 1
+
+                conn.execute(
+                    """
+                    UPDATE video_assets
+                    SET local_file_path = '',
+                        download_status = '已清理',
+                        updated_at = ?
+                    WHERE canonical_script_key = ?
+                    """,
+                    (updated_at, canonical_key),
+                )
+                cleared += 1
+
+        return {
+            "candidates": len(rows),
+            "deleted": deleted,
+            "missing": missing,
+            "cleared": cleared,
+            "skipped": skipped,
+        }
+
     def list_publish_report_rows(self) -> List[sqlite3.Row]:
         with self._connect() as conn:
             return conn.execute(
@@ -856,10 +942,20 @@ class AutoPublishDB:
                        va.publish_task_id,
                        va.publish_result,
                        va.error_message,
+                       ps.schedule_status AS latest_schedule_status,
+                       ps.scheduled_for AS latest_slot_scheduled_for,
+                       ps.updated_at AS slot_updated_at,
                        va.updated_at AS asset_updated_at,
                        sm.updated_at AS metadata_updated_at
                 FROM script_metadata sm
                 INNER JOIN video_assets va ON va.canonical_script_key = sm.canonical_script_key
-                ORDER BY COALESCE(va.planned_publish_at, ''), sm.script_id, sm.canonical_script_key
+                LEFT JOIN publish_slots ps ON ps.slot_id = (
+                    SELECT ps2.slot_id
+                    FROM publish_slots ps2
+                    WHERE ps2.canonical_script_key = sm.canonical_script_key
+                    ORDER BY COALESCE(ps2.updated_at, ps2.created_at) DESC, ps2.slot_id DESC
+                    LIMIT 1
+                )
+                ORDER BY COALESCE(va.planned_publish_at, ps.scheduled_for, ''), sm.script_id, sm.canonical_script_key
                 """
             ).fetchall()

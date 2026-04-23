@@ -166,6 +166,7 @@ def build_publish_adapter(args: argparse.Namespace):
 def command_sync_script_db(args: argparse.Namespace) -> None:
     db = AutoPublishDB(Path(args.db_path))
     title_generator = build_title_generator(args.title_mode, args.llm_route)
+    existing_lookup = db.build_metadata_lookup()
 
     app_token, table_id = resolve_feishu_config(args.script_feishu_url)
     client = FeishuBitableClient(app_token=app_token, table_id=table_id)
@@ -173,10 +174,15 @@ def command_sync_script_db(args: argparse.Namespace) -> None:
     mapping = resolve_script_mapping(field_names, SCRIPT_SOURCE_FIELD_ALIASES)
     records = client.list_records(page_size=100, limit=args.limit)
 
+    def emit_progress(payload: Dict[str, int]) -> None:
+        print({"step": "sync_script_db_progress", **payload}, flush=True)
+
     metadata = build_script_metadata_records(
         records,
         mapping,
         title_generator=title_generator,
+        existing_lookup=existing_lookup,
+        progress_callback=emit_progress,
         record_id=args.record_id,
         product_id=args.product_id,
         limit=args.limit,
@@ -294,11 +300,21 @@ def command_sync_report_table(args: argparse.Namespace) -> None:
     print(stats)
 
 
+def command_cleanup_published_videos(args: argparse.Namespace) -> None:
+    db = AutoPublishDB(Path(args.db_path))
+    stats = db.cleanup_published_videos(
+        older_than_days=args.retention_days,
+        base_dir=Path(args.video_dir),
+    )
+    print(stats)
+
+
 def command_run_all(args: argparse.Namespace) -> None:
     summary = {}
 
     db = AutoPublishDB(Path(args.db_path))
     title_generator = build_title_generator(args.title_mode, args.llm_route)
+    existing_lookup = db.build_metadata_lookup()
 
     print("[run-all] sync_script_db start", flush=True)
     script_app_token, script_table_id = resolve_feishu_config(args.script_feishu_url)
@@ -306,10 +322,17 @@ def command_run_all(args: argparse.Namespace) -> None:
     script_field_names = script_client.list_field_names()
     script_mapping = resolve_script_mapping(script_field_names, SCRIPT_SOURCE_FIELD_ALIASES)
     script_records = script_client.list_records(page_size=100, limit=args.limit)
+    print(f"[run-all] sync_script_db fetched {len(script_records)} source records", flush=True)
+
+    def emit_progress(payload: Dict[str, int]) -> None:
+        print(f"[run-all] sync_script_db progress {payload}", flush=True)
+
     metadata = build_script_metadata_records(
         script_records,
         script_mapping,
         title_generator=title_generator,
+        existing_lookup=existing_lookup,
+        progress_callback=emit_progress,
         record_id=args.record_id,
         product_id=args.product_id,
         limit=args.limit,
@@ -350,6 +373,13 @@ def command_run_all(args: argparse.Namespace) -> None:
     summary["sync_results"] = sync_publish_results(db, publisher)
     print(f"[run-all] sync_results done {summary['sync_results']}", flush=True)
 
+    print("[run-all] cleanup_videos start", flush=True)
+    summary["cleanup_videos"] = db.cleanup_published_videos(
+        older_than_days=args.cleanup_published_days,
+        base_dir=Path(args.video_dir),
+    )
+    print(f"[run-all] cleanup_videos done {summary['cleanup_videos']}", flush=True)
+
     print("[run-all] sync_report_table start", flush=True)
     report_app_token, report_table_id = resolve_feishu_config(args.report_feishu_url)
     report_client = FeishuBitableClient(app_token=report_app_token, table_id=report_table_id)
@@ -389,6 +419,11 @@ def build_parser() -> argparse.ArgumentParser:
     sync_report = subparsers.add_parser("sync-report-table", help="回写发布追踪表")
     sync_report.add_argument("--report-feishu-url", default=DEFAULT_REPORT_FEISHU_URL, help="发布追踪表飞书 URL")
     sync_report.set_defaults(func=command_sync_report_table)
+
+    cleanup_videos = subparsers.add_parser("cleanup-published-videos", help="清理已发布超过保留期的本地视频")
+    cleanup_videos.add_argument("--video-dir", default=str(default_video_dir()), help="本地视频目录")
+    cleanup_videos.add_argument("--retention-days", type=int, default=30, help="保留天数，默认 30")
+    cleanup_videos.set_defaults(func=command_cleanup_published_videos)
 
     schedule = subparsers.add_parser("schedule", help="按 24 小时窗口增量补排")
     schedule.add_argument("--publish-mode", choices=["dry-run", "http", "geelark"], default="dry-run")
@@ -479,6 +514,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_all.add_argument("--limit", type=int, help="限制处理数量")
     run_all.add_argument("--title-mode", choices=["heuristic", "llm", "fallback"], default="fallback")
     run_all.add_argument("--llm-route", default="auto", help="标题生成 LLM 线路")
+    run_all.add_argument("--cleanup-published-days", type=int, default=30, help="已发布本地视频保留天数，默认 30；传 0 可关闭")
     run_all.add_argument("--publish-mode", choices=["dry-run", "http", "geelark"], default="dry-run")
     run_all.add_argument("--publish-api-base-url", default="", help="自动发布 API Base URL")
     run_all.add_argument("--publish-api-token", default="", help="自动发布 API Token")
