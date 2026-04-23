@@ -840,7 +840,7 @@ class AutoPublishDB:
     def cleanup_published_videos(
         self,
         *,
-        older_than_days: int = 30,
+        older_than_days: int = 60,
         base_dir: Optional[Path] = None,
         now: Optional[datetime] = None,
     ) -> Dict[str, int]:

@@ -465,7 +465,7 @@ def build_parser() -> argparse.ArgumentParser:
     sync_report.set_defaults(func=command_sync_report_table)
 
     cleanup_videos = subparsers.add_parser("cleanup-published-videos", help="清理已发布超过保留期的本地视频")
-    cleanup_videos.add_argument("--retention-days", type=int, default=30, help="保留天数，默认 30")
+    cleanup_videos.add_argument("--retention-days", type=int, default=60, help="保留天数，默认 60")
     cleanup_videos.set_defaults(func=command_cleanup_published_videos)
 
     schedule = subparsers.add_parser("schedule", help="按 24 小时窗口增量补排")
@@ -557,7 +557,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_all.add_argument("--limit", type=int, help="限制处理数量")
     run_all.add_argument("--title-mode", choices=["heuristic", "llm", "fallback"], default="fallback")
     run_all.add_argument("--llm-route", default="auto", help="标题生成 LLM 线路")
-    run_all.add_argument("--cleanup-published-days", type=int, default=30, help="已发布本地视频保留天数，默认 30；传 0 可关闭")
+    run_all.add_argument("--cleanup-published-days", type=int, default=60, help="已发布本地视频保留天数，默认 60；传 0 可关闭")
     run_all.add_argument("--publish-mode", choices=["dry-run", "http", "geelark"], default="dry-run")
     run_all.add_argument("--publish-api-base-url", default="", help="自动发布 API Base URL")
     run_all.add_argument("--publish-api-token", default="", help="自动发布 API Token")
