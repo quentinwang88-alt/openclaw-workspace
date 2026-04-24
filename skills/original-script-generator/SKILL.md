@@ -3,8 +3,8 @@ name: original-script-generator
 description: |
   原创短视频脚本自动生成 skill。读取飞书多维表格中由状态位驱动的任务，
   基于产品图片、目标国家、目标语言、产品类型，自动生成 4 套原创短视频内容强策略卡、4 条经独立质检通过的正式脚本，其中 S4 作为实验增强方向测试高惊艳首镜上限。
-  每条脚本会先过独立质检，必要时自动修订，再生成最终视频提示词；轻变体默认覆盖 S1 / S2 / S3 / S4，每条脚本 5 个轻变体；如需只生成部分脚本的变体，可显式传 `--variant-script-index`。
-  模型调用当前默认对齐 OpenClaw 主 agent 的 `openai-codex/gpt-5.4`，同时保留备用 Yunwu GPT-5.4，并支持手动保留 Gemini 3.1 Pro 调试线路。当前默认推荐线路为 primary，自动切换优先级为 openai-codex/gpt-5.4 > Yunwu GPT-5.4。
+  每条脚本会先过独立质检，必要时自动修订，再生成最终视频提示词；默认先只生成母体脚本，只有当表格里勾选了 `生成变体` 时，才会在同轮或后续巡检中补跑 S1 / S2 / S3 / S4 的轻变体；如需只生成部分脚本的变体，可显式传 `--variant-script-index`。
+  模型调用当前只保留与 OpenClaw 主 agent 对齐的 `openai-codex/gpt-5.4` 主线路；其它历史线路参数和外部模型调用均已废弃，不再使用。
 ---
 
 # Original Script Generator
@@ -79,7 +79,7 @@ Git 只管理开发源目录：
 7. 为 4 套策略分别生成正式脚本
 8. 对每条脚本单独做独立质检，必要时自动修订
 9. 只对通过质检的脚本生成最终视频提示词
-10. 默认继续为 S1 / S2 / S3 / S4 四条正式脚本生成 5 个轻变体，并回写 `变体_S1_JSON ~ 变体_S4_JSON` 与 20 个可读变体字段；如需只跑部分脚本的变体，可显式传 `--variant-script-index`
+10. 默认先只生成 S1 / S2 / S3 / S4 四条正式脚本；如果表格里一开始就勾选了 `生成变体`，则同轮继续生成 5 个轻变体并回写 `变体_S1_JSON ~ 变体_S4_JSON` 与 20 个可读变体字段；如果是母体完成后才补勾选，则由下一轮巡检自动触发脚本变体分支；如需只跑部分脚本的变体，可显式传 `--variant-script-index`
 11. 更新 `输出摘要 / 输入哈希 / 最近执行时间 / 错误信息 / 执行日志 / 阶段耗时`
 
 同时会把每次运行的中间过程落到本地 SQLite，便于按产品编码追溯。
@@ -96,34 +96,19 @@ Git 只管理开发源目录：
   - `目标语言`
   - `产品类型`
   - `产品卖点说明`（可选）
-- 默认主线路模型配置对齐 OpenClaw / Hermes 当前主 agent（`openai-codex/gpt-5.4`）
-- 当前默认推荐线路：`primary`
-- 支持备用线路：
-  - `https://yunwu.ai/v1`
-  - `gpt-5.4`
-- 支持调试线路：
-  - `https://yunwu.ai/v1`
-  - `gemini-3.1-pro-preview`
-- 支持通过命令行切换：
-  - `--llm-route auto`
+  - `产品参数信息`（可选，若填写会优先并入 parameter_anchors，并参与输入哈希）
+- 默认主线路模型配置对齐 OpenClaw 当前主 agent（`openai-codex/gpt-5.4`）
+- 当前唯一生效线路：`primary`
+- 支持通过命令行显式传入：
   - `--llm-route primary`
-  - `--llm-route backup`
-  - `--llm-route gemini`
-- 支持通过单独命令切换 OpenClaw 默认线路：
-  - `python3 skills/original-script-generator/set_llm_route.py auto`
+- 支持通过单独命令查看或写入 OpenClaw 默认线路：
+  - `python3 skills/original-script-generator/set_llm_route.py`
   - `python3 skills/original-script-generator/set_llm_route.py primary`
-  - `python3 skills/original-script-generator/set_llm_route.py backup`
-  - `python3 skills/original-script-generator/set_llm_route.py gemini`
-- 备用线路支持环境变量覆盖：
+  - `python3 skills/original-script-generator/切换脚本模型.py`
+- 主线路支持环境变量覆盖：
   - `ORIGINAL_SCRIPT_PRIMARY_LLM_API_URL`
   - `ORIGINAL_SCRIPT_PRIMARY_LLM_MODEL`
   - `ORIGINAL_SCRIPT_PRIMARY_LLM_API_KEY`
-  - `ORIGINAL_SCRIPT_BACKUP_LLM_API_URL`
-  - `ORIGINAL_SCRIPT_BACKUP_LLM_MODEL`
-  - `ORIGINAL_SCRIPT_BACKUP_LLM_API_KEY`
-  - `ORIGINAL_SCRIPT_GEMINI_API_URL`
-  - `ORIGINAL_SCRIPT_GEMINI_LLM_MODEL`
-  - `ORIGINAL_SCRIPT_GEMINI_LLM_API_KEY`
 - 正式脚本与轻变体统一遵循：
   - 内部说明全部使用中文
   - 字幕/口播全部输出目标语言
@@ -175,6 +160,7 @@ Git 只管理开发源目录：
 可选补充字段：
 
 - `产品卖点说明`
+- `产品参数信息`
 
 使用原则：
 
@@ -304,36 +290,35 @@ python3 skills/original-script-generator/query_history.py --product-code "你的
 ## 运行方式
 
 ```bash
-python3 skills/original-script-generator/run_pipeline.py --feishu-url "https://xxx.feishu.cn/base/xxx?table=xxx" --max-workers 3
+python3 skills/original-script-generator/run_pipeline.py --feishu-url "https://xxx.feishu.cn/base/xxx?table=xxx" --max-workers 1
 ```
 
-先切 OpenClaw 默认线路，再按正常命令执行：
+查看或重写当前默认线路：
 
 ```bash
-python3 skills/original-script-generator/set_llm_route.py gemini
+python3 skills/original-script-generator/set_llm_route.py
+python3 skills/original-script-generator/set_llm_route.py primary
 python3 skills/original-script-generator/run_pipeline.py --feishu-url "https://xxx.feishu.cn/base/xxx?table=xxx" --limit 2
 ```
 
-切到 Gemini 备线再执行：
+也可以直接用中文别名查看或切到主线路：
 
 ```bash
-python3 skills/original-script-generator/set_llm_route.py gemini
-python3 skills/original-script-generator/run_pipeline.py --feishu-url "https://xxx.feishu.cn/base/xxx?table=xxx" --limit 2
-```
-
-也可以直接用中文别名：
-
-```bash
-python3 skills/original-script-generator/切换脚本模型.py 备线
 python3 skills/original-script-generator/切换脚本模型.py 主线
-python3 skills/original-script-generator/切换脚本模型.py 自动
-python3 skills/original-script-generator/切换脚本模型.py Gemini
+python3 skills/original-script-generator/切换脚本模型.py 主线路
+python3 skills/original-script-generator/切换脚本模型.py 默认主线
 ```
 
 先小批量验证：
 
 ```bash
-python3 skills/original-script-generator/run_pipeline.py --feishu-url "https://xxx.feishu.cn/base/xxx?table=xxx" --limit 5 --max-workers 3
+python3 skills/original-script-generator/run_pipeline.py --feishu-url "https://xxx.feishu.cn/base/xxx?table=xxx" --limit 5 --max-workers 1
+```
+
+脚本自身常驻轮询，每 1 小时检查一次待执行任务：
+
+```bash
+python3 skills/original-script-generator/run_pipeline.py --feishu-url "https://xxx.feishu.cn/base/xxx?table=xxx" --llm-route primary --watch --poll-interval-seconds 3600 --max-workers 1
 ```
 
 只查看待处理记录：
@@ -342,46 +327,40 @@ python3 skills/original-script-generator/run_pipeline.py --feishu-url "https://x
 python3 skills/original-script-generator/run_pipeline.py --feishu-url "https://xxx.feishu.cn/base/xxx?table=xxx" --dry-run
 ```
 
-只走备用线路做对比测试：
+显式指定主线路执行：
 
 ```bash
-python3 skills/original-script-generator/run_pipeline.py --feishu-url "https://xxx.feishu.cn/base/xxx?table=xxx" --llm-route backup --limit 2
-```
-
-主线路优先，失败自动切备用线路：
-
-```bash
-python3 skills/original-script-generator/run_pipeline.py --feishu-url "https://xxx.feishu.cn/base/xxx?table=xxx" --llm-route auto --limit 2
+python3 skills/original-script-generator/run_pipeline.py --feishu-url "https://xxx.feishu.cn/base/xxx?table=xxx" --llm-route primary --limit 2
 ```
 
 只重跑母版脚本和变体，不回到锚点卡 / 策略卡 / 表达计划：
 
 ```bash
-python3 skills/original-script-generator/run_pipeline.py --feishu-url "https://xxx.feishu.cn/base/xxx?table=xxx" --record-id "你的record_id" --force-rerun-script --llm-route gemini
+python3 skills/original-script-generator/run_pipeline.py --feishu-url "https://xxx.feishu.cn/base/xxx?table=xxx" --record-id "你的record_id" --force-rerun-script --llm-route primary
 ```
 
 按任务编号只重跑指定脚本位，并自动续跑该脚本位的变体：
 
 ```bash
-python3 skills/original-script-generator/run_pipeline.py --feishu-url "https://xxx.feishu.cn/base/xxx?table=xxx" --task-no "003" --force-rerun-script --script-index 2 --script-index 4 --llm-route-order gemini,backup,primary
+python3 skills/original-script-generator/run_pipeline.py --feishu-url "https://xxx.feishu.cn/base/xxx?table=xxx" --task-no "003" --force-rerun-script --script-index 2 --script-index 4 --llm-route primary
 ```
 
 按任务编号整条任务全流程重跑：
 
 ```bash
-python3 skills/original-script-generator/run_pipeline.py --feishu-url "https://xxx.feishu.cn/base/xxx?table=xxx" --task-no "003" --force-rerun-all --llm-route-order gemini,backup,primary
+python3 skills/original-script-generator/run_pipeline.py --feishu-url "https://xxx.feishu.cn/base/xxx?table=xxx" --task-no "003" --force-rerun-all --llm-route primary
 ```
 
 只重跑变体：
 
 ```bash
-python3 skills/original-script-generator/run_pipeline.py --feishu-url "https://xxx.feishu.cn/base/xxx?table=xxx" --record-id "你的record_id" --force-variants --llm-route gemini
+python3 skills/original-script-generator/run_pipeline.py --feishu-url "https://xxx.feishu.cn/base/xxx?table=xxx" --record-id "你的record_id" --force-variants --llm-route primary
 ```
 
 按任务编号只重跑某几个脚本位的变体：
 
 ```bash
-python3 skills/original-script-generator/run_pipeline.py --feishu-url "https://xxx.feishu.cn/base/xxx?table=xxx" --task-no "003" --force-variants --script-index 1 --script-index 3 --llm-route-order gemini,backup,primary
+python3 skills/original-script-generator/run_pipeline.py --feishu-url "https://xxx.feishu.cn/base/xxx?table=xxx" --task-no "003" --force-variants --script-index 1 --script-index 3 --llm-route primary
 ```
 
 查看当前 OpenClaw 默认线路：
@@ -400,26 +379,26 @@ python3 skills/original-script-generator/切换脚本模型.py
 
 推荐将原创脚本的日常跑批固化为 OpenClaw 自动任务，默认方案如下：
 
-- 每天早上 `07:00`
-- 固定使用 `gemini`
+- 每 `1` 小时检查一次
+- 固定使用 `primary`
 - 只处理飞书表格中状态为 `待开始 / 待执行` 的任务
-- 并发数固定为 `2`
+- 并发数固定为 `1`
 - 工作目录固定为：
   - `/Users/likeu3/.openclaw/workspace/skills/original-script-generator`
 
 推荐自动任务执行内容：
 
 ```bash
-python3 /Users/likeu3/.openclaw/workspace/skills/original-script-generator/run_pipeline.py --feishu-url "https://gcngopvfvo0q.feishu.cn/wiki/ZezEwZ7cKiUyeakdlI3cUuU1nRf?table=tblHRLMr9b3fvxBw&view=vewPpvR2oT" --llm-route gemini --max-workers 2
+python3 /Users/likeu3/.openclaw/workspace/skills/original-script-generator/run_pipeline.py --feishu-url "https://gcngopvfvo0q.feishu.cn/wiki/ZezEwZ7cKiUyeakdlI3cUuU1nRf?table=tblHRLMr9b3fvxBw&view=vewPpvR2oT" --llm-route primary --max-workers 1
 ```
 
 推荐自动任务名称：
 
-- `原创脚本晨跑`
+- `原创脚本小时巡检`
 
 推荐自动任务说明：
 
-- 每天 7 点自动运行原创脚本流水线
-- 固定走 `gemini`
-- 默认并发 `2`
+- 每小时自动检查一次原创脚本流水线待执行队列
+- 固定走 `primary`
+- 默认并发 `1`
 - 跑完后汇报成功数、失败数和失败主因

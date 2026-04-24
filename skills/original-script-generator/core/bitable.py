@@ -14,6 +14,7 @@ import requests
 
 FIELD_ALIASES = {
     "status": ["任务状态", "状态", "执行状态", "处理状态"],
+    "generate_variants": ["生成变体", "是否生成变体", "要生成变体", "勾选生成变体"],
     "task_no": ["任务编号", "任务ID", "任务序号", "编号"],
     "product_images": ["产品图片", "商品图片", "图片", "主图", "商品主图"],
     "product_code": ["产品编码", "商品编码", "SKU编码", "SKU", "产品Code", "Product Code"],
@@ -27,6 +28,7 @@ FIELD_ALIASES = {
     "target_language": ["目标语言", "语言"],
     "product_type": ["产品类型", "商品类型", "品类", "产品品类"],
     "product_selling_note": ["产品卖点说明"],
+    "product_params": ["产品参数信息", "参数信息", "产品参数"],
     "input_hash": ["输入哈希"],
     "last_run_at": ["最近执行时间", "最近运行时间"],
     "error_message": ["错误信息", "失败原因", "报错信息"],
@@ -352,6 +354,31 @@ def normalize_cell_value(value: Any) -> str:
         texts = [normalize_cell_value(item) for item in value]
         return " / ".join(item for item in texts if item)
     return str(value)
+
+
+def normalize_checkbox_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, list):
+        return any(normalize_checkbox_value(item) for item in value)
+    if isinstance(value, dict):
+        for key in ("checked", "value", "enabled", "text", "name"):
+            if key in value:
+                return normalize_checkbox_value(value.get(key))
+        return False
+
+    text = normalize_cell_value(value).strip().lower()
+    if not text:
+        return False
+    if text in {"true", "1", "yes", "y", "on", "checked", "是", "已勾选", "勾选", "需要"}:
+        return True
+    if text in {"false", "0", "no", "n", "off", "unchecked", "否", "未勾选", "不需要"}:
+        return False
+    return bool(text)
 
 
 def extract_attachments(raw_value: Any) -> List[Dict[str, Any]]:

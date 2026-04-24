@@ -7,9 +7,10 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import tempfile
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -19,6 +20,7 @@ from core.bitable import (
     TaskRecord,
     build_update_payload,
     extract_attachments,
+    normalize_checkbox_value,
     normalize_cell_value,
 )
 from core.autopublish_metadata_sync import default_metadata_db_path, sync_record_to_auto_publish_db
@@ -104,6 +106,10 @@ STATUS_FAILED_VARIANT_WRITE = "失败-脚本变体回写异常"
 STATUS_FAILED_INTERRUPTED = "失败-任务被中断"
 STATUS_FAILED_LEGACY = "任务失败"
 
+MODEL_SUPPORTED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+MODEL_CONVERTIBLE_IMAGE_SUFFIXES = {".heic", ".heif"}
+MODEL_CONVERTIBLE_IMAGE_MIME_TYPES = {"image/heic", "image/heif"}
+
 PENDING_STATUSES = {
     STATUS_PENDING_ALL,
     STATUS_PENDING_RERUN_SCRIPT,
@@ -111,6 +117,11 @@ PENDING_STATUSES = {
     STATUS_PENDING_VARIANTS,
     STATUS_PENDING_RERUN_VARIANTS,
     STATUS_PENDING_LEGACY,
+}
+
+COMPLETED_MOTHER_STATUSES = {
+    STATUS_DONE,
+    STATUS_DONE_WITH_QC_WARNINGS,
 }
 
 CLOTHING_PRODUCT_TYPES = {
@@ -133,6 +144,7 @@ CLOTHING_PRODUCT_TYPES = {
 }
 
 ACCESSORY_PRODUCT_TYPES = {
+    "耳线",
     "耳环",
     "耳饰",
     "项链",
@@ -182,6 +194,7 @@ ACCESSORY_PRODUCT_TYPES = {
 }
 
 ACCESSORY_PRODUCT_TYPE_KEYWORDS = {
+    "耳线",
     "手圈",
     "手环",
     "手链",
@@ -479,6 +492,103 @@ class JsonStageError(Exception):
     pass
 
 
+def _record_generate_variants_checked(
+    fields: Dict[str, Any],
+    mapping: Dict[str, Optional[str]],
+) -> bool:
+    field_name = mapping.get("generate_variants")
+    if not field_name:
+        return False
+    return normalize_checkbox_value(fields.get(field_name))
+
+
+def _record_has_any_variant_output(
+    fields: Dict[str, Any],
+    mapping: Dict[str, Optional[str]],
+) -> bool:
+    for group in VARIANT_GROUPS:
+        variant_json_field = mapping.get(str(group["variant_json_field"]))
+        if variant_json_field and normalize_cell_value(fields.get(variant_json_field)):
+            return True
+        for logical_name in group["render_fields"]:
+            field_name = mapping.get(str(logical_name))
+            if field_name and normalize_cell_value(fields.get(field_name)):
+                return True
+    return False
+
+
+def _review_json_indicates_pass(raw_value: Any) -> Optional[bool]:
+    review_json: Optional[Dict[str, Any]] = None
+    if isinstance(raw_value, dict):
+        review_json = raw_value
+    elif isinstance(raw_value, str) and raw_value.strip():
+        try:
+            parsed = parse_json_text(raw_value)
+        except JSONParseError:
+            return None
+        if isinstance(parsed, dict):
+            review_json = parsed
+    if not isinstance(review_json, dict):
+        return None
+    if "pass" in review_json:
+        return bool(review_json.get("pass"))
+    result = str(review_json.get("result", "") or "").strip().upper()
+    if result == "PASS":
+        return True
+    if result == "FAIL":
+        return False
+    return None
+
+
+def _record_has_review_pass_candidate(
+    fields: Dict[str, Any],
+    mapping: Dict[str, Optional[str]],
+) -> bool:
+    review_results: List[bool] = []
+    for script_index in DEFAULT_VARIANT_SCRIPT_INDEXES:
+        field_name = mapping.get(f"review_s{script_index}_json")
+        if not field_name:
+            continue
+        review_pass = _review_json_indicates_pass(fields.get(field_name))
+        if review_pass is not None:
+            review_results.append(review_pass)
+    if not review_results:
+        return True
+    return any(review_results)
+
+
+def _build_record_with_status(
+    record: TaskRecord,
+    mapping: Dict[str, Optional[str]],
+    status: str,
+) -> TaskRecord:
+    status_field = mapping.get("status")
+    if not status_field:
+        return record
+    cloned_fields = dict(record.fields)
+    cloned_fields[status_field] = status
+    return TaskRecord(record_id=record.record_id, fields=cloned_fields)
+
+
+def _should_enqueue_completed_record_for_variants(
+    record: TaskRecord,
+    mapping: Dict[str, Optional[str]],
+) -> bool:
+    status_field = mapping.get("status")
+    if not status_field:
+        return False
+    current_status = normalize_cell_value(record.fields.get(status_field))
+    if current_status not in COMPLETED_MOTHER_STATUSES:
+        return False
+    if not _record_generate_variants_checked(record.fields, mapping):
+        return False
+    if _record_has_any_variant_output(record.fields, mapping):
+        return False
+    if not _record_has_review_pass_candidate(record.fields, mapping):
+        return False
+    return True
+
+
 class OriginalScriptPipeline:
     def __init__(
         self,
@@ -488,6 +598,7 @@ class OriginalScriptPipeline:
         script_rerun_indexes: Optional[List[int]] = None,
         llm_route: str = "auto",
         llm_route_order: Optional[List[str]] = None,
+        startup_stagger_seconds: float = 8.0,
     ):
         self.client = client
         self.mapping = mapping
@@ -498,6 +609,7 @@ class OriginalScriptPipeline:
         self.llm_route = llm_route
         self.llm_route_order = list(llm_route_order or []) or None
         self.auto_publish_metadata_db_path = str(default_metadata_db_path())
+        self.startup_stagger_seconds = max(0.0, float(startup_stagger_seconds))
 
     def process_records(
         self,
@@ -522,6 +634,12 @@ class OriginalScriptPipeline:
 
         worker_count = max(1, min(max_workers, 3, len(records)))
         print(f"🚦 记录级并发数: {worker_count}")
+        if worker_count > 1 and self.startup_stagger_seconds > 0:
+            print(
+                "⏱️ 并发启动节流: "
+                f"最多同时在跑 {worker_count} 条 | "
+                f"每次新启动任务间隔 {self.startup_stagger_seconds:.1f} 秒"
+            )
 
         if worker_count == 1:
             for index, record in enumerate(records, 1):
@@ -541,23 +659,41 @@ class OriginalScriptPipeline:
 
         future_to_record: Dict[Any, TaskRecord] = {}
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            for index, record in enumerate(records, 1):
-                print(f"🧩 已入队任务 {index}/{len(records)}: {record.record_id}")
+            next_index = 0
+
+            def _submit_record(record: TaskRecord, index: int) -> None:
+                print(f"🧩 启动任务 {index}/{len(records)}: {record.record_id}")
                 future_to_record[executor.submit(self._process_single_record, record)] = record
 
-            for future in as_completed(future_to_record):
-                record = future_to_record[future]
-                try:
-                    ok = future.result()
-                    if ok:
-                        self.stats["success"] += 1
-                        print(f"✅ 并发任务完成: {record.record_id}")
-                    else:
+            while next_index < len(records) or future_to_record:
+                while next_index < len(records) and len(future_to_record) < worker_count:
+                    if next_index > 0 and self.startup_stagger_seconds > 0:
+                        print(
+                            f"⏳ 等待 {self.startup_stagger_seconds:.1f} 秒后启动下一条任务，"
+                            "避免瞬时请求过于集中"
+                        )
+                        time.sleep(self.startup_stagger_seconds)
+                    record = records[next_index]
+                    _submit_record(record, next_index + 1)
+                    next_index += 1
+
+                if not future_to_record:
+                    continue
+
+                done, _ = wait(list(future_to_record.keys()), return_when=FIRST_COMPLETED)
+                for future in done:
+                    record = future_to_record.pop(future)
+                    try:
+                        ok = future.result()
+                        if ok:
+                            self.stats["success"] += 1
+                            print(f"✅ 并发任务完成: {record.record_id}")
+                        else:
+                            self.stats["failed"] += 1
+                            print(f"❌ 并发任务失败: {record.record_id}")
+                    except Exception as exc:
                         self.stats["failed"] += 1
-                        print(f"❌ 并发任务失败: {record.record_id}")
-                except Exception as exc:
-                    self.stats["failed"] += 1
-                    print(f"❌ 并发任务失败: {record.record_id} | {exc}")
+                        print(f"❌ 并发任务失败: {record.record_id} | {exc}")
 
         return self.stats
 
@@ -577,6 +713,11 @@ class OriginalScriptPipeline:
         print(f"{'=' * 72}")
 
         try:
+            initial_update_values = {
+                "error_message": "",
+            }
+            if request_status == STATUS_PENDING_RERUN_ALL and not is_variant_request:
+                initial_update_values.update(self._build_full_flow_rerun_clear_values())
             self._write_update(
                 record_id,
                 logs,
@@ -584,9 +725,7 @@ class OriginalScriptPipeline:
                 status=self._runtime_status(
                     STATUS_RUNNING_VARIANTS if is_variant_request else STATUS_RUNNING_VALIDATE
                 ),
-                extra_values={
-                    "error_message": "",
-                },
+                extra_values=initial_update_values,
             )
 
             attachments = extract_attachments(record.fields.get(self.mapping["product_images"]))
@@ -628,6 +767,7 @@ class OriginalScriptPipeline:
 
             context.update(self._normalize_type_guard_payload_for_context(context))
             logs.append(self._summarize_type_guard(context.get("type_guard", {})))
+            self._raise_if_type_guard_blocked(context)
 
             if is_variant_request:
                 self._process_variant_only_record(
@@ -703,6 +843,7 @@ class OriginalScriptPipeline:
                     type_guard_payload = {}
             context.update(self._normalize_type_guard_payload_for_context(context, type_guard_payload))
             logs.append(self._summarize_type_guard(context.get("type_guard", {})))
+            self._raise_if_type_guard_blocked(context)
 
             if full_flow:
                 anchor_card = (
@@ -734,6 +875,7 @@ class OriginalScriptPipeline:
                             context["target_language"],
                             context["product_type"],
                             context.get("product_selling_note", ""),
+                            context.get("product_params", ""),
                             hair_clip_mode=bool(context.get("hair_clip_mode")),
                             type_guard_json=context.get("type_guard"),
                         ),
@@ -746,6 +888,10 @@ class OriginalScriptPipeline:
                         llm_client=llm_client,
                         validator=validate_anchor_card_payload,
                     )
+                anchor_card = self._merge_product_params_into_anchor_card(
+                    anchor_card,
+                    context.get("product_params", ""),
+                )
                 context.update(self._build_hair_clip_context(context, anchor_card))
                 if run_id is not None:
                     self.storage.update_run_artifacts(run_id, anchor_card=anchor_card)
@@ -1152,6 +1298,10 @@ class OriginalScriptPipeline:
                     fallback_stage_name=VARIANT_STAGE_LOOKUP["anchor_card_json"],
                     product_code=context["product_code"],
                 )
+                anchor_card = self._merge_product_params_into_anchor_card(
+                    anchor_card,
+                    context.get("product_params", ""),
+                )
                 context.update(self._build_hair_clip_context(context, anchor_card))
                 opening_strategy_payload = self._load_variant_context_json(
                     record=record,
@@ -1276,6 +1426,7 @@ class OriginalScriptPipeline:
 
             all_script_bundles = [script_bundles_by_index[index] for index in DEFAULT_VARIANT_SCRIPT_INDEXES]
             main_output_values = {
+                "anchor_card_json": self._dump_json(anchor_card),
                 "output_summary": build_summary(anchor_card, final_s1, final_s2, final_s3, final_s4),
                 "last_run_at": self._now_string(),
                 "error_message": "",
@@ -1302,6 +1453,7 @@ class OriginalScriptPipeline:
                 for index, bundle in enumerate(all_script_bundles, start=1)
                 if bool(bundle.get("passed_review", True))
             ]
+            should_generate_variants = bool(context.get("generate_variants_requested", True))
             if qc_failed_indexes:
                 warning_text = "；".join(
                     f"脚本{index}质检失败，已保留最后一版：{bundle.get('failure_reason', '')}"
@@ -1311,33 +1463,44 @@ class OriginalScriptPipeline:
                 main_output_values["error_message"] = warning_text
                 if not qc_pass_indexes:
                     logs.append(f"存在质检失败脚本，且无可继续生成变体的通过脚本：{warning_text}")
-                    self._write_update(
+                    return self._finalize_main_script_outputs(
                         record_id,
+                        run_id,
                         logs,
                         stage_durations,
-                        status=self._runtime_status(STATUS_DONE_WITH_QC_WARNINGS),
-                        extra_values=main_output_values,
+                        main_output_values,
+                        runtime_status=STATUS_DONE_WITH_QC_WARNINGS,
+                        final_error_message=warning_text,
+                        completion_log="任务完成（含质检失败脚本落库）",
                     )
-                    if run_id is not None:
-                        self.storage.update_run_status(
-                            run_id,
-                            runtime_status=self._runtime_status(STATUS_DONE_WITH_QC_WARNINGS),
-                            error_message=warning_text,
-                            stage_durations=stage_durations,
-                            completed=True,
-                        )
-                    logs.append("任务完成（含质检失败脚本落库）")
-                    self._sync_auto_publish_metadata(record_id, logs)
-                    self._flush_log_fields(record_id, logs, stage_durations)
-                    print("  ✅ 当前记录完成（含质检失败脚本落库）")
-                    return True
 
                 pass_index_label = "、".join(f"脚本{index}" for index in qc_pass_indexes)
                 fail_index_label = "、".join(f"脚本{index}" for index in qc_failed_indexes)
+                if not should_generate_variants:
+                    logs.append(f"存在质检失败脚本，未勾选生成变体，本轮仅落库母体脚本：{warning_text}")
+                    return self._finalize_main_script_outputs(
+                        record_id,
+                        run_id,
+                        logs,
+                        stage_durations,
+                        main_output_values,
+                        runtime_status=STATUS_DONE_WITH_QC_WARNINGS,
+                        final_error_message=warning_text,
+                    )
                 logs.append(
                     f"存在质检失败脚本，跳过 {fail_index_label} 的变体生成，继续生成 {pass_index_label} 的变体：{warning_text}"
                 )
             else:
+                if not should_generate_variants:
+                    logs.append("主体脚本生成完成，未勾选生成变体，本轮跳过变体生成")
+                    return self._finalize_main_script_outputs(
+                        record_id,
+                        run_id,
+                        logs,
+                        stage_durations,
+                        main_output_values,
+                        runtime_status=STATUS_DONE,
+                    )
                 logs.append("主体脚本生成完成，开始自动生成脚本变体")
 
             base_variant_indexes = set(script_indexes_to_generate)
@@ -1479,7 +1642,7 @@ class OriginalScriptPipeline:
                 )
             return False
 
-    def _build_context(self, record: TaskRecord) -> Dict[str, str]:
+    def _build_context(self, record: TaskRecord) -> Dict[str, Any]:
         fields = record.fields
         return {
             "task_no": normalize_cell_value(fields.get(self.mapping.get("task_no"))),
@@ -1494,9 +1657,111 @@ class OriginalScriptPipeline:
             "target_language": normalize_cell_value(fields.get(self.mapping.get("target_language"))),
             "product_type": normalize_cell_value(fields.get(self.mapping.get("product_type"))),
             "product_selling_note": normalize_cell_value(fields.get(self.mapping.get("product_selling_note"))),
+            "product_params": normalize_cell_value(fields.get(self.mapping.get("product_params"))),
             "request_status": normalize_cell_value(fields.get(self.mapping.get("status"))),
+            "generate_variants_requested": self._should_generate_variants_from_fields(fields),
             "llm_route": self.llm_route,
         }
+
+    @staticmethod
+    def _product_param_fact_chunks(product_params: str) -> List[str]:
+        text = str(product_params or "").strip()
+        if not text:
+            return []
+        normalized = re.sub(r"[；;]+", "\n", text)
+        normalized = re.sub(r"\s*\|\s*", "\n", normalized)
+        chunks = [chunk.strip(" ，,、/\t") for chunk in normalized.splitlines() if chunk.strip()]
+        if len(chunks) <= 1:
+            chunks = [chunk.strip(" ，,、/\t") for chunk in re.split(r"[，,、]+", normalized) if chunk.strip()]
+        return chunks
+
+    @staticmethod
+    def _build_manual_parameter_anchor(chunk: str, index: int) -> Dict[str, str]:
+        text = str(chunk or "").strip()
+        if not text:
+            return {}
+        parameter_name = f"参数{index}"
+        parameter_value = text
+        colon_match = re.match(r"^([^:：]{1,20})[:：]\s*(.+)$", text)
+        if colon_match:
+            parameter_name = colon_match.group(1).strip() or parameter_name
+            parameter_value = colon_match.group(2).strip() or text
+        else:
+            metric_match = re.match(r"^([\u4e00-\u9fffA-Za-z]{1,20}?)(约?[0-9][^\s]*)$", text)
+            if metric_match:
+                parameter_name = metric_match.group(1).strip() or parameter_name
+                parameter_value = metric_match.group(2).strip() or text
+        return {
+            "parameter_name": parameter_name,
+            "parameter_value": parameter_value,
+            "why_must_preserve": "来自表格“产品参数信息”字段，为人工确认的产品参数事实",
+            "execution_note": "后续脚本和最终提示词需与该参数事实保持一致，不得改写",
+            "confidence": "high",
+        }
+
+    def _merge_product_params_into_anchor_card(
+        self,
+        anchor_card: Dict[str, Any],
+        product_params: str,
+    ) -> Dict[str, Any]:
+        if not isinstance(anchor_card, dict):
+            return anchor_card
+        manual_chunks = self._product_param_fact_chunks(product_params)
+        if not manual_chunks:
+            anchor_card.setdefault("parameter_anchors", anchor_card.get("parameter_anchors") or [])
+            return anchor_card
+
+        existing_items = anchor_card.get("parameter_anchors") or []
+        merged_items: List[Dict[str, Any]] = []
+        seen_values: set = set()
+
+        def _dedupe_key(item: Dict[str, Any]) -> str:
+            return re.sub(r"\s+", "", str(item.get("parameter_value", "") or "")).lower()
+
+        for index, chunk in enumerate(manual_chunks, start=1):
+            item = self._build_manual_parameter_anchor(chunk, index)
+            if not item:
+                continue
+            key = _dedupe_key(item)
+            if key and key not in seen_values:
+                merged_items.append(item)
+                seen_values.add(key)
+
+        for raw_item in existing_items:
+            if not isinstance(raw_item, dict):
+                continue
+            item = {
+                "parameter_name": str(raw_item.get("parameter_name", "") or "").strip(),
+                "parameter_value": str(raw_item.get("parameter_value", "") or "").strip(),
+                "why_must_preserve": str(raw_item.get("why_must_preserve", "") or "").strip(),
+                "execution_note": str(raw_item.get("execution_note", "") or "").strip(),
+                "confidence": str(raw_item.get("confidence", "") or "").strip(),
+            }
+            key = _dedupe_key(item)
+            if key and key in seen_values:
+                continue
+            merged_items.append(item)
+            if key:
+                seen_values.add(key)
+
+        merged_anchor_card = dict(anchor_card)
+        merged_anchor_card["parameter_anchors"] = merged_items
+        return merged_anchor_card
+
+    def _should_generate_variants_from_fields(self, fields: Dict[str, Any]) -> bool:
+        field_name = self.mapping.get("generate_variants")
+        if not field_name:
+            return True
+        return normalize_checkbox_value(fields.get(field_name))
+
+    @staticmethod
+    def _build_variant_output_clear_values() -> Dict[str, Any]:
+        values: Dict[str, Any] = {}
+        for group in VARIANT_GROUPS:
+            values[str(group["variant_json_field"])] = ""
+            for render_field in group["render_fields"]:
+                values[str(render_field)] = ""
+        return values
 
     @staticmethod
     def _hair_clip_text_blob(*parts: Any) -> str:
@@ -1635,7 +1900,19 @@ class OriginalScriptPipeline:
             "type_conflict_level": str(type_guard.get("conflict_level", "") or "").strip(),
             "type_conflict_reason": str(type_guard.get("conflict_reason", "") or "").strip(),
             "type_review_required": bool(type_guard.get("review_required")),
+            "type_block_required": bool(type_guard.get("block_required")),
+            "type_block_reason": str(type_guard.get("block_reason", "") or "").strip(),
         }
+
+    @staticmethod
+    def _raise_if_type_guard_blocked(context: Dict[str, Any]) -> None:
+        type_guard = context.get("type_guard")
+        if not isinstance(type_guard, dict) or not type_guard:
+            return
+        if not bool(type_guard.get("block_required")):
+            return
+        reason = str(type_guard.get("block_reason", "") or "").strip()
+        raise ValidationError(reason or "产品类型守卫阻断：请先补充产品类型映射后再执行。")
 
     @staticmethod
     def _summarize_type_guard(type_guard: Dict[str, Any]) -> str:
@@ -1665,6 +1942,8 @@ class OriginalScriptPipeline:
         conflict_reason = str(type_guard.get("conflict_reason", "") or "").strip()
         if conflict_reason:
             parts.append(f"原因={conflict_reason}")
+        if bool(type_guard.get("block_required")):
+            parts.append("动作=阻断执行")
         return " | ".join(parts)
 
     @staticmethod
@@ -1762,6 +2041,7 @@ class OriginalScriptPipeline:
                 "target_language": context["target_language"],
                 "product_type": context["product_type"],
                 "product_selling_note": context.get("product_selling_note", ""),
+                "product_params": context.get("product_params", ""),
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -1781,11 +2061,42 @@ class OriginalScriptPipeline:
         image_paths = []
         for index, attachment in enumerate(attachments[:max_images], 1):
             path = self.client.download_attachment(attachment, temp_dir)
-            image_paths.append(str(path))
             logs.append(f"下载图片 {index}: {path.name}")
+            normalized_path = self._ensure_model_supported_image(path, attachment)
+            if normalized_path != path:
+                logs.append(f"图片格式转码 {index}: {path.name} -> {normalized_path.name}")
+            image_paths.append(str(normalized_path))
         if not image_paths:
             raise ValidationError("产品图片为空或下载失败")
         return image_paths
+
+    @staticmethod
+    def _ensure_model_supported_image(image_path: Path, attachment: Optional[Dict[str, Any]] = None) -> Path:
+        attachment = attachment or {}
+        mime_type = str(attachment.get("type", "") or "").strip().lower()
+        suffix = image_path.suffix.lower()
+        if suffix in MODEL_SUPPORTED_IMAGE_SUFFIXES and mime_type not in MODEL_CONVERTIBLE_IMAGE_MIME_TYPES:
+            return image_path
+        if suffix not in MODEL_CONVERTIBLE_IMAGE_SUFFIXES and mime_type not in MODEL_CONVERTIBLE_IMAGE_MIME_TYPES:
+            return image_path
+
+        converted_path = image_path.with_name(f"{image_path.stem}.converted.jpg")
+        try:
+            subprocess.run(
+                ["/usr/bin/sips", "-s", "format", "jpeg", str(image_path), "--out", str(converted_path)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError as exc:
+            raise ValidationError("当前运行环境缺少 sips，无法自动把 HEIC 图片转成 JPEG") from exc
+        except subprocess.CalledProcessError as exc:
+            stderr = str(exc.stderr or exc.stdout or exc).strip()
+            raise ValidationError(f"图片格式转换失败: {image_path.name} | {stderr[:300]}") from exc
+
+        if not converted_path.exists():
+            raise ValidationError(f"图片格式转换失败: {image_path.name} | 未生成 JPEG 输出")
+        return converted_path
 
     def _run_stage(
         self,
@@ -3032,8 +3343,22 @@ class OriginalScriptPipeline:
         expression_contexts: Dict[str, Dict[str, Any]] = {}
         script_contexts: Dict[str, Dict[str, Any]] = {}
         selected_groups = self._selected_variant_groups()
+        selected_script_indexes: set = set()
+        skipped_by_review: List[str] = []
 
         for group in selected_groups:
+            script_bundle = self._load_existing_script_bundle(
+                record=record,
+                context=context,
+                script_index=group["script_index"],
+            )
+            if not bool(script_bundle.get("passed_review", True)):
+                skipped_by_review.append(
+                    f"脚本{group['script_index']}未通过质检，跳过变体生成：{script_bundle.get('failure_reason', '')}"
+                )
+                continue
+
+            selected_script_indexes.add(int(group["script_index"]))
             final_contexts[group["final_field"]] = self._load_variant_context_json(
                 record=record,
                 logical_name=group["final_field"],
@@ -3046,12 +3371,35 @@ class OriginalScriptPipeline:
                 fallback_stage_name=VARIANT_STAGE_LOOKUP[group["exp_field"]],
                 product_code=context["product_code"],
             )
-            script_contexts[group["script_json_field"]] = self._load_script_json_for_variants(
-                record=record,
-                logical_name=group["script_json_field"],
-                fallback_stage_name=group["fallback_stage_name"],
-                product_code=context["product_code"],
+            script_contexts[group["script_json_field"]] = script_bundle["script_json"]
+
+        warning_text = "；".join(skipped_by_review)
+        if warning_text:
+            logs.append(warning_text)
+
+        if not selected_script_indexes:
+            message = warning_text or "所有母体脚本均未通过质检，暂无可生成变体的脚本"
+            self._write_update(
+                record_id,
+                logs,
+                stage_durations,
+                status=self._runtime_status(STATUS_DONE_WITH_QC_WARNINGS),
+                extra_values={
+                    "last_run_at": self._now_string(),
+                    "error_message": message,
+                },
             )
+            if run_id is not None:
+                self.storage.update_run_status(
+                    run_id,
+                    runtime_status=self._runtime_status(STATUS_DONE_WITH_QC_WARNINGS),
+                    error_message=message,
+                    stage_durations=stage_durations,
+                    completed=True,
+                )
+            self._flush_log_fields(record_id, logs, stage_durations)
+            print("  ✅ 当前记录完成（无可生成变体脚本）")
+            return
 
         self._process_variants_with_context(
             context=context,
@@ -3065,7 +3413,11 @@ class OriginalScriptPipeline:
             final_contexts=final_contexts,
             expression_contexts=expression_contexts,
             script_contexts=script_contexts,
+            selected_script_indexes=selected_script_indexes,
+            final_runtime_status=STATUS_DONE_WITH_QC_WARNINGS if skipped_by_review else None,
+            final_error_message=warning_text,
         )
+        self._sync_auto_publish_metadata(record_id, logs)
         print("  ✅ 脚本变体生成完成")
 
     def _process_variants_with_context(
@@ -3166,6 +3518,44 @@ class OriginalScriptPipeline:
             )
         logs.append("脚本变体生成完成")
         self._flush_log_fields(record_id, logs, stage_durations)
+
+    def _finalize_main_script_outputs(
+        self,
+        record_id: str,
+        run_id: Optional[int],
+        logs: List[str],
+        stage_durations: Dict[str, float],
+        output_values: Dict[str, Any],
+        runtime_status: str,
+        final_error_message: str = "",
+        completion_log: str = "任务完成（本轮未生成脚本变体）",
+    ) -> bool:
+        final_payload = {
+            **self._build_variant_output_clear_values(),
+            **output_values,
+        }
+        if final_error_message:
+            final_payload["error_message"] = final_error_message
+        self._write_update(
+            record_id,
+            logs,
+            stage_durations,
+            status=self._runtime_status(runtime_status),
+            extra_values=final_payload,
+        )
+        if run_id is not None:
+            self.storage.update_run_status(
+                run_id,
+                runtime_status=self._runtime_status(runtime_status),
+                error_message=final_error_message or None,
+                stage_durations=stage_durations,
+                completed=True,
+            )
+        logs.append(completion_log)
+        self._sync_auto_publish_metadata(record_id, logs)
+        self._flush_log_fields(record_id, logs, stage_durations)
+        print("  ✅ 当前记录完成")
+        return True
 
     # 兼容业务文档里的函数命名，内部继续复用现有主流程。
     def process_script_variants(
@@ -4662,6 +5052,7 @@ class OriginalScriptPipeline:
         final_s4: Dict[str, Any],
     ) -> Dict[str, Any]:
         values = {
+            "anchor_card_json": self._dump_json(anchor_card),
             f"script_s{script_index}_json": self._dump_json(script_bundle["script_json"]),
             f"review_s{script_index}_json": self._dump_json(script_bundle["review_json"]),
             f"script_s{script_index}": script_bundle["rendered_script"],
@@ -4669,6 +5060,29 @@ class OriginalScriptPipeline:
             "last_run_at": self._now_string(),
             "error_message": "",
         }
+        return values
+
+    @staticmethod
+    def _build_full_flow_rerun_clear_values() -> Dict[str, Any]:
+        values: Dict[str, Any] = {
+            "output_summary": "",
+            "anchor_card_json": "",
+            "opening_strategy_json": "",
+            "styling_plan_json": "",
+            "three_strategies_json": "",
+        }
+        for group in VARIANT_GROUPS:
+            script_index = int(group["script_index"])
+            values[f"final_s{script_index}_json"] = ""
+            values[f"exp_s{script_index}_json"] = ""
+            values[f"script_s{script_index}_json"] = ""
+            values[f"review_s{script_index}_json"] = ""
+            values[f"script_s{script_index}"] = ""
+            values[f"video_prompt_s{script_index}_json"] = ""
+            values[f"video_prompt_s{script_index}"] = ""
+            values[str(group["variant_json_field"])] = ""
+            for render_field in group["render_fields"]:
+                values[str(render_field)] = ""
         return values
 
     def _write_update(
@@ -4862,11 +5276,20 @@ def load_pending_records(
 ) -> List[TaskRecord]:
     records = client.list_records(page_size=100)
     status_field = mapping["status"]
-    pending = [
-        record
-        for record in records
-        if normalize_cell_value(record.fields.get(status_field)) in PENDING_STATUSES
-    ]
+    pending: List[TaskRecord] = []
+    pending_record_ids: set = set()
+    for record in records:
+        if normalize_cell_value(record.fields.get(status_field)) in PENDING_STATUSES:
+            pending.append(record)
+            pending_record_ids.add(record.record_id)
+
+    for record in records:
+        if record.record_id in pending_record_ids:
+            continue
+        if not _should_enqueue_completed_record_for_variants(record, mapping):
+            continue
+        pending.append(_build_record_with_status(record, mapping, STATUS_PENDING_VARIANTS))
+
     if limit:
         pending = pending[:limit]
     return pending
