@@ -41,7 +41,7 @@ def test_connection():
             print(f"  SKU: {result['sku']}")
             print(f"  可用库存: {result['available']}")
             print(f"  总库存: {result['total']}")
-            print(f"  预留: {result['reserved']}")
+            print(f"  仓库锁定待发库存: {result['reserved']}")
             print(f"  状态: {result['status']}")
         
         print("\n" + "=" * 60)

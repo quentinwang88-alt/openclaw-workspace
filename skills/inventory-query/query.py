@@ -47,7 +47,7 @@ def main():
         else:
             print(f"  ✅ 可用库存: {data['available']}")
             print(f"  📦 总库存: {data['total']}")
-            print(f"  🔒 预留: {data['reserved']}")
+            print(f"  🔒 仓库锁定待发库存: {data['reserved']}")
             if data.get('title'):
                 print(f"  🏷️ 前台名称: {data['title']}")
             if data.get('matched_by') == 'title':

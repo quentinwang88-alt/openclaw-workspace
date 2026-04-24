@@ -76,7 +76,7 @@ python3 test_fuzzy_query.py
   总库存统计:
     可用库存: XXX
     总库存: XXX
-    预留: XXX
+    仓库锁定待发库存: XXX
 ```
 
 ## 已实现的改进
@@ -94,7 +94,7 @@ python3 test_fuzzy_query.py
 当模糊查询匹配到多个 SKU 时，自动汇总：
 - `available`: 所有匹配 SKU 的可用库存总和
 - `total`: 所有匹配 SKU 的总库存总和
-- `reserved`: 所有匹配 SKU 的预留库存总和
+- `reserved`: 所有匹配 SKU 的仓库锁定待发库存总和
 - `matched_count`: 匹配到的 SKU 数量
 - `matched_skus`: 匹配到的所有 SKU 列表
 

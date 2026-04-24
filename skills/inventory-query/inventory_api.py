@@ -558,7 +558,7 @@ if __name__ == "__main__":
             else:
                 print(f"  可用库存: {data['available']}")
                 print(f"  总库存: {data['total']}")
-                print(f"  预留: {data['reserved']}")
+                print(f"  仓库锁定待发库存: {data['reserved']}")
                 print(f"  状态: {data['status']}")
                 if 'matched_count' in data:
                     print(f"  匹配数量: {data['matched_count']}")

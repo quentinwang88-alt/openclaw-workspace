@@ -60,7 +60,7 @@ else:
     print(f"  SKU: {result['sku']}")
     print(f"  可用库存: {result['available']}")
     print(f"  总库存: {result['total']}")
-    print(f"  预留: {result['reserved']}")
+    print(f"  仓库锁定待发库存: {result['reserved']}")
     print(f"  状态: {result['status']}")
 
 # 测试模糊查询（查询 "bu" 应该匹配到 "BU0010"）
