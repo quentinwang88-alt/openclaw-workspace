@@ -1748,6 +1748,136 @@ class OriginalScriptPipeline:
         merged_anchor_card["parameter_anchors"] = merged_items
         return merged_anchor_card
 
+    @staticmethod
+    def _compact_anchor_phrase(text: str, max_chars: int = 22) -> str:
+        value = str(text or "").strip()
+        if not value:
+            return ""
+        value = re.sub(r"\s+", " ", value)
+        replacements = {
+            "来自表格“产品参数信息”字段，为人工确认的产品参数事实": "",
+            "后续脚本和最终提示词需与该参数事实保持一致，不得改写": "",
+            "必须": "",
+            "需要": "",
+            "整体": "",
+            "画面中": "",
+        }
+        for old, new in replacements.items():
+            value = value.replace(old, new)
+        value = re.sub(r"[。；;]+$", "", value).strip(" ，,、/\t")
+        if len(value) <= max_chars:
+            return value
+        return value[: max_chars - 1].rstrip(" ，,、/\t") + "…"
+
+    def _build_final_video_prompt_anchor_segments(
+        self,
+        anchor_card: Dict[str, Any],
+        max_items: int = 3,
+    ) -> List[str]:
+        if not isinstance(anchor_card, dict):
+            return []
+
+        segments: List[str] = []
+        seen: set = set()
+
+        def _push(text: str) -> None:
+            phrase = self._compact_anchor_phrase(text)
+            if not phrase:
+                return
+            key = re.sub(r"[\s；;，,。:：、\-/]", "", phrase).lower()
+            if not key or key in seen:
+                return
+            seen.add(key)
+            segments.append(phrase)
+
+        for item in (anchor_card.get("parameter_anchors") or [])[:3]:
+            if not isinstance(item, dict):
+                continue
+            parameter_name = str(item.get("parameter_name", "") or "").strip()
+            parameter_value = str(item.get("parameter_value", "") or "").strip()
+            if parameter_name and parameter_name.startswith("参数"):
+                _push(parameter_value)
+            elif parameter_name and parameter_value:
+                _push(f"{parameter_name}{parameter_value}")
+            else:
+                _push(parameter_value or parameter_name)
+
+        for item in (anchor_card.get("hard_anchors") or [])[:3]:
+            if isinstance(item, dict):
+                _push(str(item.get("anchor", "") or ""))
+
+        for item in (anchor_card.get("display_anchors") or [])[:3]:
+            if isinstance(item, dict):
+                _push(str(item.get("anchor", "") or ""))
+
+        for key in (
+            "structure_anchors",
+            "operation_anchors",
+            "fixation_result_anchors",
+            "before_after_result_anchors",
+            "scene_usage_anchors",
+        ):
+            for item in (anchor_card.get(key) or [])[:2]:
+                _push(str(item or ""))
+
+        return segments[:max_items]
+
+    @staticmethod
+    def _merge_semicolon_text(prefix: str, current: str) -> str:
+        prefix_text = str(prefix or "").strip()
+        current_text = str(current or "").strip()
+        if not prefix_text:
+            return current_text
+        if not current_text:
+            return prefix_text
+        normalized_prefix = re.sub(r"\s+", "", prefix_text)
+        normalized_current = re.sub(r"\s+", "", current_text)
+        if normalized_prefix and normalized_prefix in normalized_current:
+            return current_text
+        return f"{prefix_text}；{current_text}"
+
+    def _reinforce_final_video_prompt_anchors(
+        self,
+        video_prompt_json: Dict[str, Any],
+        anchor_card: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(video_prompt_json, dict):
+            return video_prompt_json
+
+        anchor_segments = self._build_final_video_prompt_anchor_segments(anchor_card)
+        if not anchor_segments:
+            return video_prompt_json
+
+        reinforced = dict(video_prompt_json)
+        video_setup = str(reinforced.get("video_setup", "") or "").strip()
+        execution_boundary = str(reinforced.get("execution_boundary", "") or "").strip()
+        shots = list(reinforced.get("shot_execution") or [])
+
+        anchor_summary = f"商品锚点：{' / '.join(anchor_segments[:2])}"
+        anchor_execution = f"锚点执行：至少1镜清楚交代{' / '.join(anchor_segments[:2])}"
+        reinforced["video_setup"] = self._merge_semicolon_text(anchor_summary, video_setup)
+        reinforced["execution_boundary"] = self._merge_semicolon_text(anchor_execution, execution_boundary)
+
+        primary_anchor = anchor_segments[0]
+        shot_index = 0
+        for index, shot in enumerate(shots):
+            if not isinstance(shot, dict):
+                continue
+            task = str(shot.get("spoken_line_task", "") or "").strip()
+            if task in {"proof", "proof+decision"}:
+                shot_index = index
+                break
+
+        if shots and isinstance(shots[shot_index], dict):
+            shot = dict(shots[shot_index])
+            style_note = str(shot.get("style_note", "") or "").strip()
+            anchor_note = f"锚点：{self._compact_anchor_phrase(primary_anchor, max_chars=14)}"
+            shot["style_note"] = self._merge_semicolon_text(anchor_note, style_note)
+            shots[shot_index] = shot
+            reinforced["shot_execution"] = shots
+
+        return reinforced
+
     def _should_generate_variants_from_fields(self, fields: Dict[str, Any]) -> bool:
         field_name = self.mapping.get("generate_variants")
         if not field_name:
@@ -2897,6 +3027,10 @@ class OriginalScriptPipeline:
             script_index=script_index,
             record_id=record_id,
             video_prompt_json=video_prompt_json,
+        )
+        video_prompt_json = self._reinforce_final_video_prompt_anchors(
+            video_prompt_json,
+            anchor_card,
         )
         video_prompt_json = compress_final_video_prompt_payload(video_prompt_json)
         validate_video_prompt_payload(video_prompt_json)

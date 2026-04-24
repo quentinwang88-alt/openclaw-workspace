@@ -89,10 +89,18 @@ def _truncate_text(value: Any, max_chars: int) -> str:
     return text[: max_chars - 1].rstrip(" ，；;、,:：") + "…"
 
 
+def _is_anchor_priority_segment(segment: str) -> bool:
+    text = _compact_text(segment)
+    return text.startswith("商品锚点：") or text.startswith("锚点执行：") or text.startswith("锚点：")
+
+
 def _join_limited_segments(value: Any, max_segments: int, max_chars: int) -> str:
     if max_chars <= 0 or max_segments <= 0:
         return ""
-    segments = _semantic_segments(value)[:max_segments]
+    all_segments = _semantic_segments(value)
+    priority_segments = [segment for segment in all_segments if _is_anchor_priority_segment(segment)]
+    normal_segments = [segment for segment in all_segments if not _is_anchor_priority_segment(segment)]
+    segments = (priority_segments + normal_segments)[:max_segments]
     if not segments:
         return ""
     return _truncate_text("；".join(segments), max_chars)
@@ -124,6 +132,9 @@ def _compress_voiceover(value: Any, max_chars: int) -> str:
 
 
 def _compress_style_note(style_note: Any, boundary_text: str, shot_content: str, person_action: str, max_chars: int) -> str:
+    raw_note = _compact_text(style_note)
+    if _is_anchor_priority_segment(raw_note):
+        return _truncate_text(raw_note, max(max_chars, 18))
     note = _join_limited_segments(style_note, max_segments=2, max_chars=max_chars)
     if not note:
         return ""
@@ -923,6 +934,7 @@ def _compress_video_prompt_pass(prompt_json: Dict[str, Any], second_pass: bool =
     boundary_text = compressed["execution_boundary"]
     seen_style_notes = set()
     for shot in prompt.get("shot_execution", []) or []:
+        raw_style_note = shot.get("style_note", "")
         shot_content = _compress_descriptor(
             shot.get("shot_content", ""),
             max_segments=2 if second_pass else 3,
@@ -934,10 +946,12 @@ def _compress_video_prompt_pass(prompt_json: Dict[str, Any], second_pass: bool =
             max_chars=16 if second_pass else 28,
         )
         style_note = (
-            ""
+            _truncate_text(raw_style_note, 18)
+            if second_pass and _is_anchor_priority_segment(_compact_text(raw_style_note))
+            else ""
             if second_pass
             else _compress_style_note(
-                shot.get("style_note", ""),
+                raw_style_note,
                 boundary_text,
                 shot_content,
                 person_action,

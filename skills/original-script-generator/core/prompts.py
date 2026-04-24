@@ -1302,6 +1302,9 @@ PROMPT_P7_VIDEO = """你是最终视频提示词生成器。
 - `style_note` 只保留该镜头独有的提醒；如果某条提醒已经在全局执行边界里出现，不要在每个镜头重复写
 - 把重复的风格提醒尽量上提到 `execution_boundary`
 - `video_setup` 和 `execution_boundary` 都要用短句，不要写成长段方法论或重复限制
+- `video_setup` 里必须显式保留 1-3 个最关键的商品锚点，优先写成短句，例如“商品锚点：xxx / xxx”，不要只保留空泛风格词
+- `execution_boundary` 里必须显式写出锚点执行要求，例如“至少 1 镜清楚交代 xxx”，不要只写泛化拍摄原则
+- `shot_execution` 里至少有 1 个镜头要直接服务于最关键商品锚点，不能所有镜头都只剩泛化氛围描述
 - 如果 `anchor_card_json.parameter_anchors` 非空，不得在最终视频提示词里改写这些参数事实；关键参数可在 `video_setup` 或相关镜头里轻量保留
 - 输出结构收敛为：视频整体设定 / 分镜执行 / 统一执行边界
 
