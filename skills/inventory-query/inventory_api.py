@@ -6,6 +6,7 @@
 """
 
 import json
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +39,9 @@ class InventoryAPI:
         """
         self.profile_manager = InventoryProfileManager(Path(__file__).parent / "config")
         self.profile = profile
+        self.alias_map_path = Path(__file__).parent / 'title_sku_aliases.json'
+        self.alias_file_map = {}
+        self.alias_lookup = {}
         self.alias_map = self._load_alias_map()
         if config_path is None:
             config_path = self.profile_manager.get_config_path(profile)
@@ -54,15 +58,107 @@ class InventoryAPI:
             self._check_and_refresh_token()
     
     def _load_alias_map(self) -> dict:
-        """加载前台展示名到实际 SKU 的别名映射"""
-        alias_path = Path(__file__).parent / 'title_sku_aliases.json'
-        if not alias_path.exists():
+        """加载前台展示名到实际 SKU 的别名映射。"""
+        self.alias_file_map = self._load_alias_file_map()
+        report_aliases = self._load_alias_map_from_reports()
+
+        merged = dict(report_aliases)
+        merged.update(self.alias_file_map)
+        self.alias_lookup = {
+            self._normalize_alias_key(title): sku
+            for title, sku in merged.items()
+            if self._normalize_alias_key(title) and sku
+        }
+        return merged
+
+    def _load_alias_file_map(self) -> dict:
+        """加载手工/自动沉淀的别名映射文件。"""
+        if not self.alias_map_path.exists():
             return {}
+
         try:
-            with open(alias_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
+            with open(self.alias_map_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return {
+                    str(title).strip(): str(sku).strip()
+                    for title, sku in data.items()
+                    if str(title).strip() and str(sku).strip()
+                }
         except Exception:
+            pass
+
+        return {}
+
+    def _load_alias_map_from_reports(self) -> dict:
+        """从补货报告中提取前台名称到 SKU 的映射，增强名称回退命中率。"""
+        output_dir = Path(__file__).resolve().parents[1] / 'output'
+        if not output_dir.exists():
             return {}
+
+        aliases = {}
+        pattern = re.compile(r'^###\s+(?:\d+\.\s+)?(.+?)\s+-\s+(.+?)\s*$')
+
+        for path in sorted(output_dir.glob('*.md'), reverse=True):
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        match = pattern.match(line.strip())
+                        if not match:
+                            continue
+
+                        sku = match.group(1).strip()
+                        title = match.group(2).strip()
+                        if not sku or not title:
+                            continue
+                        if title.lower() == sku.lower():
+                            continue
+
+                        aliases.setdefault(title, sku)
+            except Exception:
+                continue
+
+        return aliases
+
+    @staticmethod
+    def _normalize_alias_key(value: Optional[str]) -> str:
+        """规范化别名 key，支持大小写和多空格回退。"""
+        return ' '.join((value or '').strip().lower().split())
+
+    def _lookup_alias_sku(self, value: Optional[str]) -> Optional[str]:
+        """按精确值或规范化 key 查询已知别名映射。"""
+        if not value:
+            return None
+
+        if value in self.alias_map:
+            return self.alias_map[value]
+
+        return self.alias_lookup.get(self._normalize_alias_key(value))
+
+    def _persist_alias_file_map(self):
+        """持久化别名映射文件。"""
+        self.alias_map_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.alias_map_path, 'w', encoding='utf-8') as f:
+            json.dump(dict(sorted(self.alias_file_map.items())), f, indent=2, ensure_ascii=False)
+
+    def _remember_title_alias(self, title: Optional[str], sku: Optional[str]):
+        """把成功查询出的 title -> sku 映射沉淀到本地，方便后续名称回退。"""
+        title = (title or '').strip()
+        sku = (sku or '').strip()
+        if not title or not sku or title.lower() == sku.lower():
+            return
+
+        normalized_title = self._normalize_alias_key(title)
+        existing_sku = self.alias_lookup.get(normalized_title)
+        if existing_sku and existing_sku != sku:
+            return
+
+        if self.alias_file_map.get(title) == sku:
+            return
+
+        self.alias_file_map[title] = sku
+        self._persist_alias_file_map()
+        self.alias_map = self._load_alias_map()
 
     def _load_config(self, config_path: Path) -> dict:
         """加载配置文件"""
@@ -163,13 +259,16 @@ class InventoryAPI:
         # 先按系统库存编码 sku 查询
         primary_result = self._query_by_field(sku, country, fuzzy=fuzzy, max_pages=max_pages, match_field='sku')
         if 'error' not in primary_result or primary_result.get('error_type') != 'no_match':
+            if 'error' not in primary_result:
+                self._remember_title_alias(primary_result.get('title'), primary_result.get('sku'))
             return primary_result
 
         # 如果存在本地别名映射，优先用映射后的真实 SKU 再查一次
-        alias_sku = self.alias_map.get(sku)
+        alias_sku = self._lookup_alias_sku(sku)
         if alias_sku and alias_sku != sku:
             alias_result = self._query_by_field(alias_sku, country, fuzzy=False, max_pages=max_pages, match_field='sku')
             if 'error' not in alias_result:
+                self._remember_title_alias(alias_result.get('title'), alias_result.get('sku'))
                 alias_result['fallback_used'] = True
                 alias_result['fallback_type'] = 'alias_map'
                 alias_result['query_input'] = sku
@@ -179,6 +278,7 @@ class InventoryAPI:
         # 如果按 sku 没查到，再回退按前台展示名称 title 查询
         title_result = self._query_by_title(sku, country, fuzzy=fuzzy, max_pages=max_pages)
         if 'error' not in title_result:
+            self._remember_title_alias(title_result.get('title'), title_result.get('sku'))
             title_result['fallback_used'] = True
             title_result['fallback_type'] = 'title_query'
             title_result['query_input'] = sku
