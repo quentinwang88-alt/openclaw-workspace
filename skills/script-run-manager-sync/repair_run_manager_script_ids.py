@@ -17,7 +17,12 @@ sys.path.insert(0, str(SKILL_DIR))
 
 from core.bitable import FeishuBitableClient  # noqa: E402
 from core.feishu_url_parser import parse_feishu_bitable_url  # noqa: E402
-from core.sync import TARGET_FIELD_ALIASES, resolve_field_mapping  # noqa: E402
+from core.sync import (  # noqa: E402
+    TARGET_FIELD_ALIASES,
+    prepend_script_id_header,
+    prompt_has_script_id_header,
+    resolve_field_mapping,
+)
 
 
 DEFAULT_TARGET_FEISHU_URL = (
@@ -130,6 +135,16 @@ def has_video(fields: Dict[str, object], mapping: Dict[str, Optional[str]]) -> b
     return False
 
 
+def summarize_update(update: Dict[str, object]) -> Dict[str, object]:
+    fields = update.get("fields")
+    compact_fields: Dict[str, object] = {}
+    if isinstance(fields, dict):
+        for key, value in fields.items():
+            text = str(value or "")
+            compact_fields[str(key)] = text[:120] + ("…" if len(text) > 120 else "")
+    return {"record_id": update.get("record_id"), "fields": compact_fields}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="按任务名批量修复运行表脚本ID")
     parser.add_argument("--target-feishu-url", default=DEFAULT_TARGET_FEISHU_URL, help="运行表飞书 URL")
@@ -137,6 +152,7 @@ def main() -> None:
     parser.add_argument("--limit", type=int, help="限制扫描记录数")
     parser.add_argument("--uploaded-only", action="store_true", help="只修复结果回传状态为 uploaded 的记录")
     parser.add_argument("--has-video-only", action="store_true", help="只修复已有视频的记录")
+    parser.add_argument("--prompt-header-only", action="store_true", help="只补提示词里的【脚本ID】头，不修改脚本ID字段")
     parser.add_argument("--dry-run", action="store_true", help="只预览，不写回飞书")
     args = parser.parse_args()
 
@@ -173,9 +189,34 @@ def main() -> None:
             continue
 
         current_script_id = str(fields.get(script_id_field) or "").strip()
+        current_prompt = fields.get(prompt_field) if prompt_field else ""
         prompt_script_id = extract_script_id_from_prompt(fields.get(prompt_field)) if prompt_field else ""
+        update_fields: Dict[str, object] = {}
+        if args.prompt_header_only:
+            if is_structured_script_id(current_script_id) and prompt_field and not prompt_has_script_id_header(current_prompt):
+                updates.append(
+                    {
+                        "record_id": record.record_id,
+                        "fields": {prompt_field: prepend_script_id_header(current_prompt, current_script_id)},
+                    }
+                )
+            else:
+                skipped += 1
+            continue
+
         if is_structured_script_id(prompt_script_id) and current_script_id != prompt_script_id:
-            updates.append({"record_id": record.record_id, "fields": {script_id_field: prompt_script_id}})
+            update_fields[script_id_field] = prompt_script_id
+            if prompt_field and not prompt_has_script_id_header(current_prompt):
+                update_fields[prompt_field] = prepend_script_id_header(current_prompt, prompt_script_id)
+            updates.append({"record_id": record.record_id, "fields": update_fields})
+            continue
+        if is_structured_script_id(current_script_id) and prompt_field and not prompt_has_script_id_header(current_prompt):
+            updates.append(
+                {
+                    "record_id": record.record_id,
+                    "fields": {prompt_field: prepend_script_id_header(current_prompt, current_script_id)},
+                }
+            )
             continue
 
         task_name = str(fields.get(task_name_field) or "").strip()
@@ -195,10 +236,15 @@ def main() -> None:
             )
             continue
 
-        if current_script_id == target_script_id:
+        if current_script_id != target_script_id:
+            update_fields[script_id_field] = target_script_id
+        if prompt_field and not prompt_has_script_id_header(current_prompt):
+            update_fields[prompt_field] = prepend_script_id_header(current_prompt, target_script_id)
+
+        if not update_fields:
             skipped += 1
             continue
-        updates.append({"record_id": record.record_id, "fields": {script_id_field: target_script_id}})
+        updates.append({"record_id": record.record_id, "fields": update_fields})
 
     print(
         {
@@ -206,7 +252,7 @@ def main() -> None:
             "updates": len(updates),
             "unresolved": len(unresolved),
             "skipped": skipped,
-            "preview_updates": updates[:10],
+            "preview_updates": [summarize_update(update) for update in updates[:10]],
             "preview_unresolved": unresolved[:10],
         }
     )

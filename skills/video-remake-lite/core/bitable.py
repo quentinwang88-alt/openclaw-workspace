@@ -13,9 +13,10 @@ import requests
 
 
 FIELD_ALIASES = {
-    "status": ["状态", "任务状态", "执行状态", "处理状态", "status"],
-    "video": ["视频", "视频素材", "原视频", "源视频", "视频链接", "素材视频", "source_video"],
+    "status": ["复刻任务状态", "状态", "任务状态", "执行状态", "处理状态", "status"],
+    "video": ["原始视频", "视频", "视频素材", "原视频", "源视频", "视频链接", "素材视频", "source_video"],
     "content_branch": ["内容分支", "content_branch"],
+    "store_id": ["店铺ID", "店铺", "店铺编号", "store_id"],
     "target_country": ["目标国家", "国家", "投放国家", "target_country"],
     "target_language": ["目标语言", "语言", "target_language"],
     "product_type": ["商品类型", "产品类型", "品类", "商品品类", "product_type"],
@@ -29,11 +30,19 @@ FIELD_ALIASES = {
     "delivery_mode_backup": ["表达载体备选", "备选表达载体模式", "delivery_mode_backup"],
     "delivery_mode_reason": ["表达载体原因", "表达载体说明", "delivery_mode_reason"],
     "delivery_mode_risk_note": ["表达载体风险", "表达载体风险提示", "delivery_mode_risk_note"],
-    "script_breakdown": ["脚本拆解", "脚本拆解结果", "analysis_result"],
-    "remake_card": ["复刻卡", "replicate_card"],
-    "remade_script": ["复刻后的脚本", "localized_script"],
-    "final_prompt": ["最终复刻视频提示词", "final_execution_prompt"],
-    "error_message": ["错误信息", "失败原因", "报错信息", "run_log", "运行日志"],
+    "highlight_dna": ["高光DNA提取结果", "脚本拆解", "脚本拆解结果", "analysis_result"],
+    "light_rewrite_plan": ["轻微改写复刻方案", "复刻卡", "replicate_card"],
+    "final_storyboard": ["最终固定分镜", "最终复刻视频提示词", "final_execution_prompt"],
+    "negative_words": ["负面限制词"],
+    "sync_status": ["同步状态"],
+    "synced_script_id": ["同步到脚本ID"],
+    "sync_error": ["同步错误信息"],
+    "error_message": ["同步错误信息", "错误信息", "失败原因", "报错信息", "run_log", "运行日志"],
+    # 旧四步字段保留映射，便于历史表不立即改列也能运行。
+    "script_breakdown": ["高光DNA提取结果", "脚本拆解", "脚本拆解结果", "analysis_result"],
+    "remake_card": ["轻微改写复刻方案", "复刻卡", "replicate_card"],
+    "remade_script": ["最终固定分镜", "复刻后的脚本", "localized_script"],
+    "final_prompt": ["最终固定分镜", "最终复刻视频提示词", "final_execution_prompt"],
 }
 
 

@@ -1,0 +1,15 @@
+{
+  "task_id": "img_demo_generate_001",
+  "task_type": "avatar",
+  "target_field": "output_avatar_image",
+  "mode": "generate",
+  "prompt": "Generate a realistic and friendly TikTok profile image for a Vietnam women's accessories store. Soft feminine style, clean background, simple composition, trustworthy and natural.",
+  "size": "1024x1024",
+  "quality": "medium",
+  "output_format": "png",
+  "output_dir": "",
+  "metadata": {
+    "business_scene": "avatar",
+    "country": "VN"
+  }
+}

@@ -136,6 +136,8 @@ class ReportingTest(unittest.TestCase):
         self.assertEqual(client.updated_records[0]["record_id"], "rpt-1")
         self.assertEqual(client.updated_records[0]["fields"]["内部脚本键"], "rec-001:S1")
         self.assertEqual(client.updated_records[0]["fields"]["发布任务ID"], "task-001")
+        self.assertEqual(client.updated_records[0]["fields"]["排期状态"], "已排期")
+        self.assertEqual(client.updated_records[0]["fields"]["计划发布时间"], "2026-04-13 12:00:00")
 
 
 if __name__ == "__main__":

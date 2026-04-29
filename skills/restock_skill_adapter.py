@@ -22,6 +22,7 @@
 """
 
 import sys
+from copy import deepcopy
 from pathlib import Path
 from typing import Dict, Any, Optional
 from datetime import datetime
@@ -43,6 +44,7 @@ if str(WORKSPACE_PATH) not in sys.path:
 
 # 导入基础框架
 from base_skill import BaseSkill, register_skill
+from restock_abc_classifier import classify_skus_by_abc
 
 # 导入旧代码
 try:
@@ -53,16 +55,218 @@ except ImportError as e:
     InventoryAlert = None
 
 
-def get_priority(days: int) -> tuple:
-    """获取优先级"""
+DEFAULT_RESTOCK_SETTINGS = {
+    "priority_strategy": "both",
+    "enable_abc_layering": True,
+    "purchase_days": 3,
+    "logistics_days": 12,
+    "safety_days": 2,
+    "safety_days_by_class": {
+        "A": 5,
+        "B": 3,
+        "C": 1,
+        "NEW": 3,
+    },
+    "abc_thresholds": {
+        "a_cumulative": 0.70,
+        "b_cumulative": 0.90,
+    },
+    "new_sku_age_days": 7,
+    "unknown_age_default_class": "B",
+}
+
+
+def _deep_merge_dicts(base: dict, override: dict) -> dict:
+    """递归合并配置，后者覆盖前者。"""
+    merged = deepcopy(base)
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dicts(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
+
+
+def _calc_priority(days: float) -> tuple:
+    """根据可售天数获取优先级。"""
     if days <= 3:
         return ('🔴 极高', 1)
-    elif days <= 7:
+    if days <= 7:
         return ('🟠 高', 2)
-    elif days <= 10:
+    if days <= 10:
         return ('🟡 中', 3)
-    else:
-        return ('🟢 低', 4)
+    return ('🟢 低', 4)
+
+
+def get_priority(days: int) -> tuple:
+    """兼容旧调用方的优先级接口。"""
+    return _calc_priority(days)
+
+
+def _format_days(days: float) -> str:
+    """格式化天数字段，尽量避免无意义的小数。"""
+    if days is None:
+        return "-"
+    rounded = round(days, 1)
+    if abs(rounded - round(rounded)) < 0.05:
+        return str(int(round(rounded)))
+    return f"{rounded:.1f}"
+
+
+def _resolve_restock_settings(
+    alert_config: dict,
+    purchase_cycle_days: int,
+    priority_strategy: Optional[str] = None,
+    enable_abc_layering: Optional[bool] = None,
+) -> dict:
+    """构建补货参数配置，兼容旧的固定补货周期与新的 ABC 分层。"""
+    settings = _deep_merge_dicts(DEFAULT_RESTOCK_SETTINGS, alert_config.get("restock", {}))
+
+    if priority_strategy is not None:
+        settings["priority_strategy"] = priority_strategy
+    if enable_abc_layering is not None:
+        settings["enable_abc_layering"] = enable_abc_layering
+
+    strategy = str(settings.get("priority_strategy", "both") or "both").lower()
+    if strategy not in {"both", "effective", "stock_only"}:
+        strategy = "both"
+    settings["priority_strategy"] = strategy
+
+    settings["enable_abc_layering"] = bool(settings.get("enable_abc_layering", True))
+    settings["purchase_days"] = int(settings.get("purchase_days", 3) or 3)
+    settings["logistics_days"] = int(settings.get("logistics_days", 12) or 12)
+    settings["safety_days"] = int(settings.get("safety_days", 2) or 2)
+    settings["new_sku_age_days"] = int(settings.get("new_sku_age_days", 7) or 7)
+
+    default_class = str(settings.get("unknown_age_default_class", "B") or "B").upper()
+    if default_class not in {"A", "B", "C", "NEW"}:
+        default_class = "B"
+    settings["unknown_age_default_class"] = default_class
+
+    thresholds = settings.get("abc_thresholds", {}) or {}
+    a_threshold = float(thresholds.get("a_cumulative", 0.70) or 0.70)
+    b_threshold = float(thresholds.get("b_cumulative", 0.90) or 0.90)
+    if a_threshold <= 0:
+        a_threshold = 0.70
+    if b_threshold < a_threshold:
+        b_threshold = a_threshold
+    settings["abc_thresholds"] = {
+        "a_cumulative": a_threshold,
+        "b_cumulative": b_threshold,
+    }
+
+    safety_days_by_class = deepcopy(settings.get("safety_days_by_class", {}))
+    for sku_class, fallback in {"A": 5, "B": 3, "C": 1, "NEW": 3}.items():
+        safety_days_by_class[sku_class] = int(safety_days_by_class.get(sku_class, fallback) or fallback)
+    settings["safety_days_by_class"] = safety_days_by_class
+
+    settings["fixed_purchase_cycle_days"] = int(purchase_cycle_days)
+    settings["cycle_days_by_class"] = {
+        sku_class: settings["purchase_days"] + settings["logistics_days"] + safety_days_by_class[sku_class]
+        for sku_class in ("A", "B", "C", "NEW")
+    }
+    settings["default_purchase_cycle_days"] = (
+        settings["cycle_days_by_class"].get(default_class, settings["cycle_days_by_class"]["B"])
+        if settings["enable_abc_layering"]
+        else int(purchase_cycle_days)
+    )
+    settings["purchase_cycle_mode"] = "abc" if settings["enable_abc_layering"] else "fixed"
+    return settings
+
+
+def _describe_purchase_cycle(settings: dict) -> str:
+    """生成补货周期说明。"""
+    if settings.get("purchase_cycle_mode") == "abc":
+        cycle_days = settings.get("cycle_days_by_class", {})
+        return (
+            f"A类{cycle_days.get('A', '-')}天 / "
+            f"B类{cycle_days.get('B', '-')}天 / "
+            f"C类{cycle_days.get('C', '-')}天 / "
+            f"NEW类{cycle_days.get('NEW', '-')}天"
+        )
+
+    cycle_days = settings.get("default_purchase_cycle_days", settings.get("fixed_purchase_cycle_days", 17))
+    return (
+        f"{cycle_days}天"
+        f"（采购{settings.get('purchase_days', 3)}天 + "
+        f"物流{settings.get('logistics_days', 12)}天 + "
+        f"安全{settings.get('safety_days', 2)}天）"
+    )
+
+
+def _build_restock_item(
+    sku_data: Dict[str, Any],
+    in_transit_qty: int,
+    threshold_days: int,
+    settings: dict,
+    abc_map: Dict[str, str],
+) -> Optional[Dict[str, Any]]:
+    """将单个 SKU 计算为补货条目。"""
+    sku = sku_data['sku']
+    available = sku_data.get('available', 0)
+    avg_sales = float(sku_data.get('avg_daily_sales', 0) or 0)
+    purchase_sale_days = float(sku_data.get('purchase_sale_days', 0) or 0)
+
+    total_available = available + in_transit_qty
+    days_with_transit = total_available / avg_sales if avg_sales > 0 else 999
+
+    sku_class = None
+    safety_days_used = settings.get("safety_days", 2)
+    lead_time_used = settings.get("default_purchase_cycle_days", settings.get("fixed_purchase_cycle_days", 17))
+    if settings.get("enable_abc_layering"):
+        sku_class = abc_map.get(sku, settings.get("unknown_age_default_class", "B"))
+        safety_days_used = settings["safety_days_by_class"].get(
+            sku_class,
+            settings["safety_days_by_class"][settings.get("unknown_age_default_class", "B")]
+        )
+        lead_time_used = settings["purchase_days"] + settings["logistics_days"] + safety_days_used
+
+    target_qty = avg_sales * lead_time_used
+    suggested_qty = max(0, int(target_qty - total_available))
+
+    stock_priority = _calc_priority(purchase_sale_days)
+    effective_priority = _calc_priority(days_with_transit)
+    priority = stock_priority if settings["priority_strategy"] == "stock_only" else effective_priority
+    days_for_priority = purchase_sale_days if settings["priority_strategy"] == "stock_only" else days_with_transit
+
+    risk_flag = None
+    if stock_priority[1] <= 2 and effective_priority[1] >= 3:
+        risk_flag = "依赖在途"
+
+    # 保持当前修正后的候选池口径：实际要补货的一定纳入，threshold 只负责预警分层
+    if suggested_qty <= 0 and purchase_sale_days > threshold_days:
+        return None
+
+    return {
+        'sku': sku,
+        'title': sku_data.get('title', ''),
+        'available': available,
+        'in_transit': in_transit_qty,
+        'avg_daily_sales': avg_sales,
+        'purchase_sale_days': purchase_sale_days,
+        'days_with_transit': days_with_transit,
+        'days_for_priority': days_for_priority,
+        'suggested_qty': suggested_qty,
+        'priority': priority,
+        'stock_priority': stock_priority,
+        'effective_priority': effective_priority,
+        'risk_flag': risk_flag,
+        'sku_class': sku_class,
+        'safety_days_used': safety_days_used,
+        'lead_time_used': lead_time_used,
+        'is_advance_restock': suggested_qty > 0 and days_for_priority > threshold_days,
+    }
+
+
+def _restock_sort_key(item: Dict[str, Any]) -> tuple:
+    """补货条目的统一排序规则。"""
+    return (
+        item['priority'][1],
+        item.get('days_for_priority', item.get('purchase_sale_days', 999)),
+        0 if item['suggested_qty'] > 0 else 1,
+        -item.get('avg_daily_sales', 0),
+        item['sku'],
+    )
 
 
 def generate_restock_report(
@@ -70,17 +274,21 @@ def generate_restock_report(
     threshold_days: int = 10,
     output_format: str = "markdown",
     profile: Optional[str] = None,
-    only_actionable: bool = True
+    only_actionable: bool = True,
+    priority_strategy: Optional[str] = None,
+    enable_abc_layering: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     生成补货建议报告（核心逻辑，从旧代码迁移）
     
     Args:
-        purchase_cycle_days: 补货周期天数（默认17：采购3天 + 物流12天 + 安全2天）
+        purchase_cycle_days: 固定补货周期天数；当 ABC 分层关闭时直接使用
         threshold_days: 预警阈值天数（默认10天）
         output_format: 输出格式，"markdown" 或 "json"
         profile: 指定账号 profile；不传时使用当前激活账号
         only_actionable: 是否只保留建议采购量大于 0 的 SKU，默认 True
+        priority_strategy: 优先级策略，both/effective/stock_only；默认走配置
+        enable_abc_layering: 是否启用 ABC 安全天数分层；默认走配置
     
     Returns:
         包含报告数据和内容的字典
@@ -95,6 +303,12 @@ def generate_restock_report(
     # 初始化
     api = InventoryAlertAPI(profile=profile)
     alert_system = InventoryAlert(profile=profile)
+    settings = _resolve_restock_settings(
+        alert_system.config,
+        purchase_cycle_days=purchase_cycle_days,
+        priority_strategy=priority_strategy,
+        enable_abc_layering=enable_abc_layering,
+    )
     
     print("正在查询所有 SKU 库存...")
     all_skus = api.query_all_skus()
@@ -104,46 +318,37 @@ def generate_restock_report(
     sku_title_map = {item['sku']: item.get('title', item['sku']) for item in all_skus}
     in_transit = alert_system.load_in_transit_inventory(sku_title_map)
     print(f"已加载 {len(in_transit)} 个 SKU 的在途库存")
+
+    abc_map = {}
+    if settings["enable_abc_layering"]:
+        abc_map = classify_skus_by_abc(
+            all_skus,
+            a_threshold=settings["abc_thresholds"]["a_cumulative"],
+            b_threshold=settings["abc_thresholds"]["b_cumulative"],
+            new_sku_age_days=settings["new_sku_age_days"],
+            unknown_age_default_class=settings["unknown_age_default_class"],
+        )
+        print(f"已完成 {len(abc_map)} 个 SKU 的 ABC 分类")
     
     restock_list = []
     
     for sku_data in all_skus:
-        sku = sku_data['sku']
-        available = sku_data.get('available', 0)
-        avg_sales = sku_data.get('avg_daily_sales', 0)
-        purchase_sale_days = sku_data.get('purchase_sale_days', 0)
-        
-        # 获取在途库存
-        in_transit_qty = in_transit.get(sku, 0)
-        
-        # 计算含在途的可售天数
-        total_available = available + in_transit_qty
-        days_with_transit = total_available / avg_sales if avg_sales > 0 else 999
-        
-        # 计算建议采购量
-        target_qty = avg_sales * purchase_cycle_days
-        suggested_qty = max(0, target_qty - total_available)
+        item = _build_restock_item(
+            sku_data,
+            in_transit_qty=in_transit.get(sku_data['sku'], 0),
+            threshold_days=threshold_days,
+            settings=settings,
+            abc_map=abc_map,
+        )
+        if item:
+            restock_list.append(item)
 
-        # 补货清单口径：只要低于补货周期导致 suggested_qty > 0，就应该纳入
-        # threshold_days 仅用于预警/优先级分层，不应拦截实际需要补货的 SKU
-        if suggested_qty > 0 or purchase_sale_days <= threshold_days:
-            restock_list.append({
-                'sku': sku,
-                'title': sku_data.get('title', ''),
-                'available': available,
-                'in_transit': in_transit_qty,
-                'avg_daily_sales': avg_sales,
-                'purchase_sale_days': purchase_sale_days,
-                'days_with_transit': days_with_transit,
-                'suggested_qty': int(suggested_qty),
-                'priority': get_priority(purchase_sale_days)
-            })
-    
-    # 按可售天数排序
-    restock_list.sort(key=lambda x: x['purchase_sale_days'])
+    # 按当前主优先级排序；同时把真正要补货的项目置前
+    restock_list.sort(key=_restock_sort_key)
 
     warning_only_list = [item for item in restock_list if item['suggested_qty'] <= 0]
     actionable_list = [item for item in restock_list if item['suggested_qty'] > 0]
+    risk_watch_list = [item for item in warning_only_list if item.get('risk_flag')]
     output_list = actionable_list if only_actionable else restock_list
     
     return {
@@ -152,43 +357,75 @@ def generate_restock_report(
         "all_restock_list": restock_list,
         "actionable_list": actionable_list,
         "warning_only_list": warning_only_list,
-        "purchase_cycle_days": purchase_cycle_days,
+        "risk_watch_list": risk_watch_list,
+        "purchase_cycle_days": settings["default_purchase_cycle_days"],
+        "purchase_cycle_mode": settings["purchase_cycle_mode"],
+        "purchase_cycle_display": _describe_purchase_cycle(settings),
+        "cycle_days_by_class": settings["cycle_days_by_class"],
         "threshold_days": threshold_days,
         "total_skus": len(all_skus),
         "restock_skus": len(output_list),
         "actionable_skus": len(actionable_list),
         "warning_only_skus": len(warning_only_list),
-        "only_actionable": only_actionable
+        "risk_watch_skus": len(risk_watch_list),
+        "only_actionable": only_actionable,
+        "priority_strategy": settings["priority_strategy"],
+        "enable_abc_layering": settings["enable_abc_layering"],
+        "restock_settings": {
+            "priority_strategy": settings["priority_strategy"],
+            "enable_abc_layering": settings["enable_abc_layering"],
+            "purchase_days": settings["purchase_days"],
+            "logistics_days": settings["logistics_days"],
+            "safety_days": settings["safety_days"],
+            "safety_days_by_class": settings["safety_days_by_class"],
+            "abc_thresholds": settings["abc_thresholds"],
+            "new_sku_age_days": settings["new_sku_age_days"],
+            "unknown_age_default_class": settings["unknown_age_default_class"],
+        }
     }
 
 
 def format_markdown_report(report_data: Dict[str, Any]) -> str:
     """生成 Markdown 格式的报告"""
     restock_list = report_data['restock_list']
-    cycle_days = report_data['purchase_cycle_days']
+    actionable_list = report_data.get('actionable_list') or [x for x in restock_list if x['suggested_qty'] > 0]
+    warning_only_list = report_data.get('warning_only_list') or [x for x in restock_list if x['suggested_qty'] <= 0]
+    risk_watch_list = report_data.get('risk_watch_list') or [x for x in warning_only_list if x.get('risk_flag')]
+    cycle_days = report_data.get('purchase_cycle_days', 17)
+    cycle_display = report_data.get('purchase_cycle_display', f"{cycle_days}天")
     threshold_days = report_data['threshold_days']
-    actionable_skus = report_data.get('actionable_skus', len([x for x in restock_list if x['suggested_qty'] > 0]))
-    warning_only_skus = report_data.get('warning_only_skus', 0)
+    actionable_skus = report_data.get('actionable_skus', len(actionable_list))
+    warning_only_skus = report_data.get('warning_only_skus', len(warning_only_list))
+    risk_watch_skus = report_data.get('risk_watch_skus', len(risk_watch_list))
     only_actionable = report_data.get('only_actionable', False)
+    priority_strategy = report_data.get('priority_strategy', "both")
     
     now = datetime.now()
     
     md = f"""# 📦 补货建议报告
 
 **生成时间**: {now.strftime('%Y-%m-%d %H:%M')}  
-**补货周期**: {cycle_days}天（采购3天 + 物流12天 + 安全2天）  
+    **补货周期**: {cycle_display}
 **预警阈值**: {threshold_days}天可售  
 **补货判定**: 总可售覆盖低于补货周期即计算建议采购量  
+    **优先级口径**: {'仅现货优先级' if priority_strategy == 'stock_only' else '实际优先级按含在途可售天数排序，现货优先级用于风险预警'}
 **报告口径**: {'仅展示建议采购 > 0 的实际补货SKU' if only_actionable else '展示全部预警SKU（含建议采购为0）'}
 
 ---
 """
-    
-    # 按优先级分组
-    urgent = [x for x in restock_list if x['purchase_sale_days'] <= 3]
-    high = [x for x in restock_list if 4 <= x['purchase_sale_days'] <= 7]
-    medium = [x for x in restock_list if 8 <= x['purchase_sale_days'] <= threshold_days]
-    routine = [x for x in restock_list if x['purchase_sale_days'] > threshold_days]
+
+    if not actionable_list and not warning_only_list:
+        md += "当前没有需要关注的 SKU。\n\n"
+        return md
+
+    actionable_list = sorted(actionable_list, key=_restock_sort_key)
+    warning_only_list = sorted(warning_only_list, key=_restock_sort_key)
+    risk_watch_list = sorted(risk_watch_list, key=_restock_sort_key)
+
+    urgent = [x for x in actionable_list if x.get('days_for_priority', x['purchase_sale_days']) <= 3]
+    high = [x for x in actionable_list if 3 < x.get('days_for_priority', x['purchase_sale_days']) <= 7]
+    medium = [x for x in actionable_list if 7 < x.get('days_for_priority', x['purchase_sale_days']) <= threshold_days]
+    routine = [x for x in actionable_list if x.get('days_for_priority', x['purchase_sale_days']) > threshold_days]
     
     # 紧急补货
     if urgent:
@@ -206,7 +443,7 @@ def format_markdown_report(report_data: Dict[str, Any]) -> str:
     
     # 中优先级
     if medium:
-        md += "## 📋 中优先级补货（8-10天可售）\n\n"
+        md += f"## 📋 中优先级补货（8-{threshold_days}天可售）\n\n"
         for i, item in enumerate(medium, len(urgent) + len(high) + 1):
             md += _format_sku_item(i, item)
         md += "\n---\n\n"
@@ -217,11 +454,25 @@ def format_markdown_report(report_data: Dict[str, Any]) -> str:
         for i, item in enumerate(routine, len(urgent) + len(high) + len(medium) + 1):
             md += _format_sku_item(i, item)
         md += "\n---\n\n"
+
+    if only_actionable and risk_watch_list:
+        md += "## 👀 风险观察（现货紧张，但当前主要依赖在途）\n\n"
+        for i, item in enumerate(risk_watch_list, 1):
+            md += _format_sku_item(i, item)
+        md += "\n---\n\n"
+
+    if not only_actionable and warning_only_list:
+        md += "## 👀 预警观察（当前无需新增采购）\n\n"
+        for i, item in enumerate(warning_only_list, 1):
+            md += _format_sku_item(i, item)
+        md += "\n---\n\n"
     
     # 汇总
     md += "## 📊 补货汇总\n\n"
     md += f"- 实际需要补货 SKU: **{actionable_skus}** 个\n"
     md += f"- 仅预警但当前无需采购 SKU: **{warning_only_skus}** 个\n\n"
+    if risk_watch_skus:
+        md += f"- 依赖在途的风险观察 SKU: **{risk_watch_skus}** 个\n\n"
     md += "| 优先级 | SKU数量 | 建议采购总量 |\n"
     md += "|--------|---------|-------------|\n"
     
@@ -241,8 +492,8 @@ def format_markdown_report(report_data: Dict[str, Any]) -> str:
         total_routine = sum(x['suggested_qty'] for x in routine)
         md += f"| 📦 提前补货（>{threshold_days}天） | {len(routine)} | 约 {total_routine:,} 件 |\n"
     
-    total_qty = sum(x['suggested_qty'] for x in restock_list)
-    md += f"| **合计** | **{len(restock_list)}** | **约 {total_qty:,} 件** |\n\n"
+    total_qty = sum(x['suggested_qty'] for x in actionable_list)
+    md += f"| **合计** | **{len(actionable_list)}** | **约 {total_qty:,} 件** |\n\n"
     
     md += "---\n\n"
     md += f"**报告生成**: {now.strftime('%Y-%m-%d %H:%M')}  \n"
@@ -271,20 +522,28 @@ def _format_sku_item(index: int, item: Dict[str, Any]) -> str:
     
     md += "\n"
     md += f"- **日均销量**: {item['avg_daily_sales']:.2f} 件/天\n"
-    md += f"- **预计可售**: {item['purchase_sale_days']} 天"
-    
-    if item['in_transit'] > 0:
-        md += f"（含在途：{int(item['days_with_transit'])} 天）"
-    
-    md += "\n"
+    md += f"- **现货可售**: {_format_days(item['purchase_sale_days'])} 天\n"
+    md += f"- **含在途可售**: {_format_days(item['days_with_transit'])} 天\n"
     md += f"- **建议采购**: **{item['suggested_qty']} 件**\n"
-    md += f"- **优先级**: {item['priority'][0]}\n"
+    md += f"- **实际优先级**: {item.get('effective_priority', item['priority'])[0]}\n"
+    md += f"- **现货优先级**: {item.get('stock_priority', item['priority'])[0]}\n"
+    if item.get('risk_flag'):
+        md += f"- **风险标记**: {item['risk_flag']}\n"
+    if item.get('sku_class'):
+        md += f"- **ABC分类**: {item['sku_class']} 类\n"
+    md += f"- **补货周期**: {item.get('lead_time_used', '-')} 天"
+    if item.get('safety_days_used') is not None:
+        md += f"（安全天数 {item['safety_days_used']} 天）"
+    md += "\n"
     
     if item['in_transit'] > 0:
-        md += f"- **备注**: 在途{item['in_transit']}件预计到货后可售{int(item['days_with_transit'])}天"
-        if item['suggested_qty'] > 10:
+        md += f"- **备注**: 在途{item['in_transit']}件预计到货后可售{_format_days(item['days_with_transit'])}天"
+        if item['suggested_qty'] > 0:
             md += "，仍需补货"
         md += "\n"
+
+    if item.get('is_advance_restock'):
+        md += "- **说明**: 当前已高于预警阈值，但低于补货周期，建议提前补货\n"
     
     md += "\n"
     
@@ -310,10 +569,9 @@ class RestockSuggestionSkillAdapter(BaseSkill):
         """Skill 描述（用于主模型理解 Skill 功能）"""
         return (
             "生成补货建议报告。"
-            "查询所有 SKU 的库存信息，结合日均销量计算预计可售天数，"
-            "生成按优先级排序的补货建议报告。"
-            "支持配置补货周期和预警阈值。"
-            "输出包含紧急补货、高优先级补货、中优先级补货等分类。"
+            "查询所有 SKU 的库存、日均销量和在途库存，"
+            "输出同时包含现货优先级和实际优先级的补货建议。"
+            "支持 ABC 分层安全天数、提前补货识别以及风险观察清单。"
         )
     
     @property
@@ -322,7 +580,7 @@ class RestockSuggestionSkillAdapter(BaseSkill):
         参数的 JSON Schema
         
         参数说明：
-        - purchase_cycle_days: 补货周期天数
+        - purchase_cycle_days: 固定补货周期天数（仅在关闭 ABC 分层时直接使用）
         - threshold_days: 预警阈值天数
         - output_format: 输出格式
         """
@@ -332,9 +590,9 @@ class RestockSuggestionSkillAdapter(BaseSkill):
                 "purchase_cycle_days": {
                     "type": "integer",
                     "description": (
-                        "补货周期天数，即从下单到收货的总天数。"
+                        "固定补货周期天数。"
                         "默认值为 17 天（采购3天 + 物流12天 + 安全库存2天）。"
-                        "用于计算建议采购量：目标库存 = 日均销量 × 补货周期。"
+                        "仅在关闭 ABC 分层时直接作为建议采购量公式的补货周期。"
                     )
                 },
                 "threshold_days": {
@@ -352,6 +610,23 @@ class RestockSuggestionSkillAdapter(BaseSkill):
                         "输出格式。"
                         "markdown：生成人类可读的 Markdown 格式报告，适合直接查看或保存。"
                         "json：返回结构化的 JSON 数据，适合程序处理或前端展示。"
+                    )
+                },
+                "priority_strategy": {
+                    "type": "string",
+                    "enum": ["both", "effective", "stock_only"],
+                    "description": (
+                        "优先级口径。"
+                        "both：同时计算现货优先级和实际优先级，并以实际优先级排序（默认）。"
+                        "effective：仅按含在途可售天数排序。"
+                        "stock_only：仅按现货可售天数排序。"
+                    )
+                },
+                "enable_abc_layering": {
+                    "type": "boolean",
+                    "description": (
+                        "是否启用 ABC 分层安全天数。"
+                        "默认 true，会根据全量 SKU 的日均销量自动使用 A/B/C/NEW 对应的补货周期。"
                     )
                 },
                 "profile": {
@@ -379,7 +654,7 @@ class RestockSuggestionSkillAdapter(BaseSkill):
         执行补货建议生成
         
         Args:
-            purchase_cycle_days: 补货周期天数（可选，默认 17）
+            purchase_cycle_days: 固定补货周期天数（可选，默认 17）
             threshold_days: 预警阈值天数（可选，默认 10）
             output_format: 输出格式（可选，默认 markdown）
             
@@ -392,6 +667,8 @@ class RestockSuggestionSkillAdapter(BaseSkill):
         output_format = kwargs.get("output_format", "markdown")
         profile = kwargs.get("profile")
         only_actionable = kwargs.get("only_actionable", True)
+        priority_strategy = kwargs.get("priority_strategy")
+        enable_abc_layering = kwargs.get("enable_abc_layering")
         
         try:
             # 调用核心逻辑
@@ -400,7 +677,9 @@ class RestockSuggestionSkillAdapter(BaseSkill):
                 threshold_days=threshold_days,
                 output_format=output_format,
                 profile=profile,
-                only_actionable=only_actionable
+                only_actionable=only_actionable,
+                priority_strategy=priority_strategy,
+                enable_abc_layering=enable_abc_layering,
             )
             
             if not result.get("success"):
@@ -417,9 +696,14 @@ class RestockSuggestionSkillAdapter(BaseSkill):
                             "total_skus": result["total_skus"],
                             "restock_skus": result["restock_skus"],
                             "purchase_cycle_days": result["purchase_cycle_days"],
+                            "purchase_cycle_mode": result["purchase_cycle_mode"],
+                            "purchase_cycle_display": result["purchase_cycle_display"],
                             "threshold_days": result["threshold_days"],
                             "actionable_skus": result["actionable_skus"],
                             "warning_only_skus": result["warning_only_skus"],
+                            "risk_watch_skus": result["risk_watch_skus"],
+                            "priority_strategy": result["priority_strategy"],
+                            "enable_abc_layering": result["enable_abc_layering"],
                             "only_actionable": result["only_actionable"]
                         }
                     }
@@ -437,9 +721,14 @@ class RestockSuggestionSkillAdapter(BaseSkill):
                             "total_skus": result["total_skus"],
                             "restock_skus": result["restock_skus"],
                             "purchase_cycle_days": result["purchase_cycle_days"],
+                            "purchase_cycle_mode": result["purchase_cycle_mode"],
+                            "purchase_cycle_display": result["purchase_cycle_display"],
                             "threshold_days": result["threshold_days"],
                             "actionable_skus": result["actionable_skus"],
                             "warning_only_skus": result["warning_only_skus"],
+                            "risk_watch_skus": result["risk_watch_skus"],
+                            "priority_strategy": result["priority_strategy"],
+                            "enable_abc_layering": result["enable_abc_layering"],
                             "only_actionable": result["only_actionable"]
                         }
                     },
@@ -467,13 +756,15 @@ def generate_report(
     threshold_days: int = 10,
     output_format: str = "markdown",
     profile: Optional[str] = None,
-    only_actionable: bool = True
+    only_actionable: bool = True,
+    priority_strategy: Optional[str] = None,
+    enable_abc_layering: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     便捷函数：直接调用补货建议生成
     
     Args:
-        purchase_cycle_days: 补货周期天数（默认 17）
+        purchase_cycle_days: 固定补货周期天数（默认 17）
         threshold_days: 预警阈值天数（默认 10）
         output_format: 输出格式（默认 markdown）
         profile: 指定账号 profile
@@ -493,7 +784,9 @@ def generate_report(
         threshold_days=threshold_days,
         output_format=output_format,
         profile=profile,
-        only_actionable=only_actionable
+        only_actionable=only_actionable,
+        priority_strategy=priority_strategy,
+        enable_abc_layering=enable_abc_layering,
     )
 
 

@@ -21,7 +21,7 @@ from core.script_ids import (  # noqa: E402
     parse_slot_from_logical_name,
     prepend_unified_id,
 )
-from core.script_renderer import render_internal_script, render_script  # noqa: E402
+from core.script_renderer import render_internal_script, render_script, render_variant_script  # noqa: E402
 
 
 class ScriptIdsTest(unittest.TestCase):
@@ -190,6 +190,76 @@ class ScriptIdsTest(unittest.TestCase):
         self.assertNotIn("核心proof起始点", rendered)
         self.assertNotIn("不做多余晃动", rendered.split("【禁止】", 1)[1])
         self.assertNotIn("窗边自然软光", rendered.split("【商品】", 1)[1].split("【镜头1", 1)[0])
+
+    def test_render_variant_script_outputs_seedance_six_section_format(self) -> None:
+        rendered = render_variant_script(
+            {
+                "content_id": "003_M1_V1",
+                "final_video_script_prompt": {
+                    "video_setup": {
+                        "video_theme": "窗边自然分享耳饰佩戴",
+                        "product_focus": "耳饰一对，小环→透明心形→浅色双翼→多股流苏，结构连续可读",
+                        "person_final": "泰国日常感女生，20-30岁，至少一侧耳部完整露出，人物不抢商品",
+                        "outfit_final": "低饱和纯色上衣，奶白或浅米，领口干净利落",
+                        "scene_final": "家中窗边自然光近距离分享",
+                        "emotion_final": "轻判断→轻发现→轻认同，不做夸张笑容或大动作",
+                        "overall_style": "家中窗边自然软光，奶油白背景，原生自然，金色真实暖调不偏橘红",
+                    },
+                    "shot_execution": [
+                        {
+                            "shot_no": 1,
+                            "duration": "2s",
+                            "visual": "手提双只耳饰入镜，先交代小环和透明心形。",
+                            "person_action": "仅手部稳定提起。",
+                            "product_focus": "先看小环，再看透明心形。",
+                            "voiceover": "อย่าเพิ่งคิดว่าเป็นห่วงธรรมดา",
+                        },
+                        {
+                            "shot_no": 2,
+                            "duration": "4s",
+                            "visual": "镜头沿浅色双翼和多股流苏慢速下移。",
+                            "person_action": "手保持稳定，不做多余晃动。",
+                            "product_focus": "按浅色双翼→多股流苏顺序读取。",
+                            "voiceover": "ดูดีเทลลงมาเรื่อยๆ",
+                        },
+                        {
+                            "shot_no": 3,
+                            "duration": "4s",
+                            "visual": "半脸耳部佩戴近景，耳饰自然下垂。",
+                            "person_action": "轻转头一次，保持耳部无遮挡。",
+                            "product_focus": "耳部佩戴结果必须清楚。",
+                            "voiceover": "ใส่แล้วหน้าดูเด่นขึ้นพอดี",
+                        },
+                        {
+                            "shot_no": 4,
+                            "duration": "5s",
+                            "visual": "镜前确认镜头，停在完整佩戴结果。",
+                            "person_action": "微点头收住。",
+                            "product_focus": "最后停在完整佩戴结果。",
+                            "voiceover": "",
+                        },
+                    ],
+                    "style_boundaries": [
+                        "原生自然",
+                        "商品必须是主角",
+                        "耳部无遮挡",
+                    ],
+                },
+            }
+        )
+        self.assertTrue(rendered.startswith("【整体】"))
+        self.assertIn("脚本ID:003_M1_V1", rendered)
+        self.assertIn("【商品】耳饰一对:小环→透明心形→浅色双翼→多股流苏;金色保持真实暖调不偏橘红;结构从上到下必须连续可读", rendered)
+        self.assertIn("【镜头1|2s|hook】", rendered)
+        self.assertIn("【镜头4|5s|decision】", rendered)
+        self.assertIn("【情绪】轻判断→轻发现→轻认同", rendered)
+        self.assertIn("【节奏】hook在前2秒内完成;proof镜头在第2-10秒之间展开;decision信号在第10秒前出现", rendered)
+        self.assertIn("禁止强滤镜、夸张闪烁和特效转场", rendered)
+        self.assertIn("人物不得抢过商品", rendered)
+        self.assertIn("禁止遮挡耳部、耳垂与小环连接处", rendered)
+        self.assertNotIn("【视频整体设定】", rendered)
+        self.assertNotIn("【分镜执行】", rendered)
+        self.assertNotIn("【统一风格边界】", rendered)
 
 
 if __name__ == "__main__":

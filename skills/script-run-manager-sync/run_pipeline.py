@@ -65,6 +65,23 @@ def print_field_mapping(title: str, mapping: dict) -> None:
         print(f"   {key}: {value or '未找到'}")
 
 
+def ensure_reference_free_field(client: FeishuBitableClient, field_names: List[str]) -> List[str]:
+    if "免参考图" in field_names:
+        return field_names
+    print("🧩 目标运行表缺少字段【免参考图】，正在创建...")
+    try:
+        client.create_field(
+            "免参考图",
+            field_type=3,
+            ui_type="SingleSelect",
+            property={"options": [{"name": "是"}, {"name": "否"}]},
+        )
+    except Exception as exc:
+        print(f"⚠️ 创建单选字段【免参考图】失败，降级创建文本字段: {exc}")
+        client.create_field("免参考图", field_type=1, ui_type="Text")
+    return client.list_field_names()
+
+
 def load_metadata_lookup(db_path: str) -> Dict[tuple, Dict[str, str]]:
     path = Path(db_path)
     if not path.exists():
@@ -95,6 +112,26 @@ def load_metadata_lookup(db_path: str) -> Dict[tuple, Dict[str, str]]:
         }
         for row in rows
     }
+
+
+def target_records_by_script_id(records: List, mapping: Dict[str, object]) -> Dict[str, object]:
+    script_field = mapping.get("script_id")
+    if not script_field:
+        return {}
+    result: Dict[str, object] = {}
+    for record in records:
+        script_id = str(record.fields.get(script_field) or "").strip()
+        if script_id and script_id not in result:
+            result[script_id] = record
+    return result
+
+
+def can_patch_reference_free(record: object, mapping: Dict[str, object]) -> bool:
+    status_field = mapping.get("task_status")
+    if not status_field:
+        return True
+    status = str(record.fields.get(status_field) or "").strip()
+    return status in {"", "待开始", "未开始"}
 
 
 def transfer_reference_images(
@@ -152,7 +189,7 @@ def main() -> None:
     target_client = FeishuBitableClient(app_token=target_app_token, table_id=target_table_id)
 
     source_field_names = source_client.list_field_names()
-    target_field_names = target_client.list_field_names()
+    target_field_names = ensure_reference_free_field(target_client, target_client.list_field_names())
     source_mapping = resolve_field_mapping(source_field_names, SOURCE_FIELD_ALIASES)
     target_mapping = resolve_field_mapping(target_field_names, TARGET_FIELD_ALIASES)
 
@@ -170,6 +207,8 @@ def main() -> None:
     print("   说明: 运行表里的脚本ID优先来自脚本主数据库；数据库未命中时才按源表规则即时推导")
 
     source_records = source_client.list_records(page_size=100)
+    target_records = target_client.list_records(page_size=100)
+    target_by_script_id = target_records_by_script_id(target_records, target_mapping)
 
     sync_tasks = build_sync_tasks(
         source_records,
@@ -219,6 +258,21 @@ def main() -> None:
                         task.reference_images,
                         image_cache,
                     )
+                existing_target = target_by_script_id.get(task.script_id)
+                if existing_target is not None:
+                    existing_updates = {}
+                    prompt_field = target_mapping.get("prompt")
+                    if prompt_field and "【脚本ID】" not in str(existing_target.fields.get(prompt_field) or ""):
+                        existing_updates[prompt_field] = fields[prompt_field]
+                    if fields.get(target_mapping.get("reference_free")) == "是" and can_patch_reference_free(existing_target, target_mapping):
+                        existing_updates[target_mapping["reference_free"]] = "是"
+                    if existing_updates:
+                        target_client.update_record_fields(existing_target.record_id, existing_updates)
+                        patched_names = "、".join(existing_updates.keys())
+                        print(f"   🔁 script_id={task.script_id} 已存在，已补写{patched_names}")
+                    else:
+                        print(f"   🔁 script_id={task.script_id} 已存在，跳过重复创建")
+                    continue
                 prepared_creates.append({"fields": fields})
 
             for batch in batch_records(prepared_creates, batch_size=args.batch_size):

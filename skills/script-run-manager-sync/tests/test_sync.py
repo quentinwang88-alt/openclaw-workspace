@@ -24,6 +24,8 @@ from core.sync import (
     build_source_success_fields,
     build_sync_tasks,
     now_text,
+    prepend_script_id_header,
+    prompt_has_script_id_header,
     resolve_field_mapping,
     summarize_sync_scope,
 )
@@ -52,7 +54,7 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
             "脚本方向二",
             "脚本4变体5",
         ]
-        target_field_names = ["任务名", "提示词", "参考图", "脚本ID"]
+        target_field_names = ["任务名", "提示词", "参考图", "脚本ID", "脚本来源", "发布用途", "是否挂车", "内容分支", "免参考图"]
         self.mapping = resolve_field_mapping(source_field_names, SOURCE_FIELD_ALIASES)
         self.target_mapping = resolve_field_mapping(target_field_names, TARGET_FIELD_ALIASES)
 
@@ -242,9 +244,60 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
         fields = build_target_fields(tasks[0], self.target_mapping)
 
         self.assertEqual(fields["任务名"], "ABC001.S1")
-        self.assertTrue(fields["提示词"].startswith("产品锚点：手镯｜细手圈，内径约56mm，圈宽2mm，开口可微调\n"))
+        self.assertTrue(fields["提示词"].startswith("【脚本ID】\n- 003_M1_M\n\n产品锚点：手镯｜细手圈，内径约56mm，圈宽2mm，开口可微调\n"))
         self.assertTrue(fields["提示词"].endswith("script one"))
         self.assertEqual(fields["脚本ID"], "003_M1_M")
+
+    def test_prepend_script_id_header_does_not_duplicate_standard_header(self) -> None:
+        prompt = prepend_script_id_header("【脚本ID】\n- old_id\n\n正文内容", "003_M1_V1")
+
+        self.assertEqual(prompt.count("【脚本ID】"), 1)
+        self.assertTrue(prompt.startswith("【脚本ID】\n- 003_M1_V1\n\n正文内容"))
+        self.assertTrue(prompt_has_script_id_header(prompt))
+
+    def test_prepend_script_id_header_keeps_legacy_content_id_below_script_id(self) -> None:
+        prompt = prepend_script_id_header("【内容ID】\n- 123456\n\n正文内容", "003_M1_V1")
+
+        self.assertTrue(prompt.startswith("【脚本ID】\n- 003_M1_V1\n\n【内容ID】\n- 123456"))
+
+    def test_nurture_task_sets_reference_free_flag(self) -> None:
+        source_field_names = [
+            "产品编码",
+            "任务编号",
+            "是否可同步母版",
+            "脚本方向一",
+            "脚本来源",
+            "发布用途",
+            "是否挂车",
+            "内容分支",
+        ]
+        mapping = resolve_field_mapping(source_field_names, SOURCE_FIELD_ALIASES)
+        tasks = build_sync_tasks(
+            [
+                TableRecord(
+                    record_id="rec_nurture",
+                    fields={
+                        "产品编码": "YR028",
+                        "任务编号": "028",
+                        "是否可同步母版": True,
+                        "脚本方向一": "final storyboard",
+                        "脚本来源": "养号复刻",
+                        "发布用途": "养号",
+                        "是否挂车": "否",
+                        "内容分支": "非商品展示型",
+                    },
+                ),
+            ],
+            mapping,
+        )
+
+        fields = build_target_fields(tasks[0], self.target_mapping)
+
+        self.assertEqual(fields["脚本来源"], "养号复刻")
+        self.assertEqual(fields["发布用途"], "养号")
+        self.assertEqual(fields["是否挂车"], "否")
+        self.assertEqual(fields["内容分支"], "非商品展示型")
+        self.assertEqual(fields["免参考图"], "是")
 
     def test_build_prompt_with_anchor_falls_back_to_raw_script_without_anchor_fields(self) -> None:
         prompt = build_prompt_with_anchor(
@@ -265,7 +318,9 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
             )[0]
         )
 
-        self.assertEqual(prompt, "plain script")
+        self.assertIn("【口播/字幕语言强制约束】", prompt)
+        self.assertTrue(prompt.startswith("【脚本ID】\n- 004_M1_M\n\n"))
+        self.assertIn("plain script", prompt)
 
     def test_compact_anchor_text_flattens_multiline_and_truncates(self) -> None:
         text = compact_anchor_text(

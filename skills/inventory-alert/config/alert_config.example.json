@@ -1,5 +1,24 @@
 {
   "threshold_days": 10,
+  "restock": {
+    "priority_strategy": "both",
+    "enable_abc_layering": true,
+    "purchase_days": 3,
+    "logistics_days": 12,
+    "safety_days": 2,
+    "safety_days_by_class": {
+      "A": 5,
+      "B": 3,
+      "C": 1,
+      "NEW": 3
+    },
+    "abc_thresholds": {
+      "a_cumulative": 0.7,
+      "b_cumulative": 0.9
+    },
+    "new_sku_age_days": 7,
+    "unknown_age_default_class": "B"
+  },
   "feishu": {
     "enabled": true,
     "user_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/YOUR_USER_WEBHOOK",

@@ -89,6 +89,7 @@ def _extract_script_bundle(row: sqlite3.Row) -> Optional[Dict[str, Any]]:
         "review_json": review_json,
         "strategy_id": strategy_id,
         "script_role": script_role,
+        "product_type": str(input_context.get("product_type", "") or "").strip(),
         "passed_review": bool(review_json.get("pass")),
     }
 
@@ -137,7 +138,89 @@ def _categorize_rule_message(message: str) -> str:
         return "direction_s4_separation"
     if "同构" in text or "结构上过于同构" in text:
         return "direction_overlap"
+    if text.startswith("ai_shot_risk:forbidden"):
+        return "ai_shot_risk_forbidden"
+    if text.startswith("ai_shot_risk:high"):
+        return "ai_shot_risk_high"
+    if text.startswith("hair_accessory:"):
+        return "hair_accessory_" + (text.split(":", 1)[1] or "other")
+    if text.startswith("audio_layer:"):
+        return "audio_layer_" + (text.split(":", 1)[1] or "other")
     return "other"
+
+
+def _flatten_text(value: Any) -> str:
+    if isinstance(value, dict):
+        return " ".join(_flatten_text(item) for item in value.values())
+    if isinstance(value, list):
+        return " ".join(_flatten_text(item) for item in value)
+    return str(value or "")
+
+
+def _is_hair_accessory_sample(product_type: str, script_json: Dict[str, Any]) -> bool:
+    text = f"{product_type} {_flatten_text(script_json)}"
+    return any(token in text for token in ("发饰", "发夹", "抓夹", "边夹", "刘海夹", "香蕉夹", "竖夹", "鲨鱼夹", "发箍", "发圈"))
+
+
+def _is_ear_accessory_sample(product_type: str, script_json: Dict[str, Any]) -> bool:
+    text = f"{product_type} {_flatten_text(script_json)}"
+    return any(token in text for token in ("耳线", "耳环", "耳饰", "耳钉", "耳夹", "耳坠"))
+
+
+def _audit_ai_shot_risk(script_json: Dict[str, Any]) -> List[str]:
+    issues: List[str] = []
+    storyboard = script_json.get("storyboard") if isinstance(script_json.get("storyboard"), list) else []
+    for shot in storyboard:
+        if not isinstance(shot, dict):
+            continue
+        risk = str(shot.get("ai_shot_risk", "") or "").strip()
+        if risk == "forbidden":
+            issues.append("ai_shot_risk:forbidden")
+        elif risk == "high":
+            issues.append("ai_shot_risk:high")
+    return issues
+
+
+def _audit_hair_accessory_rules(product_type: str, script_json: Dict[str, Any]) -> List[str]:
+    if not _is_hair_accessory_sample(product_type, script_json):
+        return []
+    storyboard = script_json.get("storyboard") if isinstance(script_json.get("storyboard"), list) else []
+    first_shot = storyboard[0] if storyboard and isinstance(storyboard[0], dict) else {}
+    first_text = _flatten_text(first_shot)
+    all_text = _flatten_text(script_json)
+    issues: List[str] = []
+    if not any(token in first_text for token in ("夹好", "已夹", "上头", "发型结果", "固定结果", "侧后", "后脑")):
+        issues.append("hair_accessory:first_result_missing")
+    if not any(token in all_text for token in ("横夹", "竖夹", "侧边", "后脑", "半扎", "散发整理", "装饰点缀", "固定头发")):
+        issues.append("hair_accessory:wearing_relation_unclear")
+    if any(token in all_text for token in ("完整夹发过程", "反复调整发夹", "大幅甩头", "复杂盘发")):
+        issues.append("hair_accessory:risky_process_dependency")
+    if not any(token in all_text for token in ("固定", "夹住", "收住", "发型更完整", "更整齐", "位置稳定")):
+        issues.append("hair_accessory:fixation_proof_missing")
+    return issues
+
+
+def _audit_audio_layer(product_type: str, script_json: Dict[str, Any]) -> List[str]:
+    audio_layer = script_json.get("audio_layer") if isinstance(script_json.get("audio_layer"), dict) else {}
+    if not audio_layer:
+        return ["audio_layer:missing"]
+    issues: List[str] = []
+    bgm_energy = str(audio_layer.get("bgm_energy", "") or "").strip()
+    if bgm_energy not in {"low", "medium"}:
+        issues.append("audio_layer:invalid_bgm_energy")
+    if str(audio_layer.get("voiceover_priority", "") or "").strip() != "high":
+        issues.append("audio_layer:voiceover_priority_not_high")
+    cues = audio_layer.get("sfx_cues") if isinstance(audio_layer.get("sfx_cues"), list) else []
+    if len(cues) > 3:
+        issues.append("audio_layer:sfx_overdense")
+    cue_text = _flatten_text(cues)
+    if _is_hair_accessory_sample(product_type, script_json) and cues and not any(token in cue_text for token in ("soft_click", "hair_rustle")):
+        issues.append("audio_layer:hair_accessory_fixed_sfx_missing")
+    if _is_ear_accessory_sample(product_type, script_json) and any(token in cue_text for token in ("bling", "夸张", "连续闪光", "metal_crash")):
+        issues.append("audio_layer:ear_accessory_over_bling")
+    if any(token in _flatten_text(audio_layer) for token in ("盖住口播", "强鼓点", "游戏音效")) and bgm_energy == "medium":
+        issues.append("audio_layer:possible_voiceover_masking")
+    return issues
 
 
 def _load_latest_review_rows(
@@ -218,6 +301,7 @@ def run_pressure_test(
         trigger_counter: Counter[str] = Counter()
         role_counter: Counter[str] = Counter()
         review_pass_counter: Counter[str] = Counter()
+        trigger_duration_values: Dict[str, List[float]] = defaultdict(list)
         duration_values: List[float] = []
         changed_shot_values: List[int] = []
         repaired_values: List[int] = []
@@ -258,8 +342,15 @@ def run_pressure_test(
             all_rule_messages = list(warnings) + list(violations)
             if direction_issue:
                 all_rule_messages.append(direction_issue)
+            local_rule_issues: List[str] = []
+            local_rule_issues.extend(_audit_ai_shot_risk(bundle["script_json"]))
+            local_rule_issues.extend(_audit_hair_accessory_rules(bundle["product_type"], bundle["script_json"]))
+            local_rule_issues.extend(_audit_audio_layer(bundle["product_type"], bundle["script_json"]))
+            all_rule_messages.extend(local_rule_issues)
             for message in all_rule_messages:
-                trigger_counter[_categorize_rule_message(message)] += 1
+                category = _categorize_rule_message(message)
+                trigger_counter[category] += 1
+                trigger_duration_values[category].append(bundle["duration_seconds"])
 
             samples.append(
                 {
@@ -277,6 +368,7 @@ def run_pressure_test(
                     "timing_warnings": warnings,
                     "timing_violations": violations,
                     "direction_issue": direction_issue or "",
+                    "local_rule_issues": local_rule_issues,
                 }
             )
 
@@ -294,6 +386,11 @@ def run_pressure_test(
             "role_distribution": dict(role_counter),
             "review_distribution": dict(review_pass_counter),
             "trigger_distribution": dict(trigger_counter.most_common()),
+            "trigger_avg_duration_seconds": {
+                key: round(sum(values) / len(values), 3)
+                for key, values in sorted(trigger_duration_values.items(), key=lambda item: sum(item[1]) / len(item[1]), reverse=True)
+                if values
+            },
             "samples": samples,
         }
     finally:
@@ -317,7 +414,9 @@ def _render_text_report(result: Dict[str, Any]) -> str:
         "规则触发分布:",
     ]
     for key, value in (result.get("trigger_distribution") or {}).items():
-        lines.append(f"- {key}: {value}")
+        avg_duration = (result.get("trigger_avg_duration_seconds") or {}).get(key)
+        suffix = f" | avg_review={avg_duration}s" if avg_duration is not None else ""
+        lines.append(f"- {key}: {value}{suffix}")
 
     lines.append("样本明细:")
     for item in result.get("samples", []) or []:
@@ -326,6 +425,7 @@ def _render_text_report(result: Dict[str, Any]) -> str:
         issues.extend(item.get("timing_violations") or [])
         if item.get("direction_issue"):
             issues.append(item["direction_issue"])
+        issues.extend(item.get("local_rule_issues") or [])
         issue_text = "；".join(issues[:3]) if issues else "无"
         lines.append(
             "- "

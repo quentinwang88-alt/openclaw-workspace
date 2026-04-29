@@ -146,6 +146,39 @@ def resolve_feishu_config(feishu_url: str) -> Tuple[str, str]:
     return app_token, info.table_id
 
 
+def ensure_account_nurture_fields(client: FeishuBitableClient, field_names: list[str]) -> list[str]:
+    existing = set(field_names)
+    if "是否开启养号" not in existing:
+        try:
+            client.create_field(
+                "是否开启养号",
+                field_type=3,
+                ui_type="SingleSelect",
+                property={"options": [{"name": "是"}, {"name": "否"}]},
+            )
+        except Exception:
+            client.create_field("是否开启养号", field_type=1, ui_type="Text")
+    if "每日养号条数" not in existing:
+        try:
+            client.create_field("每日养号条数", field_type=2, ui_type="Number")
+        except Exception:
+            client.create_field("每日养号条数", field_type=1, ui_type="Text")
+    if "是否仅养号" not in existing:
+        try:
+            client.create_field("是否仅养号", field_type=7, ui_type="Checkbox")
+        except Exception:
+            try:
+                client.create_field(
+                    "是否仅养号",
+                    field_type=3,
+                    ui_type="SingleSelect",
+                    property={"options": [{"name": "是"}, {"name": "否"}]},
+                )
+            except Exception:
+                client.create_field("是否仅养号", field_type=1, ui_type="Text")
+    return client.list_field_names()
+
+
 def build_title_generator(mode: str, llm_route: str):
     if mode == "heuristic":
         return HeuristicTitleGenerator()
@@ -248,7 +281,7 @@ def command_sync_accounts(args: argparse.Namespace) -> None:
     db = AutoPublishDB(Path(args.db_path))
     app_token, table_id = resolve_feishu_config(args.account_feishu_url)
     client = FeishuBitableClient(app_token=app_token, table_id=table_id)
-    field_names = client.list_field_names()
+    field_names = ensure_account_nurture_fields(client, client.list_field_names())
     mapping = resolve_table_mapping(field_names, ACCOUNT_FIELD_ALIASES)
     records = client.list_records(page_size=100, limit=args.limit)
     count = sync_accounts(records, mapping, db)
@@ -385,7 +418,7 @@ def command_run_all(args: argparse.Namespace) -> None:
     print("[run-all] sync_accounts start", flush=True)
     account_app_token, account_table_id = resolve_feishu_config(args.account_feishu_url)
     account_client = FeishuBitableClient(app_token=account_app_token, table_id=account_table_id)
-    account_field_names = account_client.list_field_names()
+    account_field_names = ensure_account_nurture_fields(account_client, account_client.list_field_names())
     account_mapping = resolve_table_mapping(account_field_names, ACCOUNT_FIELD_ALIASES)
     account_records = account_client.list_records(page_size=100, limit=args.limit)
     summary["sync_accounts"] = {"accounts_upserted": sync_accounts(account_records, account_mapping, db)}

@@ -19,6 +19,16 @@ class FeishuAPIError(Exception):
 
 
 @dataclass
+class TableField:
+    field_id: str
+    field_name: str
+    field_type: int
+    ui_type: Optional[str]
+    property: Optional[Dict[str, Any]]
+    description: Optional[Dict[str, Any]] = None
+
+
+@dataclass
 class TableRecord:
     record_id: str
     fields: Dict[str, Any]
@@ -113,13 +123,44 @@ class FeishuBitableClient:
                     time.sleep(2 ** attempt)
         raise FeishuAPIError(f"飞书 API 请求失败: {last_error}")
 
-    def list_field_names(self) -> List[str]:
+    def list_fields(self) -> List[TableField]:
         url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/fields"
         response = self._request("GET", url, headers=self._headers(), params={"page_size": 500})
         result = response.json()
         if result.get("code") != 0:
             raise FeishuAPIError(f"获取字段定义失败: {result.get('msg')}")
-        return [item["field_name"] for item in result.get("data", {}).get("items", []) if item.get("field_name")]
+        return [
+            TableField(
+                field_id=item["field_id"],
+                field_name=item["field_name"],
+                field_type=item["type"],
+                ui_type=item.get("ui_type"),
+                property=item.get("property"),
+                description=item.get("description"),
+            )
+            for item in result.get("data", {}).get("items", [])
+            if item.get("field_name")
+        ]
+
+    def list_field_names(self) -> List[str]:
+        return [item.field_name for item in self.list_fields()]
+
+    def create_field(
+        self,
+        field_name: str,
+        field_type: int = 1,
+        ui_type: str = "Text",
+        property: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/fields"
+        payload: Dict[str, Any] = {"field_name": field_name, "type": field_type, "ui_type": ui_type}
+        if property is not None:
+            payload["property"] = property
+        response = self._request("POST", url, headers=self._headers(), json=payload)
+        result = response.json()
+        if result.get("code") != 0:
+            raise FeishuAPIError(f"创建字段失败: {result.get('msg')}")
+        return result.get("data", {})
 
     def list_records(self, page_size: int = 100, limit: Optional[int] = None) -> List[TableRecord]:
         url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/records"

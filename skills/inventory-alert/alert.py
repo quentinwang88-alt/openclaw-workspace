@@ -262,6 +262,25 @@ class InventoryAlert:
             # 使用默认配置
             return {
                 "threshold_days": 10,
+                "restock": {
+                    "priority_strategy": "both",
+                    "enable_abc_layering": True,
+                    "purchase_days": 3,
+                    "logistics_days": 12,
+                    "safety_days": 2,
+                    "safety_days_by_class": {
+                        "A": 5,
+                        "B": 3,
+                        "C": 1,
+                        "NEW": 3,
+                    },
+                    "abc_thresholds": {
+                        "a_cumulative": 0.70,
+                        "b_cumulative": 0.90,
+                    },
+                    "new_sku_age_days": 7,
+                    "unknown_age_default_class": "B",
+                },
                 "feishu": {
                     "enabled": False,
                     "webhook_url": "",
@@ -702,13 +721,9 @@ class InventoryAlert:
     
     def create_feishu_doc(self, alerts: List[dict]) -> Optional[str]:
         """
-        使用 OpenClaw feishu-bitable 工具创建或更新飞书多维表格
-        
-        策略：
-        1. 查询所有 SKU 的库存信息
-        2. 计算每个 SKU 的建议采购数量
-        3. 筛选出建议采购数量 > 10 的产品
-        4. 将这些产品写入飞书表格
+        将补货建议导出到飞书多维表格。
+
+        这里直接复用主补货链路，避免在 inventory-alert 中维护第二套补货公式。
         
         Args:
             alerts: 预警列表（用于兼容性，实际不使用）
@@ -726,142 +741,29 @@ class InventoryAlert:
             print('  "bitable_app_token": "你的多维表格 app_token"')
             print('  "bitable_table_id": "你的数据表 table_id"')
             return None
-        
-        # 步骤1：查询所有 SKU
-        print("正在查询所有 SKU 库存信息...")
-        all_items = self.api.query_all_skus()
-        print(f"共查询到 {len(all_items)} 个 SKU")
-        
-        # 步骤1.5：构建 SKU -> title 映射，用于在途库存容错匹配
-        sku_title_map = {}
-        for item in all_items:
-            if 'error' not in item:
-                sku = item.get('sku', '')
-                title = item.get('title', '')
-                if sku and title:
-                    sku_title_map[sku] = title
-        
-        # 步骤1.6：加载在途库存数据（传入 SKU title 映射用于容错）
-        in_transit_map = self.load_in_transit_inventory(sku_title_map)
-        
-        # 步骤2 & 3：计算建议采购数量并筛选
-        purchase_cycle = 5  # 采购周期
-        logistics_cycle = 12  # 物流周期
-        safety_days = 2  # 安全预留天数
-        
-        items_to_purchase = []
-        for item in all_items:
-            if 'error' in item:
-                continue
-            
-            sku = item.get('sku', '')
-            avg_sales = item.get('avg_daily_sales', 0)
-            current_stock = item.get('available', 0)
-            in_transit = in_transit_map.get(sku, 0)  # 从在途库存表格获取，默认为0
-            
-            # 计算建议采购数量
-            total_cycle_days = purchase_cycle + logistics_cycle + safety_days
-            required_stock = avg_sales * total_cycle_days
-            suggested = int(required_stock - (current_stock + in_transit))
-            suggested = max(0, suggested)
-            
-            # 筛选：建议采购数量 > 10
-            if suggested > 10:
-                item['suggested_purchase'] = suggested
-                item['in_transit'] = in_transit  # 保存在途库存信息
-                items_to_purchase.append(item)
-        
-        print(f"筛选出 {len(items_to_purchase)} 个需要采购的 SKU（建议采购数量 > 10）")
-        
-        if not items_to_purchase:
-            print("没有需要采购的产品")
-            return None
-        
-        # 按建议采购数量降序排序
-        items_to_purchase.sort(key=lambda x: x.get('suggested_purchase', 0), reverse=True)
-        
-        # 获取 access_token
-        access_token = self.get_tenant_access_token()
-        if not access_token:
-            print("无法获取 access_token")
-            return None
-        
-        # 步骤4：先清空现有记录
+
         try:
-            url = f'https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records'
-            headers = {
-                'Authorization': f'Bearer {access_token}',
-                'Content-Type': 'application/json'
-            }
-            
-            # 获取现有记录
-            response = requests.get(url, headers=headers, timeout=30)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('code') == 0:
-                    records = data.get('data', {}).get('items', [])
-                    # 删除现有记录
-                    for record in records:
-                        record_id = record.get('record_id')
-                        if record_id:
-                            del_url = f'https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}'
-                            requests.delete(del_url, headers=headers, timeout=10)
-        except Exception as e:
-            print(f"清空记录失败（可忽略）: {e}")
-        
-        # 添加新记录
-        success_count = 0
-        for item in items_to_purchase:
-            days = item.get('purchase_sale_days', 0)
-            avg_sales = item.get('avg_daily_sales', 0)
-            suggested = item.get('suggested_purchase', 0)
-            
-            # 确定紧急程度
-            if days == 0:
-                urgency = "🚨 紧急缺货"
-            elif days <= 3:
-                urgency = "⚠️ 即将缺货"
-            else:
-                urgency = "⏰ 库存预警"
-            
-            fields = {
-                "Name": item.get('title', item.get('sku', '')),  # 使用 title 作为 Name，如果没有则用 SKU
-                "SKU编码": item.get('sku', ''),
-                "当前库存": item.get('available', 0),
-                "在途库存": item.get('in_transit', 0),
-                "日均销量": round(avg_sales, 2),
-                "预计可售天数": days,
-                "建议采购数量": suggested,
-                "紧急程度": urgency
-            }
-            
-            try:
-                url = f'https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records'
-                headers = {
-                    'Authorization': f'Bearer {access_token}',
-                    'Content-Type': 'application/json'
-                }
-                payload = {'fields': fields}
-                
-                response = requests.post(url, headers=headers, json=payload, timeout=10)
-                if response.status_code == 200:
-                    result = response.json()
-                    if result.get('code') == 0:
-                        success_count += 1
-                    else:
-                        print(f"✗ 添加记录失败: {item.get('sku')} - {result.get('msg')}")
-                else:
-                    print(f"✗ 添加记录失败: {item.get('sku')} - HTTP {response.status_code}")
-            except Exception as e:
-                print(f"✗ 添加记录异常: {item.get('sku')} - {e}")
-        
-        if success_count > 0:
-            table_url = f"https://xxx.feishu.cn/base/{app_token}"
-            print(f"✓ 已更新飞书多维表格: {table_url} ({success_count}/{len(items_to_purchase)} 条记录)")
-            return table_url
-        else:
-            print("✗ 未能添加任何记录到飞书表格")
+            from export_restock_to_bitable import export_restock_to_bitable
+        except ImportError as e:
+            print(f"无法导入补货导出模块: {e}")
             return None
+
+        result = export_restock_to_bitable(
+            app_token=app_token,
+            table_id=table_id,
+            threshold_days=self.config.get('threshold_days', 10),
+            profile=self.profile,
+        )
+
+        if result.get("success"):
+            print(
+                f"✓ 已更新飞书多维表格: {result.get('table_name', table_id)} "
+                f"({result.get('record_count', 0)} 条记录)"
+            )
+            return result.get("table_url") or result.get("table_name")
+
+        print(f"✗ 更新飞书多维表格失败: {result.get('error')}")
+        return None
     
 
     def _save_spreadsheet_token(self, spreadsheet_token: str):

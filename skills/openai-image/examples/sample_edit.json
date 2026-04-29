@@ -1,0 +1,17 @@
+{
+  "task_id": "img_demo_edit_001",
+  "task_type": "clean_main",
+  "target_field": "output_clean_main_image",
+  "mode": "edit",
+  "prompt": "Keep the product unchanged. Replace the background with a clean light beige background, improve brightness, and make the image more unified for e-commerce display.",
+  "input_image_path": "/absolute/path/to/input.png",
+  "mask_image_path": "",
+  "size": "1024x1024",
+  "quality": "medium",
+  "output_format": "png",
+  "output_dir": "",
+  "metadata": {
+    "business_scene": "product_image_cleanup",
+    "product_id": "P001"
+  }
+}

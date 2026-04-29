@@ -10,7 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 
-from app.db import AutoPublishDB, default_video_dir
+from app.db import AutoPublishDB, default_video_dir, is_nurture_candidate
 from app.models import AccountConfig
 from app.publishers import BasePublishAdapter, DryRunPublishAdapter
 
@@ -41,6 +41,9 @@ ACCOUNT_FIELD_ALIASES: Dict[str, List[str]] = {
     "publish_time_1": ["发布时间1"],
     "publish_time_2": ["发布时间2"],
     "publish_time_3": ["发布时间3"],
+    "nurture_enabled": ["是否开启养号"],
+    "nurture_daily_count": ["每日养号条数"],
+    "nurture_only": ["是否仅养号"],
 }
 
 
@@ -63,8 +66,15 @@ def normalize_checkbox(value: Any) -> bool:
     if isinstance(value, (int, float)):
         return value != 0
     if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "y", "已勾选", "勾选", "checked"}
+        return value.strip().lower() in {"1", "true", "yes", "y", "是", "已勾选", "勾选", "checked"}
     return False
+
+
+def normalize_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(str(value or "").strip()))
+    except (TypeError, ValueError):
+        return default
 
 
 def extract_attachment(raw_value: Any) -> Optional[Dict[str, Any]]:
@@ -95,6 +105,9 @@ def sync_accounts(records: Iterable[Any], mapping: Dict[str, Optional[str]], db:
                 publish_time_1=normalize_text(fields.get(mapping.get("publish_time_1"))),
                 publish_time_2=normalize_text(fields.get(mapping.get("publish_time_2"))),
                 publish_time_3=normalize_text(fields.get(mapping.get("publish_time_3"))),
+                nurture_enabled=normalize_checkbox(fields.get(mapping.get("nurture_enabled"))),
+                nurture_daily_count=max(normalize_int(fields.get(mapping.get("nurture_daily_count")), 2), 0),
+                nurture_only=normalize_checkbox(fields.get(mapping.get("nurture_only"))),
             )
         )
     return db.upsert_account_configs(configs)
@@ -207,12 +220,36 @@ def schedule_slots(db: AutoPublishDB, publisher: BasePublishAdapter, now: Option
     for slot in pending_slots:
         target_time = datetime.strptime(str(slot["scheduled_for"]), "%Y-%m-%d %H:%M:%S")
         candidates = db.list_ready_candidates(str(slot["store_id"] or ""))
+        account = db.get_account_config(str(slot["account_id"] or ""))
+        nurture_enabled = bool(account and int(account["nurture_enabled"] or 0))
+        nurture_quota = int(account["nurture_daily_count"] or 2) if account else 0
+        nurture_only = bool(account and int(account["nurture_only"] or 0))
+        nurture_count = (
+            db.count_scheduled_nurture_for_account_day(str(slot["account_id"] or ""), target_time)
+            if nurture_enabled and nurture_quota > 0
+            else 0
+        )
+        prefer_nurture = nurture_only or (nurture_enabled and nurture_count < nurture_quota)
+        has_nurture_candidate = any(is_nurture_candidate(candidate) for candidate in candidates)
+        if nurture_only:
+            candidates = [candidate for candidate in candidates if is_nurture_candidate(candidate)]
+        elif prefer_nurture:
+            candidates = [candidate for candidate in candidates if is_nurture_candidate(candidate)] + [
+                candidate for candidate in candidates if not is_nurture_candidate(candidate)
+            ]
+        else:
+            candidates = [candidate for candidate in candidates if not is_nurture_candidate(candidate)] + [
+                candidate for candidate in candidates if is_nurture_candidate(candidate)
+            ]
         selected = None
         for candidate in candidates:
-            if db.has_recent_product_conflict(str(slot["account_id"] or ""), candidate.product_id, target_time, hours=72):
-                continue
-            if db.has_recent_family_conflict(str(slot["store_id"] or ""), candidate.content_family_key, target_time, hours=48):
-                continue
+            if prefer_nurture and has_nurture_candidate and not is_nurture_candidate(candidate):
+                break
+            if not is_nurture_candidate(candidate):
+                if db.has_recent_product_conflict(str(slot["account_id"] or ""), candidate.product_id, target_time, hours=72):
+                    continue
+                if db.has_recent_family_conflict(str(slot["store_id"] or ""), candidate.content_family_key, target_time, hours=48):
+                    continue
             selected = candidate
             break
         if selected is None:
@@ -224,7 +261,7 @@ def schedule_slots(db: AutoPublishDB, publisher: BasePublishAdapter, now: Option
             title=selected.short_video_title,
             publish_at=target_time,
             script_id=selected.script_id,
-            product_id=selected.product_id,
+            product_id="" if is_nurture_candidate(selected) or str(selected.cart_enabled or "").strip() == "否" else selected.product_id,
             product_title=selected.product_title,
             ref_video_id=selected.ref_video_id,
         )

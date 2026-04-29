@@ -115,6 +115,110 @@ class MetadataTest(unittest.TestCase):
         self.assertEqual(items[0].script_text, "【脚本定位】\n- 脚本标题：原脚本")
         self.assertEqual(items[1].script_text, "variant one")
 
+    def test_build_script_metadata_records_reuses_existing_compatible_title(self) -> None:
+        field_names = [
+            "任务编号",
+            "店铺ID",
+            "产品ID",
+            "目标国家",
+            "产品类型",
+            "所属母版1",
+            "母版方向1",
+            "脚本方向一",
+        ]
+        mapping = resolve_field_mapping(field_names, SOURCE_FIELD_ALIASES)
+        records = [
+            Record(
+                record_id="rec_cached",
+                fields={
+                    "任务编号": "010",
+                    "店铺ID": "SHOP-10",
+                    "产品ID": "P1010",
+                    "目标国家": "Thailand",
+                    "产品类型": "耳环",
+                    "所属母版1": "M1",
+                    "母版方向1": "日常轻分享流",
+                    "脚本方向一": "หยิบคู่นี้แล้วลุคดูซอฟต์ขึ้น",
+                },
+            )
+        ]
+
+        class ExplodingGenerator:
+            source = "llm"
+
+            def generate(self, _: ScriptMetadata) -> str:
+                raise AssertionError("should reuse cached title instead of regenerating")
+
+        items = build_script_metadata_records(
+            records,
+            mapping,
+            title_generator=ExplodingGenerator(),
+            existing_lookup={
+                ("rec_cached", "S1"): {
+                    "short_video_title": "หยิบคู่นี้แล้วลุคดูซอฟต์ขึ้นทันที",
+                    "title_source": "cached",
+                    "script_text": "หยิบคู่นี้แล้วลุคดูซอฟต์ขึ้น",
+                    "target_country": "Thailand",
+                }
+            },
+        )
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].short_video_title, "หยิบคู่นี้แล้วลุคดูซอฟต์ขึ้นทันที")
+        self.assertEqual(items[0].title_source, "cached")
+
+    def test_build_script_metadata_records_regenerates_incompatible_cached_title(self) -> None:
+        field_names = [
+            "任务编号",
+            "店铺ID",
+            "产品ID",
+            "目标国家",
+            "产品类型",
+            "所属母版1",
+            "母版方向1",
+            "脚本方向一",
+        ]
+        mapping = resolve_field_mapping(field_names, SOURCE_FIELD_ALIASES)
+        records = [
+            Record(
+                record_id="rec_refresh",
+                fields={
+                    "任务编号": "011",
+                    "店铺ID": "SHOP-11",
+                    "产品ID": "P1011",
+                    "目标国家": "Thailand",
+                    "产品类型": "耳环",
+                    "所属母版1": "M1",
+                    "母版方向1": "日常轻分享流",
+                    "脚本方向一": "หยิบคู่นี้แล้วลุคดูซอฟต์ขึ้น",
+                },
+            )
+        ]
+
+        class ThaiGenerator:
+            source = "heuristic"
+
+            def generate(self, _: ScriptMetadata) -> str:
+                return "หยิบคู่นี้แล้วลุคดูซอฟต์ขึ้นทันที"
+
+        items = build_script_metadata_records(
+            records,
+            mapping,
+            title_generator=ThaiGenerator(),
+            existing_lookup={
+                ("rec_refresh", "S1"): {
+                    "short_video_title": "标题：今天戴上更温柔了",
+                    "title_source": "cached",
+                    "script_text": "หยิบคู่นี้แล้วลุคดูซอฟต์ขึ้น",
+                    "target_country": "Thailand",
+                }
+            },
+        )
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].short_video_title, "หยิบคู่นี้แล้วลุคดูซอฟต์ขึ้นทันที")
+        self.assertEqual(items[0].title_source, "heuristic")
+
     def test_sanitize_title_removes_leading_title_label(self) -> None:
         self.assertEqual(sanitize_title("视频标题：นี่คือชุดที่หยิบใส่ง่ายมาก"), "นี่คือชุดที่หยิบใส่ง่ายมาก")
 

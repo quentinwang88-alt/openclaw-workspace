@@ -156,11 +156,21 @@
       "canonical_type": "earring",
       "family": "jewelry",
       "slot": "ear",
-      "aliases": ["耳饰", "耳环", "耳钉", "耳坠", "耳夹"],
+      "aliases": ["耳饰", "耳环", "耳钉", "耳坠", "耳夹", "耳线"],
       "display_name": "耳饰",
       "description": "耳部佩戴首饰，可描述耳垂、耳边线条、耳饰结构和上耳效果。",
       "required_terms": ["耳部", "佩戴", "耳饰"],
       "forbidden_terms": ["手腕", "项圈", "发夹"]
+    },
+    {
+      "canonical_type": "hair_accessory_generic",
+      "family": "hair_accessory",
+      "slot": "hair",
+      "aliases": ["发饰", "头饰"],
+      "display_name": "发饰",
+      "description": "用于头发或整体发型点缀的泛发饰，重点描述头发位置、固定方式和造型完成度。",
+      "required_terms": ["头发", "发型", "发饰"],
+      "forbidden_terms": ["耳饰", "项链", "手镯"]
     },
     {
       "canonical_type": "claw_clip",

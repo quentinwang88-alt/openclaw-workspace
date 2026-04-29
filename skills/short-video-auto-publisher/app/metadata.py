@@ -8,7 +8,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from app.models import ScriptMetadata
 
@@ -47,6 +47,10 @@ SOURCE_FIELD_ALIASES: Dict[str, List[str]] = {
     "product_code": ["产品编码", "商品编码", "SKU", "Product Code"],
     "target_country": ["目标国家", "国家", "投放国家"],
     "product_type": ["产品类型", "商品类型", "品类", "产品品类"],
+    "script_source": ["脚本来源", "来源"],
+    "publish_purpose": ["发布用途", "用途"],
+    "cart_enabled": ["是否挂车", "挂车"],
+    "content_branch": ["内容分支"],
     "parent_slot_1": ["所属母版1"],
     "parent_slot_2": ["所属母版2"],
     "parent_slot_3": ["所属母版3"],
@@ -132,6 +136,26 @@ def normalize_text(raw_value: Any) -> str:
     if raw_value is None:
         return ""
     return str(raw_value).strip()
+
+
+def normalize_yes_no(raw_value: Any) -> str:
+    text = normalize_text(raw_value)
+    if not text:
+        return ""
+    lowered = text.lower()
+    if lowered in {"1", "true", "yes", "y", "是", "已勾选", "勾选", "checked"}:
+        return "是"
+    if lowered in {"0", "false", "no", "n", "否", "未勾选", "unchecked"}:
+        return "否"
+    return text
+
+
+def is_nurture_metadata(script_source: str, publish_purpose: str, content_branch: str = "") -> bool:
+    return (
+        normalize_text(script_source) == "养号复刻"
+        or normalize_text(publish_purpose) == "养号"
+        or normalize_text(content_branch) == "非商品展示型"
+    )
 
 
 def parse_script_slot(task_suffix: str) -> Tuple[int, Optional[int]]:
@@ -403,21 +427,48 @@ class FallbackTitleGenerator(BaseTitleGenerator):
         return ""
 
 
+def _resolve_title_from_existing(
+    metadata: ScriptMetadata,
+    existing: Optional[Dict[str, str]],
+) -> Tuple[str, str]:
+    if not existing:
+        return "", ""
+    existing_title = sanitize_title(str(existing.get("short_video_title") or ""))
+    if not existing_title:
+        return "", ""
+    if str(existing.get("script_text") or "") != metadata.script_text:
+        return "", ""
+    if str(existing.get("target_country") or "") != metadata.target_country:
+        return "", ""
+    if not is_title_compatible_with_country(existing_title, metadata.target_country):
+        return "", ""
+    return existing_title, str(existing.get("title_source") or "cached")
+
+
 def build_script_metadata_records(
     records: Sequence[Any],
     mapping: Dict[str, Optional[str]],
     *,
     title_generator: Optional[BaseTitleGenerator] = None,
+    existing_lookup: Optional[Dict[Tuple[str, str], Dict[str, str]]] = None,
+    progress_callback: Optional[Callable[[Dict[str, int]], None]] = None,
     record_id: Optional[str] = None,
     product_id: Optional[str] = None,
     limit: Optional[int] = None,
 ) -> List[ScriptMetadata]:
     results: List[ScriptMetadata] = []
     title_generator = title_generator or HeuristicTitleGenerator()
+    stats = {
+        "records_scanned": 0,
+        "scripts_seen": 0,
+        "titles_reused": 0,
+        "titles_generated": 0,
+    }
 
     for record in records:
         if record_id and record.record_id != record_id:
             continue
+        stats["records_scanned"] += 1
         fields = record.fields
         product_value = normalize_text(fields.get(mapping.get("product_id"))) if mapping.get("product_id") else ""
         if product_id and product_value != product_id:
@@ -427,6 +478,11 @@ def build_script_metadata_records(
         store_id = normalize_text(fields.get(mapping.get("store_id"))) if mapping.get("store_id") else ""
         target_country = normalize_text(fields.get(mapping.get("target_country"))) if mapping.get("target_country") else ""
         product_type = normalize_text(fields.get(mapping.get("product_type"))) if mapping.get("product_type") else ""
+        script_source = normalize_text(fields.get(mapping.get("script_source"))) if mapping.get("script_source") else ""
+        publish_purpose = normalize_text(fields.get(mapping.get("publish_purpose"))) if mapping.get("publish_purpose") else ""
+        cart_enabled = normalize_yes_no(fields.get(mapping.get("cart_enabled"))) if mapping.get("cart_enabled") else ""
+        content_branch = normalize_text(fields.get(mapping.get("content_branch"))) if mapping.get("content_branch") else ""
+        is_nurture = is_nurture_metadata(script_source, publish_purpose, content_branch)
 
         for spec in SCRIPT_FIELD_SPECS:
             field_name = mapping.get(spec["logical_name"])
@@ -437,7 +493,10 @@ def build_script_metadata_records(
             variant_no = spec["variant_no"]
             parent_slot = parent_slot_value(fields, mapping, direction_index)
             direction_label = direction_label_value(fields, mapping, direction_index)
-            resolved_product_id = product_value or task_no
+            resolved_product_id = product_value if is_nurture else (product_value or task_no)
+            resolved_family_key = content_family_key(resolved_product_id, parent_slot)
+            if is_nurture and not resolved_family_key:
+                resolved_family_key = f"{build_canonical_script_key(record.record_id, spec['task_suffix'])}:养号"
             metadata = ScriptMetadata(
                 script_id=build_script_id(task_no, parent_slot, variant_no),
                 source_record_id=record.record_id,
@@ -450,23 +509,45 @@ def build_script_metadata_records(
                 variant_strength=variant_strength_label(variant_no),
                 target_country=target_country,
                 product_type=product_type,
-                content_family_key=content_family_key(resolved_product_id, parent_slot),
+                content_family_key=resolved_family_key,
                 script_text=script_text,
                 short_video_title="",
                 title_source="",
                 canonical_script_key=build_canonical_script_key(record.record_id, spec["task_suffix"]),
+                script_source=script_source,
+                publish_purpose=publish_purpose,
+                cart_enabled=cart_enabled,
+                content_branch=content_branch,
             )
-            title = sanitize_title(title_generator.generate(metadata))
+            stats["scripts_seen"] += 1
+            existing_title, existing_source = _resolve_title_from_existing(
+                metadata,
+                existing_lookup.get((record.record_id, spec["task_suffix"])) if existing_lookup else None,
+            )
+            if existing_title:
+                title = existing_title
+                title_source = existing_source
+                stats["titles_reused"] += 1
+            else:
+                title = sanitize_title(title_generator.generate(metadata))
+                title_source = getattr(title_generator, "source", "unknown")
+                stats["titles_generated"] += 1
             results.append(
                 ScriptMetadata(
                     **{
                         **metadata.__dict__,
                         "short_video_title": title,
-                        "title_source": getattr(title_generator, "source", "unknown"),
+                        "title_source": title_source,
                     }
                 )
             )
+            if progress_callback is not None and (stats["scripts_seen"] % 20 == 0):
+                progress_callback({**stats, "written": len(results)})
             if limit is not None and len(results) >= limit:
+                if progress_callback is not None:
+                    progress_callback({**stats, "written": len(results)})
                 return results
 
+    if progress_callback is not None:
+        progress_callback({**stats, "written": len(results)})
     return results

@@ -16,6 +16,61 @@ class JSONParseError(Exception):
 
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 _LATINISH_RE = re.compile(r"[A-Za-zÀ-ỹĐđ]")
+HAIR_ACCESSORY_FIELD_OPTIONS = {
+    "hair_accessory_subtype": {
+        "",
+        "small_side_clip",
+        "claw_clip",
+        "headband",
+        "hair_tie",
+        "hair_band",
+        "styling_tool",
+        "other_hair_accessory",
+        "unknown",
+    },
+    "placement_zone": {
+        "",
+        "face_side",
+        "back_head",
+        "top_head",
+        "low_ponytail",
+        "half_up",
+        "bun_area",
+        "full_head",
+        "unknown",
+    },
+    "hold_scope": {
+        "",
+        "flyaway_hair",
+        "small_hair_section",
+        "half_hair",
+        "low_ponytail",
+        "bun",
+        "decorative_only",
+        "unknown",
+    },
+    "orientation": {
+        "",
+        "horizontal_clip",
+        "vertical_clip",
+        "wrap_around",
+        "tie_up",
+        "insert_fix",
+        "wear_on_head",
+        "unknown",
+    },
+    "primary_result": {
+        "",
+        "cleaner_hairline",
+        "stronger_hold",
+        "more_complete_hairstyle",
+        "faster_hair_fix",
+        "decorative_focus",
+        "softer_face_shape",
+        "more_volume",
+        "unknown",
+    },
+}
 
 
 def strip_markdown_fence(text: str) -> str:
@@ -723,12 +778,27 @@ def validate_anchor_card_payload(payload: Any) -> None:
     card = _require_dict(payload, "锚点卡")
     if "parameter_anchors" not in card or not isinstance(card.get("parameter_anchors"), list):
         card["parameter_anchors"] = []
+    if "key_visual_constraints" not in card or not isinstance(card.get("key_visual_constraints"), list):
+        card["key_visual_constraints"] = []
+    for field_name in HAIR_ACCESSORY_FIELD_OPTIONS:
+        if field_name not in card:
+            card[field_name] = ""
+        card[field_name] = str(card.get(field_name) or "").strip()
+        if card[field_name] not in HAIR_ACCESSORY_FIELD_OPTIONS[field_name]:
+            card[field_name] = "unknown"
+    card["key_visual_constraints"] = card["key_visual_constraints"][:5]
     _require_fields(
         card,
         [
             "product_positioning_one_liner",
             "hard_anchors",
             "display_anchors",
+            "key_visual_constraints",
+            "hair_accessory_subtype",
+            "placement_zone",
+            "hold_scope",
+            "orientation",
+            "primary_result",
             "distortion_alerts",
             "candidate_primary_selling_points",
             "persona_suggestions",
@@ -744,6 +814,10 @@ def validate_anchor_card_payload(payload: Any) -> None:
         "锚点卡",
     )
     _ensure_string_field(card, "product_positioning_one_liner", "锚点卡")
+    for field_name, allowed_values in HAIR_ACCESSORY_FIELD_OPTIONS.items():
+        _ensure_string_field(card, field_name, "锚点卡", allow_empty=True)
+        if card.get(field_name) not in allowed_values:
+            raise JSONParseError(f"锚点卡.{field_name} 值不在允许范围内")
     _validate_dict_list_items(
         _ensure_list_field(card, "hard_anchors", "锚点卡"),
         "hard_anchors",
@@ -754,6 +828,15 @@ def validate_anchor_card_payload(payload: Any) -> None:
         "display_anchors",
         ["anchor", "why_must_show", "recommended_shot_type"],
     )
+    _validate_dict_list_items(
+        _ensure_list_field(card, "key_visual_constraints", "锚点卡", allow_empty=True),
+        "key_visual_constraints",
+        ["constraint", "confidence", "basis"],
+    )
+    for index, item in enumerate(card.get("key_visual_constraints") or [], 1):
+        confidence = str((item or {}).get("confidence", "") or "").strip()
+        if confidence not in {"high", "medium", "low"}:
+            raise JSONParseError(f"key_visual_constraints 第 {index} 项.confidence 必须为 high|medium|low")
     _ensure_string_list_field(card, "distortion_alerts", "锚点卡", allow_empty_items=False)
     _validate_dict_list_items(
         _ensure_list_field(card, "candidate_primary_selling_points", "锚点卡"),
@@ -1141,8 +1224,42 @@ def _normalize_script_payload(payload: Any) -> Dict[str, Any]:
             anchor_reference = _coerce_scalar_text(item.get("anchor_reference"))
             if not anchor_reference or _looks_like_non_chinese_descriptive_text(anchor_reference):
                 item["anchor_reference"] = anchor_fallback
+            item["ai_shot_risk"] = str(item.get("ai_shot_risk", "") or "low").strip() or "low"
+            item["replacement_template_id"] = str(item.get("replacement_template_id", "") or "").strip()
             normalized_storyboard.append(item)
         script["storyboard"] = normalized_storyboard
+
+    audio_layer = script.get("audio_layer")
+    if not isinstance(audio_layer, dict):
+        audio_layer = {}
+    else:
+        audio_layer = dict(audio_layer)
+    audio_layer.setdefault("bgm_style", "低存在感日常背景音乐")
+    audio_layer.setdefault("bgm_energy", "low")
+    audio_layer.setdefault("sfx_cues", [])
+    audio_layer.setdefault("voiceover_priority", "high")
+    audio_layer.setdefault("mix_note", "SFX 不盖过口播，画面动作弱时音效克制")
+    audio_layer.setdefault(
+        "audio_negative_constraints",
+        ["不要盖住口播", "不要夸张闪光音", "不要廉价 bling 效果"],
+    )
+    script["audio_layer"] = audio_layer
+
+    rhythm_checkpoints = script.get("rhythm_checkpoints")
+    if not isinstance(rhythm_checkpoints, dict):
+        rhythm_checkpoints = {}
+    else:
+        rhythm_checkpoints = dict(rhythm_checkpoints)
+    rhythm_checkpoints.setdefault("hook_complete_by", "3s")
+    rhythm_checkpoints.setdefault("core_proof_start_between", "4-8s")
+    rhythm_checkpoints.setdefault("decision_signal_by", "12s")
+    rhythm_checkpoints.setdefault("risk_resolution_decision_by", "9s_or_not_applicable")
+    risk_decision_value = str(rhythm_checkpoints.get("risk_resolution_decision_by", "") or "").strip().lower()
+    if risk_decision_value in {"", "not_applicable", "not applicable", "n/a", "na", "none", "不适用"}:
+        rhythm_checkpoints["risk_resolution_decision_by"] = "9s_or_not_applicable"
+    elif risk_decision_value in {"9", "9s", "9秒", "before_9s", "by_9s"}:
+        rhythm_checkpoints["risk_resolution_decision_by"] = "9s"
+    script["rhythm_checkpoints"] = rhythm_checkpoints
 
     return script
 
@@ -1152,6 +1269,56 @@ def _validate_script_positioning(positioning: Any, label: str) -> None:
     _require_fields(obj, ["script_title", "direction_type", "core_primary_selling_point"], label)
     for key in ("script_title", "direction_type", "core_primary_selling_point"):
         _ensure_chinese_descriptive_field(obj, key, label)
+
+
+def _validate_audio_layer(audio_layer: Any) -> None:
+    layer = _require_dict(audio_layer, "audio_layer")
+    _require_fields(
+        layer,
+        ["bgm_style", "bgm_energy", "sfx_cues", "voiceover_priority", "mix_note", "audio_negative_constraints"],
+        "audio_layer",
+    )
+    _ensure_chinese_descriptive_field(layer, "bgm_style", "audio_layer", allow_empty=True)
+    _ensure_string_field(layer, "bgm_energy", "audio_layer")
+    if layer.get("bgm_energy") not in {"low", "medium"}:
+        raise JSONParseError("audio_layer.bgm_energy 必须为 low|medium")
+    _ensure_string_field(layer, "voiceover_priority", "audio_layer")
+    if layer.get("voiceover_priority") != "high":
+        raise JSONParseError("audio_layer.voiceover_priority 必须为 high")
+    _ensure_string_field(layer, "mix_note", "audio_layer", allow_empty=True)
+
+    sfx_cues = _ensure_list_field(layer, "sfx_cues", "audio_layer", allow_empty=True)
+    if len(sfx_cues) > 3:
+        raise JSONParseError("audio_layer.sfx_cues 最多 3 个")
+    for index, cue_value in enumerate(sfx_cues, 1):
+        cue = _require_dict(cue_value, f"audio_layer.sfx_cues 第 {index} 项")
+        _require_fields(cue, ["time_range", "sfx_type", "purpose", "volume_note"], f"audio_layer.sfx_cues 第 {index} 项")
+        for key in ("time_range", "sfx_type", "purpose", "volume_note"):
+            _ensure_string_field(cue, key, f"audio_layer.sfx_cues 第 {index} 项", allow_empty=True)
+
+    negative_constraints = _ensure_list_field(layer, "audio_negative_constraints", "audio_layer", allow_empty=True)
+    for index, item in enumerate(negative_constraints, 1):
+        if not isinstance(item, str):
+            raise JSONParseError(f"audio_layer.audio_negative_constraints[{index}] 必须为字符串")
+
+
+def _validate_rhythm_checkpoints(rhythm_checkpoints: Any) -> None:
+    checkpoints = _require_dict(rhythm_checkpoints, "rhythm_checkpoints")
+    _require_fields(
+        checkpoints,
+        ["hook_complete_by", "core_proof_start_between", "decision_signal_by", "risk_resolution_decision_by"],
+        "rhythm_checkpoints",
+    )
+    for key in ("hook_complete_by", "core_proof_start_between", "decision_signal_by", "risk_resolution_decision_by"):
+        _ensure_string_field(checkpoints, key, "rhythm_checkpoints")
+    if checkpoints.get("hook_complete_by") != "3s":
+        raise JSONParseError("rhythm_checkpoints.hook_complete_by 必须为 3s")
+    if checkpoints.get("core_proof_start_between") != "4-8s":
+        raise JSONParseError("rhythm_checkpoints.core_proof_start_between 必须为 4-8s")
+    if checkpoints.get("decision_signal_by") != "12s":
+        raise JSONParseError("rhythm_checkpoints.decision_signal_by 必须为 12s")
+    if checkpoints.get("risk_resolution_decision_by") not in {"9s_or_not_applicable", "9s"}:
+        raise JSONParseError("rhythm_checkpoints.risk_resolution_decision_by 必须为 9s_or_not_applicable 或 9s")
 
 
 def validate_script_schema_v2(script_json: Any) -> None:
@@ -1168,12 +1335,15 @@ def validate_script_schema_v2(script_json: Any) -> None:
             "full_15s_flow",
             "storyboard",
             "execution_constraints",
+            "rhythm_checkpoints",
+            "audio_layer",
             "negative_constraints",
         ],
         "脚本输出",
     )
 
     _validate_script_positioning(script.get("script_positioning"), "script_positioning")
+    _validate_rhythm_checkpoints(script.get("rhythm_checkpoints"))
 
     opening_design = _require_dict(script.get("opening_design"), "opening_design")
     _require_fields(
@@ -1229,6 +1399,8 @@ def validate_script_schema_v2(script_json: Any) -> None:
         "style_note",
         "anchor_reference",
         "task_type",
+        "ai_shot_risk",
+        "replacement_template_id",
     ]
 
     for index, shot_value in enumerate(storyboard, 1):
@@ -1242,8 +1414,12 @@ def validate_script_schema_v2(script_json: Any) -> None:
             "style_note",
             "anchor_reference",
             "task_type",
+            "ai_shot_risk",
+            "replacement_template_id",
         ):
-            if key in {"duration", "task_type"}:
+            if key == "replacement_template_id":
+                _ensure_string_field(shot, key, f"storyboard 第 {index} 个镜头", allow_empty=True)
+            elif key in {"duration", "task_type", "ai_shot_risk"}:
                 _ensure_string_field(shot, key, f"storyboard 第 {index} 个镜头")
             else:
                 _ensure_chinese_descriptive_field(shot, key, f"storyboard 第 {index} 个镜头")
@@ -1255,6 +1431,10 @@ def validate_script_schema_v2(script_json: Any) -> None:
         if shot.get("task_type") not in {"attention", "proof", "bridge"}:
             raise JSONParseError(
                 f"storyboard 第 {index} 个镜头 task_type 必须为 attention|proof|bridge"
+            )
+        if shot.get("ai_shot_risk") not in {"low", "medium", "high", "forbidden"}:
+            raise JSONParseError(
+                f"storyboard 第 {index} 个镜头 ai_shot_risk 必须为 low|medium|high|forbidden"
             )
 
     positioning = _require_dict(script.get("script_positioning"), "script_positioning")
@@ -1268,6 +1448,7 @@ def validate_script_schema_v2(script_json: Any) -> None:
     for index, item in enumerate(negative_constraints, 1):
         if not isinstance(item, str):
             raise JSONParseError(f"negative_constraints[{index}] 必须为字符串")
+    _validate_audio_layer(script.get("audio_layer"))
 
 
 def validate_review_payload(payload: Any) -> None:

@@ -264,17 +264,17 @@ def _extract_negative_clauses(value: Any) -> List[str]:
     text = _compact_text(value)
     if not text:
         return []
-    negatives = re.findall(r"(?:不要让|不要把|不要|不让|禁止|避免|不可|不能|不用|不做|勿)[^；;。]+", text)
+    negatives = re.findall(r"(?:不要让|不要把|不要|不让|禁止|避免|不可|不能|不用|不做|不得|不允许|勿)[^；;。]+", text)
     if not negatives:
         for segment in _semantic_segments(value):
-            if any(token in segment for token in ("不要", "不让", "禁止", "避免", "不可", "不能", "不用", "不做", "勿")):
+            if any(token in segment for token in ("不要", "不让", "禁止", "避免", "不可", "不能", "不用", "不做", "不得", "不允许", "勿")):
                 negatives.append(segment)
     return _dedupe_preserve(negatives)
 
 
 def _clean_negative_clause(value: str) -> str:
     text = _compact_text(value)
-    text = re.sub(r"^(不要让|不要把|不要|不让|禁止|避免|不可|不能|不用|不做|勿)", "", text)
+    text = re.sub(r"^(不要让|不要把|不要|不让|禁止|避免|不可|不能|不用|不做|不得|不允许|勿)", "", text)
     return text.strip(" ，；;。") or _compact_text(value)
 
 
@@ -290,7 +290,7 @@ def _constraint_semantic_key(value: str) -> str:
     if not text:
         return ""
     groups = [
-        (("喧宾夺主", "抢商品", "压过耳饰", "压过商品", "不抢商品", "强过耳饰", "强过商品"), "人物抢戏"),
+        (("喧宾夺主", "抢商品", "抢过商品", "压过耳饰", "压过商品", "不抢商品", "强过耳饰", "强过商品"), "人物抢戏"),
         (("夸张笑容", "大动作"), "夸张表演"),
         (("多余晃动",), "多余晃动"),
         (("过曝", "高光"), "局部过曝"),
@@ -317,8 +317,10 @@ def _harden_negative_clause(value: str) -> str:
     text = _compact_text(value)
     if not text:
         return ""
-    if any(keyword in text for keyword in ("喧宾夺主", "抢商品", "压过耳饰", "压过商品", "强过耳饰", "强过商品")):
-        return "人物不得抢过耳饰"
+    if any(keyword in text for keyword in ("喧宾夺主", "抢商品", "抢过商品", "压过耳饰", "压过商品", "强过耳饰", "强过商品")):
+        if any(keyword in text for keyword in ("耳饰", "耳环", "耳钉", "耳坠", "耳夹")):
+            return "人物不得抢过耳饰"
+        return "人物不得抢过商品"
     if "夸张笑容" in text or "大动作" in text:
         return "禁止夸张笑容和大动作"
     if "多余晃动" in text:
@@ -525,7 +527,7 @@ def _extract_progression(value: Any) -> str:
 def _infer_product_category(*values: Any) -> str:
     text = _compact_text(" ".join(str(value or "") for value in values))
     patterns = [
-        (r"耳环|耳饰|耳钉|耳夹|耳坠", "耳饰"),
+        (r"耳线|耳环|耳饰|耳钉|耳夹|耳坠", "耳饰"),
         (r"发夹|抓夹|鲨鱼夹|香蕉夹", "发夹"),
         (r"发饰|发箍|发圈|头箍|头绳|发带", "发饰"),
         (r"项链|吊坠", "项链"),
@@ -594,7 +596,7 @@ def _extract_action_keywords(storyboard: List[Dict[str, Any]]) -> List[str]:
         ("平静观察", ["观察", "确认", "看"]),
         ("稳定持物", ["提起", "持", "拿", "托"]),
         ("轻微摆动", ["摆动", "晃动"]),
-        ("平稳停留", ["停留", "静置"]),
+        ("稳定构图微动态", ["停留", "静置", "静止", "定格", "停住"]),
     ]
     hits: List[str] = []
     for label, tokens in keyword_specs:
@@ -740,6 +742,41 @@ def _build_rhythm_line(storyboard: List[Dict[str, Any]]) -> str:
     return ";".join(parts) or "按15秒单条节奏推进"
 
 
+def _build_audio_line(script_json: Dict[str, Any], max_chars: int = 180) -> str:
+    audio_layer = script_json.get("audio_layer") if isinstance(script_json.get("audio_layer"), dict) else {}
+    if not audio_layer:
+        return ""
+    bgm_style = _compact_text(audio_layer.get("bgm_style", ""))
+    bgm_energy = _compact_text(audio_layer.get("bgm_energy", ""))
+    voiceover_priority = _compact_text(audio_layer.get("voiceover_priority", ""))
+    cues = audio_layer.get("sfx_cues") if isinstance(audio_layer.get("sfx_cues"), list) else []
+    cue_parts: List[str] = []
+    for cue in cues[:3]:
+        if not isinstance(cue, dict):
+            continue
+        cue_text = _merge_brief_parts(
+            cue.get("time_range", ""),
+            cue.get("sfx_type", ""),
+            cue.get("purpose", ""),
+            cue.get("volume_note", ""),
+        )
+        if cue_text:
+            cue_parts.append(cue_text)
+    negatives = audio_layer.get("audio_negative_constraints")
+    negative_text = ""
+    if isinstance(negatives, list):
+        negative_text = " / ".join(_compact_text(item) for item in negatives[:3] if _compact_text(item))
+    line = _merge_brief_parts(
+        f"BGM:{bgm_style or '低存在感日常'}",
+        f"能量:{bgm_energy or 'low'}",
+        f"口播优先:{voiceover_priority or 'high'}",
+        f"SFX:{'；'.join(cue_parts)}" if cue_parts else "",
+        f"混音:{_compact_text(audio_layer.get('mix_note', ''))}" if _compact_text(audio_layer.get("mix_note", "")) else "",
+        f"禁:{negative_text}" if negative_text else "",
+    )
+    return _truncate_text(line, max_chars)
+
+
 def _build_forbidden_line(
     script_json: Dict[str, Any],
     constraints: Dict[str, Any],
@@ -766,6 +803,100 @@ def _build_forbidden_line(
         rendered.append(hardened)
     forbidden = "；".join(_dedupe_preserve(rendered))
     return _truncate_text(forbidden, max_chars) or "无"
+
+
+def _infer_variant_shot_task(index: int, total: int) -> str:
+    if index <= 1:
+        return "hook"
+    if index >= total:
+        return "decision"
+    return "proof"
+
+
+def _variant_boundary_to_negative(boundary: str) -> str:
+    text = _compact_text(boundary)
+    if not text:
+        return ""
+    if _extract_negative_clauses(text):
+        return text
+    if "原生自然" in text:
+        return "禁止强滤镜、夸张闪烁和特效转场"
+    if "商品必须是主角" in text or ("商品" in text and "主角" in text):
+        return "禁止人物抢过商品"
+    if any(keyword in text for keyword in ("耳部完整露出", "耳部无遮挡", "耳部露出")):
+        return "禁止遮挡耳部、耳垂与小环连接处"
+    if "佩戴结果" in text:
+        return "禁止只拍氛围或静物而缺少佩戴结果"
+    if "家中自然分享" in text or "家中场景" in text:
+        return "禁止脱离家中自然分享语境"
+    return ""
+
+
+def _build_variant_negative_constraints(style_boundaries: List[Any]) -> List[str]:
+    negatives: List[str] = []
+    for item in style_boundaries:
+        text = _compact_text(item)
+        if not text:
+            continue
+        extracted = _extract_negative_clauses(text)
+        if extracted:
+            negatives.extend(extracted)
+            continue
+        mapped = _variant_boundary_to_negative(text)
+        if mapped:
+            negatives.append(mapped)
+    return _dedupe_preserve(negatives)
+
+
+def _variant_to_seedance_script_json(variant: Dict[str, Any]) -> Dict[str, Any]:
+    final_prompt = variant.get("final_video_script_prompt", {}) or {}
+    video_setup = final_prompt.get("video_setup", {}) or {}
+    shots = final_prompt.get("shot_execution", []) or []
+    style_boundaries = final_prompt.get("style_boundaries", []) or []
+    content_id = str(variant.get("content_id", "") or final_prompt.get("content_id", "") or "").strip()
+
+    storyboard: List[Dict[str, Any]] = []
+    total_shots = len(shots)
+    merged_product_focus = _merge_brief_parts(
+        video_setup.get("product_focus", ""),
+        *[shot.get("product_focus", "") for shot in shots if isinstance(shot, dict)],
+    )
+    merged_style_boundaries = _merge_brief_parts(*style_boundaries)
+    for index, shot in enumerate(shots, 1):
+        if not isinstance(shot, dict):
+            continue
+        product_focus = _compact_text(shot.get("product_focus", ""))
+        storyboard.append(
+            {
+                "shot_no": int(shot.get("shot_no", index) or index),
+                "duration": _compact_text(shot.get("duration", "")),
+                "shot_content": _compact_text(shot.get("visual", "")),
+                "person_action": _compact_text(shot.get("person_action", "")),
+                "voiceover_text_target_language": _compact_text(shot.get("voiceover", "")),
+                "spoken_line_task": _infer_variant_shot_task(index, total_shots),
+                "style_note": product_focus,
+                "anchor_reference": product_focus,
+            }
+        )
+
+    execution_constraints = {
+        "visual_style": _merge_brief_parts(video_setup.get("overall_style", ""), video_setup.get("video_theme", "")),
+        "person_constraints": _compact_text(video_setup.get("person_final", "")),
+        "styling_constraints": _compact_text(video_setup.get("outfit_final", "")),
+        "tone_completion_constraints": _compact_text(video_setup.get("emotion_final", "")),
+        "scene_constraints": _compact_text(video_setup.get("scene_final", "")),
+        "emotion_progression_constraints": _compact_text(video_setup.get("emotion_final", "")),
+        "camera_focus": merged_product_focus,
+        "product_priority_principle": merged_product_focus,
+        "realism_principle": _merge_brief_parts(video_setup.get("overall_style", ""), merged_style_boundaries),
+    }
+
+    return {
+        "content_id": content_id,
+        "storyboard": storyboard,
+        "execution_constraints": execution_constraints,
+        "negative_constraints": _build_variant_negative_constraints(style_boundaries),
+    }
 
 
 def _render_seedance_script_pass(script_json: Dict[str, Any], limits: Dict[str, int]) -> str:
@@ -806,12 +937,14 @@ def _render_seedance_script_pass(script_json: Dict[str, Any], limits: Dict[str, 
     for requirement in shot_requirements:
         used_negative_keys.extend(_collect_negative_keys_from_rendered_text(requirement))
 
+    audio_line = _build_audio_line(script_json)
     sections = [
         f"【整体】{overall_line}",
         f"【商品】{_build_product_line(script_json, constraints, limits)}",
         "\n\n".join(shot_blocks),
         f"【情绪】{emotion_line}",
         f"【节奏】{_build_rhythm_line(storyboard)}",
+        f"【音频】{audio_line}" if audio_line else "",
         f"【禁止】{_build_forbidden_line(script_json, constraints, _dedupe_preserve(used_negative_keys), limits['forbidden'])}",
     ]
     return "\n\n".join(section for section in sections if section).strip()
@@ -1053,6 +1186,7 @@ def compress_final_video_prompt_payload(
 def render_anchor_card(anchor_card: Dict[str, Any]) -> str:
     hard_anchors = anchor_card.get("hard_anchors", []) or []
     display_anchors = anchor_card.get("display_anchors", []) or []
+    key_visual_constraints = anchor_card.get("key_visual_constraints", []) or []
     distortion_alerts = anchor_card.get("distortion_alerts", []) or []
     candidate_selling_points = anchor_card.get("candidate_primary_selling_points", []) or []
     parameter_anchors = anchor_card.get("parameter_anchors", []) or []
@@ -1061,6 +1195,13 @@ def render_anchor_card(anchor_card: Dict[str, Any]) -> str:
     fixation_result_anchors = anchor_card.get("fixation_result_anchors", []) or []
     before_after_result_anchors = anchor_card.get("before_after_result_anchors", []) or []
     scene_usage_anchors = anchor_card.get("scene_usage_anchors", []) or []
+    hair_profile_lines = [
+        f"- 发饰子类型：{anchor_card.get('hair_accessory_subtype', '')}",
+        f"- 佩戴区域：{anchor_card.get('placement_zone', '')}",
+        f"- 固定范围：{anchor_card.get('hold_scope', '')}",
+        f"- 佩戴方向：{anchor_card.get('orientation', '')}",
+        f"- 主要结果：{anchor_card.get('primary_result', '')}",
+    ]
 
     sections = [
             "【产品锚点卡】\n"
@@ -1074,6 +1215,12 @@ def render_anchor_card(anchor_card: Dict[str, Any]) -> str:
             "【候选主卖点】\n" + _stringify_lines(_render_dict_items(candidate_selling_points, ["selling_point", "how_to_show"])),
             "【失真警报】\n" + _stringify_lines([f"- {item}" for item in distortion_alerts if item]),
         ]
+    if key_visual_constraints:
+        sections.insert(
+            2,
+            "【关键视觉防错锚点】\n"
+            + _stringify_lines(_render_dict_items(key_visual_constraints, ["constraint", "confidence", "basis"])),
+        )
     if parameter_anchors:
         sections.insert(
             3,
@@ -1082,11 +1229,15 @@ def render_anchor_card(anchor_card: Dict[str, Any]) -> str:
                 _render_dict_items(parameter_anchors, ["parameter_name", "parameter_value", "why_must_preserve"])
             ),
         )
-    if any([structure_anchors, operation_anchors, fixation_result_anchors, before_after_result_anchors, scene_usage_anchors]):
+    if any([structure_anchors, operation_anchors, fixation_result_anchors, before_after_result_anchors, scene_usage_anchors]) or any(
+        str(anchor_card.get(key, "") or "").strip()
+        for key in ("hair_accessory_subtype", "placement_zone", "hold_scope", "orientation", "primary_result")
+    ):
         sections.append(
             "【发饰专用锚点】\n"
             + _stringify_lines(
-                [
+                hair_profile_lines
+                + [
                     f"- 结构锚点：{'；'.join(structure_anchors)}",
                     f"- 操作锚点：{'；'.join(operation_anchors)}",
                     f"- 固定结果锚点：{'；'.join(fixation_result_anchors)}",
@@ -1172,6 +1323,8 @@ def render_internal_script(script_json: Dict[str, Any]) -> str:
             f"- 口播任务：{item.get('spoken_line_task', '')}",
             f"- 风格提醒：{item.get('style_note', '')}",
             f"- 镜头任务：{item.get('task_type', '')}",
+            f"- AI可拍风险：{item.get('ai_shot_risk', 'low')}",
+            f"- 替代镜头模板：{item.get('replacement_template_id', '')}",
         ]
         if subtitle_target:
             parts.append(f"- 字幕（当地语言）：{subtitle_target}")
@@ -1194,6 +1347,21 @@ def render_internal_script(script_json: Dict[str, Any]) -> str:
         f"商品优先原则：{constraints.get('product_priority_principle', '')}",
         f"真实性执行原则：{constraints.get('realism_principle', '')}",
     ]
+    audio_layer = script_json.get("audio_layer") if isinstance(script_json.get("audio_layer"), dict) else {}
+    sfx_lines = []
+    for cue in (audio_layer.get("sfx_cues") if isinstance(audio_layer.get("sfx_cues"), list) else [])[:3]:
+        if isinstance(cue, dict):
+            sfx_lines.append(
+                f"- {cue.get('time_range', '')} / {cue.get('sfx_type', '')} / {cue.get('purpose', '')} / {cue.get('volume_note', '')}"
+            )
+    audio_lines = [
+        f"BGM风格：{audio_layer.get('bgm_style', '')}",
+        f"BGM能量：{audio_layer.get('bgm_energy', '')}",
+        f"口播优先级：{audio_layer.get('voiceover_priority', '')}",
+        f"混音备注：{audio_layer.get('mix_note', '')}",
+        "SFX提示：\n" + _stringify_lines(sfx_lines),
+        "音频负向约束：" + "；".join(str(item or "") for item in (audio_layer.get("audio_negative_constraints") or []) if str(item or "").strip()),
+    ] if audio_layer else []
 
     return "\n\n".join(
         [
@@ -1209,6 +1377,7 @@ def render_internal_script(script_json: Dict[str, Any]) -> str:
             ),
             f"【分镜】\n{_stringify_lines(storyboard_lines)}",
             f"【执行约束】\n{_stringify_lines(constraint_lines)}",
+            f"【音频层】\n{_stringify_lines(audio_lines)}" if audio_lines else "",
         ]
     ).strip()
 
@@ -1218,47 +1387,7 @@ def render_script_v2(script_json: Dict[str, Any]) -> str:
 
 
 def render_variant_script(variant: Dict[str, Any]) -> str:
-    final_prompt = variant.get("final_video_script_prompt", {}) or {}
-    video_setup = final_prompt.get("video_setup", {}) or {}
-    shots = final_prompt.get("shot_execution", []) or []
-    style_boundaries = final_prompt.get("style_boundaries", []) or []
-    content_id = str(variant.get("content_id", "") or final_prompt.get("content_id", "") or "").strip()
-
-    shot_lines = []
-    for item in shots:
-        shot_no = item.get("shot_no", "")
-        parts = [
-            f"镜头{shot_no}：",
-            f"- 时长：{item.get('duration', '')}",
-            f"- 画面内容：{item.get('visual', '')}",
-            f"- 人物动作：{item.get('person_action', '')}",
-            f"- 商品展示重点：{item.get('product_focus', '')}",
-        ]
-        voiceover = str(item.get("voiceover", "") or "").strip()
-        if voiceover:
-            parts.append(f"- 口播：{voiceover}")
-        shot_lines.append("\n".join(parts))
-
-    return "\n\n".join(
-        [
-            f"【脚本ID】\n- {content_id}" if content_id else "",
-            "【视频整体设定】\n"
-            + _stringify_lines(
-                [
-                    f"- 视频主题：{video_setup.get('video_theme', '')}",
-                    f"- 商品主角设定：{video_setup.get('product_focus', '')}",
-                    f"- 人物呈现：{video_setup.get('person_final', '')}",
-                    f"- 穿搭呈现：{video_setup.get('outfit_final', '')}",
-                    f"- 场景呈现：{video_setup.get('scene_final', '')}",
-                    f"- 情绪呈现：{video_setup.get('emotion_final', '')}",
-                    f"- 整体风格：{video_setup.get('overall_style', '')}",
-                ]
-            ),
-            f"【分镜执行】\n{_stringify_lines(shot_lines)}",
-            "【统一风格边界】\n"
-            + _stringify_lines([f"- {item}" for item in style_boundaries if item]),
-        ]
-    ).strip()
+    return _render_seedance_script(_variant_to_seedance_script_json(variant))
 
 
 def render_final_video_prompt(prompt_json: Dict[str, Any]) -> str:

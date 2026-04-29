@@ -4,14 +4,14 @@
 
 读取飞书多维表格中状态为“待开始”的记录，直接把视频传给模型分析，
 按顺序生成：
-1. 脚本拆解
-2. 复刻卡
-3. 复刻后的脚本
-4. 最终复刻视频提示词
+1. 素材筛选与高光DNA提取
+2. 轻微改写复刻方案
+3. 最终执行分镜
 """
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -40,10 +40,9 @@ from core.llm_client import VideoRemakeLLMClient  # noqa: E402
 from core.prompts import (  # noqa: E402
     CONTENT_BRANCH_NON_PRODUCT,
     CONTENT_BRANCH_PRODUCT,
-    build_final_video_prompt,
-    build_remade_script_prompt,
-    build_remake_card_prompt,
-    build_script_breakdown_prompt,
+    build_final_storyboard_prompt,
+    build_highlight_dna_prompt,
+    build_light_rewrite_prompt,
 )
 
 
@@ -85,11 +84,9 @@ def validate_required_fields(mapping: Dict[str, Optional[str]]) -> None:
     required = {
         "status": "状态字段",
         "video": "视频字段",
-        "content_branch": "内容分支字段",
-        "script_breakdown": "脚本拆解字段",
-        "remake_card": "复刻卡字段",
-        "remade_script": "复刻后的脚本字段",
-        "final_prompt": "最终复刻视频提示词字段",
+        "highlight_dna": "高光DNA提取结果字段",
+        "light_rewrite_plan": "轻微改写复刻方案字段",
+        "final_storyboard": "最终固定分镜字段",
     }
     missing = [label for key, label in required.items() if not mapping.get(key)]
     if missing:
@@ -106,13 +103,13 @@ def build_context(record: RemakeRecord, mapping: Dict[str, Optional[str]]) -> Di
     raw_branch = normalize_cell_value(fields.get(mapping.get("content_branch"))) if mapping.get("content_branch") else ""
     if raw_branch == "商品展示型":
         content_branch = CONTENT_BRANCH_PRODUCT
-    elif raw_branch == "非商品展示型":
-        content_branch = CONTENT_BRANCH_NON_PRODUCT
     else:
-        raise ValueError("内容分支字段必须填写为“商品展示型”或“非商品展示型”")
+        raw_branch = "非商品展示型"
+        content_branch = CONTENT_BRANCH_NON_PRODUCT
     return {
         "content_branch": content_branch,
         "content_branch_label": raw_branch,
+        "store_id": normalize_cell_value(fields.get(mapping.get("store_id"))) if mapping.get("store_id") else "",
         "target_country": normalize_cell_value(fields.get(mapping.get("target_country"))) if mapping.get("target_country") else "",
         "target_language": normalize_cell_value(fields.get(mapping.get("target_language"))) if mapping.get("target_language") else "",
         "product_type": normalize_cell_value(fields.get(mapping.get("product_type"))) if mapping.get("product_type") else "",
@@ -143,8 +140,22 @@ def has_text_value(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def extract_negative_words(final_storyboard: str) -> str:
+    """从 Step3 输出中拆出“负面限制词”小节，供单独字段写回。"""
+    text = str(final_storyboard or "").strip()
+    patterns = [
+        r"(?:^|\n)#+\s*三、负面限制词\s*\n(?P<body>[\s\S]+)$",
+        r"(?:^|\n)三、负面限制词\s*\n(?P<body>[\s\S]+)$",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return match.group("body").strip()
+    return ""
+
+
 class VideoRemakePipeline:
-    """四阶段轻量复刻流水线。"""
+    """三阶段高保真轻量复刻流水线。"""
 
     def __init__(self, client: FeishuBitableClient, mapping: Dict[str, Optional[str]]):
         self.client = client
@@ -166,6 +177,7 @@ class VideoRemakePipeline:
                 print(
                     f"  {index}. record_id={record.record_id} | "
                     f"分支={context['content_branch_label'] or '未提供'} | "
+                    f"店铺={context['store_id'] or '未提供'} | "
                     f"国家={context['target_country'] or '未提供'} | "
                     f"语言={context['target_language'] or '未提供'} | "
                     f"商品={context['product_type'] or '未提供'}"
@@ -197,6 +209,7 @@ class VideoRemakePipeline:
         print(f"  🎞️ 视频地址已解析: {video_url[:120]}{'...' if len(video_url) > 120 else ''}")
         print(
             f"  🧭 分支={context['content_branch_label'] or '未提供'} | "
+            f"店铺={context['store_id'] or '未提供'} | "
             f"国家={context['target_country'] or '未提供'} | "
             f"语言={context['target_language'] or '未提供'} | "
             f"商品={context['product_type'] or '未提供'} | "
@@ -208,63 +221,66 @@ class VideoRemakePipeline:
             processing_fields[error_field] = ""
         self.client.update_record_fields(record.record_id, processing_fields)
 
-        script_breakdown = fields.get(self.mapping["script_breakdown"])
-        if has_text_value(script_breakdown):
-            print("  1/4 跳过脚本拆解，复用已写入结果...")
+        highlight_dna = fields.get(self.mapping["highlight_dna"])
+        if has_text_value(highlight_dna):
+            print("  1/3 跳过高光DNA提取，复用已写入结果...")
         else:
-            print("  1/4 生成脚本拆解...")
-            script_breakdown = self.llm_client.chat_with_video(
+            print("  1/3 生成高光DNA提取结果...")
+            highlight_dna = self.llm_client.chat_with_video(
                 video_url=video_url,
-                prompt=build_script_breakdown_prompt(context),
+                prompt=build_highlight_dna_prompt(context),
                 max_tokens=2500,
             )
             self.client.update_record_fields(
                 record.record_id,
-                {self.mapping["script_breakdown"]: script_breakdown},
+                {self.mapping["highlight_dna"]: highlight_dna},
             )
 
-        remake_card = fields.get(self.mapping["remake_card"])
-        if has_text_value(remake_card):
-            print("  2/4 跳过复刻卡，复用已写入结果...")
+        light_rewrite_plan = fields.get(self.mapping["light_rewrite_plan"])
+        if has_text_value(light_rewrite_plan):
+            print("  2/3 跳过轻微改写复刻方案，复用已写入结果...")
         else:
-            print("  2/4 生成复刻卡...")
-            remake_card = self.llm_client.chat_text(
-                prompt=build_remake_card_prompt(context, script_breakdown),
+            print("  2/3 生成轻微改写复刻方案...")
+            light_rewrite_plan = self.llm_client.chat_text(
+                prompt=build_light_rewrite_prompt(context, str(highlight_dna or "")),
                 max_tokens=2500,
             )
             self.client.update_record_fields(
                 record.record_id,
-                {self.mapping["remake_card"]: remake_card},
+                {self.mapping["light_rewrite_plan"]: light_rewrite_plan},
             )
 
-        remade_script = fields.get(self.mapping["remade_script"])
-        if has_text_value(remade_script):
-            print("  3/4 跳过复刻后的脚本，复用已写入结果...")
+        final_storyboard = fields.get(self.mapping["final_storyboard"])
+        if has_text_value(final_storyboard):
+            print("  3/3 跳过最终固定分镜，复用已写入结果...")
+            if self.mapping.get("negative_words") and not has_text_value(fields.get(self.mapping["negative_words"])):
+                negative_words = extract_negative_words(str(final_storyboard or ""))
+                if negative_words:
+                    self.client.update_record_fields(
+                        record.record_id,
+                        {self.mapping["negative_words"]: negative_words},
+                    )
         else:
-            print("  3/4 生成复刻后的脚本...")
-            remade_script = self.llm_client.chat_text(
-                prompt=build_remade_script_prompt(context, remake_card),
+            print("  3/3 生成最终固定分镜...")
+            final_storyboard = self.llm_client.chat_text(
+                prompt=build_final_storyboard_prompt(context, str(light_rewrite_plan or "")),
                 max_tokens=2500,
             )
-            self.client.update_record_fields(
-                record.record_id,
-                {self.mapping["remade_script"]: remade_script},
-            )
+            final_update = {self.mapping["final_storyboard"]: final_storyboard}
+            negative_words = extract_negative_words(str(final_storyboard or ""))
+            if self.mapping.get("negative_words") and negative_words:
+                final_update[self.mapping["negative_words"]] = negative_words
+            self.client.update_record_fields(record.record_id, final_update)
 
-        final_prompt = fields.get(self.mapping["final_prompt"])
-        if has_text_value(final_prompt):
-            print("  4/4 跳过最终复刻视频提示词，复用已写入结果...")
-        else:
-            print("  4/4 生成最终复刻视频提示词...")
-            final_prompt = self.llm_client.chat_text(
-                prompt=build_final_video_prompt(context, remade_script),
-                max_tokens=2500,
-            )
         done_fields = {
             status_field: STATUS_DONE,
         }
-        if not has_text_value(fields.get(self.mapping["final_prompt"])):
-            done_fields[self.mapping["final_prompt"]] = final_prompt
+        already_synced = (
+            self.mapping.get("synced_script_id")
+            and has_text_value(fields.get(self.mapping["synced_script_id"]))
+        )
+        if self.mapping.get("sync_status") and not already_synced:
+            done_fields[self.mapping["sync_status"]] = "待同步"
         if error_field:
             done_fields[error_field] = ""
         self.client.update_record_fields(record.record_id, done_fields)

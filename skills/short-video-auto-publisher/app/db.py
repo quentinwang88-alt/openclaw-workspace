@@ -37,6 +37,14 @@ def build_canonical_script_key(source_record_id: str, script_slot: str) -> str:
     return f"{str(source_record_id or '').strip()}:{str(script_slot or '').strip()}"
 
 
+def is_nurture_candidate(candidate: PublishCandidate) -> bool:
+    return (
+        str(candidate.script_source or "").strip() == "养号复刻"
+        or str(candidate.publish_purpose or "").strip() == "养号"
+        or str(candidate.content_branch or "").strip() == "非商品展示型"
+    )
+
+
 class AutoPublishDB:
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = Path(db_path) if db_path else default_db_path()
@@ -69,7 +77,22 @@ class AutoPublishDB:
             if "canonical_script_key" not in metadata_columns:
                 self._migrate_to_canonical_schema(conn)
 
+            self._ensure_column(conn, "script_metadata", "script_source", "TEXT")
+            self._ensure_column(conn, "script_metadata", "publish_purpose", "TEXT")
+            self._ensure_column(conn, "script_metadata", "cart_enabled", "TEXT")
+            self._ensure_column(conn, "script_metadata", "content_branch", "TEXT")
+            self._ensure_column(conn, "account_configs", "nurture_enabled", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "account_configs", "nurture_daily_count", "INTEGER NOT NULL DEFAULT 2")
+            self._ensure_column(conn, "account_configs", "nurture_only", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_indexes(conn)
+
+    def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_def: str) -> None:
+        columns = {
+            str(row["name"] or "")
+            for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        if column_name not in columns:
+            conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}")
 
     def _create_schema(self, conn: sqlite3.Connection) -> None:
         conn.executescript(
@@ -91,6 +114,10 @@ class AutoPublishDB:
                 script_text TEXT,
                 short_video_title TEXT,
                 title_source TEXT,
+                script_source TEXT,
+                publish_purpose TEXT,
+                cart_enabled TEXT,
+                content_branch TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE(source_record_id, script_slot)
@@ -126,6 +153,9 @@ class AutoPublishDB:
                 publish_time_1 TEXT,
                 publish_time_2 TEXT,
                 publish_time_3 TEXT,
+                nurture_enabled INTEGER NOT NULL DEFAULT 0,
+                nurture_daily_count INTEGER NOT NULL DEFAULT 2,
+                nurture_only INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -307,8 +337,9 @@ class AutoPublishDB:
                 INSERT INTO script_metadata (
                     canonical_script_key, script_id, source_record_id, script_slot, task_no, store_id, product_id,
                     parent_slot, direction_label, variant_strength, target_country, product_type,
-                    content_family_key, script_text, short_video_title, title_source, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    content_family_key, script_text, short_video_title, title_source,
+                    script_source, publish_purpose, cart_enabled, content_branch, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(canonical_script_key) DO UPDATE SET
                     script_id = excluded.script_id,
                     source_record_id = excluded.source_record_id,
@@ -325,6 +356,10 @@ class AutoPublishDB:
                     script_text = excluded.script_text,
                     short_video_title = excluded.short_video_title,
                     title_source = excluded.title_source,
+                    script_source = excluded.script_source,
+                    publish_purpose = excluded.publish_purpose,
+                    cart_enabled = excluded.cart_enabled,
+                    content_branch = excluded.content_branch,
                     updated_at = excluded.updated_at
                 """,
                 [
@@ -345,6 +380,10 @@ class AutoPublishDB:
                         item.script_text,
                         item.short_video_title,
                         item.title_source,
+                        item.script_source,
+                        item.publish_purpose,
+                        item.cart_enabled,
+                        item.content_branch,
                         now,
                         now,
                     )
@@ -359,7 +398,8 @@ class AutoPublishDB:
                 """
                 SELECT canonical_script_key, source_record_id, script_slot, script_id, store_id, product_id,
                        parent_slot, direction_label, variant_strength, short_video_title,
-                       title_source, script_text, target_country, product_type, content_family_key, task_no
+                       title_source, script_text, target_country, product_type, content_family_key, task_no,
+                       script_source, publish_purpose, cart_enabled, content_branch
                 FROM script_metadata
                 """
             ).fetchall()
@@ -379,6 +419,10 @@ class AutoPublishDB:
                 "product_type": str(row["product_type"] or ""),
                 "content_family_key": str(row["content_family_key"] or ""),
                 "task_no": str(row["task_no"] or ""),
+                "script_source": str(row["script_source"] or ""),
+                "publish_purpose": str(row["publish_purpose"] or ""),
+                "cart_enabled": str(row["cart_enabled"] or ""),
+                "content_branch": str(row["content_branch"] or ""),
             }
             for row in rows
         }
@@ -406,7 +450,8 @@ class AutoPublishDB:
         sql = """
             SELECT canonical_script_key, script_id, source_record_id, script_slot, task_no, store_id, product_id,
                    parent_slot, direction_label, variant_strength, target_country, product_type,
-                   content_family_key, script_text, short_video_title, title_source
+                   content_family_key, script_text, short_video_title, title_source,
+                   script_source, publish_purpose, cart_enabled, content_branch
             FROM script_metadata
             ORDER BY updated_at ASC, script_id ASC, canonical_script_key ASC
         """
@@ -434,6 +479,10 @@ class AutoPublishDB:
                 script_text=str(row["script_text"] or ""),
                 short_video_title=str(row["short_video_title"] or ""),
                 title_source=str(row["title_source"] or ""),
+                script_source=str(row["script_source"] or ""),
+                publish_purpose=str(row["publish_purpose"] or ""),
+                cart_enabled=str(row["cart_enabled"] or ""),
+                content_branch=str(row["content_branch"] or ""),
             )
             for row in rows
         ]
@@ -521,8 +570,9 @@ class AutoPublishDB:
                 """
                 INSERT INTO account_configs (
                     account_id, account_name, store_id, account_status,
-                    publish_time_1, publish_time_2, publish_time_3, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    publish_time_1, publish_time_2, publish_time_3,
+                    nurture_enabled, nurture_daily_count, nurture_only, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(account_id) DO UPDATE SET
                     account_name = excluded.account_name,
                     store_id = excluded.store_id,
@@ -530,6 +580,9 @@ class AutoPublishDB:
                     publish_time_1 = excluded.publish_time_1,
                     publish_time_2 = excluded.publish_time_2,
                     publish_time_3 = excluded.publish_time_3,
+                    nurture_enabled = excluded.nurture_enabled,
+                    nurture_daily_count = excluded.nurture_daily_count,
+                    nurture_only = excluded.nurture_only,
                     updated_at = excluded.updated_at
                 """,
                 [
@@ -541,6 +594,9 @@ class AutoPublishDB:
                         item.publish_time_1,
                         item.publish_time_2,
                         item.publish_time_3,
+                        1 if item.nurture_enabled else 0,
+                        int(item.nurture_daily_count or 2),
+                        1 if item.nurture_only else 0,
                         now,
                         now,
                     )
@@ -629,7 +685,8 @@ class AutoPublishDB:
                 """
                 SELECT sm.canonical_script_key, sm.script_id, sm.store_id, sm.product_id, sm.content_family_key,
                        sm.short_video_title, va.local_file_path, va.video_source_type, va.video_source_value,
-                       sm.source_record_id, sm.script_slot
+                       sm.source_record_id, sm.script_slot,
+                       sm.script_source, sm.publish_purpose, sm.cart_enabled, sm.content_branch
                 FROM script_metadata sm
                 INNER JOIN video_assets va ON va.canonical_script_key = sm.canonical_script_key
                 WHERE sm.store_id = ?
@@ -658,9 +715,39 @@ class AutoPublishDB:
                 ),
                 source_record_id=str(row["source_record_id"] or ""),
                 script_slot=str(row["script_slot"] or ""),
+                script_source=str(row["script_source"] or ""),
+                publish_purpose=str(row["publish_purpose"] or ""),
+                cart_enabled=str(row["cart_enabled"] or ""),
+                content_branch=str(row["content_branch"] or ""),
             )
             for row in rows
         ]
+
+    def get_account_config(self, account_id: str) -> Optional[sqlite3.Row]:
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT * FROM account_configs WHERE account_id = ?",
+                (account_id,),
+            ).fetchone()
+
+    def count_scheduled_nurture_for_account_day(self, account_id: str, target_time: datetime) -> int:
+        day_start = datetime.combine(target_time.date(), time.min).strftime("%Y-%m-%d %H:%M:%S")
+        day_end = datetime.combine(target_time.date(), time.max).strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM publish_slots ps
+                INNER JOIN script_metadata sm ON sm.canonical_script_key = ps.canonical_script_key
+                WHERE ps.account_id = ?
+                  AND ps.scheduled_for >= ?
+                  AND ps.scheduled_for <= ?
+                  AND ps.schedule_status IN ('已排期', '已发布')
+                  AND (sm.script_source = '养号复刻' OR sm.publish_purpose = '养号' OR sm.content_branch = '非商品展示型')
+                """,
+                (account_id, day_start, day_end),
+            ).fetchone()
+        return int(row["count"] or 0)
 
     def recycle_dryrun_schedules(self) -> int:
         now = self._now_text()
@@ -709,6 +796,8 @@ class AutoPublishDB:
         return len(canonical_keys)
 
     def has_recent_product_conflict(self, account_id: str, product_id: str, target_time: datetime, hours: int = 72) -> bool:
+        if not str(product_id or "").strip():
+            return False
         start_at = (target_time - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
         end_at = target_time.strftime("%Y-%m-%d %H:%M:%S")
         with self._connect() as conn:
@@ -729,6 +818,8 @@ class AutoPublishDB:
         return row is not None
 
     def has_recent_family_conflict(self, store_id: str, content_family_key: str, target_time: datetime, hours: int = 48) -> bool:
+        if not str(content_family_key or "").strip():
+            return False
         start_at = (target_time - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
         end_at = target_time.strftime("%Y-%m-%d %H:%M:%S")
         with self._connect() as conn:

@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Sequence
 
 
 CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "product_type_config.json"
+TYPE_GUARD_HIGH_CONFIDENCE_THRESHOLD = 0.85
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,8 @@ class ProductTypeContext:
     prompt_label: str
     required_terms: List[str]
     forbidden_terms: List[str]
+    recognized_by_registry: bool = True
+    fallback_used: bool = False
     source: str = "table"
 
     def to_dict(self) -> Dict[str, object]:
@@ -63,6 +66,8 @@ class ResolvedProductContext(ProductTypeContext):
     resolution_policy: str = "prefer_table"
     review_required: bool = False
     conflict_reason: Optional[str] = None
+    block_required: bool = False
+    block_reason: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -170,7 +175,8 @@ def _match_canonical_type(raw_product_type: Optional[str], business_family: str)
 def normalize_product_type(raw_product_type: Optional[str], business_category: Optional[str] = None) -> ProductTypeContext:
     registry = load_type_registry()
     business_family = _resolve_business_family(business_category)
-    canonical_type = _match_canonical_type(raw_product_type, business_family)
+    matched_canonical_type = _match_canonical_type(raw_product_type, business_family)
+    canonical_type = matched_canonical_type
     if canonical_type is None:
         canonical_type = _fallback_canonical_type(business_family, raw_product_type)
 
@@ -190,6 +196,8 @@ def normalize_product_type(raw_product_type: Optional[str], business_category: O
         prompt_label=prompt_label,
         required_terms=list(definition.required_terms),
         forbidden_terms=list(definition.forbidden_terms),
+        recognized_by_registry=matched_canonical_type is not None,
+        fallback_used=matched_canonical_type is None,
     )
 
 
@@ -239,6 +247,8 @@ def resolve_product_context(
     conflict_reason = None
     review_required = False
     resolution_policy = "prefer_table"
+    block_required = False
+    block_reason = None
 
     if vision_context:
         if table_context.canonical_family == vision_context.family and table_context.canonical_slot == vision_context.slot:
@@ -248,6 +258,24 @@ def resolve_product_context(
         else:
             conflict_level = "high"
             conflict_reason = "视觉识别与表格类型的族类或佩戴/使用部位冲突"
+            review_required = True
+        if (
+            not table_context.recognized_by_registry
+            and isinstance(vision_context.confidence, (int, float))
+            and float(vision_context.confidence) >= TYPE_GUARD_HIGH_CONFIDENCE_THRESHOLD
+            and (
+                table_context.canonical_family != vision_context.family
+                or table_context.canonical_slot != vision_context.slot
+            )
+        ):
+            resolution_policy = "block_unrecognized_table_type"
+            block_required = True
+            block_reason = (
+                f"产品类型“{table_context.raw_product_type or table_context.display_type}”未命中守卫词典，"
+                f"当前兜底会落到 {table_context.canonical_family}/{table_context.canonical_slot}，"
+                f"但图片高置信识别为 {vision_context.family}/{vision_context.slot}，请先补充产品类型映射后再执行。"
+            )
+            conflict_reason = block_reason
             review_required = True
 
     return ResolvedProductContext(
@@ -260,4 +288,6 @@ def resolve_product_context(
         resolution_policy=resolution_policy,
         review_required=review_required,
         conflict_reason=conflict_reason,
+        block_required=block_required,
+        block_reason=block_reason,
     )

@@ -25,6 +25,7 @@ REPORT_FIELDS: Sequence[Dict[str, Any]] = (
     {"name": "下载状态", "type": 1, "ui_type": "Text"},
     {"name": "跑视频状态", "type": 1, "ui_type": "Text"},
     {"name": "发布状态", "type": 1, "ui_type": "Text"},
+    {"name": "排期状态", "type": 1, "ui_type": "Text"},
     {"name": "分配账号ID", "type": 1, "ui_type": "Text"},
     {"name": "分配账号名称", "type": 1, "ui_type": "Text"},
     {"name": "计划发布时间", "type": 1, "ui_type": "Text"},
@@ -63,7 +64,13 @@ def _normalize_text(value: Any) -> str:
 
 
 def build_report_fields(row: Any) -> Dict[str, Any]:
-    updated_at = _normalize_text(row["asset_updated_at"]) or _normalize_text(row["metadata_updated_at"])
+    updated_candidates = [
+        _normalize_text(row["slot_updated_at"]),
+        _normalize_text(row["asset_updated_at"]),
+        _normalize_text(row["metadata_updated_at"]),
+    ]
+    updated_at = max((item for item in updated_candidates if item), default="")
+    planned_publish_at = _normalize_text(row["planned_publish_at"]) or _normalize_text(row["latest_slot_scheduled_for"])
     return {
         "内部脚本键": _normalize_text(row["canonical_script_key"]),
         "脚本ID": _normalize_text(row["script_id"]),
@@ -81,9 +88,10 @@ def build_report_fields(row: Any) -> Dict[str, Any]:
         "下载状态": _normalize_text(row["download_status"]),
         "跑视频状态": _normalize_text(row["run_video_status"]),
         "发布状态": _normalize_text(row["publish_status"]),
+        "排期状态": _normalize_text(row["latest_schedule_status"]),
         "分配账号ID": _normalize_text(row["account_id"]),
         "分配账号名称": _normalize_text(row["account_name"]),
-        "计划发布时间": _normalize_text(row["planned_publish_at"]),
+        "计划发布时间": planned_publish_at,
         "发布时间": _normalize_text(row["published_at"]),
         "发布任务ID": _normalize_text(row["publish_task_id"]),
         "发布结果": _normalize_text(row["publish_result"]),

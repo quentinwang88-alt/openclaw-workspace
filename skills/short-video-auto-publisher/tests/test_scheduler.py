@@ -34,6 +34,9 @@ class DummyClient:
 
 
 class RealishPublisher(BasePublishAdapter):
+    def __init__(self) -> None:
+        self.calls = []
+
     def create_scheduled_task(
         self,
         *,
@@ -46,6 +49,14 @@ class RealishPublisher(BasePublishAdapter):
         product_title: str = "",
         ref_video_id: str = "",
     ) -> str:
+        self.calls.append(
+            {
+                "account_id": account_id,
+                "script_id": script_id,
+                "product_id": product_id,
+                "publish_at": publish_at,
+            }
+        )
         return f"real-{account_id}-{script_id}"
 
     def query_task_status(self, *, task_id: str, scheduled_for: datetime) -> PublishTaskStatus:
@@ -106,6 +117,42 @@ class SchedulerTest(unittest.TestCase):
             publish_status="待排期",
         )
 
+    def _upsert_nurture_script(self, script_id: str, content_branch: str = "商品展示型") -> None:
+        self.db.upsert_script_metadata(
+            [
+                ScriptMetadata(
+                    script_id=script_id,
+                    source_record_id=f"rec-{script_id}",
+                    script_slot="S1",
+                    task_no="028",
+                    store_id="SHOP-01",
+                    product_id="P-NURTURE",
+                    parent_slot="YR1",
+                    direction_label="养号复刻",
+                    variant_strength="母版",
+                    target_country="Thailand",
+                    product_type="轻上装",
+                    content_family_key=f"{script_id}:养号",
+                    script_text="nurture script",
+                    short_video_title=f"title-{script_id}",
+                    title_source="test",
+                    script_source="养号复刻",
+                    publish_purpose="养号",
+                    cart_enabled="否",
+                    content_branch=content_branch,
+                )
+            ]
+        )
+        self.db.upsert_video_asset(
+            script_id=script_id,
+            run_manager_record_id=f"run-{script_id}",
+            video_source_type="link",
+            video_source_value="https://example.com/nurture.mp4",
+            local_file_path=f"/tmp/{script_id}.mp4",
+            download_status="下载成功",
+            run_video_status="成功",
+            publish_status="待排期",
+        )
     def test_schedule_slots_respects_recent_product_rule(self) -> None:
         self._upsert_script("001_M1_M", "P1001", "P1001_M1")
         self._upsert_script("002_M1_M", "P1001", "P1001_M1")
@@ -296,6 +343,110 @@ class SchedulerTest(unittest.TestCase):
                 "SELECT COUNT(*) AS count FROM publish_slots WHERE publish_task_id LIKE 'dryrun-%'"
             ).fetchone()
         self.assertEqual(int(dryrun_slots["count"]), 0)
+
+    def test_nurture_enabled_account_prefers_two_nurture_videos_without_product_binding(self) -> None:
+        self.db.upsert_account_configs(
+            [
+                AccountConfig(
+                    account_id="acc-1",
+                    account_name="账号1",
+                    store_id="SHOP-01",
+                    account_status="可用",
+                    publish_time_1="12:00",
+                    publish_time_2="17:00",
+                    publish_time_3="20:00",
+                    nurture_enabled=True,
+                    nurture_daily_count=2,
+                )
+            ]
+        )
+        self._upsert_nurture_script("YR028_YR1_M")
+        self._upsert_nurture_script("YR029_YR1_M")
+        self._upsert_script("010_M1_M", "P1010", "P1010_M1")
+        publisher = RealishPublisher()
+
+        stats = schedule_slots(
+            self.db,
+            publisher,
+            now=datetime(2026, 4, 15, 11, 0, 0),
+        )
+
+        self.assertEqual(stats.scheduled, 3)
+        self.assertEqual([call["script_id"] for call in publisher.calls[:2]], ["YR028_YR1_M", "YR029_YR1_M"])
+        self.assertEqual([call["product_id"] for call in publisher.calls[:2]], ["", ""])
+        self.assertEqual(publisher.calls[2]["product_id"], "P1010")
+
+    def test_nurture_only_account_never_falls_back_to_product_video(self) -> None:
+        self.db.upsert_account_configs(
+            [
+                AccountConfig(
+                    account_id="acc-1",
+                    account_name="账号1",
+                    store_id="SHOP-01",
+                    account_status="可用",
+                    publish_time_1="12:00",
+                    publish_time_2="17:00",
+                    publish_time_3="20:00",
+                    nurture_enabled=True,
+                    nurture_daily_count=2,
+                    nurture_only=True,
+                )
+            ]
+        )
+        self._upsert_nurture_script("YR030_YR1_M")
+        self._upsert_script("011_M1_M", "P1011", "P1011_M1")
+        publisher = RealishPublisher()
+
+        stats = schedule_slots(
+            self.db,
+            publisher,
+            now=datetime(2026, 4, 15, 11, 0, 0),
+        )
+
+        self.assertEqual(stats.scheduled, 1)
+        self.assertEqual([call["script_id"] for call in publisher.calls], ["YR030_YR1_M"])
+        self.assertEqual([call["product_id"] for call in publisher.calls], [""])
+
+    def test_assign_slot_clears_stale_failure_state_when_rescheduling(self) -> None:
+        self._upsert_script("009_M1_V1", "P1009", "P1009_M1")
+
+        self.db.generate_future_slots(datetime(2026, 4, 13, 11, 0, 0), 24)
+        first_slot = self.db.list_pending_slots(datetime(2026, 4, 13, 11, 0, 0), 24)[0]
+        self.db.assign_slot(
+            slot_id=int(first_slot["slot_id"]),
+            script_id="009_M1_V1",
+            publish_task_id="task-failed",
+            account_id="acc-1",
+            account_name="账号1",
+            planned_publish_at=datetime(2026, 4, 13, 12, 0, 0),
+        )
+        self.db.mark_publish_result(
+            script_id="009_M1_V1",
+            publish_task_id="task-failed",
+            schedule_status="发布失败",
+            publish_status="发布失败",
+            publish_result="发布失败",
+            error_message="Product not found",
+        )
+
+        self.db.generate_future_slots(datetime(2026, 4, 14, 11, 0, 0), 24)
+        second_slot = self.db.list_pending_slots(datetime(2026, 4, 14, 11, 0, 0), 24)[0]
+        self.db.assign_slot(
+            slot_id=int(second_slot["slot_id"]),
+            script_id="009_M1_V1",
+            publish_task_id="task-retry",
+            account_id="acc-1",
+            account_name="账号1",
+            planned_publish_at=datetime(2026, 4, 14, 12, 0, 0),
+        )
+
+        asset = self.db.get_video_asset("009_M1_V1")
+        self.assertIsNotNone(asset)
+        self.assertEqual(asset["publish_status"], "已排期")
+        self.assertEqual(asset["publish_task_id"], "task-retry")
+        self.assertEqual(asset["publish_result"], None)
+        self.assertEqual(asset["error_message"], None)
+        self.assertEqual(asset["published_at"], None)
 
 
 if __name__ == "__main__":

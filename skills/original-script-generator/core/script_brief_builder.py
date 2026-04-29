@@ -59,6 +59,53 @@ def _take_dict_items(values: Any, limit: int, keys: List[str]) -> List[Dict[str,
     return items
 
 
+def _take_replacement_templates(values: Any, limit: int = 6) -> List[Dict[str, str]]:
+    if isinstance(values, dict):
+        normalized_values = [
+            {
+                "template_id": _non_empty_text(template_id),
+                "when_to_use": _non_empty_text(template_id),
+                "replacement_shot": _non_empty_text(replacement_shot),
+            }
+            for template_id, replacement_shot in values.items()
+        ]
+        return _take_dict_items(normalized_values, limit, ["template_id", "when_to_use", "replacement_shot"])
+    return _take_dict_items(values, limit, ["template_id", "when_to_use", "replacement_shot"])
+
+
+def _take_enforced_key_visual_constraints(values: Any, limit: int = 5) -> List[Dict[str, str]]:
+    if not isinstance(values, list):
+        return []
+    items: List[Dict[str, str]] = []
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        confidence = _non_empty_text(value.get("confidence"))
+        if confidence not in {"high", "medium"}:
+            continue
+        item = {
+            "constraint": _non_empty_text(value.get("constraint")),
+            "confidence": confidence,
+            "basis": _non_empty_text(value.get("basis")),
+        }
+        if item["constraint"]:
+            items.append(item)
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _build_hair_accessory_profile(anchor_card: Dict[str, Any]) -> Dict[str, str]:
+    fields = [
+        "hair_accessory_subtype",
+        "placement_zone",
+        "hold_scope",
+        "orientation",
+        "primary_result",
+    ]
+    return {field: _non_empty_text(anchor_card.get(field)) or "unknown" for field in fields}
+
+
 def _format_path(path_segments: List[str]) -> str:
     return ".".join(segment for segment in path_segments if segment)
 
@@ -113,10 +160,12 @@ def _load_ai_shot_risk_registry() -> Dict[str, Any]:
 
 def _ai_shot_risk_profile_key(product_type: str) -> str:
     text = _non_empty_text(product_type)
+    if any(token in text for token in ("耳线", "耳环", "耳饰", "耳钉", "耳夹", "耳坠")):
+        return "ear_accessory"
     if any(token in text for token in ("发饰", "发夹", "抓夹", "边夹", "发箍", "发圈", "头绳", "头箍")):
         return "hair_accessory"
-    if any(token in text for token in ("耳", "项链", "戒指", "手链", "手镯", "饰品", "首饰", "包", "帽", "围巾", "墨镜")):
-        return "accessory"
+    if any(token in text for token in ("项链", "戒指", "手链", "手镯", "手环", "饰品", "首饰", "包", "帽", "围巾", "墨镜")):
+        return "general_accessory"
     return "clothing"
 
 
@@ -134,11 +183,7 @@ def _build_ai_shot_risk_profile(product_type: str) -> Dict[str, Any]:
         "high_risk": _take_string_items(profile.get("high_risk"), 6),
         "medium_risk": _take_string_items(profile.get("medium_risk"), 6),
         "low_risk": _take_string_items(profile.get("low_risk"), 6),
-        "replacement_templates": _take_dict_items(
-            profile.get("replacement_templates"),
-            6,
-            ["template_id", "when_to_use", "replacement_shot"],
-        ),
+        "replacement_templates": _take_replacement_templates(profile.get("replacement_templates"), 6),
         "candidate_failures": _take_string_items(profile.get("candidate_failures"), 6),
     }
 
@@ -267,6 +312,8 @@ def build_script_brief(
         "product_positioning_one_liner": _non_empty_text(anchor_card.get("product_positioning_one_liner")),
         "hard_anchors": _take_dict_items(anchor_card.get("hard_anchors"), 5, ["anchor", "reason_not_changeable", "confidence"]),
         "display_anchors": _take_dict_items(anchor_card.get("display_anchors"), 5, ["anchor", "why_must_show", "recommended_shot_type"]),
+        "key_visual_constraints": _take_enforced_key_visual_constraints(anchor_card.get("key_visual_constraints")),
+        "hair_accessory_profile": _build_hair_accessory_profile(anchor_card),
         "parameter_anchors": _take_dict_items(
             anchor_card.get("parameter_anchors"),
             5,

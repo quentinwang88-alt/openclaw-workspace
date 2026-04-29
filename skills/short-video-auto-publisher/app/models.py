@@ -26,6 +26,10 @@ class ScriptMetadata:
     short_video_title: str
     title_source: str
     canonical_script_key: str = ""
+    script_source: str = ""
+    publish_purpose: str = ""
+    cart_enabled: str = ""
+    content_branch: str = ""
 
 
 @dataclass(frozen=True)
@@ -37,6 +41,9 @@ class AccountConfig:
     publish_time_1: str
     publish_time_2: str
     publish_time_3: str
+    nurture_enabled: bool = False
+    nurture_daily_count: int = 2
+    nurture_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -53,6 +60,10 @@ class PublishCandidate:
     product_title: str = ""
     ref_video_id: str = ""
     canonical_script_key: str = ""
+    script_source: str = ""
+    publish_purpose: str = ""
+    cart_enabled: str = ""
+    content_branch: str = ""
 
 
 @dataclass(frozen=True)

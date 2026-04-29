@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -40,6 +41,7 @@ SCRIPT_FIELD_SPECS: List[Dict[str, Any]] = [
 SOURCE_FIELD_ALIASES: Dict[str, List[str]] = {
     "product_code": ["产品编码", "商品编码", "SKU", "Product Code"],
     "product_type": ["产品类型", "商品类型", "类目类型"],
+    "target_language": ["目标语言", "语言", "target_language"],
     "business_category": ["一级类目", "业务大类", "主大类"],
     "product_params": ["产品参数信息", "参数信息", "产品参数"],
     "task_no": ["任务编号", "任务ID", "任务序号", "编号", "产品编码", "商品编码", "SKU", "Product Code"],
@@ -54,6 +56,10 @@ SOURCE_FIELD_ALIASES: Dict[str, List[str]] = {
     "direction_3": ["母版方向3"],
     "direction_4": ["母版方向4"],
     "product_images": ["产品图片", "商品图片", "图片"],
+    "script_source": ["脚本来源", "来源"],
+    "publish_purpose": ["发布用途", "用途"],
+    "cart_enabled": ["是否挂车", "挂车"],
+    "content_branch": ["内容分支"],
     "sync_enabled": ["是否可同步", "是否可同步脚本"],
     "sync_master_enabled": ["是否可同步母版"],
     "sync_variant_enabled": ["是否可同步子变体"],
@@ -75,7 +81,15 @@ TARGET_FIELD_ALIASES: Dict[str, List[str]] = {
     "parent_slot": ["所属母版"],
     "direction_label": ["母版方向"],
     "variant_strength": ["变体强度"],
+    "script_source": ["脚本来源", "来源"],
+    "publish_purpose": ["发布用途", "用途"],
+    "cart_enabled": ["是否挂车", "挂车"],
+    "content_branch": ["内容分支"],
+    "reference_free": ["免参考图"],
+    "task_status": ["任务状态", "状态"],
 }
+
+SCRIPT_ID_HEADER_PATTERN = re.compile(r"\A\s*【脚本ID】\s*\n-\s*[^\n\r]+(?:\r?\n){0,2}")
 
 
 @dataclass
@@ -87,6 +101,7 @@ class ScriptSyncTask:
     prompt_text: str
     reference_images: List[Dict[str, Any]]
     product_type: str = ""
+    target_language: str = ""
     business_category: str = ""
     product_params: str = ""
     script_id: str = ""
@@ -96,6 +111,10 @@ class ScriptSyncTask:
     parent_slot: str = ""
     direction_label: str = ""
     variant_strength: str = ""
+    script_source: str = ""
+    publish_purpose: str = ""
+    cart_enabled: str = ""
+    content_branch: str = ""
 
 
 def is_variant_slot(task_suffix: str) -> bool:
@@ -167,6 +186,14 @@ def normalize_checkbox(value: Any) -> bool:
     return False
 
 
+def is_nurture_task(task: ScriptSyncTask) -> bool:
+    return (
+        normalize_text(task.script_source) == "养号复刻"
+        or normalize_text(task.publish_purpose) == "养号"
+        or normalize_text(task.content_branch) == "非商品展示型"
+    )
+
+
 def extract_attachments(raw_value: Any) -> List[Dict[str, Any]]:
     attachments: List[Dict[str, Any]] = []
     if isinstance(raw_value, list):
@@ -202,11 +229,31 @@ def compact_anchor_text(raw_value: Any, max_length: int = 80) -> str:
     return text[: max_length - 1].rstrip("，,；;、 ") + "…"
 
 
+def remove_script_id_header(prompt_text: Any) -> str:
+    text = normalize_text(prompt_text)
+    if not text:
+        return ""
+    return SCRIPT_ID_HEADER_PATTERN.sub("", text, count=1).lstrip()
+
+
+def prompt_has_script_id_header(prompt_text: Any) -> bool:
+    return bool(SCRIPT_ID_HEADER_PATTERN.match(normalize_text(prompt_text)))
+
+
+def prepend_script_id_header(prompt_text: Any, script_id: str) -> str:
+    body = remove_script_id_header(prompt_text)
+    script_id_text = normalize_text(script_id)
+    if not script_id_text:
+        return body
+    return f"【脚本ID】\n- {script_id_text}\n\n{body}".rstrip()
+
+
 def build_prompt_with_anchor(task: ScriptSyncTask) -> str:
     anchor_parts: List[str] = []
     product_type = compact_anchor_text(task.product_type, max_length=24)
     business_category = compact_anchor_text(task.business_category, max_length=16)
     product_params = compact_anchor_text(task.product_params, max_length=80)
+    target_language = compact_anchor_text(task.target_language, max_length=24) or "目标国家当地语言"
 
     if product_type:
         anchor_parts.append(product_type)
@@ -216,11 +263,20 @@ def build_prompt_with_anchor(task: ScriptSyncTask) -> str:
     if product_params:
         anchor_parts.append(product_params)
 
+    language_guard = (
+        f"【口播/字幕语言强制约束】目标语言：{target_language}。\n"
+        f"所有会被视频模型朗读或显示的口播、旁白、字幕，必须使用{target_language}，不得使用中文。\n"
+        "中文只能作为场景、动作、执行提醒、中文含义等说明文字，不能作为发声/字幕内容。\n"
+        f"如果下方脚本的“字幕/旁白”里仍出现中文，请先翻译成{target_language}后再生成视频。"
+    )
+
     if not anchor_parts:
-        return task.prompt_text
+        prompt = f"{language_guard}\n\n{task.prompt_text}"
+        return prepend_script_id_header(prompt, task.script_id)
 
     anchor_text = "｜".join(anchor_parts)
-    return f"产品锚点：{anchor_text}\n{task.prompt_text}"
+    prompt = f"产品锚点：{anchor_text}\n{language_guard}\n\n{task.prompt_text}"
+    return prepend_script_id_header(prompt, task.script_id)
 
 
 DEFAULT_DIRECTION_LABELS = {
@@ -351,8 +407,13 @@ def build_sync_tasks(
                     prompt_text=prompt_text,
                     reference_images=attachments,
                     product_type=normalize_text(fields.get(mapping.get("product_type"))) if mapping.get("product_type") else "",
+                    target_language=normalize_text(fields.get(mapping.get("target_language"))) if mapping.get("target_language") else "",
                     business_category=normalize_text(fields.get(mapping.get("business_category"))) if mapping.get("business_category") else "",
                     product_params=normalize_text(fields.get(mapping.get("product_params"))) if mapping.get("product_params") else "",
+                    script_source=normalize_text(fields.get(mapping.get("script_source"))) if mapping.get("script_source") else "",
+                    publish_purpose=normalize_text(fields.get(mapping.get("publish_purpose"))) if mapping.get("publish_purpose") else "",
+                    cart_enabled=normalize_text(fields.get(mapping.get("cart_enabled"))) if mapping.get("cart_enabled") else "",
+                    content_branch=normalize_text(fields.get(mapping.get("content_branch"))) if mapping.get("content_branch") else "",
                     **derive_task_metadata(record, mapping, spec["task_suffix"], metadata_lookup=metadata_lookup),
                 )
             )
@@ -390,6 +451,16 @@ def build_target_fields(
             fields[mapping["direction_label"]] = task.direction_label
         if mapping.get("variant_strength") and task.variant_strength:
             fields[mapping["variant_strength"]] = task.variant_strength
+    if mapping.get("script_source") and task.script_source:
+        fields[mapping["script_source"]] = task.script_source
+    if mapping.get("publish_purpose") and task.publish_purpose:
+        fields[mapping["publish_purpose"]] = task.publish_purpose
+    if mapping.get("cart_enabled") and task.cart_enabled:
+        fields[mapping["cart_enabled"]] = task.cart_enabled
+    if mapping.get("content_branch") and task.content_branch:
+        fields[mapping["content_branch"]] = task.content_branch
+    if mapping.get("reference_free") and is_nurture_task(task):
+        fields[mapping["reference_free"]] = "是"
     return fields
 
 

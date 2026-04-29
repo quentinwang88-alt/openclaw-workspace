@@ -2,11 +2,8 @@
 """
 原创脚本生成 LLM 客户端。
 
-当前主线路默认对齐 OpenClaw / Hermes 主 agent：
-- primary: 只走 openai-codex / gpt-5.4
-- backup: 只走 Yunwu GPT-5.4
-- gemini: 只走 Gemini 3.1 Pro（仅手动调试保留）
-- auto: 默认优先 primary，失败时自动切到 backup
+当前只保留一条主线路：
+- primary: 只走与 OpenClaw 当前主 agent 对齐的 openai-codex / gpt-5.4
 """
 
 import base64
@@ -16,17 +13,21 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-import requests
 from openai import OpenAI
 
 from core.json_parser import JSONParseError, parse_json_text
 
 
 PRIMARY_ROUTE = "primary"
-BACKUP_ROUTE = "backup"
-GEMINI_ROUTE = "gemini"
-AUTO_ROUTE = "auto"
-SUPPORTED_ROUTES = {PRIMARY_ROUTE, BACKUP_ROUTE, GEMINI_ROUTE, AUTO_ROUTE}
+
+
+def normalize_route(route: Optional[Any]) -> str:
+    normalized = str(route or PRIMARY_ROUTE).strip().lower()
+    if not normalized:
+        return PRIMARY_ROUTE
+    if normalized == PRIMARY_ROUTE:
+        return PRIMARY_ROUTE
+    raise ValueError(f"不支持的 llm route: {route}")
 
 
 def normalize_route_order(route_order: Optional[Any]) -> Optional[List[str]]:
@@ -43,35 +44,26 @@ def normalize_route_order(route_order: Optional[Any]) -> Optional[List[str]]:
     for item in raw_items:
         if not item:
             continue
-        if item not in SUPPORTED_ROUTES or item == AUTO_ROUTE:
+        if item != PRIMARY_ROUTE:
             raise ValueError(f"llm route order 中存在不支持的线路: {item}")
-        if item not in normalized:
-            normalized.append(item)
+        if PRIMARY_ROUTE not in normalized:
+            normalized.append(PRIMARY_ROUTE)
     return normalized or None
 
-BACKUP_LLM_API_URL = os.environ.get("ORIGINAL_SCRIPT_BACKUP_LLM_API_URL", "https://yunwu.ai/v1")
-BACKUP_LLM_MODEL = os.environ.get("ORIGINAL_SCRIPT_BACKUP_LLM_MODEL", "gpt-5.4")
-BACKUP_LLM_API_KEY = os.environ.get(
-    "ORIGINAL_SCRIPT_BACKUP_LLM_API_KEY",
-    "sk-amhH6Lm8iWryav8lWyhw9WG4D90RF2PlkXhXwlcgNPXBcECh",
-)
-GEMINI_LLM_API_URL = os.environ.get(
-    "ORIGINAL_SCRIPT_GEMINI_API_URL",
-    "https://yunwu.ai/v1",
-)
-GEMINI_LLM_MODEL = os.environ.get("ORIGINAL_SCRIPT_GEMINI_LLM_MODEL", "gemini-3.1-pro-preview")
-GEMINI_LLM_API_KEY = os.environ.get(
-    "ORIGINAL_SCRIPT_GEMINI_LLM_API_KEY",
-    "sk-HA5F4HQ686iQdiEHDC2n0mdfRWU6k82fuOYlomIu6Sj1DQKK",
-)
 PRIMARY_LLM_DEFAULT_API_URL = "https://chatgpt.com/backend-api/codex"
 PRIMARY_LLM_DEFAULT_MODEL = "gpt-5.4"
 PRIMARY_LLM_REASONING_EFFORT = os.environ.get("ORIGINAL_SCRIPT_PRIMARY_REASONING_EFFORT", "high")
 OPENCLAW_CONFIG_PATH = Path(
     os.environ.get("OPENCLAW_CONFIG_PATH", str(Path.home() / ".openclaw" / "openclaw.json"))
 )
-HERMES_CONFIG_PATH = Path(
-    os.environ.get("HERMES_CONFIG_PATH", str(Path.home() / ".hermes" / "config.yaml"))
+OPENCLAW_AGENT_AUTH_PROFILE_PATH = Path(
+    os.environ.get(
+        "OPENCLAW_AGENT_AUTH_PROFILE_PATH",
+        str(Path.home() / ".openclaw" / "agents" / "main" / "agent" / "auth-profiles.json"),
+    )
+)
+CODEX_AUTH_PATH = Path(
+    os.environ.get("CODEX_AUTH_PATH", str(Path.home() / ".codex" / "auth.json"))
 )
 HERMES_AUTH_PATH = Path(
     os.environ.get("HERMES_AUTH_PATH", str(Path.home() / ".hermes" / "auth.json"))
@@ -83,13 +75,6 @@ def _safe_read_json(path: Path) -> Dict[str, Any]:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
-
-
-def _safe_read_text(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except Exception:
-        return ""
 
 
 def _extract_openclaw_primary_model() -> str:
@@ -112,32 +97,36 @@ def _extract_openclaw_primary_model() -> str:
     return ""
 
 
-def _extract_hermes_model_config() -> Dict[str, str]:
-    text = _safe_read_text(HERMES_CONFIG_PATH)
-    if not text:
-        return {}
+def _extract_openclaw_agent_access_token() -> str:
+    payload = _safe_read_json(OPENCLAW_AGENT_AUTH_PROFILE_PATH)
+    profiles = payload.get("profiles") if isinstance(payload, dict) else {}
+    profile = profiles.get("openai-codex:default") if isinstance(profiles, dict) else {}
+    if isinstance(profile, dict):
+        access_token = str(profile.get("access") or "").strip()
+        if access_token:
+            return access_token
+    return ""
 
-    in_model_block = False
-    config: Dict[str, str] = {}
-    for raw_line in text.splitlines():
-        line = raw_line.rstrip()
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if not in_model_block:
-            if stripped == "model:":
-                in_model_block = True
-            continue
-        if not raw_line.startswith("  "):
-            break
-        if ":" not in stripped:
-            continue
-        key, value = stripped.split(":", 1)
-        config[key.strip()] = value.strip().strip('"').strip("'")
-    return config
+
+def _extract_codex_cli_access_token() -> str:
+    payload = _safe_read_json(CODEX_AUTH_PATH)
+    tokens = payload.get("tokens") if isinstance(payload, dict) else {}
+    if isinstance(tokens, dict):
+        access_token = str(tokens.get("access_token") or "").strip()
+        if access_token:
+            return access_token
+    return ""
 
 
 def _extract_codex_access_token() -> str:
+    openclaw_agent_access = _extract_openclaw_agent_access_token()
+    if openclaw_agent_access:
+        return openclaw_agent_access
+
+    codex_cli_access = _extract_codex_cli_access_token()
+    if codex_cli_access:
+        return codex_cli_access
+
     payload = _safe_read_json(HERMES_AUTH_PATH)
     providers = payload.get("providers") if isinstance(payload, dict) else {}
     provider = providers.get("openai-codex") if isinstance(providers, dict) else {}
@@ -160,29 +149,19 @@ def _extract_codex_access_token() -> str:
 
 
 class OriginalScriptLLMClient:
-    """原创脚本生成 LLM 客户端，支持主备线路切换。"""
+    """原创脚本生成 LLM 客户端，仅保留 OpenClaw 主 agent 对齐线路。"""
 
     def __init__(
         self,
-        route: str = AUTO_ROUTE,
+        route: str = PRIMARY_ROUTE,
         primary_api_url: Optional[str] = None,
         primary_api_key: Optional[str] = None,
         primary_model: Optional[str] = None,
-        backup_api_url: str = BACKUP_LLM_API_URL,
-        backup_api_key: str = BACKUP_LLM_API_KEY,
-        backup_model: str = BACKUP_LLM_MODEL,
-        gemini_api_url: str = GEMINI_LLM_API_URL,
-        gemini_api_key: str = GEMINI_LLM_API_KEY,
-        gemini_model: str = GEMINI_LLM_MODEL,
         timeout: int = 120,
         max_retries: int = 2,
         route_order: Optional[List[str]] = None,
     ):
-        normalized_route = str(route or AUTO_ROUTE).strip().lower()
-        if normalized_route not in SUPPORTED_ROUTES:
-            raise ValueError(f"不支持的 llm route: {route}")
-
-        self.route = normalized_route
+        self.route = normalize_route(route)
         self._primary_client: Optional[OpenAI] = None
         self.timeout = timeout
         self.max_retries = max_retries
@@ -190,13 +169,6 @@ class OriginalScriptLLMClient:
         self.primary_api_url = self._resolve_primary_api_url(primary_api_url)
         self.primary_api_key = self._resolve_primary_api_key(primary_api_key)
         self.primary_model = self._resolve_primary_model(primary_model)
-        self.backup_api_url = self._normalize_backup_api_url(backup_api_url)
-        self.backup_api_key = backup_api_key
-        self.backup_model = backup_model
-        self.gemini_api_url = self._normalize_gemini_api_url(gemini_api_url)
-        self.gemini_api_key = gemini_api_key
-        self.gemini_model = gemini_model
-        self._working_route: Optional[str] = None
         self.route_order = normalize_route_order(route_order)
 
     def _get_primary_client(self) -> OpenAI:
@@ -302,56 +274,8 @@ class OriginalScriptLLMClient:
         image_paths: List[str],
         max_tokens: int,
     ) -> Dict[str, Any]:
-        route_candidates = self._route_candidates()
-        last_error: Optional[Exception] = None
-
-        for index, route in enumerate(route_candidates):
-            is_last = index == len(route_candidates) - 1
-            try:
-                print(f"    🛣️ 使用 LLM 线路: {route}")
-                result = self._call_raw_via_route(route, prompt=prompt, image_paths=image_paths, max_tokens=max_tokens)
-                if self.route == AUTO_ROUTE:
-                    self._working_route = route
-                return result
-            except Exception as exc:
-                last_error = exc
-                if is_last or not self._is_failover_eligible_error(exc):
-                    raise
-                print(f"    ⚠️ LLM 线路 {route} 不可用，自动切换到下一条线路...")
-
-        raise Exception(f"LLM 调用最终失败: {last_error}")
-
-    def _route_candidates(self) -> List[str]:
-        if self.route_order:
-            return list(self.route_order)
-        if self.route == GEMINI_ROUTE:
-            return [GEMINI_ROUTE, PRIMARY_ROUTE, BACKUP_ROUTE]
-        if self.route == BACKUP_ROUTE:
-            return [BACKUP_ROUTE, PRIMARY_ROUTE]
-        if self.route == PRIMARY_ROUTE:
-            return [PRIMARY_ROUTE, BACKUP_ROUTE]
-        if self._working_route == PRIMARY_ROUTE:
-            return [PRIMARY_ROUTE, BACKUP_ROUTE]
-        if self._working_route == BACKUP_ROUTE:
-            return [BACKUP_ROUTE, PRIMARY_ROUTE]
-        if self._working_route == GEMINI_ROUTE:
-            return [GEMINI_ROUTE, PRIMARY_ROUTE, BACKUP_ROUTE]
-        return [PRIMARY_ROUTE, BACKUP_ROUTE]
-
-    def _call_raw_via_route(
-        self,
-        route: str,
-        prompt: str,
-        image_paths: List[str],
-        max_tokens: int,
-    ) -> Dict[str, Any]:
-        if route == PRIMARY_ROUTE:
-            return self._call_primary(prompt=prompt, image_paths=image_paths, max_tokens=max_tokens)
-        if route == BACKUP_ROUTE:
-            return self._call_backup(prompt=prompt, image_paths=image_paths, max_tokens=max_tokens)
-        if route == GEMINI_ROUTE:
-            return self._call_gemini(prompt=prompt, image_paths=image_paths, max_tokens=max_tokens)
-        raise ValueError(f"未知的 llm route: {route}")
+        print(f"    🛣️ 使用 LLM 线路: {PRIMARY_ROUTE}")
+        return self._call_primary(prompt=prompt, image_paths=image_paths, max_tokens=max_tokens)
 
     def _call_primary(
         self,
@@ -410,134 +334,6 @@ class OriginalScriptLLMClient:
     def _call_primary_text(self, prompt: str, max_tokens: int) -> Dict[str, Any]:
         return self._call_primary(prompt=prompt, image_paths=[], max_tokens=max_tokens)
 
-    def _call_backup(
-        self,
-        prompt: str,
-        image_paths: List[str],
-        max_tokens: int,
-    ) -> Dict[str, Any]:
-        content: List[Dict[str, Any]] = []
-        for image_path in image_paths:
-            image_data_url = self._image_path_to_data_url(image_path)
-            content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": image_data_url},
-                }
-            )
-        content.append({"type": "text", "text": prompt})
-
-        payload = {
-            "model": self.backup_model,
-            "messages": [{"role": "user", "content": content}],
-            "max_tokens": max_tokens,
-            "temperature": 0.3,
-        }
-        return self._post_backup_chat(payload)
-
-    def _post_backup_chat(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        url = f"{self.backup_api_url}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.backup_api_key}",
-            "Content-Type": "application/json",
-        }
-
-        last_error: Optional[Exception] = None
-        for attempt in range(self.max_retries + 1):
-            try:
-                response = requests.post(
-                    url,
-                    headers=headers,
-                    json=payload,
-                    timeout=self.timeout,
-                )
-                if response.status_code != 200:
-                    raise Exception(f"备用线路调用失败: {response.status_code} - {response.text}")
-                try:
-                    return response.json()
-                except ValueError as exc:
-                    raise Exception(
-                        "备用线路返回的不是 JSON: "
-                        f"content-type={response.headers.get('content-type')} "
-                        f"body={response.text[:400]}"
-                    ) from exc
-            except requests.exceptions.Timeout as exc:
-                last_error = exc
-            except requests.exceptions.RequestException as exc:
-                last_error = exc
-            except Exception as exc:
-                last_error = exc
-
-            if attempt < self.max_retries:
-                wait_time = 2 ** attempt
-                print(f"    ⚠️ 备用线路调用异常，{wait_time} 秒后重试 ({attempt + 1}/{self.max_retries})...")
-                time.sleep(wait_time)
-
-        raise Exception(f"备用线路调用最终失败: {last_error}")
-
-    def _call_gemini(
-        self,
-        prompt: str,
-        image_paths: List[str],
-        max_tokens: int,
-    ) -> Dict[str, Any]:
-        parts: List[Dict[str, Any]] = [{"text": prompt}]
-        for image_path in image_paths:
-            parts.append(self._image_path_to_gemini_inline_data(image_path))
-
-        payload = {
-            "contents": [{"parts": parts}],
-            "generationConfig": {
-                "temperature": 0.3,
-                "maxOutputTokens": max_tokens,
-            },
-        }
-        return self._post_gemini_content(payload)
-
-    def _post_gemini_content(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        if not self.gemini_api_key:
-            raise Exception("Gemini 线路未配置 API Key")
-
-        url = f"{self.gemini_api_url}/models/{self.gemini_model}:generateContent"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.gemini_api_key}",
-        }
-
-        last_error: Optional[Exception] = None
-        for attempt in range(self.max_retries + 1):
-            try:
-                response = requests.post(
-                    url,
-                    headers=headers,
-                    json=payload,
-                    timeout=self.timeout,
-                )
-                if response.status_code != 200:
-                    raise Exception(f"Gemini 线路调用失败: {response.status_code} - {response.text}")
-                try:
-                    result = response.json()
-                except ValueError as exc:
-                    raise Exception(
-                        "Gemini 线路返回的不是 JSON: "
-                        f"content-type={response.headers.get('content-type')} "
-                        f"body={response.text[:400]}"
-                    ) from exc
-                return self._normalize_gemini_response(result)
-            except requests.exceptions.Timeout as exc:
-                last_error = exc
-            except requests.exceptions.RequestException as exc:
-                last_error = exc
-            except Exception as exc:
-                last_error = exc
-
-            if attempt < self.max_retries:
-                wait_time = 2 ** attempt
-                print(f"    ⚠️ Gemini 线路调用异常，{wait_time} 秒后重试 ({attempt + 1}/{self.max_retries})...")
-                time.sleep(wait_time)
-
-        raise Exception(f"Gemini 线路调用最终失败: {last_error}")
-
     @staticmethod
     def _image_path_to_data_url(image_path: str) -> str:
         image_bytes = Path(image_path).read_bytes()
@@ -547,70 +343,6 @@ class OriginalScriptLLMClient:
             image_format = "jpeg"
         mime_type = f"image/{image_format}"
         return f"data:{mime_type};base64,{image_base64}"
-
-    @staticmethod
-    def _image_path_to_gemini_inline_data(image_path: str) -> Dict[str, Any]:
-        image_bytes = Path(image_path).read_bytes()
-        image_base64 = base64.b64encode(image_bytes).decode("utf-8")
-        image_format = Path(image_path).suffix.lower().lstrip(".")
-        if image_format == "jpg":
-            image_format = "jpeg"
-        mime_type = f"image/{image_format}"
-        return {
-            "inline_data": {
-                "mime_type": mime_type,
-                "data": image_base64,
-            }
-        }
-
-    @staticmethod
-    def _normalize_backup_api_url(api_url: str) -> str:
-        normalized = str(api_url or BACKUP_LLM_API_URL).strip().rstrip("/")
-        if normalized.endswith("/V1"):
-            return normalized[:-3] + "/v1"
-        return normalized
-
-    @staticmethod
-    def _normalize_gemini_api_url(api_url: str) -> str:
-        normalized = str(api_url or GEMINI_LLM_API_URL).strip().rstrip("/")
-        if normalized.endswith("/V1"):
-            return normalized[:-3] + "/v1"
-        if normalized.endswith("/v1"):
-            return normalized
-        if normalized.endswith("/v1beta"):
-            return normalized
-        if "generativelanguage.googleapis.com" in normalized and not normalized.endswith("/v1beta"):
-            return normalized + "/v1beta"
-        return normalized + "/v1"
-
-    @staticmethod
-    def _normalize_gemini_response(result: Dict[str, Any]) -> Dict[str, Any]:
-        try:
-            candidates = result.get("candidates") or []
-            if not candidates:
-                raise Exception("Gemini 响应中缺少 candidates")
-            content = candidates[0].get("content") or {}
-            parts = content.get("parts") or []
-            text_parts: List[str] = []
-            for item in parts:
-                if isinstance(item, dict) and item.get("text"):
-                    text_parts.append(str(item["text"]))
-            text = "\n".join(part.strip() for part in text_parts if part and part.strip()).strip()
-            if not text:
-                raise Exception(f"Gemini 响应中未提取到文本: {json.dumps(result, ensure_ascii=False)[:1200]}")
-            return {
-                "choices": [
-                    {
-                        "message": {
-                            "content": text,
-                        }
-                    }
-                ]
-            }
-        except Exception as exc:
-            raise Exception(
-                f"解析 Gemini 响应失败: {exc}; 原始响应: {json.dumps(result, ensure_ascii=False)[:1200]}"
-            ) from exc
 
     @staticmethod
     def _extract_openai_responses_text(result: Dict[str, Any]) -> str:
@@ -637,10 +369,6 @@ class OriginalScriptLLMClient:
     def _resolve_primary_api_url(override: Optional[str]) -> str:
         if override and str(override).strip():
             return str(override).strip().rstrip("/")
-        hermes = _extract_hermes_model_config()
-        base_url = str(hermes.get("base_url") or "").strip()
-        if base_url:
-            return base_url.rstrip("/")
         return PRIMARY_LLM_DEFAULT_API_URL
 
     @staticmethod
@@ -650,10 +378,6 @@ class OriginalScriptLLMClient:
         openclaw_model = _extract_openclaw_primary_model()
         if openclaw_model:
             return openclaw_model
-        hermes = _extract_hermes_model_config()
-        hermes_model = str(hermes.get("default") or "").strip()
-        if hermes_model:
-            return hermes_model
         return PRIMARY_LLM_DEFAULT_MODEL
 
     @staticmethod
@@ -664,38 +388,6 @@ class OriginalScriptLLMClient:
         if env_value:
             return env_value
         return _extract_codex_access_token()
-
-    @staticmethod
-    def _is_failover_eligible_error(exc: Exception) -> bool:
-        message = str(exc).lower()
-        return (
-            "timeout" in message
-            or "超时" in message
-            or "429" in message
-            or "502" in message
-            or "503" in message
-            or "504" in message
-            or "temporarily unavailable" in message
-            or "connection" in message
-            or "dns" in message
-            or "no available channel" in message
-            or "not found" in message
-            or "rate limit" in message
-            or "限流" in message
-            or "resource exhausted" in message
-            or "insufficient_quota" in message
-            or "quota" in message
-            or "401" in message
-            or "403" in message
-            or "unauthorized" in message
-            or "forbidden" in message
-            or "deadline exceeded" in message
-            or "unavailable" in message
-            or "proxy" in message
-            or "ssl" in message
-            or "eof" in message
-            or "remote end closed connection" in message
-        )
 
     @staticmethod
     def _is_rate_limit_error(exc: Exception) -> bool:

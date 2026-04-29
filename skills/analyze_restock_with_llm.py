@@ -16,6 +16,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 from restock_skill_adapter import generate_restock_report
 
 
+def _priority_days(item: dict) -> float:
+    """优先使用新的主排序天数字段。"""
+    return item.get('days_for_priority', item.get('days_with_transit', item.get('purchase_sale_days', 0)))
+
+
 def analyze_with_llm(restock_data: Dict[str, Any]) -> str:
     """
     调用 LLM 分析补货建议数据
@@ -29,9 +34,9 @@ def analyze_with_llm(restock_data: Dict[str, Any]) -> str:
         return "暂无需要补货的 SKU。"
     
     # 按优先级分组
-    urgent = [x for x in restock_list if x['purchase_sale_days'] <= 3]
-    high = [x for x in restock_list if 4 <= x['purchase_sale_days'] <= 7]
-    medium = [x for x in restock_list if 8 <= x['purchase_sale_days'] <= 10]
+    urgent = [x for x in restock_list if _priority_days(x) <= 3]
+    high = [x for x in restock_list if 3 < _priority_days(x) <= 7]
+    medium = [x for x in restock_list if 7 < _priority_days(x) <= 10]
     
     # 计算统计数据
     total_suggested_qty = sum(x['suggested_qty'] for x in restock_list)
@@ -42,7 +47,7 @@ def analyze_with_llm(restock_data: Dict[str, Any]) -> str:
     top_sales = sorted(restock_list, key=lambda x: x['avg_daily_sales'], reverse=True)[:5]
     
     # 找出库存最紧急的 SKU
-    most_urgent = sorted(restock_list, key=lambda x: x['purchase_sale_days'])[:5]
+    most_urgent = sorted(restock_list, key=_priority_days)[:5]
     
     # 生成分析报告
     analysis = f"""## 📊 数据洞察
@@ -75,7 +80,10 @@ def analyze_with_llm(restock_data: Dict[str, Any]) -> str:
     analysis += "\n### 🚨 最紧急补货 SKU\n\n"
     for i, item in enumerate(most_urgent, 1):
         status = "⚡ 有在途" if item.get('in_transit', 0) > 0 else ""
-        analysis += f"{i}. **{item['sku']}** - 预计可售 {item['purchase_sale_days']} 天，建议采购 {item['suggested_qty']} 件 {status}\n"
+        analysis += (
+            f"{i}. **{item['sku']}** - 实际可售 {item.get('days_with_transit', item['purchase_sale_days']):.1f} 天，"
+            f"现货可售 {item['purchase_sale_days']:.1f} 天，建议采购 {item['suggested_qty']} 件 {status}\n"
+        )
     
     # 生成建议
     analysis += "\n## 💡 运营建议\n\n"
@@ -84,7 +92,10 @@ def analyze_with_llm(restock_data: Dict[str, Any]) -> str:
         analysis += "### 🚨 紧急行动项\n"
         analysis += "- 以下 SKU 库存极度紧张，建议 **立即安排补货**：\n"
         for item in urgent[:3]:
-            analysis += f"  - {item['sku']}: 仅剩 {item['purchase_sale_days']} 天库存，建议采购 {item['suggested_qty']} 件\n"
+            analysis += (
+                f"  - {item['sku']}: 实际可售 {item.get('days_with_transit', item['purchase_sale_days']):.1f} 天，"
+                f"建议采购 {item['suggested_qty']} 件\n"
+            )
         analysis += "\n"
     
     if total_in_transit > 0:
@@ -93,7 +104,7 @@ def analyze_with_llm(restock_data: Dict[str, Any]) -> str:
         analysis += "- 建议在途商品到货后优先分配给库存紧张的 SKU\n\n"
     
     # 计算平均可售天数
-    avg_days = sum(x['purchase_sale_days'] for x in restock_list) / len(restock_list)
+    avg_days = sum(_priority_days(x) for x in restock_list) / len(restock_list)
     if avg_days < 7:
         analysis += "### ⚠️ 整体库存健康度\n"
         analysis += f"- 平均可售天数仅 {avg_days:.1f} 天，整体库存偏低\n"
@@ -202,9 +213,9 @@ def main():
     print("📊 分析摘要")
     print("=" * 60)
     
-    urgent = [x for x in restock_list if x['purchase_sale_days'] <= 3]
-    high = [x for x in restock_list if 4 <= x['purchase_sale_days'] <= 7]
-    medium = [x for x in restock_list if 8 <= x['purchase_sale_days'] <= 10]
+    urgent = [x for x in restock_list if _priority_days(x) <= 3]
+    high = [x for x in restock_list if 3 < _priority_days(x) <= 7]
+    medium = [x for x in restock_list if 7 < _priority_days(x) <= 10]
     
     print(f"\n🔴 极高优先级: {len(urgent)} 个 SKU")
     print(f"🟠 高优先级: {len(high)} 个 SKU")

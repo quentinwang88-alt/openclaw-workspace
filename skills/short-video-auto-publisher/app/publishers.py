@@ -10,6 +10,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import parse_qsl, urlparse, urlunparse
 
 import requests
 
@@ -311,6 +312,33 @@ class GeeLarkPublishAdapter(BasePublishAdapter):
         upload_headers["Content-Length"] = str(file_size)
         return upload_headers
 
+    @staticmethod
+    def _guess_content_type(file_path: str) -> str:
+        suffix = Path(file_path).suffix.lower()
+        mapping = {
+            ".mp4": "video/mp4",
+            ".mov": "video/quicktime",
+            ".m4v": "video/x-m4v",
+            ".avi": "video/x-msvideo",
+            ".webm": "video/webm",
+        }
+        return mapping.get(suffix, "application/octet-stream")
+
+    @staticmethod
+    def _is_presigned_upload_url(url: str) -> bool:
+        parsed = urlparse(str(url or "").strip())
+        query_keys = {key.lower() for key, _ in parse_qsl(parsed.query, keep_blank_values=True)}
+        signature_markers = {"signature", "ossaccesskeyid", "x-amz-signature", "x-amz-algorithm", "x-oss-signature-version"}
+        return bool(query_keys & signature_markers)
+
+    @staticmethod
+    def _normalize_upload_url(url: str) -> str:
+        parsed = urlparse(str(url or "").strip())
+        normalized_path = parsed.path.replace("%2F", "/").replace("%2f", "/")
+        if normalized_path == parsed.path:
+            return str(url or "").strip()
+        return urlunparse(parsed._replace(path=normalized_path))
+
     def _upload_local_file(self, file_path: str) -> str:
         resolved_path = Path(file_path)
         file_type = self._guess_file_type(file_path)
@@ -323,21 +351,58 @@ class GeeLarkPublishAdapter(BasePublishAdapter):
         )
         self._raise_for_status_with_body(upload_meta_response, "GeeLark 获取上传地址失败")
         upload_meta_payload: Dict[str, Any] = upload_meta_response.json()
-        upload_url = self._extract_by_paths(upload_meta_payload, self.upload_url_paths, "uploadUrl")
+        raw_upload_url = self._extract_by_paths(upload_meta_payload, self.upload_url_paths, "uploadUrl")
+        upload_url = self._normalize_upload_url(raw_upload_url)
         resource_url = self._extract_by_paths(upload_meta_payload, self.resource_url_paths, "resourceUrl")
         upload_headers = self._extract_upload_headers(upload_meta_payload, file_size=resolved_path.stat().st_size)
+        upload_payload = resolved_path.read_bytes()
 
-        upload_uses_env_proxy = not str(upload_url or "").strip().lower().startswith("http://")
-        with open(resolved_path, "rb") as handle:
-            upload_response = self._request_with_retry(
-                "PUT",
-                upload_url,
-                data=handle,
-                headers=upload_headers,
-                timeout=300,
-                use_env_proxy=upload_uses_env_proxy,
-            )
-        self._raise_for_status_with_body(upload_response, f"GeeLark 上传视频失败: {resolved_path.name}")
+        is_presigned = self._is_presigned_upload_url(upload_url)
+        upload_uses_env_proxy = not is_presigned and not str(upload_url or "").strip().lower().startswith("http://")
+        headers_with_default_type = dict(upload_headers)
+        added_default_content_type = not any(key.lower() == "content-type" for key in headers_with_default_type)
+        if added_default_content_type:
+            headers_with_default_type["Content-Type"] = self._guess_content_type(file_path)
+
+        attempt_headers = [headers_with_default_type]
+        if added_default_content_type:
+            attempt_headers.append(dict(upload_headers))
+
+        attempt_urls = [upload_url]
+        if is_presigned and upload_url.lower().startswith("http://"):
+            attempt_urls.append("https://" + upload_url[len("http://") :])
+
+        last_error: Optional[Exception] = None
+        seen_attempts: set[tuple[str, tuple[tuple[str, str], ...]]] = set()
+        for attempt_url in attempt_urls:
+            for headers in attempt_headers:
+                attempt_key = (
+                    attempt_url,
+                    tuple(sorted((str(key), str(value)) for key, value in headers.items())),
+                )
+                if attempt_key in seen_attempts:
+                    continue
+                seen_attempts.add(attempt_key)
+                try:
+                    upload_response = self._request_with_retry(
+                        "PUT",
+                        attempt_url,
+                        data=upload_payload,
+                        headers=headers,
+                        timeout=300,
+                        use_env_proxy=upload_uses_env_proxy,
+                    )
+                    self._raise_for_status_with_body(upload_response, f"GeeLark 上传视频失败: {resolved_path.name}")
+                    return resource_url
+                except requests.HTTPError as exc:
+                    last_error = exc
+                    error_text = str(exc)
+                    if "SignatureDoesNotMatch" not in error_text and "Not Implemented" not in error_text:
+                        raise
+                except requests.RequestException as exc:
+                    last_error = exc
+        if last_error is not None:
+            raise last_error
         return resource_url
 
     def create_scheduled_task(

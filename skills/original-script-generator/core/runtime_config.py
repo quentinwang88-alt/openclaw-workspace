@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from core.llm_client import AUTO_ROUTE, PRIMARY_ROUTE, SUPPORTED_ROUTES
+from core.llm_client import PRIMARY_ROUTE, normalize_route
 
 
 def _shared_data_dir() -> Path:
@@ -28,10 +28,7 @@ def default_runtime_config_path() -> Path:
 
 
 def _normalize_route(route: Optional[str]) -> str:
-    normalized = str(route or AUTO_ROUTE).strip().lower()
-    if normalized not in SUPPORTED_ROUTES:
-        raise ValueError(f"不支持的 llm route: {route}")
-    return normalized
+    return normalize_route(route)
 
 
 def load_runtime_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
@@ -44,11 +41,11 @@ def load_runtime_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
     except Exception:
         return {"llm_route": PRIMARY_ROUTE}
 
-    route = payload.get("llm_route", AUTO_ROUTE)
+    route = payload.get("llm_route", PRIMARY_ROUTE)
     try:
         normalized_route = _normalize_route(route)
     except ValueError:
-        normalized_route = AUTO_ROUTE
+        normalized_route = PRIMARY_ROUTE
 
     return {
         "llm_route": normalized_route,

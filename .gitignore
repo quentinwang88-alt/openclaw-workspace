@@ -99,6 +99,8 @@ skills/output/
 skills/**/cache/
 skills/**/logs/
 skills/**/output/
+skills/**/outputs/*
+!skills/**/outputs/.gitkeep
 skills/**/temp/
 skills/**/tmp/
 

@@ -142,11 +142,16 @@ class GeeLarkPublishAdapterTest(unittest.TestCase):
         self.assertEqual(second_call.args[0], "PUT")
         self.assertEqual(second_call.args[1], "https://upload.example.com/put-target")
         self.assertEqual(second_call.kwargs["headers"]["Content-Length"], str(len(b"video-bytes")))
-        self.assertNotIn("Content-Type", second_call.kwargs["headers"])
+        self.assertEqual(second_call.kwargs["headers"]["Content-Type"], "video/mp4")
         self.assertEqual(third_call.kwargs["json"]["list"][0]["video"], "https://material-prod.geelark.cn/open-upload/demo.mp4")
 
+    @patch("app.publishers.requests.Session")
     @patch("app.publishers.requests.request")
-    def test_upload_local_file_keeps_presigned_upload_url_unchanged(self, mock_request: Mock) -> None:
+    def test_upload_local_file_normalizes_presigned_upload_url_and_bypasses_proxy(
+        self,
+        mock_request: Mock,
+        mock_session_cls: Mock,
+    ) -> None:
         upload_meta_response = Mock()
         upload_meta_response.json.return_value = {
             "data": {
@@ -162,7 +167,16 @@ class GeeLarkPublishAdapterTest(unittest.TestCase):
         task_add_response.json.return_value = {"data": {"task_id": "task-encoded"}}
         task_add_response.raise_for_status.return_value = None
 
-        mock_request.side_effect = [upload_meta_response, upload_response, task_add_response]
+        mock_session = Mock()
+        mock_session.request.return_value = upload_response
+        mock_session_cls.return_value = mock_session
+
+        def request_side_effect(method, url, **kwargs):
+            if "upload/getUrl" in url:
+                return upload_meta_response
+            return task_add_response
+
+        mock_request.side_effect = request_side_effect
 
         with tempfile.TemporaryDirectory() as temp_dir:
             local_path = Path(temp_dir) / "demo.mp4"
@@ -177,11 +191,14 @@ class GeeLarkPublishAdapterTest(unittest.TestCase):
             )
 
         self.assertEqual(task_id, "task-encoded")
-        put_call = mock_request.call_args_list[1]
+        put_call = mock_session.request.call_args
         self.assertEqual(
             put_call.args[1],
-            "https://upload.example.com/open-upload%2Ffolder%2Fdemo.mp4?Expires=123&Signature=abc%3D",
+            "https://upload.example.com/open-upload/folder/demo.mp4?Expires=123&Signature=abc%3D",
         )
+        self.assertFalse(mock_session.trust_env)
+        self.assertEqual(put_call.kwargs["headers"]["Content-Type"], "video/mp4")
+        mock_session.close.assert_called_once()
 
     @patch("app.publishers.requests.request")
     def test_upload_local_file_forwards_upload_headers_from_meta(self, mock_request: Mock) -> None:
@@ -224,6 +241,62 @@ class GeeLarkPublishAdapterTest(unittest.TestCase):
         self.assertEqual(put_headers["x-oss-meta-source"], "geelark")
         self.assertEqual(put_headers["Content-Length"], str(len(b"video-bytes")))
 
+    @patch("app.publishers.requests.Session")
+    @patch("app.publishers.requests.request")
+    def test_upload_local_file_retries_without_guessed_content_type_after_signature_mismatch(
+        self,
+        mock_request: Mock,
+        mock_session_cls: Mock,
+    ) -> None:
+        upload_meta_response = Mock()
+        upload_meta_response.json.return_value = {
+            "data": {
+                "uploadUrl": "https://upload.example.com/open-upload%2Ffolder%2Fdemo.mp4?Expires=123&Signature=abc%3D",
+                "resourceUrl": "https://material-prod.geelark.cn/open-upload/demo.mp4",
+            }
+        }
+        upload_meta_response.raise_for_status.return_value = None
+
+        signature_error_response = Mock()
+        signature_error_response.raise_for_status.side_effect = requests.HTTPError("403 Forbidden, SignatureDoesNotMatch")
+        signature_error_response.text = "SignatureDoesNotMatch"
+
+        upload_success_response = Mock()
+        upload_success_response.raise_for_status.return_value = None
+
+        task_add_response = Mock()
+        task_add_response.json.return_value = {"data": {"task_id": "task-retry"}}
+        task_add_response.raise_for_status.return_value = None
+
+        mock_session = Mock()
+        mock_session.request.side_effect = [signature_error_response, upload_success_response]
+        mock_session_cls.return_value = mock_session
+
+        def request_side_effect(method, url, **kwargs):
+            if "upload/getUrl" in url:
+                return upload_meta_response
+            return task_add_response
+
+        mock_request.side_effect = request_side_effect
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            local_path = Path(temp_dir) / "demo.mp4"
+            local_path.write_bytes(b"video-bytes")
+            adapter = GeeLarkPublishAdapter(token="secret")
+            task_id = adapter.create_scheduled_task(
+                account_id="acc-2",
+                video_path=str(local_path),
+                title="local-video",
+                publish_at=datetime(2026, 4, 9, 13, 0, 0),
+                script_id="002_M1_M",
+            )
+
+        self.assertEqual(task_id, "task-retry")
+        first_headers = mock_session.request.call_args_list[0].kwargs["headers"]
+        second_headers = mock_session.request.call_args_list[1].kwargs["headers"]
+        self.assertEqual(first_headers["Content-Type"], "video/mp4")
+        self.assertNotIn("Content-Type", second_headers)
+
     @patch("app.publishers.requests.request")
     def test_upload_local_file_includes_response_body_when_upload_fails(self, mock_request: Mock) -> None:
         upload_meta_response = Mock()
@@ -235,11 +308,15 @@ class GeeLarkPublishAdapterTest(unittest.TestCase):
         }
         upload_meta_response.raise_for_status.return_value = None
 
-        upload_error_response = Mock()
-        upload_error_response.raise_for_status.side_effect = requests.HTTPError("501 Server Error: Not Implemented")
-        upload_error_response.text = "<Error><Code>NotImplemented</Code><Header>Transfer-Encoding</Header></Error>"
+        first_upload_error_response = Mock()
+        first_upload_error_response.raise_for_status.side_effect = requests.HTTPError("501 Server Error: Not Implemented")
+        first_upload_error_response.text = "<Error><Code>NotImplemented</Code><Header>Transfer-Encoding</Header></Error>"
 
-        mock_request.side_effect = [upload_meta_response, upload_error_response]
+        second_upload_error_response = Mock()
+        second_upload_error_response.raise_for_status.side_effect = requests.HTTPError("501 Server Error: Not Implemented")
+        second_upload_error_response.text = "<Error><Code>NotImplemented</Code><Header>Transfer-Encoding</Header></Error>"
+
+        mock_request.side_effect = [upload_meta_response, first_upload_error_response, second_upload_error_response]
 
         with tempfile.TemporaryDirectory() as temp_dir:
             local_path = Path(temp_dir) / "demo.mp4"

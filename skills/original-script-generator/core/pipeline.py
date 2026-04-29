@@ -4,6 +4,7 @@
 """
 
 import hashlib
+import copy
 import json
 import os
 import re
@@ -11,6 +12,7 @@ import subprocess
 import tempfile
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -464,6 +466,7 @@ VARIANT_GROUPS = [
 ]
 
 DEFAULT_VARIANT_SCRIPT_INDEXES = {1, 2, 3, 4}
+STALE_RUNNING_VARIANT_SECONDS = int(os.environ.get("ORIGINAL_SCRIPT_STALE_RUNNING_VARIANT_SECONDS", "7200"))
 
 VARIANT_STAGE_LOOKUP = {
     "anchor_card_json": "anchor_card",
@@ -587,6 +590,59 @@ def _should_enqueue_completed_record_for_variants(
     if not _record_has_review_pass_candidate(record.fields, mapping):
         return False
     return True
+
+
+def _parse_storage_time(value: Any) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(text[:19], fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _latest_local_activity_for_record(record: TaskRecord, storage: PipelineStorage) -> Optional[datetime]:
+    with storage._connect() as conn:
+        row = conn.execute(
+            """
+            SELECT MAX(activity_at) AS activity_at
+            FROM (
+                SELECT started_at AS activity_at
+                FROM pipeline_runs
+                WHERE record_id = ?
+                  AND completed_at IS NULL
+                UNION ALL
+                SELECT sr.created_at AS activity_at
+                FROM stage_results sr
+                JOIN pipeline_runs pr ON pr.run_id = sr.run_id
+                WHERE pr.record_id = ?
+                  AND pr.completed_at IS NULL
+            )
+            """,
+            (record.record_id, record.record_id),
+        ).fetchone()
+    return _parse_storage_time(row["activity_at"] if row else None)
+
+
+def _should_enqueue_stale_running_variant_record(
+    record: TaskRecord,
+    mapping: Dict[str, Optional[str]],
+    storage: PipelineStorage,
+) -> bool:
+    status_field = mapping.get("status")
+    if not status_field:
+        return False
+    if normalize_cell_value(record.fields.get(status_field)) != STATUS_RUNNING_VARIANTS:
+        return False
+    if not (_record_generate_variants_checked(record.fields, mapping) or _record_has_any_variant_output(record.fields, mapping)):
+        return False
+    latest_activity = _latest_local_activity_for_record(record, storage)
+    if not latest_activity:
+        return False
+    return (datetime.now() - latest_activity).total_seconds() >= STALE_RUNNING_VARIANT_SECONDS
 
 
 class OriginalScriptPipeline:
@@ -1519,6 +1575,7 @@ class OriginalScriptPipeline:
             variant_phase_active = True
             self._process_variants_with_context(
                 context=context,
+                source_record=None,
                 record_id=record_id,
                 run_id=run_id,
                 logs=logs,
@@ -1802,6 +1859,14 @@ class OriginalScriptPipeline:
             else:
                 _push(parameter_value or parameter_name)
 
+        for item in (anchor_card.get("key_visual_constraints") or [])[:5]:
+            if not isinstance(item, dict):
+                continue
+            confidence = str(item.get("confidence", "") or "").strip()
+            if confidence not in {"high", "medium"}:
+                continue
+            _push(str(item.get("constraint", "") or ""))
+
         for item in (anchor_card.get("hard_anchors") or [])[:3]:
             if isinstance(item, dict):
                 _push(str(item.get("anchor", "") or ""))
@@ -1835,6 +1900,46 @@ class OriginalScriptPipeline:
         if normalized_prefix and normalized_prefix in normalized_current:
             return current_text
         return f"{prefix_text}；{current_text}"
+
+    _VIDEO_RHYTHM_SAFE_REPLACEMENT = "稳定构图 + 极轻微连续动态"
+    _VIDEO_RHYTHM_FORBIDDEN_PATTERNS = (
+        r"最后\s*1\s*秒\s*轻停",
+        r"最后\s*停\s*(?:0\.5|1)\s*秒",
+        r"停留\s*(?:0\.5|1)\s*秒",
+        r"停\s*(?:0\.5|1)\s*秒",
+        r"停半拍",
+        r"站定不动",
+        r"保持不动",
+        r"完全静止",
+        r"停顿",
+        r"停留",
+        r"静置",
+        r"停住",
+        r"定格",
+        r"静止",
+    )
+
+    @classmethod
+    def _sanitize_video_rhythm_text(cls, value: str) -> str:
+        cleaned = str(value or "")
+        for pattern in cls._VIDEO_RHYTHM_FORBIDDEN_PATTERNS:
+            cleaned = re.sub(pattern, cls._VIDEO_RHYTHM_SAFE_REPLACEMENT, cleaned)
+        cleaned = re.sub(
+            rf"(?:{re.escape(cls._VIDEO_RHYTHM_SAFE_REPLACEMENT)}[，、,\s]*){{2,}}",
+            cls._VIDEO_RHYTHM_SAFE_REPLACEMENT,
+            cleaned,
+        )
+        return cleaned
+
+    @classmethod
+    def _sanitize_video_rhythm_payload(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return cls._sanitize_video_rhythm_text(value)
+        if isinstance(value, list):
+            return [cls._sanitize_video_rhythm_payload(item) for item in value]
+        if isinstance(value, dict):
+            return {key: cls._sanitize_video_rhythm_payload(item) for key, item in value.items()}
+        return value
 
     def _reinforce_final_video_prompt_anchors(
         self,
@@ -2134,6 +2239,153 @@ class OriginalScriptPipeline:
             existing_minor = self._review_issue_texts(review_json, "minor_issues")
             review_json["minor_issues"] = self._merge_unique_issue_texts(existing_minor, warnings)
         return review_json, [str(item or "").strip() for item in violations if str(item or "").strip()]
+
+    @staticmethod
+    def _parse_script_duration_seconds(value: Any) -> float:
+        text = str(value or "").strip()
+        if not text:
+            return 0.0
+        matches = re.findall(r"(\d+(?:\.\d+)?)", text)
+        if not matches:
+            return 0.0
+        try:
+            numbers = [float(item) for item in matches]
+        except ValueError:
+            return 0.0
+        if len(numbers) >= 2 and any(token in text for token in ("-", "~", "至", "到")):
+            return max(numbers[:2])
+        return numbers[0] if numbers else 0.0
+
+    @staticmethod
+    def _format_script_duration(seconds: float) -> str:
+        rounded = round(float(seconds or 0.0), 1)
+        if abs(rounded - int(rounded)) < 0.001:
+            return f"{int(rounded)}s"
+        return f"{rounded:.1f}s"
+
+    @staticmethod
+    def _decision_deadline_seconds(final_strategy: Dict[str, Any]) -> float:
+        return 9.0 if str(final_strategy.get("script_role", "") or "").strip() == "risk_resolution" else 12.0
+
+    def _build_compact_script_durations(self, shot_count: int) -> List[float]:
+        if shot_count <= 0:
+            return []
+        if shot_count == 1:
+            return [3.0]
+        if shot_count == 2:
+            return [2.5, 3.0]
+        if shot_count == 3:
+            return [2.5, 3.0, 3.0]
+        if shot_count == 4:
+            return [2.5, 2.5, 3.0, 3.0]
+        if shot_count == 5:
+            return [2.5, 2.0, 2.5, 2.0, 2.0]
+        return [2.0 for _ in range(shot_count)]
+
+    def _repair_script_timing_if_needed(
+        self,
+        final_strategy: Dict[str, Any],
+        script_json: Dict[str, Any],
+        timing_violations: List[str],
+    ) -> Tuple[Dict[str, Any], List[str]]:
+        if not timing_violations:
+            return script_json, []
+        if not any("decision 信号" in item or "未检测到 decision" in item for item in timing_violations):
+            return script_json, []
+
+        repaired = copy.deepcopy(script_json)
+        storyboard = repaired.get("storyboard")
+        if not isinstance(storyboard, list) or not storyboard:
+            return script_json, []
+        shots = [shot for shot in storyboard if isinstance(shot, dict)]
+        if not shots:
+            return script_json, []
+
+        actions: List[str] = []
+        durations = self._build_compact_script_durations(len(shots))
+        if durations:
+            for shot, duration in zip(shots, durations):
+                shot["duration"] = self._format_script_duration(duration)
+            actions.append("代码侧压缩 storyboard 镜头时长，避免脚本节奏超过 15 秒硬节点")
+
+        if str(shots[0].get("spoken_line_task", "") or "").strip() != "hook":
+            shots[0]["spoken_line_task"] = "hook"
+            actions.append("代码侧确保首镜承担 hook")
+
+        for shot in shots[1:]:
+            if str(shot.get("spoken_line_task", "") or "").strip() == "hook":
+                shot["spoken_line_task"] = "proof"
+                actions.append("代码侧结束连续 hook，避免 hook 超过前 3 秒")
+
+        starts: List[float] = []
+        cursor = 0.0
+        for shot in shots:
+            starts.append(cursor)
+            cursor += self._parse_script_duration_seconds(shot.get("duration"))
+
+        deadline = self._decision_deadline_seconds(final_strategy)
+
+        def has_voiceover(shot: Dict[str, Any]) -> bool:
+            return bool(str(shot.get("voiceover_text_target_language", "") or "").strip())
+
+        decision_index: Optional[int] = None
+        for index, (shot, start) in enumerate(zip(shots, starts)):
+            task = str(shot.get("spoken_line_task", "") or "").strip()
+            if start <= deadline and has_voiceover(shot) and task in {"proof", "proof+decision"} and start >= 4.0:
+                decision_index = index
+                break
+        if decision_index is None:
+            for index, (shot, start) in enumerate(zip(shots, starts)):
+                task = str(shot.get("spoken_line_task", "") or "").strip()
+                if 0 < start <= deadline and has_voiceover(shot) and task != "hook":
+                    decision_index = index
+                    break
+
+        if decision_index is not None:
+            shot = shots[decision_index]
+            previous_task = str(shot.get("spoken_line_task", "") or "").strip()
+            if previous_task != "proof+decision":
+                shot["spoken_line_task"] = "proof+decision"
+                actions.append(
+                    f"代码侧把镜头{decision_index + 1}标记为 proof+decision，确保 decision 信号在 {int(deadline)}s 前出现"
+                )
+            purpose = str(shot.get("shot_purpose", "") or "").strip()
+            if "轻决策" not in purpose and "decision" not in purpose.lower():
+                shot["shot_purpose"] = (purpose + "；提前给出轻决策信号").strip("；")
+            summary = str(shot.get("shot_content", "") or "").strip()
+            if "适合" not in summary and "日常" not in summary and "轻决策" not in summary:
+                shot["shot_content"] = (summary + "，同时给出适合日常使用的轻判断").strip("，")
+        else:
+            return script_json, []
+
+        repaired["storyboard"] = storyboard
+        repaired["full_15s_flow"] = [
+            {"stage": "opening", "time_range": "0-3s", "task": "hook", "summary": "首镜完成停留理由"},
+            {"stage": "middle", "time_range": "4-8s", "task": "proof", "summary": "核心 proof 开始并接实主表达重点"},
+            {
+                "stage": "ending",
+                "time_range": f"{int(deadline)}s前",
+                "task": "decision",
+                "summary": "轻决策信号前置出现，后续镜头只做结果确认",
+            },
+        ]
+        repaired["rhythm_checkpoints"] = {
+            "hook_complete_by": "3s",
+            "core_proof_start_between": "4-8s",
+            "decision_signal_by": "12s",
+            "risk_resolution_decision_by": "9s" if deadline <= 9.0 else "9s_or_not_applicable",
+        }
+
+        try:
+            validate_script_payload(repaired)
+            self._ensure_script_spoken_structure(repaired, str(final_strategy.get("strategy_id", "") or "script"))
+        except (JSONParseError, JsonStageError):
+            return script_json, []
+
+        _, remaining_violations = validate_script_time_nodes(final_strategy, repaired)
+        if any("decision 信号" in item or "未检测到 decision" in item for item in remaining_violations):
+            return script_json, []
+        return repaired, actions
 
     def _validate_inputs(self, context: Dict[str, str], attachments: List[Dict[str, Any]]) -> None:
         missing = []
@@ -2762,6 +3014,26 @@ class OriginalScriptPipeline:
             final_strategy=final_strategy,
             script_json=script_json,
         )
+        script_json, timing_repair_actions = self._repair_script_timing_if_needed(
+            final_strategy=final_strategy,
+            script_json=script_json,
+            timing_violations=timing_violations,
+        )
+        if timing_repair_actions:
+            review_json = dict(review_json)
+            review_json["repaired_script"] = script_json
+            existing_actions = self._review_issue_texts(review_json, "repair_actions")
+            review_json["repair_actions"] = self._merge_unique_issue_texts(existing_actions, timing_repair_actions)
+            existing_minor = self._review_issue_texts(review_json, "minor_issues")
+            review_json["minor_issues"] = self._merge_unique_issue_texts(
+                existing_minor,
+                ["已执行代码侧 15 秒硬节点兜底修正"],
+            )
+            review_json, timing_violations = self._augment_review_with_timing_feedback(
+                review_json=review_json,
+                final_strategy=final_strategy,
+                script_json=script_json,
+            )
         blocking_reason = self._blocking_script_issue_after_review(
             context=context,
             final_strategy=final_strategy,
@@ -3032,7 +3304,9 @@ class OriginalScriptPipeline:
             video_prompt_json,
             anchor_card,
         )
+        video_prompt_json = self._sanitize_video_rhythm_payload(video_prompt_json)
         video_prompt_json = compress_final_video_prompt_payload(video_prompt_json)
+        video_prompt_json = self._sanitize_video_rhythm_payload(video_prompt_json)
         validate_video_prompt_payload(video_prompt_json)
         rendered_script = render_script(script_json)
         rendered_video_prompt = render_video_prompt(video_prompt_json)
@@ -3537,6 +3811,7 @@ class OriginalScriptPipeline:
 
         self._process_variants_with_context(
             context=context,
+            source_record=record,
             record_id=record_id,
             run_id=run_id,
             logs=logs,
@@ -3554,9 +3829,29 @@ class OriginalScriptPipeline:
         self._sync_auto_publish_metadata(record_id, logs)
         print("  ✅ 脚本变体生成完成")
 
+    def _variant_group_has_all_render_outputs(self, record: TaskRecord, group: Dict[str, Any]) -> bool:
+        variant_json_field = self.mapping.get(str(group.get("variant_json_field") or ""))
+        if variant_json_field:
+            raw_json = normalize_cell_value(record.fields.get(variant_json_field))
+            if raw_json:
+                try:
+                    payload = parse_json_text(raw_json)
+                except JSONParseError:
+                    payload = None
+                if isinstance(payload, dict) and len(payload.get("variants", []) or []) >= sum(
+                    len(batch) for batch in VARIANT_BATCHES
+                ):
+                    return True
+
+        render_field_names = [self.mapping.get(str(name)) for name in group.get("render_fields", [])]
+        if not render_field_names or any(not field_name for field_name in render_field_names):
+            return False
+        return all(normalize_cell_value(record.fields.get(field_name)) for field_name in render_field_names)
+
     def _process_variants_with_context(
         self,
         context: Dict[str, Any],
+        source_record: Optional[TaskRecord],
         record_id: str,
         run_id: Optional[int],
         logs: List[str],
@@ -3580,6 +3875,10 @@ class OriginalScriptPipeline:
         total_variant_count = len(selected_groups) * sum(len(batch) for batch in VARIANT_BATCHES)
 
         for group in selected_groups:
+            if source_record and self._variant_group_has_all_render_outputs(source_record, group):
+                logs.append(f"脚本{group['script_index']}变体已完整存在，跳过重复生成")
+                completed_variant_count += sum(len(batch) for batch in VARIANT_BATCHES)
+                continue
             variants_payload = self._generate_variants_for_script(
                 script_index=group["script_index"],
                 context=context,
@@ -5412,6 +5711,7 @@ def load_pending_records(
     status_field = mapping["status"]
     pending: List[TaskRecord] = []
     pending_record_ids: set = set()
+    storage = PipelineStorage()
     for record in records:
         if normalize_cell_value(record.fields.get(status_field)) in PENDING_STATUSES:
             pending.append(record)
@@ -5423,6 +5723,15 @@ def load_pending_records(
         if not _should_enqueue_completed_record_for_variants(record, mapping):
             continue
         pending.append(_build_record_with_status(record, mapping, STATUS_PENDING_VARIANTS))
+        pending_record_ids.add(record.record_id)
+
+    for record in records:
+        if record.record_id in pending_record_ids:
+            continue
+        if not _should_enqueue_stale_running_variant_record(record, mapping, storage):
+            continue
+        pending.append(_build_record_with_status(record, mapping, STATUS_PENDING_VARIANTS))
+        pending_record_ids.add(record.record_id)
 
     if limit:
         pending = pending[:limit]

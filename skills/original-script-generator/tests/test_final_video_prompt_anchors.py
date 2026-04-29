@@ -43,7 +43,7 @@ class FinalVideoPromptAnchorsTest(unittest.TestCase):
                     "voiceover_text_target_language": "Phần dây ngắn nhìn rất gọn",
                     "voiceover_text_zh": "",
                     "spoken_line_task": "proof",
-                    "person_action": "人物停住侧脸，手不要遮挡耳侧",
+                    "person_action": "人物以稳定构图呈现侧脸，头部仅做 1-3 度微动，手不要遮挡耳侧",
                     "style_note": "",
                 },
                 {
@@ -119,6 +119,33 @@ class FinalVideoPromptAnchorsTest(unittest.TestCase):
         self.assertIn("商品锚点：", compressed["video_setup"])
         self.assertIn("锚点执行：", compressed["execution_boundary"])
         self.assertIn("商品锚点：", rendered)
+
+    def test_sanitize_video_rhythm_replaces_pause_and_freeze_terms(self) -> None:
+        pipeline = self._build_pipeline()
+        prompt = self._base_prompt()
+        prompt["video_setup"] = "最后1秒轻停，商品定格在画面中心"
+        prompt["execution_boundary"] = "不要最后停 0.5 秒，收尾保持不动"
+        prompt["shot_execution"][0]["person_action"] = "人物停半拍后站定不动，耳饰保持清晰可见"
+        prompt["shot_execution"][1]["shot_content"] = "耳侧近景停留1秒，构图清楚"
+
+        sanitized = pipeline._sanitize_video_rhythm_payload(prompt)
+        rendered = render_video_prompt(sanitized)
+
+        self.assertIn("稳定构图 + 极轻微连续动态", rendered)
+        forbidden_terms = [
+            "停住",
+            "停半拍",
+            "定格",
+            "静止",
+            "停留1秒",
+            "最后1秒轻停",
+            "站定不动",
+            "保持不动",
+            "完全静止",
+            "最后停 0.5 秒",
+        ]
+        for term in forbidden_terms:
+            self.assertNotIn(term, rendered)
 
 
 if __name__ == "__main__":
