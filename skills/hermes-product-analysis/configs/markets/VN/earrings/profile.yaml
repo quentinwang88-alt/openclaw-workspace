@@ -1,0 +1,8 @@
+market_id: VN
+category_id: earrings
+profile_version: VN__earrings__v1
+base_category_path: configs/base/categories/earrings
+tag_dictionary_path: configs/markets/VN/earrings/tag_dictionary.yaml
+market_overrides_path: configs/markets/VN/earrings/market_overrides.yaml
+prompts_path: configs/markets/VN/earrings/prompts.yaml
+enabled: true

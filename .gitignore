@@ -101,6 +101,7 @@ skills/**/logs/
 skills/**/output/
 skills/**/outputs/*
 !skills/**/outputs/.gitkeep
+skills/**/artifacts/
 skills/**/temp/
 skills/**/tmp/
 

@@ -1,0 +1,8 @@
+market_id: MY
+category_id: earrings
+profile_version: MY__earrings__v1
+base_category_path: configs/base/categories/earrings
+tag_dictionary_path: configs/markets/MY/earrings/tag_dictionary.yaml
+market_overrides_path: configs/markets/MY/earrings/market_overrides.yaml
+prompts_path: configs/markets/MY/earrings/prompts.yaml
+enabled: true

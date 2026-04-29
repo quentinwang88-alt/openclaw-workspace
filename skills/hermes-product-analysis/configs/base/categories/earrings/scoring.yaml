@@ -1,0 +1,25 @@
+score_weights:
+  direction_match: 30
+  product_quality: 35
+  content_potential: 20
+  differentiation: 15
+product_quality_subscore_weights:
+  visual_style: 8
+  use_scene_clarity: 5
+  wearing_type_clarity: 6
+  material_element_clarity: 5
+  info_completeness: 4
+  price_fit: 4
+  supply_fit: 3
+risk_penalty_application:
+  apply_to: total_score
+  floor_total_score: 0
+  cap_per_product: -6
+  manual_review_trigger_if_penalty_lte: -4
+risk_penalties:
+  耳线可能过长: -2
+  耳坠可能过大: -2
+  耳夹佩戴方式不清晰: -2
+  无耳洞/有耳洞容易混淆: -3
+  材质质感不清晰: -1
+  主图信息不足: -3

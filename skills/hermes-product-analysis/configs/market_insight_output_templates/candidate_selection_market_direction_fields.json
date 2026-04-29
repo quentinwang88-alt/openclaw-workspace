@@ -1,0 +1,30 @@
+{
+  "table_name": "候选品选品表补充字段",
+  "description": "阶段 2 统一评分结果里新增的方向、评分与决策字段。",
+  "fields": [
+    {"field_name": "匹配市场方向ID", "field_type": "text", "required": false},
+    {"field_name": "匹配市场方向名称", "field_type": "text", "required": false},
+    {"field_name": "匹配市场方向理由", "field_type": "long_text", "required": false},
+    {"field_name": "匹配市场方向大类", "field_type": "single_select", "required": false},
+    {"field_name": "匹配市场方向层级", "field_type": "single_select", "required": false},
+    {"field_name": "默认内容路线偏好", "field_type": "single_select", "required": false},
+    {"field_name": "市场匹配分", "field_type": "number", "required": false},
+    {"field_name": "店铺匹配分", "field_type": "number", "required": false},
+    {"field_name": "内容可做性分", "field_type": "number", "required": false},
+    {"field_name": "批内优先级分_A", "field_type": "number", "required": false},
+    {"field_name": "路线决策_A", "field_type": "single_select", "required": false},
+    {"field_name": "批内优先级分_B", "field_type": "number", "required": false},
+    {"field_name": "路线决策_B", "field_type": "single_select", "required": false},
+    {"field_name": "供给检查状态", "field_type": "single_select", "required": false},
+    {"field_name": "供给摘要", "field_type": "long_text", "required": false},
+    {"field_name": "竞争参考等级", "field_type": "single_select", "required": false},
+    {"field_name": "竞争参考置信度", "field_type": "single_select", "required": false},
+    {"field_name": "决策原因JSON", "field_type": "long_text", "required": false},
+    {"field_name": "推荐内容公式", "field_type": "long_text", "required": false},
+    {"field_name": "备用池原因", "field_type": "text", "required": false},
+    {"field_name": "备用池创建时间", "field_type": "datetime", "required": false},
+    {"field_name": "备用池过期时间", "field_type": "datetime", "required": false},
+    {"field_name": "备用池状态", "field_type": "single_select", "required": false},
+    {"field_name": "样品检查状态", "field_type": "single_select", "required": false}
+  ]
+}

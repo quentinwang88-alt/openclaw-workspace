@@ -1,0 +1,43 @@
+{
+  "table_id": "manual_table_hair_01",
+  "table_name": "发饰人工选品表",
+  "enabled": false,
+  "source_type": "manual",
+  "source": {
+    "feishu_url": "https://gcngopvfvo0q.feishu.cn/base/BASEAPPTOKEN123?table=tblHairExample01&view=vewHairExample01"
+  },
+  "supported_manual_categories": ["发饰", "轻上装"],
+  "read_filter": {
+    "status_field": "分析状态",
+    "pending_values": ["待处理", ""]
+  },
+  "field_map": {
+    "product_name": "产品名称",
+    "product_images": "产品图片",
+    "cost_price": "采购价",
+    "target_price": "拟售价",
+    "manual_category": "人工类目",
+    "product_notes": "产品备注",
+    "competitor_notes": "竞品备注",
+    "competitor_links": "竞品链接",
+    "target_market": "目标国家"
+  },
+  "writeback_map": {
+    "analysis_status": "分析状态",
+    "recognized_category": "识别类目",
+    "category_confidence": "识别置信度",
+    "product_potential": "产品潜力",
+    "content_potential": "内容潜力",
+    "main_risk": "主要风险",
+    "suggested_action": "建议动作",
+    "brief_reason": "简短理由",
+    "v2_total_score": "V2总分",
+    "v2_suggested_action": "V2建议动作",
+    "v2_matched_direction": "V2匹配方向",
+    "v2_differentiation_conclusion": "差异化结论",
+    "v2_brief_reason": "V2一句话理由",
+    "v2_risk_tags": "V2风险标签",
+    "analysis_time": "分析时间",
+    "analysis_error": "分析异常"
+  }
+}

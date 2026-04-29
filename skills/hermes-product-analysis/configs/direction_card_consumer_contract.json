@@ -1,0 +1,41 @@
+{
+  "schema_version": "2026-04-23.v1",
+  "required_fields": [
+    "direction_canonical_key",
+    "direction_family",
+    "direction_tier",
+    "core_elements",
+    "scene_tags",
+    "target_price_bands"
+  ],
+  "optional_fields": [
+    "top_value_points",
+    "decision_confidence",
+    "top_forms",
+    "top_silhouette_forms",
+    "top_length_forms",
+    "style_cluster",
+    "style_main",
+    "product_form_or_result",
+    "default_content_route_preference"
+  ],
+  "fallback_strategy": {
+    "direction_canonical_key": [
+      "direction_canonical_key",
+      "direction_instance_id"
+    ],
+    "style_main": [
+      "style_cluster",
+      "style_main"
+    ],
+    "product_form_or_result": [
+      "top_silhouette_forms",
+      "top_forms",
+      "product_form_or_result"
+    ],
+    "decision_confidence": "missing_or_invalid -> low",
+    "missing_required_fields": "keep card loadable, force decision_confidence=low, and allow matcher to mark uncovered instead of silently assigning weak market mismatch",
+    "missing_optional_fields": "skip that sub-component only; do not directly change route"
+  },
+  "on_schema_mismatch": "mark_uncovered_and_emit_contract_warning"
+}

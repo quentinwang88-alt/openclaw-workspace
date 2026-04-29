@@ -1,0 +1,6 @@
+score_weights:
+  direction_match: 30
+  product_quality: 35
+  content_potential: 20
+  differentiation: 15
+status: ready

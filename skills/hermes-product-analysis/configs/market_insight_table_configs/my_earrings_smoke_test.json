@@ -1,0 +1,39 @@
+{
+  "table_id": "my_earrings_smoke_test",
+  "table_name": "MY 耳环市场洞察 Smoke Test",
+  "enabled": true,
+  "source": {
+    "feishu_url": "https://gcngopvfvo0q.feishu.cn/wiki/DNvTwuO7aipaeKkYQwWcvdGunBf?table=tblvIIIWXVvBlCvR&view=vewtia5pX0"
+  },
+  "input_mode": "auto",
+  "default_country": "MY",
+  "default_category": "earrings",
+  "max_samples": 20,
+  "source_scope": "smoke_test",
+  "source_currency": "MYR",
+  "price_to_cny_rate": 1.52,
+  "price_band_step_rmb": 5,
+  "price_scale_divisor": 1,
+  "price_band_edges": [0, 50, 100, 200, 500, 1000],
+  "report_output": {
+    "enabled": true,
+    "parent_folder_token": "APdxfHTWLlUPVRdwzRecWcIanwb",
+    "notify_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/94fce470-dc11-410a-8093-493443499223",
+    "notify_webhook_secret": "LM49mtUUGpahUFyXH3XUce",
+    "feishu_domain": "gcngopvfvo0q.feishu.cn"
+  },
+  "field_map": {
+    "product_name": "商品名称",
+    "product_images": ["图片", "商品图片"],
+    "shop_name": "店铺名称",
+    "country": "国家/地区",
+    "category": "商品分类",
+    "price_text": "售价",
+    "sales_7d": "7天销量",
+    "gmv_7d": "7天销售额",
+    "creator_count": "带货达人总数",
+    "video_count": "带货视频总数",
+    "product_url": ["TikTok商品落地页地址", "FastMoss商品详情页地址"],
+    "listing_time": "预估商品上架时间"
+  }
+}

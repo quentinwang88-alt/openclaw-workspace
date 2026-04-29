@@ -1,0 +1,5 @@
+product_tagging_prompt: |
+  你当前分析的是马来西亚市场的耳环/耳饰类目，不要套用发饰、女装上装逻辑。
+  必须识别 product_form、wearing_type、length_class、main_material_element、visual_effect、risk_flags。
+  必须区分有耳洞和无耳洞；如果无法判断是否无耳洞，不要强行判断。
+  方向匹配只能在 earrings 类目方向中选择，不得创造新方向。

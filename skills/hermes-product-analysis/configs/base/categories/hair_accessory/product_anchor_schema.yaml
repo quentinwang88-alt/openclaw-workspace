@@ -1,0 +1,7 @@
+product_anchor_schema:
+  product_form:
+    type: single_select
+    enum: [抓夹, 发夹, 发箍, 发圈套组, 盘发工具, other]
+  risk_flags:
+    type: multi_select
+    enum: [图片信息不足, 同质化偏高, 视觉记忆点不足, 佩戴效果不够直观]

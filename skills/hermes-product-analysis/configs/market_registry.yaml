@@ -1,0 +1,31 @@
+markets:
+  VN:
+    display_name: 越南
+    language: vi
+    currency: VND
+    default_timezone: Asia/Ho_Chi_Minh
+    local_context:
+      - 摩托通勤
+      - 学生党
+      - 热天
+      - 日常轻精致
+  TH:
+    display_name: 泰国
+    language: th
+    currency: THB
+    default_timezone: Asia/Bangkok
+    local_context:
+      - 炎热天气
+      - 校园/通勤
+      - 甜美穿搭
+      - 拍照社交
+  MY:
+    display_name: 马来西亚
+    language: ms
+    currency: MYR
+    default_timezone: Asia/Kuala_Lumpur
+    local_context:
+      - 多民族审美
+      - 通勤
+      - 礼物感
+      - 轻熟日常

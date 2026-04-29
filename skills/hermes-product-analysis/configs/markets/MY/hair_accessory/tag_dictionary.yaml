@@ -1,0 +1,20 @@
+forms:
+  zh: [抓夹, 发夹, 发箍, 发圈, 盘发工具]
+  local: [klip rambut, cekak rambut, getah rambut]
+  en: [hair clip, claw clip, headband, scrunchie]
+style_keywords:
+  zh: [韩系, 甜感, 通勤, 礼物感, 大体量]
+  local: [Korea, comel, kerja, hadiah]
+  en: [korean, sweet, commute, gift]
+scenes:
+  zh: [上学, 上班, 出门, 通勤骑行, 洗漱居家]
+  local: [sekolah, kerja, keluar, harian]
+  en: [school, work, outing, commute]
+negative_keywords:
+  zh: [假发, 帽子]
+  local: [rambut palsu, topi]
+  en: [wig, hat]
+unique_keywords:
+  zh: [头盔, 摩托, 盘发, 高颅顶]
+  local: [helmet, motosikal, sanggul]
+  en: [helmet, motorbike, updo]

@@ -1,0 +1,9 @@
+market_id: MY
+category_id: womens_tops
+profile_version: MY__womens_tops__placeholder_v1
+base_category_path: configs/base/categories/womens_tops
+tag_dictionary_path: configs/markets/MY/womens_tops/tag_dictionary.yaml
+market_overrides_path: configs/markets/MY/womens_tops/market_overrides.yaml
+prompts_path: configs/markets/MY/womens_tops/prompts.yaml
+enabled: true
+status: not_ready

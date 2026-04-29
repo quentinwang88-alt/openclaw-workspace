@@ -1,0 +1,8 @@
+market_id: VN
+category_id: hair_accessory
+profile_version: VN__hair_accessory__v1
+base_category_path: configs/base/categories/hair_accessory
+tag_dictionary_path: configs/markets/VN/hair_accessory/tag_dictionary.yaml
+market_overrides_path: configs/markets/VN/hair_accessory/market_overrides.yaml
+prompts_path: configs/markets/VN/hair_accessory/prompts.yaml
+enabled: true

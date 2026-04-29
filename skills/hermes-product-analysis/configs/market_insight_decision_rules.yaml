@@ -1,0 +1,120 @@
+default:
+  sales_action_threshold: 250
+
+  min_sample:
+    insufficient: 5
+    distribution_metrics: 8
+    p75: 12
+    p90: 20
+
+  head_concentrated:
+    top3_sales_share_threshold: 0.45
+    strong_top3_sales_share_threshold: 0.60
+    mean_median_ratio_threshold: 2.0
+    extreme_mean_median_ratio_threshold: 5.0
+
+  supply_bubble:
+    min_sample: 12
+    median_sales_vs_category_max: 0.8
+    video_density_percentile_min: 0.75
+    creator_density_percentile_min: 0.75
+
+  content_gap:
+    min_sample: 8
+    median_sales_vs_category_min: 1.0
+    video_density_vs_category_max: 1.0
+    creator_density_vs_category_max: 1.0
+
+  mature_strong_demand:
+    min_sample: 12
+    median_sales_vs_category_min: 1.1
+
+  hidden_scene_candidate:
+    min_sample: 5
+    median_sales_vs_category_min: 0.9
+    video_density_vs_category_max: 0.7
+    scene_keywords:
+      - 头盔
+      - 摩托
+      - 通勤
+      - 热天
+      - 上学
+      - 上班
+      - 宿舍
+      - 办公室
+      - 快速整理
+
+action_mapping:
+  content_gap:
+    default_action: prioritize_low_cost_test
+    fallback_action: observe
+  mature_strong_demand:
+    default_action: cautious_test
+    fallback_action: observe
+  head_concentrated:
+    default_action: study_top_not_enter
+    upgrade_action: cautious_test
+  hidden_scene:
+    default_action: hidden_small_test
+  hidden_scene_candidate:
+    default_action: observe
+  supply_bubble:
+    default_action: avoid
+  aesthetic_homogeneous:
+    default_action: study_top_not_enter
+  evidence_pending:
+    default_action: observe
+  insufficient_sample:
+    default_action: observe
+  general_observe:
+    default_action: observe
+
+team_capacity:
+  max_study_top_directions_per_batch: 2
+  max_test_directions_per_batch: 2
+  max_hidden_candidates_per_batch: 2
+
+overrides:
+  VN:
+    hair_accessory:
+      sales_action_threshold: 250
+
+product_age:
+  timezone: Asia/Shanghai
+  top_n: 300
+
+  buckets:
+    d0_30: [0, 30]
+    d31_90: [31, 90]
+    d91_180: [91, 180]
+    d181_365: [181, 365]
+    d365_plus: [366, null]
+
+  confidence:
+    min_valid_high: 12
+    min_valid_medium: 8
+    min_valid_low: 5
+    max_missing_rate_high: 0.10
+    max_missing_rate_medium: 0.25
+    max_missing_rate_low: 0.50
+
+  signals:
+    strong_new_entry:
+      new_90d_count_share_min: 0.30
+      new_90d_sales_share_min: 0.30
+
+    moderate_new_entry:
+      new_90d_count_share_min: 0.20
+      new_90d_sales_share_min: 0.20
+
+    noisy_new_supply:
+      new_90d_count_share_min: 0.30
+      new_90d_sales_share_max: 0.15
+
+    old_product_dominated:
+      new_90d_count_share_max: 0.15
+      old_180d_sales_share_min: 0.60
+
+    few_new_winners:
+      new_90d_count_share_max: 0.20
+      new_90d_sales_share_min: 0.30

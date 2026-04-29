@@ -1,0 +1,31 @@
+phase_control:
+  v2_shadow_mode: true
+  replace_core_score_a: false
+  total_score_max: 100
+  differentiation_score_enabled: true
+  differentiation_score_used_in_total: true
+  differentiation_requires_head_products: true
+  min_head_products_for_full_confidence: 3
+  study_top_upgrade_enabled: true
+  auto_threshold_update_enabled: false
+  supply_chain_external_check_enabled: false
+
+score_weights:
+  direction_match: 20
+  market_task_fit: 20
+  product_quality: 30
+  content_potential: 15
+  differentiation: 15
+
+initial_action_thresholds:
+  select: 75
+  manual_review: 65
+  observe: 55
+  eliminate: 45
+
+final_actions:
+  select: "进入测品池"
+  manual_review: "人工复核后进入"
+  observe: "放入观察池"
+  head_reference: "头部参考留档"
+  eliminate: "淘汰"

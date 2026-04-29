@@ -1,0 +1,20 @@
+forms:
+  zh: [抓夹, 发夹, 发箍, 发圈, 盘发工具]
+  local: [kẹp tóc, băng đô, dây buộc tóc]
+  en: [hair clip, claw clip, headband, scrunchie]
+style_keywords:
+  zh: [韩系, 甜感, 通勤, 礼物感, 大体量]
+  local: [Hàn Quốc, dễ thương, đi làm, quà tặng]
+  en: [korean, sweet, commute, gift]
+scenes:
+  zh: [上学, 上班, 出门, 通勤骑行, 洗漱居家]
+  local: [đi học, đi làm, đi chơi, đi xe máy]
+  en: [school, work, outing, commute]
+negative_keywords:
+  zh: [假发, 帽子]
+  local: [tóc giả, mũ]
+  en: [wig, hat]
+unique_keywords:
+  zh: [头盔, 摩托, 盘发, 高颅顶]
+  local: [mũ bảo hiểm, xe máy, búi tóc]
+  en: [helmet, motorbike, updo]

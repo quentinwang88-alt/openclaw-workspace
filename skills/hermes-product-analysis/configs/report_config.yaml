@@ -1,0 +1,81 @@
+thresholds:
+  sales_median_baseline: 250
+  crowded_supply_overhang_sales_median: 300
+  video_density_high: 1.0
+  video_density_low: 0.3
+  video_density_enter: 0.5
+  video_density_crowded_enter: 0.2
+  video_density_watch_reentry: 0.8
+  video_density_balanced_replica: 0.7
+  top_item_count_threshold: 100
+
+test_count_by_tier:
+  priority: "8-12 款"
+  balanced: "4-6 款"
+  low_sample: "2-3 款(观察用)"
+  crowded: "不建议测款"
+
+scoring_weight_advice:
+  审美风格型:
+    focus_metric: "视觉记忆点"
+    reason: "审美风格型更依赖第一眼识别和差异化外观。"
+  日常场景型:
+    focus_metric: "场景适配度"
+    reason: "日常场景型更需要稳定覆盖上学、上班、出门等高频场景。"
+  功能结果型:
+    focus_metric: "演示容易度"
+    reason: "功能结果型更需要通过内容快速证明整理效率或结果变化。"
+  形态专用型:
+    focus_metric: "佩戴门槛"
+    reason: "形态专用型更受佩戴方式和适配人群限制。"
+  other:
+    focus_metric: "信息完整度"
+    reason: "other 方向先补齐信息，再决定评分侧重。"
+
+family_order_by_category:
+  hair_accessory:
+    - 审美风格型
+    - 日常场景型
+    - 功能结果型
+    - 形态专用型
+    - other
+  light_tops:
+    - 穿着诉求型
+    - 穿着结果型
+    - 风格气质型
+    - other
+
+scoring_weight_advice_by_category:
+  hair_accessory:
+    审美风格型:
+      focus_metric: "视觉记忆点"
+      reason: "审美风格型更依赖第一眼识别和差异化外观。"
+    日常场景型:
+      focus_metric: "场景适配度"
+      reason: "日常场景型更需要稳定覆盖上学、上班、出门等高频场景。"
+    功能结果型:
+      focus_metric: "演示容易度"
+      reason: "功能结果型更需要通过内容快速证明整理效率或结果变化。"
+    形态专用型:
+      focus_metric: "佩戴门槛"
+      reason: "形态专用型更受佩戴方式和适配人群限制。"
+    other:
+      focus_metric: "信息完整度"
+      reason: "other 方向先补齐信息，再决定评分侧重。"
+  light_tops:
+    穿着诉求型:
+      focus_metric: "场景诉求清晰度"
+      reason: "穿着诉求型更依赖场景需求是否明确，例如空调房、防晒和轻薄实用价值是否能被快速读懂。"
+    穿着结果型:
+      focus_metric: "上身结果可感知度"
+      reason: "穿着结果型更需要把显比例、遮手臂、叠穿层次等上身结果讲清楚。"
+    风格气质型:
+      focus_metric: "风格识别度"
+      reason: "风格气质型更依赖第一眼风格感知和整体气质表达的一致性。"
+    other:
+      focus_metric: "信息完整度"
+      reason: "other 方向先补齐信息，再决定评分侧重。"
+
+report:
+  max_summary_items: 3
+  llm_max_workers: 4

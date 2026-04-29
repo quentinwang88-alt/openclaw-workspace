@@ -1,0 +1,40 @@
+{
+  "table_id": "vn_fastmoss_hair_product_ranking",
+  "table_name": "VN 发饰市场洞察商品榜单",
+  "enabled": true,
+  "source": {
+    "feishu_url": "https://gcngopvfvo0q.feishu.cn/wiki/PQgjw8N5Fi3yn6krkUyciP2YnEf?table=tblHSa5LHdPlF4DH&view=vewqm252jR"
+  },
+  "input_mode": "auto",
+  "default_country": "VN",
+  "default_category": "hair_accessory",
+  "max_samples": 0,
+  "source_currency": "VND",
+  "price_to_cny_rate": 0.000259,
+  "price_band_step_rmb": 5,
+  "price_scale_divisor": 1000,
+  "price_band_edges": [0, 50, 100, 200, 500, 1000],
+  "report_output": {
+    "enabled": true,
+    "parent_folder_token": "APdxfHTWLlUPVRdwzRecWcIanwb",
+    "notify_receive_id_type": "",
+    "notify_receive_id": "",
+    "notify_webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/94fce470-dc11-410a-8093-493443499223",
+    "notify_webhook_secret": "LM49mtUUGpahUFyXH3XUce",
+    "feishu_domain": "gcngopvfvo0q.feishu.cn"
+  },
+  "field_map": {
+    "product_name": "商品名称",
+    "product_images": ["图片", "商品图片"],
+    "shop_name": "店铺名称",
+    "country": "国家/地区",
+    "category": "商品分类",
+    "price_text": "售价",
+    "sales_7d": "7天销量",
+    "gmv_7d": "7天销售额",
+    "creator_count": "带货达人总数",
+    "video_count": "带货视频总数",
+    "product_url": ["TikTok商品落地页地址", "FastMoss商品详情页地址"],
+    "listing_time": "预估商品上架时间"
+  }
+}

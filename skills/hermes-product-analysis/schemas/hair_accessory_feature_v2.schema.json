@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HairAccessoryFeatureResultV2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "analysis_category",
+    "wearing_change_strength",
+    "demo_ease",
+    "visual_memory_point",
+    "homogenization_risk",
+    "title_selling_clarity",
+    "info_completeness",
+    "risk_tag",
+    "risk_note",
+    "brief_observation"
+  ],
+  "properties": {
+    "analysis_category": { "type": "string", "const": "发饰" },
+    "wearing_change_strength": { "type": "string", "enum": ["高", "中", "低"] },
+    "demo_ease": { "type": "string", "enum": ["高", "中", "低"] },
+    "visual_memory_point": { "type": "string", "enum": ["高", "中", "低"] },
+    "homogenization_risk": { "type": "string", "enum": ["高", "中", "低"] },
+    "title_selling_clarity": { "type": "string", "enum": ["高", "中", "低"] },
+    "info_completeness": { "type": "string", "enum": ["高", "中", "低"] },
+    "risk_tag": {
+      "type": "string",
+      "enum": ["同质化偏高", "戴上效果不够直观", "演示场景较弱", "视觉记忆点不足", "图片信息不足", "标题卖点不清", "价格支撑不足", "无明显主要风险"]
+    },
+    "risk_note": { "type": "string", "minLength": 1, "maxLength": 30 },
+    "brief_observation": { "type": "string", "minLength": 1, "maxLength": 50 }
+  }
+}

@@ -1,0 +1,140 @@
+unified_decision_matrix:
+  prioritize_low_cost_test:
+    display_name: 优先低成本验证
+    task_type: low_cost_test
+    default_pool: test_product_pool
+    max_pool: test_product_pool
+    constraint_override: false
+
+  cautious_test:
+    display_name: 谨慎切入验证
+    task_type: low_cost_test
+    default_pool: test_product_pool
+    max_pool: test_product_pool
+    select_quota_per_direction: 3
+    constraint_override: false
+
+  study_top_not_enter:
+    display_name: 拆头部不直接入场
+    task_type: head_dissection
+    default_pool: head_reference_pool
+    max_pool: manual_review_pool
+    constraint_override: true
+
+  strong_signal_verify:
+    display_name: 强信号待核验
+    task_type: signal_verify
+    default_pool: manual_review_pool
+    max_pool: manual_review_pool
+    constraint_override: true
+
+  hidden_candidate:
+    display_name: 暗线候选
+    task_type: hidden_candidate
+    default_pool: observe_pool
+    max_pool: observe_pool
+    constraint_override: true
+
+  hidden_small_test:
+    display_name: 暗线小样本验证
+    task_type: low_cost_test
+    default_pool: manual_review_pool
+    max_pool: manual_review_pool
+    constraint_override: true
+
+  observe:
+    display_name: 持续观察
+    task_type: observe
+    default_pool: observe_pool
+    max_pool: observe_pool
+    constraint_override: true
+
+  avoid:
+    display_name: 暂不投入
+    task_type: avoid
+    default_pool: eliminate
+    max_pool: head_reference_pool
+    constraint_override: true
+
+  neutral:
+    display_name: 中性
+    task_type: low_cost_test
+    default_pool: test_product_pool
+    max_pool: test_product_pool
+    constraint_override: false
+
+  "":
+    display_name: 未指定
+    task_type: low_cost_test
+    default_pool: test_product_pool
+    max_pool: test_product_pool
+    constraint_override: false
+
+brief_fallback_strategy:
+  enabled: true
+  when_brief_missing:
+    method: auto_generate_minimal_brief_from_direction_action
+
+fallback_mapping:
+  prioritize_low_cost_test:
+    task_type: low_cost_test
+    target_pool: test_product_pool
+  cautious_test:
+    task_type: low_cost_test
+    target_pool: test_product_pool
+  study_top_not_enter:
+    task_type: head_dissection
+    target_pool: head_reference_pool
+  strong_signal_verify:
+    task_type: signal_verify
+    target_pool: manual_review_pool
+  hidden_candidate:
+    task_type: hidden_candidate
+    target_pool: observe_pool
+  hidden_small_test:
+    task_type: low_cost_test
+    target_pool: manual_review_pool
+  observe:
+    task_type: observe
+    target_pool: observe_pool
+  avoid:
+    task_type: avoid
+    target_pool: eliminate
+  neutral:
+    task_type: low_cost_test
+    target_pool: test_product_pool
+  "":
+    task_type: low_cost_test
+    target_pool: test_product_pool
+
+pool_lifecycle_rules:
+  test_product_pool:
+    lifecycle_status: pending_test
+    pool_family: test_pool
+  content_baseline_pool:
+    lifecycle_status: pending_content_baseline
+    pool_family: test_pool
+  new_winner_analysis_pool:
+    lifecycle_status: pending_dissection
+    pool_family: dissection_pool
+    dissection_subtype: new_winner
+  replacement_candidate_pool:
+    lifecycle_status: pending_replacement_check
+    pool_family: dissection_pool
+    dissection_subtype: old_product_replacement
+  category_review_pool:
+    lifecycle_status: pending_category_review
+    pool_family: review_pool
+  observe_pool:
+    lifecycle_status: pending_next_batch_review
+    pool_family: observe_pool
+  head_reference_pool:
+    lifecycle_status: archived_as_head_reference
+    pool_family: dissection_pool
+    dissection_subtype: head_dissection
+  manual_review_pool:
+    lifecycle_status: pending_manual_review
+    pool_family: review_pool
+  eliminate:
+    lifecycle_status: eliminated
+    pool_family: eliminate

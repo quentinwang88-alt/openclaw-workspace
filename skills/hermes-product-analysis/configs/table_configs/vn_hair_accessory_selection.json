@@ -1,0 +1,53 @@
+{
+  "table_id": "vn_hair_accessory_selection",
+  "table_name": "越南发饰选品表",
+  "enabled": true,
+  "source_type": "manual",
+  "source": {
+    "app_token": "L8b1bRq2Oa2Uy9syZzqclJb7nmf",
+    "bitable_table_id": "tbltMvS0a8hotiIk"
+  },
+  "supported_manual_categories": ["发饰", "轻上装"],
+  "read_filter": {
+    "status_field": "分析状态",
+    "pending_values": ["待处理", ""]
+  },
+  "field_map": {
+    "product_title": "产品标题",
+    "product_images": "图片",
+    "cost_price": "采购价",
+    "target_price": "定价",
+    "manual_category": "产品类目",
+    "product_notes": "备注",
+    "competitor_notes": "竞手情况",
+    "competitor_links": "采购链接",
+    "target_market": "目标市场"
+  },
+  "writeback_map": {
+    "analysis_status": "分析状态",
+    "recognized_category": "识别类目",
+    "category_confidence": "识别置信度",
+    "market_match_score": "市场匹配分",
+    "store_fit_score": "店铺匹配分",
+    "content_potential_score": "内容可做性分",
+    "batch_priority_score": "批内优先级分",
+    "supply_check_status": "供给检查状态",
+    "suggested_action": "建议动作",
+    "brief_reason": "简短理由",
+    "v2_total_score": "V2总分",
+    "v2_suggested_action": "V2建议动作",
+    "v2_matched_direction": "V2匹配方向",
+    "v2_task_pool": "V2任务池",
+    "v2_task_fit_level": "任务适配度",
+    "v2_task_fit_reason": "任务适配理由",
+    "v2_task_type": "V2任务类型",
+    "v2_lifecycle_status": "生命周期状态",
+    "v2_direction_action": "方向动作",
+    "v2_brief_source": "Brief来源",
+    "v2_differentiation_conclusion": "差异化结论",
+    "v2_brief_reason": "V2一句话理由",
+    "v2_risk_tags": "V2风险标签",
+    "analysis_time": "分析时间",
+    "analysis_error": "分析异常"
+  }
+}

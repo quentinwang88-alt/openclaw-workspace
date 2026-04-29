@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CategoryIdentificationResultV2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["predicted_category", "confidence", "reason"],
+  "properties": {
+    "predicted_category": {
+      "type": "string",
+      "enum": ["发饰", "轻上装", "其他", "无法判断"]
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["high", "medium", "low"]
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 40
+    }
+  }
+}

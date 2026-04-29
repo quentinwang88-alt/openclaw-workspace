@@ -1,0 +1,6 @@
+category_id: womens_tops
+display_name: 女装上装
+directions:
+  womens_tops__placeholder:
+    direction_name: 占位方向（待补）
+    status: not_ready

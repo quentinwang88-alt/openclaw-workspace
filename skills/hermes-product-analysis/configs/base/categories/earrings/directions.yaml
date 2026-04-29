@@ -1,0 +1,89 @@
+category_id: earrings
+display_name: 耳环
+directions:
+  earrings__korean_light_commute:
+    direction_name: 韩系轻通勤型
+    direction_group: 日常通勤型
+    product_forms: [耳钉, 小耳圈, 短款耳坠]
+    wearing_type: [有耳洞]
+    style_tags: [韩系, 低调, 精致, 不夸张, 日常百搭]
+    core_user_scene: [上班, 上学, 日常出门]
+    core_value_point: [普通穿搭增加精致感, 不夸张但比基础款有细节]
+    content_expression_route: [近景佩戴, 半身穿搭, 普通上衣搭配前后对比]
+    risk_flags: [容易同质化, 视觉记忆点弱]
+  earrings__sweet_gift:
+    direction_name: 少女礼物感型
+    direction_group: 礼物氛围型
+    product_forms: [小耳钉, 花朵耳环, 蝴蝶结耳环, 珍珠小耳坠, 耳夹]
+    wearing_type: [有耳洞, 耳夹]
+    style_tags: [少女, 礼物感, 甜美, 可爱但不幼稚]
+    core_user_scene: [学生互送, 生日小礼物, 约会前搭配]
+    core_value_point: [小价格但有礼物感, 拍照有细节]
+    content_expression_route: [包装展示, 佩戴效果, 拍照效果三段式]
+    risk_flags: [过度幼稚, 廉价感, 包装与实物不一致]
+  earrings__pearl_zircon_elegance:
+    direction_name: 珍珠锆石气质型
+    direction_group: 质感气质型
+    product_forms: [珍珠耳坠, 锆石耳扣, 珍珠耳钉, 短款垂坠耳环]
+    wearing_type: [有耳洞, 耳扣]
+    style_tags: [气质, 温柔, 微闪, 轻熟, 精致]
+    core_user_scene: [约会, 通勤, 拍照, 晚上出门]
+    core_value_point: [提升整体质感, 比普通耳钉更有存在感, 亮但不俗]
+    content_expression_route: [侧脸近景, 转头微闪, 穿搭完成度对比]
+    risk_flags: [珍珠比例失真, 锆石过闪显假, 垂坠长度过长]
+  earrings__face_shape_slimming:
+    direction_name: 脸型修饰显瘦型
+    direction_group: 脸型修饰型
+    product_forms: [长款耳坠, 线条型耳环, 水滴形耳环, 细长耳线]
+    wearing_type: [有耳洞]
+    style_tags: [修饰脸型, 拉长脸部线条, 显脸小, 轻气质]
+    core_user_scene: [拍照, 约会, 穿裙子, 出门搭配]
+    core_value_point: [侧脸更有线条, 脸部看起来更轻盈]
+    content_expression_route: [正脸侧脸对比, 头发拨到耳后展示脸部线条]
+    risk_flags: [耳线可能过长, AI 生成时比例失真, 过度夸大显脸小效果]
+  earrings__no_piercing_friendly:
+    direction_name: 无耳洞友好型
+    direction_group: 佩戴门槛型
+    product_forms: [耳夹, 耳扣, 耳骨夹, 假耳钉]
+    wearing_type: [无耳洞, 耳夹, 耳扣, 耳骨夹]
+    style_tags: [无耳洞, 易佩戴, 不痛, 日常]
+    core_user_scene: [想戴耳饰但没有耳洞, 临时拍照, 学生党]
+    core_value_point: [没耳洞也能有耳饰细节, 低门槛尝试]
+    content_expression_route: [佩戴动作演示, 夹上耳朵前后对比, 轻晃不掉落]
+    risk_flags: [容易和有耳洞耳环混淆, 耳夹痛感, 固定不稳, 佩戴方式生成错误]
+  earrings__statement_photo:
+    direction_name: 高存在感拍照型
+    direction_group: 拍照出片型
+    product_forms: [大耳圈, 大耳坠, 造型耳环, 花朵耳环]
+    wearing_type: [有耳洞, 耳夹]
+    style_tags: [高存在感, 拍照出片, 造型感, 明显装饰]
+    core_user_scene: [拍照, 旅行, 周末出门, 约会]
+    core_value_point: [一眼能看到, 提升穿搭造型感]
+    content_expression_route: [首镜侧脸强视觉, 转头展示耳环存在感, 简单衣服加高存在感耳环对比]
+    risk_flags: [太夸张不日常, 重量感, AI 生成比例过大]
+  earrings__lucky_meaning:
+    direction_name: 幸运寓意型
+    direction_group: 寓意情绪型
+    product_forms: [四叶草耳环, 爱心耳环, 星月耳环, 珍珠寓意款]
+    wearing_type: [有耳洞, 耳夹]
+    style_tags: [幸运, 小寓意, 礼物, 日常祝福]
+    core_user_scene: [自戴, 小礼物, 学生互送, 日常好运感]
+    core_value_point: [不只是好看，还有一点寓意, 小价格买情绪价值]
+    content_expression_route: [近景符号展示, 轻口播解释寓意, 日常出门前戴上]
+    risk_flags: [寓意表达过重, 容易变成广告感, 本地文化适配需谨慎]
+mutual_exclusion_rules:
+  - id: ER-001
+    directions: [少女礼物感型, 幸运寓意型]
+    priority_direction: 幸运寓意型
+    keywords: [四叶草, 爱心, 星月, 幸运, 寓意]
+    rule: 如果命中四叶草/爱心/星月/幸运/寓意，则优先匹配幸运寓意型；否则匹配少女礼物感型。
+  - id: ER-002
+    directions: [珍珠锆石气质型, 高存在感拍照型]
+    priority_direction: 高存在感拍照型
+    keywords: [中长款, 长款, 大体量, 造型明显, 大耳圈, 大耳坠]
+    rule: 如果耳饰为中长款/长款/大体量/造型明显，则优先匹配高存在感拍照型；否则匹配珍珠锆石气质型。
+  - id: ER-003
+    directions: [韩系轻通勤型, 珍珠锆石气质型]
+    priority_direction: 珍珠锆石气质型
+    keywords: [珍珠, 锆石, 微闪, 气质]
+    rule: 如果主元素为珍珠/锆石且有微闪/气质表达，则优先匹配珍珠锆石气质型；否则匹配韩系轻通勤型。

@@ -1,0 +1,19 @@
+product_anchor_schema:
+  product_form:
+    type: single_select
+    enum: [耳钉, 耳圈, 耳坠, 耳线, 耳夹, 耳扣, 耳骨夹, 套装, 不确定]
+  wearing_type:
+    type: single_select
+    enum: [有耳洞, 无耳洞, 耳夹, 耳扣, 耳骨夹, 不确定]
+  length_class:
+    type: single_select
+    enum: [贴耳, 短款, 中长款, 长款, 不确定]
+  main_material_element:
+    type: multi_select
+    enum: [珍珠, 锆石, 金属, 树脂, 水钻, 花朵, 蝴蝶结, 四叶草, 爱心, 其他]
+  visual_effect:
+    type: multi_select
+    enum: [提升精致度, 修饰脸型, 拉长脸部线条, 增加甜感, 增加气质, 增加拍照存在感, 无法判断]
+  risk_flags:
+    type: multi_select
+    enum: [耳线可能过长, 耳坠可能过大, 耳夹佩戴方式不清晰, 无耳洞/有耳洞容易混淆, 材质质感不清晰, 尺寸比例缺失, 主图信息不足]

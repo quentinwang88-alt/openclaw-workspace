@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LightTopsFeatureResultV2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "analysis_category",
+    "upper_body_change_strength",
+    "camera_readability",
+    "design_signal_strength",
+    "basic_style_escape_strength",
+    "title_selling_clarity",
+    "info_completeness",
+    "risk_tag",
+    "risk_note",
+    "brief_observation"
+  ],
+  "properties": {
+    "analysis_category": { "type": "string", "const": "轻上装" },
+    "upper_body_change_strength": { "type": "string", "enum": ["高", "中", "低"] },
+    "camera_readability": { "type": "string", "enum": ["高", "中", "低"] },
+    "design_signal_strength": { "type": "string", "enum": ["高", "中", "低"] },
+    "basic_style_escape_strength": { "type": "string", "enum": ["高", "中", "低"] },
+    "title_selling_clarity": { "type": "string", "enum": ["高", "中", "低"] },
+    "info_completeness": { "type": "string", "enum": ["高", "中", "低"] },
+    "risk_tag": {
+      "type": "string",
+      "enum": ["同质化偏高", "真人上身依赖强", "镜头识别度弱", "设计点不够集中", "脱离基础款能力弱", "图片信息不足", "标题卖点不清", "价格支撑不足", "无明显主要风险"]
+    },
+    "risk_note": { "type": "string", "minLength": 1, "maxLength": 30 },
+    "brief_observation": { "type": "string", "minLength": 1, "maxLength": 50 }
+  }
+}

@@ -1,0 +1,44 @@
+category_id: hair_accessory
+display_name: 发饰
+source_taxonomy: configs/market_insight_taxonomies/hair_accessory_v1.json
+directions:
+  hair_accessory__basic_commute:
+    direction_name: 基础通勤型
+    direction_group: 日常场景型
+    status: ready
+  hair_accessory__volume_elegance:
+    direction_name: 大体量气质型
+    direction_group: 审美风格型
+    status: ready
+  hair_accessory__korean_light_commute:
+    direction_name: 韩系轻通勤型
+    direction_group: 审美风格型
+    status: ready
+  hair_accessory__sweet_decorative:
+    direction_name: 甜感装饰型
+    direction_group: 审美风格型
+    status: ready
+  hair_accessory__hair_tie_set:
+    direction_name: 发圈套组型
+    direction_group: 形态专用型
+    status: ready
+  hair_accessory__headband_shape:
+    direction_name: 发箍修饰型
+    direction_group: 形态专用型
+    status: ready
+  hair_accessory__hair_up_efficiency:
+    direction_name: 盘发效率型
+    direction_group: 功能结果型
+    status: ready
+  hair_accessory__helmet_friendly:
+    direction_name: 头盔友好整理型
+    direction_group: 功能结果型
+    status: ready
+  hair_accessory__sweet_gift:
+    direction_name: 少女礼物感型
+    direction_group: 审美风格型
+    status: ready
+  hair_accessory__other:
+    direction_name: other
+    direction_group: other
+    status: ready

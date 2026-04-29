@@ -1,0 +1,197 @@
+dictionary_meta:
+  country: VN
+  category: hair_accessory
+  version: "VN_hair_accessory_v1"
+  language: ["zh", "vi"]
+
+directions:
+  少女礼物感型:
+    forms:
+      zh: [发夹, 小抓夹, 发饰套装, 发圈]
+      vi: []
+    style_keywords:
+      zh: [少女, 甜美, 礼物, 蝴蝶结, 花朵, 珍珠, 可爱, 小体积]
+      vi: []
+    function_keywords:
+      zh: []
+      vi: []
+    scenes:
+      zh: [约会, 拍照, 学生互送, 出门搭配]
+      vi: []
+    negative_keywords:
+      zh: [极简通勤, 大体量, 盘发工具]
+      vi: []
+    unique_keywords:
+      zh: [礼物感, 学生互送, 小体积有记忆点]
+      vi: []
+  大体量气质型:
+    forms:
+      zh: [大抓夹, 鲨鱼夹, 发夹]
+      vi: []
+    style_keywords:
+      zh: [大体量, 气质, 法式, 优雅, 复古, 质感]
+      vi: []
+    function_keywords:
+      zh: [显发量, 修饰头型]
+      vi: []
+    scenes:
+      zh: [约会, 通勤, 拍照, 出门搭配]
+      vi: []
+    negative_keywords:
+      zh: [小抓夹, 儿童, 学生互送]
+      vi: []
+    unique_keywords:
+      zh: [体量感, 气质感, 显发量]
+      vi: []
+  盘发效率型:
+    forms:
+      zh: [盘发器, 发簪, 抓夹, 发夹]
+      vi: []
+    style_keywords:
+      zh: [简约, 实用, 工具感, 整理]
+      vi: []
+    function_keywords:
+      zh: [盘发, 快速盘发, 固定, 防滑, 不松散]
+      vi: []
+    scenes:
+      zh: [通勤, 上班, 热天, 洗漱, 宿舍]
+      vi: []
+    negative_keywords:
+      zh: [纯装饰, 礼物感, 拍照]
+      vi: []
+    unique_keywords:
+      zh: [快速盘发, 省时间, 固定力]
+      vi: []
+  发箍修饰型:
+    forms:
+      zh: [发箍, 头箍, 发带]
+      vi: []
+    style_keywords:
+      zh: [修饰脸型, 显脸小, 甜美, 韩系, 气质]
+      vi: []
+    function_keywords:
+      zh: [固定碎发, 修饰发际线]
+      vi: []
+    scenes:
+      zh: [洗脸, 化妆, 出门, 拍照]
+      vi: []
+    negative_keywords:
+      zh: [抓夹, 盘发]
+      vi: []
+    unique_keywords:
+      zh: [修饰脸型, 发际线, 碎发整理]
+      vi: []
+  头盔友好整理型:
+    forms:
+      zh: [抓夹, 发夹, 发圈, 低马尾夹]
+      vi: []
+    style_keywords:
+      zh: [低饱和, 简约, 通勤, 实用]
+      vi: []
+    function_keywords:
+      zh: [头盔友好, 快速整理, 不压头发, 固定碎发]
+      vi: []
+    scenes:
+      zh: [骑车, 摩托, 通勤骑行, 上学, 上班]
+      vi: []
+    negative_keywords:
+      zh: [大体量, 高盘发, 拍照装饰]
+      vi: []
+    unique_keywords:
+      zh: [头盔友好, 骑车, 通勤骑行]
+      vi: []
+  韩系轻通勤型:
+    forms:
+      zh: [抓夹, 发夹, 发圈, 发箍]
+      vi: []
+    style_keywords:
+      zh: [韩系, 轻通勤, 低饱和, 简约, 温柔]
+      vi: []
+    function_keywords:
+      zh: [日常整理, 搭配]
+      vi: []
+    scenes:
+      zh: [上班, 上学, 通勤, 日常出门]
+      vi: []
+    negative_keywords:
+      zh: [夸张, 礼物感, 大体量]
+      vi: []
+    unique_keywords:
+      zh: [轻通勤, 韩系日常, 低饱和]
+      vi: []
+  发圈套组型:
+    forms:
+      zh: [发圈, 皮筋, 发绳, 套组]
+      vi: []
+    style_keywords:
+      zh: [多色, 套装, 基础, 日常, 实用]
+      vi: []
+    function_keywords:
+      zh: [扎头发, 不勒头发, 多场景替换]
+      vi: []
+    scenes:
+      zh: [宿舍, 上学, 运动, 日常]
+      vi: []
+    negative_keywords:
+      zh: [大抓夹, 发箍, 盘发器]
+      vi: []
+    unique_keywords:
+      zh: [套组, 多色, 高频替换]
+      vi: []
+  甜感装饰型:
+    forms:
+      zh: [发夹, 边夹, 抓夹, 发箍]
+      vi: []
+    style_keywords:
+      zh: [甜感, 可爱, 蝴蝶结, 花朵, 珍珠, 彩色]
+      vi: []
+    function_keywords:
+      zh: [装饰, 点缀]
+      vi: []
+    scenes:
+      zh: [拍照, 约会, 出门搭配]
+      vi: []
+    negative_keywords:
+      zh: [极简, 工具, 盘发效率]
+      vi: []
+    unique_keywords:
+      zh: [甜感, 装饰记忆点]
+      vi: []
+  基础通勤型:
+    forms:
+      zh: [抓夹, 发夹, 发圈, 发箍]
+      vi: []
+    style_keywords:
+      zh: [基础, 通勤, 极简, 黑色, 棕色, 低饱和]
+      vi: []
+    function_keywords:
+      zh: [整理头发, 固定, 日常]
+      vi: []
+    scenes:
+      zh: [上班, 上学, 通勤, 日常出门]
+      vi: []
+    negative_keywords:
+      zh: [夸张, 礼物感, 拍照款]
+      vi: []
+    unique_keywords:
+      zh: [基础百搭, 通勤]
+      vi: []
+  other:
+    forms:
+      zh: []
+      vi: []
+    style_keywords:
+      zh: []
+      vi: []
+    function_keywords:
+      zh: []
+      vi: []
+    scenes:
+      zh: []
+      vi: []
+    negative_keywords:
+      zh: []
+      vi: []
+    unique_keywords:
+      zh: []
+      vi: []

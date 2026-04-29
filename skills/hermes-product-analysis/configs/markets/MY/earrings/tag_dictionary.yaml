@@ -1,0 +1,20 @@
+forms:
+  zh: [耳钉, 耳圈, 耳坠, 耳线, 耳夹, 耳扣, 耳骨夹]
+  local: [anting-anting, subang, klip telinga]
+  en: [earring, earrings, studs, hoops, clip-on]
+style_keywords:
+  zh: [韩系, 少女, 礼物感, 气质, 珍珠, 锆石, 显脸小, 无耳洞, 拍照, 幸运]
+  local: [Korea, comel, hadiah, mutiara, zircon, tanpa tindik, bergambar, bertuah]
+  en: [korean, sweet, gift, pearl, zircon, no piercing, photo, lucky]
+scenes:
+  zh: [上班, 上学, 约会, 拍照, 日常出门]
+  local: [kerja, sekolah, dating, bergambar, harian]
+  en: [work, school, date, photo, daily]
+negative_keywords:
+  zh: [耳机, 耳套, 耳塞]
+  local: [fon telinga, penyumbat telinga]
+  en: [earphone, headset, earplug]
+unique_keywords:
+  zh: [无耳洞, 耳夹, 四叶草, 星月, 耳骨夹]
+  local: [tanpa tindik, klip telinga, clover, bulan bintang]
+  en: [clip-on, no piercing, clover, moon star, ear cuff]

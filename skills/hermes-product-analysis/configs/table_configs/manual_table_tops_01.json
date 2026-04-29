@@ -1,0 +1,43 @@
+{
+  "table_id": "manual_table_tops_01",
+  "table_name": "轻上装人工选品表",
+  "enabled": false,
+  "source_type": "manual",
+  "source": {
+    "feishu_url": "https://gcngopvfvo0q.feishu.cn/base/BASEAPPTOKEN456?table=tblTopsExample01&view=vewTopsExample01"
+  },
+  "supported_manual_categories": ["发饰", "轻上装"],
+  "read_filter": {
+    "status_field": "当前分析状态",
+    "pending_values": ["待处理", ""]
+  },
+  "field_map": {
+    "product_name": "候选品名称",
+    "product_images": "候选品主图",
+    "cost_price": "供货价",
+    "target_price": "计划售价",
+    "manual_category": "人工判断类目",
+    "product_notes": "产品补充说明",
+    "competitor_notes": "竞品观察",
+    "competitor_links": "竞品参考链接",
+    "target_market": "国家"
+  },
+  "writeback_map": {
+    "analysis_status": "当前分析状态",
+    "recognized_category": "系统识别类目",
+    "category_confidence": "系统识别置信度",
+    "product_potential": "产品潜力判断",
+    "content_potential": "内容潜力判断",
+    "main_risk": "核心风险",
+    "suggested_action": "建议动作",
+    "brief_reason": "简短结论",
+    "v2_total_score": "V2总分",
+    "v2_suggested_action": "V2建议动作",
+    "v2_matched_direction": "V2匹配方向",
+    "v2_differentiation_conclusion": "差异化结论",
+    "v2_brief_reason": "V2一句话理由",
+    "v2_risk_tags": "V2风险标签",
+    "analysis_time": "分析完成时间",
+    "analysis_error": "失败原因"
+  }
+}

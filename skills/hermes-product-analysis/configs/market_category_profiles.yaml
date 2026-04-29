@@ -1,0 +1,31 @@
+market_category_profiles:
+  VN:
+    hair_accessory:
+      enabled: true
+      profile_path: configs/markets/VN/hair_accessory/profile.yaml
+    earrings:
+      enabled: true
+      profile_path: configs/markets/VN/earrings/profile.yaml
+    womens_tops:
+      enabled: true
+      profile_path: configs/markets/VN/womens_tops/profile.yaml
+  TH:
+    hair_accessory:
+      enabled: true
+      profile_path: configs/markets/TH/hair_accessory/profile.yaml
+    earrings:
+      enabled: true
+      profile_path: configs/markets/TH/earrings/profile.yaml
+    womens_tops:
+      enabled: true
+      profile_path: configs/markets/TH/womens_tops/profile.yaml
+  MY:
+    hair_accessory:
+      enabled: true
+      profile_path: configs/markets/MY/hair_accessory/profile.yaml
+    earrings:
+      enabled: true
+      profile_path: configs/markets/MY/earrings/profile.yaml
+    womens_tops:
+      enabled: true
+      profile_path: configs/markets/MY/womens_tops/profile.yaml

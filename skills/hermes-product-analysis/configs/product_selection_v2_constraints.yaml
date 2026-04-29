@@ -1,0 +1,28 @@
+direction_action_constraints:
+  prioritize_low_cost_test:
+    max_action: select
+  cautious_test:
+    max_action: select
+    select_quota_per_direction: 3
+  strong_signal_verify:
+    max_action: manual_review
+  hidden_candidate:
+    max_action: observe
+  hidden_small_test:
+    max_action: manual_review
+  study_top_not_enter:
+    max_action: manual_review
+    upgrade_to_select_if:
+      differentiation_score_used_min: 12
+      content_potential_score_min: 15
+      differentiation_confidence_allowed: ["medium", "high"]
+      concrete_difference_required: true
+      head_product_comparison_required: true
+  observe:
+    max_action: observe
+  avoid:
+    max_action: head_reference
+  neutral:
+    max_action: select
+  "":
+    max_action: select
