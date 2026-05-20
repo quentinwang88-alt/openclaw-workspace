@@ -3,10 +3,10 @@
 This directory is a source snapshot of the local Hermes Agent checkout.
 
 - Source remote: https://github.com/NousResearch/hermes-agent.git
-- Source commit: b16f9d438ba18cb433a94a47dd99a05abc808d0a
+- Source commit: 3ca07b125bf4b23388d395cdd453275752021c16
 - Snapshot path: /Users/likeu3/.hermes/hermes-agent
 - Vendored path: /Users/likeu3/.openclaw/workspace/vendor/hermes-agent
 
 The snapshot was copied from Git-tracked files only, excluding local Git metadata,
 virtual environments, dependency installs, logs, runtime data, and auth files.
-It includes the local working-tree patch for OpenAI Codex base URL normalization.
+It includes the local commit for OpenAI Codex base URL normalization.
