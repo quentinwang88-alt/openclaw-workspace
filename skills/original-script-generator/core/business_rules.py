@@ -68,6 +68,14 @@ def _field_value(strategy: Dict[str, object], key: str) -> str:
     return normalize_text(str(value or ""))
 
 
+def _first_field_value(strategy: Dict[str, object], *keys: str) -> str:
+    for key in keys:
+        value = _field_value(strategy, key)
+        if value:
+            return value
+    return ""
+
+
 def _contains_unwanted_ad_expression(text: str) -> bool:
     normalized = normalize_text(text)
     if not normalized:
@@ -211,13 +219,13 @@ def strategies_too_similar(strategies: List[Dict[str, object]]) -> bool:
             _field_value(strategy, "script_role"),
             _field_value(strategy, "primary_focus"),
             _field_value(strategy, "secondary_focus"),
-            _field_value(strategy, "opening_mode"),
-            _field_value(strategy, "proof_mode"),
+            _first_field_value(strategy, "opening_angle", "opening_mode"),
+            _first_field_value(strategy, "proof_path", "proof_mode"),
             _field_value(strategy, "ending_mode"),
             _field_value(strategy, "scene_subspace"),
-            _field_value(strategy, "visual_entry_mode"),
-            _field_value(strategy, "persona_state"),
-            _field_value(strategy, "action_entry_mode"),
+            _first_field_value(strategy, "opening_angle", "visual_entry_mode"),
+            _first_field_value(strategy, "performance_strategy_hint", "performance_bias", "persona_state"),
+            _first_field_value(strategy, "performance_strategy_hint", "performance_bias", "action_entry_mode"),
             _field_value(strategy, "dominant_user_question"),
             _field_value(strategy, "proof_thesis"),
             _field_value(strategy, "decision_thesis"),
@@ -242,21 +250,21 @@ def validate_strategy_distribution(
     if strategy_ids != ["S1", "S2", "S3", "S4"]:
         return f"strategy_id 顺序必须为 S1/S2/S3/S4，当前为 {strategy_ids}"
 
-    if len({_field_value(item, "opening_mode") for item in strategies}) < 2:
-        return "4 套策略的 opening_mode 区分度不足"
+    if len({_first_field_value(item, "opening_angle", "opening_mode") for item in strategies}) < 2:
+        return "4 套策略的 opening_angle/opening_mode 区分度不足"
     script_roles = {_field_value(item, "script_role") for item in strategies if _field_value(item, "script_role")}
     if script_roles and script_roles != {normalize_text(item) for item in SCRIPT_ROLES}:
         return "script_role 需要完整覆盖 4 种固定角色"
-    if len({_field_value(item, "proof_mode") for item in strategies}) < 3:
-        return "proof_mode 少于 3 种"
+    if len({_first_field_value(item, "proof_path", "proof_mode") for item in strategies}) < 3:
+        return "proof_path/proof_mode 少于 3 种"
     if len({_field_value(item, "ending_mode") for item in strategies}) < 3:
         return "ending_mode 少于 3 种"
-    if len({_field_value(item, "visual_entry_mode") for item in strategies}) < 3:
-        return "visual_entry_mode 少于 3 种"
-    if len({_field_value(item, "persona_state") for item in strategies}) < 2:
-        return "persona_state 少于 2 种"
-    if len({_field_value(item, "action_entry_mode") for item in strategies}) < 3:
-        return "action_entry_mode 少于 3 种"
+    if len({_first_field_value(item, "opening_angle", "visual_entry_mode") for item in strategies}) < 3:
+        return "opening_angle/visual_entry_mode 少于 3 种"
+    if len({_first_field_value(item, "performance_strategy_hint", "performance_bias", "persona_state") for item in strategies}) < 2:
+        return "performance_strategy_hint/persona_state 少于 2 种"
+    if len({_first_field_value(item, "performance_strategy_hint", "performance_bias", "action_entry_mode") for item in strategies}) < 3:
+        return "performance_strategy_hint/action_entry_mode 少于 3 种"
     if len({_field_value(item, "dominant_user_question") for item in strategies}) < 3:
         return "dominant_user_question 区分度不足"
     if len({_field_value(item, "proof_thesis") for item in strategies}) < 3:
@@ -275,8 +283,8 @@ def validate_strategy_distribution(
     s1 = strategies[0]
     s4 = strategies[3]
     if (
-        _field_value(s1, "opening_mode") == _field_value(s4, "opening_mode")
-        and _field_value(s1, "visual_entry_mode") == _field_value(s4, "visual_entry_mode")
+        _first_field_value(s1, "opening_angle", "opening_mode") == _first_field_value(s4, "opening_angle", "opening_mode")
+        and _first_field_value(s1, "opening_angle", "visual_entry_mode") == _first_field_value(s4, "opening_angle", "visual_entry_mode")
         and _field_value(s1, "opening_first_shot") == _field_value(s4, "opening_first_shot")
     ):
         return "S4 与 S1 的首镜逻辑拉开不足"

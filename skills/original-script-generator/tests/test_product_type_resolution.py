@@ -47,6 +47,17 @@ class ProductTypeResolutionTest(unittest.TestCase):
         self.assertFalse(result.is_valid)
         self.assertIn("手腕", result.matched_forbidden_terms)
 
+    def test_type_guard_ignores_negated_forbidden_terms(self) -> None:
+        resolved = resolve_product_context("围巾", "配饰")
+        result = validate_generated_text(
+            "围巾已围好后让上半身冬季穿搭更完整；不承诺强保暖，也不得暗示防风效果。",
+            resolved,
+        )
+
+        self.assertTrue(result.is_valid)
+        self.assertNotIn("强保暖", result.matched_forbidden_terms)
+        self.assertNotIn("防风", result.matched_forbidden_terms)
+
     def test_high_confidence_visual_conflict_blocks_unrecognized_accessory_type(self) -> None:
         resolved = resolve_product_context(
             "长耳线款",

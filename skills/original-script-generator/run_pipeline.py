@@ -23,6 +23,7 @@ from core.pipeline import (  # noqa: E402
     OriginalScriptPipeline,
     load_pending_records,
     load_selected_records,
+    recover_stale_running_records,
     STATUS_PENDING_RERUN_ALL,
     STATUS_PENDING_RERUN_SCRIPT,
     STATUS_PENDING_VARIANTS,
@@ -65,7 +66,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-workers",
         type=int,
         default=DEFAULT_MAX_WORKERS,
-        help=f"记录级最大并发数，默认 {DEFAULT_MAX_WORKERS}，实际自动封顶到 3",
+        help=(
+            f"记录级最大并发数，默认 {DEFAULT_MAX_WORKERS}；"
+            "实际默认封顶到 1，可用 ORIGINAL_SCRIPT_MAX_WORKERS_CAP 显式提高"
+        ),
     )
     parser.add_argument("--watch", action="store_true", help="持续轮询待执行任务")
     parser.add_argument(
@@ -82,8 +86,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force-rerun-script", action="store_true", help="对指定记录强制执行母版脚本重跑分支；如表格已勾选生成变体，则在通过后继续生成变体")
     parser.add_argument("--force-rerun-all", action="store_true", help="对指定记录强制执行全流程重跑")
     parser.add_argument(
+        "--resume-from-latest-success",
+        action="store_true",
+        help=(
+            "全流程重跑时允许复用同输入哈希的上游成功阶段，适合中后段超时/失败后的断点续跑；"
+            "不传则 --force-rerun-all 仍按干净全量重跑处理"
+        ),
+    )
+    parser.add_argument(
         "--llm-route",
-        help="选择 LLM 线路。当前只支持 primary=走 OpenClaw 当前主 agent 的 openai-codex/gpt-5.4；不传则使用已保存的默认线路",
+        help="选择 LLM 线路。当前只支持 primary=走 OpenClaw 当前主 agent 的 openai-codex/gpt-5.5；不传则使用已保存的默认线路",
     )
     parser.add_argument(
         "--llm-route-order",
@@ -104,6 +116,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="只执行指定脚本索引的变体，可重复传入；默认扩 1/2/3/4，显式传参时仅执行指定脚本",
     )
     parser.add_argument("--dry-run", action="store_true", help="只查看待处理任务")
+    parser.add_argument(
+        "--recover-stale",
+        action="store_true",
+        default=True,
+        help="运行前自动恢复超过阈值的 stale 进行中任务（默认开启）",
+    )
+    parser.add_argument(
+        "--no-recover-stale",
+        action="store_false",
+        dest="recover_stale",
+        help="关闭运行前 stale 进行中任务恢复",
+    )
+    parser.add_argument(
+        "--recover-stale-only",
+        action="store_true",
+        help="只恢复 stale 进行中任务，不执行待处理队列",
+    )
+    parser.add_argument(
+        "--stale-minutes",
+        type=int,
+        default=120,
+        help="进行中任务超过多少分钟无本地进展后视为 stale，默认 120",
+    )
     parser.add_argument(
         "--run-timeout",
         type=int,
@@ -126,6 +161,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--poll-interval-seconds 必须大于等于 1")
     if args.max_cycles is not None and args.max_cycles < 1:
         raise ValueError("--max-cycles 必须大于等于 1")
+    if args.stale_minutes < 1:
+        raise ValueError("--stale-minutes 必须大于等于 1")
     if not args.watch:
         return
     if args.product_code or args.record_id or args.task_no:
@@ -148,6 +185,8 @@ def print_runtime_config(
             print(f"   {key}: {value}")
     print(f"🤖 当前 LLM 线路: {llm_route} (source={llm_route_source})")
     print(f"🚦 默认记录级并发上限: {args.max_workers}")
+    if args.resume_from_latest_success:
+        print("♻️ 已启用断点续跑复用: 同输入哈希的成功阶段会优先复用")
     if args.watch:
         next_run = datetime.now() + timedelta(seconds=args.poll_interval_seconds)
         print(
@@ -155,6 +194,16 @@ def print_runtime_config(
             f"每 {args.poll_interval_seconds} 秒检查一次待执行任务 | "
             f"预计下一次检查时间: {next_run:%Y-%m-%d %H:%M:%S}"
         )
+
+
+def should_enable_global_timeout(args: argparse.Namespace) -> bool:
+    if args.run_timeout <= 0 and DEFAULT_RUN_TIMEOUT_SECONDS <= 0:
+        return False
+    if args.watch:
+        return True
+    if args.record_id or args.product_code or args.task_no:
+        return True
+    return bool(args.limit == 1)
 
 
 def load_records_for_run(
@@ -202,6 +251,21 @@ def run_once(
     llm_route: str,
     llm_route_order: Optional[Tuple[str, ...]],
 ) -> Dict[str, int]:
+    if args.recover_stale:
+        recovery = recover_stale_running_records(
+            client,
+            mapping,
+            stale_seconds=args.stale_minutes * 60,
+            dry_run=args.dry_run,
+        )
+        if recovery["checked"]:
+            print(
+                "🧹 stale 进行中检查: "
+                f"checked={recovery['checked']} | recovered={recovery['recovered']} | skipped={recovery['skipped']}"
+            )
+    if args.recover_stale_only:
+        return {"total": 0, "success": 0, "failed": 0}
+
     selected_script_indexes = args.script_index or args.variant_script_index
     records, message = load_records_for_run(args, client, mapping)
     print(f"\n{message}")
@@ -217,6 +281,7 @@ def run_once(
         script_rerun_indexes=args.script_index,
         llm_route=llm_route,
         llm_route_order=llm_route_order,
+        resume_from_latest_success=args.resume_from_latest_success,
     )
     return pipeline.process_records(records, dry_run=args.dry_run, max_workers=args.max_workers)
 
@@ -239,7 +304,7 @@ def run_watch_loop(
             print(f"🔁 轮询第 {cycle} 次 | {datetime.now():%Y-%m-%d %H:%M:%S}")
             print(f"{'#' * 72}")
             # Reset timeout alarm per cycle in watch mode
-            if run_timeout > 0:
+            if should_enable_global_timeout(args) and run_timeout > 0:
                 signal.alarm(run_timeout)
             try:
                 stats = run_once(args, client, mapping, llm_route, llm_route_order)
@@ -331,10 +396,13 @@ def main() -> None:
 
     # --- Run timeout ---
     run_timeout = args.run_timeout if args.run_timeout > 0 else DEFAULT_RUN_TIMEOUT_SECONDS
-    if run_timeout > 0:
+    global_timeout_enabled = should_enable_global_timeout(args)
+    if global_timeout_enabled and run_timeout > 0:
         signal.signal(signal.SIGALRM, _timeout_handler)
         signal.alarm(run_timeout)
         print(f"⏱️ 单次运行超时: {run_timeout} 秒 ({run_timeout // 60} 分钟)")
+    elif run_timeout > 0:
+        print("⏱️ 批量模式已关闭跨记录总超时；使用阶段超时与 stale 恢复避免单任务卡死")
 
     try:
         app_token, table_id = resolve_feishu_config(args.feishu_url)

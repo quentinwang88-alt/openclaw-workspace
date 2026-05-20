@@ -34,6 +34,16 @@ FIELD_ALIASES = {
     "light_rewrite_plan": ["轻微改写复刻方案", "复刻卡", "replicate_card"],
     "final_storyboard": ["最终固定分镜", "最终复刻视频提示词", "final_execution_prompt"],
     "negative_words": ["负面限制词"],
+    # 字段名与下游同步脚本 sync_to_script_table.py 保持一致，
+    # 推荐飞书表里直接命名为「视频时长」（数字字段）。
+    "video_duration": [
+        "视频时长",
+        "短视频时长",
+        "时长",
+        "视频秒数",
+        "video_duration",
+        "duration",
+    ],
     "sync_status": ["同步状态"],
     "synced_script_id": ["同步到脚本ID"],
     "sync_error": ["同步错误信息"],

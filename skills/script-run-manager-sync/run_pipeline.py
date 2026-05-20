@@ -66,20 +66,25 @@ def print_field_mapping(title: str, mapping: dict) -> None:
 
 
 def ensure_reference_free_field(client: FeishuBitableClient, field_names: List[str]) -> List[str]:
-    if "免参考图" in field_names:
-        return field_names
-    print("🧩 目标运行表缺少字段【免参考图】，正在创建...")
-    try:
-        client.create_field(
-            "免参考图",
-            field_type=3,
-            ui_type="SingleSelect",
-            property={"options": [{"name": "是"}, {"name": "否"}]},
-        )
-    except Exception as exc:
-        print(f"⚠️ 创建单选字段【免参考图】失败，降级创建文本字段: {exc}")
-        client.create_field("免参考图", field_type=1, ui_type="Text")
-    return client.list_field_names()
+    changed = False
+    if "免参考图" not in field_names:
+        print("🧩 目标运行表缺少字段【免参考图】，正在创建...")
+        try:
+            client.create_field(
+                "免参考图",
+                field_type=3,
+                ui_type="SingleSelect",
+                property={"options": [{"name": "是"}, {"name": "否"}]},
+            )
+        except Exception as exc:
+            print(f"⚠️ 创建单选字段【免参考图】失败，降级创建文本字段: {exc}")
+            client.create_field("免参考图", field_type=1, ui_type="Text")
+        changed = True
+    if "视频时长" not in field_names:
+        print("🧩 目标运行表缺少字段【视频时长】，正在创建...")
+        client.create_field("视频时长", field_type=2, ui_type="Number")
+        changed = True
+    return client.list_field_names() if changed else field_names
 
 
 def load_metadata_lookup(db_path: str) -> Dict[tuple, Dict[str, str]]:
@@ -266,6 +271,9 @@ def main() -> None:
                         existing_updates[prompt_field] = fields[prompt_field]
                     if fields.get(target_mapping.get("reference_free")) == "是" and can_patch_reference_free(existing_target, target_mapping):
                         existing_updates[target_mapping["reference_free"]] = "是"
+                    duration_field = target_mapping.get("video_duration")
+                    if duration_field and fields.get(duration_field) and not existing_target.fields.get(duration_field):
+                        existing_updates[duration_field] = fields[duration_field]
                     if existing_updates:
                         target_client.update_record_fields(existing_target.record_id, existing_updates)
                         patched_names = "、".join(existing_updates.keys())

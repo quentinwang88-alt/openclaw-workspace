@@ -22,6 +22,7 @@ DEFAULT_OUTPUT_DIR = "/Users/likeu3/.openclaw/workspace/runtime/image_outputs"
 CODEX_DEFAULT_BASE_URL = "https://chatgpt.com/backend-api/codex"
 CODEX_DEFAULT_CHAT_MODEL = "gpt-5.5"
 CODEX_DEFAULT_IMAGE_MODEL = "gpt-image-2"
+CODEX_DEFAULT_RESPONSES_MODEL = "gpt-5.5"
 
 OPENCLAW_CONFIG_PATH = Path(
     os.environ.get("OPENCLAW_CONFIG_PATH", str(Path.home() / ".openclaw" / "openclaw.json"))
@@ -189,6 +190,10 @@ class Settings:
     codex_base_url: str = field(default_factory=resolve_codex_base_url)
     codex_api_key: str = field(default_factory=resolve_codex_access_token)
     codex_model: str = field(default_factory=resolve_codex_model)
+    codex_responses_model: str = field(
+        default_factory=lambda: os.environ.get("OPENAI_CODEX_RESPONSES_MODEL", CODEX_DEFAULT_RESPONSES_MODEL).strip()
+        or CODEX_DEFAULT_RESPONSES_MODEL
+    )
 
     # --- SOCKS5 proxy ---
     socks5_proxy: str = field(default_factory=resolve_socks5_proxy)

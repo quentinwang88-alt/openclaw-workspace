@@ -39,7 +39,7 @@ SCRIPT_FIELD_SPECS: List[Dict[str, Any]] = [
 ]
 
 SOURCE_FIELD_ALIASES: Dict[str, List[str]] = {
-    "product_code": ["产品编码", "商品编码", "SKU", "Product Code"],
+    "product_code": ["产品编码", "商品编码", "SKU", "Product Code", "产品ID"],
     "product_type": ["产品类型", "商品类型", "类目类型"],
     "target_language": ["目标语言", "语言", "target_language"],
     "business_category": ["一级类目", "业务大类", "主大类"],
@@ -60,6 +60,7 @@ SOURCE_FIELD_ALIASES: Dict[str, List[str]] = {
     "publish_purpose": ["发布用途", "用途"],
     "cart_enabled": ["是否挂车", "挂车"],
     "content_branch": ["内容分支"],
+    "video_duration": ["视频时长", "短视频时长", "时长", "视频秒数", "duration", "video_duration"],
     "sync_enabled": ["是否可同步", "是否可同步脚本"],
     "sync_master_enabled": ["是否可同步母版"],
     "sync_variant_enabled": ["是否可同步子变体"],
@@ -86,6 +87,7 @@ TARGET_FIELD_ALIASES: Dict[str, List[str]] = {
     "cart_enabled": ["是否挂车", "挂车"],
     "content_branch": ["内容分支"],
     "reference_free": ["免参考图"],
+    "video_duration": ["视频时长", "短视频时长", "时长", "视频秒数", "duration", "video_duration"],
     "task_status": ["任务状态", "状态"],
 }
 
@@ -115,6 +117,7 @@ class ScriptSyncTask:
     publish_purpose: str = ""
     cart_enabled: str = ""
     content_branch: str = ""
+    video_duration: int = 15
 
 
 def is_variant_slot(task_suffix: str) -> bool:
@@ -209,6 +212,22 @@ def normalize_text(raw_value: Any) -> str:
     if raw_value is None:
         return ""
     return str(raw_value).strip()
+
+
+def normalize_video_duration(raw_value: Any, default_seconds: int = 15) -> int:
+    text = normalize_text(raw_value)
+    if not text:
+        return default_seconds
+    match = re.search(r"\d+(?:\.\d+)?", text)
+    if not match:
+        return default_seconds
+    try:
+        value = float(match.group(0))
+    except ValueError:
+        return default_seconds
+    if value <= 0:
+        return default_seconds
+    return int(round(value))
 
 
 def now_text() -> str:
@@ -414,6 +433,7 @@ def build_sync_tasks(
                     publish_purpose=normalize_text(fields.get(mapping.get("publish_purpose"))) if mapping.get("publish_purpose") else "",
                     cart_enabled=normalize_text(fields.get(mapping.get("cart_enabled"))) if mapping.get("cart_enabled") else "",
                     content_branch=normalize_text(fields.get(mapping.get("content_branch"))) if mapping.get("content_branch") else "",
+                    video_duration=normalize_video_duration(fields.get(mapping.get("video_duration")) if mapping.get("video_duration") else None),
                     **derive_task_metadata(record, mapping, spec["task_suffix"], metadata_lookup=metadata_lookup),
                 )
             )
@@ -459,6 +479,8 @@ def build_target_fields(
         fields[mapping["cart_enabled"]] = task.cart_enabled
     if mapping.get("content_branch") and task.content_branch:
         fields[mapping["content_branch"]] = task.content_branch
+    if mapping.get("video_duration"):
+        fields[mapping["video_duration"]] = task.video_duration or 15
     if mapping.get("reference_free") and is_nurture_task(task):
         fields[mapping["reference_free"]] = "是"
     return fields

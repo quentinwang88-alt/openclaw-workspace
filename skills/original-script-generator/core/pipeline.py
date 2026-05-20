@@ -8,9 +8,12 @@ import copy
 import json
 import os
 import re
+import signal
 import subprocess
 import tempfile
+import threading
 import time
+from contextlib import contextmanager
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime
 from pathlib import Path
@@ -107,6 +110,26 @@ STATUS_FAILED_VARIANT_JSON = "失败-脚本变体解析异常"
 STATUS_FAILED_VARIANT_WRITE = "失败-脚本变体回写异常"
 STATUS_FAILED_INTERRUPTED = "失败-任务被中断"
 STATUS_FAILED_LEGACY = "任务失败"
+RUNNING_STATUSES = {
+    STATUS_RUNNING_VALIDATE,
+    STATUS_RUNNING_ANCHOR,
+    STATUS_RUNNING_STRATEGY,
+    STATUS_RUNNING_SCRIPT,
+    STATUS_RUNNING_VARIANTS,
+    STATUS_RUNNING_LEGACY,
+}
+FAILED_STATUSES = {
+    STATUS_FAILED_INPUT,
+    STATUS_FAILED_MODEL,
+    STATUS_FAILED_JSON,
+    STATUS_FAILED_WRITE,
+    STATUS_FAILED_VARIANT_INPUT,
+    STATUS_FAILED_VARIANT_MODEL,
+    STATUS_FAILED_VARIANT_JSON,
+    STATUS_FAILED_VARIANT_WRITE,
+    STATUS_FAILED_INTERRUPTED,
+    STATUS_FAILED_LEGACY,
+}
 
 MODEL_SUPPORTED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 MODEL_CONVERTIBLE_IMAGE_SUFFIXES = {".heic", ".heif"}
@@ -495,6 +518,76 @@ class JsonStageError(Exception):
     pass
 
 
+class StageTimeoutError(BaseException):
+    pass
+
+
+STAGE_TIMEOUT_SECONDS_DEFAULT = int(os.environ.get("ORIGINAL_SCRIPT_STAGE_TIMEOUT_SECONDS", "420"))
+STAGE_TIMEOUT_SECONDS_PRODUCT_GUARD = int(os.environ.get("ORIGINAL_SCRIPT_PRODUCT_GUARD_TIMEOUT_SECONDS", "120"))
+STAGE_TIMEOUT_SECONDS_SHORT = int(os.environ.get("ORIGINAL_SCRIPT_SHORT_STAGE_TIMEOUT_SECONDS", "300"))
+STAGE_TIMEOUT_SECONDS_SCRIPT = int(os.environ.get("ORIGINAL_SCRIPT_SCRIPT_STAGE_TIMEOUT_SECONDS", "420"))
+STAGE_TIMEOUT_SECONDS_REVIEW = int(os.environ.get("ORIGINAL_SCRIPT_REVIEW_STAGE_TIMEOUT_SECONDS", "360"))
+STAGE_TIMEOUT_SECONDS_VIDEO = int(os.environ.get("ORIGINAL_SCRIPT_VIDEO_STAGE_TIMEOUT_SECONDS", "300"))
+STALE_STAGE_TIMEOUT_BUFFER_SECONDS = int(os.environ.get("ORIGINAL_SCRIPT_STALE_STAGE_TIMEOUT_BUFFER_SECONDS", "300"))
+CONTRACT_REGISTRY_SCHEMA_VERSION = os.environ.get(
+    "ORIGINAL_SCRIPT_CONTRACT_REGISTRY_SCHEMA_VERSION",
+    "category_execution_contract_v1",
+)
+ENABLE_CONTRACT_REGISTRY = os.environ.get("ORIGINAL_SCRIPT_ENABLE_CONTRACT_REGISTRY", "1") != "0"
+ENABLE_TEMPLATE_VIDEO_PROMPT = os.environ.get("ORIGINAL_SCRIPT_TEMPLATE_VIDEO_PROMPT", "1") != "0"
+DEFER_VARIANTS_AFTER_MOTHER = os.environ.get("ORIGINAL_SCRIPT_DEFER_VARIANTS_AFTER_MOTHER", "1") != "0"
+TYPE_GUARD_MAX_IMAGES = max(1, int(os.environ.get("ORIGINAL_SCRIPT_TYPE_GUARD_MAX_IMAGES", "4")))
+P1_DEFAULT_MAX_IMAGES = max(1, int(os.environ.get("ORIGINAL_SCRIPT_P1_MAX_IMAGES", "3")))
+P1_SET_MAX_IMAGES = max(P1_DEFAULT_MAX_IMAGES, int(os.environ.get("ORIGINAL_SCRIPT_P1_SET_MAX_IMAGES", "4")))
+
+
+def _stage_timeout_seconds_for_name(stage_name: str) -> int:
+    if stage_name == "product_type_guard":
+        return STAGE_TIMEOUT_SECONDS_PRODUCT_GUARD
+    if stage_name.startswith("script_review_"):
+        return STAGE_TIMEOUT_SECONDS_REVIEW
+    if stage_name.startswith("video_prompt_"):
+        return STAGE_TIMEOUT_SECONDS_VIDEO
+    if stage_name.startswith("script_"):
+        return STAGE_TIMEOUT_SECONDS_SCRIPT
+    if stage_name.startswith("expression_"):
+        return STAGE_TIMEOUT_SECONDS_SHORT
+    if stage_name in {
+        "anchor_card",
+        "opening_strategy",
+        "persona_style_emotion_pack",
+        "strategy_candidates",
+        "strategy_cards",
+    }:
+        return STAGE_TIMEOUT_SECONDS_DEFAULT
+    return STAGE_TIMEOUT_SECONDS_DEFAULT
+
+
+@contextmanager
+def _stage_deadline(stage_name: str, timeout_seconds: int):
+    if timeout_seconds <= 0 or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+    start = time.time()
+
+    def _raise_stage_timeout(_signum: int, _frame: Any) -> None:
+        raise StageTimeoutError(f"{stage_name} 阶段超过 {timeout_seconds} 秒，已中断以避免单任务卡死")
+
+    signal.signal(signal.SIGALRM, _raise_stage_timeout)
+    try:
+        yield
+    finally:
+        elapsed = time.time() - start
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            remaining_seconds = max(0.001, previous_timer[0] - elapsed)
+            signal.setitimer(signal.ITIMER_REAL, remaining_seconds, previous_timer[1])
+
+
 def _record_generate_variants_checked(
     fields: Dict[str, Any],
     mapping: Dict[str, Optional[str]],
@@ -615,6 +708,18 @@ def _latest_local_activity_for_record(record: TaskRecord, storage: PipelineStora
                 WHERE record_id = ?
                   AND completed_at IS NULL
                 UNION ALL
+                SELECT current_stage_started_at AS activity_at
+                FROM pipeline_runs
+                WHERE record_id = ?
+                  AND completed_at IS NULL
+                  AND current_stage_started_at IS NOT NULL
+                UNION ALL
+                SELECT last_heartbeat_at AS activity_at
+                FROM pipeline_runs
+                WHERE record_id = ?
+                  AND completed_at IS NULL
+                  AND last_heartbeat_at IS NOT NULL
+                UNION ALL
                 SELECT sr.created_at AS activity_at
                 FROM stage_results sr
                 JOIN pipeline_runs pr ON pr.run_id = sr.run_id
@@ -622,9 +727,14 @@ def _latest_local_activity_for_record(record: TaskRecord, storage: PipelineStora
                   AND pr.completed_at IS NULL
             )
             """,
-            (record.record_id, record.record_id),
+            (record.record_id, record.record_id, record.record_id, record.record_id),
         ).fetchone()
     return _parse_storage_time(row["activity_at"] if row else None)
+
+
+def _latest_local_run_for_record(record_id: str, storage: PipelineStorage) -> Optional[Any]:
+    runs = storage.query_runs_by_record_id(record_id, limit=1)
+    return runs[0] if runs else None
 
 
 def _should_enqueue_stale_running_variant_record(
@@ -645,6 +755,100 @@ def _should_enqueue_stale_running_variant_record(
     return (datetime.now() - latest_activity).total_seconds() >= STALE_RUNNING_VARIANT_SECONDS
 
 
+def recover_stale_running_records(
+    client: FeishuBitableClient,
+    mapping: Dict[str, Optional[str]],
+    stale_seconds: int = 7200,
+    dry_run: bool = False,
+) -> Dict[str, int]:
+    status_field = mapping.get("status")
+    if not status_field:
+        return {"checked": 0, "recovered": 0, "skipped": 0}
+
+    storage = PipelineStorage()
+    records = client.list_records(page_size=100)
+    now = datetime.now()
+    checked = 0
+    recovered = 0
+    skipped = 0
+
+    for record in records:
+        current_status = normalize_cell_value(record.fields.get(status_field))
+        if current_status not in RUNNING_STATUSES:
+            continue
+        checked += 1
+        latest_run = _latest_local_run_for_record(record.record_id, storage)
+        if not latest_run:
+            skipped += 1
+            continue
+
+        target_status = ""
+        error_message = ""
+        if latest_run["completed_at"]:
+            completed_at = _parse_storage_time(latest_run["completed_at"])
+            if not completed_at or (now - completed_at).total_seconds() < stale_seconds:
+                skipped += 1
+                continue
+            runtime_status = normalize_cell_value(latest_run["runtime_status"])
+            if runtime_status in FAILED_STATUSES:
+                target_status = runtime_status
+                error_message = normalize_cell_value(latest_run["error_message"]) or runtime_status
+            elif runtime_status in {STATUS_DONE, STATUS_DONE_VARIANTS, STATUS_DONE_WITH_QC_WARNINGS}:
+                target_status = runtime_status
+                error_message = normalize_cell_value(latest_run["error_message"])
+        else:
+            latest_activity = _latest_local_activity_for_record(record, storage)
+            current_stage = normalize_cell_value(latest_run["current_stage"]) if "current_stage" in latest_run.keys() else ""
+            current_stage_started_at = (
+                _parse_storage_time(latest_run["current_stage_started_at"])
+                if "current_stage_started_at" in latest_run.keys()
+                else None
+            )
+            effective_stale_seconds = stale_seconds
+            if current_stage:
+                effective_stale_seconds = max(
+                    stale_seconds,
+                    _stage_timeout_seconds_for_name(current_stage) + STALE_STAGE_TIMEOUT_BUFFER_SECONDS,
+                )
+            reference_activity = current_stage_started_at or latest_activity
+            if not reference_activity or (now - reference_activity).total_seconds() < effective_stale_seconds:
+                skipped += 1
+                continue
+            target_status = STATUS_FAILED_INTERRUPTED
+            if current_stage:
+                error_message = (
+                    "运行中断自动恢复："
+                    f"当前阶段 {current_stage} 超过 {int(effective_stale_seconds // 60)} 分钟无本地进展"
+                )
+            else:
+                error_message = f"运行中断自动恢复：超过 {int(effective_stale_seconds // 60)} 分钟无本地进展"
+            if not dry_run:
+                storage.update_run_status(
+                    int(latest_run["run_id"]),
+                    runtime_status=STATUS_FAILED_INTERRUPTED,
+                    error_message=error_message,
+                    stage_durations={},
+                    completed=True,
+                )
+
+        if not target_status:
+            skipped += 1
+            continue
+
+        updates = {
+            "status": target_status,
+            "error_message": error_message[:2000],
+            "execution_log": f"自动恢复 stale 进行中：{current_status} -> {target_status}",
+        }
+        payload = build_update_payload(mapping, updates)
+        if payload and not dry_run:
+            client.update_record_fields(record.record_id, payload)
+        recovered += 1
+        print(f"🧹 stale 状态恢复: record_id={record.record_id} | {current_status} -> {target_status}")
+
+    return {"checked": checked, "recovered": recovered, "skipped": skipped}
+
+
 class OriginalScriptPipeline:
     def __init__(
         self,
@@ -655,6 +859,7 @@ class OriginalScriptPipeline:
         llm_route: str = "auto",
         llm_route_order: Optional[List[str]] = None,
         startup_stagger_seconds: float = 8.0,
+        resume_from_latest_success: bool = False,
     ):
         self.client = client
         self.mapping = mapping
@@ -666,6 +871,8 @@ class OriginalScriptPipeline:
         self.llm_route_order = list(llm_route_order or []) or None
         self.auto_publish_metadata_db_path = str(default_metadata_db_path())
         self.startup_stagger_seconds = max(0.0, float(startup_stagger_seconds))
+        self.resume_from_latest_success = bool(resume_from_latest_success)
+        self.abort_batch_reason = ""
 
     def process_records(
         self,
@@ -688,8 +895,11 @@ class OriginalScriptPipeline:
                 )
             return self.stats
 
-        worker_count = max(1, min(max_workers, 3, len(records)))
+        worker_cap = self._resolve_record_worker_cap()
+        worker_count = max(1, min(max_workers, worker_cap, len(records)))
         print(f"🚦 记录级并发数: {worker_count}")
+        if max_workers > worker_cap:
+            print(f"🧯 并发保护: 请求 max-workers={max_workers}，已按上限 {worker_cap} 执行")
         if worker_count > 1 and self.startup_stagger_seconds > 0:
             print(
                 "⏱️ 并发启动节流: "
@@ -708,9 +918,15 @@ class OriginalScriptPipeline:
                         self.stats["success"] += 1
                     else:
                         self.stats["failed"] += 1
+                        if self.abort_batch_reason:
+                            print(f"🛑 批次熔断: {self.abort_batch_reason}")
+                            break
                 except Exception as exc:
                     self.stats["failed"] += 1
                     print(f"❌ 当前记录失败: {exc}")
+                    if self.abort_batch_reason:
+                        print(f"🛑 批次熔断: {self.abort_batch_reason}")
+                        break
             return self.stats
 
         future_to_record: Dict[Any, TaskRecord] = {}
@@ -753,6 +969,58 @@ class OriginalScriptPipeline:
 
         return self.stats
 
+    @staticmethod
+    def _resolve_record_worker_cap() -> int:
+        raw_value = str(os.environ.get("ORIGINAL_SCRIPT_MAX_WORKERS_CAP", "1") or "1").strip()
+        try:
+            return max(1, int(raw_value))
+        except ValueError:
+            return 1
+
+    @staticmethod
+    def _resolve_stage_timeout_seconds(stage_name: str) -> int:
+        return _stage_timeout_seconds_for_name(stage_name)
+
+    def _runtime_status_for_stage(self, stage_name: str) -> str:
+        if stage_name.startswith("variant_"):
+            return self._runtime_status(STATUS_RUNNING_VARIANTS)
+        if stage_name in {"anchor_card", "product_type_guard"}:
+            return self._runtime_status(STATUS_RUNNING_ANCHOR)
+        if stage_name in {
+            "opening_strategy",
+            "persona_style_emotion_pack",
+            "strategy_candidates",
+            "strategy_cards",
+        } or stage_name.startswith("expression_"):
+            return self._runtime_status(STATUS_RUNNING_STRATEGY)
+        if stage_name.startswith(("script_", "script_review_", "video_prompt_")):
+            return self._runtime_status(STATUS_RUNNING_SCRIPT)
+        return self._runtime_status(STATUS_RUNNING_LEGACY)
+
+    def _should_clear_full_flow_outputs(self, request_status: str, is_variant_request: bool) -> bool:
+        return (
+            request_status == STATUS_PENDING_RERUN_ALL
+            and not is_variant_request
+            and not getattr(self, "resume_from_latest_success", False)
+        )
+
+    def _allow_resume_stages(self, request_status: str) -> bool:
+        return request_status != STATUS_PENDING_RERUN_ALL or getattr(self, "resume_from_latest_success", False)
+
+    @staticmethod
+    def _is_llm_auth_failure(exc: Exception) -> bool:
+        message = str(exc)
+        lowered = message.lower()
+        return (
+            "llm 认证失败" in lowered
+            or "token_expired" in lowered
+            or "authentication token is expired" in lowered
+            or "provided authentication token is expired" in lowered
+            or "invalid_api_key" in lowered
+            or "unauthorized" in lowered
+            or "401" in message
+        )
+
     def _process_single_record(self, record: TaskRecord) -> bool:
         logs: List[str] = []
         stage_durations: Dict[str, float] = {}
@@ -769,23 +1037,7 @@ class OriginalScriptPipeline:
         print(f"{'=' * 72}")
 
         try:
-            initial_update_values = {
-                "error_message": "",
-            }
-            if request_status == STATUS_PENDING_RERUN_ALL and not is_variant_request:
-                initial_update_values.update(self._build_full_flow_rerun_clear_values())
-            self._write_update(
-                record_id,
-                logs,
-                stage_durations,
-                status=self._runtime_status(
-                    STATUS_RUNNING_VARIANTS if is_variant_request else STATUS_RUNNING_VALIDATE
-                ),
-                extra_values=initial_update_values,
-            )
-
             attachments = extract_attachments(record.fields.get(self.mapping["product_images"]))
-
             normalized_product_type = self._normalize_product_type(
                 context["product_type"],
                 context.get("top_category", ""),
@@ -802,10 +1054,49 @@ class OriginalScriptPipeline:
             else:
                 self._validate_inputs(context, attachments)
 
+            initial_update_values = {
+                "error_message": "",
+            }
+            if self._should_clear_full_flow_outputs(request_status, is_variant_request):
+                initial_update_values.update(self._build_full_flow_rerun_clear_values())
+            self._write_update(
+                record_id,
+                logs,
+                stage_durations,
+                status=self._runtime_status(
+                    STATUS_RUNNING_VARIANTS if is_variant_request else STATUS_RUNNING_VALIDATE
+                ),
+                extra_values=initial_update_values,
+            )
+
             input_hash = self._build_input_hash(attachments, context)
+            contract_registry_key = ""
+            product_image_hash = ""
+            if not is_variant_request:
+                contract_registry_key, product_image_hash = self._build_contract_registry_identity(
+                    attachments,
+                    context,
+                    normalized_product_type,
+                )
             image_paths: List[str] = []
             if not is_variant_request:
                 image_paths = self._download_images(record_id, attachments, logs)
+            type_guard_image_paths = self._select_stage_image_paths(
+                image_paths,
+                context["product_type"],
+                "product_type_guard",
+            )
+            anchor_card_image_paths = self._select_stage_image_paths(
+                image_paths,
+                context["product_type"],
+                "anchor_card",
+            )
+            if not is_variant_request and image_paths:
+                logs.append(
+                    "阶段图片数控制："
+                    f"type_guard={len(type_guard_image_paths)}/{len(image_paths)}，"
+                    f"P1={len(anchor_card_image_paths)}/{len(image_paths)}"
+                )
             run_id = self.storage.create_run(
                 record_id=record_id,
                 product_code=context["product_code"],
@@ -857,7 +1148,9 @@ class OriginalScriptPipeline:
             exp_s3: Dict[str, Any]
             exp_s4: Dict[str, Any]
 
-            allow_resume_stages = request_status != STATUS_PENDING_RERUN_ALL
+            allow_resume_stages = self._allow_resume_stages(request_status)
+            if request_status == STATUS_PENDING_RERUN_ALL and allow_resume_stages:
+                logs.append("断点续跑模式：允许复用同输入哈希的上游成功阶段")
 
             type_guard_payload = (
                 self._load_resume_stage_output(
@@ -866,6 +1159,11 @@ class OriginalScriptPipeline:
                     input_hash=input_hash,
                     stage_name="product_type_guard",
                     validator=validate_product_type_guard_payload,
+                    input_context={
+                        **context,
+                        "table_product_type": context.get("product_type", ""),
+                        "business_category": context.get("top_category", ""),
+                    },
                 )
                 if allow_resume_stages
                 else None
@@ -889,7 +1187,7 @@ class OriginalScriptPipeline:
                             "business_category": context.get("top_category", ""),
                         },
                         stage_durations=stage_durations,
-                        image_paths=image_paths,
+                        image_paths=type_guard_image_paths,
                         llm_client=llm_client,
                         validator=validate_product_type_guard_payload,
                         max_tokens=1400,
@@ -909,6 +1207,7 @@ class OriginalScriptPipeline:
                         input_hash=input_hash,
                         stage_name="anchor_card",
                         validator=validate_anchor_card_payload,
+                        input_context=context,
                     )
                     if allow_resume_stages
                     else None
@@ -916,37 +1215,51 @@ class OriginalScriptPipeline:
                 if anchor_card:
                     logs.append("复用同输入哈希的产品锚点卡")
                 else:
-                    self._write_update(
-                        record_id,
+                    anchor_card = self._load_contract_registry_anchor_card(
+                        contract_registry_key,
                         logs,
-                        stage_durations,
-                        status=self._runtime_status(STATUS_RUNNING_ANCHOR),
-                        extra_values={"input_hash": input_hash},
                     )
+                    if not anchor_card:
+                        self._write_update(
+                            record_id,
+                            logs,
+                            stage_durations,
+                            status=self._runtime_status(STATUS_RUNNING_ANCHOR),
+                            extra_values={"input_hash": input_hash},
+                        )
 
-                    anchor_card = self._run_stage(
-                        "anchor_card",
-                        build_anchor_card_prompt(
-                            context["target_country"],
-                            context["target_language"],
-                            context["product_type"],
-                            context.get("product_selling_note", ""),
-                            context.get("product_params", ""),
-                            hair_clip_mode=bool(context.get("hair_clip_mode")),
-                            type_guard_json=context.get("type_guard"),
-                        ),
-                        run_id=run_id,
-                        record_id=record_id,
-                        product_code=context["product_code"],
-                        input_context=context,
-                        stage_durations=stage_durations,
-                        image_paths=image_paths,
-                        llm_client=llm_client,
-                        validator=validate_anchor_card_payload,
-                    )
+                        anchor_card = self._run_stage(
+                            "anchor_card",
+                            build_anchor_card_prompt(
+                                context["target_country"],
+                                context["target_language"],
+                                context["product_type"],
+                                context.get("product_selling_note", ""),
+                                context.get("product_params", ""),
+                                hair_clip_mode=bool(context.get("hair_clip_mode")),
+                                type_guard_json=context.get("type_guard"),
+                            ),
+                            run_id=run_id,
+                            record_id=record_id,
+                            product_code=context["product_code"],
+                            input_context=context,
+                            stage_durations=stage_durations,
+                            image_paths=anchor_card_image_paths,
+                            llm_client=llm_client,
+                            validator=validate_anchor_card_payload,
+                        )
                 anchor_card = self._merge_product_params_into_anchor_card(
                     anchor_card,
                     context.get("product_params", ""),
+                )
+                self._store_contract_registry_anchor_card(
+                    contract_key=contract_registry_key,
+                    product_image_hash=product_image_hash,
+                    normalized_product_type=normalized_product_type,
+                    anchor_card=anchor_card,
+                    run_id=run_id,
+                    record_id=record_id,
+                    logs=logs,
                 )
                 context.update(self._build_hair_clip_context(context, anchor_card))
                 if run_id is not None:
@@ -959,6 +1272,10 @@ class OriginalScriptPipeline:
                         input_hash=input_hash,
                         stage_name="opening_strategy",
                         validator=validate_opening_strategy_payload,
+                        input_context={
+                            **context,
+                            "anchor_card": anchor_card,
+                        },
                     )
                     if allow_resume_stages
                     else None
@@ -995,6 +1312,10 @@ class OriginalScriptPipeline:
                         input_hash=input_hash,
                         stage_name="persona_style_emotion_pack",
                         validator=validate_persona_style_emotion_pack_payload,
+                        input_context={
+                            **context,
+                            "anchor_card": anchor_card,
+                        },
                     )
                     if allow_resume_stages
                     else None
@@ -1031,6 +1352,12 @@ class OriginalScriptPipeline:
                         input_hash=input_hash,
                         stage_name="strategy_candidates",
                         validator=validate_strategy_payload,
+                        input_context={
+                            **context,
+                            "anchor_card": anchor_card,
+                            "opening_strategy_payload": opening_strategy_payload,
+                            "persona_style_emotion_pack": persona_style_emotion_pack,
+                        },
                     )
                     if allow_resume_stages
                     else None
@@ -1087,6 +1414,13 @@ class OriginalScriptPipeline:
                         input_hash=input_hash,
                         stage_name="strategy_cards",
                         validator=validate_strategy_payload,
+                        input_context={
+                            **context,
+                            "anchor_card": anchor_card,
+                            "opening_strategy_payload": opening_strategy_payload,
+                            "persona_style_emotion_pack": persona_style_emotion_pack,
+                            "strategy_candidates": strategy_candidates,
+                        },
                     )
                     if allow_resume_stages
                     else None
@@ -1134,6 +1468,7 @@ class OriginalScriptPipeline:
                         stage_durations=stage_durations,
                         llm_client=llm_client,
                     )
+                strategy_cards = self._align_strategy_cards_with_contract(strategy_cards, anchor_card)
                 if run_id is not None:
                     self.storage.update_run_artifacts(run_id, strategy_cards=strategy_cards)
 
@@ -1171,6 +1506,11 @@ class OriginalScriptPipeline:
                         product_code=context["product_code"],
                         input_hash=input_hash,
                         stage_name="expression_s1",
+                        input_context={
+                            **context,
+                            "anchor_card": anchor_card,
+                            "final_strategy": final_s1,
+                        },
                     )
                     if allow_resume_stages
                     else None
@@ -1209,6 +1549,11 @@ class OriginalScriptPipeline:
                         product_code=context["product_code"],
                         input_hash=input_hash,
                         stage_name="expression_s2",
+                        input_context={
+                            **context,
+                            "anchor_card": anchor_card,
+                            "final_strategy": final_s2,
+                        },
                     )
                     if allow_resume_stages
                     else None
@@ -1247,6 +1592,11 @@ class OriginalScriptPipeline:
                         product_code=context["product_code"],
                         input_hash=input_hash,
                         stage_name="expression_s3",
+                        input_context={
+                            **context,
+                            "anchor_card": anchor_card,
+                            "final_strategy": final_s3,
+                        },
                     )
                     if allow_resume_stages
                     else None
@@ -1285,6 +1635,11 @@ class OriginalScriptPipeline:
                         product_code=context["product_code"],
                         input_hash=input_hash,
                         stage_name="expression_s4",
+                        input_context={
+                            **context,
+                            "anchor_card": anchor_card,
+                            "final_strategy": final_s4,
+                        },
                     )
                     if allow_resume_stages
                     else None
@@ -1559,6 +1914,21 @@ class OriginalScriptPipeline:
                     )
                 logs.append("主体脚本生成完成，开始自动生成脚本变体")
 
+            if should_generate_variants and DEFER_VARIANTS_AFTER_MOTHER:
+                deferred_status = STATUS_DONE_WITH_QC_WARNINGS if qc_failed_indexes else STATUS_DONE
+                deferred_error = warning_text if qc_failed_indexes else ""
+                logs.append("已勾选生成变体，按后台补齐策略先落库母体脚本；后续巡检会自动补跑脚本变体")
+                return self._finalize_main_script_outputs(
+                    record_id,
+                    run_id,
+                    logs,
+                    stage_durations,
+                    main_output_values,
+                    runtime_status=deferred_status,
+                    final_error_message=deferred_error,
+                    completion_log="任务完成（母体脚本已先落库，变体后台补齐）",
+                )
+
             base_variant_indexes = set(script_indexes_to_generate)
             if qc_failed_indexes:
                 selected_variant_indexes = base_variant_indexes & set(qc_pass_indexes)
@@ -1658,6 +2028,8 @@ class OriginalScriptPipeline:
             return False
         except ModelStageError as exc:
             logs.append(f"模型阶段失败：{exc}")
+            if self._is_llm_auth_failure(exc):
+                self.abort_batch_reason = "LLM 认证过期，本批次停止继续拉起后续记录；请重新登录后再恢复巡检"
             failed_status = STATUS_FAILED_VARIANT_MODEL if variant_phase_active else STATUS_FAILED_MODEL
             self._mark_failed(record_id, failed_status, str(exc), logs, stage_durations)
             if run_id is not None:
@@ -1685,6 +2057,19 @@ class OriginalScriptPipeline:
             self._flush_log_fields(record_id, logs, stage_durations)
             print(f"  ⏹️ 当前记录中断: {interruption_message}")
             raise
+        except TimeoutError as exc:
+            interruption_message = str(exc) or "任务运行超时"
+            logs.append(f"运行中断：{interruption_message}")
+            self._mark_failed(record_id, STATUS_FAILED_INTERRUPTED, interruption_message, logs, stage_durations)
+            if run_id is not None:
+                self.storage.update_run_status(
+                    run_id,
+                    runtime_status=self._runtime_status(STATUS_FAILED_INTERRUPTED),
+                    error_message=interruption_message,
+                    stage_durations=stage_durations,
+                    completed=True,
+                )
+            return False
         except Exception as exc:
             logs.append(f"未知错误：{exc}")
             failed_status = STATUS_FAILED_VARIANT_MODEL if variant_phase_active else STATUS_FAILED_MODEL
@@ -1859,7 +2244,7 @@ class OriginalScriptPipeline:
             else:
                 _push(parameter_value or parameter_name)
 
-        for item in (anchor_card.get("key_visual_constraints") or [])[:5]:
+        for item in (anchor_card.get("key_visual_constraints") or [])[:3]:
             if not isinstance(item, dict):
                 continue
             confidence = str(item.get("confidence", "") or "").strip()
@@ -2430,6 +2815,134 @@ class OriginalScriptPipeline:
         )
         return hashlib.sha256(source.encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _short_hash(value: Any) -> str:
+        source = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+    def _build_product_image_hash(self, attachments: List[Dict[str, Any]]) -> str:
+        image_tokens = [
+            {
+                "file_token": item.get("file_token", ""),
+                "name": item.get("name", "") or item.get("file_name", ""),
+                "size": item.get("size", ""),
+            }
+            for item in attachments
+        ]
+        return self._short_hash(image_tokens)
+
+    def _build_contract_registry_identity(
+        self,
+        attachments: List[Dict[str, Any]],
+        context: Dict[str, Any],
+        normalized_product_type: str,
+    ) -> Tuple[str, str]:
+        product_image_hash = self._build_product_image_hash(attachments)
+        source = {
+            "schema_version": CONTRACT_REGISTRY_SCHEMA_VERSION,
+            "product_image_hash": product_image_hash,
+            "top_category": context.get("top_category", ""),
+            "normalized_product_type": normalized_product_type or context.get("product_type", ""),
+            "product_type": context.get("product_type", ""),
+            "product_selling_note": context.get("product_selling_note", ""),
+            "product_params": context.get("product_params", ""),
+        }
+        return self._short_hash(source), product_image_hash
+
+    def _load_contract_registry_anchor_card(
+        self,
+        contract_key: str,
+        logs: List[str],
+    ) -> Optional[Dict[str, Any]]:
+        if not ENABLE_CONTRACT_REGISTRY or not contract_key:
+            return None
+        anchor_card = self.storage.get_contract_registry_anchor_card(contract_key)
+        if not anchor_card:
+            return None
+        try:
+            validate_anchor_card_payload(anchor_card)
+        except Exception as exc:
+            logs.append(f"SKU级契约缓存命中但校验失败，改走 P1 生成：{exc}")
+            return None
+        logs.append("复用 SKU 级 category_execution_contract / 产品锚点缓存")
+        return anchor_card
+
+    def _store_contract_registry_anchor_card(
+        self,
+        contract_key: str,
+        product_image_hash: str,
+        normalized_product_type: str,
+        anchor_card: Dict[str, Any],
+        run_id: Optional[int],
+        record_id: str,
+        logs: List[str],
+    ) -> None:
+        if not ENABLE_CONTRACT_REGISTRY or not contract_key or not isinstance(anchor_card, dict):
+            return
+        try:
+            self.storage.upsert_contract_registry(
+                contract_key=contract_key,
+                product_image_hash=product_image_hash,
+                normalized_product_type=normalized_product_type,
+                schema_version=CONTRACT_REGISTRY_SCHEMA_VERSION,
+                anchor_card=anchor_card,
+                source_run_id=run_id,
+                source_record_id=record_id,
+            )
+            logs.append("已写入 SKU 级 category_execution_contract / 产品锚点缓存")
+        except Exception as exc:
+            logs.append(f"SKU级契约缓存写入失败，已忽略：{exc}")
+
+    def _build_stage_cache_key(self, stage_name: str, input_context: Dict[str, Any]) -> str:
+        if not isinstance(input_context, dict):
+            input_context = {}
+        stable_context = {
+            "stage_name": stage_name,
+            "target_country": input_context.get("target_country", ""),
+            "target_language": input_context.get("target_language", ""),
+            "product_type": input_context.get("product_type", ""),
+            "top_category": input_context.get("top_category", ""),
+            "product_selling_note": input_context.get("product_selling_note", ""),
+            "product_params": input_context.get("product_params", ""),
+            "type_guard": input_context.get("type_guard", {}),
+        }
+        for key in (
+            "anchor_card",
+            "opening_strategy_payload",
+            "persona_style_emotion_pack",
+            "strategy_candidates",
+            "strategy_cards",
+            "final_strategy",
+            "expression_plan",
+            "script_brief",
+            "script_json",
+            "existing_scripts",
+        ):
+            if key in input_context:
+                stable_context[key] = input_context.get(key)
+        return self._short_hash(stable_context)
+
+    @staticmethod
+    def _is_set_like_product_type(product_type: str) -> bool:
+        text = str(product_type or "").strip().lower()
+        return any(token in text for token in ("set", "combo", "bundle", "套装", "组合", "两件套", "围巾帽子"))
+
+    def _select_stage_image_paths(
+        self,
+        image_paths: List[str],
+        product_type: str,
+        stage_name: str,
+    ) -> List[str]:
+        if not image_paths:
+            return []
+        if stage_name == "product_type_guard":
+            max_images = TYPE_GUARD_MAX_IMAGES
+        elif stage_name == "anchor_card":
+            max_images = P1_SET_MAX_IMAGES if self._is_set_like_product_type(product_type) else P1_DEFAULT_MAX_IMAGES
+        else:
+            max_images = len(image_paths)
+        return image_paths[: max(1, min(len(image_paths), max_images))]
+
     def _download_images(
         self,
         record_id: str,
@@ -2494,16 +3007,25 @@ class OriginalScriptPipeline:
         llm_client: Optional[OriginalScriptLLMClient] = None,
         validator: Optional[Any] = None,
     ) -> Dict[str, Any]:
-        print(f"  ▶️ 阶段开始: {stage_name}")
+        stage_timeout_seconds = self._resolve_stage_timeout_seconds(stage_name)
+        print(f"  ▶️ 阶段开始: {stage_name} | timeout={stage_timeout_seconds}s")
         start = time.time()
+        cache_key = self._build_stage_cache_key(stage_name, input_context)
+        if run_id is not None:
+            self.storage.mark_stage_started(
+                run_id=run_id,
+                stage_name=stage_name,
+                runtime_status=self._runtime_status_for_stage(stage_name),
+            )
         try:
             active_llm_client = llm_client or OriginalScriptLLMClient(route=self.llm_route, route_order=self.llm_route_order)
-            result = active_llm_client.call_json(
-                prompt,
-                image_paths=image_paths or [],
-                max_tokens=max_tokens,
-                validator=validator,
-            )
+            with _stage_deadline(stage_name, stage_timeout_seconds):
+                result = active_llm_client.call_json(
+                    prompt,
+                    image_paths=image_paths or [],
+                    max_tokens=max_tokens,
+                    validator=validator,
+                )
             if not isinstance(result, dict):
                 raise JsonStageError(f"{stage_name} 返回结果不是 JSON 对象")
             elapsed = time.time() - start
@@ -2521,6 +3043,7 @@ class OriginalScriptPipeline:
                     image_paths=image_paths or [],
                     output_json=result,
                     duration_seconds=round(elapsed, 3),
+                    cache_key=cache_key,
                 )
             print(f"  ✅ 阶段完成: {stage_name} ({elapsed:.1f}s)")
             return result
@@ -2538,10 +3061,29 @@ class OriginalScriptPipeline:
                     image_paths=image_paths or [],
                     duration_seconds=round(time.time() - start, 3),
                     error_message=str(exc),
+                    cache_key=cache_key,
                 )
             raise JsonStageError(f"{stage_name}: {exc}")
         except JsonStageError:
             raise
+        except StageTimeoutError as exc:
+            stage_durations[stage_name] = round(time.time() - start, 3)
+            if run_id is not None:
+                self.storage.record_stage_result(
+                    run_id=run_id,
+                    record_id=record_id,
+                    product_code=product_code,
+                    stage_name=stage_name,
+                    stage_order=self._resolve_stage_order(stage_name),
+                    status="model_error",
+                    prompt_text=prompt,
+                    input_context=input_context,
+                    image_paths=image_paths or [],
+                    duration_seconds=round(time.time() - start, 3),
+                    error_message=str(exc),
+                    cache_key=cache_key,
+                )
+            raise ModelStageError(f"{stage_name}: {exc}")
         except Exception as exc:
             stage_durations[stage_name] = round(time.time() - start, 3)
             if run_id is not None:
@@ -2557,8 +3099,12 @@ class OriginalScriptPipeline:
                     image_paths=image_paths or [],
                     duration_seconds=round(time.time() - start, 3),
                     error_message=str(exc),
+                    cache_key=cache_key,
                 )
             raise ModelStageError(f"{stage_name}: {exc}")
+        finally:
+            if run_id is not None:
+                self.storage.mark_stage_finished(run_id=run_id, stage_name=stage_name)
 
     def _run_script_stage_with_language_retry(
         self,
@@ -2583,7 +3129,10 @@ class OriginalScriptPipeline:
                 stage_durations=stage_durations,
                 image_paths=image_paths,
                 llm_client=llm_client,
-                validator=validate_script_payload,
+                validator=lambda data: validate_script_payload(
+                    data,
+                    target_language=str(input_context.get("target_language", "") or ""),
+                ),
                 max_tokens=5200,
             )
             self._ensure_script_spoken_structure(result, stage_name)
@@ -2591,11 +3140,17 @@ class OriginalScriptPipeline:
         except JsonStageError as exc:
             repair_instruction = (
                 "脚本修复指令：请严格补齐 storyboard 的核心执行字段。"
+                "顶层必须保留 proof_path、performance_strategy、shot_skeleton；"
+                "shot_skeleton 必须与 storyboard 数量一致，并包含 shot_index、time_range、role、shot_purpose、proof_path。"
                 "每个 storyboard 镜头必须保留 shot_no、duration、shot_content、shot_purpose、"
                 "subtitle_text_target_language、subtitle_text_zh、voiceover_text_target_language、"
-                "voiceover_text_zh、spoken_line_task、person_action、style_note、anchor_reference、task_type。"
+                "voiceover_text_zh、spoken_line_task、person_action、performance、style_note、anchor_reference、task_type。"
+                "performance 必须是对象，包含 gaze、expression_or_micro_reaction、body_language、product_interaction；"
+                "其中 gaze 不能为空，不要只写自然微笑。"
                 "同时补齐 opening_design、full_15s_flow、execution_constraints、negative_constraints。"
                 "全片必须覆盖 hook、proof、decision 三类任务。"
+                f"所有 voiceover_text_target_language / subtitle_text_target_language 必须使用目标语言 {input_context.get('target_language', '')}，不得包含中文；"
+                "voiceover_text_zh 默认留空。"
                 "默认使用 4-6 个镜头推进，单镜头尽量控制在 1-3 秒，避免三个大镜头机械拼接。"
                 f"上次失败原因：{exc}"
             )
@@ -2609,7 +3164,10 @@ class OriginalScriptPipeline:
                 stage_durations=stage_durations,
                 image_paths=image_paths,
                 llm_client=llm_client,
-                validator=validate_script_payload,
+                validator=lambda data: validate_script_payload(
+                    data,
+                    target_language=str(input_context.get("target_language", "") or ""),
+                ),
                 max_tokens=5200,
             )
             self._ensure_script_spoken_structure(result, stage_name)
@@ -2681,6 +3239,68 @@ class OriginalScriptPipeline:
                 return item
         raise JsonStageError(f"未找到 {strategy_id}")
 
+    def _align_strategy_cards_with_contract(
+        self,
+        strategy_cards: Dict[str, Any],
+        anchor_card: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(strategy_cards, dict):
+            return strategy_cards
+        contract = anchor_card.get("category_execution_contract") if isinstance(anchor_card, dict) else {}
+        if not isinstance(contract, dict):
+            return strategy_cards
+        operation_policy = str(contract.get("operation_policy", "") or "").strip()
+        if operation_policy == "result_first_process_avoid":
+            allowed = {"A_result_detail_only", "B_result_with_light_compare"}
+            fallback_by_path = {
+                "C_result_with_short_process": "A_result_detail_only",
+                "D_result_with_light_compare_and_short_process": "B_result_with_light_compare",
+            }
+        elif operation_policy in {"process_forbidden", "static_result_only"}:
+            allowed = {"A_result_detail_only"}
+            fallback_by_path = {
+                "B_result_with_light_compare": "A_result_detail_only",
+                "C_result_with_short_process": "A_result_detail_only",
+                "D_result_with_light_compare_and_short_process": "A_result_detail_only",
+            }
+        elif operation_policy == "process_allowed_once":
+            allowed = {"A_result_detail_only", "B_result_with_light_compare", "C_result_with_short_process"}
+            fallback_by_path = {
+                "D_result_with_light_compare_and_short_process": "C_result_with_short_process",
+            }
+        else:
+            return strategy_cards
+
+        aligned = copy.deepcopy(strategy_cards)
+        strategies = aligned.get("strategies") if isinstance(aligned.get("strategies"), list) else []
+        changed: List[str] = []
+        for strategy in strategies:
+            if not isinstance(strategy, dict):
+                continue
+            current = str(strategy.get("proof_path") or strategy.get("proof_mode") or "").strip() or "A_result_detail_only"
+            if current in allowed:
+                continue
+            new_path = fallback_by_path.get(current, "A_result_detail_only")
+            strategy_id = str(strategy.get("strategy_id") or "").strip() or "strategy"
+            strategy["proof_path"] = new_path
+            strategy["proof_mode"] = new_path
+            strategy["main_shooting_method"] = new_path
+            strategy["core_proof_method"] = new_path
+            strategy["selling_point_proof_method"] = str(strategy.get("proof_thesis") or f"按 {new_path} 证明主结果")
+            note = f"proof_path 已按 operation_policy={operation_policy} 从 {current} 收敛为 {new_path}"
+            existing_risk = str(strategy.get("risk_note") or "").strip()
+            strategy["risk_note"] = f"{existing_risk}；{note}" if existing_risk else note
+            changed.append(f"{strategy_id}:{current}->{new_path}")
+        if changed:
+            warning = str(aligned.get("contract_conflict_warning") or "").strip()
+            append = "；".join(changed)
+            aligned["contract_conflict_warning"] = (
+                f"{warning}；代码侧按 operation_policy 收敛 proof_path：{append}"
+                if warning
+                else f"代码侧按 operation_policy 收敛 proof_path：{append}"
+            )
+        return aligned
+
     def _repair_strategy_cards_if_needed(
         self,
         context: Dict[str, Any],
@@ -2710,13 +3330,11 @@ class OriginalScriptPipeline:
         repair_instruction = (
             "请重做 4 套内容强策略卡，并严格满足差异化约束。"
             "4 条 script_role 必须完整覆盖 cognitive_reframing、result_delivery、risk_resolution、aura_enhancement。"
-            "至少保证 3 种 proof_mode、3 种 ending_mode、3 种 visual_entry_mode、"
-            "2 种 persona_state、3 种 action_entry_mode。"
+            "至少保证 3 种 proof_path、3 种 opening_angle、"
+            "2 种 performance_strategy_hint、3 种人物互动或画面进入思路。"
             "同时拉开 dominant_user_question、proof_thesis、decision_thesis 三组语义字段，"
             "不要只是同一句轻改写。"
             "每条都要明确 primary_focus；secondary_focus 可为空，但若为空，proof 仍要更集中服务 primary_focus。"
-            "同时至少拉开 2 种 styling_completion_tag、2 种 persona_visual_tone、2 种 emotion_arc_tag，"
-            "并确保 styling_key_anchor 不要 4 条完全相同。"
             "S4 必须与 S1 在首镜逻辑上明确拉开。"
             "如果是东南亚市场，请至少保留 2 套家中自然分享场景，并覆盖至少 2 种 scene_subspace。"
             "东南亚市场下的 S4 必须明确落在家中自然分享语境，"
@@ -2814,6 +3432,594 @@ class OriginalScriptPipeline:
         if isinstance(repaired_script, dict):
             return repaired_script
         return fallback_script
+
+    @staticmethod
+    def _flatten_text(value: Any) -> str:
+        if isinstance(value, dict):
+            return " ".join(OriginalScriptPipeline._flatten_text(item) for item in value.values())
+        if isinstance(value, list):
+            return " ".join(OriginalScriptPipeline._flatten_text(item) for item in value)
+        return str(value or "")
+
+    @staticmethod
+    def _script_execution_text(script_json: Dict[str, Any]) -> str:
+        if not isinstance(script_json, dict):
+            return ""
+        parts: List[Any] = [
+            script_json.get("shot_skeleton", []),
+            script_json.get("opening_design", {}),
+            script_json.get("full_15s_flow", []),
+            script_json.get("storyboard", []),
+            script_json.get("audio_layer", {}),
+        ]
+        return " ".join(OriginalScriptPipeline._flatten_text(part) for part in parts)
+
+    @staticmethod
+    def _actual_sfx_text(script_json: Dict[str, Any]) -> str:
+        if not isinstance(script_json, dict):
+            return ""
+        audio_layer = script_json.get("audio_layer")
+        if not isinstance(audio_layer, dict):
+            return ""
+        cues = audio_layer.get("sfx_cues")
+        if not isinstance(cues, list):
+            return ""
+        values: List[str] = []
+        for cue in cues:
+            if not isinstance(cue, dict):
+                continue
+            values.append(str(cue.get("sfx_type", "") or ""))
+            values.append(str(cue.get("sound_type", "") or ""))
+            values.append(str(cue.get("name", "") or ""))
+        return " ".join(item for item in values if item.strip())
+
+    @staticmethod
+    def _contains_affirmative_token(text: str, token: str) -> bool:
+        if not token:
+            return False
+        source = str(text or "")
+        start = 0
+        negative_markers = ("不", "不要", "不得", "禁止", "避免", "不拍", "不展示", "不加入", "不使用", "无")
+        while True:
+            index = source.find(token, start)
+            if index < 0:
+                return False
+            prefix = source[max(0, index - 24):index]
+            if not any(marker in prefix for marker in negative_markers):
+                return True
+            start = index + len(token)
+
+    @staticmethod
+    def _extract_contract_list_items(values: Any) -> List[str]:
+        if not isinstance(values, list):
+            return []
+        items: List[str] = []
+        for value in values:
+            if isinstance(value, dict):
+                text = str(value.get("desc", "") or value.get("description", "") or value.get("action", "") or "").strip()
+            else:
+                text = str(value or "").strip()
+            if text:
+                items.append(text)
+        return items
+
+    @staticmethod
+    def _text_contains_any(text: str, tokens: List[str]) -> bool:
+        normalized = str(text or "").lower()
+        return any(str(token or "").strip().lower() in normalized for token in tokens if str(token or "").strip())
+
+    @staticmethod
+    def _performance_text(performance: Any) -> str:
+        if isinstance(performance, dict):
+            return " ".join(str(value or "").strip() for value in performance.values())
+        return str(performance or "").strip()
+
+    @staticmethod
+    def _parse_time_range_bounds(value: Any) -> Optional[Tuple[float, float]]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        numbers = re.findall(r"\d+(?:\.\d+)?", text)
+        if len(numbers) < 2:
+            return None
+        try:
+            start, end = float(numbers[0]), float(numbers[1])
+        except ValueError:
+            return None
+        if end < start:
+            return None
+        return start, end
+
+    def _precheck_timing_issues(self, script_json: Dict[str, Any]) -> List[str]:
+        skeleton = script_json.get("shot_skeleton") if isinstance(script_json.get("shot_skeleton"), list) else []
+        ranges: List[Tuple[float, float]] = []
+        for item in skeleton:
+            if not isinstance(item, dict):
+                continue
+            parsed = self._parse_time_range_bounds(item.get("time_range"))
+            if parsed:
+                ranges.append(parsed)
+        if not ranges:
+            return []
+        issues: List[str] = []
+        cursor = 0.0
+        for index, (start, end) in enumerate(ranges, 1):
+            if abs(start - cursor) > 0.08:
+                issues.append(f"L0 timing_consistency_check：shot_skeleton 第 {index} 段不连续，期望从 {cursor:g}s 开始，实际 {start:g}s")
+                break
+            cursor = end
+        if abs(cursor - 15.0) > 0.08:
+            issues.append(f"L0 timing_consistency_check：shot_skeleton 总时长为 {cursor:g}s，不等于 15s")
+        return issues
+
+    def _precheck_human_stiffness(
+        self,
+        anchor_card: Dict[str, Any],
+        persona_style_emotion_pack: Dict[str, Any],
+        script_json: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], List[str], List[str]]:
+        storyboard = script_json.get("storyboard") if isinstance(script_json.get("storyboard"), list) else []
+        shots = [shot for shot in storyboard if isinstance(shot, dict)]
+        check = {
+            "timing_consistency_check": False,
+            "timeline_consistency_check": False,
+            "ai_shot_risk_check": False,
+            "emotion_flatness_check": False,
+            "gaze_monotony_check": False,
+            "category_interaction_missing_check": False,
+            "hit_count": 0,
+            "summary": "",
+        }
+        if not shots:
+            check["emotion_flatness_check"] = True
+            check["gaze_monotony_check"] = True
+            check["hit_count"] = 2
+            check["summary"] = "storyboard 为空，人物表演无法落地"
+            return check, ["L0 human_stiffness_check：storyboard 为空"], []
+
+        generic_micro = {"自然微笑", "亲和展示", "开心看镜头", "人物自然展示商品", "女生对镜微笑", "自然展示"}
+        micro_count = 0
+        consecutive_no_micro = 0
+        max_consecutive_no_micro = 0
+        gaze_points: List[str] = []
+        for shot in shots:
+            performance = shot.get("performance")
+            if isinstance(performance, dict):
+                gaze = str(performance.get("gaze", "") or "").strip()
+                micro = str(performance.get("expression_or_micro_reaction", "") or "").strip()
+            else:
+                gaze = ""
+                micro = ""
+            if gaze:
+                gaze_points.append(gaze)
+            if micro and micro not in generic_micro:
+                micro_count += 1
+                consecutive_no_micro = 0
+            else:
+                consecutive_no_micro += 1
+                max_consecutive_no_micro = max(max_consecutive_no_micro, consecutive_no_micro)
+
+        if micro_count < max(1, (len(shots) + 1) // 2) or max_consecutive_no_micro >= 3:
+            check["emotion_flatness_check"] = True
+
+        unique_gaze = {re.sub(r"\s+", "", item.lower()) for item in gaze_points if item.strip()}
+        final_options: List[str] = []
+        contract = persona_style_emotion_pack.get("human_performance_contract") if isinstance(persona_style_emotion_pack, dict) else {}
+        if isinstance(contract, dict):
+            gaze_rule = contract.get("gaze_rule") if isinstance(contract.get("gaze_rule"), dict) else {}
+            final_options = [str(item or "").strip().lower() for item in (gaze_rule.get("final_point_options") or []) if str(item or "").strip()]
+        last_gaze = str(gaze_points[-1] if gaze_points else "").strip().lower()
+        final_matches = not final_options or any(option in last_gaze for option in final_options)
+        if len(unique_gaze) < 3 or not final_matches:
+            check["gaze_monotony_check"] = True
+
+        all_text = self._flatten_text(script_json)
+        category_contract = anchor_card.get("category_execution_contract") if isinstance(anchor_card, dict) else {}
+        display_family = str(category_contract.get("display_family", "") if isinstance(category_contract, dict) else "").strip()
+        interaction_tokens_by_family = {
+            "hair_accessory": ["镜", "发饰", "整理", "发型", "整体效果"],
+            "ear_accessory": ["半侧脸", "拨开", "耳侧", "轻转头", "耳环"],
+            "apparel": ["全身镜", "衣摆", "肩线", "半步后退", "轻转身"],
+            "apparel_accessory": ["上半身", "围巾", "帽", "外套", "针织", "半步后退", "轻整理"],
+        }
+        tokens = interaction_tokens_by_family.get(display_family, [])
+        if tokens and sum(1 for token in tokens if token in all_text) < 1:
+            check["category_interaction_missing_check"] = True
+
+        hit_count = sum(
+            1
+            for key in ("emotion_flatness_check", "gaze_monotony_check", "category_interaction_missing_check")
+            if check[key]
+        )
+        check["hit_count"] = hit_count
+        summaries: List[str] = []
+        minor_issues: List[str] = []
+        major_issues: List[str] = []
+        if check["emotion_flatness_check"]:
+            summaries.append("微反应覆盖不足或连续多镜头缺少表情变化")
+        if check["gaze_monotony_check"]:
+            summaries.append("gaze point 少于 3 个或结尾未落在镜头/整体确认点")
+        if check["category_interaction_missing_check"]:
+            summaries.append("缺少类目对应的真实互动动作")
+        check["summary"] = "；".join(summaries)
+        if hit_count >= 2:
+            major_issues.append(f"L1 human_stiffness_check：{check['summary']}")
+        elif hit_count == 1:
+            minor_issues.append(f"L1 human_stiffness_check：{check['summary']}")
+        return check, major_issues, minor_issues
+
+    def _build_q1_precheck_result(
+        self,
+        context: Dict[str, Any],
+        anchor_card: Dict[str, Any],
+        persona_style_emotion_pack: Dict[str, Any],
+        final_strategy: Dict[str, Any],
+        script_json: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "pass": True,
+            "blocking_major": False,
+            "l0_major_issues": [],
+            "l0_minor_issues": [],
+            "l1_major_issues": [],
+            "l1_minor_issues": [],
+            "warnings": [],
+            "repair_actions": [],
+            "recommended_repair_scope": "semantic_q1",
+            "human_stiffness_check": {
+                "timing_consistency_check": False,
+                "timeline_consistency_check": False,
+                "ai_shot_risk_check": False,
+                "emotion_flatness_check": False,
+                "gaze_monotony_check": False,
+                "category_interaction_missing_check": False,
+                "hit_count": 0,
+                "summary": "",
+            },
+        }
+
+        try:
+            validate_script_payload(script_json, target_language=str(context.get("target_language", "") or ""))
+        except Exception as exc:
+            result["l0_major_issues"].append(f"L0 schema_or_language_check：{exc}")
+            result["blocking_major"] = True
+
+        for issue in self._precheck_timing_issues(script_json):
+            result["l0_major_issues"].append(issue)
+
+        for issue in self._precheck_target_language_text_issues(
+            script_json=script_json,
+            target_language=str(context.get("target_language", "") or ""),
+        ):
+            result["l0_major_issues"].append(issue)
+
+        contract = anchor_card.get("category_execution_contract") if isinstance(anchor_card, dict) else {}
+        if not isinstance(contract, dict):
+            contract = {}
+        audio_policy = contract.get("audio_policy") if isinstance(contract.get("audio_policy"), dict) else {}
+        text_blob = self._script_execution_text(script_json)
+        actual_sfx_text = self._actual_sfx_text(script_json)
+
+        forbidden_sfx = [str(item or "").strip() for item in (audio_policy.get("forbidden_sfx") or []) if str(item or "").strip()]
+        for token in forbidden_sfx:
+            if token and token in actual_sfx_text:
+                result["l1_major_issues"].append(f"L1 audio_policy：audio_layer 使用 forbidden_sfx「{token}」")
+
+        operation_policy = str(contract.get("operation_policy", "") or "").strip()
+        process_tokens = [
+            "完整佩戴",
+            "完整套入",
+            "完整夹入",
+            "完整扎发",
+            "完整环绕",
+            "环绕固定过程",
+            "复杂打结",
+            "多圈绕脖",
+            "复杂戴帽",
+            "夹齿深入",
+            "扣住头发",
+            "反复夹发",
+            "长时间纠缠",
+        ]
+        if operation_policy in {"result_first_process_avoid", "process_forbidden", "static_result_only"}:
+            matched = [token for token in process_tokens if self._contains_affirmative_token(text_blob, token)]
+            if matched:
+                result["l1_major_issues"].append(
+                    f"L1 operation_policy：{operation_policy} 不允许复杂过程，但脚本出现「{matched[0]}」"
+                )
+
+        forbidden_actions = self._extract_contract_list_items(contract.get("forbidden_actions"))
+        for action in forbidden_actions:
+            compact_action = re.sub(r"\s+", "", action)
+            compact_text = re.sub(r"\s+", "", text_blob)
+            if len(compact_action) >= 4 and (
+                self._contains_affirmative_token(text_blob, action)
+                or self._contains_affirmative_token(compact_text, compact_action)
+            ):
+                result["l1_major_issues"].append(f"L1 forbidden_actions：脚本出现 contract 禁止动作「{action}」")
+
+        product_subtype = str(contract.get("product_subtype", "") or "").strip()
+        if product_subtype == "scrunchie" and "低马尾根部" in text_blob:
+            confidence = str((contract.get("field_confidence") or {}).get("use_case", "high") if isinstance(contract.get("field_confidence"), dict) else "high")
+            issue = "L1 category_contract：scrunchie 脚本主线误写成低马尾根部"
+            if confidence == "low":
+                result["warnings"].append(issue)
+            elif confidence == "medium":
+                result["l1_minor_issues"].append(issue)
+            else:
+                result["l1_major_issues"].append(issue)
+
+        display_family = str(contract.get("display_family", "") or "").strip()
+        if display_family == "apparel_accessory":
+            strong_claim_tokens = ["强保暖", "防寒", "防风", "防晒", "防水", "极寒", "保暖效果", "抗寒"]
+            matched = [token for token in strong_claim_tokens if self._contains_affirmative_token(text_blob, token)]
+            if matched:
+                result["l1_major_issues"].append(f"L1 apparel_accessory_winter_check：出现强功效承诺「{matched[0]}」")
+
+        human_check, human_major, human_minor = self._precheck_human_stiffness(
+            anchor_card=anchor_card,
+            persona_style_emotion_pack=persona_style_emotion_pack,
+            script_json=script_json,
+        )
+        result["human_stiffness_check"] = human_check
+        result["l1_major_issues"].extend(human_major)
+        result["l1_minor_issues"].extend(human_minor)
+
+        blocking_prefixes = (
+            "L0 schema_or_language_check",
+            "L0 timing_consistency_check",
+            "L1 audio_policy",
+            "L1 operation_policy",
+            "L1 forbidden_actions",
+            "L1 category_contract",
+            "L1 apparel_accessory_winter_check",
+        )
+        all_major = result["l0_major_issues"] + result["l1_major_issues"]
+        result["blocking_major"] = any(issue.startswith(blocking_prefixes) for issue in all_major)
+        result["pass"] = not (result["l0_major_issues"] or result["l1_major_issues"] or result["l0_minor_issues"] or result["l1_minor_issues"])
+        if result["blocking_major"]:
+            result["recommended_repair_scope"] = "semantic_q1_minimal_repair"
+        elif result["l0_minor_issues"] or result["l1_minor_issues"] or result["warnings"]:
+            result["recommended_repair_scope"] = "semantic_q1"
+        return result
+
+    @staticmethod
+    def _target_language_allows_chinese_text(target_language: str) -> bool:
+        text = str(target_language or "").strip().lower()
+        return any(token in text for token in ("中文", "汉语", "普通话", "粤语", "chinese", "mandarin", "cantonese", "zh"))
+
+    def _precheck_target_language_text_issues(
+        self,
+        script_json: Dict[str, Any],
+        target_language: str,
+    ) -> List[str]:
+        if self._target_language_allows_chinese_text(target_language):
+            return []
+        storyboard = script_json.get("storyboard") if isinstance(script_json, dict) else []
+        if not isinstance(storyboard, list):
+            return []
+        issues: List[str] = []
+        for index, shot in enumerate(storyboard, 1):
+            if not isinstance(shot, dict):
+                continue
+            for field in ("voiceover_text_target_language", "subtitle_text_target_language"):
+                text = str(shot.get(field, "") or "").strip()
+                if not text:
+                    continue
+                if re.search(r"[\u4e00-\u9fff]", text):
+                    issues.append(
+                        f"L0 target_language_check：第 {index} 镜 {field} 含中文，必须改为目标语言 {target_language}"
+                    )
+                elif text in {"无", "なし", "none", "None", "NONE"} and field == "voiceover_text_target_language":
+                    issues.append(
+                        f"L0 target_language_check：第 {index} 镜 {field} 不要写“无”，无口播请留空字符串"
+                    )
+        return issues
+
+    def _q1_precheck_blocking_issues(self, pre_qc_result: Dict[str, Any]) -> List[str]:
+        if not isinstance(pre_qc_result, dict) or not pre_qc_result.get("blocking_major"):
+            return []
+        return [
+            str(item or "").strip()
+            for item in (pre_qc_result.get("l0_major_issues") or []) + (pre_qc_result.get("l1_major_issues") or [])
+            if str(item or "").strip()
+        ]
+
+    def _merge_q1_precheck_result(
+        self,
+        review_json: Dict[str, Any],
+        pre_qc_result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not isinstance(pre_qc_result, dict):
+            return review_json
+        review = dict(review_json)
+        major = (
+            list(pre_qc_result.get("l0_major_issues") or [])
+            + list(pre_qc_result.get("l1_major_issues") or [])
+        )
+        minor = (
+            list(pre_qc_result.get("l0_minor_issues") or [])
+            + list(pre_qc_result.get("l1_minor_issues") or [])
+            + list(pre_qc_result.get("warnings") or [])
+        )
+        if major:
+            review["major_issues"] = self._merge_unique_issue_texts(
+                self._review_issue_texts(review, "major_issues"),
+                major,
+            )
+            review["pass"] = False
+        if minor:
+            review["minor_issues"] = self._merge_unique_issue_texts(
+                self._review_issue_texts(review, "minor_issues"),
+                minor,
+            )
+        if isinstance(pre_qc_result.get("human_stiffness_check"), dict):
+            review["human_stiffness_check"] = pre_qc_result["human_stiffness_check"]
+        review["pre_qc_result"] = pre_qc_result
+        return review
+
+    @staticmethod
+    def _q1_data_maturity_level(anchor_card: Dict[str, Any]) -> str:
+        contract = anchor_card.get("category_execution_contract") if isinstance(anchor_card, dict) else {}
+        if not isinstance(contract, dict):
+            return "low"
+        display_family = str(contract.get("display_family", "") or "").strip()
+        if display_family in {"hair_accessory", "ear_accessory"}:
+            return "high"
+        if display_family == "apparel":
+            return "medium"
+        return "low"
+
+    def _should_use_local_q1_pass(
+        self,
+        context: Dict[str, Any],
+        anchor_card: Dict[str, Any],
+        pre_qc_result: Dict[str, Any],
+    ) -> bool:
+        if str(os.environ.get("ORIGINAL_SCRIPT_Q1_LOCAL_PASS", "1") or "1").strip() in {"0", "false", "False"}:
+            return False
+        if not isinstance(pre_qc_result, dict) or not bool(pre_qc_result.get("pass")):
+            return False
+        if pre_qc_result.get("blocking_major"):
+            return False
+        for field_name in ("l0_major_issues", "l0_minor_issues", "l1_major_issues", "l1_minor_issues", "warnings"):
+            if pre_qc_result.get(field_name):
+                return False
+        human_check = pre_qc_result.get("human_stiffness_check")
+        if isinstance(human_check, dict) and int(human_check.get("hit_count") or 0) > 0:
+            return False
+        type_guard = context.get("type_guard")
+        if isinstance(type_guard, dict) and bool(type_guard.get("review_required")):
+            return False
+        return self._q1_data_maturity_level(anchor_card) == "high"
+
+    def _build_local_q1_pass_review(
+        self,
+        script_json: Dict[str, Any],
+        pre_qc_result: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return {
+            "pass": True,
+            "contract_conflict_warning": "",
+            "major_issues": [],
+            "minor_issues": [],
+            "suggest_fix": [],
+            "human_stiffness_check": pre_qc_result.get("human_stiffness_check", {}),
+            "repair_actions": list(pre_qc_result.get("repair_actions") or []),
+            "repaired_script": script_json,
+            "pre_qc_result": pre_qc_result,
+            "q1_route": "local_pass_high_maturity",
+        }
+
+    def _record_local_q1_stage(
+        self,
+        review_stage_name: str,
+        review_json: Dict[str, Any],
+        pre_qc_result: Dict[str, Any],
+        run_id: Optional[int],
+        record_id: str,
+        product_code: str,
+        stage_durations: Dict[str, float],
+    ) -> None:
+        stage_durations[review_stage_name] = 0.0
+        print(f"  ✅ 阶段完成: {review_stage_name} (0.0s, local precheck pass)")
+        if run_id is None:
+            return
+        self.storage.record_stage_result(
+            run_id=run_id,
+            record_id=record_id,
+            product_code=product_code,
+            stage_name=review_stage_name,
+            stage_order=STAGE_ORDER.get(review_stage_name, 999),
+            status="success",
+            prompt_text="LOCAL_Q1_HIGH_MATURITY_PASS",
+            input_context={
+                "q1_route": "local_pass_high_maturity",
+                "pre_qc_result": pre_qc_result,
+            },
+            image_paths=[],
+            output_json=review_json,
+            rendered_text="Q1 本地三层分流通过：高成熟类目且 L0/L1 precheck 全绿。",
+            duration_seconds=0.0,
+        )
+
+    def _apply_q1_precheck_local_repairs(
+        self,
+        script_json: Dict[str, Any],
+        anchor_card: Dict[str, Any],
+        pre_qc_result: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], List[str]]:
+        if not isinstance(script_json, dict):
+            return script_json, []
+        repaired = copy.deepcopy(script_json)
+        actions: List[str] = []
+
+        contract = anchor_card.get("category_execution_contract") if isinstance(anchor_card, dict) else {}
+        audio_policy = contract.get("audio_policy") if isinstance(contract, dict) and isinstance(contract.get("audio_policy"), dict) else {}
+        forbidden_sfx = [str(item or "").strip() for item in (audio_policy.get("forbidden_sfx") or []) if str(item or "").strip()]
+        audio_layer = repaired.get("audio_layer") if isinstance(repaired.get("audio_layer"), dict) else {}
+        cues = audio_layer.get("sfx_cues") if isinstance(audio_layer.get("sfx_cues"), list) else []
+        if forbidden_sfx and cues:
+            kept_cues = []
+            removed_sfx = []
+            for cue in cues:
+                cue_text = self._flatten_text(cue)
+                matched = [token for token in forbidden_sfx if token and token in cue_text]
+                if matched:
+                    removed_sfx.extend(matched)
+                    continue
+                kept_cues.append(cue)
+            if len(kept_cues) != len(cues):
+                audio_layer["sfx_cues"] = kept_cues
+                negative = audio_layer.get("audio_negative_constraints")
+                if not isinstance(negative, list):
+                    negative = []
+                for token in removed_sfx:
+                    note = f"已移除 contract 禁止音效：{token}"
+                    if note not in negative:
+                        negative.append(note)
+                audio_layer["audio_negative_constraints"] = negative
+                repaired["audio_layer"] = audio_layer
+                actions.append("代码侧移除 audio_policy forbidden_sfx 命中的音效 cue")
+
+        storyboard = repaired.get("storyboard") if isinstance(repaired.get("storyboard"), list) else []
+        cleared_none_voiceover = 0
+        for shot in storyboard:
+            if not isinstance(shot, dict):
+                continue
+            if str(shot.get("voiceover_text_target_language", "") or "").strip() in {"无", "none", "None", "NONE"}:
+                shot["voiceover_text_target_language"] = ""
+                cleared_none_voiceover += 1
+        if cleared_none_voiceover:
+            actions.append("代码侧将 voiceover_text_target_language 的“无/none”改为空字符串")
+
+        if isinstance(pre_qc_result, dict) and pre_qc_result.get("human_stiffness_check", {}).get("emotion_flatness_check"):
+            generic_micro = {"自然微笑", "亲和展示", "开心看镜头", "人物自然展示商品", "女生对镜微笑", "自然展示"}
+            replacements = [
+                "先轻微观察，不急着笑",
+                "看到效果后嘴角轻轻放松",
+                "短暂确认整体后轻点头",
+            ]
+            replace_index = 0
+            for shot in storyboard:
+                if not isinstance(shot, dict) or not isinstance(shot.get("performance"), dict):
+                    continue
+                performance = shot["performance"]
+                micro = str(performance.get("expression_or_micro_reaction", "") or "").strip()
+                if not micro or micro in generic_micro:
+                    performance["expression_or_micro_reaction"] = replacements[min(replace_index, len(replacements) - 1)]
+                    replace_index += 1
+                if replace_index >= len(replacements):
+                    break
+            if replace_index:
+                actions.append("代码侧补齐空泛/缺失的 expression_or_micro_reaction")
+
+        if actions:
+            try:
+                validate_script_payload(repaired)
+            except Exception:
+                return script_json, []
+        return repaired, actions
 
     def _blocking_script_issue_after_review(
         self,
@@ -2982,28 +4188,85 @@ class OriginalScriptPipeline:
         if input_context_extra:
             review_input_context.update(input_context_extra)
 
-        review_json = self._run_stage(
-            review_stage_name,
-            build_script_review_prompt(
-                context["target_country"],
-                context["product_type"],
-                anchor_card,
-                final_strategy,
-                expression_plan,
-                persona_style_emotion_pack,
-                script_json,
-                type_guard_json=context.get("type_guard"),
-            ),
-            run_id=run_id,
-            record_id=record_id,
-            product_code=context["product_code"],
-            input_context=review_input_context,
-            stage_durations=stage_durations,
-            llm_client=llm_client,
-            validator=validate_review_payload,
+        pre_qc_result = self._build_q1_precheck_result(
+            context=context,
+            anchor_card=anchor_card,
+            persona_style_emotion_pack=persona_style_emotion_pack,
+            final_strategy=final_strategy,
+            script_json=script_json,
         )
+        script_json, local_repair_actions = self._apply_q1_precheck_local_repairs(
+            script_json=script_json,
+            anchor_card=anchor_card,
+            pre_qc_result=pre_qc_result,
+        )
+        if local_repair_actions:
+            pre_qc_result = self._build_q1_precheck_result(
+                context=context,
+                anchor_card=anchor_card,
+                persona_style_emotion_pack=persona_style_emotion_pack,
+                final_strategy=final_strategy,
+                script_json=script_json,
+            )
+            pre_qc_result["repair_actions"] = self._merge_unique_issue_texts(
+                list(pre_qc_result.get("repair_actions") or []),
+                local_repair_actions,
+            )
+            review_input_context["script_json"] = script_json
+        review_input_context["pre_qc_result"] = pre_qc_result
+
+        if self._should_use_local_q1_pass(context, anchor_card, pre_qc_result):
+            review_json = self._build_local_q1_pass_review(
+                script_json=script_json,
+                pre_qc_result=pre_qc_result,
+            )
+            validate_review_payload(review_json, target_language=str(context.get("target_language", "") or ""))
+            self._record_local_q1_stage(
+                review_stage_name=review_stage_name,
+                review_json=review_json,
+                pre_qc_result=pre_qc_result,
+                run_id=run_id,
+                record_id=record_id,
+                product_code=context["product_code"],
+                stage_durations=stage_durations,
+            )
+        else:
+            review_json = self._run_stage(
+                review_stage_name,
+                build_script_review_prompt(
+                    context["target_country"],
+                    context["product_type"],
+                    anchor_card,
+                    final_strategy,
+                    expression_plan,
+                    persona_style_emotion_pack,
+                    script_json,
+                    target_language=context.get("target_language", ""),
+                    type_guard_json=context.get("type_guard"),
+                    pre_qc_result=pre_qc_result,
+                ),
+                run_id=run_id,
+                record_id=record_id,
+                product_code=context["product_code"],
+                input_context=review_input_context,
+                stage_durations=stage_durations,
+                llm_client=llm_client,
+                validator=lambda data: validate_review_payload(
+                    data,
+                    target_language=str(context.get("target_language", "") or ""),
+                ),
+            )
 
         script_json = self._extract_repaired_script(review_json, script_json)
+        validate_script_payload(script_json, target_language=str(context.get("target_language", "") or ""))
+        post_pre_qc_result = self._build_q1_precheck_result(
+            context=context,
+            anchor_card=anchor_card,
+            persona_style_emotion_pack=persona_style_emotion_pack,
+            final_strategy=final_strategy,
+            script_json=script_json,
+        )
+        review_json = self._merge_q1_precheck_result(review_json, post_pre_qc_result)
         review_json, type_guard_violations = self._augment_review_with_type_guard_feedback(
             review_json=review_json,
             context=context,
@@ -3043,6 +4306,9 @@ class OriginalScriptPipeline:
         local_violations = type_guard_violations + timing_violations
         if not blocking_reason and local_violations:
             blocking_reason = "；".join(local_violations[:3])
+        pre_qc_blocking_violations = self._q1_precheck_blocking_issues(post_pre_qc_result)
+        if not blocking_reason and pre_qc_blocking_violations:
+            blocking_reason = "；".join(pre_qc_blocking_violations[:3])
         review_json, passed_review, failure_reason = self._promote_light_review_if_safe(
             review_json=review_json,
             script_json=script_json,
@@ -3242,57 +4508,106 @@ class OriginalScriptPipeline:
             }
 
         video_prompt_start = time.time()
-        try:
-            video_prompt_json = self._run_stage(
-                video_stage_name,
-                build_final_video_prompt_prompt(
-                    context["target_country"],
-                    context["target_language"],
-                    context["product_type"],
-                    anchor_card,
-                    final_strategy,
-                    script_json,
-                    type_guard_json=context.get("type_guard"),
-                ),
-                run_id=run_id,
-                record_id=record_id,
-                product_code=context["product_code"],
-                input_context={
-                    **context,
-                    "anchor_card": anchor_card,
-                    "final_strategy": final_strategy,
-                    "script_json": script_json,
-                },
-                stage_durations=stage_durations,
-                llm_client=llm_client,
-                validator=validate_video_prompt_payload,
-            )
-        except JsonStageError as exc:
-            video_prompt_json = self._build_video_prompt_fallback_from_script(script_json)
-            validate_video_prompt_payload(video_prompt_json)
-            elapsed = round(time.time() - video_prompt_start, 3)
-            stage_durations[video_stage_name] = elapsed
-            if run_id is not None:
-                self.storage.record_stage_result(
+        video_input_context = {
+            **context,
+            "anchor_card": anchor_card,
+            "final_strategy": final_strategy,
+            "script_json": script_json,
+        }
+        if ENABLE_TEMPLATE_VIDEO_PROMPT:
+            try:
+                video_prompt_json = self._build_video_prompt_template_from_script(
+                    script_json=script_json,
+                    anchor_card=anchor_card,
+                    final_strategy=final_strategy,
+                )
+                validate_video_prompt_payload(video_prompt_json)
+                elapsed = round(time.time() - video_prompt_start, 3)
+                stage_durations[video_stage_name] = elapsed
+                if run_id is not None:
+                    self.storage.record_stage_result(
+                        run_id=run_id,
+                        record_id=record_id,
+                        product_code=context["product_code"],
+                        stage_name=video_stage_name,
+                        stage_order=self._resolve_stage_order(video_stage_name),
+                        status="success",
+                        prompt_text=f"template_from_script({video_stage_name})",
+                        input_context=video_input_context,
+                        image_paths=[],
+                        output_json=video_prompt_json,
+                        duration_seconds=elapsed,
+                        cache_key=self._build_stage_cache_key(video_stage_name, video_input_context),
+                    )
+            except Exception as exc:
+                print(f"  ⚠️ P7_VIDEO 模板化失败，回退 LLM: {exc}")
+                video_prompt_json = self._run_stage(
+                    video_stage_name,
+                    build_final_video_prompt_prompt(
+                        context["target_country"],
+                        context["target_language"],
+                        context["product_type"],
+                        anchor_card,
+                        final_strategy,
+                        script_json,
+                        type_guard_json=context.get("type_guard"),
+                    ),
                     run_id=run_id,
                     record_id=record_id,
                     product_code=context["product_code"],
-                    stage_name=video_stage_name,
-                    stage_order=self._resolve_stage_order(video_stage_name),
-                    status="success",
-                    prompt_text=f"fallback_from_script({video_stage_name})",
-                    input_context={
-                        **context,
-                        "anchor_card": anchor_card,
-                        "final_strategy": final_strategy,
-                        "script_json": script_json,
-                        "fallback_reason": str(exc),
-                    },
-                    image_paths=[],
-                    output_json=video_prompt_json,
-                    duration_seconds=elapsed,
+                    input_context=video_input_context,
+                    stage_durations=stage_durations,
+                    llm_client=llm_client,
+                    validator=validate_video_prompt_payload,
                 )
-
+        else:
+            try:
+                video_prompt_json = self._run_stage(
+                    video_stage_name,
+                    build_final_video_prompt_prompt(
+                        context["target_country"],
+                        context["target_language"],
+                        context["product_type"],
+                        anchor_card,
+                        final_strategy,
+                        script_json,
+                        type_guard_json=context.get("type_guard"),
+                    ),
+                    run_id=run_id,
+                    record_id=record_id,
+                    product_code=context["product_code"],
+                    input_context=video_input_context,
+                    stage_durations=stage_durations,
+                    llm_client=llm_client,
+                    validator=validate_video_prompt_payload,
+                )
+            except JsonStageError as exc:
+                video_prompt_json = self._build_video_prompt_template_from_script(
+                    script_json=script_json,
+                    anchor_card=anchor_card,
+                    final_strategy=final_strategy,
+                )
+                validate_video_prompt_payload(video_prompt_json)
+                elapsed = round(time.time() - video_prompt_start, 3)
+                stage_durations[video_stage_name] = elapsed
+                if run_id is not None:
+                    self.storage.record_stage_result(
+                        run_id=run_id,
+                        record_id=record_id,
+                        product_code=context["product_code"],
+                        stage_name=video_stage_name,
+                        stage_order=self._resolve_stage_order(video_stage_name),
+                        status="success",
+                        prompt_text=f"fallback_from_script({video_stage_name})",
+                        input_context={
+                            **video_input_context,
+                            "fallback_reason": str(exc),
+                        },
+                        image_paths=[],
+                        output_json=video_prompt_json,
+                        duration_seconds=elapsed,
+                        cache_key=self._build_stage_cache_key(video_stage_name, video_input_context),
+                    )
         self._ensure_script_content_id(
             script_json,
             context=context,
@@ -4753,6 +6068,7 @@ class OriginalScriptPipeline:
                 data,
                 expected_count=len(expected_variant_ids),
                 expected_variant_ids=expected_variant_ids,
+                target_language=target_language,
             )
             prompt = build_variant_prompt(
                 target_country=target_country,
@@ -4832,6 +6148,7 @@ class OriginalScriptPipeline:
                     "不得跨方向，不得改主卖点，不得破坏生活语境。"
                     "请明显缩短字段文本，避免长段落；final_video_script_prompt 默认使用 4-6 个镜头，"
                     "单镜头尽量控制在 1-3 秒。字幕字段允许为空字符串。"
+                    f"每个 shot_execution.voiceover 必须使用目标语言 {target_language}，不得包含中文；"
                     f"本次只返回 {', '.join(variant_ids)}。"
                 )
                 try:
@@ -4918,6 +6235,7 @@ class OriginalScriptPipeline:
                                 "最后一次降级修复：允许省略 internal_variant_state，"
                                 "只要 variants 的 final_video_script_prompt 完整、可执行、"
                                 "不跨方向、不改主卖点、不丢关键锚点即可。"
+                                f"每个 shot_execution.voiceover 必须使用目标语言 {target_language}，不得包含中文。"
                                 f"其中 source_script_id 必须等于 {source_script_id}，"
                                 f"source_strategy_id 必须等于 {source_strategy_id}，"
                                 f"strategy_id 必须严格等于 {strategy_id}。"
@@ -4976,7 +6294,7 @@ class OriginalScriptPipeline:
                     on_variant_generated(variant, list(variants))
 
         final_payload = {"variant_count": len(variants), "variants": variants}
-        validate_variant_payload(final_payload, expected_count=len(variants))
+        validate_variant_payload(final_payload, expected_count=len(variants), target_language=target_language)
         self._ensure_variant_spoken_structure(final_payload, script_index)
         self._validate_variant_batch_semantics(
             final_payload,
@@ -5076,6 +6394,17 @@ class OriginalScriptPipeline:
         return coverage
 
     @staticmethod
+    def _localized_video_prompt_note(value: Any, *, fallback: str = "") -> str:
+        text = str(value or "").strip()
+        if not text:
+            return fallback
+        if not re.search(r"[\u4e00-\u9fff]", text):
+            return fallback
+        cleaned = re.sub(r"[A-Za-z0-9_./|:-]{4,}", "", text)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" ；;,，、")
+        return cleaned or fallback
+
+    @staticmethod
     def _build_video_prompt_fallback_from_script(script_json: Dict[str, Any]) -> Dict[str, Any]:
         positioning = script_json.get("script_positioning", {}) or {}
         constraints = script_json.get("execution_constraints", {}) or {}
@@ -5114,18 +6443,28 @@ class OriginalScriptPipeline:
         for index, shot in enumerate(storyboard[:6], 1):
             if not isinstance(shot, dict):
                 continue
-            style_note = str(shot.get("style_note", "") or "").strip()
+            style_note = OriginalScriptPipeline._localized_video_prompt_note(
+                shot.get("style_note"),
+                fallback="",
+            )
             if style_note and re.sub(r"\s+", "", style_note) in normalized_boundary:
                 style_note = ""
             shot_execution.append(
                 {
                     "shot_no": int(shot.get("shot_no")) if isinstance(shot.get("shot_no"), int) else index,
                     "duration": str(shot.get("duration", "") or "").strip(),
-                    "shot_content": str(shot.get("shot_content", "") or "").strip(),
+                    "shot_content": OriginalScriptPipeline._localized_video_prompt_note(
+                        shot.get("shot_content"),
+                        fallback="镜头画面推进",
+                    ),
                     "voiceover_text_target_language": str(shot.get("voiceover_text_target_language", "") or "").strip(),
                     "voiceover_text_zh": str(shot.get("voiceover_text_zh", "") or "").strip(),
                     "spoken_line_task": str(shot.get("spoken_line_task", "") or "").strip(),
-                    "person_action": str(shot.get("person_action", "") or "").strip(),
+                    "person_action": OriginalScriptPipeline._localized_video_prompt_note(
+                        shot.get("person_action"),
+                        fallback="人物自然完成动作",
+                    ),
+                    "performance": shot.get("performance", "") if isinstance(shot.get("performance"), dict) else str(shot.get("performance", "") or "").strip(),
                     "style_note": style_note,
                 }
             )
@@ -5133,8 +6472,48 @@ class OriginalScriptPipeline:
         return {
             "video_setup": video_setup,
             "shot_execution": shot_execution,
+            "sound_design": OriginalScriptPipeline._build_default_video_sound_design(),
             "execution_boundary": execution_boundary,
         }
+
+    @staticmethod
+    def _build_default_video_sound_design() -> Dict[str, str]:
+        return {
+            "bgm": "清晰可感知的无歌词背景音乐，中低音量，持续作为情绪底色",
+            "voiceover_mix": "口播是信息主线，BGM 在口播出现时自动压低，不盖过口播",
+            "rhythm_relation": "音乐可轻度贴合镜头切换、手部动作和商品近景停顿，但不改变既定动作链",
+            "sfx": "少量且只服务明确画面动作",
+        }
+
+    def _build_video_prompt_template_from_script(
+        self,
+        script_json: Dict[str, Any],
+        anchor_card: Dict[str, Any],
+        final_strategy: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        prompt_json = self._build_video_prompt_fallback_from_script(script_json)
+        setup_parts = [str(prompt_json.get("video_setup", "") or "").strip()]
+        strategy_name = str(final_strategy.get("strategy_name", "") or final_strategy.get("script_role", "") or "").strip()
+        primary_focus = str(final_strategy.get("primary_focus", "") or final_strategy.get("primary_selling_point", "") or "").strip()
+        for value in (strategy_name, primary_focus):
+            if value and value not in setup_parts:
+                setup_parts.append(value)
+        prompt_json["video_setup"] = "；".join(part for part in setup_parts if part)
+
+        boundary_parts = [str(prompt_json.get("execution_boundary", "") or "").strip()]
+        anchor_segments = self._build_final_video_prompt_anchor_segments(anchor_card, max_items=6)
+        if anchor_segments:
+            boundary_parts.append("；".join(anchor_segments))
+        contract = anchor_card.get("category_execution_contract") if isinstance(anchor_card, dict) else {}
+        if isinstance(contract, dict):
+            result_priority = str(contract.get("result_priority", "") or "").strip()
+            operation_policy = str(contract.get("operation_policy", "") or "").strip()
+            if result_priority:
+                boundary_parts.append(result_priority)
+            if operation_policy:
+                boundary_parts.append(f"operation_policy={operation_policy}")
+        prompt_json["execution_boundary"] = "；".join(part for part in boundary_parts if part)
+        return prompt_json
 
     def _ensure_spoken_task_coverage(
         self,
@@ -5248,15 +6627,22 @@ class OriginalScriptPipeline:
         input_hash: str,
         stage_name: str,
         validator: Optional[Any] = None,
+        input_context: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
-        if not input_hash:
-            return None
-        stage_output = self.storage.get_latest_stage_output_json_for_input(
-            record_id=record_id,
-            product_code=product_code,
-            input_hash=input_hash,
-            stage_name=stage_name,
-        )
+        stage_output = None
+        if input_hash:
+            stage_output = self.storage.get_latest_stage_output_json_for_input(
+                record_id=record_id,
+                product_code=product_code,
+                input_hash=input_hash,
+                stage_name=stage_name,
+            )
+        if not stage_output and input_context:
+            cache_key = self._build_stage_cache_key(stage_name, input_context)
+            stage_output = self.storage.get_latest_stage_output_json_for_cache_key(
+                stage_name=stage_name,
+                cache_key=cache_key,
+            )
         if stage_output and isinstance(stage_output, dict):
             if validator is not None:
                 try:
@@ -5584,11 +6970,19 @@ class OriginalScriptPipeline:
         status_field_name = self.mapping.get("status")
         if status_field_name == "任务状态":
             if preferred_status in {
+                STATUS_RUNNING_VALIDATE,
+                STATUS_RUNNING_ANCHOR,
+                STATUS_RUNNING_STRATEGY,
+                STATUS_RUNNING_SCRIPT,
                 STATUS_PENDING_VARIANTS,
                 STATUS_PENDING_RERUN_VARIANTS,
                 STATUS_RUNNING_VARIANTS,
                 STATUS_DONE_VARIANTS,
                 STATUS_DONE_WITH_QC_WARNINGS,
+                STATUS_FAILED_INPUT,
+                STATUS_FAILED_MODEL,
+                STATUS_FAILED_JSON,
+                STATUS_FAILED_WRITE,
                 STATUS_FAILED_VARIANT_INPUT,
                 STATUS_FAILED_VARIANT_MODEL,
                 STATUS_FAILED_VARIANT_JSON,

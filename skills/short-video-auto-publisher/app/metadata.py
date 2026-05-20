@@ -471,7 +471,8 @@ def build_script_metadata_records(
         stats["records_scanned"] += 1
         fields = record.fields
         product_value = normalize_text(fields.get(mapping.get("product_id"))) if mapping.get("product_id") else ""
-        if product_id and product_value != product_id:
+        product_code_value = normalize_text(fields.get(mapping.get("product_code"))) if mapping.get("product_code") else ""
+        if product_id and product_id not in {product_value, product_code_value}:
             continue
 
         task_no = fallback_task_no(fields, mapping, record.record_id)
@@ -493,7 +494,9 @@ def build_script_metadata_records(
             variant_no = spec["variant_no"]
             parent_slot = parent_slot_value(fields, mapping, direction_index)
             direction_label = direction_label_value(fields, mapping, direction_index)
-            resolved_product_id = product_value if is_nurture else (product_value or task_no)
+            # 原创脚本链路以“产品编码”为商品ID主字段；“产品ID/商品ID”仅作兼容兜底。
+            # 商品ID会直接传给发布平台挂车；缺失时宁可留空，也不能用任务编号冒充商品ID。
+            resolved_product_id = product_value if is_nurture else (product_code_value or product_value)
             resolved_family_key = content_family_key(resolved_product_id, parent_slot)
             if is_nurture and not resolved_family_key:
                 resolved_family_key = f"{build_canonical_script_key(record.record_id, spec['task_suffix'])}:养号"

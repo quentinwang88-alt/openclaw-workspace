@@ -66,6 +66,31 @@ python3 /Users/likeu3/Desktop/skills/workspace-archive-20260419-131447/skills/he
 - `is_valid = true`
 - `crawl_batch_id`、`market_id`、`category_id` 非空
 
+### 原始 Top300 榜单标准化修复
+
+如果用户明确说明“这批 FastMoss/Top300 原始榜单就是本周目标源数据”，不要只停在缺少标准化字段。先按当前 scope 做一次受控标准化修复，然后再走标准流程。
+
+适用场景：源表有 `商品名称`、`商品图片`、`售价`、`7天销量`、`FastMoss商品详情页地址`、`预估商品上架时间` 等原始榜单字段，但缺少 `crawl_batch_id`、`market_id`、`category_id`、`商品三级分类`、`data_status`、`is_valid`、`price_rmb`。
+
+注意：业务上的 Top300 输入不是单榜 300 条。Layer2 生产侧应优先合并两个来源：
+
+- 近 7 天销量排名 Top300
+- 总销量排名 Top300
+
+合并后按稳定商品 ID / FastMoss URL / TikTok 商品 URL 去重，因此每个类目每批进入 Layer2 的记录数通常可能大于 300。
+
+但 Market Agent / Selection Agent 不需要、也不应该依赖榜单来源拆分。只要数据已经落在 Layer2，且当前 scope 存在 `ready_for_agents / is_valid=true` 的标准化行，就以当前 Layer2 scope 为事实源，遍历本批/新增商品并按选品条件筛选入池。刚好 300 条只作为数据质量提示向上游报告，不作为选品流程阻塞条件；除非 ready 行为 0 或标准化必需字段缺失。
+
+修复规则：
+
+- 只修用户指定的 `market_id + category_id + 商品三级分类`，不要影响其他国家、类目或 sibling 三级类目。
+- `VN / 发夹发簪` 和 `TH / 发夹发簪` 统一为 `category_id=hair_accessory`、`商品三级分类=发夹发簪`。
+- 如果 `crawl_batch_id` 缺失，按本周批次生成，例如 `FM__VN__hair_clip__YYYYMMDD__top300_7d_total`；如果能确认合并情况，可把来源说明记录在数据质量备注里，但不要让选品层依赖该字段。
+- 从 `售价` 折算 `price_rmb`，从 `商品图片` 提取 `main_image_url`，从 `FastMoss商品详情页地址` 提取 `fastmoss_url`，从 `预估商品上架时间` 计算 `product_age_days`。
+- 能安全解析的行标记为 `data_status=ready_for_agents`、`is_valid=true`。
+- 价格、图片、标题、市场或类目无法安全解析的行不要标 ready，标记为 `data_status=need_manual_review`、`is_valid=false`，并记录具体原因。
+- 修复后必须重新预检；只有当前 scope 至少有 1 条 `ready_for_agents / is_valid=true`，才继续导入、Market Agent、Selection Agent、找货和工作台刷新。
+
 ## 周度 Selection Agent 触发预检
 
 用于周二自动任务。这个脚本只做计划判断，不直接跑选品：

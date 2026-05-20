@@ -40,6 +40,7 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
             "产品参数信息",
             "任务编号",
             "产品图片",
+            "视频时长",
             "是否可同步",
             "是否可同步母版",
             "是否可同步子变体",
@@ -54,7 +55,18 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
             "脚本方向二",
             "脚本4变体5",
         ]
-        target_field_names = ["任务名", "提示词", "参考图", "脚本ID", "脚本来源", "发布用途", "是否挂车", "内容分支", "免参考图"]
+        target_field_names = [
+            "任务名",
+            "提示词",
+            "参考图",
+            "脚本ID",
+            "脚本来源",
+            "发布用途",
+            "是否挂车",
+            "内容分支",
+            "免参考图",
+            "视频时长",
+        ]
         self.mapping = resolve_field_mapping(source_field_names, SOURCE_FIELD_ALIASES)
         self.target_mapping = resolve_field_mapping(target_field_names, TARGET_FIELD_ALIASES)
 
@@ -73,6 +85,7 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
                     "任务编号": "003",
                     "是否可同步": True,
                     "产品图片": [{"file_token": "file_1"}],
+                    "视频时长": "28秒",
                     "所属母版1": "M1",
                     "所属母版2": "M2",
                     "母版方向1": "日常轻分享流",
@@ -92,6 +105,7 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
         self.assertEqual(tasks[0].product_type, "手镯")
         self.assertEqual(tasks[0].business_category, "配饰")
         self.assertEqual(tasks[0].product_params, "细手圈，内径约56mm，圈宽2mm，开口可微调")
+        self.assertEqual(tasks[0].video_duration, 28)
         self.assertEqual(tasks[0].script_id, "003_M1_M")
         self.assertEqual(tasks[1].script_id, "003_M1_V1")
         self.assertEqual(tasks[2].script_id, "003_M2_M")
@@ -247,6 +261,27 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
         self.assertTrue(fields["提示词"].startswith("【脚本ID】\n- 003_M1_M\n\n产品锚点：手镯｜细手圈，内径约56mm，圈宽2mm，开口可微调\n"))
         self.assertTrue(fields["提示词"].endswith("script one"))
         self.assertEqual(fields["脚本ID"], "003_M1_M")
+        self.assertEqual(fields["视频时长"], 15)
+
+    def test_build_target_fields_carries_video_duration(self) -> None:
+        records = [
+            TableRecord(
+                record_id="rec_duration",
+                fields={
+                    "产品编码": "ABC088",
+                    "任务编号": "088",
+                    "是否可同步母版": True,
+                    "视频时长": 31,
+                    "脚本方向一": "duration script",
+                },
+            ),
+        ]
+
+        tasks = build_sync_tasks(records, self.mapping)
+        fields = build_target_fields(tasks[0], self.target_mapping)
+
+        self.assertEqual(tasks[0].video_duration, 31)
+        self.assertEqual(fields["视频时长"], 31)
 
     def test_prepend_script_id_header_does_not_duplicate_standard_header(self) -> None:
         prompt = prepend_script_id_header("【脚本ID】\n- old_id\n\n正文内容", "003_M1_V1")

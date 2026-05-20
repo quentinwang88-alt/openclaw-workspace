@@ -1,0 +1,4 @@
+interface:
+  display_name: "TikTok Fashion Image Pack"
+  short_description: "Generate likeU product main images from Feishu with product-truth QA"
+  default_prompt: "Generate and QA likeU TikTok Shop womens-top main images from pending Feishu records."

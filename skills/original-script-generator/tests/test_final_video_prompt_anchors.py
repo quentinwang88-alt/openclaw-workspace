@@ -14,6 +14,7 @@ if str(SKILL_DIR) not in sys.path:
     sys.path.insert(0, str(SKILL_DIR))
 
 from core.pipeline import OriginalScriptPipeline  # noqa: E402
+from core.json_parser import validate_video_prompt_payload  # noqa: E402
 from core.script_renderer import compress_final_video_prompt_payload, render_video_prompt  # noqa: E402
 
 
@@ -146,6 +147,37 @@ class FinalVideoPromptAnchorsTest(unittest.TestCase):
         ]
         for term in forbidden_terms:
             self.assertNotIn(term, rendered)
+
+    def test_final_video_prompt_renders_default_sound_design(self) -> None:
+        prompt = self._base_prompt()
+        validate_video_prompt_payload(prompt)
+        rendered = render_video_prompt(prompt)
+
+        self.assertIn("声音：", rendered)
+        self.assertIn("清晰可感知的无歌词背景音乐", rendered)
+        self.assertIn("口播是信息主线", rendered)
+        self.assertIn("BGM 在口播出现时自动压低", rendered)
+
+    def test_template_video_prompt_includes_sound_design(self) -> None:
+        pipeline = self._build_pipeline()
+        script_json = {
+            "script_positioning": {
+                "script_title": "镜前发饰结果",
+                "direction_type": "S1",
+                "core_primary_selling_point": "发型更完整",
+            },
+            "storyboard": self._base_prompt()["shot_execution"],
+            "execution_constraints": {},
+        }
+
+        prompt = pipeline._build_video_prompt_template_from_script(script_json, {}, {})
+        validate_video_prompt_payload(prompt)
+
+        self.assertIn("sound_design", prompt)
+        self.assertEqual(
+            prompt["sound_design"]["voiceover_mix"],
+            "口播是信息主线，BGM 在口播出现时自动压低，不盖过口播",
+        )
 
 
 if __name__ == "__main__":

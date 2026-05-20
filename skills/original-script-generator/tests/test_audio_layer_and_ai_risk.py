@@ -118,6 +118,28 @@ class AudioLayerAndAiRiskTest(unittest.TestCase):
         self.assertEqual(script["storyboard"][0]["ai_shot_risk"], "low")
         self.assertEqual(script["rhythm_checkpoints"]["core_proof_start_between"], "4-8s")
 
+    def test_script_schema_backfills_local_completion_fields_for_lean_p7_payload(self) -> None:
+        script = _base_script()
+        for field in ("full_15s_flow", "execution_constraints", "rhythm_checkpoints", "audio_layer", "negative_constraints"):
+            script.pop(field, None)
+
+        validate_script_payload(script)
+
+        self.assertGreaterEqual(len(script["full_15s_flow"]), 3)
+        self.assertEqual(script["rhythm_checkpoints"]["hook_complete_by"], "3s")
+        self.assertEqual(script["audio_layer"]["voiceover_priority"], "high")
+        self.assertIn("product_priority_principle", script["execution_constraints"])
+        self.assertTrue(script["negative_constraints"])
+
+    def test_script_schema_converts_silent_task_shot_to_none(self) -> None:
+        script = _base_script()
+        script["storyboard"][1]["voiceover_text_target_language"] = ""
+        script["storyboard"][1]["spoken_line_task"] = "proof"
+
+        validate_script_payload(script)
+
+        self.assertEqual(script["storyboard"][1]["spoken_line_task"], "none")
+
     def test_audio_layer_rejects_overdense_sfx(self) -> None:
         script = _base_script()
         script["audio_layer"]["sfx_cues"] = [
@@ -130,6 +152,22 @@ class AudioLayerAndAiRiskTest(unittest.TestCase):
         with self.assertRaises(JSONParseError):
             validate_script_payload(script)
 
+    def test_rhythm_checkpoints_normalize_common_llm_wording(self) -> None:
+        script = _base_script()
+        script["rhythm_checkpoints"] = {
+            "hook_complete_by": "前 3 秒完成",
+            "core_proof_start_between": "4 到 8 秒之间",
+            "decision_signal_by": "12 秒前",
+            "risk_resolution_decision_by": "9 秒内",
+        }
+
+        validate_script_payload(script)
+
+        self.assertEqual(script["rhythm_checkpoints"]["hook_complete_by"], "3s")
+        self.assertEqual(script["rhythm_checkpoints"]["core_proof_start_between"], "4-8s")
+        self.assertEqual(script["rhythm_checkpoints"]["decision_signal_by"], "12s")
+        self.assertEqual(script["rhythm_checkpoints"]["risk_resolution_decision_by"], "9s")
+
     def test_prompts_include_new_execution_rules(self) -> None:
         script_prompt = build_script_prompt("VN", "vi", "发夹", {"focus_control": {"script_role": "result_delivery"}})
         review_prompt = build_script_review_prompt("VN", "发夹", {}, {}, {}, {}, {})
@@ -140,8 +178,60 @@ class AudioLayerAndAiRiskTest(unittest.TestCase):
         self.assertIn("BGM 可能盖过口播", review_prompt)
         self.assertIn("前 3 秒看到夹好结果", review_prompt)
         self.assertIn("hair_accessory_subtype", script_prompt)
-        self.assertIn("没有明确夹合动作时，不要强行使用 soft_click", script_prompt)
+        self.assertIn("没有明确夹合动作时，不写 click 类表达", script_prompt)
+        self.assertIn("category_execution_contract", script_prompt)
+        self.assertIn("不得使用 soft_click / clean_clip_click", script_prompt)
+        self.assertIn("field_confidence", review_prompt)
+        self.assertIn("primary_visual_result", script_prompt)
+        self.assertIn("contract_conflict_warning", script_prompt + review_prompt)
         self.assertIn("rhythm_checkpoints", script_prompt)
+        self.assertIn("human_performance_contract", script_prompt)
+        self.assertIn("Step 1：生成 shot_skeleton", script_prompt)
+        self.assertIn("proof_path", script_prompt)
+        self.assertIn("performance_strategy", script_prompt)
+        self.assertIn("performance 必须是对象", script_prompt)
+        self.assertIn("human_stiffness_check", review_prompt)
+        self.assertIn("emotion_flatness_check", review_prompt)
+        self.assertIn("timing_consistency_check", review_prompt)
+        self.assertIn("timeline_consistency_check", review_prompt)
+        self.assertIn("P7 不需要输出 audio_layer", script_prompt)
+        self.assertIn('spoken_line_task 必须写 "none"', script_prompt)
+        self.assertNotIn("BGM 必须低存在感", script_prompt)
+
+    def test_script_prompt_uses_compact_p7_brief_and_operation_template(self) -> None:
+        script_prompt = build_script_prompt(
+            "VN",
+            "vi",
+            "发饰",
+            {
+                "product_type": "发饰",
+                "product_positioning_one_liner": "后脑发髻外侧的大花朵发饰",
+                "category_execution_contract": {
+                    "display_family": "hair_accessory",
+                    "product_subtype": "other_hair_accessory",
+                    "placement_zone": "bun_area",
+                    "primary_visual_result": "佩戴后发髻外侧更饱满",
+                    "operation_policy": "result_first_process_avoid",
+                    "forbidden_actions": ["完整佩戴过程"],
+                },
+                "final_strategy": {
+                    "strategy_id": "S3",
+                    "script_role": "risk_resolution",
+                    "primary_focus": "发髻外侧更饱满",
+                    "proof_path": "A_result_detail_only",
+                    "unused_long_field": "这段不应该进入 P7 prompt" * 50,
+                },
+                "human_performance_contract": {
+                    "gaze_plan": ["mirror", "hair_accessory_position", "camera", "mirror_full_result"],
+                    "gaze_rule": {"min_points_required": 3, "final_point_options": ["camera", "mirror_full_result"]},
+                },
+            },
+        )
+
+        self.assertIn("p7_execution_template", script_prompt)
+        self.assertIn("shot_skeleton_template", script_prompt)
+        self.assertIn("result_first_process_avoid", script_prompt)
+        self.assertNotIn("这段不应该进入 P7 prompt", script_prompt)
 
     def test_ai_shot_risk_profile_key_splits_ear_and_general_accessory(self) -> None:
         self.assertEqual(_ai_shot_risk_profile_key("耳线"), "ear_accessory")

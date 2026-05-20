@@ -81,6 +81,56 @@ This script already handles:
 - writing back after each batch
 - stopping only when the queue is empty
 
+## Built-in 1688 supply lookup
+
+Use this only after Selection Agent has produced candidate products that need supply lookup. Do not run 1688 lookup for all products.
+
+The live Hermes project contains the full SOP at:
+
+```bash
+/Users/likeu3/Desktop/skills/workspace-archive-20260419-131447/skills/hermes-product-analysis/references/1688_supply_lookup_sop.md
+```
+
+Safe default command:
+
+```bash
+python3 scripts/run_1688_supply_lookup.py \
+  --db-path artifacts/agent_runtime.sqlite3 \
+  --feishu-url "<1688找货任务表URL>" \
+  --selection-feishu-url "<选品工作台URL>" \
+  --crawl-batch-id "<crawl_batch_id>" \
+  --market-id MY \
+  --category-id womens_tops \
+  --only-db-need-lookup \
+  --limit 5 \
+  --sleep-min 10 \
+  --sleep-max 30
+```
+
+Hard rules:
+- Every batch should be 5-10 products. The script blocks actual runs above 10 unless `--allow-large-batch` is explicitly supplied.
+- Random sleep must stay at 10-30 seconds by default. The script blocks faster actual runs unless `--allow-fast-lookup` is explicitly supplied.
+- The script writes each result immediately, so it is safe to resume after interruption.
+- If 1688 redirects to Taobao login or shows captcha/security verification, pause and report the issue. Do not mark remaining products as not found.
+- Recommended supplier links must be real `https://detail.1688.com/offer/{id}.html` links. Do not write keyword search pages or guessed offer IDs as supplier links.
+- Only candidate pools (`test_product_pool`, `replacement_candidate_pool`, `new_winner_analysis_pool`, `manual_review_pool`) should trigger lookup.
+
+To rerun manual-check rows that still lack a real supplier link:
+
+```bash
+python3 scripts/run_1688_supply_lookup.py \
+  --db-path artifacts/agent_runtime.sqlite3 \
+  --feishu-url "<1688找货任务表URL>" \
+  --selection-feishu-url "<选品工作台URL>" \
+  --crawl-batch-id "<crawl_batch_id>" \
+  --market-id MY \
+  --category-id womens_tops \
+  --only-db-need-lookup \
+  --retry-manual-check \
+  --retry-manual-check-missing-url \
+  --limit 5
+```
+
 ## Runtime monitoring note
 If `run_until_done.py` is launched as a background process, its JSON round logs may not stream incrementally through the process tool and can appear only after exit due to buffering. In that case, do not abandon the run or switch to Feishu reverse-engineering. Keep the batch process running and verify progress by either:
 - checking for active child `hermes chat -Q --source tool` processes, and/or

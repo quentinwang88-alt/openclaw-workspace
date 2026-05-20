@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "updatedAt": "2026-05-19T19:27:00+08:00",
+  "policy": {
+    "purpose": "Deduplicate and update recurring memory events before appending to daily memory or promoting to MEMORY.md.",
+    "dailyMemory": "Allow progress updates for the same task, but use the same fingerprint when the task identity is the same.",
+    "longTermMemory": "Merge by project/fact/rule and keep only the latest stable version.",
+    "privacy": "Never store passwords, cookies, tokens, private chat transcripts, or raw sensitive data."
+  },
+  "fingerprintFields": [
+    "category",
+    "project",
+    "subject",
+    "date",
+    "status"
+  ],
+  "events": {
+    "memory-system:workspace:dream-memory-enable:2026-05-16:active": {
+      "fingerprint": "memory-system:workspace:dream-memory-enable:2026-05-16:active",
+      "category": "memory-system",
+      "project": "workspace",
+      "subject": "dream-memory-enable",
+      "date": "2026-05-16",
+      "status": "active",
+      "dailyPath": "memory/2026-05-16.md",
+      "summary": "Enabled lightweight dream memory: daily memory, MEMORY.md promotion, heartbeat maintenance, and index-based deduplication.",
+      "firstSeenAt": "2026-05-16T09:34:00+08:00",
+      "lastSeenAt": "2026-05-16T09:34:00+08:00",
+      "count": 1
+    },
+    "memory-maintenance:workspace:promote-recent-lessons:2026-05-16:done": {
+      "fingerprint": "memory-maintenance:workspace:promote-recent-lessons:2026-05-16:done",
+      "category": "memory-maintenance",
+      "project": "workspace",
+      "subject": "promote-recent-lessons",
+      "date": "2026-05-16",
+      "status": "done",
+      "dailyPath": "memory/2026-05-16.md",
+      "summary": "Promoted durable lessons from recent daily memory into MEMORY.md, then rechecked through 11:13 with no new durable facts to promote.",
+      "firstSeenAt": "2026-05-16T09:43:00+08:00",
+      "lastSeenAt": "2026-05-16T11:13:00+08:00",
+      "count": 4
+    },
+    "data-ingestion:feishu-workbench:weekly-sku-reports-2026-05-10_2026-05-16:2026-05-18:done": {
+      "fingerprint": "data-ingestion:feishu-workbench:weekly-sku-reports-2026-05-10_2026-05-16:2026-05-18:done",
+      "category": "data-ingestion",
+      "project": "feishu-workbench",
+      "subject": "weekly-sku-reports-2026-05-10_2026-05-16",
+      "date": "2026-05-18",
+      "status": "done",
+      "dailyPath": "memory/2026-05-18.md",
+      "summary": "Processed three Feishu data-ingestion workbench records for VNPS01, MYPS01, and VNFJ02 for 2026-05-10 to 2026-05-16; generated SKU table business reports and corrected MYPS01 country from TH to MY before execution.",
+      "firstSeenAt": "2026-05-18T10:28:00+08:00",
+      "lastSeenAt": "2026-05-18T10:28:00+08:00",
+      "count": 1
+    },
+    "inventory:restock:jp-size-allocation-400-units:2026-05-18:done": {
+      "fingerprint": "inventory:restock:jp-size-allocation-400-units:2026-05-18:done",
+      "category": "inventory",
+      "project": "restock",
+      "subject": "jp-size-allocation-400-units",
+      "date": "2026-05-18",
+      "status": "done",
+      "dailyPath": "memory/2026-05-18.md",
+      "summary": "Queried inventory for JP-S-01, JP-M-02, JP-L-03, and JP-XL-04, then advised a 400-unit replenishment split of S 5, M 135, L 225, and XL 35 when forced ordering despite system recommendation of zero due to sufficient inbound stock.",
+      "firstSeenAt": "2026-05-18T15:13:00+08:00",
+      "lastSeenAt": "2026-05-18T15:13:00+08:00",
+      "count": 1
+    },
+    "script-generation:feishu-original-script-summary:tasks-698-706:2026-05-18:partial": {
+      "fingerprint": "script-generation:feishu-original-script-summary:tasks-698-706:2026-05-18:partial",
+      "category": "script-generation",
+      "project": "feishu-original-script-summary",
+      "subject": "tasks-698-706",
+      "date": "2026-05-18",
+      "status": "partial",
+      "dailyPath": "memory/2026-05-18.md",
+      "summary": "Processed nine pending original-script tasks in Feishu: tasks 698-702 completed, with 698 completed despite QC-failed scripts; tasks 703-706 were marked failed after long model-call stalls, while upstream anchor, strategy, and expression-stage outputs remain available for checkpoint reruns.",
+      "firstSeenAt": "2026-05-18T17:56:00+08:00",
+      "lastSeenAt": "2026-05-18T17:56:00+08:00",
+      "count": 1
+    },
+    "script-generation:feishu-original-script-summary:tasks-719-720:2026-05-19:done": {
+      "fingerprint": "script-generation:feishu-original-script-summary:tasks-719-720:2026-05-19:done",
+      "category": "script-generation",
+      "project": "feishu-original-script-summary",
+      "subject": "tasks-719-720",
+      "date": "2026-05-19",
+      "status": "done",
+      "dailyPath": "memory/2026-05-19.md",
+      "summary": "Completed Feishu original-script summary tasks 719 and 720 in table tblHRLMr9b3fvxBw: generated and quality-checked four script directions for each, skipped variants because variant generation was unchecked, marked both tasks completed, and synced four auto-publish master records per task.",
+      "firstSeenAt": "2026-05-19T19:27:00+08:00",
+      "lastSeenAt": "2026-05-19T19:27:00+08:00",
+      "count": 1
+    }
+  }
+}

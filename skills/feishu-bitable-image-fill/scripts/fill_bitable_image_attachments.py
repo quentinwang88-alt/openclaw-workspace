@@ -19,10 +19,11 @@ import requests
 
 DEFAULT_SOURCE_FIELDS = [
     "商品图片",
+    "商品描述",
     "TikTok商品落地页地址",
     "FastMoss商品详情页地址",
 ]
-DEFAULT_TARGET_FIELD = "图片"
+DEFAULT_TARGET_FIELDS = ["图片", "产品主图", "商品主图"]
 DEFAULT_BATCH_SIZE = 10
 DEFAULT_TIMEOUT = 30
 DEFAULT_SLEEP = 0.2
@@ -286,6 +287,13 @@ def extract_urls(value: Any) -> List[str]:
             raw = cell.strip()
             if raw.startswith(("http://", "https://")):
                 urls.append(raw)
+            # Also support HTML snippets such as 商品描述 containing
+            # <img src="https://..."> tags. Some Feishu text fields store
+            # product description images this way rather than as plain URLs.
+            for match in re.finditer(r'<img[^>]+src=["\']([^"\']+)["\']', raw, flags=re.IGNORECASE):
+                candidate = match.group(1).strip()
+                if candidate.startswith(("http://", "https://")):
+                    urls.append(candidate)
             return
         if isinstance(cell, dict):
             for key in ("link", "url", "text"):
@@ -426,7 +434,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         dest="source_fields",
         help="源字段名，可重复传入。默认依次尝试 商品图片 / TikTok商品落地页地址 / FastMoss商品详情页地址",
     )
-    parser.add_argument("--target-field", default=DEFAULT_TARGET_FIELD, help=f"目标附件字段，默认 {DEFAULT_TARGET_FIELD}")
+    parser.add_argument(
+        "--target-field",
+        help=f"目标附件字段；默认自动选择第一个存在的附件字段: {' / '.join(DEFAULT_TARGET_FIELDS)}",
+    )
     parser.add_argument("--limit", type=int, help="最多处理多少条记录")
     parser.add_argument("--record-id", action="append", help="只处理指定 record_id，可重复传入")
     parser.add_argument("--overwrite", action="store_true", help="覆盖已有附件字段。默认只补空白")
@@ -465,12 +476,30 @@ def main() -> int:
 
     fields = {field.field_name: field for field in client.list_fields()}
     missing_source_fields = [name for name in source_fields if name not in fields]
-    if missing_source_fields:
+    if missing_source_fields and args.source_fields:
         raise ValueError(f"源字段不存在: {', '.join(missing_source_fields)}")
-    if args.target_field not in fields:
-        raise ValueError(f"目标字段不存在: {args.target_field}")
-    if fields[args.target_field].field_type != 17:
-        raise ValueError(f"目标字段 {args.target_field} 不是附件字段(type=17)")
+    if missing_source_fields:
+        source_fields = [name for name in source_fields if name in fields]
+    if not source_fields:
+        raise ValueError("未找到任何可用源字段，请用 --source-field 指定")
+    target_field = args.target_field
+    if not target_field:
+        target_field = next(
+            (
+                name
+                for name in DEFAULT_TARGET_FIELDS
+                if name in fields and fields[name].field_type == 17
+            ),
+            None,
+        )
+        if not target_field:
+            raise ValueError(
+                f"未找到默认目标附件字段: {', '.join(DEFAULT_TARGET_FIELDS)}，请用 --target-field 指定"
+            )
+    if target_field not in fields:
+        raise ValueError(f"目标字段不存在: {target_field}")
+    if fields[target_field].field_type != 17:
+        raise ValueError(f"目标字段 {target_field} 不是附件字段(type=17)")
 
     records = client.list_records(limit=args.limit, view_id=view_id)
     record_filter = set(args.record_id or [])
@@ -494,12 +523,12 @@ def main() -> int:
     if view_id:
         print(f"👁️  视图: {view_id}")
     print(f"📥 源字段优先级: {' > '.join(source_fields)}")
-    print(f"📤 目标字段: {args.target_field}")
+    print(f"📤 目标字段: {target_field}")
     print(f"🧪 模式: {'dry-run' if args.dry_run else 'write'}")
     print(f"🔢 待扫描记录数: {len(records)}")
 
     for index, record in enumerate(records, start=1):
-        target_value = record.fields.get(args.target_field)
+        target_value = record.fields.get(target_field)
         if has_attachment_value(target_value) and not args.overwrite:
             summary["skipped_target_filled"] += 1
             continue
@@ -527,7 +556,7 @@ def main() -> int:
                         {
                             "record_id": record.record_id,
                             "fields": {
-                                args.target_field: [attachment],
+                                target_field: [attachment],
                             },
                         }
                     )

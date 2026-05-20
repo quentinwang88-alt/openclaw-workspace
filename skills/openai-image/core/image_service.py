@@ -48,6 +48,7 @@ class ImageService:
                 response = self.client.edit_image(
                     prompt=resolved_request.prompt,
                     input_image_path=resolved_request.input_image_path,
+                    input_image_paths=resolved_request.input_image_paths,
                     mask_image_path=resolved_request.mask_image_path,
                     size=resolved_request.size,
                     quality=resolved_request.quality,
@@ -88,6 +89,11 @@ class ImageService:
     def _resolve_request(self, request: ImageTaskRequest) -> ImageTaskRequest:
         output_dir = request.output_dir or str(self.settings.image_output_dir)
         input_image_path = self._resolve_optional_path(request.input_image_path)
+        input_image_paths = [self._resolve_optional_path(path) for path in request.input_image_paths if path]
+        if input_image_path and input_image_path not in input_image_paths:
+            input_image_paths.insert(0, input_image_path)
+        if input_image_paths and not input_image_path:
+            input_image_path = input_image_paths[0]
         mask_image_path = self._resolve_optional_path(request.mask_image_path)
         resolved_output_dir = str(Path(output_dir).expanduser().resolve())
 
@@ -99,6 +105,7 @@ class ImageService:
             output_format=(request.output_format or self.settings.default_output_format).strip().lower(),
             output_dir=resolved_output_dir,
             input_image_path=input_image_path,
+            input_image_paths=input_image_paths,
             mask_image_path=mask_image_path,
             n=max(int(request.n or 1), 1),
         )
@@ -142,6 +149,9 @@ class ImageService:
                 raise ValueError("input_image_path is required for edit mode")
             if not Path(request.input_image_path).exists():
                 raise FileNotFoundError(f"Input image not found: {request.input_image_path}")
+            for path in request.input_image_paths:
+                if not Path(path).exists():
+                    raise FileNotFoundError(f"Input image not found: {path}")
             if request.mask_image_path and not Path(request.mask_image_path).exists():
                 raise FileNotFoundError(f"Mask image not found: {request.mask_image_path}")
 

@@ -21,11 +21,53 @@ class ValidationResult:
         return asdict(self)
 
 
+_NEGATION_MARKERS = (
+    "不",
+    "无",
+    "未",
+    "勿",
+    "非",
+    "别",
+    "避免",
+    "禁止",
+    "不得",
+    "不做",
+    "不写",
+    "不要",
+    "不能",
+    "不应",
+    "不许",
+    "没有",
+    "拒绝",
+    "规避",
+    "禁止出现",
+    "不得出现",
+    "不承诺",
+    "不暗示",
+)
+
+
+def _is_negated_match(text: str, start: int) -> bool:
+    prefix = text[max(0, start - 24):start]
+    compact_prefix = "".join(prefix.split())
+    return any(marker in compact_prefix for marker in _NEGATION_MARKERS)
+
+
 def _find_terms(text: str, candidates: List[str]) -> List[str]:
     lowered = text.casefold()
     matches = []
     for candidate in candidates:
-        if candidate and candidate.casefold() in lowered:
+        if not candidate:
+            continue
+        needle = candidate.casefold()
+        start = lowered.find(needle)
+        found_affirmative = False
+        while start >= 0:
+            if not _is_negated_match(text, start):
+                found_affirmative = True
+                break
+            start = lowered.find(needle, start + len(needle))
+        if found_affirmative:
             matches.append(candidate)
     return matches
 

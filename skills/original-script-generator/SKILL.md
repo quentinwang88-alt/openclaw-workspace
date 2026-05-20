@@ -4,7 +4,7 @@ description: |
   原创短视频脚本自动生成 skill。读取飞书多维表格中由状态位驱动的任务，
   基于产品图片、目标国家、目标语言、产品类型，自动生成 4 套原创短视频内容强策略卡、4 条经独立质检通过的正式脚本，其中 S4 作为实验增强方向测试高惊艳首镜上限。
   每条脚本会先过独立质检，必要时自动修订，再生成最终视频提示词；默认先只生成母体脚本，只有当表格里勾选了 `生成变体` 时，才会在同轮或后续巡检中补跑 S1 / S2 / S3 / S4 的轻变体；如需只生成部分脚本的变体，可显式传 `--variant-script-index`。
-  模型调用当前只保留与 OpenClaw 主 agent 对齐的 `openai-codex/gpt-5.4` 主线路；其它历史线路参数和外部模型调用均已废弃，不再使用。
+  模型调用当前只保留与 OpenClaw 主 agent 对齐的 `openai-codex/gpt-5.5` 主线路；其它历史线路参数和外部模型调用均已废弃，不再使用。
 ---
 
 # Original Script Generator
@@ -97,7 +97,7 @@ Git 只管理开发源目录：
   - `产品类型`
   - `产品卖点说明`（可选）
   - `产品参数信息`（可选，若填写会优先并入 parameter_anchors，并参与输入哈希）
-- 默认主线路模型配置对齐 OpenClaw 当前主 agent（`openai-codex/gpt-5.4`）
+- 默认主线路模型配置对齐 OpenClaw 当前主 agent（`openai-codex/gpt-5.5`）
 - 当前唯一生效线路：`primary`
 - 支持通过命令行显式传入：
   - `--llm-route primary`
@@ -350,6 +350,22 @@ python3 skills/original-script-generator/run_pipeline.py --feishu-url "https://x
 ```bash
 python3 skills/original-script-generator/run_pipeline.py --feishu-url "https://xxx.feishu.cn/base/xxx?table=xxx" --task-no "003" --force-rerun-all --llm-route primary
 ```
+
+中后段超时或失败后，按任务编号断点续跑，复用同输入哈希下已经成功的上游阶段：
+
+```bash
+python3 skills/original-script-generator/run_pipeline.py --feishu-url "https://xxx.feishu.cn/base/xxx?table=xxx" --task-no "003" --force-rerun-all --resume-from-latest-success --llm-route primary
+```
+
+默认还会启用两类提速缓存：
+
+- `ORIGINAL_SCRIPT_ENABLE_CONTRACT_REGISTRY=1`：SKU 级 P1 锚点卡 / `category_execution_contract` 缓存，key 包含产品图哈希、产品类型、卖点/参数和 schema version。
+- `ORIGINAL_SCRIPT_TEMPLATE_VIDEO_PROMPT=1`：P7_VIDEO 默认由 P7 结构化脚本本地模板渲染，保留 gaze / 微反应 / 身体语言；模板校验失败时才回退 LLM。
+- Q1 已启用三层分流：代码侧 L0 结构/时间/语言检查 + L1 契约/音频/人物表演检查先生成 `pre_qc_result`，再交给语义 Q1 兜底；语义 Q1 不允许推翻 high-confidence 硬违约。
+- 阶段复用顺序：同 input_hash 成功阶段优先，其次按 `stage_cache_key` 跨运行复用，最后才调用 LLM。
+- P1 / P4 / P5 / P7 / Q1 已加入稳定 prompt 前缀，尽量让长规则区保持一致，动态 JSON 放在后续输入区。
+- Q1 precheck 会先做极小范围本地修正：移除 forbidden_sfx 命中的音效 cue，补齐空泛/缺失的镜头级微反应；不会改商品 proof 主线。
+- `ORIGINAL_SCRIPT_DEFER_VARIANTS_AFTER_MOTHER=1`：若勾选了生成变体，默认先落库母体脚本，后续巡检自动补齐变体；设为 `0` 可恢复同轮生成变体。
 
 只重跑变体：
 

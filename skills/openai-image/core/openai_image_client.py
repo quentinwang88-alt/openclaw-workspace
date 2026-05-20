@@ -118,6 +118,7 @@ class OpenAIImageClient:
         prompt: str,
         input_image_path: str,
         mask_image_path: str,
+        input_image_paths: Optional[List[str]] = None,
         size: str,
         quality: str,
         output_format: str,
@@ -127,6 +128,7 @@ class OpenAIImageClient:
             return self._edit_via_codex(
                 prompt=prompt,
                 input_image_path=input_image_path,
+                input_image_paths=input_image_paths,
                 mask_image_path=mask_image_path,
                 size=size,
                 quality=quality,
@@ -241,16 +243,24 @@ class OpenAIImageClient:
 
         tool_config: Dict[str, Any] = {
             "type": "image_generation",
+            "model": self.settings.codex_model,
             "quality": quality,
             "size": size,
             "output_format": output_format,
+            "background": "opaque",
+            "partial_images": 1,
         }
 
         body: Dict[str, Any] = {
-            "model": self.settings.codex_model,
+            "model": self.settings.codex_responses_model,
             "instructions": self.settings.codex_instructions,
             "input": input_content,
             "tools": [tool_config],
+            "tool_choice": {
+                "type": "allowed_tools",
+                "mode": "required",
+                "tools": [{"type": "image_generation"}],
+            },
             "stream": True,
             "store": False,
         }
@@ -267,6 +277,7 @@ class OpenAIImageClient:
         prompt: str,
         input_image_path: str,
         mask_image_path: str,
+        input_image_paths: Optional[List[str]] = None,
         size: str,
         quality: str,
         output_format: str,
@@ -287,12 +298,15 @@ class OpenAIImageClient:
             "Content-Type": "application/json",
         }
 
-        # Build content with input image
-        image_data_url = _image_path_to_data_url(input_image_path)
-        content_items: List[Dict[str, Any]] = [
-            {"type": "input_text", "text": prompt},
-            {"type": "input_image", "image_url": image_data_url},
-        ]
+        # Build content with one or more input images. Image 1 remains the
+        # primary edit anchor; later images are auxiliary references.
+        ordered_images: List[str] = []
+        for candidate in [input_image_path, *(input_image_paths or [])]:
+            if candidate and candidate not in ordered_images:
+                ordered_images.append(candidate)
+        content_items: List[Dict[str, Any]] = [{"type": "input_text", "text": prompt}]
+        for image_path in ordered_images:
+            content_items.append({"type": "input_image", "image_url": _image_path_to_data_url(image_path)})
 
         # If mask provided, add it as another input image
         if mask_image_path:
@@ -308,16 +322,24 @@ class OpenAIImageClient:
 
         tool_config: Dict[str, Any] = {
             "type": "image_generation",
+            "model": self.settings.codex_model,
             "quality": quality,
             "size": size,
             "output_format": output_format,
+            "background": "opaque",
+            "partial_images": 1,
         }
 
         body: Dict[str, Any] = {
-            "model": self.settings.codex_model,
+            "model": self.settings.codex_responses_model,
             "instructions": self.settings.codex_instructions,
             "input": input_content,
             "tools": [tool_config],
+            "tool_choice": {
+                "type": "allowed_tools",
+                "mode": "required",
+                "tools": [{"type": "image_generation"}],
+            },
             "stream": True,
             "store": False,
         }
@@ -349,6 +371,8 @@ class OpenAIImageClient:
                     f"Codex API returned {resp.status_code}: {error_body[:500]}"
                 )
             completed_event: Optional[Dict[str, Any]] = None
+            image_item: Optional[Dict[str, Any]] = None
+            partial_image_b64 = ""
             for line in resp.iter_lines():
                 if not line or not line.startswith("data: "):
                     continue
@@ -359,15 +383,47 @@ class OpenAIImageClient:
                     event = json.loads(data_str)
                 except json.JSONDecodeError:
                     continue
-                if event.get("type") == "response.completed":
+                event_type = str(event.get("type") or "")
+                if event_type == "response.completed":
                     completed_event = event
+                elif event_type == "response.output_item.done":
+                    item = event.get("item")
+                    if isinstance(item, dict) and item.get("type") == "image_generation_call":
+                        if str(item.get("result") or "").strip():
+                            image_item = item
+                elif event_type == "response.image_generation_call.partial_image":
+                    candidate = str(event.get("partial_image_b64") or "").strip()
+                    if candidate:
+                        partial_image_b64 = candidate
 
         if completed_event is None:
             raise RuntimeError(
                 "Codex streaming response ended without a 'response.completed' event"
             )
         # Return the response object which has the same shape as the non-streaming response
-        return completed_event.get("response", completed_event)
+        response = completed_event.get("response", completed_event)
+        if not isinstance(response, dict):
+            return completed_event
+
+        output = response.get("output")
+        if not isinstance(output, list):
+            output = []
+            response["output"] = output
+        has_image_result = any(
+            isinstance(item, dict)
+            and item.get("type") == "image_generation_call"
+            and str(item.get("result") or "").strip()
+            for item in output
+        )
+        if not has_image_result and image_item:
+            output.append(image_item)
+        elif not has_image_result and partial_image_b64:
+            output.append({
+                "type": "image_generation_call",
+                "status": "partial",
+                "result": partial_image_b64,
+            })
+        return response
 
     @staticmethod
     def _parse_codex_image_response(result: Dict[str, Any]) -> Dict[str, Any]:

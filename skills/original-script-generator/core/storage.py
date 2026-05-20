@@ -61,6 +61,9 @@ class PipelineStorage:
                     exp_s4_json TEXT,
                     raw_record_fields_json TEXT,
                     stage_durations_json TEXT,
+                    current_stage TEXT,
+                    current_stage_started_at TEXT,
+                    last_heartbeat_at TEXT,
                     started_at TEXT NOT NULL,
                     completed_at TEXT
                 );
@@ -84,6 +87,19 @@ class PipelineStorage:
                     FOREIGN KEY (run_id) REFERENCES pipeline_runs(run_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS contract_registry (
+                    contract_key TEXT PRIMARY KEY,
+                    product_image_hash TEXT NOT NULL,
+                    normalized_product_type TEXT NOT NULL,
+                    schema_version TEXT NOT NULL,
+                    anchor_card_json TEXT NOT NULL,
+                    category_execution_contract_json TEXT,
+                    source_run_id INTEGER,
+                    source_record_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_pipeline_runs_record_id
                 ON pipeline_runs(record_id);
 
@@ -98,6 +114,9 @@ class PipelineStorage:
 
                 CREATE INDEX IF NOT EXISTS idx_stage_results_stage_name
                 ON stage_results(stage_name);
+
+                CREATE INDEX IF NOT EXISTS idx_contract_registry_product_image_hash
+                ON contract_registry(product_image_hash);
                 """
             )
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(pipeline_runs)")}
@@ -112,8 +131,17 @@ class PipelineStorage:
             for column in ("exp_s1_json", "exp_s2_json", "exp_s3_json", "exp_s4_json"):
                 if column not in columns:
                     conn.execute(f"ALTER TABLE pipeline_runs ADD COLUMN {column} TEXT")
+            for column in ("current_stage", "current_stage_started_at", "last_heartbeat_at"):
+                if column not in columns:
+                    conn.execute(f"ALTER TABLE pipeline_runs ADD COLUMN {column} TEXT")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_pipeline_runs_top_category ON pipeline_runs(top_category)"
+            )
+            stage_columns = {row["name"] for row in conn.execute("PRAGMA table_info(stage_results)")}
+            if "cache_key" not in stage_columns:
+                conn.execute("ALTER TABLE stage_results ADD COLUMN cache_key TEXT")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_stage_results_cache_key ON stage_results(cache_key)"
             )
 
     @staticmethod
@@ -181,7 +209,10 @@ class PipelineStorage:
                 SET runtime_status = ?,
                     error_message = ?,
                     stage_durations_json = ?,
-                    completed_at = COALESCE(?, completed_at)
+                    completed_at = COALESCE(?, completed_at),
+                    last_heartbeat_at = ?,
+                    current_stage = CASE WHEN ? THEN NULL ELSE current_stage END,
+                    current_stage_started_at = CASE WHEN ? THEN NULL ELSE current_stage_started_at END
                 WHERE run_id = ?
                 """,
                 (
@@ -189,8 +220,52 @@ class PipelineStorage:
                     error_message or None,
                     self._json_dump(stage_durations or {}),
                     completed_at,
+                    self._now_string(),
+                    1 if completed else 0,
+                    1 if completed else 0,
                     run_id,
                 ),
+            )
+
+    def mark_stage_started(
+        self,
+        run_id: int,
+        stage_name: str,
+        runtime_status: Optional[str] = None,
+    ) -> None:
+        now = self._now_string()
+        updates = [
+            "current_stage = ?",
+            "current_stage_started_at = ?",
+            "last_heartbeat_at = ?",
+        ]
+        values: List[Any] = [stage_name, now, now]
+        if runtime_status:
+            updates.insert(0, "runtime_status = ?")
+            values.insert(0, runtime_status)
+        values.append(run_id)
+        with self._connect() as conn:
+            conn.execute(
+                f"""
+                UPDATE pipeline_runs
+                SET {', '.join(updates)}
+                WHERE run_id = ?
+                """,
+                tuple(values),
+            )
+
+    def mark_stage_finished(self, run_id: int, stage_name: str) -> None:
+        now = self._now_string()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE pipeline_runs
+                SET last_heartbeat_at = ?,
+                    current_stage = CASE WHEN current_stage = ? THEN NULL ELSE current_stage END,
+                    current_stage_started_at = CASE WHEN current_stage = ? THEN NULL ELSE current_stage_started_at END
+                WHERE run_id = ?
+                """,
+                (now, stage_name, stage_name, run_id),
             )
 
     def update_run_artifacts(
@@ -249,6 +324,7 @@ class PipelineStorage:
         rendered_text: Optional[str] = None,
         duration_seconds: Optional[float] = None,
         error_message: str = "",
+        cache_key: str = "",
     ) -> None:
         with self._connect() as conn:
             conn.execute(
@@ -267,8 +343,9 @@ class PipelineStorage:
                     rendered_text,
                     duration_seconds,
                     error_message,
+                    cache_key,
                     created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -284,9 +361,82 @@ class PipelineStorage:
                     rendered_text,
                     duration_seconds,
                     error_message or None,
+                    cache_key or None,
                     self._now_string(),
                 ),
             )
+
+    def upsert_contract_registry(
+        self,
+        contract_key: str,
+        product_image_hash: str,
+        normalized_product_type: str,
+        schema_version: str,
+        anchor_card: Dict[str, Any],
+        source_run_id: Optional[int] = None,
+        source_record_id: str = "",
+    ) -> None:
+        if not contract_key or not anchor_card:
+            return
+        contract = anchor_card.get("category_execution_contract") if isinstance(anchor_card, dict) else {}
+        now = self._now_string()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO contract_registry (
+                    contract_key,
+                    product_image_hash,
+                    normalized_product_type,
+                    schema_version,
+                    anchor_card_json,
+                    category_execution_contract_json,
+                    source_run_id,
+                    source_record_id,
+                    created_at,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(contract_key) DO UPDATE SET
+                    anchor_card_json = excluded.anchor_card_json,
+                    category_execution_contract_json = excluded.category_execution_contract_json,
+                    source_run_id = excluded.source_run_id,
+                    source_record_id = excluded.source_record_id,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    contract_key,
+                    product_image_hash,
+                    normalized_product_type,
+                    schema_version,
+                    self._json_dump(anchor_card),
+                    self._json_dump(contract if isinstance(contract, dict) else {}),
+                    source_run_id,
+                    source_record_id or None,
+                    now,
+                    now,
+                ),
+            )
+
+    def get_contract_registry_anchor_card(self, contract_key: str) -> Optional[Dict[str, Any]]:
+        if not contract_key:
+            return None
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                SELECT anchor_card_json
+                FROM contract_registry
+                WHERE contract_key = ?
+                LIMIT 1
+                """,
+                (contract_key,),
+            )
+            row = cursor.fetchone()
+            if not row or not row["anchor_card_json"]:
+                return None
+            try:
+                value = json.loads(row["anchor_card_json"])
+            except json.JSONDecodeError:
+                return None
+            return value if isinstance(value, dict) else None
 
     def query_runs_by_product_code(self, product_code: str, limit: int = 20) -> List[sqlite3.Row]:
         with self._connect() as conn:
@@ -403,6 +553,32 @@ class PipelineStorage:
                 LIMIT 1
                 """,
                 (stage_name, input_hash, record_id, product_code, product_code),
+            )
+            row = cursor.fetchone()
+            if not row or not row["output_json"]:
+                return None
+            return json.loads(row["output_json"])
+
+    def get_latest_stage_output_json_for_cache_key(
+        self,
+        stage_name: str,
+        cache_key: str,
+    ) -> Optional[Dict[str, Any]]:
+        if not cache_key:
+            return None
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                SELECT output_json
+                FROM stage_results
+                WHERE stage_name = ?
+                  AND status = 'success'
+                  AND output_json IS NOT NULL
+                  AND cache_key = ?
+                ORDER BY stage_result_id DESC
+                LIMIT 1
+                """,
+                (stage_name, cache_key),
             )
             row = cursor.fetchone()
             if not row or not row["output_json"]:

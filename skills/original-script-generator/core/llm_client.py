@@ -3,7 +3,7 @@
 原创脚本生成 LLM 客户端。
 
 当前只保留一条主线路：
-- primary: 只走与 OpenClaw 当前主 agent 对齐的 openai-codex / gpt-5.4
+- primary: 只走与 OpenClaw 当前主 agent 对齐的 openai-codex / gpt-5.5
 """
 
 import base64
@@ -51,8 +51,11 @@ def normalize_route_order(route_order: Optional[Any]) -> Optional[List[str]]:
     return normalized or None
 
 PRIMARY_LLM_DEFAULT_API_URL = "https://chatgpt.com/backend-api/codex"
-PRIMARY_LLM_DEFAULT_MODEL = "gpt-5.4"
+PRIMARY_LLM_DEFAULT_MODEL = "gpt-5.5"
 PRIMARY_LLM_REASONING_EFFORT = os.environ.get("ORIGINAL_SCRIPT_PRIMARY_REASONING_EFFORT", "high")
+PRIMARY_LLM_STREAM_RETURN_ON_TEXT_DONE = (
+    os.environ.get("ORIGINAL_SCRIPT_STREAM_RETURN_ON_TEXT_DONE", "1") != "0"
+)
 OPENCLAW_CONFIG_PATH = Path(
     os.environ.get("OPENCLAW_CONFIG_PATH", str(Path.home() / ".openclaw" / "openclaw.json"))
 )
@@ -119,13 +122,13 @@ def _extract_codex_cli_access_token() -> str:
 
 
 def _extract_codex_access_token() -> str:
-    openclaw_agent_access = _extract_openclaw_agent_access_token()
-    if openclaw_agent_access:
-        return openclaw_agent_access
-
     codex_cli_access = _extract_codex_cli_access_token()
     if codex_cli_access:
         return codex_cli_access
+
+    openclaw_agent_access = _extract_openclaw_agent_access_token()
+    if openclaw_agent_access:
+        return openclaw_agent_access
 
     payload = _safe_read_json(HERMES_AUTH_PATH)
     providers = payload.get("providers") if isinstance(payload, dict) else {}
@@ -233,6 +236,8 @@ class OriginalScriptLLMClient:
                 raise
             except Exception as exc:
                 last_error = exc
+                if self._is_auth_error(exc):
+                    raise Exception(f"LLM 认证失败，请重新登录后再运行: {last_error}")
                 if self._is_rate_limit_error(exc):
                     rate_limit_attempts += 1
                     if rate_limit_attempts <= rate_limit_max_attempts:
@@ -292,8 +297,34 @@ class OriginalScriptLLMClient:
                     "image_url": self._image_path_to_data_url(image_path),
                 }
             )
+        if str(os.environ.get("ORIGINAL_SCRIPT_USE_NONSTREAM", "") or "").strip() == "1":
+            response = client.responses.create(
+                model=self.primary_model,
+                reasoning={"effort": PRIMARY_LLM_REASONING_EFFORT},
+                instructions=(
+                    "You are a multimodal content generation worker for original short-video scripting. "
+                    "Follow the user prompt exactly. "
+                    "If the prompt asks for JSON, output only valid JSON with no extra prose."
+                ),
+                store=False,
+                input=[{"role": "user", "content": input_content}],
+            )
+            dumped = response.model_dump(mode="json")
+            text = getattr(response, "output_text", "") or self._extract_openai_responses_text(dumped)
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": text.strip(),
+                        }
+                    }
+                ],
+                "_raw_response": dumped,
+            }
         text_chunks: List[str] = []
         fallback_text = ""
+        final_response_dump: Dict[str, Any] = {}
+        saw_text_done = False
         with client.responses.stream(
             model=self.primary_model,
             reasoning={"effort": PRIMARY_LLM_REASONING_EFFORT},
@@ -315,11 +346,28 @@ class OriginalScriptLLMClient:
                     done_text = str(getattr(event, "text", "") or "")
                     if done_text:
                         fallback_text = done_text
-            response = stream.get_final_response()
-        dumped = response.model_dump(mode="json")
-        text = "".join(text_chunks).strip() or fallback_text.strip()
+                    saw_text_done = True
+                    if PRIMARY_LLM_STREAM_RETURN_ON_TEXT_DONE and (fallback_text.strip() or text_chunks):
+                        break
+                elif event_type == "response.completed":
+                    response_obj = getattr(event, "response", None)
+                    if response_obj is not None and hasattr(response_obj, "model_dump"):
+                        final_response_dump = response_obj.model_dump(mode="json")
+                    break
+                elif event_type in {"response.failed", "response.incomplete"}:
+                    response_obj = getattr(event, "response", None)
+                    if response_obj is not None and hasattr(response_obj, "model_dump"):
+                        final_response_dump = response_obj.model_dump(mode="json")
+                    raise Exception(f"Responses stream ended with {event_type}: {final_response_dump or event}")
+            if not (text_chunks or fallback_text.strip() or saw_text_done or final_response_dump):
+                response = stream.get_final_response()
+                final_response_dump = response.model_dump(mode="json")
+        dumped = final_response_dump
+        text = fallback_text.strip() or "".join(text_chunks).strip()
+        if not text and dumped:
+            text = self._extract_openai_responses_text(dumped)
         if not text:
-            text = getattr(response, "output_text", "") or self._extract_openai_responses_text(dumped)
+            raise Exception("Responses stream ended without output text")
         return {
             "choices": [
                 {
@@ -397,6 +445,19 @@ class OriginalScriptLLMClient:
             or "TooManyRequests" in message
             or "429" in message
             or "限流" in message
+        )
+
+    @staticmethod
+    def _is_auth_error(exc: Exception) -> bool:
+        message = str(exc)
+        lowered = message.lower()
+        return (
+            "token_expired" in lowered
+            or "authentication token is expired" in lowered
+            or "provided authentication token is expired" in lowered
+            or "invalid_api_key" in lowered
+            or "unauthorized" in lowered
+            or "401" in message
         )
 
     @staticmethod

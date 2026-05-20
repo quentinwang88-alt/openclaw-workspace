@@ -53,6 +53,7 @@ STATUS_PENDING = "待开始"
 STATUS_PROCESSING = "处理中"
 STATUS_DONE = "已完成"
 STATUS_FAILED = "失败"
+STATUS_NOT_SUITABLE = "不适合复刻"
 
 
 def resolve_feishu_config(feishu_url: Optional[str]) -> (str, str):
@@ -141,17 +142,86 @@ def has_text_value(value: object) -> bool:
 
 
 def extract_negative_words(final_storyboard: str) -> str:
-    """从 Step3 输出中拆出“负面限制词”小节，供单独字段写回。"""
+    """从 Step3 输出中拆出“负面限制词”小节，供单独字段写回。
+
+    Step3 prompt 升级后负面限制词章节序号从「三、」改为「四、」，
+    保留旧序号匹配以便兼容历史已写入的内容。
+    """
     text = str(final_storyboard or "").strip()
     patterns = [
-        r"(?:^|\n)#+\s*三、负面限制词\s*\n(?P<body>[\s\S]+)$",
-        r"(?:^|\n)三、负面限制词\s*\n(?P<body>[\s\S]+)$",
+        r"(?:^|\n)#+\s*[三四]、负面限制词\s*\n(?P<body>[\s\S]+?)$",
+        r"(?:^|\n)[三四]、负面限制词\s*\n(?P<body>[\s\S]+?)$",
     ]
     for pattern in patterns:
         match = re.search(pattern, text)
         if match:
             return match.group("body").strip()
     return ""
+
+
+# 复刻策略关键词 → 是否适合后续生成
+_STRATEGY_NOT_SUITABLE = "不建议复刻"
+_STRATEGY_KEEP_LENGTH = "原长复刻"
+_STRATEGY_COMPRESS = "选段压缩复刻"
+
+
+def extract_duration_decision(highlight_dna: str) -> Dict[str, str]:
+    """从 Step1 输出的「零、时长决策」段中抽取关键决策字段。
+
+    返回字典：
+      - original_duration: 原视频实际秒数（字符串，可能为空）
+      - strategy: 原长复刻 / 选段压缩复刻 / 不建议复刻 / 空字符串
+      - target_duration: 复刻目标时长秒数（字符串，可能为空；不建议复刻时为 0）
+      - not_suitable_reason: 仅在不建议复刻时给出原因摘要（截断 500 字符）
+    """
+    text = str(highlight_dna or "")
+    # 去掉 Markdown 加粗/斜体标记，避免 `**原视频实际时长**：12` 抓不到
+    flat = re.sub(r"\*+", "", text)
+    result = {
+        "original_duration": "",
+        "strategy": "",
+        "target_duration": "",
+        "not_suitable_reason": "",
+    }
+
+    # 原视频实际时长（秒）
+    m = re.search(r"原视频实际时长\s*[（(]?\s*秒\s*[)）]?\s*[:：]\s*([0-9]+(?:\.[0-9]+)?)", flat)
+    if m:
+        result["original_duration"] = m.group(1).strip()
+
+    # 复刻策略
+    m = re.search(r"复刻策略\s*[:：]\s*([^\n]+)", flat)
+    if m:
+        raw = m.group(1).strip()
+        for keyword in (_STRATEGY_NOT_SUITABLE, _STRATEGY_COMPRESS, _STRATEGY_KEEP_LENGTH):
+            if keyword in raw:
+                result["strategy"] = keyword
+                break
+
+    # 复刻目标时长（秒）
+    m = re.search(r"复刻目标时长\s*[（(]?\s*秒\s*[)）]?\s*[:：]\s*([0-9]+(?:\.[0-9]+)?)", flat)
+    if m:
+        result["target_duration"] = m.group(1).strip()
+
+    # 不建议复刻原因（取「不建议复刻」之后的第一段简短描述）
+    if result["strategy"] == _STRATEGY_NOT_SUITABLE:
+        # 优先匹配「原因：xxx」或「不适合的原因：xxx」
+        reason_match = re.search(
+            r"(?:不适合的?原因|原因|理由)\s*[:：]\s*([^\n]+(?:\n(?!\s*[一二三四五六七八九零])[^\n]+)*)",
+            flat,
+        )
+        if reason_match:
+            result["not_suitable_reason"] = reason_match.group(1).strip()[:500]
+
+    return result
+
+
+class NotSuitableForRemake(Exception):
+    """Step1 判定原视频不适合复刻；用于跳过 Step2/3 并打上专用状态。"""
+
+    def __init__(self, reason: str):
+        super().__init__(reason or "原视频不适合复刻")
+        self.reason = reason
 
 
 class VideoRemakePipeline:
@@ -165,6 +235,7 @@ class VideoRemakePipeline:
             "total": 0,
             "success": 0,
             "failed": 0,
+            "not_suitable": 0,
         }
 
     def process_records(self, records: List[RemakeRecord], dry_run: bool = False) -> Dict[str, int]:
@@ -191,6 +262,10 @@ class VideoRemakePipeline:
             try:
                 self._process_single_record(record)
                 self.stats["success"] += 1
+            except NotSuitableForRemake as exc:
+                self.stats["not_suitable"] += 1
+                print(f"⏭️  当前记录被判定为不适合复刻: {exc.reason or '未提供原因'}")
+                self._mark_not_suitable(record.record_id, exc.reason)
             except Exception as exc:
                 self.stats["failed"] += 1
                 print(f"❌ 当前记录失败: {exc}")
@@ -235,6 +310,40 @@ class VideoRemakePipeline:
                 record.record_id,
                 {self.mapping["highlight_dna"]: highlight_dna},
             )
+
+        # 抽取 Step1 输出的时长决策；不适合复刻则直接分流，跳过 Step2/3
+        decision = extract_duration_decision(str(highlight_dna or ""))
+        if decision["original_duration"] or decision["target_duration"] or decision["strategy"]:
+            print(
+                f"  📏 时长决策：原视频={decision['original_duration'] or '?'}s"
+                f" | 策略={decision['strategy'] or '?'}"
+                f" | 目标={decision['target_duration'] or '?'}s"
+            )
+
+        if decision["strategy"] == _STRATEGY_NOT_SUITABLE:
+            # 把 0 秒目标时长也回写一下，便于下游识别
+            duration_field = self.mapping.get("video_duration")
+            if duration_field:
+                try:
+                    self.client.update_record_fields(
+                        record.record_id,
+                        {duration_field: 0},
+                    )
+                except Exception as exc:
+                    print(f"    ⚠️ 回写视频时长(0)失败: {exc}")
+            raise NotSuitableForRemake(decision["not_suitable_reason"])
+
+        # 回写复刻目标时长，供下游脚本管理表/视频生成模型消费
+        if decision["target_duration"]:
+            duration_field = self.mapping.get("video_duration")
+            if duration_field:
+                try:
+                    self.client.update_record_fields(
+                        record.record_id,
+                        {duration_field: int(float(decision["target_duration"]))},
+                    )
+                except Exception as exc:
+                    print(f"    ⚠️ 回写复刻目标时长失败: {exc}")
 
         light_rewrite_plan = fields.get(self.mapping["light_rewrite_plan"])
         if has_text_value(light_rewrite_plan):
@@ -297,6 +406,35 @@ class VideoRemakePipeline:
         except Exception as exc:
             print(f"⚠️ 回写失败状态也失败了: {exc}")
 
+    def _mark_not_suitable(self, record_id: str, reason: str) -> None:
+        """标记为不适合复刻：状态=不适合复刻，原因写入错误信息字段，跳过同步。
+
+        前置：飞书状态字段的选项里必须已经添加「不适合复刻」选项；
+        若未添加，飞书 API 会返回 InvalidRequest，此时降级为「失败」并附说明。
+        """
+        status_field = self.mapping["status"]
+        error_field = self.mapping.get("error_message")
+        fields = {status_field: STATUS_NOT_SUITABLE}
+        if error_field:
+            fields[error_field] = (reason or "原视频不适合复刻")[:1000]
+        try:
+            self.client.update_record_fields(record_id, fields)
+        except Exception as exc:
+            print(
+                f"⚠️ 回写「不适合复刻」状态失败（请确认飞书状态字段已添加该选项）: {exc}\n"
+                f"   降级为「失败」状态。"
+            )
+            fallback = {status_field: STATUS_FAILED}
+            if error_field:
+                fallback[error_field] = (
+                    f"[不适合复刻] {reason or '原视频不适合复刻'}\n"
+                    f"⚠️ 飞书状态选项缺少「{STATUS_NOT_SUITABLE}」，已降级为失败。"
+                )[:1000]
+            try:
+                self.client.update_record_fields(record_id, fallback)
+            except Exception as exc2:
+                print(f"⚠️ 降级回写失败状态也失败了: {exc2}")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -332,6 +470,7 @@ def main() -> None:
     print(f"{'=' * 70}")
     print(f"总任务数: {stats['total']}")
     print(f"成功: {stats['success']}")
+    print(f"不适合复刻: {stats.get('not_suitable', 0)}")
     print(f"失败: {stats['failed']}")
 
 

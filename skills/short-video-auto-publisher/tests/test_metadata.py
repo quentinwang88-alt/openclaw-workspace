@@ -80,6 +80,80 @@ class MetadataTest(unittest.TestCase):
         self.assertEqual(items[1].variant_strength, "轻变体")
         self.assertTrue(items[0].short_video_title)
 
+    def test_build_script_metadata_records_uses_product_code_when_product_id_blank(self) -> None:
+        field_names = [
+            "任务编号",
+            "店铺ID",
+            "产品编码",
+            "产品ID",
+            "目标国家",
+            "产品类型",
+            "所属母版1",
+            "母版方向1",
+            "脚本方向一",
+        ]
+        mapping = resolve_field_mapping(field_names, SOURCE_FIELD_ALIASES)
+        records = [
+            Record(
+                record_id="rec_product_code",
+                fields={
+                    "任务编号": "082",
+                    "店铺ID": "THFZ02",
+                    "产品编码": "1735460460424628091",
+                    "产品ID": "",
+                    "目标国家": "Thailand",
+                    "产品类型": "上装",
+                    "所属母版1": "M1",
+                    "母版方向1": "日常轻分享流",
+                    "脚本方向一": "เสื้อขาวเรียบๆ แต่มีเท็กซ์เจอร์นิดๆ",
+                },
+            )
+        ]
+
+        items = build_script_metadata_records(records, mapping, title_generator=HeuristicTitleGenerator())
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].task_no, "082")
+        self.assertEqual(items[0].script_id, "082_M1_M")
+        self.assertEqual(items[0].product_id, "1735460460424628091")
+        self.assertEqual(items[0].content_family_key, "1735460460424628091_M1")
+
+    def test_build_script_metadata_records_prefers_product_code_over_product_id(self) -> None:
+        field_names = [
+            "任务编号",
+            "店铺ID",
+            "产品编码",
+            "产品ID",
+            "目标国家",
+            "产品类型",
+            "所属母版1",
+            "母版方向1",
+            "脚本方向一",
+        ]
+        mapping = resolve_field_mapping(field_names, SOURCE_FIELD_ALIASES)
+        records = [
+            Record(
+                record_id="rec_prefer_product_code",
+                fields={
+                    "任务编号": "141",
+                    "店铺ID": "MYPS01",
+                    "产品编码": "1731290957522437723",
+                    "产品ID": "141",
+                    "目标国家": "Malaysia",
+                    "产品类型": "项链",
+                    "所属母版1": "M1",
+                    "母版方向1": "日常轻分享流",
+                    "脚本方向一": "Rantai kecil nampak kemas",
+                },
+            )
+        ]
+
+        items = build_script_metadata_records(records, mapping, title_generator=HeuristicTitleGenerator())
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].product_id, "1731290957522437723")
+        self.assertEqual(items[0].content_family_key, "1731290957522437723_M1")
+
     def test_build_script_metadata_records_uses_original_script_for_master_slot(self) -> None:
         field_names = [
             "任务编号",

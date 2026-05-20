@@ -3,6 +3,7 @@
     "apparel": "服饰",
     "jewelry": "首饰",
     "hair_accessory": "发饰",
+    "apparel_accessory": "服饰配件",
     "accessory": "配饰",
     "unknown": "未知"
   },
@@ -16,6 +17,9 @@
     "ear": "耳部佩戴",
     "finger": "手指佩戴",
     "hair": "头发 / 发型位置使用",
+    "neck_shoulder": "脖颈 / 肩部搭配",
+    "head_face": "头部 / 脸部搭配",
+    "upper_body_accessory": "上半身配饰搭配",
     "unknown": "未知部位"
   },
   "business_category_aliases": {
@@ -29,6 +33,11 @@
     "饰品": "jewelry",
     "发饰": "hair_accessory",
     "头饰": "hair_accessory",
+    "apparel_accessory": "apparel_accessory",
+    "服饰配件": "apparel_accessory",
+    "围巾": "apparel_accessory",
+    "帽子": "apparel_accessory",
+    "围巾帽子套装": "apparel_accessory",
     "配饰": "accessory"
   },
   "types": [
@@ -241,6 +250,36 @@
       "description": "用于盘发或固定发型的发饰，可描述插入头发、盘发位置和装饰效果。",
       "required_terms": ["头发", "固定", "盘发"],
       "forbidden_terms": ["耳饰", "项链", "手镯"]
+    },
+    {
+      "canonical_type": "scarf",
+      "family": "apparel_accessory",
+      "slot": "neck_shoulder",
+      "aliases": ["围巾", "冬季围巾", "披肩围巾"],
+      "display_name": "围巾",
+      "description": "脖颈和肩部搭配配饰，重点描述已围好后的上半身冬季穿搭完整度、围巾边缘和外套或针织衫关系。",
+      "required_terms": ["围巾", "上半身", "冬季穿搭"],
+      "forbidden_terms": ["强保暖", "防风", "复杂打结教程"]
+    },
+    {
+      "canonical_type": "hat",
+      "family": "apparel_accessory",
+      "slot": "head_face",
+      "aliases": ["帽子", "冬季帽子", "针织帽", "毛线帽", "渔夫帽", "贝雷帽", "护耳帽"],
+      "display_name": "帽子",
+      "description": "头部和脸部比例搭配配饰，重点描述已戴好后的帽型、脸部轮廓、头肩比例和冬季上衣或外套关系。",
+      "required_terms": ["帽子", "帽型", "头肩比例"],
+      "forbidden_terms": ["强防风", "强保暖", "强防晒", "甩头测试"]
+    },
+    {
+      "canonical_type": "scarf_hat_set",
+      "family": "apparel_accessory",
+      "slot": "upper_body_accessory",
+      "aliases": ["围巾帽子套装", "帽子围巾套装", "围巾帽子两件套", "帽子围巾两件套"],
+      "display_name": "围巾帽子套装",
+      "description": "冬季头肩和上半身组合配饰，重点描述帽子、围巾和外套或针织衫一起佩戴后的冬季穿搭完整度。",
+      "required_terms": ["围巾", "帽子", "上半身冬季穿搭"],
+      "forbidden_terms": ["强保暖", "复杂组合教程", "多色托盘镜"]
     }
   ]
 }

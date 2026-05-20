@@ -1,0 +1,266 @@
+enabled_display_families:
+  - hair_accessory
+  - ear_accessory
+  - apparel
+  - apparel_accessory
+
+profiles:
+  hair_accessory:
+    default:
+      performance_family: mirror_hair_check
+      persona_mode: mirror_self_check_with_soft_friend_share
+      performance_intensity: low_to_medium
+
+      gaze_rule:
+        min_points_required: 3
+        final_point_options:
+          - camera
+          - mirror_full_result
+
+      expression_arc:
+        - "0-3s：先看镜子里的发型，表情是轻微观察，不要一开始固定微笑"
+        - "3-8s：看到发饰让发型更完整后，嘴角自然上扬，有一点满意感"
+        - "8-15s：轻微侧头或半步后退看整体，最后看向镜头像朋友轻分享"
+
+      gaze_plan:
+        - mirror
+        - hair_accessory_position
+        - camera
+        - mirror_full_result
+
+      micro_reaction_beats:
+        - "轻轻抿嘴观察发型是否松散"
+        - "看到效果后眼神轻微变亮"
+        - "手指轻碰发饰边缘后自然笑一下"
+        - "最后轻轻点头确认可以出门"
+
+      body_language_beats:
+        - "身体微微靠近镜子看细节"
+        - "侧头 15-30 度展示发饰位置"
+        - "肩膀放松，避免模特式挺直"
+        - "最后半步后退看整体效果"
+
+      product_interaction_beats:
+        - "只轻整理发饰边缘或附近头发"
+        - "不长时间让手、头发、发饰纠缠"
+        - "复杂佩戴过程用结果镜头替代"
+
+      relatable_moment: "出门前觉得头发有点随便，顺手整理后确认整体更完整"
+
+      forbidden_performance:
+        - "全程固定微笑看镜头"
+        - "像棚拍模特一样僵硬展示发饰"
+        - "没有看镜子确认发型的动作"
+        - "表情从头到尾没有观察、满意、确认的变化"
+        - "人物动作只是在摆拍商品，没有真实整理自己的动机"
+
+  ear_accessory:
+    default:
+      performance_family: face_side_detail_check
+      persona_mode: soft_side_profile_check_with_small_delight
+      performance_intensity: low
+
+      gaze_rule:
+        min_points_required: 3
+        final_point_options:
+          - camera
+          - mirror_face_overall
+
+      expression_arc:
+        - "0-3s：先用侧脸或半侧脸展示耳环效果，表情放松，不要直接硬推销"
+        - "3-8s：轻轻拨开头发或侧头，看耳侧细节，出现轻微满意反应"
+        - "8-15s：转回一点看镜头，像朋友说这个细节让脸侧更精致"
+
+      gaze_plan:
+        - mirror
+        - ear_side_detail
+        - camera
+        - mirror_face_overall
+
+      micro_reaction_beats:
+        - "轻轻拨开耳边头发"
+        - "看到耳环反光或轮廓后眼神短暂变亮"
+        - "轻微侧头展示耳环摆动或耳侧线条"
+        - "最后自然笑一下，不要夸张惊喜"
+
+      body_language_beats:
+        - "头部轻转 15-30 度"
+        - "下巴轻微抬起一点展示耳侧线条"
+        - "肩颈放松，不做僵硬定点 pose"
+        - "最后回到自然半侧脸"
+
+      product_interaction_beats:
+        - "可以轻拨头发露出耳环"
+        - "可以轻触耳环附近，但不要反复摸耳垂"
+        - "不展示穿耳、扣耳针、复杂佩戴过程"
+
+      relatable_moment: "出门前照镜子时发现耳侧细节让整体穿搭更精致"
+
+      forbidden_performance:
+        - "全程正脸固定微笑"
+        - "反复用手摸耳朵或耳垂"
+        - "展示穿耳或扣耳针的复杂过程"
+        - "耳环被头发遮住但人物仍在展示"
+        - "表情像硬凹精致 pose"
+
+  apparel:
+    default:
+      performance_family: outfit_fit_check
+      persona_mode: mirror_outfit_check_with_confident_finish
+      performance_intensity: medium
+
+      gaze_rule:
+        min_points_required: 3
+        final_point_options:
+          - camera
+          - mirror_full_body_again
+
+      expression_arc:
+        - "0-3s：先看镜子里的整体穿搭，表情是轻微评估，不要一开始大笑"
+        - "3-8s：整理衣摆、肩线或腰部后，表情变得更放松、更满意"
+        - "8-15s：半步后退看整体，轻转身展示版型，最后看镜头像确认这套可以出门"
+
+      gaze_plan:
+        - mirror_full_body
+        - outfit_fit_area
+        - camera
+        - mirror_full_body_again
+
+      micro_reaction_beats:
+        - "低头看一下衣摆或腰线"
+        - "整理后轻轻点头"
+        - "看到整体比例后自然笑一下"
+        - "最后有一点更自信的站姿"
+
+      body_language_beats:
+        - "半步后退看全身"
+        - "轻拉衣摆或抚平面料"
+        - "轻转身展示侧面或背面轮廓"
+        - "站姿从观察变成放松自信"
+
+      product_interaction_beats:
+        - "轻整理衣摆、领口、肩线、腰部或袖口"
+        - "用半步后退展示整体比例"
+        - "避免复杂换装过程和夸张走秀动作"
+
+      relatable_moment: "出门前试穿后照镜子确认版型、比例和整体搭配是否成立"
+
+      forbidden_performance:
+        - "全程站着不动微笑"
+        - "像电商模特一样僵硬定点摆拍"
+        - "过度走秀或夸张转圈"
+        - "没有试穿检查动作"
+        - "只拍脸和上半身导致看不清衣服版型"
+
+  apparel_accessory:
+    default:
+      performance_family: winter_outfit_accessory_check
+      persona_mode: before_going_out_winter_accessory_check
+      performance_intensity: low_to_medium
+
+      gaze_rule:
+        min_points_required: 3
+        final_point_options:
+          - camera
+          - mirror_full_result
+
+      expression_rule:
+        min_expression_or_micro_reaction_count: 1
+        max_expression_or_micro_reaction_count: 3
+        facial_expression_should_not_drive_camera: true
+
+      product_priority_rule:
+        product_focus_ratio: medium_high
+        face_focus_allowed: supportive
+        forbid_face_led_storyboard: false
+        forbid_expression_forcing: true
+
+      expression_arc:
+        - "0-3s：先看镜中上半身或头肩整体，表情是轻微判断，不要一开始大笑"
+        - "3-8s：轻整理围巾边缘、帽檐或帽边，看到冬季穿搭更完整后有轻微满意感"
+        - "8-15s：半步后退确认整体穿搭，最后短暂看向镜头像朋友轻分享"
+
+      gaze_plan:
+        - mirror_upper_body
+        - accessory_position
+        - camera
+        - mirror_full_result
+
+      micro_reaction_beats:
+        - "低头看一下围巾边缘或帽檐位置"
+        - "整理后嘴角轻轻放松"
+        - "半步后退后轻点头"
+        - "短暂看向镜头像朋友分享"
+
+      body_language_beats:
+        - "手轻整理围巾边缘、帽檐或帽边"
+        - "肩膀放松，身体微微侧向镜子"
+        - "半步后退看上半身整体"
+        - "轻转身展示配饰和冬季上衣或外套的关系"
+
+      product_interaction_beats:
+        - "围巾只轻整理边缘，不完整展示复杂打结"
+        - "帽子只轻压帽檐或整理帽边，不长时间遮住帽型"
+        - "配饰始终和脸部、肩颈、上衣或外套关系清楚"
+        - "不要做夸张甩头、强风、拉扯测试"
+
+      relatable_moment: "出门前在镜前确认冬季配饰和上半身穿搭是否完整"
+
+      forbidden_performance:
+        - "像走秀一样夸张摆拍"
+        - "为了表情把围巾、帽子或上半身效果弱化"
+        - "全程只拍脸，看不清配饰和上半身关系"
+        - "主播式手势或强推销表情"
+        - "大幅甩围巾、用力压帽子、强风测试感"
+
+    scarf_variant:
+      body_language_beats:
+        - "手轻整理围巾边缘，确认垂感和层次"
+        - "轻拨围巾外缘，展示厚薄和柔软感"
+        - "调整围巾在肩部的位置"
+        - "半步后退看围巾和外套 / 针织衫的整体关系"
+
+      product_interaction_beats:
+        - "只轻整理围巾边缘，不展示完整打结教程"
+        - "避免双手长时间缠绕布料"
+        - "围巾始终和脖颈、肩部、上衣或外套关系清楚"
+        - "不让围巾遮住大半张脸"
+
+      micro_reaction_beats:
+        - "低头看围巾边缘是否顺"
+        - "整理后嘴角轻轻放松"
+        - "半步后退后轻点头确认整体更完整"
+
+    hat_variant:
+      body_language_beats:
+        - "手轻压帽檐或整理帽边"
+        - "头部轻转 15-30 度展示帽型"
+        - "肩颈放松，站姿自然"
+        - "半步后退看帽子和冬季上衣 / 外套的整体关系"
+
+      product_interaction_beats:
+        - "可以轻压帽檐"
+        - "可以轻整理帽边"
+        - "不长时间遮住帽子主体"
+        - "不做夸张甩头或强风测试"
+
+      micro_reaction_beats:
+        - "看到帽型合适后眼神轻微放松"
+        - "轻压帽檐后嘴角自然放松"
+        - "半步后退后轻点头确认整体更完整"
+
+    scarf_hat_set_variant:
+      body_language_beats:
+        - "轻整理围巾边缘，同时帽型保持清楚"
+        - "半步后退看帽子、围巾和外套的整体关系"
+        - "轻转头展示头肩和上半身冬季层次"
+
+      product_interaction_beats:
+        - "只轻整理围巾或帽檐其中一处，不同时复杂操作两件商品"
+        - "帽子和围巾必须同时清楚可见"
+        - "不做多色自由组合展示"
+        - "不做复杂戴帽和打结过程"
+
+      micro_reaction_beats:
+        - "看到整套上半身更完整后轻点头"
+        - "短暂看向镜头，像朋友轻分享这一套搭配"

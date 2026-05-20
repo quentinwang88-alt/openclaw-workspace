@@ -59,6 +59,18 @@ def _compact_text(value: Any) -> str:
     return text.strip(" \n\t；;，,。")
 
 
+def _format_performance(value: Any) -> str:
+    if isinstance(value, dict):
+        return _compact_text(
+            "；".join(
+                str(value.get(key) or "").strip()
+                for key in ("gaze", "expression_or_micro_reaction", "body_language", "product_interaction")
+                if str(value.get(key) or "").strip()
+            )
+        )
+    return _compact_text(value)
+
+
 def _semantic_segments(value: Any) -> List[str]:
     text = _compact_text(value)
     if not text:
@@ -86,7 +98,16 @@ def _truncate_text(value: Any, max_chars: int) -> str:
         return text
     if max_chars <= 1:
         return text[:max_chars]
-    return text[: max_chars - 1].rstrip(" ，；;、,:：") + "…"
+
+    # 正式脚本字段不能出现“…”占位符；它会被人工理解成“内容没写完”。
+    # 截断时优先停在最近的自然分隔点，并且不追加省略号。
+    candidate = text[:max_chars].rstrip(" ，；;、,:：。.!！?？")
+    boundary_chars = "。.!！?？；;，,、"
+    min_keep = max(8, int(max_chars * 0.6))
+    cut_at = max(candidate.rfind(ch) for ch in boundary_chars)
+    if cut_at >= min_keep:
+        candidate = candidate[:cut_at].rstrip(" ，；;、,:：。.!！?？")
+    return candidate or text[:max_chars].rstrip(" ，；;、,:：。.!！?？")
 
 
 def _is_anchor_priority_segment(segment: str) -> bool:
@@ -1016,6 +1037,18 @@ def _render_final_video_prompt_core(prompt_json: Dict[str, Any]) -> str:
     if video_setup:
         sections.append(f"整体：{video_setup}")
 
+    sound_design = prompt.get("sound_design") if isinstance(prompt.get("sound_design"), dict) else {}
+    if sound_design:
+        sound_parts = [
+            _compact_text(sound_design.get("bgm", "")),
+            _compact_text(sound_design.get("voiceover_mix", "")),
+            _compact_text(sound_design.get("rhythm_relation", "")),
+            _compact_text(sound_design.get("sfx", "")),
+        ]
+        sound_text = "；".join(part for part in sound_parts if part)
+        if sound_text:
+            sections.append(f"声音：{sound_text}")
+
     shot_blocks = []
     for shot in shots:
         shot_no = shot.get("shot_no", "")
@@ -1025,6 +1058,9 @@ def _render_final_video_prompt_core(prompt_json: Dict[str, Any]) -> str:
             f"内容：{shot.get('shot_content', '')}",
             f"动作：{shot.get('person_action', '')}",
         ]
+        performance = _format_performance(shot.get("performance", ""))
+        if performance:
+            parts.append(f"表演：{performance}")
         voiceover = (
             str(shot.get("voiceover_text_target_language", "") or "").strip()
             or str(shot.get("voiceover_text_zh", "") or "").strip()
@@ -1062,6 +1098,13 @@ def _compress_video_prompt_pass(prompt_json: Dict[str, Any], second_pass: bool =
         max_segments=3 if second_pass else 5,
         max_chars=90 if second_pass else 180,
     )
+    sound_design = prompt.get("sound_design") if isinstance(prompt.get("sound_design"), dict) else {}
+    compressed["sound_design"] = {
+        "bgm": _compress_descriptor(sound_design.get("bgm", ""), max_segments=1, max_chars=34),
+        "voiceover_mix": _compress_descriptor(sound_design.get("voiceover_mix", ""), max_segments=1, max_chars=34),
+        "rhythm_relation": _compress_descriptor(sound_design.get("rhythm_relation", ""), max_segments=1, max_chars=36),
+        "sfx": _compress_descriptor(sound_design.get("sfx", ""), max_segments=1, max_chars=24),
+    }
 
     shot_execution: List[Dict[str, Any]] = []
     boundary_text = compressed["execution_boundary"]
@@ -1077,6 +1120,11 @@ def _compress_video_prompt_pass(prompt_json: Dict[str, Any], second_pass: bool =
             shot.get("person_action", ""),
             max_segments=1 if second_pass else 2,
             max_chars=16 if second_pass else 28,
+        )
+        performance = _compress_descriptor(
+            _format_performance(shot.get("performance", "")),
+            max_segments=1 if second_pass else 2,
+            max_chars=20 if second_pass else 34,
         )
         style_note = (
             _truncate_text(raw_style_note, 18)
@@ -1110,6 +1158,7 @@ def _compress_video_prompt_pass(prompt_json: Dict[str, Any], second_pass: bool =
                 else _compress_voiceover(shot.get("voiceover_text_zh", ""), max_chars=20),
                 "spoken_line_task": _compact_text(shot.get("spoken_line_task", "")),
                 "person_action": person_action,
+                "performance": performance,
                 "style_note": style_note,
             }
         )
@@ -1132,12 +1181,20 @@ def _hard_trim_video_prompt(prompt_json: Dict[str, Any], hard_max_chars: int) ->
                 ),
                 "voiceover_text_zh": "",
                 "person_action": _compress_descriptor(shot.get("person_action", ""), max_segments=1, max_chars=12),
+                "performance": _compress_descriptor(_format_performance(shot.get("performance", "")), max_segments=1, max_chars=16),
                 "style_note": "",
             }
         )
     trimmed["shot_execution"] = aggressively_trimmed
     trimmed["video_setup"] = _compress_setup(prompt.get("video_setup", ""), max_segments=2, max_chars=60)
     trimmed["execution_boundary"] = _compress_boundary(prompt.get("execution_boundary", ""), max_segments=2, max_chars=60)
+    sound_design = prompt.get("sound_design") if isinstance(prompt.get("sound_design"), dict) else {}
+    trimmed["sound_design"] = {
+        "bgm": _truncate_text(sound_design.get("bgm", ""), 24),
+        "voiceover_mix": _truncate_text(sound_design.get("voiceover_mix", ""), 24),
+        "rhythm_relation": _truncate_text(sound_design.get("rhythm_relation", ""), 24),
+        "sfx": _truncate_text(sound_design.get("sfx", ""), 18),
+    }
 
     rendered = _render_final_video_prompt_core(trimmed)
     if len(rendered) <= hard_max_chars:
@@ -1145,6 +1202,13 @@ def _hard_trim_video_prompt(prompt_json: Dict[str, Any], hard_max_chars: int) ->
 
     trimmed["video_setup"] = _truncate_text(trimmed.get("video_setup", ""), 40)
     trimmed["execution_boundary"] = _truncate_text(trimmed.get("execution_boundary", ""), 40)
+    sound_design = trimmed.get("sound_design") if isinstance(trimmed.get("sound_design"), dict) else {}
+    trimmed["sound_design"] = {
+        "bgm": _truncate_text(sound_design.get("bgm", ""), 18),
+        "voiceover_mix": _truncate_text(sound_design.get("voiceover_mix", ""), 18),
+        "rhythm_relation": _truncate_text(sound_design.get("rhythm_relation", ""), 18),
+        "sfx": _truncate_text(sound_design.get("sfx", ""), 12),
+    }
     final_shots: List[Dict[str, Any]] = []
     for shot in trimmed.get("shot_execution", []) or []:
         final_shots.append(
@@ -1153,6 +1217,7 @@ def _hard_trim_video_prompt(prompt_json: Dict[str, Any], hard_max_chars: int) ->
                 "shot_content": _truncate_text(shot.get("shot_content", ""), 18),
                 "voiceover_text_target_language": _truncate_text(shot.get("voiceover_text_target_language", ""), 14),
                 "person_action": _truncate_text(shot.get("person_action", ""), 10),
+                "performance": _truncate_text(_format_performance(shot.get("performance", "")), 12),
             }
         )
     trimmed["shot_execution"] = final_shots
@@ -1320,6 +1385,7 @@ def render_internal_script(script_json: Dict[str, Any]) -> str:
             f"- 镜头内容：{item.get('shot_content', '')}",
             f"- 镜头目的：{item.get('shot_purpose', '')}",
             f"- 人物动作：{item.get('person_action', '')}",
+            f"- 人物表演：{_format_performance(item.get('performance', ''))}",
             f"- 口播任务：{item.get('spoken_line_task', '')}",
             f"- 风格提醒：{item.get('style_note', '')}",
             f"- 镜头任务：{item.get('task_type', '')}",
@@ -1382,12 +1448,17 @@ def render_internal_script(script_json: Dict[str, Any]) -> str:
     ).strip()
 
 
+def _remove_ellipsis_markers(text: str) -> str:
+    """Remove ellipsis placeholders from user-facing script text."""
+    return text.replace("……", "").replace("…", "")
+
+
 def render_script_v2(script_json: Dict[str, Any]) -> str:
-    return _render_seedance_script(script_json)
+    return _remove_ellipsis_markers(_render_seedance_script(script_json))
 
 
 def render_variant_script(variant: Dict[str, Any]) -> str:
-    return _render_seedance_script(_variant_to_seedance_script_json(variant))
+    return _remove_ellipsis_markers(_render_seedance_script(_variant_to_seedance_script_json(variant)))
 
 
 def render_final_video_prompt(prompt_json: Dict[str, Any]) -> str:
@@ -1414,7 +1485,7 @@ def render_skipped_video_prompt(reason: str) -> str:
 
 
 def render_script(script_json: Dict[str, Any]) -> str:
-    return _render_seedance_script(script_json)
+    return _remove_ellipsis_markers(_render_seedance_script(script_json))
 
 
 def build_summary(

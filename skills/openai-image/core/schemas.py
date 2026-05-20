@@ -22,6 +22,15 @@ def _normalize_metadata(value: Any) -> Dict[str, Any]:
     return {"value": value}
 
 
+def _normalize_string_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [_normalize_string(item) for item in value if _normalize_string(item)]
+    single = _normalize_string(value)
+    return [single] if single else []
+
+
 def _normalize_positive_int(value: Any, default: int = 1) -> int:
     try:
         normalized = int(value)
@@ -38,6 +47,7 @@ class ImageTaskRequest:
     mode: str = ""
     prompt: str = ""
     input_image_path: str = ""
+    input_image_paths: List[str] = field(default_factory=list)
     mask_image_path: str = ""
     size: str = ""
     quality: str = ""
@@ -57,6 +67,7 @@ class ImageTaskRequest:
             mode=_normalize_string(payload.get("mode")).lower(),
             prompt=_normalize_string(payload.get("prompt")),
             input_image_path=_normalize_string(payload.get("input_image_path")),
+            input_image_paths=_normalize_string_list(payload.get("input_image_paths")),
             mask_image_path=_normalize_string(payload.get("mask_image_path")),
             size=_normalize_string(payload.get("size")),
             quality=_normalize_string(payload.get("quality")).lower(),

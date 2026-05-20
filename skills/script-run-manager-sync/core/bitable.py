@@ -256,11 +256,18 @@ class FeishuBitableClient:
         size = int(attachment.get("size") or len(content))
         return content, file_name, content_type, size
 
-    def upload_attachment(self, content: bytes, file_name: str, content_type: str, size: Optional[int] = None) -> Dict[str, Any]:
+    def upload_attachment(
+        self,
+        content: bytes,
+        file_name: str,
+        content_type: str,
+        size: Optional[int] = None,
+        parent_type: str = "bitable_image",
+    ) -> Dict[str, Any]:
         upload_url = "https://open.feishu.cn/open-apis/drive/v1/medias/upload_all"
         payload = {
             "file_name": file_name,
-            "parent_type": "bitable_image",
+            "parent_type": str(parent_type or "bitable_image"),
             "parent_node": self.app_token,
             "size": str(size or len(content)),
         }

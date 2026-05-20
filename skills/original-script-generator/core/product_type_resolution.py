@@ -143,6 +143,8 @@ def _fallback_canonical_type(business_family: str, raw_product_type: Optional[st
         return "womenwear"
     if business_family in {"jewelry", "accessory"}:
         return "bangle"
+    if business_family == "apparel_accessory":
+        return "scarf"
     if business_family == "hair_accessory":
         return "hair_clip"
     return "womenwear"

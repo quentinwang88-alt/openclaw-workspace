@@ -14,6 +14,7 @@ _AI_SHOT_RISK_REGISTRY_CACHE: Optional[Dict[str, Any]] = None
 _AI_SHOT_RISK_REGISTRY_PATH = Path(__file__).resolve().parent.parent / "config" / "ai_shot_risk_registry.json"
 _CONTROL_LAYER_NON_CHINESE_RUN_RE = re.compile(r"[^\u4e00-\u9fff]{11,}")
 _ENGINEERING_TOKEN_RE = re.compile(r"^[A-Za-z0-9_./|:-]{1,64}$")
+_ENGINEERING_TOKEN_CHARS_RE = re.compile(r"[^A-Za-z0-9_./|:-]+")
 _CONTROL_LAYER_CONTENT_KEYS = {"native_expression_entry", "suggested_short_line", "ending"}
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,31 @@ def _take_string_items(values: Any, limit: int) -> List[str]:
         if len(items) >= limit:
             break
     return items
+
+
+def _take_template_items(values: Any, limit: int) -> List[Any]:
+    if not isinstance(values, list):
+        return []
+    items: List[Any] = []
+    for value in values:
+        text = _non_empty_text(value)
+        if isinstance(value, dict):
+            item = {
+                "id": _non_empty_text(value.get("id")),
+                "desc": _non_empty_text(value.get("desc") or value.get("description")),
+            }
+            if item["id"] or item["desc"]:
+                items.append(item)
+        elif text:
+            items.append(text)
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _confidence_text(value: Any) -> str:
+    text = _non_empty_text(value)
+    return text if text in {"high", "medium", "low"} else "low"
 
 
 def _take_dict_items(values: Any, limit: int, keys: List[str]) -> List[Dict[str, str]]:
@@ -73,7 +99,7 @@ def _take_replacement_templates(values: Any, limit: int = 6) -> List[Dict[str, s
     return _take_dict_items(values, limit, ["template_id", "when_to_use", "replacement_shot"])
 
 
-def _take_enforced_key_visual_constraints(values: Any, limit: int = 5) -> List[Dict[str, str]]:
+def _take_enforced_key_visual_constraints(values: Any, limit: int = 3) -> List[Dict[str, str]]:
     if not isinstance(values, list):
         return []
     items: List[Dict[str, str]] = []
@@ -106,6 +132,136 @@ def _build_hair_accessory_profile(anchor_card: Dict[str, Any]) -> Dict[str, str]
     return {field: _non_empty_text(anchor_card.get(field)) or "unknown" for field in fields}
 
 
+def _build_category_execution_contract(anchor_card: Dict[str, Any]) -> Dict[str, Any]:
+    raw_contract = anchor_card.get("category_execution_contract") if isinstance(anchor_card, dict) else {}
+    if not isinstance(raw_contract, dict):
+        raw_contract = {}
+
+    audio_policy = raw_contract.get("audio_policy")
+    if not isinstance(audio_policy, dict):
+        audio_policy = {}
+    field_confidence = raw_contract.get("field_confidence")
+    if not isinstance(field_confidence, dict):
+        field_confidence = {}
+
+    product_subtype = _first_non_empty_text(
+        raw_contract.get("product_subtype"),
+        anchor_card.get("hair_accessory_subtype"),
+        "unknown",
+    )
+    placement_zone = _first_non_empty_text(
+        raw_contract.get("placement_zone"),
+        anchor_card.get("placement_zone"),
+        "unknown",
+    )
+    hold_scope = _first_non_empty_text(
+        raw_contract.get("hold_scope"),
+        anchor_card.get("hold_scope"),
+        "unknown",
+    )
+    orientation = _first_non_empty_text(
+        raw_contract.get("orientation"),
+        anchor_card.get("orientation"),
+        "unknown",
+    )
+    primary_visual_result = _first_non_empty_text(
+        raw_contract.get("primary_visual_result"),
+        anchor_card.get("primary_result"),
+        "unknown",
+    )
+
+    return {
+        "display_family": _non_empty_text(raw_contract.get("display_family")) or "unknown",
+        "product_subtype": product_subtype,
+        "use_case": _non_empty_text(raw_contract.get("use_case")) or "unknown",
+        "placement_zone": placement_zone,
+        "hold_scope": hold_scope,
+        "orientation": orientation,
+        "primary_visual_result": primary_visual_result,
+        "operation_policy": _non_empty_text(raw_contract.get("operation_policy")) or "unknown",
+        "field_confidence": {
+            "product_subtype": _confidence_text(field_confidence.get("product_subtype")),
+            "use_case": _confidence_text(field_confidence.get("use_case")),
+            "placement_zone": _confidence_text(field_confidence.get("placement_zone")),
+            "hold_scope": _confidence_text(field_confidence.get("hold_scope")),
+            "orientation": _confidence_text(field_confidence.get("orientation")),
+            "primary_visual_result": _confidence_text(field_confidence.get("primary_visual_result")),
+            "operation_policy": _confidence_text(field_confidence.get("operation_policy")),
+        },
+        "safe_shot_templates": _take_template_items(raw_contract.get("safe_shot_templates"), 4),
+        "forbidden_actions": _take_template_items(raw_contract.get("forbidden_actions"), 4),
+        "result_priority": _non_empty_text(raw_contract.get("result_priority")),
+        "season_context": {
+            "primary_season": _non_empty_text(
+                (raw_contract.get("season_context") or {}).get("primary_season")
+                if isinstance(raw_contract.get("season_context"), dict)
+                else ""
+            )
+            or "unknown",
+            "weather_signal": _non_empty_text(
+                (raw_contract.get("season_context") or {}).get("weather_signal")
+                if isinstance(raw_contract.get("season_context"), dict)
+                else ""
+            )
+            or "unknown",
+        },
+        "hat_risk_tier": _non_empty_text(raw_contract.get("hat_risk_tier")) or "unknown",
+        "set_relationship": _non_empty_text(raw_contract.get("set_relationship")) or "unknown",
+        "co_styling_hint": {
+            "pair_with": _take_string_items(
+                (raw_contract.get("co_styling_hint") or {}).get("pair_with")
+                if isinstance(raw_contract.get("co_styling_hint"), dict)
+                else [],
+                4,
+            ),
+        },
+        "audio_policy": {
+            "bgm_style": _non_empty_text(audio_policy.get("bgm_style")),
+            "bgm_energy": _non_empty_text(audio_policy.get("bgm_energy")) or "low",
+            "voiceover_priority": _non_empty_text(audio_policy.get("voiceover_priority")) or "high",
+            "sfx_policy": _non_empty_text(audio_policy.get("sfx_policy")),
+            "allowed_sfx": _take_string_items(audio_policy.get("allowed_sfx"), 4),
+            "forbidden_sfx": _take_string_items(audio_policy.get("forbidden_sfx"), 4),
+            "sfx_timing_rules": _take_string_items(audio_policy.get("sfx_timing_rules"), 4),
+            "audio_negative_constraints": _take_string_items(audio_policy.get("audio_negative_constraints"), 4),
+        },
+    }
+
+
+def _build_human_performance_contract(persona_style_emotion_pack: Dict[str, Any]) -> Dict[str, Any]:
+    raw_contract = (
+        persona_style_emotion_pack.get("human_performance_contract")
+        if isinstance(persona_style_emotion_pack, dict)
+        else {}
+    )
+    if not isinstance(raw_contract, dict) or not raw_contract:
+        return {}
+    gaze_rule = raw_contract.get("gaze_rule") if isinstance(raw_contract.get("gaze_rule"), dict) else {}
+    active_limit = raw_contract.get("active_micro_reaction_limit")
+    if not isinstance(active_limit, int):
+        active_limit = 0
+    min_points = gaze_rule.get("min_points_required")
+    if not isinstance(min_points, int):
+        min_points = 3
+    return {
+        "performance_family": _non_empty_text(raw_contract.get("performance_family")),
+        "persona_mode": _non_empty_text(raw_contract.get("persona_mode")),
+        "expression_arc": _take_string_items(raw_contract.get("expression_arc"), 5),
+        "gaze_plan": _take_string_items(raw_contract.get("gaze_plan"), 6),
+        "gaze_rule": {
+            "min_points_required": min_points,
+            "final_point_options": _take_string_items(gaze_rule.get("final_point_options"), 4),
+        },
+        "micro_reaction_beats": _take_string_items(raw_contract.get("micro_reaction_beats"), 6),
+        "body_language_beats": _take_string_items(raw_contract.get("body_language_beats"), 6),
+        "product_interaction_beats": _take_string_items(raw_contract.get("product_interaction_beats"), 6),
+        "relatable_moment": _non_empty_text(raw_contract.get("relatable_moment")),
+        "performance_intensity": _non_empty_text(raw_contract.get("performance_intensity")),
+        "active_micro_reaction_limit": active_limit,
+        "forbidden_performance": _take_string_items(raw_contract.get("forbidden_performance"), 8),
+    }
+
+
 def _format_path(path_segments: List[str]) -> str:
     return ".".join(segment for segment in path_segments if segment)
 
@@ -114,11 +270,46 @@ def _should_skip_control_layer_warning(path_segments: List[str], value: str) -> 
     if not value:
         return True
     last_key = path_segments[-1] if path_segments else ""
+    if "audio_policy" in path_segments:
+        return True
     if last_key in _CONTROL_LAYER_CONTENT_KEYS:
         return True
     if _ENGINEERING_TOKEN_RE.fullmatch(value):
         return True
+    long_runs = _CONTROL_LAYER_NON_CHINESE_RUN_RE.findall(value)
+    if long_runs:
+        normalized_runs = [
+            _ENGINEERING_TOKEN_CHARS_RE.sub("", run)
+            for run in long_runs
+        ]
+        if normalized_runs and all(
+            (not run) or bool(_ENGINEERING_TOKEN_RE.fullmatch(run))
+            for run in normalized_runs
+        ):
+            return True
     return False
+
+
+def _clean_expression_control_text(value: Any) -> str:
+    text = _non_empty_text(value)
+    if not text:
+        return ""
+    text = re.sub(
+        r"[“\"']([^”\"']*[A-Za-zÀ-ỹĐđ][^”\"']*)[”\"']",
+        "“目标语言口播由 P7 按意图生成”",
+        text,
+    )
+    text = re.sub(
+        r"((?:目标语言|越南语|泰语|英语|印尼语|马来语)[^。；;\n]{0,16}(?:口播|字幕)[^。；;\n]{0,16})[：:][^。；;\n]+",
+        r"\1：按口播意图生成，不在控制字段预写完整句子",
+        text,
+    )
+    text = re.sub(
+        r"((?:口播|字幕)[^。；;\n]{0,16}(?:使用|用)(?:目标语言|越南语|泰语|英语|印尼语|马来语)[^。；;\n]{0,12})[：:][^。；;\n]+",
+        r"\1：按口播意图生成，不在控制字段预写完整句子",
+        text,
+    )
+    return text.strip()
 
 
 def _log_control_layer_language_warnings(payload: Any, path_segments: Optional[List[str]] = None) -> None:
@@ -310,10 +501,11 @@ def build_script_brief(
     script_brief = {
         "product_type": _non_empty_text(product_type),
         "product_positioning_one_liner": _non_empty_text(anchor_card.get("product_positioning_one_liner")),
-        "hard_anchors": _take_dict_items(anchor_card.get("hard_anchors"), 5, ["anchor", "reason_not_changeable", "confidence"]),
-        "display_anchors": _take_dict_items(anchor_card.get("display_anchors"), 5, ["anchor", "why_must_show", "recommended_shot_type"]),
+        "hard_anchors": _take_dict_items(anchor_card.get("hard_anchors"), 3, ["anchor", "reason_not_changeable", "confidence"]),
+        "display_anchors": _take_dict_items(anchor_card.get("display_anchors"), 3, ["anchor", "why_must_show", "recommended_shot_type"]),
         "key_visual_constraints": _take_enforced_key_visual_constraints(anchor_card.get("key_visual_constraints")),
         "hair_accessory_profile": _build_hair_accessory_profile(anchor_card),
+        "category_execution_contract": _build_category_execution_contract(anchor_card),
         "parameter_anchors": _take_dict_items(
             anchor_card.get("parameter_anchors"),
             5,
@@ -342,6 +534,7 @@ def build_script_brief(
             "movement_style": _non_empty_text(persona_style_emotion_pack.get("movement_style")),
             "anti_template_warnings": _take_string_items(persona_style_emotion_pack.get("anti_template_warnings"), 4),
         },
+        "human_performance_contract": _build_human_performance_contract(persona_style_emotion_pack),
         "light_control_fields": {
             "styling_completion_tag": styling_completion_tag,
             "persona_visual_tone": persona_visual_tone,
@@ -375,6 +568,13 @@ def build_script_brief(
             "main_shooting_method": _non_empty_text(final_strategy.get("main_shooting_method")),
             "aux_shooting_method": _non_empty_text(final_strategy.get("aux_shooting_method")),
             "selected_opening_strategy_name": _non_empty_text(final_strategy.get("selected_opening_strategy_name")),
+            "opening_angle": _non_empty_text(final_strategy.get("opening_angle")),
+            "proof_path": _non_empty_text(final_strategy.get("proof_path")),
+            "performance_strategy_hint": _non_empty_text(
+                final_strategy.get("performance_strategy_hint") or final_strategy.get("performance_bias")
+            ),
+            "contract_alignment_note": _non_empty_text(final_strategy.get("contract_alignment_note")),
+            "risk_controls": _take_string_items(final_strategy.get("risk_controls"), 4),
             "opening_mode": _non_empty_text(final_strategy.get("opening_mode")),
             "opening_strategy": _non_empty_text(final_strategy.get("opening_strategy")),
             "opening_first_line_type": _non_empty_text(final_strategy.get("opening_first_line_type")),
@@ -412,9 +612,11 @@ def build_script_brief(
         },
         "expression_plan": {
             "native_expression_entry": _non_empty_text(expression_plan.get("native_expression_entry")),
-            "opening_expression_task": _non_empty_text(expression_plan.get("opening_expression_task")),
-            "middle_expression_task": _non_empty_text(expression_plan.get("middle_expression_task")),
-            "ending_expression_task": _non_empty_text(expression_plan.get("ending_expression_task")),
+            "opening_expression_task": _clean_expression_control_text(expression_plan.get("opening_expression_task")),
+            "middle_expression_task": _clean_expression_control_text(expression_plan.get("middle_expression_task")),
+            "ending_expression_task": _clean_expression_control_text(expression_plan.get("ending_expression_task")),
+            "voiceover_intent": _non_empty_text(expression_plan.get("voiceover_intent")),
+            "voiceover_language_requirement": _non_empty_text(expression_plan.get("voiceover_language_requirement")),
             "most_likely_empty_point": _non_empty_text(expression_plan.get("most_likely_empty_point")),
         },
         "avoid_same_as_existing_scripts": _summarize_existing_scripts(existing_scripts),
