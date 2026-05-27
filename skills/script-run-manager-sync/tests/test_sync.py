@@ -29,6 +29,11 @@ from core.sync import (
     resolve_field_mapping,
     summarize_sync_scope,
 )
+from run_pipeline import (
+    build_target_record_indexes,
+    existing_target_conflict_reason,
+    resolve_task_action,
+)
 
 
 class ScriptRunManagerSyncTest(unittest.TestCase):
@@ -60,12 +65,14 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
             "提示词",
             "参考图",
             "脚本ID",
+            "内部脚本键",
             "脚本来源",
             "发布用途",
             "是否挂车",
             "内容分支",
             "免参考图",
             "视频时长",
+            "状态",
         ]
         self.mapping = resolve_field_mapping(source_field_names, SOURCE_FIELD_ALIASES)
         self.target_mapping = resolve_field_mapping(target_field_names, TARGET_FIELD_ALIASES)
@@ -100,13 +107,17 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
 
         tasks = build_sync_tasks(records, self.mapping)
 
-        self.assertEqual([task.task_name for task in tasks], ["ABC001.S1", "ABC001.S1V1", "ABC001.S2", "ABC001.S4V5"])
+        self.assertEqual(
+            [task.task_name for task in tasks],
+            ["ABC001.003_M1_M", "ABC001.003_M1_V1", "ABC001.003_M2_M", "ABC001.003_M4_V5"],
+        )
         self.assertEqual(tasks[0].reference_images, [{"file_token": "file_1"}])
         self.assertEqual(tasks[0].product_type, "手镯")
         self.assertEqual(tasks[0].business_category, "配饰")
         self.assertEqual(tasks[0].product_params, "细手圈，内径约56mm，圈宽2mm，开口可微调")
         self.assertEqual(tasks[0].video_duration, 28)
         self.assertEqual(tasks[0].script_id, "003_M1_M")
+        self.assertEqual(tasks[0].internal_script_key, "rec_1:S1")
         self.assertEqual(tasks[1].script_id, "003_M1_V1")
         self.assertEqual(tasks[2].script_id, "003_M2_M")
         self.assertEqual(tasks[3].script_id, "003_M4_V5")
@@ -127,7 +138,7 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
 
         tasks = build_sync_tasks(records, self.mapping)
 
-        self.assertEqual(tasks[0].task_name, "ABC099.S1")
+        self.assertEqual(tasks[0].task_name, "ABC099.099_M1_M")
         self.assertEqual(tasks[0].prompt_text, "original script one")
         self.assertEqual(tasks[1].prompt_text, "variant one")
 
@@ -147,7 +158,7 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
 
         tasks = build_sync_tasks(records, self.mapping)
 
-        self.assertEqual([task.task_name for task in tasks], ["053.S1", "053.S2"])
+        self.assertEqual([task.task_name for task in tasks], ["053.053_M1_M", "053.053_M2_M"])
         self.assertTrue(all(task.product_code == "053" for task in tasks))
         self.assertEqual(tasks[0].script_id, "053_M1_M")
 
@@ -169,7 +180,7 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
 
         tasks = build_sync_tasks(records, self.mapping)
 
-        self.assertEqual([task.task_name for task in tasks], ["ABC010.S1", "ABC010.S2"])
+        self.assertEqual([task.task_name for task in tasks], ["ABC010.ABC010_M1_M", "ABC010.ABC010_M2_M"])
 
     def test_split_sync_checkboxes_only_sync_variant_slots_when_variant_checked(self) -> None:
         records = [
@@ -189,7 +200,7 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
 
         tasks = build_sync_tasks(records, self.mapping)
 
-        self.assertEqual([task.task_name for task in tasks], ["ABC011.S1V1", "ABC011.S4V5"])
+        self.assertEqual([task.task_name for task in tasks], ["ABC011.ABC011_M1_V1", "ABC011.ABC011_M4_V5"])
 
     def test_build_sync_tasks_respects_checkbox(self) -> None:
         records = [
@@ -257,10 +268,11 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
         tasks = build_sync_tasks(records, self.mapping)
         fields = build_target_fields(tasks[0], self.target_mapping)
 
-        self.assertEqual(fields["任务名"], "ABC001.S1")
+        self.assertEqual(fields["任务名"], "ABC001.003_M1_M")
         self.assertTrue(fields["提示词"].startswith("【脚本ID】\n- 003_M1_M\n\n产品锚点：手镯｜细手圈，内径约56mm，圈宽2mm，开口可微调\n"))
         self.assertTrue(fields["提示词"].endswith("script one"))
         self.assertEqual(fields["脚本ID"], "003_M1_M")
+        self.assertEqual(fields["内部脚本键"], "rec_1:S1")
         self.assertEqual(fields["视频时长"], 15)
 
     def test_build_target_fields_carries_video_duration(self) -> None:
@@ -282,6 +294,68 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
 
         self.assertEqual(tasks[0].video_duration, 31)
         self.assertEqual(fields["视频时长"], 31)
+
+    def test_existing_internal_script_key_updates_instead_of_create(self) -> None:
+        existing_records = [
+            TableRecord(
+                record_id="target_1",
+                fields={
+                    "任务名": "ABC001.003_M1_M",
+                    "内部脚本键": "ABC001.S1",
+                    "脚本ID": "003_M1_M",
+                    "状态": "待处理",
+                },
+            )
+        ]
+        task = build_sync_tasks(
+            [
+                TableRecord(
+                    record_id="source_1",
+                    fields={
+                        "产品编码": "ABC001",
+                        "任务编号": "004",
+                        "是否可同步母版": True,
+                        "脚本方向一": "new script",
+                    },
+                )
+            ],
+            self.mapping,
+        )[0]
+
+        indexes = build_target_record_indexes(existing_records, self.target_mapping)
+
+        self.assertEqual(resolve_task_action(task, indexes, self.target_mapping), "create")
+
+    def test_existing_script_id_skips_create(self) -> None:
+        existing_records = [
+            TableRecord(
+                record_id="target_1",
+                fields={
+                    "任务名": "OLD.S1",
+                    "内部脚本键": "OLD.S1",
+                    "脚本ID": "003_M1_M",
+                    "状态": "待处理",
+                },
+            )
+        ]
+        task = build_sync_tasks(
+            [
+                TableRecord(
+                    record_id="source_1",
+                    fields={
+                        "产品编码": "ABC001",
+                        "任务编号": "003",
+                        "是否可同步母版": True,
+                        "脚本方向一": "same script",
+                    },
+                )
+            ],
+            self.mapping,
+        )[0]
+
+        indexes = build_target_record_indexes(existing_records, self.target_mapping)
+
+        self.assertEqual(resolve_task_action(task, indexes, self.target_mapping), "skip(script_id exists)")
 
     def test_prepend_script_id_header_does_not_duplicate_standard_header(self) -> None:
         prompt = prepend_script_id_header("【脚本ID】\n- old_id\n\n正文内容", "003_M1_V1")
@@ -392,6 +466,50 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
         self.assertEqual(success_fields["同步时间"], ts)
         self.assertIn("子变体（20 条）", failure_fields["同步状态"])
         self.assertIn("同步失败", failure_fields["同步状态"])
+
+    def test_source_success_fields_report_actual_created_and_patched_counts(self) -> None:
+        ts = now_text()
+        fields = build_source_success_fields(
+            self.mapping,
+            synced_count=1,
+            synced_at=ts,
+            sync_scope="母版（4 条）",
+            patched_count=2,
+            existing_count=1,
+        )
+
+        self.assertIn("新增 1 条", fields["同步状态"])
+        self.assertIn("补写 2 条", fields["同步状态"])
+        self.assertIn("已存在 1 条", fields["同步状态"])
+
+    def test_existing_target_conflict_blocks_legacy_task_name_collision(self) -> None:
+        task = build_sync_tasks(
+            [
+                TableRecord(
+                    record_id="source_1",
+                    fields={
+                        "产品编码": "ABC001",
+                        "任务编号": "824",
+                        "是否可同步母版": True,
+                        "脚本方向一": "new script",
+                    },
+                )
+            ],
+            self.mapping,
+        )[0]
+        existing = TableRecord(
+            record_id="target_1",
+            fields={
+                "任务名": "ABC001.S1",
+                "提示词": "【脚本ID】\n- 022_M1_M\n\nold script",
+                "脚本ID": "022_M1_M",
+                "状态": "已发布",
+            },
+        )
+
+        reason = existing_target_conflict_reason(task, existing, "任务名", self.target_mapping)
+
+        self.assertIn("脚本ID不一致", reason)
 
 
 if __name__ == "__main__":

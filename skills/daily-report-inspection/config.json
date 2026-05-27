@@ -1,0 +1,84 @@
+{
+  "wiki": {
+    "url": "https://gcngopvfvo0q.feishu.cn/wiki/DR6nwi6auiXqRHkrh9hccLyCnZe",
+    "wiki_token": "DR6nwi6auiXqRHkrh9hccLyCnZe",
+    "space_id": "7396530723924148226",
+    "doc_token": "SZtydsCyGoUByGxAX08ciZH8nDb",
+    "has_child": false
+  },
+  "feishu": {
+    "default_app_id": "cli_a920876864b9dcbd",
+    "default_app_secret": null,
+    "laowang_app_id": "cli_a96673266af9dcdb",
+    "laowang_app_secret": null,
+    "sender_app_id": "cli_a920876864b9dcbd",
+    "receive_id_type": "open_id",
+    "receive_id": "ou_49b2e9a1ccc3820264b5f4b7b9d1301d"
+  },
+  "business_lines": [
+    {
+      "name": "配饰",
+      "keywords": [
+        "配饰"
+      ]
+    },
+    {
+      "name": "女装",
+      "keywords": [
+        "女装"
+      ]
+    }
+  ],
+  "title_matching": {
+    "date_formats": [
+      "{MMDD}",
+      "{YYYY}-{MM}-{DD}",
+      "{M}月{D}日"
+    ],
+    "fallback_window_days": 1
+  },
+  "report_fields": [
+    "short_video_generation",
+    "video_publish",
+    "product_listing",
+    "creator_outreach",
+    "sample_approval",
+    "other_notes",
+    "tomorrow_plan"
+  ],
+  "inspection": {
+    "video_generation": {
+      "backlog_threshold": 10,
+      "direct_usable_rate_threshold": 0.4,
+      "combined_usable_rate_threshold": 0.6,
+      "runaway_keywords": [
+        "类目不符",
+        "商品目标不匹配",
+        "商品描述缺失",
+        "生成成其它品类",
+        "脚本跑偏",
+        "无法使用"
+      ]
+    },
+    "creator_outreach": {
+      "anomaly_threshold": 500
+    },
+    "summary": {
+      "max_progress_items": 5,
+      "max_issue_items": 5,
+      "max_action_items": 5,
+      "max_intervention_items": 3,
+      "word_limit_min": 500,
+      "word_limit_max": 800
+    }
+  },
+  "llm": {
+    "enabled": true,
+    "provider_config_path": "~/.openclaw/agents/laowang-assistant/agent/models.json",
+    "provider": "deepseek-api",
+    "model": "deepseek-v4-flash",
+    "temperature": 0.3,
+    "max_tokens": 4096,
+    "timeout": 60
+  }
+}

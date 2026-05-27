@@ -20,7 +20,9 @@ from core.json_parser import (  # noqa: E402
     validate_variant_payload,
     validate_video_prompt_payload,
 )
-from core.prompts import build_final_video_prompt_prompt, build_styling_plan_prompt  # noqa: E402
+from core.business_rules import validate_script_direction_separation  # noqa: E402
+from core.prompts import build_final_video_prompt_prompt, build_script_prompt, build_styling_plan_prompt  # noqa: E402
+from core.pipeline import OriginalScriptPipeline  # noqa: E402
 from core.script_brief_builder import build_script_brief  # noqa: E402
 
 
@@ -146,6 +148,35 @@ def _persona_pack() -> dict:
             "performance_intensity": "low_to_medium",
             "forbidden_performance": ["全程固定微笑看镜头"],
             "active_micro_reaction_limit": 3,
+            "scene_seed_brief": {
+                "enabled": True,
+                "display_family": "hair_accessory",
+                "seed_goal": "让人物像在镜前确认发型完整度",
+                "strategy_by_script_role": {
+                    "S1": {
+                        "seed_mode": "casual_self_check",
+                        "moment_bias": "随手检查",
+                        "tension_bias": "轻微犹豫",
+                        "camera_gaze_bias": "少",
+                        "payoff_bias": "自然确认",
+                    },
+                    "S4": {
+                        "seed_mode": "visual_hook_first",
+                        "moment_bias": "首镜先给更明显结果",
+                        "tension_bias": "第一眼有惊喜但不过度",
+                        "camera_gaze_bias": "中高",
+                        "payoff_bias": "惊艳感收回自然分享",
+                    },
+                },
+                "moment_hints": ["出门前看镜中发型"],
+                "small_tension_hints": ["发髻看起来有点随意"],
+                "micro_behavior_boundary": {
+                    "safe_behavior_hints": ["轻看发髻边缘"],
+                    "risk_boundary": ["不展示完整套入过程"],
+                },
+                "payoff_direction": "确认发型更完整",
+                "anti_template_guidance": ["不要每条都写成固定微笑展示"],
+            },
         },
     }
 
@@ -176,6 +207,10 @@ class HumanPerformanceContractTest(unittest.TestCase):
         self.assertIn('"display_family":"ear_accessory"', prompt)
         self.assertIn("face_side_detail_check", prompt)
         self.assertIn("ear_side_detail", prompt)
+        self.assertIn("scene_seed_brief", prompt)
+        self.assertIn("strategy_by_script_role", prompt)
+        self.assertIn("visual_hook_first", prompt)
+        self.assertIn("让人物像在镜前确认脸侧细节是否补完整", prompt)
 
     def test_apparel_p3_prompt_is_enabled(self) -> None:
         prompt = build_styling_plan_prompt(
@@ -189,6 +224,7 @@ class HumanPerformanceContractTest(unittest.TestCase):
         self.assertIn('"display_family":"apparel"', prompt)
         self.assertIn("outfit_fit_check", prompt)
         self.assertIn("mirror_full_body", prompt)
+        self.assertIn("让人物像在试穿后确认版型和比例", prompt)
 
     def test_apparel_accessory_p3_prompt_selects_scarf_variant(self) -> None:
         prompt = build_styling_plan_prompt(
@@ -203,6 +239,7 @@ class HumanPerformanceContractTest(unittest.TestCase):
         self.assertIn('"selected_variant":"scarf_variant"', prompt)
         self.assertIn("winter_outfit_accessory_check", prompt)
         self.assertIn("手轻整理围巾边缘，确认垂感和层次", prompt)
+        self.assertIn("让人物像在冬季出门前确认上半身穿搭完整度", prompt)
 
     def test_persona_validator_and_script_brief_preserve_contract(self) -> None:
         pack = _persona_pack()
@@ -222,7 +259,126 @@ class HumanPerformanceContractTest(unittest.TestCase):
         self.assertEqual(contract["active_micro_reaction_limit"], 3)
         self.assertIn("hair_accessory_position", contract["gaze_plan"])
         self.assertIn("全程固定微笑看镜头", contract["forbidden_performance"])
+        self.assertTrue(contract["scene_seed_brief"]["enabled"])
+        self.assertIn("出门前看镜中发型", contract["scene_seed_brief"]["moment_hints"])
+        self.assertEqual(
+            contract["scene_seed_brief"]["strategy_by_script_role"]["S4"]["seed_mode"],
+            "visual_hook_first",
+        )
         self.assertNotIn("performance_plan_by_shot", brief)
+
+    def test_p7_prompt_receives_compact_scene_seed_brief_and_requires_scene_seed(self) -> None:
+        pack = _persona_pack()
+        brief = build_script_brief(
+            product_type="发圈",
+            anchor_card=_hair_anchor_card(),
+            opening_strategies={},
+            persona_style_emotion_pack=pack,
+            final_strategy={"strategy_id": "S1", "primary_selling_point": "发髻更完整", "proof_path": "A_result_detail_only"},
+            expression_plan={},
+        )
+
+        prompt = build_script_prompt(
+            target_country="VN",
+            target_language="vi",
+            product_type="发圈",
+            script_brief_json=brief,
+        )
+
+        self.assertIn("scene_seed_brief", prompt)
+        self.assertIn("current_script_strategy", prompt)
+        self.assertIn("casual_self_check", prompt)
+        self.assertIn('"scene_seed"', prompt)
+        self.assertIn("moment", prompt)
+        self.assertIn("small_tension", prompt)
+
+    def test_direction_separation_flags_s4_scene_seed_too_close_to_s1(self) -> None:
+        s1_script = {
+            "scene_seed": {
+                "moment": "出门前在镜前确认耳侧",
+                "small_tension": "脸侧有点空",
+                "micro_behavior": "靠近镜子看耳侧，再退半步看整体",
+                "payoff_feeling": "自然确认刚好补完整体",
+            },
+            "opening_design": {"visual": "镜前耳侧结果"},
+            "storyboard": [
+                {"shot_content": "镜前侧脸佩戴后结果", "person_action": "看镜子", "task_type": "attention"},
+                {"shot_content": "脸侧比例结果", "person_action": "小幅转头", "task_type": "proof"},
+                {"shot_content": "整体关系", "person_action": "退半步", "task_type": "proof"},
+                {"shot_content": "轻分享", "person_action": "看镜头", "task_type": "bridge"},
+            ],
+        }
+        s4_script = {
+            "scene_seed": {
+                "moment": "出门前在镜中看脸侧",
+                "small_tension": "整体太素，脸侧少一点",
+                "micro_behavior": "靠近镜子确认耳侧反光，再退半步",
+                "payoff_feeling": "自然确认耳侧亮点刚好补上",
+            },
+            "opening_design": {"visual": "暖光窗边强结果"},
+            "storyboard": [
+                {"shot_content": "暖光窗边耳饰强结果", "person_action": "轻转头", "task_type": "attention"},
+                {"shot_content": "耳侧细节近景", "person_action": "头部小幅转动", "task_type": "proof"},
+                {"shot_content": "脸侧整体关系", "person_action": "退半步", "task_type": "proof"},
+                {"shot_content": "轻分享", "person_action": "看镜头", "task_type": "bridge"},
+            ],
+        }
+
+        issue = validate_script_direction_separation(
+            final_strategy={"strategy_id": "S4"},
+            script_json=s4_script,
+            existing_scripts={"S1": s1_script},
+        )
+
+        self.assertIn("scene_seed", issue or "")
+
+    def test_scene_seed_liveliness_precheck_flags_static_storyboard(self) -> None:
+        pipeline = OriginalScriptPipeline.__new__(OriginalScriptPipeline)
+        pack = _persona_pack()
+        script = {
+            "scene_seed": {
+                "moment": "出门前看镜中发型",
+                "small_tension": "发髻看起来有点随意",
+                "micro_behavior": "轻看发髻边缘",
+                "payoff_feeling": "确认发型更完整",
+            },
+            "storyboard": [
+                {
+                    "shot_no": 1,
+                    "shot_content": "静物发圈细节",
+                    "person_action": "人物不入镜",
+                    "performance": {"gaze": "none", "expression_or_micro_reaction": "无人物表情", "body_language": "无人物身体动作"},
+                },
+                {
+                    "shot_no": 2,
+                    "shot_content": "静物发圈细节",
+                    "person_action": "人物不入镜",
+                    "performance": {"gaze": "none", "expression_or_micro_reaction": "无人物表情", "body_language": "无人物身体动作"},
+                },
+                {
+                    "shot_no": 3,
+                    "shot_content": "静物发圈细节",
+                    "person_action": "人物不入镜",
+                    "performance": {"gaze": "none", "expression_or_micro_reaction": "无人物表情", "body_language": "无人物身体动作"},
+                },
+                {
+                    "shot_no": 4,
+                    "shot_content": "镜中结果",
+                    "person_action": "人物看镜子",
+                    "performance": {"gaze": "mirror", "expression_or_micro_reaction": "轻确认", "body_language": "肩膀放松"},
+                },
+            ],
+        }
+
+        check, major, minor = pipeline._precheck_scene_seed_liveliness(
+            anchor_card=_hair_anchor_card(),
+            persona_style_emotion_pack=pack,
+            script_json=script,
+        )
+
+        self.assertTrue(check["static_or_pose_heavy"])
+        self.assertTrue(major)
+        self.assertFalse(minor)
 
     def test_script_validator_backfills_and_accepts_performance_field(self) -> None:
         storyboard = []

@@ -126,9 +126,10 @@ def _build_card(record_id: str, fields: Dict[str, Any]) -> StorePositioningCard:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Sync store positioning cards from Feishu into SQLite.")
+    parser = argparse.ArgumentParser(description="Sync store positioning cards from Feishu into Market Insight DB.")
     parser.add_argument("--feishu-url", required=True)
     parser.add_argument("--db-path", default=str(DEFAULT_DB_PATH))
+    parser.add_argument("--database-url", default="", help="Optional MySQL/RDS URL. Env HERMES_MARKET_INSIGHT_DATABASE_URL or LIKEU_AI_DATABASE_URL also works.")
     args = parser.parse_args()
 
     info = parse_feishu_bitable_url(args.feishu_url)
@@ -144,7 +145,7 @@ def main() -> int:
             continue
         cards.append(card)
 
-    database = MarketInsightDatabase(Path(args.db_path))
+    database = MarketInsightDatabase(Path(args.db_path), database_url=args.database_url)
     stored = database.upsert_store_positioning_cards(
         source_table_id=info.table_id,
         cards=cards,

@@ -1,0 +1,23 @@
+[
+  {
+    "product_id": "VN_HAIR_001",
+    "product_name": "Pearl bow hair clip",
+    "market": "VN",
+    "category": "hair_accessories",
+    "requested_variant_count": 5
+  },
+  {
+    "product_id": "VN_EAR_001",
+    "product_name": "Small pearl earrings",
+    "market": "VN",
+    "category": "earrings",
+    "requested_variant_count": 5
+  },
+  {
+    "product_id": "VN_SCARF_001",
+    "product_name": "Soft daily scarf",
+    "market": "VN",
+    "category": "scarves",
+    "requested_variant_count": 5
+  }
+]

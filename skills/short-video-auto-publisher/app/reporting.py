@@ -95,9 +95,11 @@ PRODUCT_PUBLISH_REPORT_FIELDS: Sequence[Dict[str, Any]] = (
     {"name": "店铺ID", "type": 1, "ui_type": "Text"},
     {"name": "产品ID", "type": 1, "ui_type": "Text"},
     {"name": "产品主图", "type": 17, "ui_type": "Attachment"},
+    {"name": "本周已发布视频数", "type": 2, "ui_type": "Number"},
     {"name": "上周已发布视频数", "type": 2, "ui_type": "Number"},
     {"name": "本月已发布视频数", "type": 2, "ui_type": "Number"},
     {"name": "上月已发布视频数", "type": 2, "ui_type": "Number"},
+    {"name": "本周统计周期", "type": 1, "ui_type": "Text"},
     {"name": "上周统计周期", "type": 1, "ui_type": "Text"},
     {"name": "本月统计周期", "type": 1, "ui_type": "Text"},
     {"name": "上月统计周期", "type": 1, "ui_type": "Text"},
@@ -254,6 +256,8 @@ def product_publish_periods(reference_date: str = "") -> Dict[str, str]:
         previous_month_start = current_month_start.replace(year=current_month_start.year - 1, month=12)
     else:
         previous_month_start = current_month_start.replace(month=current_month_start.month - 1)
+    this_week_start = (ref - timedelta(days=ref.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    this_week_end = (ref + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     last_week_start = (ref - timedelta(days=ref.weekday() + 7)).replace(hour=0, minute=0, second=0, microsecond=0)
     last_week_end = last_week_start + timedelta(days=7)
 
@@ -264,12 +268,15 @@ def product_publish_periods(reference_date: str = "") -> Dict[str, str]:
         return f"{start.strftime('%Y-%m-%d')} ~ {(end - timedelta(days=1)).strftime('%Y-%m-%d')}"
 
     return {
+        "this_week_start": text(this_week_start),
+        "this_week_end": text(this_week_end),
         "last_week_start": text(last_week_start),
         "last_week_end": text(last_week_end),
         "current_month_start": text(current_month_start),
         "current_month_end": text(current_month_end),
         "previous_month_start": text(previous_month_start),
         "previous_month_end": text(previous_month_end),
+        "this_week_label": period_label(this_week_start, this_week_end),
         "last_week_label": period_label(last_week_start, last_week_end),
         "current_month_label": period_label(current_month_start, current_month_end),
         "previous_month_label": period_label(previous_month_start, previous_month_end),
@@ -329,9 +336,11 @@ def build_product_publish_report_fields(
         "汇总唯一键": _product_report_key(row),
         "店铺ID": _normalize_text(row.get("store_id")),
         "产品ID": _normalize_text(row.get("product_id")),
+        "本周已发布视频数": int(row.get("this_week_published") or 0),
         "上周已发布视频数": int(row.get("last_week_published") or 0),
         "本月已发布视频数": int(row.get("current_month_published") or 0),
         "上月已发布视频数": int(row.get("previous_month_published") or 0),
+        "本周统计周期": periods["this_week_label"],
         "上周统计周期": periods["last_week_label"],
         "本月统计周期": periods["current_month_label"],
         "上月统计周期": periods["previous_month_label"],
@@ -623,6 +632,8 @@ def sync_product_publish_report_table(
     field_stats = ensure_product_publish_report_fields(target_client)
     periods = product_publish_periods(reference_date)
     rows = db.list_product_publish_summary_rows(
+        this_week_start=periods["this_week_start"],
+        this_week_end=periods["this_week_end"],
         last_week_start=periods["last_week_start"],
         last_week_end=periods["last_week_end"],
         current_month_start=periods["current_month_start"],

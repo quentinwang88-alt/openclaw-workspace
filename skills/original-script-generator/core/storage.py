@@ -10,6 +10,22 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+try:
+    from .db_compat import connect_sqlite_or_mysql
+except ImportError:
+    from db_compat import connect_sqlite_or_mysql
+
+
+PIPELINE_TABLES = {"contract_registry", "pipeline_runs", "stage_results"}
+RUN_ARTIFACT_COLUMNS = {
+    "anchor_card_json",
+    "strategy_cards_json",
+    "exp_s1_json",
+    "exp_s2_json",
+    "exp_s3_json",
+    "exp_s4_json",
+}
+
 
 def _shared_data_dir() -> Path:
     root = os.environ.get("OPENCLAW_SHARED_DATA_DIR", str(Path.home() / ".openclaw" / "shared" / "data"))
@@ -26,14 +42,24 @@ def default_db_path() -> Path:
 
 
 class PipelineStorage:
-    def __init__(self, db_path: Optional[Path] = None):
+    def __init__(self, db_path: Optional[Path] = None, database_url: str = ""):
         self.db_path = Path(db_path) if db_path else default_db_path()
+        self.database_url = database_url
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path)
-        connection.row_factory = sqlite3.Row
+    def _connect(self):
+        connection = connect_sqlite_or_mysql(
+            self.db_path,
+            database_url=self.database_url,
+            env_name="ORIGINAL_SCRIPT_GENERATOR_DATABASE_URL",
+            table_prefix="osg__",
+            table_names=PIPELINE_TABLES,
+            timeout=60,
+        )
+        if isinstance(connection, sqlite3.Connection):
+            connection.execute("PRAGMA busy_timeout=60000")
+            connection.execute("PRAGMA journal_mode=WAL")
         return connection
 
     def _initialize(self) -> None:
@@ -485,6 +511,39 @@ class PipelineStorage:
             except json.JSONDecodeError:
                 return {}
             return value if isinstance(value, dict) else {}
+
+    def get_latest_run_artifact_json(
+        self,
+        record_id: str,
+        product_code: str,
+        column_name: str,
+    ) -> Optional[Dict[str, Any]]:
+        if column_name not in RUN_ARTIFACT_COLUMNS:
+            return None
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"""
+                SELECT {column_name}
+                FROM pipeline_runs
+                WHERE {column_name} IS NOT NULL
+                  AND {column_name} <> ''
+                  AND (
+                    record_id = ?
+                    OR (? <> '' AND product_code = ?)
+                  )
+                ORDER BY run_id DESC
+                LIMIT 1
+                """,
+                (record_id, product_code, product_code),
+            )
+            row = cursor.fetchone()
+            if not row or not row[column_name]:
+                return None
+            try:
+                value = json.loads(row[column_name])
+            except json.JSONDecodeError:
+                return None
+            return value if isinstance(value, dict) else None
 
     def query_stage_results(self, run_id: int) -> List[sqlite3.Row]:
         with self._connect() as conn:

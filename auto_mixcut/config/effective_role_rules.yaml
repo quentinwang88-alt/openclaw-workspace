@@ -1,0 +1,20 @@
+effective_role_rules:
+  - name: trusted_core
+    when: high_or_medium_trust_and_product_match_and_low_risk
+    effective_roles: [hero, detail, result, scene, ending]
+  - name: medium_uncertain
+    when: source_trust_level=medium and product_match_status=uncertain
+    effective_roles: [scene, ending]
+  - name: low_trust
+    when: source_trust_level=low and risk_level=low and has_watermark=no
+    effective_roles: [scene, ending]
+  - name: ai_generated_consistency_not_pass
+    when: source_type=ai_generated and frame_consistency_status!=pass
+    effective_roles: [scene, ending]
+  - name: soft_local_language_subtitle
+    when: reason contains local-language subtitle only and no watermark/platform_ui/sku_drift/mismatch/severe_occlusion
+    effective_roles: [detail, result, scene, ending]
+    notes: local market subtitles are allowed as soft risk; render_plan must avoid first slot and cap usage per output.
+  - name: blocked
+    when: risk_level in [medium, high] or has_watermark=yes or mixcut_usability=no
+    effective_roles: []

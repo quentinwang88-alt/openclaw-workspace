@@ -1,0 +1,20 @@
+templates:
+  - template_id: GENERAL_BALANCED_15S
+    duration_ms: 15000
+    roles: [hero, detail, result, scene, ending]
+  - template_id: RESULT_FIRST_15S
+    duration_ms: 15000
+    roles: [result, detail, result, scene, ending]
+  - template_id: DETAIL_HOOK_15S
+    duration_ms: 15000
+    roles: [detail, hero, result, scene, ending]
+  - template_id: COLD_START_IMAGE_ONLY_15S
+    fallback_only: true
+    roles: [product_image_hero, detail_image, product_image_result_or_model, selling_point_image, ending]
+
+render_plan_rules:
+  soft_local_language_subtitle:
+    max_per_output: 2
+    disallow_first_slot: true
+    prefer_clean_core_slots: true
+    preferred_roles: [scene, ending]

@@ -76,6 +76,7 @@ TARGET_FIELD_ALIASES: Dict[str, List[str]] = {
     "prompt": ["提示词"],
     "reference_images": ["参考图"],
     "script_id": ["脚本ID"],
+    "internal_script_key": ["内部脚本键"],
     "short_video_title": ["短视频标题", "标题"],
     "store_id": ["店铺ID"],
     "product_id": ["产品ID"],
@@ -102,6 +103,7 @@ class ScriptSyncTask:
     task_name: str
     prompt_text: str
     reference_images: List[Dict[str, Any]]
+    internal_script_key: str = ""
     product_type: str = ""
     target_language: str = ""
     business_category: str = ""
@@ -367,6 +369,7 @@ def derive_task_metadata(
     direction_index = _direction_index_from_suffix(task_suffix)
     variant_no = _variant_no_from_suffix(task_suffix)
     derived = {
+        "canonical_script_key": f"{record.record_id}:{task_suffix}",
         "store_id": normalize_text(fields.get(mapping.get("store_id"))),
         "product_id": normalize_text(fields.get(mapping.get("product_id")))
         or normalize_text(fields.get(mapping.get("product_code"))),
@@ -380,7 +383,16 @@ def derive_task_metadata(
     derived["script_id"] = _build_script_id(task_no, derived["parent_slot"], variant_no)
     if metadata_lookup:
         derived.update(metadata_lookup.get((record.record_id, task_suffix), {}))
+    if not normalize_text(derived.get("canonical_script_key")):
+        derived["canonical_script_key"] = f"{record.record_id}:{task_suffix}"
     return derived
+
+
+def build_run_manager_task_name(product_code: str, task_suffix: str, metadata: Dict[str, str]) -> str:
+    script_id = normalize_text(metadata.get("script_id"))
+    if script_id:
+        return f"{product_code}.{script_id}"
+    return f"{product_code}.{task_suffix}"
 
 
 def build_sync_tasks(
@@ -417,14 +429,16 @@ def build_sync_tasks(
             prompt_text = normalize_text(fields.get(field_name)) if field_name else ""
             if not prompt_text:
                 continue
+            metadata = derive_task_metadata(record, mapping, spec["task_suffix"], metadata_lookup=metadata_lookup)
             tasks.append(
                 ScriptSyncTask(
                     source_record_id=record.record_id,
                     product_code=task_name_base,
                     script_slot=spec["task_suffix"],
-                    task_name=f"{task_name_base}.{spec['task_suffix']}",
+                    task_name=build_run_manager_task_name(task_name_base, spec["task_suffix"], metadata),
                     prompt_text=prompt_text,
                     reference_images=attachments,
+                    internal_script_key=normalize_text(metadata.get("canonical_script_key")),
                     product_type=normalize_text(fields.get(mapping.get("product_type"))) if mapping.get("product_type") else "",
                     target_language=normalize_text(fields.get(mapping.get("target_language"))) if mapping.get("target_language") else "",
                     business_category=normalize_text(fields.get(mapping.get("business_category"))) if mapping.get("business_category") else "",
@@ -434,7 +448,7 @@ def build_sync_tasks(
                     cart_enabled=normalize_text(fields.get(mapping.get("cart_enabled"))) if mapping.get("cart_enabled") else "",
                     content_branch=normalize_text(fields.get(mapping.get("content_branch"))) if mapping.get("content_branch") else "",
                     video_duration=normalize_video_duration(fields.get(mapping.get("video_duration")) if mapping.get("video_duration") else None),
-                    **derive_task_metadata(record, mapping, spec["task_suffix"], metadata_lookup=metadata_lookup),
+                    **{key: value for key, value in metadata.items() if key != "canonical_script_key"},
                 )
             )
             if limit is not None and len(tasks) >= limit:
@@ -458,6 +472,10 @@ def build_target_fields(
         fields[mapping["reference_images"]] = task.reference_images
     if mapping.get("script_id") and task.script_id:
         fields[mapping["script_id"]] = task.script_id
+    if mapping.get("internal_script_key"):
+        internal_key = task.internal_script_key or task.task_name
+        if internal_key:
+            fields[mapping["internal_script_key"]] = internal_key
     if include_publish_metadata:
         if mapping.get("short_video_title") and task.short_video_title:
             fields[mapping["short_video_title"]] = task.short_video_title
@@ -492,6 +510,8 @@ def build_source_success_fields(
     synced_at: str,
     *,
     sync_scope: str = "",
+    patched_count: int = 0,
+    existing_count: int = 0,
     cleared_master: bool = False,
     cleared_variant: bool = False,
     cleared_legacy: bool = False,
@@ -505,7 +525,12 @@ def build_source_success_fields(
         fields[mapping["sync_variant_enabled"]] = False
     if mapping.get("sync_status"):
         scope_text = f"{sync_scope}；" if sync_scope else ""
-        status_text = f"同步成功：{scope_text}新增 {synced_count} 条；同步时间：{synced_at}"
+        parts = [f"新增 {synced_count} 条"]
+        if patched_count:
+            parts.append(f"补写 {patched_count} 条")
+        if existing_count:
+            parts.append(f"已存在 {existing_count} 条")
+        status_text = f"同步成功：{scope_text}{'；'.join(parts)}；同步时间：{synced_at}"
         fields[mapping["sync_status"]] = status_text
     if mapping.get("sync_time"):
         fields[mapping["sync_time"]] = synced_at

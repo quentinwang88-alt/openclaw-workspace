@@ -53,3 +53,73 @@ def generate_main_image(
     if result.status != "success":
         raise RuntimeError(result.error_message or "image generation failed")
     return result.output_image_paths
+
+
+def generate_scene_image(
+    *,
+    task_id: str,
+    prompt: str,
+    input_image_path: str,
+    input_image_paths: Optional[List[str]] = None,
+    output_dir: Path,
+    quality: str = "medium",
+) -> List[str]:
+    ordered_images: List[str] = []
+    for candidate in [input_image_path, *(input_image_paths or [])]:
+        if candidate and candidate not in ordered_images:
+            ordered_images.append(candidate)
+    service = ImageService(settings=get_settings())
+    request = ImageTaskRequest(
+        task_id=task_id,
+        task_type="likeu_scene_image",
+        target_field="场景图结果",
+        mode="edit",
+        prompt=prompt,
+        input_image_path=ordered_images[0],
+        input_image_paths=ordered_images,
+        size="1024x1024",
+        quality=quality,
+        output_format="png",
+        output_dir=str(output_dir),
+        n=1,
+        metadata={"skill": "tiktok-fashion-image-pack", "image_pack_part": "scene"},
+    )
+    result = service.process_task(request)
+    if result.status != "success":
+        raise RuntimeError(result.error_message or "scene image generation failed")
+    return result.output_image_paths
+
+
+def generate_fix_image(
+    *,
+    task_id: str,
+    prompt: str,
+    fix_target_path: str,
+    reference_paths: List[str],
+    output_dir: Path,
+    quality: str = "medium",
+) -> List[str]:
+    ordered_images: List[str] = [fix_target_path]
+    for candidate in reference_paths:
+        if candidate and candidate not in ordered_images:
+            ordered_images.append(candidate)
+    service = ImageService(settings=get_settings())
+    request = ImageTaskRequest(
+        task_id=task_id,
+        task_type="likeu_feedback_fix",
+        target_field="反馈修正结果",
+        mode="edit",
+        prompt=prompt,
+        input_image_path=ordered_images[0],
+        input_image_paths=ordered_images,
+        size="1024x1024",
+        quality=quality,
+        output_format="png",
+        output_dir=str(output_dir),
+        n=1,
+        metadata={"skill": "tiktok-fashion-image-pack", "type": "feedback_fix"},
+    )
+    result = service.process_task(request)
+    if result.status != "success":
+        raise RuntimeError(result.error_message or "feedback fix image generation failed")
+    return result.output_image_paths

@@ -96,7 +96,114 @@ def analyze_product_truth(
     )
     if not isinstance(result, dict):
         raise ValueError("product truth response must be a JSON object")
-    return normalize_product_truth(result)
+    truth = normalize_product_truth(result)
+    return repair_multicolor_truth_from_sources(truth, image_paths)
+
+
+def repair_multicolor_truth_from_sources(truth: Dict[str, Any], image_paths: List[str]) -> Dict[str, Any]:
+    """Use a conservative local color fallback when vision misses obvious multi-color refs."""
+    if len(image_paths) < 2:
+        return truth
+    existing_colors = [str(item).strip() for item in truth.get("sellable_colors_observed") or [] if str(item).strip()]
+    if truth.get("is_probably_multicolor") and len(existing_colors) > 1:
+        return truth
+
+    inferred = infer_reference_color_names(image_paths[:4])
+    unique = unique_preserve_order(inferred)
+    if len(unique) < 2:
+        return truth
+
+    repaired = dict(truth)
+    repaired["is_probably_multicolor"] = True
+    repaired["sellable_colors_observed"] = unique
+    repaired["main_color"] = unique[0]
+    reasons = normalize_string_list(repaired.get("review_reasons"))
+    reasons.append("local color fallback detected multiple source-image colors")
+    repaired["review_reasons"] = unique_preserve_order(reasons)
+    return repaired
+
+
+def infer_reference_color_names(image_paths: List[str]) -> List[str]:
+    colors: List[str] = []
+    for path in image_paths:
+        color = infer_reference_color_name(path)
+        if color:
+            colors.append(color)
+    return colors
+
+
+def infer_reference_color_name(image_path: str) -> str:
+    try:
+        from PIL import Image
+    except Exception:
+        return ""
+
+    try:
+        image = Image.open(image_path).convert("RGB")
+    except Exception:
+        return ""
+
+    width, height = image.size
+    left = int(width * 0.18)
+    right = int(width * 0.82)
+    top = int(height * 0.18)
+    bottom = int(height * 0.62)
+    crop = image.crop((left, top, right, bottom)).resize((80, 80))
+
+    counts = {
+        "black": 0,
+        "ivory white": 0,
+        "brown": 0,
+        "gray": 0,
+        "pink": 0,
+        "khaki": 0,
+        "other": 0,
+    }
+    for red, green, blue in crop.getdata():
+        name = classify_rgb_color(red, green, blue)
+        counts[name] = counts.get(name, 0) + 1
+
+    # Prefer clothing-relevant dark/white/brown colors over weak background noise.
+    priority = ["black", "ivory white", "brown", "khaki", "gray", "pink", "other"]
+    ranked = sorted(counts.items(), key=lambda item: (item[1], -priority.index(item[0])), reverse=True)
+    best, count = ranked[0]
+    if count < 500 or best == "other":
+        return ""
+    return best
+
+
+def classify_rgb_color(red: int, green: int, blue: int) -> str:
+    max_c = max(red, green, blue)
+    min_c = min(red, green, blue)
+    delta = max_c - min_c
+    avg = (red + green + blue) / 3
+
+    if avg < 72:
+        return "black"
+    if avg > 185 and delta < 55:
+        return "ivory white"
+    if delta < 28:
+        return "gray" if avg < 170 else "ivory white"
+    if red > green > blue and red >= 85 and green >= 55 and blue <= 130:
+        if avg < 170:
+            return "brown"
+        return "khaki"
+    if red >= 140 and blue >= 110 and green < red * 0.9:
+        return "pink"
+    if red >= 120 and green >= 105 and blue <= 120:
+        return "khaki"
+    return "other"
+
+
+def unique_preserve_order(items: List[str]) -> List[str]:
+    seen = set()
+    unique: List[str] = []
+    for item in items:
+        normalized = str(item).strip()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            unique.append(normalized)
+    return unique
 
 
 def normalize_product_truth(raw: Dict[str, Any]) -> Dict[str, Any]:

@@ -1,0 +1,62 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from auto_mixcut.core.ids import new_id
+from auto_mixcut.core.result import Result
+
+from .context import SkillContext
+
+
+class FrameSampleSkill:
+    def __init__(self, ctx: SkillContext):
+        self.ctx = ctx
+
+    def sample_product(self, product_id: str) -> Result:
+        segments = self.ctx.repo.list_where("segments", "product_id=? AND segment_status='created'", (product_id,))
+        results = [self.sample_segment(s["segment_id"]).to_dict() for s in segments]
+        self.ctx.repo.update("content_tasks", "product_id", product_id, {"task_status": "FRAMES_SAMPLED"})
+        return Result.ok({"count": len(results), "results": results})
+
+    def sample_segment(self, segment_id: str) -> Result:
+        segment = self.ctx.repo.get("segments", "segment_id", segment_id)
+        if not segment:
+            return Result.fail("SEGMENT_NOT_FOUND", "segment not found", {"segment_id": segment_id})
+        count = 9 if segment["source_type"] == "ai_generated" else 4
+        product = self.ctx.repo.get("products", "product_id", segment["product_id"]) or {}
+        frames = []
+        for idx in range(1, count + 1):
+            frame_id = new_id("FRAME")
+            local = self.ctx.settings.temp_root / "frames" / segment["product_id"] / segment_id / f"frame_{idx:03d}.jpg"
+            local.parent.mkdir(parents=True, exist_ok=True)
+            timestamp = int((segment["duration_ms"] or 3000) * idx / (count + 1))
+            if self.ctx.ffmpeg.mock:
+                local.write_bytes(b"\xff\xd8\xff\xe0mock-jpeg\xff\xd9")
+            else:
+                source = _segment_path(self.ctx, segment)
+                if not source:
+                    return Result.fail("FRAME_SAMPLE_FAILED", "segment source object not found", {"segment_id": segment_id})
+                sampled = self.ctx.ffmpeg.run(
+                    ["-y", "-ss", f"{timestamp / 1000:.3f}", "-i", str(source), "-frames:v", "1", "-q:v", "2", str(local)],
+                    "FRAME_SAMPLE_FAILED",
+                )
+                if not sampled.success:
+                    return sampled
+            object_key = f"auto_mixcut/frames/{product.get('market','NA')}/{product.get('category','uncategorized')}/{segment['product_id']}/{segment_id}/frame_{idx:03d}.jpg"
+            upload = self.ctx.oss.upload(local, object_key)
+            if not upload.success:
+                return upload
+            oss_row = dict(upload.data, object_type="frame", mime_type="image/jpeg")
+            self.ctx.repo.upsert("oss_objects", "object_id", oss_row)
+            row = {"frame_id": frame_id, "segment_id": segment_id, "frame_index": idx, "timestamp_ms": timestamp, "oss_object_id": oss_row["object_id"]}
+            self.ctx.repo.upsert("segment_frames", "frame_id", row)
+            frames.append(frame_id)
+        return Result.ok({"segment_id": segment_id, "frames": frames})
+
+
+def _segment_path(ctx: SkillContext, segment: dict) -> Path | None:
+    obj = ctx.repo.get("oss_objects", "object_id", segment.get("segment_oss_object_id"))
+    if not obj:
+        return None
+    path = ctx.settings.oss_root / obj["object_key"]
+    return path if path.exists() else None

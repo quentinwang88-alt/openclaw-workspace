@@ -26,6 +26,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Plan weekly Selection Agent incremental runs.")
     parser.add_argument("--feishu-url", required=True, help="标准化商品快照表 URL")
     parser.add_argument("--db-path", default=str(ROOT / "artifacts" / "agent_runtime.sqlite3"))
+    parser.add_argument("--database-url", default="", help="Optional MySQL/RDS URL. Env HERMES_AGENT_DATABASE_URL or LIKEU_AI_DATABASE_URL also works.")
     parser.add_argument("--crawl-batch-id", default="")
     parser.add_argument("--market-id", default="")
     parser.add_argument("--category-id", default="")
@@ -41,7 +42,7 @@ def main() -> int:
         category_id=args.category_id,
         limit=args.limit or None,
     )
-    store = AgentDataStore(Path(args.db_path))
+    store = AgentDataStore(Path(args.db_path), database_url=args.database_url)
     plans = plan_selection_runs(store, loaded.snapshots, retry_attempt=args.retry_attempt)
     print(
         json.dumps(

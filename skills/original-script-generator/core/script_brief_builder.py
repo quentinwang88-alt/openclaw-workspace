@@ -259,7 +259,67 @@ def _build_human_performance_contract(persona_style_emotion_pack: Dict[str, Any]
         "performance_intensity": _non_empty_text(raw_contract.get("performance_intensity")),
         "active_micro_reaction_limit": active_limit,
         "forbidden_performance": _take_string_items(raw_contract.get("forbidden_performance"), 8),
+        "scene_seed_brief": _build_scene_seed_brief(raw_contract.get("scene_seed_brief")),
     }
+
+
+def _build_scene_seed_brief(raw_value: Any) -> Dict[str, Any]:
+    if not isinstance(raw_value, dict) or not raw_value:
+        return {}
+    boundary = raw_value.get("micro_behavior_boundary") if isinstance(raw_value.get("micro_behavior_boundary"), dict) else {}
+    strategy_by_role = _build_scene_seed_strategy_by_role(
+        raw_value.get("strategy_by_script_role")
+        or raw_value.get("scene_seed_strategy_by_script_role")
+        or raw_value.get("scene_seed_strategy")
+    )
+    enabled = bool(raw_value.get("enabled"))
+    brief = {
+        "enabled": enabled,
+        "display_family": _non_empty_text(raw_value.get("display_family")),
+        "seed_goal": _non_empty_text(raw_value.get("seed_goal")),
+        "strategy_by_script_role": strategy_by_role,
+        "moment_hints": _take_string_items(raw_value.get("moment_hints"), 5),
+        "small_tension_hints": _take_string_items(raw_value.get("small_tension_hints"), 5),
+        "micro_behavior_boundary": {
+            "safe_behavior_hints": _take_string_items(boundary.get("safe_behavior_hints"), 5),
+            "risk_boundary": _take_string_items(boundary.get("risk_boundary"), 6),
+        },
+        "payoff_direction": _non_empty_text(raw_value.get("payoff_direction")),
+        "anti_template_guidance": _take_string_items(raw_value.get("anti_template_guidance"), 4),
+    }
+    if not any(
+        [
+            brief["seed_goal"],
+            brief["strategy_by_script_role"],
+            brief["moment_hints"],
+            brief["small_tension_hints"],
+            brief["micro_behavior_boundary"]["safe_behavior_hints"],
+            brief["payoff_direction"],
+        ]
+    ):
+        return {}
+    return brief
+
+
+def _build_scene_seed_strategy_by_role(raw_value: Any) -> Dict[str, Dict[str, str]]:
+    if not isinstance(raw_value, dict):
+        return {}
+    allowed_keys = [
+        "seed_mode",
+        "moment_bias",
+        "tension_bias",
+        "camera_gaze_bias",
+        "payoff_bias",
+    ]
+    strategies: Dict[str, Dict[str, str]] = {}
+    for role in ("S1", "S2", "S3", "S4"):
+        value = raw_value.get(role) or raw_value.get(role.lower())
+        if not isinstance(value, dict):
+            continue
+        item = {key: _non_empty_text(value.get(key)) for key in allowed_keys}
+        if any(item.values()):
+            strategies[role] = item
+    return strategies
 
 
 def _format_path(path_segments: List[str]) -> str:
@@ -459,6 +519,22 @@ def _summarize_existing_scripts(existing_scripts: Optional[Dict[str, Dict[str, A
                 "strategy_id": _non_empty_text(strategy_id),
                 "opening": _non_empty_text(first_shot.get("shot_content")),
                 "action": _non_empty_text(first_shot.get("person_action")),
+                "scene_seed": " / ".join(
+                    part
+                    for part in [
+                        _non_empty_text(
+                            (script_json.get("scene_seed") or {}).get("moment")
+                            if isinstance(script_json.get("scene_seed"), dict)
+                            else ""
+                        ),
+                        _non_empty_text(
+                            (script_json.get("scene_seed") or {}).get("small_tension")
+                            if isinstance(script_json.get("scene_seed"), dict)
+                            else ""
+                        ),
+                    ]
+                    if part
+                ),
                 "ending": (
                     _non_empty_text((storyboard[-1] or {}).get("voiceover_text_target_language"))
                     or _non_empty_text((storyboard[-1] or {}).get("voiceover_text_zh"))

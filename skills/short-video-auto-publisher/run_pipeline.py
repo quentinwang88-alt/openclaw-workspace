@@ -35,12 +35,14 @@ from app.notifications import (  # noqa: E402
     default_summary_date,
     format_daily_publish_summary,
     format_manual_publish_queue,
+    format_product_publish_weekly_report,
     send_feishu_webhook_text,
     send_openclaw_feishu_text,
 )
 from app.publishers import DryRunPublishAdapter, GeeLarkPublishAdapter, HttpPublishAdapter  # noqa: E402
 from app.reporting import (  # noqa: E402
     apply_manual_publish_statuses_from_table,
+    product_publish_periods,
     sync_manual_publish_queue_table,
     sync_product_publish_report_table,
     sync_publish_report_table,
@@ -722,6 +724,46 @@ def command_notify_ops_daily(args: argparse.Namespace) -> None:
     print(result_payload)
 
 
+def command_notify_product_publish_weekly(args: argparse.Namespace) -> None:
+    db = AutoPublishDB(Path(args.db_path))
+    reference_date = args.date or datetime.now().strftime("%Y-%m-%d")
+    periods = product_publish_periods(reference_date)
+
+    target_app_token, target_table_id = resolve_feishu_config(args.product_report_feishu_url)
+    target_client = FeishuBitableClient(app_token=target_app_token, table_id=target_table_id)
+    source_client = None
+    if not args.no_upload_images:
+        source_app_token, source_table_id = resolve_feishu_config(args.script_feishu_url)
+        source_client = FeishuBitableClient(app_token=source_app_token, table_id=source_table_id)
+
+    sync_result = sync_product_publish_report_table(
+        db,
+        target_client,
+        source_client=source_client,
+        reference_date=reference_date,
+        source_image_field=args.source_image_field,
+        upload_images=not args.no_upload_images,
+        force_upload_images=args.force_upload_images,
+    )
+    print(f"sync_product_publish_report_table: {sync_result}")
+
+    rows = db.list_product_publish_summary_rows(
+        this_week_start=periods["this_week_start"],
+        this_week_end=periods["this_week_end"],
+        last_week_start=periods["last_week_start"],
+        last_week_end=periods["last_week_end"],
+        current_month_start=periods["current_month_start"],
+        current_month_end=periods["current_month_end"],
+        previous_month_start=periods["previous_month_start"],
+        previous_month_end=periods["previous_month_end"],
+    )
+
+    message = format_product_publish_weekly_report(rows, periods=periods, table_url=args.product_report_feishu_url, max_items=args.max_items)
+    notification_key = f"product-publish-weekly:{args.delivery}:{reference_date}"
+    result = send_notification_message(db=db, args=args, notification_key=notification_key, message=message)
+    print({"sync": sync_result, "notification": result})
+
+
 def command_run_all(args: argparse.Namespace) -> None:
     with exclusive_run_lock("schedule"):
         _command_run_all_locked(args)
@@ -894,7 +936,7 @@ def build_parser() -> argparse.ArgumentParser:
     disable_account.add_argument("--reason", default="账号连续发布失败，暂停自动发布", help="写入本地状态的原因")
     disable_account.set_defaults(func=command_disable_account)
 
-    enforce_retry = subparsers.add_parser("enforce-retry-limit", help="清理超过自动重试上限的历史活跃排期")
+    enforce_retry = subparsers.add_parser("enforce-retry-limit", help="复活超过自动重试上限的视频并重新进入排期池")
     enforce_retry.add_argument("--max-auto-retries", type=int, default=2, help="失败后最多自动重试次数，默认 2")
     enforce_retry.add_argument("--reason", default="", help="写入本地状态的原因")
     enforce_retry.set_defaults(func=command_enforce_retry_limit)
@@ -933,6 +975,17 @@ def build_parser() -> argparse.ArgumentParser:
     notify_ops.add_argument("--force-upload-videos", action="store_true", help="同步人工表时强制重新上传视频附件")
     add_notification_args(notify_ops)
     notify_ops.set_defaults(func=command_notify_ops_daily)
+
+    notify_product_weekly = subparsers.add_parser("notify-product-publish-weekly", help="同步产品发布汇总表并发送周报到飞书群")
+    notify_product_weekly.add_argument("--product-report-feishu-url", default=DEFAULT_PRODUCT_PUBLISH_REPORT_FEISHU_URL, help="店铺产品发布汇总表飞书 URL")
+    notify_product_weekly.add_argument("--script-feishu-url", default=DEFAULT_SCRIPT_FEISHU_URL, help="生产脚本表飞书 URL，用于复制产品主图")
+    notify_product_weekly.add_argument("--date", default="", help="参考日期 YYYY-MM-DD，默认今天")
+    notify_product_weekly.add_argument("--source-image-field", default="", help="源脚本表产品主图字段名，默认自动识别")
+    notify_product_weekly.add_argument("--no-upload-images", action="store_true", help="不复制产品主图，只同步统计数据")
+    notify_product_weekly.add_argument("--force-upload-images", action="store_true", help="即使目标表已有主图也重新上传")
+    notify_product_weekly.add_argument("--max-items", type=int, default=100, help="周报最多展示产品数，默认 100")
+    add_notification_args(notify_product_weekly)
+    notify_product_weekly.set_defaults(func=command_notify_product_publish_weekly)
 
     schedule = subparsers.add_parser("schedule", help="按 24 小时窗口增量补排")
     schedule.add_argument("--publish-mode", choices=["dry-run", "http", "geelark"], default="dry-run")

@@ -171,6 +171,52 @@ def format_manual_publish_queue(rows: List[Dict[str, Any]], *, queue_date: str, 
     return "\n".join(lines)
 
 
+def format_product_publish_weekly_report(
+    rows: List[Dict[str, Any]],
+    *,
+    periods: Dict[str, str],
+    table_url: str = "",
+    max_items: int = 100,
+) -> str:
+    if not rows:
+        return f"产品发布周报 - {periods.get('this_week_label', '')}\n本周暂无产品发布。"
+    store_map: Dict[str, Dict[str, Any]] = defaultdict(
+        lambda: {"this_week": 0, "last_week": 0, "this_month": 0, "products": []}
+    )
+    for row in rows:
+        store_id = _text(row.get("store_id")) or "未知"
+        product_id = _text(row.get("product_id")) or "-"
+        tw = int(row.get("this_week_published") or 0)
+        lw = int(row.get("last_week_published") or 0)
+        tm = int(row.get("current_month_published") or 0)
+        store_map[store_id]["this_week"] += tw
+        store_map[store_id]["last_week"] += lw
+        store_map[store_id]["this_month"] += tm
+        if tw > 0:
+            store_map[store_id]["products"].append(f"  {product_id}: {tw}")
+    total_tw = sum(int(row.get("this_week_published") or 0) for row in rows)
+    total_lw = sum(int(row.get("last_week_published") or 0) for row in rows)
+    total_tm = sum(int(row.get("current_month_published") or 0) for row in rows)
+    lines = [
+        f"产品发布周报 - {periods.get('this_week_label', '')}",
+        f"本周已发布：{total_tw} 条  |  上周：{total_lw} 条  |  本月：{total_tm} 条",
+    ]
+    for store_id, payload in sorted(
+        store_map.items(),
+        key=lambda item: -item[1]["this_week"],
+    ):
+        count = payload["this_week"]
+        name = store_id
+        lines.append("")
+        lines.append(f"{name}：本周 {count}（上周 {payload['last_week']}，本月 {payload['this_month']}）")
+        for product in payload["products"][:max_items]:
+            lines.append(product)
+    if table_url:
+        lines.append("")
+        lines.append(f"详细数据：{table_url}")
+    return "\n".join(lines)
+
+
 def send_feishu_webhook_text(webhook_url: str, text: str) -> Dict[str, Any]:
     url = _text(webhook_url)
     if not url:

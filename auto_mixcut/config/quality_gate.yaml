@@ -1,0 +1,22 @@
+auto_quality_gate:
+  first_segment:
+    product_visibility: high
+    risk_level: low
+    hook_strength_in: [strong, medium]
+    product_match_status_in: [trusted_by_source, anchor_pass]
+    effective_role_contains_any: [hero, result, detail]
+  content_integrity:
+    require_roles: [result, detail]
+    max_high_risk_segments: 0
+    max_low_visibility_segments: 1
+  diversity:
+    min_unique_source_assets: 3
+    max_same_segment_reuse_in_batch: 2
+    max_same_first_segment_reuse_in_batch: 2
+  technical:
+    duration_range_ms: [14500, 15500]
+    width: 1080
+    height: 1920
+    fps: 30
+    playable: true
+    has_audio: true

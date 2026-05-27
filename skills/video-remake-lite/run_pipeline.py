@@ -82,16 +82,43 @@ def resolve_feishu_config(feishu_url: Optional[str]) -> (str, str):
 
 def validate_required_fields(mapping: Dict[str, Optional[str]]) -> None:
     """校验运行所需字段。"""
-    required = {
+    base_required = {
         "status": "状态字段",
         "video": "视频字段",
+    }
+    four_step_required = {
+        "script_breakdown": "脚本拆解字段",
+        "remake_card": "复刻卡字段",
+        "remade_script": "复刻后的脚本字段",
+        "final_prompt": "最终复刻视频提示词字段",
+    }
+    legacy_required = {
         "highlight_dna": "高光DNA提取结果字段",
         "light_rewrite_plan": "轻微改写复刻方案字段",
         "final_storyboard": "最终固定分镜字段",
     }
-    missing = [label for key, label in required.items() if not mapping.get(key)]
-    if missing:
-        raise Exception(f"表格缺少必需字段: {', '.join(missing)}")
+    missing_base = [label for key, label in base_required.items() if not mapping.get(key)]
+    has_four_step = all(mapping.get(key) for key in four_step_required)
+    has_legacy = all(mapping.get(key) for key in legacy_required)
+    if missing_base or not (has_four_step or has_legacy):
+        missing_modes = []
+        if not has_four_step:
+            missing_modes.append(
+                "四字段模式缺少: "
+                + ", ".join(label for key, label in four_step_required.items() if not mapping.get(key))
+            )
+        if not has_legacy:
+            missing_modes.append(
+                "三字段兼容模式缺少: "
+                + ", ".join(label for key, label in legacy_required.items() if not mapping.get(key))
+            )
+        raise Exception(f"表格缺少必需字段: {', '.join(missing_base + missing_modes)}")
+
+
+def has_four_step_fields(mapping: Dict[str, Optional[str]]) -> bool:
+    """优先使用四字段 Codex gpt-5.5 生成路径。"""
+    keys = ("script_breakdown", "remake_card", "remade_script", "final_prompt")
+    return all(mapping.get(key) for key in keys)
 
 
 def build_context(record: RemakeRecord, mapping: Dict[str, Optional[str]]) -> Dict[str, str]:
@@ -296,6 +323,35 @@ class VideoRemakePipeline:
             processing_fields[error_field] = ""
         self.client.update_record_fields(record.record_id, processing_fields)
 
+        if has_four_step_fields(self.mapping):
+            task_label = normalize_cell_value(fields.get("任务编号")) or record.record_id
+            print("  🤖 使用 Codex/OpenAI gpt-5.5 四字段路径...")
+            outputs = self.llm_client.generate_four_fields(
+                video_url=video_url,
+                context=context,
+                task_label=task_label,
+            )
+            update_fields = {
+                self.mapping["script_breakdown"]: outputs["脚本拆解"],
+                self.mapping["remake_card"]: outputs["复刻卡"],
+                self.mapping["remade_script"]: outputs["复刻后的脚本"],
+                self.mapping["final_prompt"]: outputs["最终复刻视频提示词"],
+            }
+
+            decision = extract_duration_decision(outputs["脚本拆解"])
+            if decision["target_duration"] and self.mapping.get("video_duration"):
+                try:
+                    update_fields[self.mapping["video_duration"]] = int(float(decision["target_duration"]))
+                except Exception:
+                    pass
+            self.client.update_record_fields(record.record_id, update_fields)
+            print(
+                "  ✅ 已写入四字段: "
+                + ", ".join(f"{key}={len(value)}字" for key, value in outputs.items())
+            )
+            self._mark_done(record, fields)
+            return
+
         highlight_dna = fields.get(self.mapping["highlight_dna"])
         if has_text_value(highlight_dna):
             print("  1/3 跳过高光DNA提取，复用已写入结果...")
@@ -381,9 +437,12 @@ class VideoRemakePipeline:
                 final_update[self.mapping["negative_words"]] = negative_words
             self.client.update_record_fields(record.record_id, final_update)
 
-        done_fields = {
-            status_field: STATUS_DONE,
-        }
+        self._mark_done(record, fields)
+
+    def _mark_done(self, record: RemakeRecord, fields: Dict[str, object]) -> None:
+        status_field = self.mapping["status"]
+        error_field = self.mapping.get("error_message")
+        done_fields = {status_field: STATUS_DONE}
         already_synced = (
             self.mapping.get("synced_script_id")
             and has_text_value(fields.get(self.mapping["synced_script_id"]))

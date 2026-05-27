@@ -1,0 +1,9 @@
+{
+  "product_anchor_generation": {"tier": "medium_vision", "max_retries": 2},
+  "watermark_detection": {"tier": "medium_vision", "max_retries": 1},
+  "segment_tagging_default": {"tier": "medium_vision", "batch_size": 10, "concurrency": 5, "max_retries": 2},
+  "product_anchor_check": {"tier": "medium_vision", "escalate_to_high_if": ["source_trust_level == low", "product_match_status == uncertain", "selected_for_core_role == true"]},
+  "ai_generated_consistency_check": {"tier": "medium_vision", "escalate_to_high_if": ["selected_for_core_role == true", "frame_consistency_status == uncertain"]},
+  "final_video_qc": {"tier": "medium_vision", "escalate_to_high_if": ["machine_quality_status == borderline"]},
+  "golden_benchmark": {"tier": "medium_vision", "analysis_tier": "high_reasoning"}
+}

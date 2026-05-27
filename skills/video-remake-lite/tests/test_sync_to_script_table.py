@@ -16,6 +16,7 @@ from sync_to_script_table import (  # noqa: E402
     SCRIPT_TYPE_NURTURE_REMAKE,
     build_source_synced_fields,
     build_target_fields,
+    find_existing_script_id,
     resolve_field_mapping,
     should_process_source_record,
     SOURCE_FIELD_ALIASES,
@@ -36,6 +37,7 @@ class VideoRemakeScriptTableSyncTest(unittest.TestCase):
             [
                 "状态",
                 "同步状态",
+                "同步到脚本ID",
                 "脚本ID",
                 "同步时间",
                 "店铺ID",
@@ -148,8 +150,60 @@ class VideoRemakeScriptTableSyncTest(unittest.TestCase):
         fields = build_source_synced_fields(self.source_mapping, "P10086_VR1_M", "body")
 
         self.assertEqual(fields["同步状态"], "已同步")
-        self.assertEqual(fields["脚本ID"], "P10086_VR1_M")
+        self.assertEqual(fields["同步到脚本ID"], "P10086_VR1_M")
+        self.assertNotIn("脚本ID", fields)
         self.assertTrue(fields["最终视频提示词"].startswith("【脚本ID】\n- P10086_VR1_M\n\n"))
+
+    def test_find_existing_script_id_ignores_same_product_without_source_or_script_id(self) -> None:
+        existing = FakeRecord(
+            "target_1",
+            {
+                "脚本来源": SCRIPT_TYPE_SHORT_VIDEO_REMAKE,
+                "产品编码": "P10086",
+                "脚本方向一": "【脚本ID】\n- P10086_VRother_M\n\nbody",
+            },
+        )
+
+        script_id = find_existing_script_id(
+            [existing],
+            self.target_mapping,
+            source_record_id="rec_001",
+            task_no="P10086",
+            profile="short-video",
+        )
+
+        self.assertEqual(script_id, "")
+
+    def test_find_existing_script_id_matches_source_record_id_or_exact_script_id(self) -> None:
+        by_source = FakeRecord("target_1", {"源复刻任务ID": "rec_001", "产品编码": "P10086"})
+        by_script = FakeRecord(
+            "target_2",
+            {
+                "产品编码": "P10086",
+                "脚本方向一": "【脚本ID】\n- P10086_VRrec001_M\n\nbody",
+            },
+        )
+
+        self.assertEqual(
+            find_existing_script_id(
+                [by_source],
+                self.target_mapping,
+                source_record_id="rec_001",
+                task_no="P10086",
+                profile="short-video",
+            ),
+            "P10086_VRrec001_M",
+        )
+        self.assertEqual(
+            find_existing_script_id(
+                [by_script],
+                self.target_mapping,
+                source_record_id="rec_001",
+                task_no="P10086",
+                profile="short-video",
+            ),
+            "P10086_VRrec001_M",
+        )
 
 
 if __name__ == "__main__":

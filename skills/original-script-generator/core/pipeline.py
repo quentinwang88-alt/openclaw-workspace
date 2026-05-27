@@ -51,6 +51,7 @@ from core.json_parser import (
     validate_video_prompt_payload,
 )
 from core.llm_client import OriginalScriptLLMClient
+from core.model_circuit_breaker import ModelCircuitBreaker
 from core.prompt_contract_builder import build_prompt_contract, build_prompt_contract_payload
 from core.prompts import (
     build_anchor_card_prompt,
@@ -504,6 +505,17 @@ VARIANT_STAGE_LOOKUP = {
     "exp_s3_json": "expression_s3",
     "exp_s4_json": "expression_s4",
 }
+VARIANT_RUN_ARTIFACT_LOOKUP = {
+    "anchor_card_json": "anchor_card_json",
+    "final_s1_json": "strategy_cards_json",
+    "final_s2_json": "strategy_cards_json",
+    "final_s3_json": "strategy_cards_json",
+    "final_s4_json": "strategy_cards_json",
+    "exp_s1_json": "exp_s1_json",
+    "exp_s2_json": "exp_s2_json",
+    "exp_s3_json": "exp_s3_json",
+    "exp_s4_json": "exp_s4_json",
+}
 
 
 class ValidationError(Exception):
@@ -873,6 +885,7 @@ class OriginalScriptPipeline:
         self.startup_stagger_seconds = max(0.0, float(startup_stagger_seconds))
         self.resume_from_latest_success = bool(resume_from_latest_success)
         self.abort_batch_reason = ""
+        self.model_circuit = ModelCircuitBreaker()
 
     def process_records(
         self,
@@ -895,6 +908,12 @@ class OriginalScriptPipeline:
                 )
             return self.stats
 
+        can_start, circuit_reason = self.model_circuit.can_start()
+        if not can_start:
+            self.abort_batch_reason = circuit_reason
+            print(f"🛑 模型熔断中，本轮不拉起新任务: {circuit_reason}")
+            return self.stats
+
         worker_cap = self._resolve_record_worker_cap()
         worker_count = max(1, min(max_workers, worker_cap, len(records)))
         print(f"🚦 记录级并发数: {worker_count}")
@@ -909,6 +928,11 @@ class OriginalScriptPipeline:
 
         if worker_count == 1:
             for index, record in enumerate(records, 1):
+                can_start, circuit_reason = self.model_circuit.can_start()
+                if not can_start:
+                    self.abort_batch_reason = circuit_reason
+                    print(f"🛑 批次熔断: {circuit_reason}")
+                    break
                 print(f"\n{'=' * 72}")
                 print(f"🧩 处理任务 {index}/{len(records)}: {record.record_id}")
                 print(f"{'=' * 72}")
@@ -939,6 +963,13 @@ class OriginalScriptPipeline:
 
             while next_index < len(records) or future_to_record:
                 while next_index < len(records) and len(future_to_record) < worker_count:
+                    if self.abort_batch_reason:
+                        break
+                    can_start, circuit_reason = self.model_circuit.can_start()
+                    if not can_start:
+                        self.abort_batch_reason = circuit_reason
+                        print(f"🛑 批次熔断: {circuit_reason}")
+                        break
                     if next_index > 0 and self.startup_stagger_seconds > 0:
                         print(
                             f"⏳ 等待 {self.startup_stagger_seconds:.1f} 秒后启动下一条任务，"
@@ -949,6 +980,8 @@ class OriginalScriptPipeline:
                     _submit_record(record, next_index + 1)
                     next_index += 1
 
+                if self.abort_batch_reason and not future_to_record:
+                    break
                 if not future_to_record:
                     continue
 
@@ -963,9 +996,13 @@ class OriginalScriptPipeline:
                         else:
                             self.stats["failed"] += 1
                             print(f"❌ 并发任务失败: {record.record_id}")
+                            if self.abort_batch_reason:
+                                print(f"🛑 批次熔断: {self.abort_batch_reason}")
                     except Exception as exc:
                         self.stats["failed"] += 1
                         print(f"❌ 并发任务失败: {record.record_id} | {exc}")
+                        if self.abort_batch_reason:
+                            print(f"🛑 批次熔断: {self.abort_batch_reason}")
 
         return self.stats
 
@@ -1020,6 +1057,15 @@ class OriginalScriptPipeline:
             or "unauthorized" in lowered
             or "401" in message
         )
+
+    def _record_model_stage_failure(self, stage_name: str, exc: BaseException) -> None:
+        opened, reason = self.model_circuit.record_failure(
+            kind=ModelCircuitBreaker.normalize_failure_kind("", str(exc)),
+            detail=str(exc),
+            stage_name=stage_name,
+        )
+        if opened:
+            self.abort_batch_reason = reason
 
     def _process_single_record(self, record: TaskRecord) -> bool:
         logs: List[str] = []
@@ -1078,6 +1124,9 @@ class OriginalScriptPipeline:
                     context,
                     normalized_product_type,
                 )
+                context["contract_registry_key"] = contract_registry_key
+                context["product_image_hash"] = product_image_hash
+                context["attachment_tokens_hash"] = self._build_attachment_tokens_hash(attachments)
             image_paths: List[str] = []
             if not is_variant_request:
                 image_paths = self._download_images(record_id, attachments, logs)
@@ -2831,6 +2880,10 @@ class OriginalScriptPipeline:
         ]
         return self._short_hash(image_tokens)
 
+    def _build_attachment_tokens_hash(self, attachments: List[Dict[str, Any]]) -> str:
+        tokens = [str(item.get("file_token", "") or "") for item in attachments]
+        return self._short_hash(tokens)
+
     def _build_contract_registry_identity(
         self,
         attachments: List[Dict[str, Any]],
@@ -2898,6 +2951,10 @@ class OriginalScriptPipeline:
             input_context = {}
         stable_context = {
             "stage_name": stage_name,
+            "product_code": input_context.get("product_code", ""),
+            "product_image_hash": input_context.get("product_image_hash", ""),
+            "attachment_tokens_hash": input_context.get("attachment_tokens_hash", ""),
+            "contract_registry_key": input_context.get("contract_registry_key", ""),
             "target_country": input_context.get("target_country", ""),
             "target_language": input_context.get("target_language", ""),
             "product_type": input_context.get("product_type", ""),
@@ -2956,6 +3013,7 @@ class OriginalScriptPipeline:
         image_paths = []
         for index, attachment in enumerate(attachments[:max_images], 1):
             path = self.client.download_attachment(attachment, temp_dir)
+            path = self._rename_downloaded_attachment(path, attachment, index)
             logs.append(f"下载图片 {index}: {path.name}")
             normalized_path = self._ensure_model_supported_image(path, attachment)
             if normalized_path != path:
@@ -2964,6 +3022,22 @@ class OriginalScriptPipeline:
         if not image_paths:
             raise ValidationError("产品图片为空或下载失败")
         return image_paths
+
+    @staticmethod
+    def _rename_downloaded_attachment(path: Path, attachment: Dict[str, Any], index: int) -> Path:
+        file_token = str(attachment.get("file_token", "") or f"attachment_{index}")
+        token_hint = re.sub(r"[^0-9A-Za-z_-]+", "", file_token)[-12:] or f"attachment_{index}"
+        safe_name = re.sub(r"[^0-9A-Za-z._-]+", "_", path.name).strip("._") or f"image{path.suffix or '.bin'}"
+        target = path.with_name(f"{index:02d}_{token_hint}_{safe_name}")
+        if target == path:
+            return path
+        suffix_index = 1
+        unique_target = target
+        while unique_target.exists():
+            unique_target = target.with_name(f"{target.stem}_{suffix_index}{target.suffix}")
+            suffix_index += 1
+        path.replace(unique_target)
+        return unique_target
 
     @staticmethod
     def _ensure_model_supported_image(image_path: Path, attachment: Optional[Dict[str, Any]] = None) -> Path:
@@ -3045,6 +3119,7 @@ class OriginalScriptPipeline:
                     duration_seconds=round(elapsed, 3),
                     cache_key=cache_key,
                 )
+            self.model_circuit.record_success()
             print(f"  ✅ 阶段完成: {stage_name} ({elapsed:.1f}s)")
             return result
         except JSONParseError as exc:
@@ -3068,6 +3143,7 @@ class OriginalScriptPipeline:
             raise
         except StageTimeoutError as exc:
             stage_durations[stage_name] = round(time.time() - start, 3)
+            self._record_model_stage_failure(stage_name, exc)
             if run_id is not None:
                 self.storage.record_stage_result(
                     run_id=run_id,
@@ -3086,6 +3162,7 @@ class OriginalScriptPipeline:
             raise ModelStageError(f"{stage_name}: {exc}")
         except Exception as exc:
             stage_durations[stage_name] = round(time.time() - start, 3)
+            self._record_model_stage_failure(stage_name, exc)
             if run_id is not None:
                 self.storage.record_stage_result(
                     run_id=run_id,
@@ -3648,6 +3725,85 @@ class OriginalScriptPipeline:
             minor_issues.append(f"L1 human_stiffness_check：{check['summary']}")
         return check, major_issues, minor_issues
 
+    def _precheck_scene_seed_liveliness(
+        self,
+        anchor_card: Dict[str, Any],
+        persona_style_emotion_pack: Dict[str, Any],
+        script_json: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], List[str], List[str]]:
+        human_contract = (
+            persona_style_emotion_pack.get("human_performance_contract")
+            if isinstance(persona_style_emotion_pack, dict)
+            else {}
+        )
+        if not isinstance(human_contract, dict):
+            human_contract = {}
+        scene_brief = human_contract.get("scene_seed_brief") if isinstance(human_contract.get("scene_seed_brief"), dict) else {}
+        enabled = bool(scene_brief.get("enabled"))
+        check = {
+            "enabled": enabled,
+            "missing_or_incomplete": False,
+            "risk_boundary_hit": False,
+            "not_reflected_in_storyboard": False,
+            "static_or_pose_heavy": False,
+            "summary": "",
+        }
+        if not enabled:
+            return check, [], []
+
+        scene_seed = script_json.get("scene_seed") if isinstance(script_json.get("scene_seed"), dict) else {}
+        seed_fields = ["moment", "small_tension", "micro_behavior", "payoff_feeling"]
+        seed_values = [str(scene_seed.get(field, "") or "").strip() for field in seed_fields]
+        seed_text = " ".join(seed_values)
+        if any(not value for value in seed_values):
+            check["missing_or_incomplete"] = True
+
+        boundary = scene_brief.get("micro_behavior_boundary") if isinstance(scene_brief.get("micro_behavior_boundary"), dict) else {}
+        risk_tokens = [str(item or "").strip() for item in (boundary.get("risk_boundary") or []) if str(item or "").strip()]
+        contract = anchor_card.get("category_execution_contract") if isinstance(anchor_card, dict) else {}
+        if not isinstance(contract, dict):
+            contract = {}
+        risk_tokens.extend(self._extract_contract_list_items(contract.get("forbidden_actions")))
+        for token in risk_tokens:
+            if token and self._contains_affirmative_token(seed_text, token):
+                check["risk_boundary_hit"] = True
+                break
+
+        storyboard_text = self._flatten_text(script_json.get("storyboard") or [])
+        static_tokens = ["人物不入镜", "无人物表情", "无人物身体动作", "无人物肢体", "固定摆拍", "站定展示"]
+        static_hits = sum(storyboard_text.count(token) for token in static_tokens)
+        storyboard = script_json.get("storyboard") if isinstance(script_json.get("storyboard"), list) else []
+        if storyboard and static_hits >= max(2, len(storyboard) // 2):
+            check["static_or_pose_heavy"] = True
+
+        reflection_units: List[str] = []
+        for value in seed_values:
+            for unit in re.split(r"[，。；;、\s]+", value):
+                unit = unit.strip()
+                if len(unit) >= 4:
+                    reflection_units.append(unit[:8])
+        if reflection_units and not any(unit in storyboard_text for unit in reflection_units[:8]):
+            check["not_reflected_in_storyboard"] = True
+
+        summaries: List[str] = []
+        if check["missing_or_incomplete"]:
+            summaries.append("scene_seed 四字段不完整")
+        if check["risk_boundary_hit"]:
+            summaries.append("scene_seed 命中风险边界或商品禁止动作")
+        if check["not_reflected_in_storyboard"]:
+            summaries.append("storyboard 未体现 scene_seed 的生活动机或连续反应")
+        if check["static_or_pose_heavy"]:
+            summaries.append("人物不入镜/无表情/固定摆拍占比偏高")
+        check["summary"] = "；".join(summaries)
+
+        major_issues: List[str] = []
+        minor_issues: List[str] = []
+        if check["risk_boundary_hit"] or check["static_or_pose_heavy"]:
+            major_issues.append(f"L1 scene_seed_liveliness_check：{check['summary']}")
+        elif check["missing_or_incomplete"] or check["not_reflected_in_storyboard"]:
+            minor_issues.append(f"L1 scene_seed_liveliness_check：{check['summary']}")
+        return check, major_issues, minor_issues
+
     def _build_q1_precheck_result(
         self,
         context: Dict[str, Any],
@@ -3674,6 +3830,15 @@ class OriginalScriptPipeline:
                 "gaze_monotony_check": False,
                 "category_interaction_missing_check": False,
                 "hit_count": 0,
+                "summary": "",
+            },
+            "scene_seed": script_json.get("scene_seed") if isinstance(script_json.get("scene_seed"), dict) else {},
+            "scene_seed_liveliness_check": {
+                "enabled": False,
+                "missing_or_incomplete": False,
+                "risk_boundary_hit": False,
+                "not_reflected_in_storyboard": False,
+                "static_or_pose_heavy": False,
                 "summary": "",
             },
         }
@@ -3765,6 +3930,16 @@ class OriginalScriptPipeline:
         result["l1_major_issues"].extend(human_major)
         result["l1_minor_issues"].extend(human_minor)
 
+        scene_check, scene_major, scene_minor = self._precheck_scene_seed_liveliness(
+            anchor_card=anchor_card,
+            persona_style_emotion_pack=persona_style_emotion_pack,
+            script_json=script_json,
+        )
+        result["scene_seed"] = script_json.get("scene_seed") if isinstance(script_json.get("scene_seed"), dict) else {}
+        result["scene_seed_liveliness_check"] = scene_check
+        result["l1_major_issues"].extend(scene_major)
+        result["l1_minor_issues"].extend(scene_minor)
+
         blocking_prefixes = (
             "L0 schema_or_language_check",
             "L0 timing_consistency_check",
@@ -3773,6 +3948,7 @@ class OriginalScriptPipeline:
             "L1 forbidden_actions",
             "L1 category_contract",
             "L1 apparel_accessory_winter_check",
+            "L1 scene_seed_liveliness_check",
         )
         all_major = result["l0_major_issues"] + result["l1_major_issues"]
         result["blocking_major"] = any(issue.startswith(blocking_prefixes) for issue in all_major)
@@ -6618,7 +6794,15 @@ class OriginalScriptPipeline:
             product_code=product_code,
             stage_name=fallback_stage_name,
         )
-        return bool(stage_output and isinstance(stage_output, dict))
+        if stage_output and isinstance(stage_output, dict):
+            return True
+        return bool(
+            self._load_variant_run_artifact_json(
+                record_id=record_id,
+                product_code=product_code,
+                logical_name=logical_name,
+            )
+        )
 
     def _load_resume_stage_output(
         self,
@@ -6727,6 +6911,12 @@ class OriginalScriptPipeline:
             stage_name=fallback_stage_name,
         )
         if not stage_output or not isinstance(stage_output, dict):
+            stage_output = self._load_variant_run_artifact_json(
+                record_id=record.record_id,
+                product_code=product_code,
+                logical_name=logical_name,
+            )
+        if not stage_output or not isinstance(stage_output, dict):
             raise ValidationError(
                 f"缺少变体生成依赖: {field_name or logical_name} / fallback {fallback_stage_name}"
             )
@@ -6742,6 +6932,24 @@ class OriginalScriptPipeline:
             return stage_output
 
         return stage_output
+
+    def _load_variant_run_artifact_json(
+        self,
+        record_id: str,
+        product_code: str,
+        logical_name: str,
+    ) -> Optional[Dict[str, Any]]:
+        column_name = VARIANT_RUN_ARTIFACT_LOOKUP.get(logical_name)
+        if not column_name:
+            return None
+        value = self.storage.get_latest_run_artifact_json(
+            record_id=record_id,
+            product_code=product_code,
+            column_name=column_name,
+        )
+        if not value or not isinstance(value, dict):
+            return None
+        return value
 
     def _selected_script_indexes_for_rerun(self) -> set:
         return set(self.script_rerun_indexes or DEFAULT_VARIANT_SCRIPT_INDEXES)

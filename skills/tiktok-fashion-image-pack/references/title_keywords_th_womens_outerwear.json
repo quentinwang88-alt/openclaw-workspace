@@ -1,0 +1,92 @@
+{
+  "leather_jacket": {
+    "series_name_cn": "皮衣系列",
+    "series_code_prefix": "E",
+    "core_terms": ["เสื้อแจ็คเก็ตหนัง PU ผู้หญิง", "เสื้อแจ็คเก็ตหนังผู้หญิง"],
+    "material_terms": ["หนัง PU", "ลุคหนัง"],
+    "fit_terms": ["ทรงสั้น", "ทรงครอป", "ทรงหลวม"],
+    "structure_terms": ["กระดุมหน้า", "มีกระเป๋า"],
+    "style_terms": ["สไตล์เกาหลี", "ลุคมินิมอล", "ใส่ง่าย"]
+  },
+  "suede_jacket": {
+    "series_name_cn": "麂皮外套系列",
+    "series_code_prefix": "S",
+    "core_terms": ["เสื้อแจ็คเก็ตหนังกลับผู้หญิง", "เสื้อแจ็คเก็ตผ้าหนังกลับ"],
+    "material_terms": ["ผ้าหนังกลับ", "ผิวสัมผัสนุ่ม"],
+    "fit_terms": ["ทรงหลวม", "ทรงสั้น"],
+    "structure_terms": ["กระดุมหน้า", "มีกระเป๋า"],
+    "style_terms": ["ลุคมินิมอล", "ใส่ง่ายทุกวัน"]
+  },
+  "faux_fur_jacket": {
+    "series_name_cn": "皮草系列",
+    "series_code_prefix": "C",
+    "core_terms": ["เสื้อแจ็คเก็ตขนเฟอร์ผู้หญิง", "เสื้อขนเฟอร์ผู้หญิง"],
+    "material_terms": ["ขนฟู", "เนื้อนุ่ม"],
+    "fit_terms": ["ทรงสั้น", "ทรงหลวม"],
+    "structure_terms": [],
+    "style_terms": ["อบอุ่น", "แมตช์ง่าย", "สไตล์เกาหลี"]
+  },
+  "puffer_jacket": {
+    "series_name_cn": "短款棉服系列",
+    "series_code_prefix": "P",
+    "core_terms": ["เสื้อแจ็คเก็ตบุนวมผู้หญิง", "เสื้อบุนวมผู้หญิง"],
+    "material_terms": ["บุนวม"],
+    "fit_terms": ["ทรงสั้น", "ทรงครอป", "แขนยาว"],
+    "structure_terms": ["กระดุมหน้า", "ซิปหน้า"],
+    "style_terms": ["อบอุ่น", "ใส่อากาศเย็น", "สไตล์เกาหลี"]
+  },
+  "down_jacket": {
+    "series_name_cn": "羽绒服系列",
+    "series_code_prefix": "D",
+    "core_terms": ["เสื้อกันหนาวขนเป็ดผู้หญิง", "เสื้อแจ็คเก็ตขนเป็ดผู้หญิง"],
+    "material_terms": ["ขนเป็ด"],
+    "fit_terms": ["ตัวยาว", "ทรงหลวม"],
+    "structure_terms": ["ซิปหน้า"],
+    "style_terms": ["อบอุ่น", "น้ำหนักเบา", "สำหรับเดินทาง"]
+  },
+  "bomber_jacket": {
+    "series_name_cn": "夹克外套系列",
+    "series_code_prefix": "J",
+    "core_terms": ["เสื้อแจ็คเก็ตผู้หญิง"],
+    "material_terms": [],
+    "fit_terms": ["ทรงหลวม", "แขนยาว"],
+    "structure_terms": ["กระดุมหน้า", "ขอบจั๊ม"],
+    "style_terms": ["ใส่ง่าย", "สไตล์เกาหลี"]
+  },
+  "utility_jacket": {
+    "series_name_cn": "夹克外套系列",
+    "series_code_prefix": "J",
+    "core_terms": ["เสื้อแจ็คเก็ตผู้หญิง"],
+    "material_terms": ["ผ้า twill"],
+    "fit_terms": ["ทรงหลวม", "แขนยาว"],
+    "structure_terms": ["กระดุมหน้า", "มีกระเป๋า"],
+    "style_terms": ["ใส่ง่าย", "สไตล์เกาหลี"]
+  },
+  "knit_top": {
+    "series_name_cn": "打底毛衣系列",
+    "series_code_prefix": "K",
+    "core_terms": ["เสื้อสเวตเตอร์ผู้หญิง", "เสื้อถักผู้หญิง"],
+    "material_terms": ["ผ้าถัก", "นุ่มสบาย"],
+    "fit_terms": ["แขนยาว", "ทรงเข้ารูป", "ทรงหลวม"],
+    "structure_terms": ["คอกลม", "คอเต่า"],
+    "style_terms": ["ใส่เป็นเสื้อด้านใน", "ใส่ได้ทุกวัน"]
+  },
+  "cardigan": {
+    "series_name_cn": "打底毛衣系列",
+    "series_code_prefix": "K",
+    "core_terms": ["เสื้อคาร์ดิแกนผู้หญิง", "เสื้อถักผู้หญิง"],
+    "material_terms": ["ผ้าถัก", "นุ่มสบาย"],
+    "fit_terms": ["แขนยาว", "ทรงหลวม"],
+    "structure_terms": ["คอเปิด", "กระดุมหน้า"],
+    "style_terms": ["ใส่ได้ทุกวัน", "สไตล์เกาหลี"]
+  },
+  "unknown_womens_top": {
+    "series_name_cn": "女装外套系列",
+    "series_code_prefix": "U",
+    "core_terms": ["เสื้อแจ็คเก็ตผู้หญิง", "เสื้อคลุมผู้หญิง"],
+    "material_terms": [],
+    "fit_terms": ["ทรงหลวม", "ทรงสั้น"],
+    "structure_terms": [],
+    "style_terms": ["สไตล์เกาหลี", "ใส่ง่าย"]
+  }
+}

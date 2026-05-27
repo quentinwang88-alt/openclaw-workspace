@@ -1370,6 +1370,7 @@ def render_internal_script(script_json: Dict[str, Any]) -> str:
     storyboard = script_json.get("storyboard", []) or []
     constraints = script_json.get("execution_constraints", {}) or {}
     opening_design = script_json.get("opening_design", {}) or {}
+    scene_seed = script_json.get("scene_seed") if isinstance(script_json.get("scene_seed"), dict) else {}
     content_id = str(script_json.get("content_id", "") or "").strip()
 
     storyboard_lines = []
@@ -1432,6 +1433,17 @@ def render_internal_script(script_json: Dict[str, Any]) -> str:
     return "\n\n".join(
         [
             f"【脚本ID】\n- {content_id}" if content_id else "",
+            "【生活动机】\n"
+            + _stringify_lines(
+                [
+                    f"- 片刻：{scene_seed.get('moment', '')}",
+                    f"- 小张力：{scene_seed.get('small_tension', '')}",
+                    f"- 小动作：{scene_seed.get('micro_behavior', '')}",
+                    f"- 确认感：{scene_seed.get('payoff_feeling', '')}",
+                ]
+            )
+            if any(str(scene_seed.get(key, "") or "").strip() for key in ("moment", "small_tension", "micro_behavior", "payoff_feeling"))
+            else "",
             "【开头设计】\n"
             + _stringify_lines(
                 [

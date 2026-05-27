@@ -4,12 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import os
 import sqlite3
 import sys
+import time
+from contextlib import contextmanager
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Tuple
+from types import SimpleNamespace
+from typing import Dict, List, Optional, Tuple
 
 
 SKILL_DIR = Path(__file__).parent.absolute()
@@ -46,6 +50,8 @@ DEFAULT_METADATA_DB_PATH = os.environ.get(
     "SHORT_VIDEO_AUTO_PUBLISH_DB_PATH",
     str(Path.home() / ".openclaw" / "shared" / "data" / "short_video_auto_publish.sqlite3"),
 )
+DEFAULT_LOCK_FILE = os.environ.get("SCRIPT_RUN_MANAGER_SYNC_LOCK_FILE", "/tmp/script_run_manager_sync.pid")
+PATCHABLE_TARGET_STATUSES = {"", "待处理", "待开始", "未开始", "失败", "阻塞"}
 
 
 def resolve_feishu_config(feishu_url: str) -> Tuple[str, str]:
@@ -97,7 +103,7 @@ def load_metadata_lookup(db_path: str) -> Dict[tuple, Dict[str, str]]:
         rows = conn.execute(
             """
             SELECT source_record_id, script_slot, script_id, store_id, product_id, parent_slot,
-                   direction_label, variant_strength, short_video_title
+                   direction_label, variant_strength, short_video_title, canonical_script_key
             FROM script_metadata
             """
         ).fetchall()
@@ -114,6 +120,7 @@ def load_metadata_lookup(db_path: str) -> Dict[tuple, Dict[str, str]]:
             "direction_label": str(row["direction_label"] or ""),
             "variant_strength": str(row["variant_strength"] or ""),
             "short_video_title": str(row["short_video_title"] or ""),
+            "canonical_script_key": str(row["canonical_script_key"] or ""),
         }
         for row in rows
     }
@@ -129,6 +136,131 @@ def target_records_by_script_id(records: List, mapping: Dict[str, object]) -> Di
         if script_id and script_id not in result:
             result[script_id] = record
     return result
+
+
+@contextmanager
+def process_lock(lock_file: str):
+    path = Path(lock_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a+", encoding="utf-8") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError(f"同步任务已在运行中，已跳过本次启动: lock={lock_file}") from exc
+        handle.seek(0)
+        handle.truncate()
+        handle.write(f"{os.getpid()} {int(time.time())}\n")
+        handle.flush()
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            handle.truncate()
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _record_field_text(record: object, field_name: Optional[str]) -> str:
+    if not field_name:
+        return ""
+    return str(record.fields.get(field_name) or "").strip()
+
+
+def build_target_record_indexes(records: List, mapping: Dict[str, object]) -> Dict[str, Dict[str, object]]:
+    indexes: Dict[str, Dict[str, object]] = {
+        "script_id": {},
+        "task_name": {},
+        "internal_script_key": {},
+    }
+    for record in records:
+        for index_name in indexes:
+            field_name = mapping.get(index_name)
+            value = _record_field_text(record, field_name)
+            if value and value not in indexes[index_name]:
+                indexes[index_name][value] = record
+    return indexes
+
+
+def find_existing_target(task, indexes: Dict[str, Dict[str, object]]) -> Tuple[Optional[object], str]:
+    if task.script_id and task.script_id in indexes["script_id"]:
+        return indexes["script_id"][task.script_id], "脚本ID"
+    internal_script_key = getattr(task, "internal_script_key", "") or task.task_name
+    if internal_script_key and internal_script_key in indexes["internal_script_key"]:
+        return indexes["internal_script_key"][internal_script_key], "内部脚本键"
+    if task.task_name and task.task_name in indexes["task_name"]:
+        return indexes["task_name"][task.task_name], "任务名"
+    return None, ""
+
+
+def can_update_existing_target(record: object, mapping: Dict[str, object]) -> bool:
+    status_field = mapping.get("task_status")
+    if not status_field:
+        return False
+    status = _record_field_text(record, status_field)
+    return status in PATCHABLE_TARGET_STATUSES
+
+
+def build_existing_target_updates(
+    existing_target: object,
+    fields: Dict[str, object],
+    mapping: Dict[str, object],
+    *,
+    allow_full_patch: bool,
+) -> Dict[str, object]:
+    updates: Dict[str, object] = {}
+    prompt_field = mapping.get("prompt")
+    if prompt_field and (
+        allow_full_patch
+        or "【脚本ID】" not in str(existing_target.fields.get(prompt_field) or "")
+    ):
+        updates[prompt_field] = fields[prompt_field]
+
+    for logical_name in ("script_id", "internal_script_key", "task_name"):
+        field_name = mapping.get(logical_name)
+        if field_name and fields.get(field_name) and (allow_full_patch or not existing_target.fields.get(field_name)):
+            updates[field_name] = fields[field_name]
+
+    if fields.get(mapping.get("reference_free")) == "是" and can_patch_reference_free(existing_target, mapping):
+        updates[mapping["reference_free"]] = "是"
+
+    duration_field = mapping.get("video_duration")
+    if duration_field and fields.get(duration_field) and (allow_full_patch or not existing_target.fields.get(duration_field)):
+        updates[duration_field] = fields[duration_field]
+    return updates
+
+
+def remember_target_fields(indexes: Dict[str, Dict[str, object]], record: object, fields: Dict[str, object], mapping: Dict[str, object]) -> None:
+    remembered_record = record or SimpleNamespace(record_id="", fields=dict(fields))
+    for index_name in indexes:
+        field_name = mapping.get(index_name)
+        value = str(fields.get(field_name) or "").strip() if field_name else ""
+        if value and value not in indexes[index_name]:
+            indexes[index_name][value] = remembered_record
+
+
+def resolve_task_action(task, indexes: Dict[str, Dict[str, object]], mapping: Dict[str, object]) -> str:
+    existing_target, reason = find_existing_target(task, indexes)
+    if existing_target is None:
+        return "create"
+    if reason == "脚本ID":
+        return "skip(script_id exists)"
+    if can_update_existing_target(existing_target, mapping):
+        return f"update({reason})"
+    return f"skip({reason} exists)"
+
+
+def existing_target_conflict_reason(task, existing_target: object, existing_reason: str, mapping: Dict[str, object]) -> str:
+    if existing_reason == "脚本ID":
+        return ""
+    script_field = mapping.get("script_id")
+    target_script_id = _record_field_text(existing_target, script_field)
+    if target_script_id and target_script_id != task.script_id:
+        return f"{existing_reason}命中旧记录，但脚本ID不一致: target={target_script_id}, expected={task.script_id}"
+
+    prompt_field = mapping.get("prompt")
+    target_prompt = _record_field_text(existing_target, prompt_field)
+    if "【脚本ID】" in target_prompt and task.script_id and task.script_id not in target_prompt:
+        return f"{existing_reason}命中旧记录，但提示词脚本ID不一致: expected={task.script_id}"
+    return ""
 
 
 def can_patch_reference_free(record: object, mapping: Dict[str, object]) -> bool:
@@ -178,12 +310,19 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=100, help="写入批大小，默认 100")
     parser.add_argument("--dry-run", action="store_true", help="只预览，不落表")
     parser.add_argument("--metadata-db-path", default=DEFAULT_METADATA_DB_PATH, help="脚本主数据 SQLite 路径")
+    parser.add_argument("--lock-file", default=DEFAULT_LOCK_FILE, help="进程锁文件，避免定时/手动同步并发执行")
     parser.add_argument(
         "--include-publish-metadata",
         action="store_true",
         help="额外把短视频标题/店铺ID/产品ID/所属母版/母版方向/变体强度回写到运行表；默认只写最小字段",
     )
     args = parser.parse_args()
+
+    with process_lock(args.lock_file):
+        _main_with_lock(args)
+
+
+def _main_with_lock(args: argparse.Namespace) -> None:
 
     print(f"🚀 开始执行同步任务 | mode={args.mode}")
 
@@ -213,7 +352,7 @@ def main() -> None:
 
     source_records = source_client.list_records(page_size=100)
     target_records = target_client.list_records(page_size=100)
-    target_by_script_id = target_records_by_script_id(target_records, target_mapping)
+    target_indexes = build_target_record_indexes(target_records, target_mapping)
 
     sync_tasks = build_sync_tasks(
         source_records,
@@ -235,7 +374,8 @@ def main() -> None:
     if sync_tasks:
         print("\n🧩 任务预览:")
         for task in sync_tasks[: min(len(sync_tasks), 10)]:
-            print(f"   - {task.task_name} | source_record_id={task.source_record_id} | action=create")
+            action = resolve_task_action(task, target_indexes, target_mapping)
+            print(f"   - {task.task_name} | source_record_id={task.source_record_id} | action={action}")
 
     if args.dry_run:
         print("\n🔍 dry-run 模式，不执行写入。")
@@ -250,12 +390,43 @@ def main() -> None:
             source_record = next((record for record in source_records if record.record_id == source_record_id), None)
             source_fields = source_record.fields if source_record else {}
             prepared_creates = []
+            patched_for_source = 0
+            existing_for_source = 0
+            unresolved_tasks = []
             for task in source_tasks:
                 fields = build_target_fields(
                     task,
                     target_mapping,
                     include_publish_metadata=args.include_publish_metadata,
                 )
+                existing_target, existing_reason = find_existing_target(task, target_indexes)
+                if existing_target is not None:
+                    if not getattr(existing_target, "record_id", ""):
+                        print(f"   🔁 本轮内已准备创建，跳过重复创建 | task={task.task_name} | script_id={task.script_id}")
+                        existing_for_source += 1
+                        continue
+                    conflict_reason = existing_target_conflict_reason(task, existing_target, existing_reason, target_mapping)
+                    if conflict_reason:
+                        unresolved_tasks.append(f"{task.script_id}: {conflict_reason}")
+                        print(f"   ⚠️ {conflict_reason} | task={task.task_name}")
+                        continue
+                    allow_full_patch = existing_reason != "脚本ID" and can_update_existing_target(existing_target, target_mapping)
+                    existing_updates = build_existing_target_updates(
+                        existing_target,
+                        fields,
+                        target_mapping,
+                        allow_full_patch=allow_full_patch,
+                    )
+                    if existing_updates:
+                        target_client.update_record_fields(existing_target.record_id, existing_updates)
+                        patched_names = "、".join(existing_updates.keys())
+                        remember_target_fields(target_indexes, existing_target, {**fields, **existing_updates}, target_mapping)
+                        print(f"   🔁 {existing_reason} 已存在，已补写{patched_names} | task={task.task_name} | script_id={task.script_id}")
+                        patched_for_source += 1
+                    else:
+                        print(f"   🔁 {existing_reason} 已存在，跳过重复创建 | task={task.task_name} | script_id={task.script_id}")
+                        existing_for_source += 1
+                    continue
                 if target_mapping.get("reference_images"):
                     fields[target_mapping["reference_images"]] = transfer_reference_images(
                         source_client,
@@ -263,25 +434,11 @@ def main() -> None:
                         task.reference_images,
                         image_cache,
                     )
-                existing_target = target_by_script_id.get(task.script_id)
-                if existing_target is not None:
-                    existing_updates = {}
-                    prompt_field = target_mapping.get("prompt")
-                    if prompt_field and "【脚本ID】" not in str(existing_target.fields.get(prompt_field) or ""):
-                        existing_updates[prompt_field] = fields[prompt_field]
-                    if fields.get(target_mapping.get("reference_free")) == "是" and can_patch_reference_free(existing_target, target_mapping):
-                        existing_updates[target_mapping["reference_free"]] = "是"
-                    duration_field = target_mapping.get("video_duration")
-                    if duration_field and fields.get(duration_field) and not existing_target.fields.get(duration_field):
-                        existing_updates[duration_field] = fields[duration_field]
-                    if existing_updates:
-                        target_client.update_record_fields(existing_target.record_id, existing_updates)
-                        patched_names = "、".join(existing_updates.keys())
-                        print(f"   🔁 script_id={task.script_id} 已存在，已补写{patched_names}")
-                    else:
-                        print(f"   🔁 script_id={task.script_id} 已存在，跳过重复创建")
-                    continue
                 prepared_creates.append({"fields": fields})
+                remember_target_fields(target_indexes, None, fields, target_mapping)
+
+            if unresolved_tasks:
+                raise RuntimeError("；".join(unresolved_tasks[:5]))
 
             for batch in batch_records(prepared_creates, batch_size=args.batch_size):
                 if not batch:
@@ -298,9 +455,11 @@ def main() -> None:
                 source_record_id,
                 build_source_success_fields(
                     source_mapping,
-                    synced_count=len(source_tasks),
+                    synced_count=len(prepared_creates),
                     synced_at=synced_at,
                     sync_scope=summarize_sync_scope(source_tasks),
+                    patched_count=patched_for_source,
+                    existing_count=existing_for_source,
                     cleared_legacy=legacy_enabled,
                     cleared_master=master_enabled,
                     cleared_variant=variant_enabled,

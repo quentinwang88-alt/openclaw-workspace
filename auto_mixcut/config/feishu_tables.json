@@ -1,0 +1,37 @@
+{
+  "product_task_table": {
+    "name": "商品内容任务表",
+    "url": "https://gcngopvfvo0q.feishu.cn/wiki/PO2bwgrGaiOPcnkxXI8cq3fsnzg?table=tblIy2XkKc2144Pm&view=vew84aAgfU",
+    "app_token": "X7s0bxMAsacG6FsZyFuc725On5e",
+    "table_id": "tblIy2XkKc2144Pm",
+    "view_id": "vew84aAgfU"
+  },
+  "product_anchor_table": {
+    "name": "商品锚点卡确认队列",
+    "url": "https://gcngopvfvo0q.feishu.cn/wiki/V35wwjDLYiMFeTkiVFPc7SM5nvd?table=tbl2QRHwF7g9CmaF&view=vewv752AHQ",
+    "app_token": "IHhGbKws0akToRsmEfRc2vPvnsb",
+    "table_id": "tbl2QRHwF7g9CmaF",
+    "view_id": "vewv752AHQ"
+  },
+  "asset_upload_table": {
+    "name": "商品素材上传表",
+    "url": "https://gcngopvfvo0q.feishu.cn/wiki/KhzowIkkbi4Di6kOQRDcvd1NnYe?table=tblBj3UCaBRicSKS&view=vewcSyAc8S",
+    "app_token": "TAHCb5acva0osEsP8bOcWabIndd",
+    "table_id": "tblBj3UCaBRicSKS",
+    "view_id": "vewcSyAc8S"
+  },
+  "segment_review_table": {
+    "name": "人工复核队列表",
+    "url": "https://gcngopvfvo0q.feishu.cn/wiki/Hha6wcSJKidWbCkNkfocTTINnGg?table=tblEqdnodcuJsrut&view=vewfDtzs9g",
+    "app_token": "RZ0Mbf7lxaSkr3sstQHc62Whn0b",
+    "table_id": "tblEqdnodcuJsrut",
+    "view_id": "vewfDtzs9g"
+  },
+  "output_qc_table": {
+    "name": "成片质检表",
+    "url": "https://gcngopvfvo0q.feishu.cn/wiki/VjuzwPingiuTWxk8yAjc4gQvn8f?table=tbl43RnlocUGin5a&view=vewiKniVVC",
+    "app_token": "B7Nbb4khnakuIGsTlRacjMi9nzf",
+    "table_id": "tbl43RnlocUGin5a",
+    "view_id": "vewiKniVVC"
+  }
+}

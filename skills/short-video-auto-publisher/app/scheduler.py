@@ -14,9 +14,6 @@ from app.db import AutoPublishDB, default_video_dir, is_nurture_candidate
 from app.models import AccountConfig
 from app.publishers import BasePublishAdapter, DryRunPublishAdapter
 
-MAX_AUTO_RETRY_FAILURES = 2
-
-
 RUN_MANAGER_FIELD_ALIASES: Dict[str, List[str]] = {
     "canonical_script_key": ["内部脚本键", "稳定脚本键", "canonical_script_key"],
     "script_id": ["脚本ID"],
@@ -247,11 +244,8 @@ def schedule_slots(db: AutoPublishDB, publisher: BasePublishAdapter, now: Option
         for candidate in candidates:
             if prefer_nurture and has_nurture_candidate and not is_nurture_candidate(candidate):
                 break
-            # One original failed publish plus two automatic retries is the maximum.
-            if db.count_failed_publish_attempts(candidate.canonical_script_key) > MAX_AUTO_RETRY_FAILURES:
-                continue
             if not is_nurture_candidate(candidate):
-                if db.has_recent_product_conflict(str(slot["account_id"] or ""), candidate.product_id, target_time, hours=72):
+                if db.has_recent_product_conflict(str(slot["account_id"] or ""), candidate.product_id, target_time, hours=24):
                     continue
                 if db.has_recent_family_conflict(str(slot["store_id"] or ""), candidate.content_family_key, target_time, hours=48):
                     continue

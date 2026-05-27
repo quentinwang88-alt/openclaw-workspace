@@ -8,6 +8,7 @@ import sqlite3
 from pathlib import Path
 from typing import Dict, Iterable, List
 
+from src.db_compat import connect_sqlite_or_mysql, database_exists
 from src.market_insight_models import (
     MarketDirectionCard,
     MarketInsightProductRunState,
@@ -17,9 +18,32 @@ from src.market_insight_models import (
 from src.models import StorePositioningCard
 
 
+MARKET_INSIGHT_TABLES = {
+    "market_direction_cards",
+    "market_insight_product_snapshots",
+    "market_insight_product_tags",
+    "market_insight_runs",
+    "store_positioning_cards",
+}
+
+
 class MarketInsightDatabase(object):
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, database_url: str = ""):
         self.db_path = Path(db_path)
+        self.database_url = database_url
+
+    def _connect(self, timeout: int = 30):
+        return connect_sqlite_or_mysql(
+            self.db_path,
+            database_url=self.database_url,
+            env_name="HERMES_MARKET_INSIGHT_DATABASE_URL",
+            table_prefix="hmi__",
+            table_names=MARKET_INSIGHT_TABLES,
+            timeout=timeout,
+        )
+
+    def _exists(self) -> bool:
+        return database_exists(self.db_path, self.database_url, env_name="HERMES_MARKET_INSIGHT_DATABASE_URL")
 
     def upsert_direction_card_run(
         self,
@@ -47,7 +71,7 @@ class MarketInsightDatabase(object):
         cards = list(direction_cards)
         run_id = str(run_state.artifacts_dir)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._connect() as conn:
             self._ensure_schema(conn)
             conn.execute(
                 """
@@ -431,9 +455,9 @@ class MarketInsightDatabase(object):
             conn.commit()
 
     def load_latest_direction_cards(self, country: str, category: str) -> List[Dict[str, object]]:
-        if not self.db_path.exists():
+        if not self._exists():
             return []
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._connect() as conn:
             self._ensure_schema(conn)
             row = conn.execute(
                 """
@@ -539,9 +563,9 @@ class MarketInsightDatabase(object):
         return cards
 
     def list_recent_completed_runs(self, country: str, category: str, limit: int = 3) -> List[Dict[str, object]]:
-        if not self.db_path.exists():
+        if not self._exists():
             return []
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._connect() as conn:
             self._ensure_schema(conn)
             rows = conn.execute(
                 """
@@ -573,9 +597,9 @@ class MarketInsightDatabase(object):
         return results
 
     def load_direction_cards_for_run(self, run_id: str) -> List[Dict[str, object]]:
-        if not self.db_path.exists():
+        if not self._exists():
             return []
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._connect() as conn:
             self._ensure_schema(conn)
             results = conn.execute(
                 """
@@ -662,9 +686,9 @@ class MarketInsightDatabase(object):
         return cards
 
     def load_latest_scored_products(self, country: str, category: str) -> List[Dict[str, object]]:
-        if not self.db_path.exists():
+        if not self._exists():
             return []
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._connect() as conn:
             self._ensure_schema(conn)
             row = conn.execute(
                 """
@@ -756,9 +780,9 @@ class MarketInsightDatabase(object):
         return payload
 
     def load_scored_products_for_run(self, run_id: str) -> List[Dict[str, object]]:
-        if not self.db_path.exists():
+        if not self._exists():
             return []
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._connect() as conn:
             self._ensure_schema(conn)
             results = conn.execute(
                 """
@@ -848,7 +872,7 @@ class MarketInsightDatabase(object):
             if str(card.store_id or "").strip() or str(card.card_name or "").strip()
         ]
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._connect() as conn:
             self._ensure_schema(conn)
             card_keys = [
                 self._store_positioning_key(card.store_id or card.card_name, card.country, card.category)
@@ -955,11 +979,11 @@ class MarketInsightDatabase(object):
             str(card_name or "").strip(),
         }
         candidates = {item for item in candidates if item}
-        if not candidates or not self.db_path.exists():
+        if not candidates or not self._exists():
             return StorePositioningCard()
 
         placeholders = ",".join(["?"] * len(candidates))
-        with sqlite3.connect(str(self.db_path)) as conn:
+        with self._connect() as conn:
             self._ensure_schema(conn)
             rows = conn.execute(
                 """

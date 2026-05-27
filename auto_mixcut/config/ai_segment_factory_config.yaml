@@ -1,0 +1,230 @@
+# AI 片段素材工厂 V1.0 配置
+# 片段类型决定风险和镜位，类目只负责禁用项，商品锚点负责专属约束
+
+global_rules:
+  output:
+    duration_seconds: [2, 5]
+    aspect_ratio: "9:16"
+    single_shot: true
+    no_text: true
+    no_subtitle: true
+    no_logo: true
+    no_watermark: true
+    no_bgm: true
+    style: "natural TikTok UGC"
+    avoid:
+      - "复杂剧情"
+      - "多镜头剪辑"
+      - "夸张广告感"
+      - "硬 CTA"
+      - "品牌标识"
+      - "过度棚拍"
+
+segment_type_rules:
+  home_lifestyle:
+    risk_level: low
+    default_roles: [scene, ending]
+    possible_roles: [scene, ending]
+    core_allowed: false
+    anchor_strength: soft
+    require_reference_image: false
+    preferred_generation_type: text_to_video
+    batch_friendly: true
+    prompt:
+      cn: "居家生活场景"
+      description: "卧室、梳妆台、衣柜前、窗边自然光、床边、空调房，自然居家动作，真实日常感。"
+      scene_default: "卧室、梳妆台、衣柜前、窗边自然光、空调房"
+      action_default: "自然居家动作，整理东西、看镜子、走过画面"
+
+  seasonal_scene:
+    risk_level: low
+    default_roles: [scene, ending]
+    possible_roles: [scene, ending]
+    core_allowed: false
+    anchor_strength: soft
+    require_reference_image: false
+    preferred_generation_type: text_to_video
+    batch_friendly: true
+    prompt:
+      cn: "季节/场景氛围"
+      description: "夏日防晒、空调房、冬季户外、旅行街景、咖啡店、商场，自然生活氛围。"
+      scene_default: "户外街景、咖啡店、商场、旅行场景"
+      action_default: "自然行走、逛街、喝咖啡、户外休息"
+
+  before_go_out:
+    risk_level: medium_low
+    default_roles: [scene, ending]
+    possible_roles: [scene, result, ending]
+    core_allowed: conditional
+    anchor_strength: soft
+    require_reference_image: false
+    preferred_generation_type: text_to_video
+    batch_friendly: true
+    prompt:
+      cn: "出门前场景"
+      description: "玄关、门口、拿包、整理发型、整理衣服、戴帽子、披围巾。"
+      scene_default: "玄关、门口、全身镜前自然光"
+      action_default: "整理发型、整理衣服、拿包、戴帽子、披围巾"
+
+  mirror_routine:
+    risk_level: medium_low
+    default_roles: [scene, ending]
+    possible_roles: [scene, result, ending]
+    core_allowed: conditional
+    anchor_strength: soft
+    require_reference_image: false
+    preferred_generation_type: text_to_video
+    batch_friendly: true
+    prompt:
+      cn: "镜前整理"
+      description: "女生在镜前整理头发、耳饰、衣服、围巾帽子，真实日常风格。"
+      scene_default: "自然光卧室镜前或梳妆台前"
+      action_default: "轻轻整理头发、耳饰、衣服或配饰，动作自然不夸张"
+
+  product_display:
+    risk_level: medium
+    default_roles: [hero, detail, ending]
+    possible_roles: [hero, detail, scene, ending]
+    core_allowed: true
+    anchor_strength: strict
+    require_reference_image: true
+    preferred_generation_type: image_to_video
+    batch_friendly: true
+    prompt:
+      cn: "商品桌面展示"
+      description: "商品放在干净桌面、梳妆台、柔和布面或包装旁边，镜头轻微推进，展示整体形状、材质和氛围。"
+      scene_default: "干净桌面、梳妆台、柔和布面或包装旁边"
+      action_default: "镜头轻微推进商品，展示整体造型和材质质感"
+
+  handheld_product:
+    risk_level: medium
+    default_roles: [hero, detail]
+    possible_roles: [hero, detail, scene, ending]
+    core_allowed: true
+    anchor_strength: strict
+    require_reference_image: true
+    preferred_generation_type: image_to_video
+    batch_friendly: medium
+    prompt:
+      cn: "手拿商品"
+      description: "手拿商品靠近镜头，轻微转动，展示整体形状和质感。"
+      scene_default: "室内自然光，纯色背景或柔和布景"
+      action_default: "手拿商品靠近镜头，轻轻转动展示不同角度"
+
+  tryon_result:
+    risk_level: high
+    default_roles: [result, hero]
+    possible_roles: [result, hero, scene, ending]
+    core_allowed: true
+    anchor_strength: strict
+    require_reference_image: true
+    preferred_generation_type: image_to_video
+    require_frame_consistency: true
+    require_tier3_review_for_core: true
+    batch_friendly: low
+    prompt:
+      cn: "佩戴/上身效果"
+      description: "发饰戴在头发上、耳饰在耳侧、女装上身、帽子围巾佩戴效果。"
+      scene_default: "自然光室内或户外，干净背景"
+      action_default: "展示佩戴/上身效果，轻微转头或动作展示商品"
+
+  detail_atmosphere:
+    risk_level: high
+    default_roles: [detail]
+    possible_roles: [detail, scene, ending]
+    core_allowed: true
+    anchor_strength: strict
+    require_reference_image: true
+    preferred_generation_type: image_to_video
+    require_frame_consistency: true
+    require_tier3_review_for_core: true
+    batch_friendly: low
+    prompt:
+      cn: "细节氛围"
+      description: "局部近景、材质、珍珠、水钻、面料、纹理、光泽。"
+      scene_default: "柔和自然光近景，浅景深突出材质"
+      action_default: "特写商品局部，光线在材质表面流动"
+
+# 类目轻量禁用项
+category_light_rules:
+  hair_accessories:
+    forbidden:
+      - "不能变成发圈"
+      - "不能变成边夹"
+      - "不能变成耳饰"
+      - "不能错误佩戴"
+      - "不能丢失核心装饰"
+      - "不能夸张拉扯头发"
+  earrings:
+    forbidden:
+      - "不能耳夹变耳钉"
+      - "不能变成项链或发饰"
+      - "不能结构明显变化"
+      - "不能耳侧位置错误"
+      - "不能单只变成多只"
+  womens_top:
+    forbidden:
+      - "不能改变衣长"
+      - "不能改变版型"
+      - "不能改变领口、袖口、下摆"
+      - "不能变成其他服装品类"
+      - "不能明显改变颜色和面料观感"
+  scarf_hat:
+    forbidden:
+      - "不能季节错位"
+      - "不能围巾变成衣服"
+      - "不能帽子款式明显变化"
+      - "不能材质体积明显不对"
+      - "不能戴法完全错误"
+
+# effective_roles 计算规则
+effective_role_rules:
+  ai_generated:
+    - condition:
+        anchor_match_level: strict_pass
+        frame_consistency_status: pass
+        risk_level: low
+        product_visibility_in: [high, medium]
+        mixcut_usability: yes
+      roles: "from_tag_and_segment_type_rules"
+
+    - condition:
+        anchor_match_level: soft_pass
+        risk_level: low
+        mixcut_usability: yes
+      roles: [scene, ending]
+
+    - condition:
+        anchor_match_level: uncertain
+      roles: [scene, ending]
+
+    - condition:
+        anchor_match_level: fail
+      roles: []
+
+# 入库分级
+export_grading:
+  A_core:
+    label: "核心可用"
+    description: "可进入 hero/detail/result"
+    conditions:
+      - anchor_match_level: strict_pass
+        frame_consistency_status: pass
+        product_visibility_in: [high, medium]
+  B_scene:
+    label: "场景可用"
+    description: "只能进入 scene/ending"
+    conditions:
+      - anchor_match_level: soft_pass
+      - anchor_match_level: uncertain
+  C_reference:
+    label: "风格参考"
+    description: "不进混剪，只做风格参考"
+    conditions:
+      - anchor_match_level: uncertain
+        needs_human_review: true
+  D_reject:
+    label: "废弃"
+    description: "不可用"
+    conditions:
+      - anchor_match_level: fail

@@ -20,6 +20,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Import standardized product snapshots into agent DB tables.")
     parser.add_argument("--feishu-url", required=True, help="标准化商品快照表 URL")
     parser.add_argument("--db-path", default=str(ROOT / "artifacts" / "agent_runtime.sqlite3"))
+    parser.add_argument("--database-url", default="", help="Optional MySQL/RDS URL. Env HERMES_AGENT_DATABASE_URL or LIKEU_AI_DATABASE_URL also works.")
     parser.add_argument("--agent", choices=["market", "selection", "both"], default="both")
     parser.add_argument("--crawl-batch-id", default="")
     parser.add_argument("--market-id", default="")
@@ -43,7 +44,7 @@ def main() -> int:
         limit=args.limit or None,
     )
 
-    store = AgentDataStore(Path(args.db_path))
+    store = AgentDataStore(Path(args.db_path), database_url=args.database_url)
     agents = []
     if args.agent in {"market", "both"}:
         agents.append(MARKET_AGENT)

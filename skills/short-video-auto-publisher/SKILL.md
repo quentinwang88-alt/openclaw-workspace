@@ -93,7 +93,7 @@ python3 /Users/likeu3/.openclaw/workspace/skills/short-video-auto-publisher/run_
 
 当前只保留两条硬规则：
 
-- 同账号同产品 72 小时不重复
+- 同账号同产品 24 小时不重复
 - 同店铺同内容家族 48 小时不重复
 
 调度方式：

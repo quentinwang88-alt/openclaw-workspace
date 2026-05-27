@@ -103,6 +103,61 @@ profiles:
         - "耳环被头发遮住但人物仍在展示"
         - "表情像硬凹精致 pose"
 
+      scene_seed_brief:
+        enabled: true
+        seed_goal: "让人物像在镜前确认脸侧细节是否补完整，而不是静物展示耳环"
+        strategy_by_script_role:
+          S1:
+            seed_mode: "casual_self_check"
+            moment_bias: "随手检查耳侧，不刻意分享"
+            tension_bias: "轻微犹豫耳侧是否空"
+            camera_gaze_bias: "少，只在中后段短暂出现"
+            payoff_bias: "自然确认刚好补完整体"
+          S2:
+            seed_mode: "balanced_share"
+            moment_bias: "出门或拍照前确认整体"
+            tension_bias: "耳饰存在感是否刚好"
+            camera_gaze_bias: "中，后半段有朋友式轻分享"
+            payoff_bias: "亲和地分享耳侧细节刚刚好"
+          S3:
+            seed_mode: "problem_resolved"
+            moment_bias: "发现穿搭或脸侧缺少重点"
+            tension_bias: "脸侧空白或比例问题被解决"
+            camera_gaze_bias: "中低，以镜中确认为主"
+            payoff_bias: "这个确实把脸侧补上了"
+          S4:
+            seed_mode: "visual_hook_first"
+            moment_bias: "首镜先给更明显的耳侧视觉触发"
+            tension_bias: "第一眼有亮点但不能夸张"
+            camera_gaze_bias: "中高，首镜后快速回到自然确认"
+            payoff_bias: "惊艳感收回到自然轻分享"
+        moment_hints:
+          - "换好简单上衣后准备看整体"
+          - "补妆结束后顺手确认耳侧"
+          - "出门前看镜中脸侧"
+          - "拍照前确认脸侧亮点"
+        small_tension_hints:
+          - "脸侧有点空"
+          - "整体太素"
+          - "担心耳饰太夸张"
+          - "想确认垂坠落点是否刚好"
+        micro_behavior_boundary:
+          safe_behavior_hints:
+            - "耳侧已露出后的轻微观察"
+            - "头部 5-15 度小幅连续转动"
+            - "靠近镜子确认耳侧反光"
+            - "退半步看脸侧和上衣关系"
+          risk_boundary:
+            - "不展示戴耳环过程"
+            - "不触碰耳饰"
+            - "不反复拨头发"
+            - "不大幅转头"
+        payoff_direction: "确认耳侧亮点刚好补完整体，不夸张"
+        anti_template_guidance:
+          - "不要每条都写成出门前照镜子"
+          - "不要把人物写成固定半侧脸摆拍"
+          - "不要让静物耳饰镜头占据主要情绪推进"
+
   apparel:
     default:
       performance_family: outfit_fit_check
@@ -151,6 +206,63 @@ profiles:
         - "过度走秀或夸张转圈"
         - "没有试穿检查动作"
         - "只拍脸和上半身导致看不清衣服版型"
+
+      scene_seed_brief:
+        enabled: true
+        seed_goal: "让人物像在试穿后确认版型和比例，而不是模特定点展示"
+        strategy_by_script_role:
+          S1:
+            seed_mode: "casual_fit_check"
+            moment_bias: "刚换好后随手看全身"
+            tension_bias: "轻微判断版型是否顺"
+            camera_gaze_bias: "少，以镜中观察为主"
+            payoff_bias: "自然确认这套可以穿出门"
+          S2:
+            seed_mode: "balanced_outfit_share"
+            moment_bias: "准备出门前看整体搭配"
+            tension_bias: "比例和日常感是否刚好"
+            camera_gaze_bias: "中，结尾像朋友轻分享"
+            payoff_bias: "亲和确认整套更顺"
+          S3:
+            seed_mode: "fit_problem_resolved"
+            moment_bias: "发现肩线、腰线或衣摆有顾虑"
+            tension_bias: "版型问题是否被解决"
+            camera_gaze_bias: "中低，重点是镜中确认"
+            payoff_bias: "确认比例问题被修正"
+          S4:
+            seed_mode: "proportion_hook_first"
+            moment_bias: "首镜先给更明显的比例或版型结果"
+            tension_bias: "第一眼显得更精神但不走秀"
+            camera_gaze_bias: "中高，首镜后回到自然试穿确认"
+            payoff_bias: "惊艳比例回落到真实出门感"
+        moment_hints:
+          - "刚换好衣服后看全身镜"
+          - "出门前试搭一件上衣"
+          - "收到衣服第一次上身确认"
+          - "准备拍穿搭照前看整体比例"
+        small_tension_hints:
+          - "肩线是否显精神"
+          - "腰线是否压身高"
+          - "衣摆是否拖沓"
+          - "整体是否太普通"
+          - "侧面比例是否顺"
+        micro_behavior_boundary:
+          safe_behavior_hints:
+            - "低头看衣摆"
+            - "轻拉平肩线"
+            - "半步后退看全身"
+            - "轻转身看侧面"
+            - "用手抚平衣料但不夸张摆拍"
+          risk_boundary:
+            - "不做复杂换装转场"
+            - "不夸张走秀"
+            - "不连续转圈"
+            - "不让人物表情抢过版型"
+        payoff_direction: "确认比例更顺、整套可以出门"
+        anti_template_guidance:
+          - "不要写成模特站定展示"
+          - "不要每条都只是整理衣摆后微笑"
+          - "不要让试穿动作变成电商棚拍 pose"
 
   apparel_accessory:
     default:
@@ -212,6 +324,63 @@ profiles:
         - "全程只拍脸，看不清配饰和上半身关系"
         - "主播式手势或强推销表情"
         - "大幅甩围巾、用力压帽子、强风测试感"
+
+      scene_seed_brief:
+        enabled: true
+        seed_goal: "让人物像在冬季出门前确认上半身穿搭完整度，而不是氛围展示"
+        strategy_by_script_role:
+          S1:
+            seed_mode: "casual_winter_check"
+            moment_bias: "出门前随手确认上半身"
+            tension_bias: "脖颈或头肩区域略空"
+            camera_gaze_bias: "少，以镜前自检为主"
+            payoff_bias: "自然确认冬季搭配更完整"
+          S2:
+            seed_mode: "balanced_winter_share"
+            moment_bias: "冬季通勤或旅行前确认搭配"
+            tension_bias: "配饰和外套是否协调"
+            camera_gaze_bias: "中，后段朋友式轻分享"
+            payoff_bias: "轻分享这套上半身更成立"
+          S3:
+            seed_mode: "winter_gap_resolved"
+            moment_bias: "外套穿好后发现上半身少一点完整度"
+            tension_bias: "冬季氛围或头肩比例被补上"
+            camera_gaze_bias: "中低，重点看镜中整体"
+            payoff_bias: "确认空白区域被补完整"
+          S4:
+            seed_mode: "winter_visual_hook_first"
+            moment_bias: "首镜先给更明显的冬季上半身完整度"
+            tension_bias: "第一眼更有冬季氛围但不棚拍"
+            camera_gaze_bias: "中高，首镜后回到出门前自检"
+            payoff_bias: "惊艳冬季感收回到自然出门确认"
+        moment_hints:
+          - "穿好外套后看上半身是否完整"
+          - "准备出门前在玄关镜前确认"
+          - "冷天气旅行前检查头肩比例"
+          - "拍照前确认围巾帽子和外套是否搭"
+        small_tension_hints:
+          - "外套穿好但脖颈区域有点空"
+          - "头肩比例少一点冬季氛围"
+          - "旅行拍照前上半身不够完整"
+          - "帽子和围巾是否和外套搭得上"
+        micro_behavior_boundary:
+          safe_behavior_hints:
+            - "轻整理围巾边缘"
+            - "轻压帽檐或整理帽边"
+            - "半步后退看上半身"
+            - "轻转头看头肩比例"
+            - "看镜中围巾帽子和外套关系"
+          risk_boundary:
+            - "不展示复杂围法"
+            - "不展示复杂戴帽过程"
+            - "不强风测试"
+            - "不同时复杂操作围巾和帽子"
+            - "不承诺强保暖防风防寒"
+        payoff_direction: "确认冬季上半身更完整，适合出门或旅行"
+        anti_template_guidance:
+          - "不要写成美女戴帽围巾微笑展示"
+          - "不要每条都只是冬季氛围感"
+          - "不要让外套/针织衫协同关系缺失"
 
     scarf_variant:
       body_language_beats:

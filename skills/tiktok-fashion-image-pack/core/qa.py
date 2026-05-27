@@ -60,6 +60,64 @@ def qa_generated_image(
     return normalize_qa_result(result)
 
 
+def build_scene_qa_prompt(product_truth: Dict[str, Any], scene_role: str) -> str:
+    return f"""
+你是 TikTok Shop 女装场景图质检员。你会看到两类图：
+1. 供应商原图/商品事实参考
+2. AI 生成场景图
+
+请检查生成图是否可作为商品场景图上线。场景可以更生活化，但商品事实不能变。只输出合法 JSON。
+
+Scene role: {scene_role}
+Product Truth:
+{product_truth}
+
+输出字段：
+{{
+  "result": "通过|轻微问题可用|不通过|需人工复核",
+  "score": 0.0,
+  "issues": [],
+  "must_retry": false,
+  "summary": ""
+}}
+
+质检重点：
+- 商品颜色、材质、衣长、版型、领型、门襟、口袋、袖口、下摆是否和原图一致。
+- 是否新增帽子、毛领、腰带、刺绣、额外口袋、拉链/扣子等原图没有的结构。
+- 如果是纯产品图生成的试穿图，人物是否过度完美、太像 AI、美颜过重；优先接受弱露脸/半身/侧身的自然试穿。
+- 即使原图有真人，S1/S2/S5/S6 也不应生成过于完美的正脸甜笑模特照；弱脸、低头、侧脸、手机遮脸、局部裁切通常更真实。
+- 场景道具是否让买家误以为随商品附赠。
+- 商品是否占画面主体，是否被手、包、杯子、头发等遮挡关键结构。
+- 是否出现价格、促销、大段文案或廉价感。
+
+判定标准：
+- 关键结构/材质/颜色错误：不通过，must_retry=true。
+- 人物略 AI 但商品准确、可上线：轻微问题可用，并说明问题。
+- 人脸明显像 AI 精修模特、正脸过度完美且削弱商品真实感：需人工复核；如果同时商品结构也漂移，则不通过。
+- 场景不错但商品被遮挡明显：需人工复核或不通过。
+""".strip()
+
+
+def qa_scene_image(
+    *,
+    source_image_paths: List[str],
+    generated_image_path: str,
+    product_truth: Dict[str, Any],
+    scene_role: str,
+    client: Optional[VisionJSONClient] = None,
+) -> Dict[str, Any]:
+    vision = client or VisionJSONClient()
+    images = source_image_paths[:2] + [generated_image_path]
+    result = vision.call_json(
+        build_scene_qa_prompt(product_truth, scene_role),
+        image_paths=images,
+        max_output_tokens=1800,
+    )
+    if not isinstance(result, dict):
+        raise ValueError("Scene QA response must be a JSON object")
+    return normalize_qa_result(result)
+
+
 def normalize_qa_result(raw: Dict[str, Any]) -> Dict[str, Any]:
     result = str(raw.get("result") or "").strip()
     if result not in {"通过", "轻微问题可用", "不通过", "需人工复核"}:

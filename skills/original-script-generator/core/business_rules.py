@@ -455,6 +455,79 @@ def _classify_ending_family(script_json: Dict[str, object]) -> str:
     return "light_share"
 
 
+def _scene_seed_signature(script_json: Dict[str, object]) -> Dict[str, str]:
+    seed = script_json.get("scene_seed") if isinstance(script_json.get("scene_seed"), dict) else {}
+    if not isinstance(seed, dict):
+        seed = {}
+    moment = _merge_text_parts(seed.get("moment", ""))
+    tension = _merge_text_parts(seed.get("small_tension", ""))
+    behavior = _merge_text_parts(seed.get("micro_behavior", ""))
+    payoff = _merge_text_parts(seed.get("payoff_feeling", ""))
+
+    def classify(text: str, groups: Dict[str, tuple]) -> str:
+        for label, tokens in groups.items():
+            if any(token in text for token in tokens):
+                return label
+        return "unknown"
+
+    return {
+        "moment": classify(
+            moment,
+            {
+                "photo_check": ("拍照", "镜头前", "拍穿搭"),
+                "outing_check": ("出门", "通勤", "旅行", "玄关"),
+                "makeup_check": ("补妆", "化妆"),
+                "try_on_check": ("换好", "试穿", "上身"),
+                "casual_mirror": ("镜前", "镜中", "照镜"),
+            },
+        ),
+        "tension": classify(
+            tension,
+            {
+                "empty_gap": ("空", "太素", "少一点", "不够完整"),
+                "too_much": ("太夸张", "抢", "过长", "压脸"),
+                "fit_ratio": ("比例", "肩线", "腰线", "衣摆", "版型"),
+                "matching": ("搭", "协调", "颜色", "外套"),
+            },
+        ),
+        "behavior": classify(
+            behavior,
+            {
+                "approach_detail": ("靠近", "细节", "反光", "落点"),
+                "step_back": ("退半步", "后退", "整体"),
+                "small_turn": ("转头", "侧脸", "头部"),
+                "adjust_accessory": ("整理", "轻压", "轻拉", "抚平"),
+            },
+        ),
+        "payoff": classify(
+            payoff,
+            {
+                "natural_confirm": ("自然", "刚好", "可以出门"),
+                "resolved": ("补上", "解决", "修正", "完整"),
+                "visual_hook": ("惊艳", "亮点", "明显"),
+                "share": ("分享", "朋友"),
+            },
+        ),
+    }
+
+
+def _scene_seed_similarity_issue(
+    strategy_id: str,
+    sibling_id: str,
+    script_json: Dict[str, object],
+    sibling_script: Dict[str, object],
+) -> Optional[str]:
+    current = _scene_seed_signature(script_json)
+    sibling = _scene_seed_signature(sibling_script)
+    comparable_keys = [key for key, value in current.items() if value != "unknown" and sibling.get(key) != "unknown"]
+    same_count = sum(1 for key in comparable_keys if current.get(key) == sibling.get(key))
+    if strategy_id == "S4" and sibling_id == "S1" and same_count >= 3:
+        return "S4 与 S1 的 scene_seed 生活片刻/小张力/观察路径过近，惊艳型没有从人物动机上拉开"
+    if same_count >= 4:
+        return f"{strategy_id} 与 {sibling_id} 的 scene_seed 四项路径高度同构"
+    return None
+
+
 def validate_script_direction_separation(
     final_strategy: Dict[str, object],
     script_json: Dict[str, object],
@@ -504,6 +577,10 @@ def validate_script_direction_separation(
 
         if same_entry and same_proof and same_ending:
             return f"{strategy_id} 与 {sibling_id} 在开场、proof 和结尾结构上过于同构"
+
+        scene_seed_issue = _scene_seed_similarity_issue(strategy_id, sibling_id, script_json, sibling_script)
+        if scene_seed_issue:
+            return scene_seed_issue
 
     return None
 

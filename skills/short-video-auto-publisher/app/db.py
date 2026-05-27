@@ -719,14 +719,15 @@ class AutoPublishDB:
         }
 
     def enforce_retry_limit(self, max_auto_retries: int = 2, reason: str = "") -> Dict[str, Any]:
-        """把已经超过自动重试上限的活跃视频移出排期池。
+        """把超过自动重试上限的视频复活回待排期池。
 
         这里的 max_auto_retries 表示“失败后最多再自动尝试几次”。当前业务约定是
-        原始发布失败 + 2 次自动重试，所以失败次数大于 2 时就不再继续自动排期。
+        原始发布失败 + 2 次自动重试。超过上限后取消旧活跃排期并清空旧账号/任务，
+        让后续调度可以换账号或换环境继续尝试。
         """
         limit = max(0, int(max_auto_retries))
         now = self._now_text()
-        message = str(reason or f"超过自动重试上限，已自动跳过；失败次数 > {limit}").strip()
+        message = str(reason or f"超过自动重试上限，已复活待重新排期；失败次数 > {limit}").strip()
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -746,7 +747,7 @@ class AutoPublishDB:
                 FROM failed
                 INNER JOIN video_assets va ON va.canonical_script_key = failed.canonical_script_key
                 WHERE failed.failed_count > ?
-                  AND va.publish_status IN ('待排期', '已排期', '发布失败')
+                  AND va.publish_status IN ('待排期', '已排期', '发布失败', '已跳过')
                 ORDER BY failed.failed_count DESC, va.script_id ASC
                 """,
                 (limit,),
@@ -761,18 +762,22 @@ class AutoPublishDB:
                 for row in rows
                 if str(row["publish_task_id"] or "").strip()
             ]
-            assets = 0
+            requeued = 0
             slots = 0
             for key in keys:
-                assets += conn.execute(
+                requeued += conn.execute(
                     """
                     UPDATE video_assets
-                    SET publish_status = '已跳过',
-                        publish_result = '已跳过',
+                    SET publish_status = '待排期',
+                        account_id = NULL,
+                        account_name = NULL,
+                        planned_publish_at = NULL,
+                        publish_task_id = NULL,
+                        publish_result = NULL,
                         error_message = ?,
                         updated_at = ?
                     WHERE canonical_script_key = ?
-                      AND publish_status IN ('待排期', '已排期', '发布失败')
+                      AND publish_status IN ('待排期', '已排期', '发布失败', '已跳过')
                     """,
                     (message, now, key),
                 ).rowcount
@@ -791,7 +796,8 @@ class AutoPublishDB:
         return {
             "max_auto_retries": limit,
             "candidates": len(rows),
-            "video_assets_skipped": int(assets or 0),
+            "video_assets_skipped": 0,
+            "video_assets_requeued": int(requeued or 0),
             "active_slots_cancelled": int(slots or 0),
             "remote_task_ids": remote_task_ids,
             "items": [
@@ -799,6 +805,7 @@ class AutoPublishDB:
                     "script_id": str(row["script_id"] or ""),
                     "canonical_script_key": str(row["canonical_script_key"] or ""),
                     "failed_count": int(row["failed_count"] or 0),
+                    "revived": True,
                     "account_id": str(row["account_id"] or ""),
                     "account_name": str(row["account_name"] or ""),
                     "planned_publish_at": str(row["planned_publish_at"] or ""),
@@ -976,22 +983,6 @@ class AutoPublishDB:
             for row in rows
         ]
 
-    def count_failed_publish_attempts(self, canonical_script_key: str) -> int:
-        key = str(canonical_script_key or "").strip()
-        if not key:
-            return 0
-        with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT COUNT(*) AS count
-                FROM publish_slots
-                WHERE canonical_script_key = ?
-                  AND schedule_status = '发布失败'
-                """,
-                (key,),
-            ).fetchone()
-        return int(row["count"] or 0)
-
     def get_account_config(self, account_id: str) -> Optional[sqlite3.Row]:
         with self._connect() as conn:
             return conn.execute(
@@ -1065,7 +1056,7 @@ class AutoPublishDB:
                 )
         return len(canonical_keys)
 
-    def has_recent_product_conflict(self, account_id: str, product_id: str, target_time: datetime, hours: int = 72) -> bool:
+    def has_recent_product_conflict(self, account_id: str, product_id: str, target_time: datetime, hours: int = 24) -> bool:
         if not str(product_id or "").strip():
             return False
         start_at = (target_time - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
@@ -1450,6 +1441,8 @@ class AutoPublishDB:
     def list_product_publish_summary_rows(
         self,
         *,
+        this_week_start: str,
+        this_week_end: str,
         last_week_start: str,
         last_week_end: str,
         current_month_start: str,
@@ -1457,8 +1450,8 @@ class AutoPublishDB:
         previous_month_start: str,
         previous_month_end: str,
     ) -> List[Dict[str, Any]]:
-        min_start = min(last_week_start, current_month_start, previous_month_start)
-        max_end = max(last_week_end, current_month_end, previous_month_end)
+        min_start = min(this_week_start, last_week_start, current_month_start, previous_month_start)
+        max_end = max(this_week_end, last_week_end, current_month_end, previous_month_end)
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -1467,6 +1460,8 @@ class AutoPublishDB:
                        MIN(sm.source_record_id) AS source_record_id,
                        COUNT(DISTINCT sm.canonical_script_key) AS script_count,
                        MAX(ps.scheduled_for) AS latest_published_at,
+                       SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
+                           AS this_week_published,
                        SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
                            AS last_week_published,
                        SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
@@ -1481,12 +1476,15 @@ class AutoPublishDB:
                   AND COALESCE(sm.store_id, '') <> ''
                   AND COALESCE(sm.product_id, '') <> ''
                 GROUP BY sm.store_id, sm.product_id
-                HAVING last_week_published > 0
+                HAVING this_week_published > 0
+                    OR last_week_published > 0
                     OR current_month_published > 0
                     OR previous_month_published > 0
-                ORDER BY sm.store_id ASC, current_month_published DESC, last_week_published DESC, sm.product_id ASC
+                ORDER BY sm.store_id ASC, this_week_published DESC, current_month_published DESC, sm.product_id ASC
                 """,
                 (
+                    this_week_start,
+                    this_week_end,
                     last_week_start,
                     last_week_end,
                     current_month_start,

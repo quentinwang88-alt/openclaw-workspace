@@ -8,7 +8,6 @@ import mimetypes
 import re
 import time
 from dataclasses import dataclass
-from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
@@ -108,7 +107,7 @@ class FeishuBitableClient:
                 if result.get("code") != 0:
                     raise FeishuAPIError(f"获取飞书 access_token 失败: {result.get('msg')}")
                 self.access_token = result["tenant_access_token"]
-                self.token_expires_at = time.time() + config.get("feishu", {}).get("tokenExpire", 7200) - 300
+                self.token_expires_at = time.time() + int(result.get("expire", 7200)) - 300
                 return self.access_token
             except (requests.exceptions.RequestException, ValueError, KeyError, FeishuAPIError) as exc:
                 last_error = exc
@@ -129,6 +128,18 @@ class FeishuBitableClient:
                 response = requests.request(method, url, timeout=DEFAULT_TIMEOUT, **kwargs)
                 if response.status_code >= 500:
                     raise FeishuAPIError(f"飞书服务异常: {response.status_code} {response.text[:300]}")
+                try:
+                    result = response.json()
+                except ValueError:
+                    result = {}
+                if result.get("code") in {99991663, 99991664, 99991668, 99991671} or "Invalid access token" in str(result.get("msg", "")):
+                    self.access_token = None
+                    self.token_expires_at = 0
+                    headers = dict(kwargs.get("headers") or {})
+                    if "Authorization" in headers:
+                        headers["Authorization"] = f"Bearer {self._get_access_token()}"
+                        kwargs["headers"] = headers
+                    raise FeishuAPIError(f"飞书 access_token 已失效，刷新后重试: {result.get('msg')}")
                 return response
             except (requests.exceptions.RequestException, FeishuAPIError) as exc:
                 last_error = exc
@@ -218,7 +229,7 @@ class FeishuBitableClient:
             raise FeishuAPIError("附件缺少 file_token")
         output_dir.mkdir(parents=True, exist_ok=True)
         file_name = sanitize_filename(attachment.get("name") or f"{file_token}.jpg")
-        target = output_dir / file_name
+        target = unique_download_path(output_dir / file_name)
         response = self._request("GET", self.get_tmp_download_url(file_token))
         if response.status_code >= 400:
             raise FeishuAPIError(f"附件下载失败: {response.status_code}")
@@ -226,18 +237,19 @@ class FeishuBitableClient:
         return target
 
     def upload_attachment(self, path: Path) -> Dict[str, Any]:
-        content = path.read_bytes()
+        file_size = path.stat().st_size
         content_type = mimetypes.guess_type(path.name)[0] or "image/png"
         upload_url = "https://open.feishu.cn/open-apis/drive/v1/medias/upload_all"
         payload = {
             "file_name": path.name,
             "parent_type": "bitable_image",
             "parent_node": self.app_token,
-            "size": str(len(content)),
+            "size": str(file_size),
         }
-        files = {"file": (path.name, BytesIO(content), content_type)}
         headers = {"Authorization": f"Bearer {self._get_access_token()}"}
-        response = self._request("POST", upload_url, headers=headers, data=payload, files=files)
+        with path.open("rb") as handle:
+            files = {"file": (path.name, handle, content_type)}
+            response = self._request("POST", upload_url, headers=headers, data=payload, files=files)
         result = response.json()
         if result.get("code") != 0:
             raise FeishuAPIError(f"上传附件失败: {result.get('msg')}")
@@ -247,7 +259,7 @@ class FeishuBitableClient:
         return {
             "file_token": file_token,
             "name": path.name,
-            "size": len(content),
+            "size": file_size,
             "type": content_type,
         }
 
@@ -312,3 +324,16 @@ def sanitize_filename(name: str) -> str:
     cleaned = re.sub(r"[\\/:*?\"<>|]", "_", str(name or "")).strip()
     cleaned = cleaned[:120].strip("._")
     return cleaned or "image"
+
+
+def unique_download_path(path: Path) -> Path:
+    """Avoid overwriting same-named Feishu attachments in one output directory."""
+    if not path.exists():
+        return path
+    stem = path.stem or "image"
+    suffix = path.suffix
+    for index in range(2, 1000):
+        candidate = path.with_name(f"{stem}_{index}{suffix}")
+        if not candidate.exists():
+            return candidate
+    raise FeishuAPIError(f"无法生成唯一附件文件名: {path}")

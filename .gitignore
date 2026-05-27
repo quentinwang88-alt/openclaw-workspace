@@ -89,6 +89,7 @@ notes/
 # =========================
 *.log
 *.tmp
+*.invalid
 tmp/
 cache/
 logs/

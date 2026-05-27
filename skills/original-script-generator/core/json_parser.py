@@ -482,7 +482,53 @@ def _normalize_human_performance_contract(value: Any) -> Dict[str, Any]:
         "performance_intensity": performance_intensity,
         "forbidden_performance": _coerce_string_list(value.get("forbidden_performance"))[:8],
         "active_micro_reaction_limit": active_limit,
+        "scene_seed_brief": _normalize_scene_seed_brief(value.get("scene_seed_brief")),
     }
+
+
+def _normalize_scene_seed_brief(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, dict) or not value:
+        return {}
+    boundary = value.get("micro_behavior_boundary") if isinstance(value.get("micro_behavior_boundary"), dict) else {}
+    return {
+        "enabled": bool(value.get("enabled")),
+        "display_family": _coerce_scalar_text(value.get("display_family")),
+        "seed_goal": _coerce_scalar_text(value.get("seed_goal")),
+        "strategy_by_script_role": _normalize_scene_seed_strategy_by_role(
+            value.get("strategy_by_script_role")
+            or value.get("scene_seed_strategy_by_script_role")
+            or value.get("scene_seed_strategy")
+        ),
+        "moment_hints": _coerce_string_list(value.get("moment_hints"))[:5],
+        "small_tension_hints": _coerce_string_list(value.get("small_tension_hints"))[:5],
+        "micro_behavior_boundary": {
+            "safe_behavior_hints": _coerce_string_list(boundary.get("safe_behavior_hints"))[:5],
+            "risk_boundary": _coerce_string_list(boundary.get("risk_boundary"))[:6],
+        },
+        "payoff_direction": _coerce_scalar_text(value.get("payoff_direction")),
+        "anti_template_guidance": _coerce_string_list(value.get("anti_template_guidance"))[:4],
+    }
+
+
+def _normalize_scene_seed_strategy_by_role(value: Any) -> Dict[str, Dict[str, str]]:
+    if not isinstance(value, dict):
+        return {}
+    allowed_keys = (
+        "seed_mode",
+        "moment_bias",
+        "tension_bias",
+        "camera_gaze_bias",
+        "payoff_bias",
+    )
+    result: Dict[str, Dict[str, str]] = {}
+    for role in ("S1", "S2", "S3", "S4"):
+        raw_item = value.get(role) or value.get(role.lower())
+        if not isinstance(raw_item, dict):
+            continue
+        item = {key: _coerce_scalar_text(raw_item.get(key)) for key in allowed_keys}
+        if any(item.values()):
+            result[role] = item
+    return result
 
 
 def _normalize_expression_plan_payload(payload: Any) -> Dict[str, Any]:
@@ -1395,6 +1441,54 @@ def validate_persona_style_emotion_pack_payload(payload: Any) -> None:
             )
     if not isinstance(contract.get("active_micro_reaction_limit"), int):
         raise JSONParseError("人物穿搭情绪强化包.human_performance_contract.active_micro_reaction_limit 必须为整数")
+    scene_seed_brief = contract.get("scene_seed_brief")
+    if scene_seed_brief not in (None, ""):
+        scene_seed_brief = _require_dict(
+            scene_seed_brief,
+            "人物穿搭情绪强化包.human_performance_contract.scene_seed_brief",
+        )
+        boundary = scene_seed_brief.get("micro_behavior_boundary")
+        if boundary not in (None, ""):
+            boundary = _require_dict(
+                boundary,
+                "人物穿搭情绪强化包.human_performance_contract.scene_seed_brief.micro_behavior_boundary",
+            )
+            for field in ("safe_behavior_hints", "risk_boundary"):
+                values = _ensure_list_field(
+                    boundary,
+                    field,
+                    "人物穿搭情绪强化包.human_performance_contract.scene_seed_brief.micro_behavior_boundary",
+                    allow_empty=True,
+                )
+                for index, item in enumerate(values, 1):
+                    if not isinstance(item, str):
+                        raise JSONParseError(
+                            "人物穿搭情绪强化包.human_performance_contract."
+                            f"scene_seed_brief.micro_behavior_boundary.{field}[{index}] 必须为字符串"
+                        )
+        strategy_by_role = scene_seed_brief.get("strategy_by_script_role")
+        if strategy_by_role not in (None, ""):
+            strategy_by_role = _require_dict(
+                strategy_by_role,
+                "人物穿搭情绪强化包.human_performance_contract.scene_seed_brief.strategy_by_script_role",
+            )
+            for role, item in strategy_by_role.items():
+                if str(role) not in {"S1", "S2", "S3", "S4"}:
+                    raise JSONParseError(
+                        "人物穿搭情绪强化包.human_performance_contract."
+                        "scene_seed_brief.strategy_by_script_role 只允许 S1/S2/S3/S4"
+                    )
+                item = _require_dict(
+                    item,
+                    "人物穿搭情绪强化包.human_performance_contract."
+                    f"scene_seed_brief.strategy_by_script_role.{role}",
+                )
+                for field in ("seed_mode", "moment_bias", "tension_bias", "camera_gaze_bias", "payoff_bias"):
+                    if field in item and not isinstance(item.get(field), str):
+                        raise JSONParseError(
+                            "人物穿搭情绪强化包.human_performance_contract."
+                            f"scene_seed_brief.strategy_by_script_role.{role}.{field} 必须为字符串"
+                        )
 
 
 def _validate_language_fields(
@@ -1852,6 +1946,17 @@ def _normalize_shot_skeleton_item(value: Any, index: int, default_proof_path: st
     }
 
 
+def _normalize_scene_seed(value: Any) -> Dict[str, str]:
+    if not isinstance(value, dict):
+        value = {}
+    return {
+        "moment": _coerce_scalar_text(value.get("moment")),
+        "small_tension": _coerce_scalar_text(value.get("small_tension")),
+        "micro_behavior": _coerce_scalar_text(value.get("micro_behavior")),
+        "payoff_feeling": _coerce_scalar_text(value.get("payoff_feeling")),
+    }
+
+
 def _normalize_script_payload(payload: Any) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
@@ -1891,6 +1996,7 @@ def _normalize_script_payload(payload: Any) -> Dict[str, Any]:
     if proof_path not in PROOF_PATH_OPTIONS:
         proof_path = "A_result_detail_only"
     script["proof_path"] = proof_path
+    script["scene_seed"] = _normalize_scene_seed(script.get("scene_seed"))
     script["performance_strategy"] = _prefer_localized_descriptive_text(
         script.get("performance_strategy"),
         default="根据脚本角色分配眼神路径、微反应强度和轻分享位置",

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import re
-import sys
 from datetime import datetime
 from collections import Counter
 from pathlib import Path
@@ -17,12 +16,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
 SKILL_DIR = Path(__file__).parent.absolute()
-SYNC_SKILL_DIR = SKILL_DIR.parent / "script-run-manager-sync"
-sys.path.insert(0, str(SYNC_SKILL_DIR))
-
 from core.bitable import FeishuBitableClient, resolve_wiki_bitable_app_token  # type: ignore  # noqa: E402
 from core.feishu_url_parser import parse_feishu_bitable_url  # type: ignore  # noqa: E402
-from core.sync import _build_script_id  # type: ignore  # noqa: E402
 
 
 DEFAULT_REMAKE_FEISHU_URL = (
@@ -48,10 +43,15 @@ PUBLISH_PURPOSE_NURTURE = "养号"
 PROFILE_SHORT_VIDEO = "short-video"
 PROFILE_NURTURE = "nurture"
 
+
+def _build_script_id(task_no: str, parent_slot: str, variant_no: Optional[int]) -> str:
+    suffix = "M" if variant_no is None else f"V{variant_no}"
+    return f"{task_no}_{parent_slot}_{suffix}".replace(" ", "")
+
 SOURCE_FIELD_ALIASES: Dict[str, List[str]] = {
     "status": ["复刻任务状态", "任务状态", "状态"],
     "sync_status": ["同步状态"],
-    "synced_script_id": ["脚本ID", "同步到脚本ID", "script_id"],
+    "synced_script_id": ["同步到脚本ID", "脚本ID", "script_id"],
     "sync_time": ["同步时间"],
     "sync_error": ["同步错误信息", "错误信息"],
     "task_no": ["任务编号", "产品ID", "产品编码", "task_id", "编号"],
@@ -94,6 +94,7 @@ TARGET_FIELD_ALIASES: Dict[str, List[str]] = {
 }
 
 SCRIPT_ID_HEADER_PATTERN = re.compile(r"\A\s*【脚本ID】\s*\n-\s*[^\n\r]+(?:\r?\n){0,2}")
+SCRIPT_ID_LOOKUP_PATTERN = re.compile(r"【脚本ID】\s*[-:\n\r ]+\s*([A-Za-z0-9_]+)")
 
 
 def resolve_feishu_config(feishu_url: str) -> Tuple[str, str]:
@@ -139,6 +140,14 @@ def prepend_script_id_header(prompt_text: Any, script_id: str) -> str:
     if not script_id_text:
         return body
     return f"【脚本ID】\n- {script_id_text}\n\n{body}".rstrip()
+
+
+def extract_script_id_from_prompt(prompt_text: Any) -> str:
+    text = normalize_text(prompt_text)
+    if not text:
+        return ""
+    match = SCRIPT_ID_LOOKUP_PATTERN.search(text)
+    return match.group(1).strip() if match else ""
 
 
 def build_parent_slot(source_record_id: str) -> str:
@@ -238,19 +247,17 @@ def find_existing_script_id(
     profile: str,
 ) -> str:
     source_field = target_mapping.get("source_remake_record_id")
-    source_name_field = target_mapping.get("script_source")
-    product_code_field = target_mapping.get("product_code")
-    task_no_field = target_mapping.get("task_no")
+    script_fields = [
+        target_mapping.get("script_s1"),
+        target_mapping.get("final_storyboard"),
+    ]
     script_id = build_script_id_for_profile(profile, task_no, source_record_id)
-    expected_source = SCRIPT_TYPE_NURTURE_REMAKE if profile == PROFILE_NURTURE else SCRIPT_TYPE_SHORT_VIDEO_REMAKE
     for record in target_records:
         fields = record.fields
         if source_field and normalize_text(fields.get(source_field)) == source_record_id:
             return script_id
-        if source_name_field and normalize_text(fields.get(source_name_field)) == expected_source:
-            if product_code_field and normalize_text(fields.get(product_code_field)) == task_no:
-                return script_id
-            if task_no_field and normalize_text(fields.get(task_no_field)) == task_no:
+        for field_name in script_fields:
+            if field_name and extract_script_id_from_prompt(fields.get(field_name)) == script_id:
                 return script_id
     return ""
 

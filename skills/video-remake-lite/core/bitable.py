@@ -49,10 +49,10 @@ FIELD_ALIASES = {
     "sync_error": ["同步错误信息"],
     "error_message": ["同步错误信息", "错误信息", "失败原因", "报错信息", "run_log", "运行日志"],
     # 旧四步字段保留映射，便于历史表不立即改列也能运行。
-    "script_breakdown": ["高光DNA提取结果", "脚本拆解", "脚本拆解结果", "analysis_result"],
+    "script_breakdown": ["脚本拆解", "脚本拆解结果", "高光DNA提取结果", "analysis_result"],
     "remake_card": ["轻微改写复刻方案", "复刻卡", "replicate_card"],
-    "remade_script": ["最终固定分镜", "复刻后的脚本", "localized_script"],
-    "final_prompt": ["最终固定分镜", "最终复刻视频提示词", "final_execution_prompt"],
+    "remade_script": ["复刻后的脚本", "localized_script", "最终固定分镜"],
+    "final_prompt": ["最终复刻视频提示词", "final_execution_prompt", "最终固定分镜"],
 }
 
 

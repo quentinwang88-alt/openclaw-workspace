@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from src.db_compat import connect_sqlite_or_mysql
 from selection.market_task_fit import build_fallback_direction_execution_brief
 from src.standardized_snapshot import StandardizedProductSnapshot
 
@@ -30,12 +31,37 @@ SAFE_FALLBACK_CONFIG = {
     }
 }
 
+AGENT_TABLES = {
+    "agent_import_log",
+    "direction_execution_brief",
+    "direction_sample_pool",
+    "market_agent_run_log",
+    "market_direction_report",
+    "market_direction_snapshot",
+    "market_raw_product_snapshot",
+    "product_selection_score",
+    "product_task_pool_result",
+    "selection_raw_product_snapshot",
+    "selection_run_log",
+}
+
 
 class AgentDataStore(object):
     """Persistence boundary between standardized snapshots and business agents."""
 
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, database_url: str = ""):
         self.db_path = Path(db_path)
+        self.database_url = database_url
+
+    def _connect(self, timeout: int = 30):
+        return connect_sqlite_or_mysql(
+            self.db_path,
+            database_url=self.database_url,
+            env_name="HERMES_AGENT_DATABASE_URL",
+            table_prefix="hr__",
+            table_names=AGENT_TABLES,
+            timeout=timeout,
+        )
 
     def import_snapshots(
         self,
@@ -59,7 +85,7 @@ class AgentDataStore(object):
         now = int(time.time())
         table_name = _raw_table_for_agent(agent_name)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(str(self.db_path), timeout=30) as conn:
+        with self._connect(timeout=30) as conn:
             self.ensure_schema(conn)
             for snapshot in snapshot_list:
                 self._upsert_raw_snapshot(conn, table_name, snapshot, now)
@@ -106,7 +132,7 @@ class AgentDataStore(object):
         structured_json: Dict[str, Any],
     ) -> None:
         now = int(time.time())
-        with sqlite3.connect(str(self.db_path), timeout=30) as conn:
+        with self._connect(timeout=30) as conn:
             self.ensure_schema(conn)
             conn.execute(
                 """
@@ -157,7 +183,7 @@ class AgentDataStore(object):
     ) -> int:
         now = int(time.time())
         count = 0
-        with sqlite3.connect(str(self.db_path), timeout=30) as conn:
+        with self._connect(timeout=30) as conn:
             self.ensure_schema(conn)
             for brief in briefs:
                 brief_id = _brief_id(report_id, brief)
@@ -224,7 +250,7 @@ class AgentDataStore(object):
     ) -> int:
         now = int(time.time())
         count = 0
-        with sqlite3.connect(str(self.db_path), timeout=30) as conn:
+        with self._connect(timeout=30) as conn:
             self.ensure_schema(conn)
             conn.execute("DELETE FROM market_direction_snapshot WHERE report_id = ?", (report_id,))
             for row in direction_rows:
@@ -270,7 +296,7 @@ class AgentDataStore(object):
     ) -> int:
         now = int(time.time())
         count = 0
-        with sqlite3.connect(str(self.db_path), timeout=30) as conn:
+        with self._connect(timeout=30) as conn:
             self.ensure_schema(conn)
             conn.execute("DELETE FROM direction_sample_pool WHERE report_id = ?", (report_id,))
             for row in rows:
@@ -315,7 +341,7 @@ class AgentDataStore(object):
         direction_action: str = "observe",
         direction_name: str = "",
     ) -> Dict[str, Any]:
-        with sqlite3.connect(str(self.db_path), timeout=30) as conn:
+        with self._connect(timeout=30) as conn:
             self.ensure_schema(conn)
             row = None
             if crawl_batch_id:
@@ -350,7 +376,7 @@ class AgentDataStore(object):
 
     def save_product_selection_result(self, result: Dict[str, Any], crawl_batch_id: str, product_snapshot_id: str) -> None:
         now = int(time.time())
-        with sqlite3.connect(str(self.db_path), timeout=30) as conn:
+        with self._connect(timeout=30) as conn:
             self.ensure_schema(conn)
             score_id = "{batch}__{snapshot}".format(batch=crawl_batch_id, snapshot=product_snapshot_id)
             conn.execute(
@@ -412,7 +438,7 @@ class AgentDataStore(object):
 
     def save_human_override(self, payload: Dict[str, Any]) -> None:
         now = int(time.time())
-        with sqlite3.connect(str(self.db_path), timeout=30) as conn:
+        with self._connect(timeout=30) as conn:
             self.ensure_schema(conn)
             conn.execute(
                 """
@@ -469,7 +495,7 @@ class AgentDataStore(object):
             market=market_id,
             category=category_id,
         )
-        with sqlite3.connect(str(self.db_path), timeout=30) as conn:
+        with self._connect(timeout=30) as conn:
             self.ensure_schema(conn)
             conn.execute(
                 """
@@ -523,7 +549,7 @@ class AgentDataStore(object):
         category_id: str,
     ) -> Optional[Dict[str, Any]]:
         table_name = "market_agent_run_log" if agent_name == MARKET_AGENT else "selection_run_log"
-        with sqlite3.connect(str(self.db_path), timeout=30) as conn:
+        with self._connect(timeout=30) as conn:
             self.ensure_schema(conn)
             row = conn.execute(
                 """
@@ -555,7 +581,7 @@ class AgentDataStore(object):
             category=category_id,
         )
         expires_at = now + int(ttl_seconds or 7200)
-        with sqlite3.connect(str(self.db_path), timeout=30) as conn:
+        with self._connect(timeout=30) as conn:
             self.ensure_schema(conn)
             current = conn.execute(
                 "SELECT status, expires_at FROM agent_run_lock WHERE lock_key = ?",
@@ -583,7 +609,7 @@ class AgentDataStore(object):
         lock_key: str,
         status: str = "released",
     ) -> None:
-        with sqlite3.connect(str(self.db_path), timeout=30) as conn:
+        with self._connect(timeout=30) as conn:
             self.ensure_schema(conn)
             conn.execute(
                 "UPDATE agent_run_lock SET status = ?, expires_at = ? WHERE lock_key = ?",
@@ -596,7 +622,7 @@ class AgentDataStore(object):
         category_id: str,
         crawl_batch_id: str = "",
     ) -> Optional[Dict[str, Any]]:
-        with sqlite3.connect(str(self.db_path), timeout=30) as conn:
+        with self._connect(timeout=30) as conn:
             self.ensure_schema(conn)
             row = None
             if crawl_batch_id:
@@ -637,7 +663,7 @@ class AgentDataStore(object):
         category_id: str,
         crawl_batch_id: str,
     ) -> int:
-        with sqlite3.connect(str(self.db_path), timeout=30) as conn:
+        with self._connect(timeout=30) as conn:
             self.ensure_schema(conn)
             row = conn.execute(
                 """

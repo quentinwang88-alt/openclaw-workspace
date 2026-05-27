@@ -20,10 +20,22 @@ if str(WORKSPACE_DIR) not in sys.path:
 if str(OPENAI_IMAGE_SKILL) not in sys.path:
     sys.path.append(str(OPENAI_IMAGE_SKILL))
 
+import httpx
+
 from app.config import resolve_codex_access_token, resolve_codex_base_url  # type: ignore  # noqa: E402
 from openai import OpenAI  # noqa: E402
 
 from json_utils import parse_json_object  # noqa: E402
+
+
+def _build_http_client() -> Optional[httpx.Client]:
+    proxy = os.environ.get("ALL_PROXY") or os.environ.get("HTTPS_PROXY") or ""
+    if not proxy:
+        proxy = "socks5://127.0.0.1:10808"
+    try:
+        return httpx.Client(proxy=proxy, timeout=httpx.Timeout(180.0, connect=15.0))
+    except Exception:
+        return None
 
 
 class VisionJSONClient:
@@ -56,38 +68,54 @@ class VisionJSONClient:
             content.append({"type": "input_image", "image_url": image_path_to_data_url(path)})
         text_chunks: List[str] = []
         fallback_text = ""
-        with client.responses.stream(
-            model=self.model,
-            reasoning={"effort": os.environ.get("LIKEU_VISION_REASONING_EFFORT", "medium")},
-            instructions=(
-                "You are a precise ecommerce product-image analyst. "
-                "When asked for JSON, return only valid JSON and no markdown."
-            ),
-            store=False,
-            input=[{"role": "user", "content": content}],
-        ) as stream:
-            for event in stream:
-                event_type = str(getattr(event, "type", "") or "")
-                if event_type == "response.output_text.delta":
-                    delta = str(getattr(event, "delta", "") or "")
-                    if delta:
-                        text_chunks.append(delta)
-                elif event_type == "response.output_text.done":
-                    done_text = str(getattr(event, "text", "") or "")
-                    if done_text:
-                        fallback_text = done_text
-            response = stream.get_final_response()
-        dumped = response.model_dump(mode="json")
-        text = "".join(text_chunks).strip() or fallback_text.strip()
-        if not text:
-            text = getattr(response, "output_text", "") or extract_responses_text(dumped)
+        try:
+            with client.responses.stream(
+                model=self.model,
+                reasoning={"effort": os.environ.get("LIKEU_VISION_REASONING_EFFORT", "medium")},
+                instructions=(
+                    "You are a precise ecommerce product-image analyst. "
+                    "When asked for JSON, return only valid JSON and no markdown."
+                ),
+                store=False,
+                input=[{"role": "user", "content": content}],
+            ) as stream:
+                for event in stream:
+                    event_type = str(getattr(event, "type", "") or "")
+                    if event_type == "response.output_text.delta":
+                        delta = str(getattr(event, "delta", "") or "")
+                        if delta:
+                            text_chunks.append(delta)
+                    elif event_type == "response.output_text.done":
+                        done_text = str(getattr(event, "text", "") or "")
+                        if done_text:
+                            fallback_text = done_text
+                        text = fallback_text.strip() or "".join(text_chunks).strip()
+                        if text:
+                            return text
+        except TypeError as exc:
+            # Some Codex Responses streams end with response.output=None, which
+            # makes the SDK crash while building the final snapshot. The text
+            # deltas have already arrived by then, so keep the usable response.
+            if "NoneType" not in str(exc):
+                raise
+            text = fallback_text.strip() or "".join(text_chunks).strip()
+            if text:
+                return text
+            raise
+        text = fallback_text.strip() or "".join(text_chunks).strip()
         if not text.strip():
             raise RuntimeError("Vision model returned no text")
         return text.strip()
 
     def _get_client(self) -> OpenAI:
         if self._client is None:
-            self._client = OpenAI(api_key=self.api_key, base_url=self.base_url, timeout=self.timeout, max_retries=0)
+            self._client = OpenAI(
+                api_key=self.api_key,
+                base_url=self.base_url,
+                timeout=self.timeout,
+                max_retries=0,
+                http_client=_build_http_client(),
+            )
         return self._client
 
 
