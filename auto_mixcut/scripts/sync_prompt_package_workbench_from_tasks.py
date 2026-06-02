@@ -154,6 +154,7 @@ def sync_workbench(
                 failed.append({"product_id": product_id, "reason": "prompt_build_failed", "error": package_result.to_dict()})
                 continue
             package = package_result.data
+            package["segment_script_id"] = _segment_script_id(package["segment_prompt_id"])
             row_fields = {
                 "提示词包ID": package["segment_prompt_id"],
                 "商品ID": product_id,
@@ -229,6 +230,7 @@ def _refresh_existing_prompt(
     existing_prompt_id = _text(fields.get("提示词包ID"))
     if existing_prompt_id:
         package["segment_prompt_id"] = existing_prompt_id
+    package["segment_script_id"] = _segment_script_id(package["segment_prompt_id"])
     update_fields = {
         "提示词包ID": package["segment_prompt_id"],
         "短视频片段提示词": _format_prompt_package(package),
@@ -373,13 +375,20 @@ def _contains_cjk(text: str) -> bool:
 def _format_prompt_package(package: Dict[str, Any]) -> str:
     prompt = package.get("prompt") or {}
     anchor = package.get("anchor_ref") or {}
+    script_id = package.get("segment_script_id") or _segment_script_id(package.get("segment_prompt_id"))
     parts = [
+        f"片段脚本ID：{script_id}",
         f"正向提示词：\n{prompt.get('positive') or ''}",
         f"负向提示词：\n{prompt.get('negative') or ''}",
         f"运镜/动作弧线：\n{prompt.get('motion_arc') or ''}",
         f"参考图锚点提示：\n{_join(_short_list(anchor.get('hard_anchors'), 2))}",
     ]
     return "\n\n".join(part for part in parts if not part.endswith("\n"))
+
+
+def _segment_script_id(segment_prompt_id: Any) -> str:
+    compact = "".join(ch for ch in str(segment_prompt_id or "") if ch.isalnum()).upper()
+    return f"SPK-{compact[:8]}" if compact else ""
 
 
 def _short_list(value: Any, limit: int) -> List[str]:

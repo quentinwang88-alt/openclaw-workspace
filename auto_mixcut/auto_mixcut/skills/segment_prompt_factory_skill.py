@@ -66,8 +66,10 @@ class SegmentPromptFactorySkill:
             return prompt_result
         prompt = prompt_result.data
 
+        segment_prompt_id = str(uuid.uuid4())
         package = {
-            "segment_prompt_id": str(uuid.uuid4()),
+            "segment_prompt_id": segment_prompt_id,
+            "segment_script_id": _segment_script_id(segment_prompt_id),
             "product_id": brief.get("product_id"),
             "raw_category": raw_category,
             "category": category,
@@ -181,6 +183,7 @@ def _ensure_prompt_package_table(ctx: SkillContext) -> Result:
                         CREATE TABLE IF NOT EXISTS segment_prompt_packages (
                           id BIGINT PRIMARY KEY AUTO_INCREMENT,
                           segment_prompt_id VARCHAR(128) NOT NULL UNIQUE,
+                          segment_script_id VARCHAR(64),
                           product_id VARCHAR(128) NOT NULL,
                           raw_category VARCHAR(128),
                           category VARCHAR(128),
@@ -215,6 +218,7 @@ def _ensure_prompt_package_table(ctx: SkillContext) -> Result:
                     CREATE TABLE IF NOT EXISTS segment_prompt_packages (
                       id INTEGER PRIMARY KEY AUTOINCREMENT,
                       segment_prompt_id TEXT NOT NULL UNIQUE,
+                      segment_script_id TEXT,
                       product_id TEXT NOT NULL,
                       raw_category TEXT,
                       category TEXT,
@@ -243,14 +247,36 @@ def _ensure_prompt_package_table(ctx: SkillContext) -> Result:
                     )
                     """
                 )
+            _ensure_prompt_package_column(ctx, conn, "segment_script_id", "VARCHAR(64)" if getattr(ctx.repo, "dialect", "sqlite") == "mysql" else "TEXT")
         return Result.ok()
     except Exception as exc:
         return Result.fail("PROMPT_PACKAGE_TABLE_FAILED", str(exc))
 
 
+def _ensure_prompt_package_column(ctx: SkillContext, conn: Any, column: str, spec: str) -> None:
+    if getattr(ctx.repo, "dialect", "sqlite") == "mysql":
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema=%s AND table_name=%s AND column_name=%s
+                LIMIT 1
+                """,
+                (ctx.repo.database, "segment_prompt_packages", column),
+            )
+            if not cur.fetchone():
+                cur.execute(f"ALTER TABLE segment_prompt_packages ADD COLUMN {column} {spec}")
+        return
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(segment_prompt_packages)").fetchall()}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE segment_prompt_packages ADD COLUMN {column} {spec}")
+
+
 def _package_row(package: dict[str, Any], status: str) -> dict[str, Any]:
     return {
         "segment_prompt_id": package["segment_prompt_id"],
+        "segment_script_id": package.get("segment_script_id") or _segment_script_id(package["segment_prompt_id"]),
         "product_id": package["product_id"],
         "raw_category": package.get("raw_category"),
         "category": package["category"],
@@ -275,6 +301,11 @@ def _normalize_category(ctx: SkillContext, raw_category: str) -> str:
     aliases = _load_factory_config(ctx).get("category_normalization", {}).get("aliases", {})
     key = str(raw_category or "").strip()
     return str(aliases.get(key) or key or "generic_fashion")
+
+
+def _segment_script_id(segment_prompt_id: str) -> str:
+    compact = "".join(ch for ch in str(segment_prompt_id or "") if ch.isalnum()).upper()
+    return f"SPK-{compact[:8] or uuid.uuid4().hex[:8].upper()}"
 
 
 def _load_factory_config(ctx: SkillContext) -> dict[str, Any]:
@@ -503,6 +534,8 @@ def _validate_prompt_text(prompt: dict[str, str], category: str, segment_key: st
 def _validate_package(package: dict[str, Any]) -> Result:
     if not package.get("segment_prompt_id"):
         return Result.fail("PROMPT_ID_REQUIRED", "segment_prompt_id is required")
+    if not str(package.get("segment_script_id") or "").startswith("SPK-"):
+        return Result.fail("SEGMENT_SCRIPT_ID_REQUIRED", "segment_script_id is required")
     if not package["anchor_ref"]["hard_anchors"]:
         return Result.fail("HARD_ANCHORS_REQUIRED", "anchor_ref.hard_anchors is required")
     if package["category"] == "womens_outerwear" and package["person_framing"] == "ai_full_face":

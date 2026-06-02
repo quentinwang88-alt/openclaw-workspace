@@ -33,6 +33,7 @@ class SegmentPromptFactoryTest(unittest.TestCase):
         negative = package["prompt"]["negative"]
 
         self.assertEqual(package["duration_sec"], 4)
+        self.assertRegex(package["segment_script_id"], r"^SPK-[A-F0-9]{8}$")
         self.assertEqual(package["person_framing"], "ai_local")
         self.assertEqual(package["gen_policy"]["num_variants"], 4)
         self.assertTrue(package["gen_policy"]["lock_character_ref"])
@@ -47,6 +48,7 @@ class SegmentPromptFactoryTest(unittest.TestCase):
         self.assertIsNotNone(saved)
         self.assertEqual(saved["package_status"], "created")
         self.assertEqual(saved["prompt_grade"], "A")
+        self.assertEqual(saved["segment_script_id"], package["segment_script_id"])
 
     def test_same_segment_type_keeps_prompt_detail_independent_from_grade(self):
         grade_a = SegmentPromptFactorySkill(self.ctx).build_package(_brief(), _slot(ai_gen_grade="A"), persist=False)
