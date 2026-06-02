@@ -14,6 +14,7 @@ class SegmentPromptFactoryTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
         os.environ["AUTO_MIXCUT_ROOT"] = str(Path(__file__).resolve().parents[1])
+        os.environ["AUTO_MIXCUT_DB_PROVIDER"] = "sqlite"
         os.environ["AUTO_MIXCUT_DB"] = str(root / "db.sqlite")
         os.environ["AUTO_MIXCUT_OSS_ROOT"] = str(root / "oss")
         os.environ["AUTO_MIXCUT_OSS_PROVIDER"] = "local"
@@ -49,6 +50,18 @@ class SegmentPromptFactoryTest(unittest.TestCase):
         self.assertEqual(saved["package_status"], "created")
         self.assertEqual(saved["prompt_grade"], "A")
         self.assertEqual(saved["segment_script_id"], package["segment_script_id"])
+
+    def test_reference_image_pack_metadata_is_saved(self):
+        slot = _slot(ai_gen_grade="A")
+        slot.update({"sku_id": "CREAM", "reference_image_pack_id": "REFPACK_VN_P001_CREAM_V1", "reference_image_version": 1})
+        res = SegmentPromptFactorySkill(self.ctx).build_package(_brief(), slot)
+        self.assertTrue(res.success, res.to_dict())
+
+        saved = self.ctx.repo.get("segment_prompt_packages", "segment_prompt_id", res.data["segment_prompt_id"])
+        self.assertIsNotNone(saved)
+        self.assertEqual(saved["sku_id"], "CREAM")
+        self.assertEqual(saved["reference_image_pack_id"], "REFPACK_VN_P001_CREAM_V1")
+        self.assertEqual(saved["reference_image_version"], 1)
 
     def test_same_segment_type_keeps_prompt_detail_independent_from_grade(self):
         grade_a = SegmentPromptFactorySkill(self.ctx).build_package(_brief(), _slot(ai_gen_grade="A"), persist=False)

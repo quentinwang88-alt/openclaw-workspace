@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import mimetypes
 import os
 import shutil
 from pathlib import Path
@@ -104,6 +105,8 @@ class AliyunOSS:
             headers = {
                 "x-oss-meta-sha256": source_hash,
                 "x-oss-meta-file-size": str(source_size),
+                "Content-Type": mimetypes.guess_type(source.name)[0] or "application/octet-stream",
+                "Content-Disposition": f'inline; filename="{_ascii_header_filename(source.name)}"',
             }
             self._bucket.put_object_from_file(object_key, str(source), headers=headers)
             head = self._bucket.head_object(object_key)
@@ -140,7 +143,10 @@ class AliyunOSS:
     def signed_url(self, object_key: str, expires_seconds: int = 86400) -> str:
         if self.public_base_url:
             return f"{self.public_base_url}/{object_key}"
-        return self._bucket.sign_url("GET", object_key, expires_seconds, slash_safe=True)
+        params = {}
+        if Path(object_key).suffix.lower() == ".mp4":
+            params["response-content-disposition"] = f'inline; filename="{_ascii_header_filename(Path(object_key).name)}"'
+        return self._bucket.sign_url("GET", object_key, expires_seconds, params=params, slash_safe=True)
 
 
 def build_oss(settings: Any):
@@ -172,3 +178,12 @@ def _header_get(headers: Any, key: str) -> str:
     if hasattr(headers, "get"):
         return str(headers.get(key) or headers.get(key.lower()) or headers.get(key.upper()) or "").strip()
     return ""
+
+
+def _ascii_header_filename(name: str) -> str:
+    safe = []
+    for char in Path(str(name or "file")).name:
+        code = ord(char)
+        safe.append(char if 32 <= code < 127 and char not in {'"', "\\"} else "_")
+    value = "".join(safe).strip("._ ")
+    return value or "file"

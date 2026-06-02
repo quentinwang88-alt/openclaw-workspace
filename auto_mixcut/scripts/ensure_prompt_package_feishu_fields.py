@@ -46,7 +46,11 @@ PROMPT_PACKAGE_FIELDS: List[Dict[str, Any]] = [
     {"name": "提示词包ID", **TEXT},
     {"name": "商品ID", **TEXT},
     {"name": "商品名称", **TEXT},
-    {"name": "商品图片", **ATTACHMENT},
+    {"name": "SKU ID", **TEXT},
+    {"name": "参考图包ID", **TEXT},
+    {"name": "参考图版本", **NUMBER},
+    {"name": "参考图预览地址", **URL},
+    {"name": "参考图状态", **single_select(["可用", "缺失", "已归档", "更新失败"])},
     {"name": "市场", **single_select(["VN", "TH", "MY", "PH", "ID", "SG"])},
     {"name": "归一类目", **single_select(["发饰", "耳环", "围巾/帽子", "女装外套", "女装上衣", "通用服饰", "其它"])},
     {

@@ -71,6 +71,11 @@ class SegmentPromptFactorySkill:
             "segment_prompt_id": segment_prompt_id,
             "segment_script_id": _segment_script_id(segment_prompt_id),
             "product_id": brief.get("product_id"),
+            "sku_id": str(template_slot.get("sku_id") or brief.get("sku_id") or "DEFAULT"),
+            "reference_image_pack_id": str(template_slot.get("reference_image_pack_id") or brief.get("reference_image_pack_id") or ""),
+            "reference_image_version": int(template_slot.get("reference_image_version") or brief.get("reference_image_version") or 0),
+            "reference_image_preview_url": str(template_slot.get("reference_image_preview_url") or brief.get("reference_image_preview_url") or ""),
+            "reference_image_status": str(template_slot.get("reference_image_status") or brief.get("reference_image_status") or ""),
             "raw_category": raw_category,
             "category": category,
             "template_id": template_slot.get("template_id"),
@@ -185,6 +190,9 @@ def _ensure_prompt_package_table(ctx: SkillContext) -> Result:
                           segment_prompt_id VARCHAR(128) NOT NULL UNIQUE,
                           segment_script_id VARCHAR(64),
                           product_id VARCHAR(128) NOT NULL,
+                          sku_id VARCHAR(128),
+                          reference_image_pack_id VARCHAR(256),
+                          reference_image_version INT DEFAULT 0,
                           raw_category VARCHAR(128),
                           category VARCHAR(128),
                           template_id VARCHAR(128),
@@ -220,6 +228,9 @@ def _ensure_prompt_package_table(ctx: SkillContext) -> Result:
                       segment_prompt_id TEXT NOT NULL UNIQUE,
                       segment_script_id TEXT,
                       product_id TEXT NOT NULL,
+                      sku_id TEXT,
+                      reference_image_pack_id TEXT,
+                      reference_image_version INTEGER DEFAULT 0,
                       raw_category TEXT,
                       category TEXT,
                       template_id TEXT,
@@ -248,6 +259,9 @@ def _ensure_prompt_package_table(ctx: SkillContext) -> Result:
                     """
                 )
             _ensure_prompt_package_column(ctx, conn, "segment_script_id", "VARCHAR(64)" if getattr(ctx.repo, "dialect", "sqlite") == "mysql" else "TEXT")
+            _ensure_prompt_package_column(ctx, conn, "sku_id", "VARCHAR(128)" if getattr(ctx.repo, "dialect", "sqlite") == "mysql" else "TEXT")
+            _ensure_prompt_package_column(ctx, conn, "reference_image_pack_id", "VARCHAR(256)" if getattr(ctx.repo, "dialect", "sqlite") == "mysql" else "TEXT")
+            _ensure_prompt_package_column(ctx, conn, "reference_image_version", "INT DEFAULT 0" if getattr(ctx.repo, "dialect", "sqlite") == "mysql" else "INTEGER DEFAULT 0")
         return Result.ok()
     except Exception as exc:
         return Result.fail("PROMPT_PACKAGE_TABLE_FAILED", str(exc))
@@ -278,6 +292,9 @@ def _package_row(package: dict[str, Any], status: str) -> dict[str, Any]:
         "segment_prompt_id": package["segment_prompt_id"],
         "segment_script_id": package.get("segment_script_id") or _segment_script_id(package["segment_prompt_id"]),
         "product_id": package["product_id"],
+        "sku_id": package.get("sku_id") or "DEFAULT",
+        "reference_image_pack_id": package.get("reference_image_pack_id") or "",
+        "reference_image_version": int(package.get("reference_image_version") or 0),
         "raw_category": package.get("raw_category"),
         "category": package["category"],
         "template_id": package.get("template_id"),

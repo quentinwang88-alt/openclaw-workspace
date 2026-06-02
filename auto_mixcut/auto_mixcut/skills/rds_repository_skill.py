@@ -6,6 +6,7 @@ from auto_mixcut.core.ids import new_id
 from auto_mixcut.core.result import Result
 
 from .context import SkillContext
+from .product_reference_image_skill import ensure_reference_image_tables
 
 
 class RDSRepositorySkill:
@@ -23,7 +24,10 @@ class RDSRepositorySkill:
                 compatible = _ensure_mysql_runtime_compatibility_columns(self.ctx)
                 if not compatible.success:
                     return compatible
-                return Result.ok({"migrations": ["ensure_mysql_core_tables", "ensure_llm_router_tables", "ensure_runtime_compatibility_columns"], "db_provider": "mysql"})
+                reference_images = ensure_reference_image_tables(self.ctx)
+                if not reference_images.success:
+                    return reference_images
+                return Result.ok({"migrations": ["ensure_mysql_core_tables", "ensure_llm_router_tables", "ensure_runtime_compatibility_columns", "ensure_reference_image_tables"], "db_provider": "mysql"})
             return Result.fail("MYSQL_MIGRATION_UNAVAILABLE", "mysql repository cannot initialize tables")
         migrations_dir = self.ctx.settings.root_dir / "migrations"
         sql_files = sorted(m for m in migrations_dir.glob("*.sql") if not m.name.endswith("_mysql_init.sql"))
@@ -34,7 +38,10 @@ class RDSRepositorySkill:
         compatible = _ensure_runtime_compatibility_columns(self.ctx)
         if not compatible.success:
             return compatible
-        return Result.ok({"migrations": [m.name for m in sql_files]})
+        reference_images = ensure_reference_image_tables(self.ctx)
+        if not reference_images.success:
+            return reference_images
+        return Result.ok({"migrations": [m.name for m in sql_files] + ["ensure_reference_image_tables"]})
 
     def create_product_task(
         self,

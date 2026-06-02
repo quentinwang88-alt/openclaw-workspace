@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
@@ -19,6 +19,8 @@ from core.bitable import FeishuBitableClient, resolve_wiki_bitable_app_token  # 
 from core.feishu_url_parser import parse_feishu_bitable_url  # type: ignore  # noqa: E402
 
 from auto_mixcut.core.bootstrap import build_context  # noqa: E402
+from auto_mixcut.skills.product_reference_image_skill import ProductReferenceImageSkill  # noqa: E402
+from auto_mixcut.skills.rds_repository_skill import RDSRepositorySkill  # noqa: E402
 from auto_mixcut.skills.segment_prompt_factory_skill import SegmentPromptFactorySkill  # noqa: E402
 
 
@@ -86,9 +88,15 @@ def sync_workbench(
     max_packages_per_product: int = 6,
     refresh_existing_prompts: bool = False,
 ) -> Dict[str, Any]:
-    _prefer_local_oss_when_unconfigured()
-    ctx = build_context()
+    try:
+        ctx = build_context()
+    except Exception as exc:
+        return {"created": [], "skipped": [], "failed": [{"reason": "context_init_failed", "error": str(exc)}]}
+    db_ready = RDSRepositorySkill(ctx).init_db()
+    if not db_ready.success:
+        return {"created": [], "skipped": [], "failed": [{"reason": "rds_init_failed", "error": db_ready.to_dict()}]}
     factory = SegmentPromptFactorySkill(ctx)
+    reference_images = ProductReferenceImageSkill(ctx)
     task_client = resolve_client(product_task_url)
     anchor_client = resolve_client(anchor_queue_url)
     prompt_client = resolve_client(prompt_workbench_url)
@@ -97,7 +105,7 @@ def sync_workbench(
     anchor_by_product = _index_latest_anchor(anchor_client.list_records(page_size=100))
     existing_prompt_records = _existing_prompt_records(prompt_client.list_records(page_size=100))
     existing_keys = set(existing_prompt_records)
-    image_cache: Dict[str, List[Dict[str, Any]]] = {}
+    reference_pack_cache: Dict[tuple[str, str, str], Dict[str, Any]] = {}
 
     created: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
@@ -124,18 +132,31 @@ def sync_workbench(
 
         product_name = _text(fields.get("商品名称")) or _text(anchor_fields.get("商品名称")) or product_id
         market = _text(fields.get("市场")) or _text(anchor_fields.get("市场")) or "VN"
+        sku_id = _sku_id(fields, anchor_fields)
+        sku_label = _sku_label(fields, anchor_fields)
         category = _category_key(_text(fields.get("类目")) or _text(anchor_fields.get("类目")))
         category_cn = CATEGORY_KEY_TO_CN.get(category, "通用服饰")
         brief = _anchor_brief(product_id, product_name, category, anchor_fields)
+        brief["material_anchor_brief"]["sku_id"] = sku_id
         if not brief["material_anchor_brief"]["hard_anchors"]:
             skipped.append({"product_id": product_id, "reason": "anchor_without_hard_anchors"})
             continue
 
         slots = _gap_slots(_text(fields.get("素材缺口说明")), category, gap_count, max_packages_per_product)
-        copied_image = image_cache.get(product_id)
-        if copied_image is None:
-            copied_image = [] if dry_run else _copy_product_image(anchor_client, prompt_client, anchor_fields)
-            image_cache[product_id] = copied_image
+        reference_key = (market, product_id, sku_id)
+        reference_pack = reference_pack_cache.get(reference_key)
+        if reference_pack is None:
+            reference_pack = _ensure_reference_pack(reference_images, anchor_client, product_id, market, sku_id, sku_label, anchor_fields, dry_run)
+            reference_pack_cache[reference_key] = reference_pack
+        for slot in slots:
+            slot["sku_id"] = sku_id
+            slot["reference_image_pack_id"] = reference_pack.get("reference_image_pack_id", "")
+            slot["reference_image_version"] = reference_pack.get("reference_image_version", 0)
+            slot["reference_image_preview_url"] = reference_pack.get("primary_preview_url", "")
+            slot["reference_image_status"] = reference_pack.get("reference_image_status", "缺失")
+        if not reference_pack.get("reference_image_pack_id") and not dry_run:
+            skipped.append({"product_id": product_id, "reason": "reference_image_pack_missing", "sku_id": sku_id, "detail": reference_pack.get("error")})
+            continue
 
         for idx, slot in enumerate(slots):
             dedupe_key = (product_id, SEGMENT_CN.get(slot["segment_type"], slot["segment_type"]), GRADE_CN.get(slot["ai_gen_grade"], slot["ai_gen_grade"]))
@@ -159,7 +180,11 @@ def sync_workbench(
                 "提示词包ID": package["segment_prompt_id"],
                 "商品ID": product_id,
                 "商品名称": product_name,
-                "商品图片": copied_image,
+                "SKU ID": sku_id,
+                "参考图包ID": reference_pack.get("reference_image_pack_id", ""),
+                "参考图版本": reference_pack.get("reference_image_version", 0),
+                "参考图预览地址": _feishu_url(reference_pack.get("primary_preview_url", ""), "查看参考图"),
+                "参考图状态": reference_pack.get("reference_image_status", "缺失"),
                 "市场": market,
                 "归一类目": category_cn,
                 "片段类型": SEGMENT_CN.get(package["segment_type"], package["segment_type"]),
@@ -183,13 +208,6 @@ def sync_workbench(
                     failed.append({"product_id": product_id, "segment_prompt_id": package["segment_prompt_id"], "reason": "feishu_create_failed", "error": str(exc)})
 
     return {"created": created, "skipped": skipped, "failed": failed}
-
-
-def _prefer_local_oss_when_unconfigured() -> None:
-    provider = os.environ.get("AUTO_MIXCUT_OSS_PROVIDER", "").lower()
-    required = ["ALIYUN_OSS_BUCKET", "ALIYUN_OSS_ENDPOINT", "ALIYUN_OSS_ACCESS_KEY_ID", "ALIYUN_OSS_ACCESS_KEY_SECRET"]
-    if provider in {"", "aliyun"} and any(not os.environ.get(key) for key in required):
-        os.environ["AUTO_MIXCUT_OSS_PROVIDER"] = "local"
 
 
 def _index_latest_anchor(records: Iterable[Any]) -> Dict[str, Any]:
@@ -233,6 +251,11 @@ def _refresh_existing_prompt(
     package["segment_script_id"] = _segment_script_id(package["segment_prompt_id"])
     update_fields = {
         "提示词包ID": package["segment_prompt_id"],
+        "SKU ID": package.get("sku_id") or "DEFAULT",
+        "参考图包ID": package.get("reference_image_pack_id") or "",
+        "参考图版本": package.get("reference_image_version") or 0,
+        "参考图预览地址": _feishu_url(package.get("reference_image_preview_url") or "", "查看参考图"),
+        "参考图状态": package.get("reference_image_status") or "缺失",
         "短视频片段提示词": _format_prompt_package(package),
     }
     if dry_run:
@@ -395,16 +418,72 @@ def _short_list(value: Any, limit: int) -> List[str]:
     return _listish(value)[: max(0, limit)]
 
 
-def _copy_product_image(anchor_client: FeishuBitableClient, prompt_client: FeishuBitableClient, anchor_fields: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _ensure_reference_pack(
+    reference_images: ProductReferenceImageSkill,
+    anchor_client: FeishuBitableClient,
+    product_id: str,
+    market: str,
+    sku_id: str,
+    sku_label: str,
+    anchor_fields: Dict[str, Any],
+    dry_run: bool,
+) -> Dict[str, Any]:
+    active = reference_images.get_active_pack(product_id, market=market, sku_id=sku_id)
+    if active.success and active.data.get("pack"):
+        return _reference_pack_summary(active.data)
+    if dry_run:
+        return {"reference_image_pack_id": "", "reference_image_version": 0, "primary_preview_url": "", "reference_image_status": "缺失"}
     images = _attachments(anchor_fields.get("商品主图"))
     if not images:
-        return []
-    attachment = images[0]
-    try:
-        content, file_name, content_type, size = anchor_client.download_attachment_bytes(attachment)
-        return [prompt_client.upload_attachment(content, file_name, content_type, size=size, parent_type="bitable_file")]
-    except Exception:
-        return []
+        return {"reference_image_pack_id": "", "reference_image_version": 0, "primary_preview_url": "", "reference_image_status": "缺失", "error": "anchor_card_missing_product_images"}
+    source_images: List[Dict[str, Any]] = []
+    with tempfile.TemporaryDirectory(prefix=f"refpack_{product_id}_") as tmpdir:
+        tmp_root = Path(tmpdir)
+        for index, attachment in enumerate(images, start=1):
+            try:
+                content, file_name, content_type, _size = anchor_client.download_attachment_bytes(attachment)
+            except Exception as exc:
+                return {"reference_image_pack_id": "", "reference_image_version": 0, "primary_preview_url": "", "reference_image_status": "更新失败", "error": str(exc)}
+            safe_name = _safe_file_name(file_name or f"reference_{index}.jpg")
+            path = tmp_root / f"{index:03d}_{safe_name}"
+            path.write_bytes(content)
+            source_images.append(
+                {
+                    "path": str(path),
+                    "image_role": "main" if index == 1 else "detail",
+                    "source_file_token": _text(attachment.get("file_token") if isinstance(attachment, dict) else ""),
+                    "source_url": _text(attachment),
+                }
+            )
+        packed = reference_images.ensure_pack(
+            product_id,
+            market=market,
+            sku_id=sku_id,
+            sku_label=sku_label,
+            source_images=source_images,
+            source="feishu_anchor_card",
+            anchor_snapshot={"商品主图数量": len(images), "AI生成锚点卡": _text(anchor_fields.get("AI生成锚点卡"))[:2000]},
+        )
+    if not packed.success:
+        return {"reference_image_pack_id": "", "reference_image_version": 0, "primary_preview_url": "", "reference_image_status": "更新失败", "error": packed.to_dict()}
+    return _reference_pack_summary(packed.data)
+
+
+def _reference_pack_summary(data: Dict[str, Any]) -> Dict[str, Any]:
+    pack = data.get("pack") or {}
+    images = data.get("images") or []
+    preview = pack.get("primary_preview_url") or (images[0].get("preview_url") if images else "")
+    return {
+        "reference_image_pack_id": pack.get("reference_image_pack_id") or "",
+        "reference_image_version": int(pack.get("version") or 0),
+        "primary_preview_url": preview,
+        "reference_image_status": "可用" if pack.get("reference_image_pack_id") else "缺失",
+    }
+
+
+def _safe_file_name(value: str) -> str:
+    name = Path(str(value or "reference.jpg")).name
+    return "".join(ch if ch.isalnum() or ch in {".", "-", "_"} else "_" for ch in name) or "reference.jpg"
 
 
 def _priority(fields: Dict[str, Any]) -> str:
@@ -427,13 +506,32 @@ def _without_large_prompt(fields: Dict[str, Any]) -> Dict[str, Any]:
     cloned = dict(fields)
     if cloned.get("短视频片段提示词"):
         cloned["短视频片段提示词"] = str(cloned["短视频片段提示词"])[:160] + "..."
-    if cloned.get("商品图片"):
-        cloned["商品图片"] = f"{len(cloned['商品图片'])} attachment(s)"
     return cloned
 
 
 def _compact(fields: Dict[str, Any]) -> Dict[str, Any]:
     return {key: value for key, value in fields.items() if value not in (None, "", [], {})}
+
+
+def _feishu_url(url: Any, text: str) -> Dict[str, str] | str:
+    link = _text(url)
+    return {"link": link, "text": text, "type": "url"} if link else ""
+
+
+def _sku_id(task_fields: Dict[str, Any], anchor_fields: Dict[str, Any]) -> str:
+    for name in ("SKU ID", "SKU", "skuID", "sku_id", "SKU编码", "颜色SKU"):
+        value = _text(task_fields.get(name)) or _text(anchor_fields.get(name))
+        if value:
+            return value
+    return "DEFAULT"
+
+
+def _sku_label(task_fields: Dict[str, Any], anchor_fields: Dict[str, Any]) -> str:
+    for name in ("SKU名称", "SKU标签", "颜色", "颜色名称", "款式"):
+        value = _text(task_fields.get(name)) or _text(anchor_fields.get(name))
+        if value:
+            return value
+    return ""
 
 
 def _category_key(value: str) -> str:

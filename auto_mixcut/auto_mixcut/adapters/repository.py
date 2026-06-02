@@ -52,6 +52,7 @@ JSON_FIELDS = {
     "reference_image_oss_ids",
     "prompt_package_json",
     "anchor_ref_json",
+    "anchor_snapshot_json",
     "perturbation_seed_json",
     "budget_json",
     "alert_json",
