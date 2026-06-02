@@ -19,8 +19,10 @@ class AutoMixcutMockE2ETest(unittest.TestCase):
         os.environ["AUTO_MIXCUT_ROOT"] = str(Path(__file__).resolve().parents[1])
         os.environ["AUTO_MIXCUT_DB"] = str(root / "db.sqlite")
         os.environ["AUTO_MIXCUT_OSS_ROOT"] = str(root / "oss")
+        os.environ["AUTO_MIXCUT_OSS_PROVIDER"] = "local"
         os.environ["AUTO_MIXCUT_TEMP_ROOT"] = str(root / "tmp")
         os.environ["AUTO_MIXCUT_MOCK_FFMPEG"] = "1"
+        os.environ["AUTO_MIXCUT_MOCK_LLM"] = "1"
         self.ctx = build_context()
         init = RDSRepositorySkill(self.ctx).init_db()
         self.assertTrue(init.success, init.to_dict())
@@ -45,7 +47,7 @@ class AutoMixcutMockE2ETest(unittest.TestCase):
         self.assertEqual(len(lineage), 5)
         self.assertTrue(self.ctx.repo.list_where("llm_calls", "product_id=?", ("VN_HAIR_001",)))
 
-    def test_watermarked_low_trust_asset_is_excluded(self):
+    def test_watermarked_low_trust_asset_is_excluded_even_after_processing(self):
         create = RDSRepositorySkill(self.ctx).create_product_task("VN_HAIR_002", "Scarf", "VN", "scarves", 1)
         self.assertTrue(create.success, create.to_dict())
         ProductAnchorSkill(self.ctx).draft_anchor("VN_HAIR_002")
@@ -57,7 +59,7 @@ class AutoMixcutMockE2ETest(unittest.TestCase):
         run = AutoMixcutOrchestratorAgent(self.ctx).run_product("VN_HAIR_002", requested_count=1, auto_confirm_anchor=True)
         self.assertFalse(run.success)
         asset = self.ctx.repo.get("assets", "asset_id", upload.data["asset_id"])
-        self.assertEqual(asset["has_watermark"], "yes")
+        self.assertEqual(asset["has_watermark"], "processed")
         self.assertEqual(self.ctx.repo.list_where("segments", "product_id=?", ("VN_HAIR_002",)), [])
 
     def _create_mock_assets(self, count: int):

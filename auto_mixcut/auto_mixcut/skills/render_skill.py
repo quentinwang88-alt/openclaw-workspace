@@ -6,6 +6,7 @@ from pathlib import Path
 
 from auto_mixcut.core.ids import new_id
 from auto_mixcut.core.result import Result
+from auto_mixcut.core.storage_paths import require_oss_object_path
 
 from .context import SkillContext
 
@@ -17,11 +18,18 @@ class RenderSkill:
     def render_batch(self, batch_id: str) -> Result:
         plans = self.ctx.repo.list_where("render_plans", "batch_id=? AND render_status='planned'", (batch_id,))
         outputs = []
+        failures = []
         for plan in plans:
             res = self.render_plan(plan["render_plan_id"])
             if res.success:
                 outputs.append(res.data["output_id"])
+            else:
+                failures.append({"render_plan_id": plan["render_plan_id"], "error": res.error.to_dict() if res.error else {}})
         batch = self.ctx.repo.get("mixcut_batches", "batch_id", batch_id)
+        if failures:
+            if batch:
+                self.ctx.repo.update("mixcut_batches", "batch_id", batch_id, {"rendered_count": len(outputs), "batch_status": "render_failed"})
+            return Result.fail("BATCH_RENDER_FAILED", "one or more render plans failed", {"batch_id": batch_id, "output_ids": outputs, "failures": failures})
         if batch:
             self.ctx.repo.update("mixcut_batches", "batch_id", batch_id, {"rendered_count": len(outputs), "batch_status": "rendered"})
             self.ctx.repo.update("content_tasks", "task_id", batch.get("task_id"), {"actual_variant_count": len(outputs), "task_status": "RENDERED"})
@@ -64,11 +72,12 @@ class RenderSkill:
         cover_obj = dict(cover_upload.data, object_type="cover", mime_type="image/jpeg")
         self.ctx.repo.upsert("oss_objects", "object_id", out_obj)
         self.ctx.repo.upsert("oss_objects", "object_id", cover_obj)
-        output_row = {"output_id": output_id, "batch_id": plan["batch_id"], "product_id": plan["product_id"], "variant_no": plan["variant_no"], "template_id": plan["template_id"], "output_oss_object_id": out_obj["object_id"], "cover_oss_object_id": cover_obj["object_id"], "duration_ms": 15000, "width": 1080, "height": 1920, "render_status": "rendered", "machine_quality_status": "pending", "human_quality_status": "pending"}
+        duration_ms = _planned_duration_ms(plan, segments)
+        output_row = {"output_id": output_id, "batch_id": plan["batch_id"], "product_id": plan["product_id"], "variant_no": plan["variant_no"], "template_id": plan["template_id"], "output_oss_object_id": out_obj["object_id"], "cover_oss_object_id": cover_obj["object_id"], "duration_ms": duration_ms, "width": 1080, "height": 1920, "render_status": "rendered", "machine_quality_status": "pending", "human_quality_status": "pending"}
         self.ctx.repo.upsert("outputs", "output_id", output_row)
         for slot in segments:
             self.ctx.repo.insert("output_segments", {"output_id": output_id, "segment_id": slot["segment_id"], "asset_id": slot["asset_id"], "slot_index": slot["slot"], "role_used": slot["role"], "start_ms_in_output": slot["start_ms_in_output"], "end_ms_in_output": slot["end_ms_in_output"]})
-        manifest_data = {"output_id": output_id, "batch_id": plan["batch_id"], "product_id": plan["product_id"], "template_id": plan["template_id"], "duration_ms": 15000, "output_oss_object_id": out_obj["object_id"], "cover_oss_object_id": cover_obj["object_id"], "segments": segments, "subtitles": subtitles, "bgm": {"oss_object_id": bgm_object, "volume": 0.55, "loudness_normalized": True}, "machine_quality_status": "pending", "experiment_group": plan["template_id"], "experiment_batch": plan["batch_id"]}
+        manifest_data = {"output_id": output_id, "batch_id": plan["batch_id"], "product_id": plan["product_id"], "template_id": plan["template_id"], "duration_ms": duration_ms, "output_oss_object_id": out_obj["object_id"], "cover_oss_object_id": cover_obj["object_id"], "segments": segments, "subtitles": subtitles, "bgm": {"oss_object_id": bgm_object, "volume": 0.55, "loudness_normalized": True}, "machine_quality_status": "pending", "experiment_group": plan["template_id"], "experiment_batch": plan["batch_id"]}
         manifest.write_text(json.dumps(manifest_data, ensure_ascii=False, indent=2), encoding="utf-8")
         man_key = f"auto_mixcut/manifests/{product.get('market','NA')}/{product.get('category','uncategorized')}/{plan['product_id']}/{plan['batch_id']}/variant_{plan['variant_no']:03d}.json"
         man_upload = self.ctx.oss.upload(manifest, man_key)
@@ -118,6 +127,7 @@ class RenderSkill:
         concat_file = work_dir / "concat.txt"
         concat_file.write_text("".join(f"file '{part.as_posix()}'\n" for part in parts), encoding="utf-8")
         video_only = work_dir / "video_only.mp4"
+        duration_arg = _duration_arg(_planned_duration_ms(plan, slots))
         concat_args = [
             "-y",
             "-f",
@@ -127,7 +137,7 @@ class RenderSkill:
             "-i",
             str(concat_file),
             "-t",
-            "15.000",
+            duration_arg,
             "-c",
             "copy",
             str(video_only),
@@ -151,7 +161,7 @@ class RenderSkill:
             "-map",
             "[a]",
             "-t",
-            "15.000",
+            duration_arg,
             "-c:v",
             "libx264",
             "-preset",
@@ -182,18 +192,48 @@ class RenderSkill:
         return Result.ok({"path": str(output_path), "probe": data, "bgm_object": bgm.data.get("object_id")})
 
 
+def _planned_duration_ms(plan: dict, segments: list[dict]) -> int:
+    try:
+        planned = int(plan.get("planned_duration_ms") or 0)
+    except (TypeError, ValueError):
+        planned = 0
+    if planned > 0:
+        return planned
+    try:
+        return max(int(slot.get("end_ms_in_output") or 0) for slot in segments)
+    except (TypeError, ValueError, StopIteration):
+        return 15000
+
+
+def _duration_arg(duration_ms: int) -> str:
+    return f"{max(duration_ms, 500) / 1000:.3f}"
+
+
 def _segment_path(ctx: SkillContext, segment_id: str) -> Path | None:
     segment = ctx.repo.get("segments", "segment_id", segment_id)
     if not segment:
         return None
-    obj = ctx.repo.get("oss_objects", "object_id", segment.get("segment_oss_object_id"))
-    if not obj:
-        return None
-    path = ctx.settings.oss_root / obj["object_key"]
-    return path if path.exists() else None
+    return require_oss_object_path(ctx, segment.get("segment_oss_object_id"), "render_segments")
 
 
 def _ensure_bgm(ctx: SkillContext, plan: dict | None = None) -> Result:
+    try:
+        from auto_mixcut.skills.bgm_library_skill import BgmLibrarySkill
+        product_id = (plan or {}).get("product_id", "")
+        category = ""
+        if product_id:
+            product = ctx.repo.get("products", "product_id", product_id) or {}
+            category = product.get("category", "")
+        rec = BgmLibrarySkill(ctx).get_recommendation(product_id=product_id, category=category)
+        recs = rec.data.get("recommendations", []) if rec.success else []
+        if recs:
+            best = recs[0]
+            path = require_oss_object_path(ctx, best.get("oss_object_id", ""), "render_bgm")
+            if path and path.exists():
+                return Result.ok({"path": str(path), "object_id": best.get("oss_object_id", "")})
+    except Exception:
+        pass
+
     bgm_dir = ctx.settings.root_dir / "assets" / "bgm"
     bgm_dir.mkdir(parents=True, exist_ok=True)
     paths = [path for path in sorted(bgm_dir.rglob("*")) if path.suffix.lower() in {".mp3", ".wav", ".m4a", ".aac"} and not path.name.startswith("test_")]

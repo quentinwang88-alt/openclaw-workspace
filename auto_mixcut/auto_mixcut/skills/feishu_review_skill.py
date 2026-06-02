@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from auto_mixcut.adapters.feishu import AutoMixcutFeishuClient, datetime_cell, url_cell
 from auto_mixcut.core.ids import new_id
 from auto_mixcut.core.result import Result
+from auto_mixcut.core.storage_paths import require_oss_object_path
 
 from .context import SkillContext
 
@@ -144,9 +145,11 @@ class FeishuReviewSkill:
                 "视频预览链接": url_cell(_object_url(self.ctx, output.get("output_oss_object_id")), "视频预览"),
                 "机器质检状态": output.get("machine_quality_status"),
                 "人工质检状态": "待检查",
-                "是否可发布": False,
                 "飞书展示到期时间": datetime_cell((datetime.utcnow() + timedelta(days=7)).isoformat(timespec="seconds")),
             }
+            video_attachment = _upload_video_to_feishu(self.ctx, output.get("output_oss_object_id"))
+            if video_attachment:
+                fields["成片文件"] = [video_attachment]
             res = self._sync("output_qc", output["output_id"], "成片质检表", days=7, fields=fields)
             if not res.success:
                 return res
@@ -272,6 +275,56 @@ def _object_url(ctx: SkillContext, object_id: str | None) -> str | None:
     if not obj:
         return None
     return ctx.oss.signed_url(obj["object_key"])
+
+
+def _object_file_info(ctx: SkillContext, object_id: str | None) -> dict | None:
+    if not object_id:
+        return None
+    path = require_oss_object_path(ctx, object_id, "feishu_preview")
+    if not path or not path.exists():
+        return None
+    obj = ctx.repo.get("oss_objects", "object_id", object_id)
+    if not obj:
+        return None
+    return {"file_token": "", "name": path.name, "size": path.stat().st_size, "tmp_url": ctx.oss.signed_url(obj["object_key"]) or ""}
+
+
+def _upload_video_to_feishu(ctx: SkillContext, object_id: str | None) -> dict | None:
+    if not object_id:
+        return None
+    path = require_oss_object_path(ctx, object_id, "feishu_upload")
+    if not path or not path.exists():
+        return None
+    obj = ctx.repo.get("oss_objects", "object_id", object_id)
+    if not obj:
+        return None
+    try:
+        from auto_mixcut.adapters.feishu import TABLES
+        table_info = TABLES["成片质检表"]
+        client_cls = _get_bitable_client()
+        client = client_cls(app_token=table_info.app_token, table_id=table_info.table_id)
+        content = path.read_bytes()
+        result = client.upload_attachment(
+            content=content,
+            file_name=path.name,
+            content_type="video/mp4",
+            size=len(content),
+            parent_type="bitable_file",
+        )
+        return result
+    except Exception:
+        return None
+
+
+def _get_bitable_client():
+    import sys
+    from pathlib import Path
+    workspace = Path(__file__).resolve().parent.parent.parent.parent.parent
+    skill_path = workspace / "skills" / "script-run-manager-sync"
+    if str(skill_path) not in sys.path:
+        sys.path.insert(0, str(skill_path))
+    from core.bitable import FeishuBitableClient
+    return FeishuBitableClient
 
 
 def _latest_output(ctx: SkillContext, product_id: str) -> dict | None:

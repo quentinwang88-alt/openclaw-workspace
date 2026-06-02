@@ -1,9 +1,142 @@
 {
-  "product_anchor_generation": {"tier": "medium_vision", "max_retries": 2},
-  "watermark_detection": {"tier": "medium_vision", "max_retries": 1},
-  "segment_tagging_default": {"tier": "medium_vision", "batch_size": 10, "concurrency": 5, "max_retries": 2},
-  "product_anchor_check": {"tier": "medium_vision", "escalate_to_high_if": ["source_trust_level == low", "product_match_status == uncertain", "selected_for_core_role == true"]},
-  "ai_generated_consistency_check": {"tier": "medium_vision", "escalate_to_high_if": ["selected_for_core_role == true", "frame_consistency_status == uncertain"]},
-  "final_video_qc": {"tier": "medium_vision", "escalate_to_high_if": ["machine_quality_status == borderline"]},
-  "golden_benchmark": {"tier": "medium_vision", "analysis_tier": "high_reasoning"}
+  "providers": {
+    "deepseek": {
+      "type": "openai_compatible",
+      "display_name": "DeepSeek V4 Flash",
+      "base_url": "https://api.deepseek.com",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "default_timeout": 120
+    },
+    "volcano_ark": {
+      "type": "openai_compatible",
+      "display_name": "Volcano Ark (Doubao Seed 2.0 Lite)",
+      "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+      "api_key_env": "VOLCANO_ARK_API_KEY",
+      "default_timeout": 180
+    },
+    "volcano_ark_coding": {
+      "type": "openai_compatible",
+      "display_name": "Volcano Ark Coding (Doubao Seed 2.0 Pro)",
+      "base_url": "https://ark.cn-beijing.volces.com/api/coding/v3",
+      "api_key_env": "VOLCANO_ARK_API_KEY",
+      "default_timeout": 180
+    },
+    "openai_codex": {
+      "type": "openai_codex",
+      "display_name": "OpenAI Codex (OpenClaw auto-auth)",
+      "base_url_env": "OPENAI_CODEX_BASE_URL",
+      "api_key_env": "OPENAI_CODEX_API_KEY",
+      "default_timeout": 180
+    },
+    "mock": {
+      "type": "mock",
+      "display_name": "Mock Provider"
+    }
+  },
+
+  "model_tiers": {
+    "cheap_text": {
+      "tier": "cheap_text",
+      "description": "基础文本模型，低成本高速度 — DeepSeek V4 Flash",
+      "primary_provider": "deepseek",
+      "fallback_provider": "volcano_ark_coding",
+      "model_name": "deepseek-v4-flash",
+      "fallback_model": "doubao-seed-2-0-pro-260215",
+      "max_concurrency": 5,
+      "max_retries": 2,
+      "retry_delays_ms": [5000, 20000],
+      "timeout_ms": 60000,
+      "max_output_tokens": 2000
+    },
+    "audio_model": {
+      "tier": "audio_model",
+      "description": "音频/BGM 元数据打标 — GPT-5.5 (支持音频输入)",
+      "primary_provider": "openai_codex",
+      "fallback_provider": "volcano_ark",
+      "model_name": "gpt-5.5",
+      "fallback_model": "doubao-seed-2-0-lite-260428",
+      "fallback_model": "gpt-5.5",
+      "max_concurrency": 3,
+      "max_retries": 2,
+      "retry_delays_ms": [5000, 20000],
+      "timeout_ms": 120000,
+      "max_output_tokens": 1500
+    },
+    "medium_vision": {
+      "tier": "medium_vision",
+      "description": "中等多模态视觉模型，主力视觉判断 — Doubao Seed 2.0 Pro",
+      "primary_provider": "volcano_ark_coding",
+      "fallback_provider": "openai_codex",
+      "model_name": "doubao-seed-2-0-pro-260215",
+      "fallback_model": "gpt-5.5",
+      "max_concurrency": 2,
+      "max_retries": 2,
+      "retry_delays_ms": [5000, 20000],
+      "timeout_ms": 180000,
+      "max_output_tokens": 2000
+    },
+    "high_vision": {
+      "tier": "high_vision",
+      "description": "最高等级多模态/推理模型，用于仲裁和兜底 — OpenClaw GPT-5.5",
+      "primary_provider": "openai_codex",
+      "fallback_provider": "volcano_ark_coding",
+      "model_name": "gpt-5.5",
+      "fallback_model": "doubao-seed-2-0-pro-260215",
+      "max_concurrency": 1,
+      "max_retries": 1,
+      "retry_delays_ms": [10000, 30000],
+      "timeout_ms": 180000,
+      "max_output_tokens": 4000
+    }
+  },
+
+  "call_type_routing": {
+    "failure_summary":          {"tier": "cheap_text",    "escalate_on_failure": false},
+    "segment_prompt_refinement": {"tier": "cheap_text",    "escalate_on_failure": false},
+
+    "bgm_metadata_tagging":     {"tier": "audio_model",   "escalate_on_failure": false},
+
+    "segment_tagging_default":   {"tier": "medium_vision", "escalate_on_failure": true,  "escalate_tier": "high_vision"},
+    "product_anchor_check":      {"tier": "medium_vision", "escalate_on_failure": true,  "escalate_tier": "high_vision"},
+    "product_anchor_generation": {"tier": "medium_vision", "escalate_on_failure": false},
+    "watermark_detection":       {"tier": "medium_vision", "escalate_on_failure": false},
+    "ai_anchor_check":           {"tier": "medium_vision", "escalate_on_failure": false},
+    "ai_generated_consistency_check": {"tier": "medium_vision", "escalate_on_failure": false},
+    "final_video_qc":           {"tier": "medium_vision", "escalate_on_failure": true,  "escalate_tier": "high_vision"},
+
+    "core_anchor_review":        {"tier": "high_vision",   "escalate_on_failure": false},
+    "core_consistency_review":   {"tier": "high_vision",   "escalate_on_failure": false},
+    "golden_benchmark_analysis": {"tier": "high_vision",   "escalate_on_failure": false},
+    "risk_escalation":           {"tier": "high_vision",   "escalate_on_failure": false}
+  },
+
+  "retry_conditions": {
+    "network_errors": ["ConnectionError", "TimeoutError", "RemoteProtocolError", "ReadTimeout", "ConnectTimeout"],
+    "rate_limit_errors": ["429", "rate_limit", "RateLimitError"],
+    "server_errors": ["500", "502", "503", "504", "InternalServerError"],
+    "json_parse_error": true,
+    "empty_response": true
+  },
+
+  "cache": {
+    "enabled": true,
+    "cache_table": "llm_cache",
+    "hash_fields": ["call_type", "payload", "prompt_version", "model_tier", "product_id", "segment_id"]
+  },
+
+  "escalation_rules": {
+    "max_total_retries_per_call": 3,
+    "escalate_after_retry_exhaustion": true,
+    "only_escalate_if_previous_tier_exhausted": true
+  },
+
+  "concurrency": {
+    "enabled": true,
+    "wait_timeout_ms": 300000
+  },
+
+  "logging": {
+    "log_table": "llm_call_logs",
+    "verbosity": "full"
+  }
 }

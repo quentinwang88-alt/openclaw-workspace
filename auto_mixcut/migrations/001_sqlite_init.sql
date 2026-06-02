@@ -85,6 +85,8 @@ CREATE TABLE IF NOT EXISTS assets (
   local_file_status TEXT,
   ai_tag_status TEXT,
   human_review_status TEXT,
+  source_identity TEXT,
+  scene_tag TEXT,
   created_at TEXT,
   updated_at TEXT
 );
@@ -116,6 +118,7 @@ CREATE TABLE IF NOT EXISTS segments (
   frame_consistency_score REAL,
   frame_consistency_status TEXT,
   frame_consistency_reason TEXT,
+  visual_phash TEXT,
   is_image_generated INTEGER DEFAULT 0,
   usage_count INTEGER DEFAULT 0,
   used_in_outputs_count INTEGER DEFAULT 0,
@@ -181,6 +184,9 @@ CREATE TABLE IF NOT EXISTS segment_tags (
   confidence TEXT,
   needs_human_review INTEGER,
   reason TEXT,
+  text_overlay_risk TEXT,
+  text_language TEXT,
+  text_overlay_reason TEXT,
   reviewer_id TEXT,
   reviewed_at TEXT,
   created_at TEXT
@@ -312,6 +318,7 @@ CREATE TABLE IF NOT EXISTS outputs (
   variant_no INTEGER,
   template_id TEXT,
   output_oss_object_id TEXT,
+  bgm_output_oss_object_id TEXT,
   cover_oss_object_id TEXT,
   duration_ms INTEGER,
   width INTEGER,
@@ -319,11 +326,44 @@ CREATE TABLE IF NOT EXISTS outputs (
   render_status TEXT,
   machine_quality_status TEXT,
   human_quality_status TEXT,
+  human_feedback_reason TEXT,
+  remix_plan_json TEXT,
+  final_qc_json TEXT,
+  bgm_plan_json TEXT,
+  avg_completion_rate REAL,
+  published_at TEXT,
   feishu_preview_status TEXT,
   feishu_record_id TEXT,
   preview_expire_at TEXT,
   experiment_group TEXT,
   experiment_batch TEXT,
+  created_at TEXT,
+  updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS segment_visual_fingerprints (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  fingerprint_id TEXT NOT NULL UNIQUE,
+  product_id TEXT,
+  segment_id TEXT,
+  source_type TEXT,
+  phash TEXT,
+  hash_method TEXT,
+  frame_count INTEGER,
+  created_at TEXT,
+  updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS ai_diversity_alerts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  alert_id TEXT NOT NULL UNIQUE,
+  product_id TEXT NOT NULL,
+  reason TEXT,
+  phase TEXT,
+  ai_ratio_cap REAL,
+  trusted_real_anchor_count INTEGER,
+  alert_json TEXT,
+  status TEXT,
   created_at TEXT,
   updated_at TEXT
 );

@@ -4,6 +4,7 @@ import re
 import subprocess
 
 from auto_mixcut.core.result import Result
+from auto_mixcut.core.storage_paths import require_oss_object_path
 
 from .context import SkillContext
 
@@ -24,8 +25,12 @@ class QualityGateSkill:
         slots = self.ctx.repo.list_where("output_segments", "output_id=? ORDER BY slot_index", (output_id,))
         reasons = []
         first = _segment_bundle(self.ctx, slots[0]["segment_id"]) if slots else None
-        if output.get("duration_ms") < 14500 or output.get("duration_ms") > 15500:
-            reasons.append("duration out of range")
+        expected_duration = _expected_duration_ms(slots)
+        actual_duration = int(output.get("duration_ms") or 0)
+        if expected_duration and abs(actual_duration - expected_duration) > 500:
+            reasons.append("duration does not match render plan")
+        elif actual_duration < 12000 or actual_duration > 30000:
+            reasons.append("duration out of supported range")
         if output.get("width") != 1080 or output.get("height") != 1920:
             reasons.append("resolution is not 1080x1920")
         volume = _audio_volume(self.ctx, output)
@@ -67,11 +72,8 @@ def _segment_bundle(ctx: SkillContext, segment_id: str):
 
 
 def _audio_volume(ctx: SkillContext, output: dict) -> float | None:
-    obj = ctx.repo.get("oss_objects", "object_id", output.get("output_oss_object_id"))
-    if not obj:
-        return None
-    path = ctx.settings.oss_root / obj["object_key"]
-    if not path.exists():
+    path = require_oss_object_path(ctx, output.get("output_oss_object_id"), "quality_outputs")
+    if not path or not path.exists():
         return None
     proc = subprocess.run(
         ["ffmpeg", "-hide_banner", "-i", str(path), "-af", "volumedetect", "-vn", "-sn", "-dn", "-f", "null", "-"],
@@ -80,3 +82,9 @@ def _audio_volume(ctx: SkillContext, output: dict) -> float | None:
     )
     match = re.search(r"mean_volume:\s*(-?\d+(?:\.\d+)?) dB", proc.stderr)
     return float(match.group(1)) if match else None
+
+
+def _expected_duration_ms(slots: list[dict]) -> int:
+    if not slots:
+        return 0
+    return max(int(slot.get("end_ms_in_output") or 0) for slot in slots)

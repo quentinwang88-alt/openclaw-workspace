@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from auto_mixcut.core.result import Result
+from auto_mixcut.core.storage_paths import resolve_oss_object_path
 
 from .context import SkillContext
 
@@ -27,11 +28,10 @@ class MediaProbeSkill:
         if asset["media_type"] == "image":
             data = {"duration_ms": 3000, "width": 1080, "height": 1920, "fps": 30.0, "codec": "image", "has_audio": False, "orientation": "vertical", "raw": {"image": True}}
         else:
-            obj = self.ctx.repo.get("oss_objects", "object_id", asset["original_oss_object_id"])
-            if not obj:
-                return Result.fail("OSS_OBJECT_NOT_FOUND", "raw object missing", {"asset_id": asset_id})
-            path = self.ctx.settings.oss_root / obj["object_key"]
-            probed = self.ctx.ffmpeg.probe(path)
+            resolved = resolve_oss_object_path(self.ctx, asset["original_oss_object_id"], "probe")
+            if not resolved.success:
+                return resolved
+            probed = self.ctx.ffmpeg.probe(Path(resolved.data["path"]))
             if not probed.success:
                 self.ctx.repo.update("assets", "asset_id", asset_id, {"probe_status": "failed"})
                 return probed

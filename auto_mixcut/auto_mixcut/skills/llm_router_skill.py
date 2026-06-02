@@ -3,110 +3,304 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import time
-from typing import Any, Dict
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from auto_mixcut.adapters.vision_json import VisionJSONClient
+from auto_mixcut.adapters.llm_provider import LLMProvider, LLMResponse, MockLLMProvider
 from auto_mixcut.core.ids import new_id
 from auto_mixcut.core.result import Result
+from auto_mixcut.core.storage_paths import require_oss_object_path
 
 from .context import SkillContext
 
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config" / "llm_router.json"
+
+RETRYABLE_ERRORS = [
+    "ConnectionError", "TimeoutError", "RemoteProtocolError", "ReadTimeout",
+    "ConnectTimeout", "RateLimitError",
+]
+RETRYABLE_STATUS_CODES = {"429", "500", "502", "503", "504"}
+
 
 class LLMRouterSkill:
-    def __init__(self, ctx: SkillContext):
+    def __init__(self, ctx: SkillContext, config_path: Optional[str] = None):
         self.ctx = ctx
-        self._vision_client: VisionJSONClient | None = None
+        self._config = _load_config(config_path or str(DEFAULT_CONFIG_PATH))
+        self._providers: Dict[str, LLMProvider] = {}
+        self._mock_provider: LLMProvider = MockLLMProvider()
+        self._concurrency_locks: Dict[str, threading.Semaphore] = {}
 
-    def call(self, call_type: str, payload: Dict[str, Any], product_id: str = "", segment_id: str = "", asset_id: str = "") -> Result:
-        route = dict(ROUTES.get(call_type, {"model_tier": "medium_vision", "model_name": "mock-medium-vision"}))
-        if not self.ctx.settings.mock_llm and "vision" in route["model_tier"]:
-            route["model_name"] = os.environ.get("AUTO_MIXCUT_VISION_MODEL", "gpt-5.5")
-        self._ensure_cache_table()
-        input_hash = self._input_hash(call_type, payload, product_id, segment_id, asset_id, route)
-        cache_hit = False
-        started = time.time()
-        try:
-            cached = None if self.ctx.settings.mock_llm else self._read_cache(input_hash)
-            if cached is not None:
-                response = cached
-                cache_hit = True
-            else:
-                response = self._mock(call_type, payload) if self.ctx.settings.mock_llm else self._real(call_type, payload, product_id, segment_id, asset_id)
-                if not self.ctx.settings.mock_llm:
-                    self._write_cache(input_hash, call_type, response, payload, product_id, segment_id, asset_id, route)
-            status = "success"
-            error_message = ""
-        except Exception as exc:
-            response = {"error": str(exc)}
-            status = "failed"
-            error_message = str(exc)
-        latency_ms = int((time.time() - started) * 1000)
-        self.ctx.repo.upsert(
-            "llm_calls",
-            "call_id",
-            {
-                "call_id": new_id("LLM"),
-                "product_id": product_id,
-                "asset_id": asset_id,
-                "segment_id": segment_id,
-                "call_type": call_type,
-                "model_tier": route["model_tier"],
-                "model_name": route["model_name"],
-                "prompt_version": payload.get("prompt_version", "v1.0"),
-                "input_hash": input_hash,
-                "cache_hit": int(cache_hit),
-                "token_input": 0,
-                "token_output": 0,
-                "image_count": payload.get("image_count", 0),
-                "estimated_cost": 0,
-                "latency_ms": latency_ms,
-                "result_status": status,
-            },
-        )
-        if status != "success":
-            return Result.fail("LLM_CALL_FAILED", error_message, {"call_type": call_type, "segment_id": segment_id})
-        return Result.ok({"route": route, "response": response, "cache_hit": cache_hit})
+    def call(
+        self,
+        call_type: str,
+        payload: Dict[str, Any],
+        *,
+        product_id: str = "",
+        segment_id: str = "",
+        asset_id: str = "",
+        output_id: str = "",
+        task_id: str = "",
+        force_tier: Optional[str] = None,
+        force_escalation: bool = False,
+    ) -> Result:
+        routing = self._config.get("call_type_routing", {}).get(call_type)
+        if not routing:
+            return Result.fail("UNKNOWN_CALL_TYPE", f"no routing config for call_type: {call_type}", {"call_type": call_type})
 
-    def _ensure_cache_table(self) -> None:
-        with self.ctx.repo.connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS llm_cache (
-                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  cache_key TEXT NOT NULL UNIQUE,
-                  call_type TEXT,
-                  product_id TEXT,
-                  asset_id TEXT,
-                  segment_id TEXT,
-                  model_tier TEXT,
-                  model_name TEXT,
-                  prompt_version TEXT,
-                  input_hash TEXT,
-                  response_json TEXT,
-                  created_at TEXT,
-                  updated_at TEXT
-                )
-                """
+        tier_name = force_tier or routing.get("tier", "medium_vision")
+        tier = self._config.get("model_tiers", {}).get(tier_name)
+        if not tier:
+            return Result.fail("UNKNOWN_TIER", f"no tier config for: {tier_name}", {"tier": tier_name})
+
+        prompt_version = payload.get("prompt_version", "v1.0")
+        input_hash = _compute_input_hash(call_type, payload, product_id, segment_id, asset_id, tier_name, prompt_version, self.ctx)
+
+        if self.ctx.settings.mock_llm:
+            return self._execute_mock(call_type, payload, tier, tier_name, prompt_version, input_hash, product_id, segment_id, asset_id, output_id, task_id)
+
+        cached = self._read_cache(input_hash)
+        if cached is not None:
+            self._write_log(
+                call_id=new_id("LLM"), call_type=call_type, tier=tier, model_name=tier.get("model_name", "cached"),
+                prompt_version=prompt_version, input_hash=input_hash, result_status="cache_hit",
+                product_id=product_id, segment_id=segment_id, asset_id=asset_id,
+                output_id=output_id, task_id=task_id, cache_hit=1, latency_ms=0,
             )
+            return Result.ok({
+                "route": {"model_tier": tier_name, "model_name": "cache", "provider": "cache"},
+                "response": cached, "cache_hit": True,
+                "meta": {"call_id": "CACHE", "call_type": call_type, "model_tier": tier_name, "retry_count": 0},
+            })
 
-    def _input_hash(self, call_type: str, payload: Dict[str, Any], product_id: str, segment_id: str, asset_id: str, route: Dict[str, str]) -> str:
-        material = {
-            "call_type": call_type,
-            "payload": payload,
-            "product_id": product_id,
-            "segment_id": segment_id,
-            "asset_id": asset_id,
-            "model_tier": route["model_tier"],
-            "model_name": route["model_name"],
-            "prompt_version": payload.get("prompt_version", "v1.0"),
-            "product_anchor": _product_anchor(self.ctx, product_id),
-            "frame_hashes": _frame_hashes(self.ctx, segment_id),
-            "image_path_hashes": _image_path_hashes(payload.get("image_paths") or []),
+        image_paths = _frame_paths(self.ctx, segment_id, max_count=9) if segment_id else payload.get("image_paths") or []
+
+        audio_path = ""
+        if self._is_audio_call(call_type):
+            audio_path = payload.get("audio_path") or _find_audio_path(self.ctx, asset_id)
+
+        provider_name = tier.get("primary_provider", "mock")
+        fallback_name = tier.get("fallback_provider", "")
+        escalation_tier = routing.get("escalate_tier") if routing.get("escalate_on_failure") else None
+
+        route_policy = self._resolve_route_policy(call_type, tier_name)
+
+        def exec_fn(tier_cfg: dict, tier_label: str, escalated_from: str = "") -> Tuple[Optional[Dict[str, Any]], str, int, int]:
+            model = tier_cfg.get("model_name", "unknown")
+            provider = self._get_provider(provider_name)
+            if self._is_mock_provider(provider):
+                return _mock_response(call_type, payload), "mock", 0, 0
+
+            max_retries = int(tier_cfg.get("max_retries", 2))
+            retry_delays = tier_cfg.get("retry_delays_ms", [5000, 20000])
+            timeout = int(tier_cfg.get("timeout_ms", 120000))
+            max_tokens = int(tier_cfg.get("max_output_tokens", 2000))
+
+            with self._acquire_concurrency(tier_label):
+                for attempt in range(max_retries + 1):
+                    started = time.time()
+                    try:
+                        if self._is_audio_call(call_type) and audio_path:
+                            resp = provider.call_audio(prompt=self._build_prompt(call_type, payload),
+                                                         audio_path=audio_path, model=model,
+                                                         max_output_tokens=max_tokens, timeout_ms=timeout)
+                            if resp.parsed is None and resp.text:
+                                from auto_mixcut.adapters.llm_provider import _parse_json_safe
+                                resp = LLMResponse(text=resp.text, parsed=_parse_json_safe(resp.text), raw_response=resp.raw_response, usage=resp.usage, model=resp.model, provider_name=resp.provider_name, latency_ms=resp.latency_ms, retry_count=resp.retry_count)
+                        elif self._is_vision_call(call_type):
+                            resp = provider.call_json(prompt=self._build_prompt(call_type, payload),
+                                                       image_paths=image_paths, model=model,
+                                                       max_output_tokens=max_tokens, timeout_ms=timeout)
+                        else:
+                            resp = provider.call_text(prompt=self._build_prompt(call_type, payload),
+                                                       image_paths=image_paths, model=model,
+                                                       max_output_tokens=max_tokens, timeout_ms=timeout)
+                        latency = int((time.time() - started) * 1000)
+                        if resp.parsed is not None:
+                            return resp.parsed, model, attempt, latency
+                        if resp.text:
+                            return {"text": resp.text}, model, attempt, latency
+                        if attempt < max_retries:
+                            time.sleep(retry_delays[min(attempt, len(retry_delays) - 1)] / 1000.0)
+                            continue
+                        return None, model, attempt, latency
+                    except Exception as exc:
+                        latency = int((time.time() - started) * 1000)
+                        if not _is_retryable(exc) or attempt >= max_retries:
+                            return None, model, attempt, latency
+                        delay = retry_delays[min(attempt, len(retry_delays) - 1)] / 1000.0
+                        time.sleep(delay)
+            return None, model, max_retries, 0
+
+        response, model_used, retry_count, latency_ms = exec_fn(tier, tier_name)
+
+        escalation_count = 0
+        escalated_from = ""
+        if response is None and escalation_tier and escalation_tier != tier_name and (routing.get("escalate_on_failure") or force_escalation):
+            escalated = self._config.get("model_tiers", {}).get(escalation_tier)
+            if escalated:
+                escalation_count = 1
+                escalated_from = tier_name
+                response, model_used, retry_count2, latency_ms2 = exec_fn(escalated, escalation_tier, escalated_from=tier_name)
+                retry_count += retry_count2
+                latency_ms += latency_ms2
+                tier_name = escalation_tier
+                model_used = escalated.get("model_name", model_used)
+
+        if response is None:
+            self._write_log(
+                call_id=new_id("LLM"), call_type=call_type, tier=tier, model_name=model_used,
+                prompt_version=prompt_version, input_hash=input_hash, result_status="failed",
+                error_code="LLM_CALL_EXHAUSTED", error_message="all retries and escalations exhausted",
+                product_id=product_id, segment_id=segment_id, asset_id=asset_id,
+                output_id=output_id, task_id=task_id, retry_count=retry_count,
+                escalation_count=escalation_count, escalated_from=escalated_from,
+                image_count=len(image_paths), latency_ms=latency_ms,
+                route_policy=route_policy, provider=provider_name,
+            )
+            return Result.fail("LLM_CALL_EXHAUSTED", "all retries and escalations exhausted", {
+                "call_type": call_type, "tier": tier_name, "retry_count": retry_count,
+                "escalation_count": escalation_count,
+            })
+
+        response = self._normalize_response(call_type, response, payload)
+        self._write_cache(input_hash, call_type, response, payload, product_id, segment_id, asset_id, tier)
+        self._write_log(
+            call_id=new_id("LLM"), call_type=call_type, tier=tier,
+            model_name=model_used, prompt_version=prompt_version, input_hash=input_hash,
+            result_status="success", product_id=product_id, segment_id=segment_id,
+            asset_id=asset_id, output_id=output_id, task_id=task_id,
+            retry_count=retry_count, escalation_count=escalation_count,
+            escalated_from=escalated_from, image_count=len(image_paths),
+            latency_ms=latency_ms, route_policy=route_policy, provider=provider_name,
+        )
+
+        return Result.ok({
+            "route": {"model_tier": tier_name, "model_name": model_used, "provider": provider_name, "route_policy": route_policy},
+            "response": response,
+            "cache_hit": False,
+            "meta": {"call_id": "OK", "call_type": call_type, "model_tier": tier_name, "model_name": model_used, "prompt_version": prompt_version, "retry_count": retry_count, "latency_ms": latency_ms, "escalation_count": escalation_count},
+        })
+
+    def _get_provider(self, provider_name: str) -> LLMProvider:
+        if provider_name not in self._providers:
+            provider_config = self._config.get("providers", {}).get(provider_name)
+            if provider_config:
+                self._providers[provider_name] = LLMProvider.create(provider_config)
+            else:
+                self._providers[provider_name] = self._mock_provider
+        return self._providers[provider_name]
+
+    def _is_mock_provider(self, provider: LLMProvider) -> bool:
+        return isinstance(provider, MockLLMProvider)
+
+    def _is_audio_call(self, call_type: str) -> bool:
+        return call_type in {
+            "bgm_metadata_tagging",
         }
-        return hashlib.sha256(json.dumps(material, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()
 
-    def _read_cache(self, input_hash: str) -> Dict[str, Any] | None:
+    def _is_vision_call(self, call_type: str) -> bool:
+        return call_type in {
+            "segment_tagging_default", "product_anchor_check", "product_anchor_generation",
+            "watermark_detection", "ai_anchor_check", "ai_generated_consistency_check",
+            "final_video_qc", "core_anchor_review", "core_consistency_review",
+            "golden_benchmark_analysis", "risk_escalation",
+        }
+
+    def _resolve_route_policy(self, call_type: str, tier_name: str) -> str:
+        tier_to_policy = {
+            "cheap_text": "cheap_text",
+            "medium_vision": "medium_vision",
+            "high_vision": "high_vision",
+        }
+        primary = tier_to_policy.get(tier_name, "medium_vision")
+        routing = self._config.get("call_type_routing", {}).get(call_type, {})
+        if routing.get("escalate_on_failure"):
+            return primary + "_with_fallback"
+        return primary
+
+    def _acquire_concurrency(self, tier_name: str):
+        if not self._config.get("concurrency", {}).get("enabled", True):
+            from contextlib import nullcontext
+            return nullcontext()
+
+        tier = self._config.get("model_tiers", {}).get(tier_name, {})
+        max_conc = int(tier.get("max_concurrency", 2))
+        wait_timeout = self._config.get("concurrency", {}).get("wait_timeout_ms", 300000) / 1000.0
+
+        if tier_name not in self._concurrency_locks:
+            self._concurrency_locks[tier_name] = threading.Semaphore(max_conc)
+
+        return _TimedSemaphore(self._concurrency_locks[tier_name], wait_timeout)
+
+    def _normalize_response(self, call_type: str, response: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+        from auto_mixcut.skills.llm_prompts import (
+            normalize_segment_tag, normalize_consistency, normalize_anchor_check,
+            normalize_prompt_refinement, normalize_product_anchor, normalize_bgm_tag,
+        )
+        if call_type == "segment_tagging_default":
+            return normalize_segment_tag(response)
+        if call_type == "ai_generated_consistency_check":
+            return normalize_consistency(response)
+        if call_type == "ai_anchor_check":
+            return normalize_anchor_check(response)
+        if call_type == "segment_prompt_refinement":
+            return normalize_prompt_refinement(response)
+        if call_type in ("product_anchor_check", "product_anchor_generation"):
+            return normalize_product_anchor(
+                response,
+                payload.get("category", ""),
+                payload.get("product_name", ""),
+            )
+        if call_type == "bgm_metadata_tagging":
+            return normalize_bgm_tag(response)
+        return response
+
+    def _build_prompt(self, call_type: str, payload: Dict[str, Any]) -> str:
+        from auto_mixcut.skills.llm_prompts import (
+            consistency_prompt, watermark_prompt, ai_anchor_check_prompt,
+            segment_tagging_prompt, segment_prompt_refinement_prompt,
+            product_anchor_prompt, bgm_tagging_prompt,
+        )
+        if call_type == "segment_tagging_default":
+            segment_id = payload.get("segment_id", "")
+            product_id = payload.get("product_id", "")
+            product = self.ctx.repo.get("products", "product_id", product_id) or {}
+            asset = self.ctx.repo.get("assets", "asset_id", payload.get("asset_id", "")) or {}
+            segment = self.ctx.repo.get("segments", "segment_id", segment_id) or {}
+            return segment_tagging_prompt(product, asset, segment)
+        if call_type == "ai_generated_consistency_check":
+            return consistency_prompt()
+        if call_type == "watermark_detection":
+            return watermark_prompt()
+        if call_type == "ai_anchor_check":
+            segment_id = payload.get("segment_id", "")
+            product_id = payload.get("product_id", "")
+            product = self.ctx.repo.get("products", "product_id", product_id) or {}
+            segment = self.ctx.repo.get("segments", "segment_id", segment_id) or {}
+            return ai_anchor_check_prompt(product, segment)
+        if call_type == "segment_prompt_refinement":
+            return segment_prompt_refinement_prompt(
+                str(payload.get("anchor_json") or "{}"),
+                str(payload.get("segment_type") or ""),
+                str(payload.get("segment_type_cn") or ""),
+                str(payload.get("category") or ""),
+            )
+        if call_type in ("product_anchor_check", "product_anchor_generation"):
+            return product_anchor_prompt(
+                payload.get("product_id", ""),
+                payload.get("product_name", ""),
+                payload.get("category", ""),
+                payload.get("market", ""),
+            )
+        if call_type == "bgm_metadata_tagging":
+            return bgm_tagging_prompt(payload)
+        return str(payload.get("prompt_text") or payload.get("prompt") or "{}")
+
+    def _read_cache(self, input_hash: str) -> Optional[Dict[str, Any]]:
+        if not self._config.get("cache", {}).get("enabled", True):
+            return None
         row = self.ctx.repo.get("llm_cache", "cache_key", input_hash)
         if not row:
             return None
@@ -114,10 +308,13 @@ class LLMRouterSkill:
         if isinstance(data, dict):
             return data
         if isinstance(data, str):
-            return json.loads(data)
+            try:
+                return json.loads(data)
+            except json.JSONDecodeError:
+                return None
         return None
 
-    def _write_cache(self, input_hash: str, call_type: str, response: Dict[str, Any], payload: Dict[str, Any], product_id: str, segment_id: str, asset_id: str, route: Dict[str, str]) -> None:
+    def _write_cache(self, input_hash: str, call_type: str, response: Dict[str, Any], payload: Dict[str, Any], product_id: str, segment_id: str, asset_id: str, tier: Dict[str, Any]) -> None:
         self.ctx.repo.upsert(
             "llm_cache",
             "cache_key",
@@ -127,160 +324,169 @@ class LLMRouterSkill:
                 "product_id": product_id,
                 "asset_id": asset_id,
                 "segment_id": segment_id,
-                "model_tier": route["model_tier"],
-                "model_name": route["model_name"],
+                "model_tier": tier.get("tier", ""),
+                "model_name": tier.get("model_name", ""),
                 "prompt_version": payload.get("prompt_version", "v1.0"),
                 "input_hash": input_hash,
                 "response_json": response,
             },
         )
 
-    def _real(self, call_type: str, payload: Dict[str, Any], product_id: str, segment_id: str, asset_id: str) -> Dict[str, Any]:
-        if call_type == "segment_tagging_default":
-            segment = self.ctx.repo.get("segments", "segment_id", segment_id) or {}
-            product = self.ctx.repo.get("products", "product_id", product_id) or {}
-            asset = self.ctx.repo.get("assets", "asset_id", asset_id) or {}
-            image_paths = _frame_paths(self.ctx, segment_id, max_count=6)
-            if not image_paths:
-                raise RuntimeError(f"no sampled frames for segment {segment_id}")
-            prompt = _segment_tagging_prompt(product, asset, segment)
-            data = self._client().call_json(prompt, image_paths, max_output_tokens=1600)
-            return _normalize_segment_tag(data)
-        if call_type == "ai_generated_consistency_check":
-            image_paths = _frame_paths(self.ctx, segment_id, max_count=9)
-            if not image_paths:
-                raise RuntimeError(f"no sampled frames for segment {segment_id}")
-            data = self._client().call_json(_consistency_prompt(), image_paths, max_output_tokens=900)
-            return _normalize_consistency(data)
-        if call_type == "watermark_detection":
-            image_paths = payload.get("image_paths") or []
-            data = self._client().call_json(_watermark_prompt(), image_paths, max_output_tokens=700)
-            return data if isinstance(data, dict) else {"has_watermark": "unknown", "confidence": "low"}
-        if call_type == "ai_anchor_check":
-            segment = self.ctx.repo.get("segments", "segment_id", segment_id) or {}
-            product = self.ctx.repo.get("products", "product_id", product_id) or {}
-            image_paths = _frame_paths(self.ctx, segment_id, max_count=6)
-            if not image_paths:
-                raise RuntimeError(f"no sampled frames for segment {segment_id}")
-            prompt = _ai_anchor_check_prompt(product, segment)
-            data = self._client().call_json(prompt, image_paths, max_output_tokens=1200)
-            return _normalize_anchor_check(data)
-        if call_type == "segment_prompt_refinement":
-            anchor_json = str(payload.get("anchor_json") or "{}")
-            segment_type = str(payload.get("segment_type") or "")
-            segment_type_cn = str(payload.get("segment_type_cn") or "")
-            category = str(payload.get("category") or "")
-            data = self._client().call_json(_segment_prompt_refinement_prompt(anchor_json, segment_type, segment_type_cn, category), [], max_output_tokens=800)
-            return _normalize_prompt_refinement(data)
-        return self._mock(call_type, payload)
+    def _write_log(
+        self, *, call_id: str, call_type: str, tier: Dict[str, Any], model_name: str,
+        prompt_version: str, input_hash: str, result_status: str,
+        product_id: str = "", segment_id: str = "", asset_id: str = "",
+        output_id: str = "", task_id: str = "",
+        error_code: str = "", error_message: str = "",
+        retry_count: int = 0, escalation_count: int = 0,
+        escalated_from: str = "", cache_hit: int = 0,
+        latency_ms: int = 0, image_count: int = 0,
+        route_policy: str = "", provider: str = "",
+    ) -> None:
+        self.ctx.repo.insert("llm_call_logs", {
+            "call_id": call_id,
+            "call_type": call_type,
+            "route_policy": route_policy,
+            "product_id": product_id,
+            "asset_id": asset_id,
+            "segment_id": segment_id,
+            "output_id": output_id,
+            "task_id": task_id,
+            "model_tier": tier.get("tier", ""),
+            "model_name": model_name,
+            "provider": provider or tier.get("primary_provider", ""),
+            "fallback_provider": tier.get("fallback_provider", ""),
+            "prompt_version": prompt_version,
+            "input_hash": input_hash,
+            "cache_hit": cache_hit,
+            "result_status": result_status,
+            "error_code": error_code,
+            "error_message": error_message,
+            "retry_count": retry_count,
+            "escalation_count": escalation_count,
+            "escalated_from": escalated_from,
+            "image_count": image_count,
+            "latency_ms": latency_ms,
+        })
+        self.ctx.repo.upsert("llm_calls", "call_id", {
+            "call_id": call_id,
+            "task_id": task_id,
+            "product_id": product_id,
+            "asset_id": asset_id,
+            "segment_id": segment_id,
+            "output_id": output_id,
+            "call_type": call_type,
+            "model_tier": tier.get("tier", ""),
+            "model_name": model_name,
+            "prompt_version": prompt_version,
+            "input_hash": input_hash,
+            "cache_hit": cache_hit,
+            "token_input": 0,
+            "token_output": 0,
+            "image_count": image_count,
+            "estimated_cost": 0,
+            "latency_ms": latency_ms,
+            "result_status": result_status,
+        })
 
-    def _client(self) -> VisionJSONClient:
-        if self._vision_client is None:
-            self._vision_client = VisionJSONClient()
-        return self._vision_client
-
-    def _mock(self, call_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        if call_type == "segment_tagging_default":
-            index = int(payload.get("index", 0))
-            roles = ["hero", "detail", "result", "scene", "ending"]
-            role = roles[index % len(roles)]
-            secondary = {
-                "hero": ["detail"],
-                "detail": [],
-                "result": [],
-                "scene": ["ending"],
-                "ending": [],
-            }[role]
-            return {
-                "primary_shot_role": role,
-                "secondary_roles": secondary,
-                "product_visibility": "high" if role in {"hero", "detail", "result"} else "medium",
-                "hook_strength": "strong" if role in {"hero", "result"} else "medium",
-                "mixcut_usability": "yes",
-                "risk_level": "low",
-                "confidence": "high",
-                "needs_human_review": False,
-                "reason": f"mock tag selected {role} from sampled frames",
-            }
-        if call_type == "ai_generated_consistency_check":
-            return {"frame_consistency_score": 92, "frame_consistency_status": "pass", "frame_consistency_reason": "mock frames remain visually consistent"}
-        if call_type == "watermark_detection":
-            return {"has_watermark": "no", "confidence": "medium"}
-        if call_type == "ai_anchor_check":
-            segment_type = str(payload.get("segment_type") or "")
-            if segment_type in {"detail_atmosphere", "tryon_result"}:
-                return {
-                    "anchor_match_level": "soft_pass",
-                    "product_category_correct": True,
-                    "core_visual_points_status": {"product_shape": "likely", "key_features": "unclear"},
-                    "forbidden_mismatch_detected": False,
-                    "distortion_risk": "medium",
-                    "allowed_core_roles": [],
-                    "allowed_soft_roles": ["scene", "ending"],
-                    "needs_human_review": False,
-                    "reason": "AI生成商品类目一致，但细节不够清晰",
-                }
-            return {
-                "anchor_match_level": "strict_pass",
-                "product_category_correct": True,
-                "core_visual_points_status": {},
-                "forbidden_mismatch_detected": False,
-                "distortion_risk": "low",
-                "allowed_core_roles": ["hero", "detail", "result"],
-                "allowed_soft_roles": ["scene", "ending"],
-                "needs_human_review": False,
-                "reason": "AI生成素材关键视觉点通过",
-            }
-        if call_type == "segment_prompt_generation":
-            return {"prompt": "mock generated prompt", "prompt_version": "v1.0"}
-        if call_type == "segment_prompt_refinement":
-            segment_type = str(payload.get("segment_type") or "home_lifestyle")
-            segment_type_cn = str(payload.get("segment_type_cn") or "居家生活场景")
-            return {
-                "visual_description": f"一段3秒竖屏短视频，展现{segment_type_cn}氛围，商品在画面中自然呈现。",
-                "key_anchor_points": ["商品主体形状和材质可见", "佩戴/使用场景自然"],
-                "scene_description": f"适合{segment_type_cn}的日常场景，自然光，真实生活感。",
-                "forbidden_items": ["字幕", "文字", "logo", "水印", "广告感", "多镜头"],
-            }
-        return {"ok": True}
+    def _execute_mock(
+        self, call_type: str, payload: Dict[str, Any], tier: Dict[str, Any],
+        tier_name: str, prompt_version: str, input_hash: str,
+        product_id: str, segment_id: str, asset_id: str,
+        output_id: str, task_id: str,
+    ) -> Result:
+        response = _mock_response(call_type, payload)
+        self._write_log(
+            call_id=new_id("LLM"), call_type=call_type, tier=tier,
+            model_name="mock", prompt_version=prompt_version, input_hash=input_hash,
+            result_status="mock_success", product_id=product_id, segment_id=segment_id,
+            asset_id=asset_id, output_id=output_id, task_id=task_id,
+            route_policy=self._resolve_route_policy(call_type, tier_name),
+            provider="mock",
+        )
+        return Result.ok({
+            "route": {"model_tier": tier_name, "model_name": "mock", "provider": "mock", "route_policy": "mock"},
+            "response": response,
+            "cache_hit": False,
+            "meta": {"call_id": "MOCK", "call_type": call_type, "model_tier": tier_name, "retry_count": 0, "mock": True},
+        })
 
 
-ROUTES = {
-    "product_anchor_generation": {"model_tier": "medium_vision", "model_name": "mock-medium-vision"},
-    "watermark_detection": {"model_tier": "medium_vision", "model_name": "mock-medium-vision"},
-    "segment_tagging_default": {"model_tier": "medium_vision", "model_name": "mock-medium-vision"},
-    "product_anchor_check": {"model_tier": "medium_vision", "model_name": "mock-medium-vision"},
-    "ai_anchor_check": {"model_tier": "medium_vision", "model_name": "mock-medium-vision"},
-    "ai_generated_consistency_check": {"model_tier": "medium_vision", "model_name": "mock-medium-vision"},
-    "segment_prompt_generation": {"model_tier": "medium_vision", "model_name": "mock-medium-vision"},
-    "segment_prompt_refinement": {"model_tier": "medium_text", "model_name": "gpt-5.5"},
-    "risk_escalation": {"model_tier": "high_vision", "model_name": "mock-high-vision"},
-    "final_video_qc": {"model_tier": "medium_vision", "model_name": "mock-medium-vision"},
-    "golden_benchmark": {"model_tier": "medium_vision", "model_name": "mock-medium-vision"},
-}
+class _TimedSemaphore:
+    def __init__(self, sem: threading.Semaphore, timeout: float):
+        self._sem = sem
+        self._timeout = timeout
+
+    def __enter__(self):
+        if not self._sem.acquire(timeout=self._timeout):
+            raise RuntimeError(f"concurrency semaphore acquisition timed out after {self._timeout}s")
+
+    def __exit__(self, *args):
+        self._sem.release()
 
 
-def _frame_paths(ctx: SkillContext, segment_id: str, max_count: int) -> list[str]:
-    rows = ctx.repo.list_where("segment_frames", "segment_id=? ORDER BY id DESC", (segment_id,))
-    selected = list(reversed(rows[:max_count]))
-    paths = []
-    for row in selected:
-        obj = ctx.repo.get("oss_objects", "object_id", row.get("oss_object_id"))
-        if not obj:
-            continue
-        path = ctx.settings.oss_root / obj["object_key"]
-        if path.exists() and path.stat().st_size > 1024:
-            paths.append(str(path))
-    return paths
+def _load_config(path: str) -> Dict[str, Any]:
+    p = Path(path)
+    if not p.exists():
+        return _default_config()
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return _default_config()
 
 
-def _product_anchor(ctx: SkillContext, product_id: str) -> Any:
-    product = ctx.repo.get("products", "product_id", product_id) or {}
-    return product.get("product_anchor_json") or {}
+def _default_config() -> Dict[str, Any]:
+    return {
+        "providers": {"mock": {"type": "mock", "display_name": "Mock"}},
+        "model_tiers": {
+            "cheap_text":     {"tier": "cheap_text",     "primary_provider": "mock", "model_name": "mock-cheap", "max_concurrency": 5, "max_retries": 0, "retry_delays_ms": [], "timeout_ms": 60000,  "max_output_tokens": 1000},
+            "medium_vision":  {"tier": "medium_vision",  "primary_provider": "mock", "model_name": "mock-mid",   "max_concurrency": 2, "max_retries": 0, "retry_delays_ms": [], "timeout_ms": 120000, "max_output_tokens": 2000},
+            "high_vision":    {"tier": "high_vision",    "primary_provider": "mock", "model_name": "mock-high",  "max_concurrency": 1, "max_retries": 0, "retry_delays_ms": [], "timeout_ms": 180000, "max_output_tokens": 2000},
+        },
+        "call_type_routing": {
+            "failure_summary":               {"tier": "cheap_text",    "escalate_on_failure": False},
+            "bgm_metadata_tagging":          {"tier": "cheap_text",    "escalate_on_failure": False},
+            "segment_tagging_default":        {"tier": "medium_vision", "escalate_on_failure": False},
+            "product_anchor_check":           {"tier": "medium_vision", "escalate_on_failure": True,  "escalate_tier": "high_vision"},
+            "product_anchor_generation":      {"tier": "medium_vision", "escalate_on_failure": False},
+            "watermark_detection":            {"tier": "medium_vision", "escalate_on_failure": False},
+            "ai_anchor_check":                {"tier": "medium_vision", "escalate_on_failure": False},
+            "ai_generated_consistency_check": {"tier": "medium_vision", "escalate_on_failure": False},
+            "segment_prompt_refinement":      {"tier": "cheap_text",    "escalate_on_failure": False},
+            "final_video_qc":                {"tier": "medium_vision", "escalate_on_failure": True,  "escalate_tier": "high_vision"},
+            "core_anchor_review":             {"tier": "high_vision",   "escalate_on_failure": False},
+            "core_consistency_review":        {"tier": "high_vision",   "escalate_on_failure": False},
+            "golden_benchmark_analysis":      {"tier": "high_vision",   "escalate_on_failure": False},
+            "risk_escalation":                {"tier": "high_vision",   "escalate_on_failure": False},
+        },
+        "cache": {"enabled": True},
+        "concurrency": {"enabled": False},
+        "escalation_rules": {"max_total_retries_per_call": 3},
+    }
 
 
-def _frame_hashes(ctx: SkillContext, segment_id: str) -> list[str]:
-    rows = ctx.repo.list_where("segment_frames", "segment_id=? ORDER BY id DESC", (segment_id,))
+def _compute_input_hash(call_type: str, payload: Dict[str, Any], product_id: str, segment_id: str, asset_id: str, tier_name: str, prompt_version: str, ctx: SkillContext) -> str:
+    material = {
+        "call_type": call_type,
+        "payload": payload,
+        "product_id": product_id,
+        "segment_id": segment_id,
+        "asset_id": asset_id,
+        "model_tier": tier_name,
+        "prompt_version": prompt_version,
+        "frame_hashes": _frame_hashes(ctx, segment_id),
+        "image_path_hashes": _image_path_hashes(payload.get("image_paths") or []),
+    }
+    return hashlib.sha256(json.dumps(material, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()
+
+
+def _frame_hashes(ctx: SkillContext, segment_id: str) -> List[str]:
+    if not segment_id:
+        return []
+    try:
+        rows = ctx.repo.list_where("segment_frames", "segment_id=? ORDER BY id DESC", (segment_id,))
+    except Exception:
+        return []
     hashes = []
     for row in reversed(rows[:10]):
         obj = ctx.repo.get("oss_objects", "object_id", row.get("oss_object_id"))
@@ -289,7 +495,7 @@ def _frame_hashes(ctx: SkillContext, segment_id: str) -> list[str]:
     return hashes
 
 
-def _image_path_hashes(paths: list[str]) -> list[str]:
+def _image_path_hashes(paths: List[str]) -> List[str]:
     hashes = []
     for path in paths:
         try:
@@ -300,196 +506,134 @@ def _image_path_hashes(paths: list[str]) -> list[str]:
     return hashes
 
 
-def _segment_tagging_prompt(product: dict, asset: dict, segment: dict) -> str:
-    anchor = product.get("product_anchor_json") or {}
-    return f"""
-请根据连续抽帧判断这个 TikTok Shop 商品短视频片段的混剪用途。
-
-商品信息：
-- 商品ID：{product.get('product_id')}
-- 商品名称：{product.get('product_name')}
-- 市场：{product.get('market')}
-- 类目：{product.get('category')}
-- 商品锚点：{json.dumps(anchor, ensure_ascii=False)}
-
-素材信息：
-- source_type：{asset.get('source_type')}
-- source_trust_level：{asset.get('source_trust_level')}
-- product_binding_type：{asset.get('product_binding_type')}
-- segment_id：{segment.get('segment_id')}
-
-请只返回 JSON，不要 markdown，不要解释。字段和值必须严格使用下面枚举：
-{{
-  "primary_shot_role": "hero|detail|result|scene|ending|unusable",
-  "secondary_roles": ["hero|detail|result|scene|ending"],
-  "product_visibility": "high|medium|low",
-  "hook_strength": "strong|medium|weak",
-  "mixcut_usability": "yes|needs_processing|no",
-  "risk_level": "low|medium|high",
-  "confidence": "high|medium|low",
-  "needs_human_review": true|false,
-  "reason": "中文，简短说明判断依据"
-}}
-
-判断标准：
-- hero：商品主体清楚、首屏能吸引人，适合开头。
-- detail：商品材质、结构、局部细节清楚。
-- result：佩戴/使用后效果清楚。
-- scene：氛围、生活方式、背景场景，商品可以不是强主体。
-- ending：适合收尾、定格、轻氛围。
-- unusable：黑屏、严重模糊、商品不可见、明显错品、风险内容、水印/UI遮挡严重。
-- 如果商品与锚点不确定、AI生成漂移、画面含平台水印/账号UI/明显搬运痕迹，应提高 risk_level 或 needs_human_review。
-""".strip()
+def _find_audio_path(ctx: SkillContext, asset_id: str) -> str:
+    if not asset_id:
+        return ""
+    path = require_oss_object_path(ctx, asset_id, "llm_audio")
+    if path and path.exists():
+        return str(path)
+    return ""
 
 
-def _normalize_segment_tag(data: Any) -> Dict[str, Any]:
-    if not isinstance(data, dict):
-        raise ValueError("segment tag response is not object")
-    roles = {"hero", "detail", "result", "scene", "ending", "unusable"}
-    vis = {"high", "medium", "low"}
-    hooks = {"strong", "medium", "weak"}
-    usability = {"yes", "needs_processing", "no"}
-    risk = {"low", "medium", "high"}
-    conf = {"high", "medium", "low"}
-    primary = _enum(data.get("primary_shot_role"), roles, "unusable")
-    secondary = [_enum(v, roles - {"unusable"}, "") for v in (data.get("secondary_roles") or [])]
-    secondary = [v for v in secondary if v]
-    return {
-        "primary_shot_role": primary,
-        "secondary_roles": secondary[:3],
-        "product_visibility": _enum(data.get("product_visibility"), vis, "low"),
-        "hook_strength": _enum(data.get("hook_strength"), hooks, "weak"),
-        "mixcut_usability": _enum(data.get("mixcut_usability"), usability, "needs_processing"),
-        "risk_level": _enum(data.get("risk_level"), risk, "medium"),
-        "confidence": _enum(data.get("confidence"), conf, "low"),
-        "needs_human_review": bool(data.get("needs_human_review")),
-        "reason": str(data.get("reason") or "").strip()[:500],
-    }
+def _frame_paths(ctx: SkillContext, segment_id: str, max_count: int) -> List[str]:
+    rows = ctx.repo.list_where("segment_frames", "segment_id=? ORDER BY id DESC", (segment_id,))
+    selected = list(reversed(rows[:max_count]))
+    paths = []
+    for row in selected:
+        path = require_oss_object_path(ctx, row.get("oss_object_id"), "llm_frames")
+        if path and path.exists() and path.stat().st_size > 1024:
+            paths.append(str(path))
+    return paths
 
 
-def _consistency_prompt() -> str:
-    return """
-请检查这些连续帧中的商品是否跨帧保持一致，重点看商品形状、结构、关键装饰、数量、材质是否漂移。
-只返回 JSON：
-{
-  "frame_consistency_score": 0-100,
-  "frame_consistency_status": "pass|uncertain|fail",
-  "frame_consistency_reason": "中文简短原因"
-}
-""".strip()
+def _is_retryable(exc: Exception) -> bool:
+    exc_type = type(exc).__name__
+    exc_str = str(exc)
+    for token in RETRYABLE_ERRORS:
+        if token in exc_type or token in exc_str:
+            return True
+    for code in RETRYABLE_STATUS_CODES:
+        if code in exc_str:
+            return True
+    if "JSON" in exc_type or "json" in exc_str.lower():
+        return True
+    if not exc_str.strip():
+        return True
+    return False
 
 
-def _normalize_consistency(data: Any) -> Dict[str, Any]:
-    if not isinstance(data, dict):
-        raise ValueError("consistency response is not object")
-    score = float(data.get("frame_consistency_score") or 0)
-    status = _enum(data.get("frame_consistency_status"), {"pass", "uncertain", "fail"}, "uncertain")
-    return {"frame_consistency_score": max(0, min(100, score)), "frame_consistency_status": status, "frame_consistency_reason": str(data.get("frame_consistency_reason") or "")[:500]}
-
-
-def _watermark_prompt() -> str:
-    return "请判断图片是否包含 TikTok/Douyin logo、平台 UI、用户ID、账号名或明显水印。只返回 JSON：{\"has_watermark\":\"yes|no|unknown\",\"confidence\":\"high|medium|low\",\"watermark_type\":\"TikTok|Douyin|platform_ui|user_id|other|none\",\"reason\":\"中文简短原因\"}"
-
-
-def _enum(value: Any, allowed: set[str], default: str) -> str:
-    text = str(value or "").strip()
-    return text if text in allowed else default
-
-
-def _ai_anchor_check_prompt(product: dict, segment: dict) -> str:
-    anchor = product.get("product_anchor_json") or {}
-    return f"""
-请根据连续抽帧，判断这个 AI 生成的商品片段是否可以用于混剪。
-
-商品信息：
-- 商品ID：{product.get('product_id')}
-- 商品名称：{product.get('product_name')}
-- 类目：{product.get('category')}
-
-商品锚点：
-{json.dumps(anchor, ensure_ascii=False)}
-
-片段信息：
-- 片段类型：{segment.get('segment_type') or 'unknown'}
-- source_type：{segment.get('source_type')}
-
-请只返回 JSON，不要 markdown，不要解释：
-{{
-  "anchor_match_level": "strict_pass|soft_pass|uncertain|fail",
-  "product_category_correct": true|false,
-  "core_visual_points_status": {{}},
-  "forbidden_mismatch_detected": true|false,
-  "forbidden_mismatch_reason": "如有就不匹配，简述原因；否则null",
-  "distortion_risk": "low|medium|high",
-  "allowed_core_roles": ["hero|detail|result"],
-  "allowed_soft_roles": ["scene|ending"],
-  "needs_human_review": true|false,
-  "reason": "中文简短说明判断依据"
-}}
-
-判定标准：
-- strict_pass：商品类别正确，关键识别点清楚，不违反 forbidden_mismatch，跨帧一致，可承担 hero/detail/result。
-- soft_pass：商品方向大体正确，但细节不足以承担强商品展示，只能用于 scene/ending。
-- uncertain：模型不确定，普通商品默认降级 scene/ending，高优先级商品需人工复核。
-- fail：商品明显错了（类目错误、结构错误、核心视觉点消失），不能进入混剪。
-
-注意：AI 生成素材容易在细节处失真，请重点关注商品形状、结构、关键装饰是否漂移。
-""".strip()
-
-
-def _normalize_anchor_check(data: Any) -> Dict[str, Any]:
-    if not isinstance(data, dict):
-        raise ValueError("anchor check response is not object")
-    levels = {"strict_pass", "soft_pass", "uncertain", "fail"}
-    roles = {"hero", "detail", "result"}
-    soft_roles = {"scene", "ending"}
-    core = data.get("allowed_core_roles") or []
-    soft = data.get("allowed_soft_roles") or []
-    return {
-        "anchor_match_level": _enum(data.get("anchor_match_level"), levels, "uncertain"),
-        "product_category_correct": bool(data.get("product_category_correct")),
-        "core_visual_points_status": data.get("core_visual_points_status") or {},
-        "forbidden_mismatch_detected": bool(data.get("forbidden_mismatch_detected")),
-        "forbidden_mismatch_reason": str(data.get("forbidden_mismatch_reason") or "") if data.get("forbidden_mismatch_reason") else None,
-        "distortion_risk": _enum(data.get("distortion_risk"), {"low", "medium", "high"}, "medium"),
-        "allowed_core_roles": [r for r in core if r in roles],
-        "allowed_soft_roles": [r for r in soft if r in soft_roles],
-        "needs_human_review": bool(data.get("needs_human_review")),
-        "reason": str(data.get("reason") or "").strip()[:500],
-    }
-
-
-def _segment_prompt_refinement_prompt(anchor_json: str, segment_type: str, segment_type_cn: str, category: str) -> str:
-    return f"""你是一个 TikTok Shop 商品视频 prompt 提炼助手。
-请从商品锚点中提取与「{segment_type_cn}」({segment_type}) 片段类型最相关的视觉信息，生成精炼的视频生成 prompt 组件。
-
-商品类目：{category}
-
-商品锚点：
-{anchor_json}
-
-请只返回 JSON，不要 markdown，不要解释：
-{{
-  "visual_description": "一段 3 秒竖屏视频的英文描述，聚焦该片段类型需要的画面内容。如果此片段类型需要在画面中展示商品，必须包含商品关键视觉特征。120 词以内。",
-  "key_anchor_points": ["3-5 个用于该片段的关键锚点要求，中文简短描述"],
-  "scene_description": "该片段类型的场景和光线描述，英文。30 词以内。",
-  "forbidden_items": ["必须禁止出现的元素，如字幕、水印、logo、广告感等，中文"]
-}}
-
-提炼原则：
-- 如果片段类型是 product_display / handheld_product / detail_atmosphere / tryon_result：必须强调商品核心视觉点（结构、材质、颜色、关键装饰）
-- 如果片段类型是 mirror_routine / home_lifestyle / before_go_out / seasonal_scene：强调氛围和生活感，商品可以自然出现但不强制
-- 必须根据 category_execution_contract 中的 forbidden_actions 给出禁止项
-- visual_description 必须包含 TikTok UGC 风格、9:16 竖屏、单镜头、2-5 秒这些硬约束
-""".strip()
-
-
-def _normalize_prompt_refinement(data: Any) -> Dict[str, Any]:
-    if not isinstance(data, dict):
-        raise ValueError("prompt refinement response is not object")
-    return {
-        "visual_description": str(data.get("visual_description") or "").strip()[:800],
-        "key_anchor_points": (data.get("key_anchor_points") or [])[:5],
-        "scene_description": str(data.get("scene_description") or "").strip()[:200],
-        "forbidden_items": (data.get("forbidden_items") or [])[:10],
-    }
+def _mock_response(call_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    if call_type == "segment_tagging_default":
+        index = int(payload.get("index", 0))
+        roles = ["hero", "detail", "result", "scene", "ending"]
+        role = roles[index % len(roles)]
+        secondary = {"hero": ["detail"], "detail": [], "result": [], "scene": ["ending"], "ending": []}[role]
+        return {
+            "primary_shot_role": role,
+            "secondary_roles": secondary,
+            "product_visibility": "high" if role in {"hero", "detail", "result"} else "medium",
+            "hook_strength": "strong" if role in {"hero", "result"} else "medium",
+            "mixcut_usability": "yes",
+            "risk_level": "low",
+            "confidence": "high",
+            "needs_human_review": False,
+            "reason": f"mock tag selected {role} from sampled frames",
+        }
+    if call_type == "ai_generated_consistency_check":
+        return {"frame_consistency_score": 92, "frame_consistency_status": "pass", "frame_consistency_reason": "mock frames remain visually consistent"}
+    if call_type == "watermark_detection":
+        return {"has_watermark": "no", "confidence": "medium"}
+    if call_type == "ai_anchor_check":
+        segment_type = str(payload.get("segment_type") or "")
+        if segment_type in {"detail_atmosphere", "tryon_result"}:
+            return {
+                "anchor_match_level": "soft_pass",
+                "product_category_correct": True,
+                "core_visual_points_status": {"product_shape": "likely", "key_features": "unclear"},
+                "forbidden_mismatch_detected": False,
+                "distortion_risk": "medium",
+                "allowed_core_roles": [],
+                "allowed_soft_roles": ["scene", "ending"],
+                "needs_human_review": False,
+                "reason": "mock ai anchor soft_pass",
+            }
+        return {
+            "anchor_match_level": "strict_pass",
+            "product_category_correct": True,
+            "core_visual_points_status": {},
+            "forbidden_mismatch_detected": False,
+            "distortion_risk": "low",
+            "allowed_core_roles": ["hero", "detail", "result"],
+            "allowed_soft_roles": ["scene", "ending"],
+            "needs_human_review": False,
+            "reason": "mock ai anchor strict_pass",
+        }
+    if call_type == "segment_prompt_refinement":
+        segment_type = str(payload.get("segment_type") or "home_lifestyle")
+        segment_type_cn = str(payload.get("segment_type_cn") or "居家生活场景")
+        return {
+            "visual_description": f"mock visual: {segment_type_cn}",
+            "key_anchor_points": ["mock anchor point 1", "mock anchor point 2"],
+            "scene_description": f"mock scene for {segment_type}",
+            "forbidden_items": ["字幕", "文字", "logo"],
+        }
+    if call_type in ("product_anchor_check", "product_anchor_generation"):
+        product_id = payload.get("product_id", "MOCK")
+        product_name = payload.get("product_name", "Mock Product")
+        category = payload.get("category", "uncategorized")
+        return {
+            "category": category,
+            "product_subtype": product_name,
+            "core_visual_points": ["商品主体形状清楚", "主要材质和颜色可见"],
+            "must_not_change_points": ["商品类型不能变", "核心外观特征必须可见"],
+            "forbidden_mismatch": ["其他类目商品", "无关配饰"],
+            "strict_roles": ["hero", "detail", "result"],
+            "allowed_scene_usage": True,
+            "drafted_by": "mock_tier2_vision_zh",
+            "confidence": "high",
+        }
+    if call_type == "bgm_metadata_tagging":
+        track_name = str(payload.get("track_name") or "Mock BGM")
+        return {
+            "ai_suggested_tags": {
+                "mood_tags": ["daily_clean", "calm_lifestyle"],
+                "energy_level": "medium",
+                "vocal_type": "instrumental",
+                "category_tags": ["generic_fashion"],
+                "template_tags": ["GENERAL_BALANCED_15S"],
+            },
+            "mix_suggestions": {
+                "recommended_start_sec": 12,
+                "default_volume": 0.2,
+                "fade_in_ms": 500,
+                "fade_out_ms": 800,
+                "suitable_for_intro": True,
+                "loop_friendly": False,
+                "voiceover_friendly": True,
+            },
+            "tag_confidence": "high",
+            "tag_review_required": False,
+            "tag_diff_json": {},
+            "reason": f"mock bgm tag for {track_name}",
+        }
+    return {"ok": True}

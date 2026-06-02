@@ -109,6 +109,7 @@ def process_record(ctx, client: AutoMixcutFeishuClient, record: Any, dry_run: bo
         err = uploaded.error.message if uploaded.error else "unknown error"
         client.update_record(record.record_id, {"上传状态": "upload_failed", "处理状态": "failed", "处理失败原因": err, "最近处理时间": now_ms()})
         return {"record_id": record.record_id, "product_id": product_id, "status": "failed", "error": err}
+    local_cleanup_status = cleanup_uploaded_temp_file(ctx, local_path)
     asset_id = uploaded.data["asset_id"]
     oss_obj = uploaded.data["oss_object"]
     media_type = "image" if str(file_name).lower().endswith((".jpg", ".jpeg", ".png", ".webp")) else "video"
@@ -122,10 +123,38 @@ def process_record(ctx, client: AutoMixcutFeishuClient, record: Any, dry_run: bo
             "文件类型": media_type,
             "文件大小": int(oss_obj.get("file_size") or size),
             "是否有水印": "pending",
+            "是否已清理飞书附件": local_cleanup_status,
             "最近处理时间": now_ms(),
         },
     )
-    return {"record_id": record.record_id, "product_id": product_id, "status": "oss_uploaded", "asset_id": asset_id}
+    upload_status = "local_cleaned" if local_cleanup_status == "是" else "oss_uploaded"
+    client.update_record(record.record_id, {"上传状态": upload_status, "最近处理时间": now_ms()})
+    return {"record_id": record.record_id, "product_id": product_id, "status": upload_status, "asset_id": asset_id, "local_cleanup_status": local_cleanup_status}
+
+
+def cleanup_uploaded_temp_file(ctx, local_path: Path) -> str:
+    if int(getattr(ctx.settings, "local_upload_backup_days", 0) or 0) > 0:
+        return "否"
+    temp_root = ctx.settings.temp_root.resolve()
+    try:
+        resolved = local_path.resolve()
+        if temp_root not in resolved.parents:
+            return "失败"
+        local_path.unlink(missing_ok=True)
+        _remove_empty_parents(local_path.parent, temp_root)
+        return "是"
+    except Exception:
+        return "失败"
+
+
+def _remove_empty_parents(path: Path, stop_at: Path) -> None:
+    current = path
+    while current != stop_at and stop_at in current.resolve().parents:
+        try:
+            current.rmdir()
+        except OSError:
+            break
+        current = current.parent
 
 
 def safe_name(value: str) -> str:

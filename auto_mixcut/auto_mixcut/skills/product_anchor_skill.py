@@ -33,16 +33,10 @@ class ProductAnchorSkill:
             self.ctx.repo.update("content_tasks", "product_id", product_id, {"task_status": "ANCHOR_DRAFTED"})
             return Result.ok({"product_id": product_id, "source": "original_script_generator", "product_anchor_json": existing_anchor})
 
-        anchor = {
-            "category": product.get("category"),
-            "product_subtype": product.get("product_name") or product_id,
-            "core_visual_points": ["商品主体形状清楚", "主要材质和颜色可见", "能看出佩戴或使用场景"],
-            "must_not_change_points": ["商品类型不能变", "核心外观特征必须可见", "不能变成其他类目商品"],
-            "forbidden_mismatch": ["其他类目商品", "无关配饰", "画面中没有商品", "款式明显不一致"],
-            "strict_roles": ["hero", "detail", "result"],
-            "allowed_scene_usage": True,
-            "drafted_by": "mock_tier2_vision_zh",
-        }
+        if not self.ctx.settings.mock_llm:
+            return self._draft_via_router(product)
+
+        anchor = _build_default_anchor(product)
         res = self.ctx.repo.update(
             "products", "product_id", product_id,
             {"product_anchor_json": anchor, "anchor_status": "drafted", "anchor_version": "v1.0"},
@@ -51,6 +45,51 @@ class ProductAnchorSkill:
             return res
         self.ctx.repo.update("content_tasks", "product_id", product_id, {"task_status": "ANCHOR_DRAFTED"})
         return Result.ok({"product_id": product_id, "source": "mock", "product_anchor_json": anchor})
+
+    def _draft_via_router(self, product: Dict[str, Any]) -> Result:
+        from .llm_router_skill import LLMRouterSkill
+        from .llm_prompts import normalize_product_anchor
+
+        router = LLMRouterSkill(self.ctx)
+        product_id = product.get("product_id", "")
+        product_name = product.get("product_name", "")
+        category = product.get("category", "")
+        market = product.get("market", "")
+
+        call = router.call(
+            "product_anchor_generation",
+            {
+                "product_id": product_id,
+                "product_name": product_name,
+                "category": category,
+                "market": market,
+                "prompt_version": "v1.0",
+                "image_count": 0,
+            },
+            product_id=product_id,
+        )
+
+        if not call.success:
+            anchor = _build_default_anchor(product)
+            anchor["drafted_by"] = "mock_fallback"
+            anchor["fallback_reason"] = call.error.message if call.error else "router call failed"
+        else:
+            try:
+                response = call.data.get("response", {})
+                anchor = normalize_product_anchor(response, category, product_name)
+            except Exception:
+                anchor = _build_default_anchor(product)
+                anchor["drafted_by"] = "mock_fallback"
+                anchor["fallback_reason"] = "normalization failed"
+
+        res = self.ctx.repo.update(
+            "products", "product_id", product_id,
+            {"product_anchor_json": anchor, "anchor_status": "drafted", "anchor_version": "v1.0"},
+        )
+        if not res.success:
+            return res
+        self.ctx.repo.update("content_tasks", "product_id", product_id, {"task_status": "ANCHOR_DRAFTED"})
+        return Result.ok({"product_id": product_id, "source": "llm_router", "product_anchor_json": anchor})
 
     def confirm_anchor(self, product_id: str, reviewer: str = "mock_reviewer") -> Result:
         product = self.ctx.repo.get("products", "product_id", product_id)
@@ -93,3 +132,16 @@ def _load_anchor_from_original_db(product_id: str) -> Optional[Dict[str, Any]]:
     except Exception:
         pass
     return None
+
+
+def _build_default_anchor(product: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "category": product.get("category"),
+        "product_subtype": product.get("product_name") or product.get("product_id"),
+        "core_visual_points": ["商品主体形状清楚", "主要材质和颜色可见", "能看出佩戴或使用场景"],
+        "must_not_change_points": ["商品类型不能变", "核心外观特征必须可见", "不能变成其他类目商品"],
+        "forbidden_mismatch": ["其他类目商品", "无关配饰", "画面中没有商品", "款式明显不一致"],
+        "strict_roles": ["hero", "detail", "result"],
+        "allowed_scene_usage": True,
+        "drafted_by": "mock_tier2_vision_zh",
+    }

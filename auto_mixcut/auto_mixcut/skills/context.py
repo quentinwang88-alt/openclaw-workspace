@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from auto_mixcut.adapters.oss import LocalOSS
 from auto_mixcut.adapters.repository import SQLiteRepository
 from auto_mixcut.core.config import Settings
 from auto_mixcut.core.ffmpeg import FFmpeg
@@ -12,5 +11,5 @@ from auto_mixcut.core.ffmpeg import FFmpeg
 class SkillContext:
     settings: Settings
     repo: SQLiteRepository
-    oss: LocalOSS
+    oss: object
     ffmpeg: FFmpeg

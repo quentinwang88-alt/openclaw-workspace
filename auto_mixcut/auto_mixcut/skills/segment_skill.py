@@ -4,6 +4,7 @@ from pathlib import Path
 
 from auto_mixcut.core.ids import new_id
 from auto_mixcut.core.result import Result
+from auto_mixcut.core.storage_paths import resolve_oss_object_path
 
 from .context import SkillContext
 
@@ -15,7 +16,7 @@ class SegmentSkill:
     def segment_product(self, product_id: str) -> Result:
         assets = self.ctx.repo.list_where(
             "assets",
-            "product_id=? AND probe_status='done' AND COALESCE(has_watermark,'no')!='yes'",
+            "product_id=? AND probe_status='done' AND has_watermark='no'",
             (product_id,),
         )
         results = [self.segment_asset(a["asset_id"]).to_dict() for a in assets]
@@ -40,8 +41,10 @@ class SegmentSkill:
                 local.write_bytes(f"mock segment {segment_id}".encode("utf-8"))
             else:
                 # Real rendering uses FFmpeg only. Scale/pad to 1080x1920 at 30fps.
-                obj = self.ctx.repo.get("oss_objects", "object_id", asset["original_oss_object_id"]) or {}
-                source = self.ctx.settings.oss_root / obj["object_key"]
+                resolved = resolve_oss_object_path(self.ctx, asset["original_oss_object_id"], "segments_source")
+                if not resolved.success:
+                    return resolved
+                source = Path(resolved.data["path"])
                 args = ["-y", "-ss", str(start / 1000), "-to", str(end / 1000), "-i", str(source), "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2,fps=30", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(local)]
                 rendered = self.ctx.ffmpeg.run(args, "SEGMENT_FAILED")
                 if not rendered.success:

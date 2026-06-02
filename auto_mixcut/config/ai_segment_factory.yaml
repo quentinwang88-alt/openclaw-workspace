@@ -1,0 +1,55 @@
+category_normalization:
+  aliases:
+    hair_accessories: hair_accessories
+    hair_accessory: hair_accessories
+    earrings: earrings
+    earring: earrings
+    scarves_hats: scarves_hats
+    scarf_hat: scarves_hats
+    scarves: scarves_hats
+    hats: scarves_hats
+    womens_outerwear: womens_outerwear
+    womens_outerwears: womens_outerwear
+    womens_top: womens_outerwear
+    womens_tops: womens_outerwear
+
+prompt_rules:
+  category_grade_positive:
+    womens_outerwear:
+      A: "外套轮廓清楚，面料垂感可见，完整衣型可辨认，商品占据画面主体"
+      B: "袖口、领口、衣长、口袋、扣子和面料纹理可识别"
+      C: "季节穿搭氛围自然，外套可以不是主体但不能变形"
+    hair_accessories:
+      A: "发饰特征清楚，佩戴/夹取瞬间可见，优先后脑或手部局部构图"
+      B: "材质、珍珠、蝴蝶结、夹子结构和接触头发的位置可识别"
+      C: "柔和日常发型氛围，发饰可非主体但必须可见"
+    earrings:
+      A: "耳饰特征清楚，耳侧近景或侧脸裁切，形状和光泽可见"
+      B: "金属、珍珠、吊坠、耳针或固定结构细节可识别"
+      C: "暖光氛围中轻微转头，耳饰可非主体但有光泽露出"
+    scarves_hats:
+      A: "围巾或帽子形状清楚，佩戴瞬间可见，面料或帽檐结构可读"
+      B: "纹理、边缘、结扣、帽檐或编织细节可识别"
+      C: "季节生活氛围自然，配饰自然出现"
+  category_negative:
+    womens_outerwear: ["全身正脸硬广构图", "外套轮廓变形", "衣长错误", "领口袖口下摆结构错误"]
+    hair_accessories: ["发饰品类错误", "发饰消失在头发里", "佩戴位置错误"]
+    earrings: ["首饰品类错误", "耳饰没有出现在耳侧", "耳饰结构变形"]
+    scarves_hats: ["配饰品类错误", "围巾或帽子变形", "季节感错位"]
+
+diversity_budget:
+  thresholds:
+    n1_cold_to_ramp: 30
+    n2_ramp_to_mature: 80
+  ai_ratio_cap:
+    cold: 0.80
+    ramp: 0.50
+    mature: 0.30
+  early_demote_signals:
+    phash_cluster_threshold: 6
+    completion_decay_ratio: 0.70
+    completion_recent_k: 10
+    completion_min_samples: 5
+  retire:
+    min_trust_anchors_required: 1
+    on_exhausted: retire_candidate

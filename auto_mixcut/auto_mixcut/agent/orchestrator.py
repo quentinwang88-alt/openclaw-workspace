@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from auto_mixcut.agent.ai_diversity_budget import AIDiversityBudget
 from auto_mixcut.core.result import Result
 from auto_mixcut.skills.ai_generated_consistency_skill import AIGeneratedConsistencySkill
 from auto_mixcut.skills.ai_segment_factory_skill import AISegmentFactorySkill
@@ -7,6 +8,7 @@ from auto_mixcut.skills.ai_tagging_skill import AITaggingSkill
 from auto_mixcut.skills.cleanup_skill import CleanupSkill
 from auto_mixcut.skills.effective_role_skill import EffectiveRoleSkill
 from auto_mixcut.skills.feishu_review_skill import FeishuReviewSkill
+from auto_mixcut.skills.final_video_qc_skill import FinalVideoQCSkill
 from auto_mixcut.skills.frame_sample_skill import FrameSampleSkill
 from auto_mixcut.skills.media_probe_skill import MediaProbeSkill
 from auto_mixcut.skills.product_anchor_skill import ProductAnchorSkill
@@ -14,8 +16,10 @@ from auto_mixcut.skills.quality_gate_skill import QualityGateSkill
 from auto_mixcut.skills.readiness_check_skill import ReadinessCheckSkill
 from auto_mixcut.skills.render_plan_skill import RenderPlanSkill
 from auto_mixcut.skills.render_skill import RenderSkill
+from auto_mixcut.skills.segment_fingerprint_skill import SegmentFingerprintSkill
 from auto_mixcut.skills.segment_skill import SegmentSkill
 from auto_mixcut.skills.watermark_detect_skill import WatermarkDetectSkill
+from auto_mixcut.skills.watermark_process_skill import WatermarkProcessSkill
 from auto_mixcut.skills.context import SkillContext
 
 
@@ -47,12 +51,15 @@ class AutoMixcutOrchestratorAgent:
         pipeline = [
             ("probe", lambda: MediaProbeSkill(self.ctx).probe_product(product_id)),
             ("watermark", lambda: WatermarkDetectSkill(self.ctx).check_product(product_id)),
+            ("watermark_process", lambda: WatermarkProcessSkill(self.ctx).process_product(product_id)),
             ("segment", lambda: SegmentSkill(self.ctx).segment_product(product_id)),
             ("frames", lambda: FrameSampleSkill(self.ctx).sample_product(product_id)),
+            ("fingerprint", lambda: SegmentFingerprintSkill(self.ctx).fingerprint_product(product_id, only_ai_generated=False)),
             ("tag_submit", lambda: AITaggingSkill(self.ctx).submit_batch(product_id)),
             ("tag_poll", lambda: AITaggingSkill(self.ctx).poll_results(product_id)),
             ("consistency", lambda: AIGeneratedConsistencySkill(self.ctx).check_product(product_id)),
             ("effective_roles", lambda: EffectiveRoleSkill(self.ctx).compute_product(product_id)),
+            ("ai_diversity_budget", lambda: AIDiversityBudget(self.ctx).evaluate(product_id)),
             ("readiness", lambda: ReadinessCheckSkill(self.ctx).check_product(product_id, requested_count)),
             ("render_plan", lambda: RenderPlanSkill(self.ctx).create_plans(product_id, requested_count)),
         ]
@@ -71,6 +78,12 @@ class AutoMixcutOrchestratorAgent:
             return rendered
         qc = QualityGateSkill(self.ctx).check_batch(batch_id)
         steps.append(("quality", qc.to_dict()))
+        if not qc.success:
+            return qc
+        final_qc = FinalVideoQCSkill(self.ctx).check_batch(batch_id)
+        steps.append(("final_video_qc", final_qc.to_dict()))
+        if not final_qc.success:
+            return final_qc
         FeishuReviewSkill(self.ctx).sync_task(product_id)
         FeishuReviewSkill(self.ctx).sync_review_segments(product_id)
         FeishuReviewSkill(self.ctx).sync_output_qc(batch_id)

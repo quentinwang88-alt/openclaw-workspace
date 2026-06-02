@@ -1,20 +1,467 @@
 templates:
   - template_id: GENERAL_BALANCED_15S
     duration_ms: 15000
-    roles: [hero, detail, result, scene, ending]
+    default_moods: [daily_clean, calm_lifestyle]
+    description: 通用均衡兜底版，首镜稳定展示商品，再补细节和结果。
+    suitable_categories: [hair_accessories, earrings, womens_top, scarf_hat, generic_fashion, scarves]
+    template_objective: balanced
+    pacing: balanced
+    required_roles: [hero, detail]
+    risk_policy:
+      require_no_watermark_for_first_slot: true
+      avoid_subtitle_risk_in_first_slot: true
+      allow_risky_segments_after_slot: 3
+      fail_only_on_severe_mismatch: true
+    source_policy:
+      prefer_high_trust: true
+      allow_medium_trust: true
+      avoid_low_trust_core_slots: true
+    bgm_profile:
+      moods: [daily_clean, calm_lifestyle]
+      energy: medium
+      preferred_vocal_types: [instrumental]
+      vocal_types: [instrumental, light_vocal]
+    slots:
+      - {role: hero, duration_ms: 3000, preferred_source_trust: high, preferred_binding: exact_sku}
+      - {role: detail, duration_ms: 3000, preferred_source_trust: high}
+      - {role: result, duration_ms: 3000, preferred_source_trust: high}
+      - {role: scene, duration_ms: 3000}
+      - {role: ending, duration_ms: 3000}
+
+  - template_id: CLEAN_PRODUCT_PROOF_15S
+    duration_ms: 15000
+    default_moods: [daily_clean, minimal_clean]
+    description: 干净商品证明版，素材质量一般时兜底，优先商品清晰和低风险素材。
+    suitable_categories: [hair_accessories, earrings, womens_top, scarf_hat, generic_fashion, scarves]
+    template_objective: clean_proof
+    pacing: slow
+    required_roles: [hero, detail]
+    risk_policy:
+      require_no_watermark_for_first_slot: true
+      avoid_subtitle_risk_in_first_slot: true
+      allow_risky_segments_after_slot: 3
+      fail_only_on_severe_mismatch: true
+    source_policy:
+      prefer_high_trust: true
+      allow_medium_trust: true
+      avoid_low_trust_core_slots: true
+    bgm_profile:
+      moods: [daily_clean, calm_lifestyle]
+      energy: low
+      preferred_vocal_types: [instrumental]
+      vocal_types: [instrumental, light_vocal]
+    slots:
+      - {role: hero, duration_ms: 3500, preferred_source_trust: high, preferred_binding: exact_sku}
+      - {role: detail, duration_ms: 3000, preferred_source_trust: high}
+      - {role: hero, duration_ms: 2500, preferred_source_trust: high}
+      - {role: scene, duration_ms: 3000}
+      - {role: ending, duration_ms: 3000}
+
   - template_id: RESULT_FIRST_15S
     duration_ms: 15000
-    roles: [result, detail, result, scene, ending]
+    default_moods: [fashion_chic, energetic]
+    description: 结果前置版，先展示佩戴/使用效果，再补商品和细节。
+    suitable_categories: [hair_accessories, earrings, womens_top, scarf_hat, generic_fashion]
+    template_objective: result_first
+    pacing: fast
+    required_roles: [result, detail]
+    risk_policy:
+      require_no_watermark_for_first_slot: true
+      avoid_subtitle_risk_in_first_slot: true
+      allow_risky_segments_after_slot: 3
+      fail_only_on_severe_mismatch: true
+    source_policy:
+      prefer_high_trust: true
+      allow_medium_trust: true
+      avoid_low_trust_core_slots: true
+    bgm_profile:
+      moods: [fashion_chic, daily_clean]
+      energy: medium
+      preferred_vocal_types: [instrumental]
+      vocal_types: [instrumental, light_vocal]
+    slots:
+      - {role: result, duration_ms: 3000, preferred_source_trust: high, preferred_binding: exact_sku}
+      - {role: detail, duration_ms: 3000, preferred_source_trust: high}
+      - {role: result, duration_ms: 3000, preferred_source_trust: high}
+      - {role: scene, duration_ms: 3000}
+      - {role: ending, duration_ms: 3000}
+
   - template_id: DETAIL_HOOK_15S
     duration_ms: 15000
-    roles: [detail, hero, result, scene, ending]
+    default_moods: [premium_clean, minimal_clean]
+    description: 细节钩子版，首镜用细节或质感建立信任，再展示结果。
+    suitable_categories: [hair_accessories, earrings, womens_top, scarf_hat, generic_fashion]
+    template_objective: detail_hook
+    pacing: balanced
+    required_roles: [detail, hero]
+    risk_policy:
+      require_no_watermark_for_first_slot: true
+      avoid_subtitle_risk_in_first_slot: true
+      allow_risky_segments_after_slot: 3
+      fail_only_on_severe_mismatch: true
+    source_policy:
+      prefer_high_trust: true
+      allow_medium_trust: true
+      avoid_low_trust_core_slots: true
+    bgm_profile:
+      moods: [premium_clean, minimal_clean]
+      energy: medium
+      preferred_vocal_types: [instrumental]
+      vocal_types: [instrumental, light_vocal]
+    slots:
+      - {role: detail, duration_ms: 3000, preferred_source_trust: high, preferred_binding: exact_sku}
+      - {role: hero, duration_ms: 3000, preferred_source_trust: high}
+      - {role: result, duration_ms: 3000}
+      - {role: scene, duration_ms: 3000}
+      - {role: ending, duration_ms: 3000}
+
+  - template_id: UGC_TRUST_PROOF_15S
+    fallback_only: true
+    duration_ms: 15000
+    default_moods: [daily_clean, calm_lifestyle]
+    description: UGC 信任证明版，优先使用授权达人/自拍素材，突出真实感。
+    suitable_categories: [hair_accessories, earrings, womens_top, scarf_hat, generic_fashion]
+    template_objective: trust_proof
+    pacing: balanced
+    required_roles: [scene, hero, detail]
+    risk_policy:
+      require_no_watermark_for_first_slot: true
+      avoid_subtitle_risk_in_first_slot: true
+      allow_risky_segments_after_slot: 3
+      fail_only_on_severe_mismatch: true
+    source_policy:
+      prefer_high_trust: true
+      allow_medium_trust: true
+      avoid_low_trust_core_slots: true
+    bgm_profile:
+      moods: [daily_clean, calm_lifestyle]
+      energy: medium
+    slots:
+      - {role: scene, duration_ms: 3000, preferred_source_types: [authorized_creator, self_shot], min_source_trust: medium}
+      - {role: hero, duration_ms: 3000, preferred_source_trust: high}
+      - {role: detail, duration_ms: 3000, preferred_source_trust: high}
+      - {role: result, duration_ms: 3000}
+      - {role: ending, duration_ms: 3000}
+
+  - template_id: DETAIL_TEXTURE_PROOF_15S
+    fallback_only: true
+    duration_ms: 15000
+    default_moods: [premium_clean, cute_light]
+    description: 细节质感证明版，适合发饰、耳环、围巾帽子等需要展示材质和佩戴效果的商品。
+    suitable_categories: [hair_accessories, earrings, scarf_hat]
+    template_objective: detail_proof
+    pacing: balanced
+    required_roles: [hero, detail]
+    risk_policy:
+      require_no_watermark_for_first_slot: true
+      avoid_subtitle_risk_in_first_slot: true
+      allow_risky_segments_after_slot: 3
+      fail_only_on_severe_mismatch: true
+    source_policy:
+      prefer_high_trust: true
+      allow_medium_trust: true
+      avoid_low_trust_core_slots: true
+    bgm_profile:
+      moods: [daily_clean, cute_light]
+      energy: medium
+    slots:
+      - {role: hero, duration_ms: 2500, preferred_source_trust: high, preferred_binding: exact_sku}
+      - {role: detail, duration_ms: 3500, preferred_source_trust: high}
+      - {role: detail, duration_ms: 3000, preferred_source_trust: high}
+      - {role: result, duration_ms: 3000}
+      - {role: ending, duration_ms: 3000}
+
+  - template_id: TRYON_RESULT_FAST_15S
+    fallback_only: true
+    duration_ms: 15000
+    default_moods: [fashion_chic, energetic]
+    description: 快速试戴/上身结果版，适合女装和配饰中 result 素材较多的商品。
+    suitable_categories: [womens_top, hair_accessories, earrings, scarf_hat, generic_fashion]
+    template_objective: tryon_result
+    pacing: fast
+    required_roles: [hero, detail, result]
+    risk_policy:
+      require_no_watermark_for_first_slot: true
+      avoid_subtitle_risk_in_first_slot: true
+      allow_risky_segments_after_slot: 3
+      fail_only_on_severe_mismatch: true
+    source_policy:
+      prefer_high_trust: true
+      allow_medium_trust: true
+      avoid_low_trust_core_slots: true
+    bgm_profile:
+      moods: [daily_clean, cute_light]
+      energy: high
+    slots:
+      - {role: result, duration_ms: 2500, preferred_source_trust: high, preferred_binding: exact_sku}
+      - {role: hero, duration_ms: 2500, preferred_source_trust: high}
+      - {role: detail, duration_ms: 3000, preferred_source_trust: high}
+      - {role: result, duration_ms: 3500}
+      - {role: ending, duration_ms: 3500}
+
+  - template_id: AI_PRODUCT_FIRST_20S
+    duration_ms: 20000
+    default_moods: [daily_clean, premium_clean]
+    description: AI 补给商品前置版，5 个 4s slot，适合素材工厂回流片段较多的商品。
+    suitable_categories: [hair_accessories, earrings, scarves_hats, womens_outerwear, generic_fashion]
+    template_objective: ai_product_first
+    pacing: balanced
+    required_roles: [hero, detail, result]
+    hook_profile:
+      hook_type: product_first
+      first_1s_goal: clear_product
+      required_visual_signal: product_visible_high
+      avoid: [watermark, subtitle_risk, low_trust]
+    risk_policy:
+      require_no_watermark_for_first_slot: true
+      avoid_subtitle_risk_in_first_slot: true
+      allow_risky_segments_after_slot: 4
+      fail_only_on_severe_mismatch: true
+    source_policy:
+      prefer_high_trust: true
+      allow_medium_trust: true
+      avoid_low_trust_core_slots: true
+    bgm_profile:
+      moods: [daily_clean, premium_clean]
+      energy: medium
+      preferred_vocal_types: [instrumental]
+      vocal_types: [instrumental, light_vocal]
+    slots:
+      - {role: hero, duration_ms: 4000, preferred_source_trust: high, preferred_binding: exact_sku, hook_intent: product_clarity, ai_gen_grade: A, ai_fill_min_grade: A_core, person_framing: ai_local}
+      - {role: detail, duration_ms: 4000, preferred_source_trust: high, hook_intent: material_closeup, ai_gen_grade: B, ai_fill_min_grade: A_core, person_framing: ai_local}
+      - {role: result, duration_ms: 4000, preferred_source_trust: high, hook_intent: tryon_result, ai_gen_grade: B, ai_fill_min_grade: A_core, person_framing: ai_local}
+      - {role: scene, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred}
+      - {role: ending, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred}
+
+  - template_id: AI_LIFESTYLE_16S
+    duration_ms: 16000
+    default_moods: [calm_lifestyle, warm_cozy]
+    description: AI 生活方式短版，4 个 4s slot，用于避免所有 AI 补给都固定 20s。
+    suitable_categories: [hair_accessories, earrings, scarves_hats, womens_outerwear, generic_fashion]
+    template_objective: ai_lifestyle
+    pacing: balanced
+    required_roles: [hero, scene]
+    hook_profile:
+      hook_type: lifestyle_scene
+      first_1s_goal: clear_product
+      required_visual_signal: product_visible_high
+      avoid: [watermark, subtitle_risk, low_trust]
+    risk_policy:
+      require_no_watermark_for_first_slot: true
+      avoid_subtitle_risk_in_first_slot: true
+      allow_risky_segments_after_slot: 3
+      fail_only_on_severe_mismatch: true
+    source_policy:
+      prefer_high_trust: true
+      allow_medium_trust: true
+      avoid_low_trust_core_slots: true
+    bgm_profile:
+      moods: [calm_lifestyle, warm_cozy]
+      energy: low
+      preferred_vocal_types: [instrumental]
+      vocal_types: [instrumental, light_vocal]
+    slots:
+      - {role: hero, duration_ms: 4000, preferred_source_trust: high, preferred_binding: exact_sku, hook_intent: product_clarity, ai_gen_grade: A, ai_fill_min_grade: A_core, person_framing: ai_local}
+      - {role: scene, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred}
+      - {role: detail, duration_ms: 4000, preferred_source_trust: high, hook_intent: material_closeup, ai_gen_grade: B, ai_fill_min_grade: A_core, person_framing: ai_local}
+      - {role: ending, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred}
+
+  - template_id: AI_DETAIL_PROOF_24S
+    duration_ms: 24000
+    default_moods: [premium_clean, minimal_clean]
+    description: AI 细节证明长版，6 个 4s slot，用于高价值商品补足细节/结果/场景变化。
+    suitable_categories: [hair_accessories, earrings, scarves_hats, womens_outerwear, generic_fashion]
+    template_objective: ai_detail_proof
+    pacing: slow
+    required_roles: [hero, detail, result]
+    hook_profile:
+      hook_type: texture_detail
+      first_1s_goal: material_closeup
+      required_visual_signal: product_visible_high
+      avoid: [watermark, subtitle_risk, low_trust]
+    risk_policy:
+      require_no_watermark_for_first_slot: true
+      avoid_subtitle_risk_in_first_slot: true
+      allow_risky_segments_after_slot: 4
+      fail_only_on_severe_mismatch: true
+    source_policy:
+      prefer_high_trust: true
+      allow_medium_trust: true
+      avoid_low_trust_core_slots: true
+    bgm_profile:
+      moods: [premium_clean, minimal_clean]
+      energy: medium
+      preferred_vocal_types: [instrumental]
+      vocal_types: [instrumental, light_vocal]
+    slots:
+      - {role: detail, duration_ms: 4000, preferred_source_trust: high, preferred_binding: exact_sku, hook_intent: material_closeup, ai_gen_grade: A, ai_fill_min_grade: A_core, person_framing: ai_local}
+      - {role: hero, duration_ms: 4000, preferred_source_trust: high, hook_intent: product_clarity, ai_gen_grade: A, ai_fill_min_grade: A_core, person_framing: ai_local}
+      - {role: detail, duration_ms: 4000, preferred_source_trust: high, hook_intent: material_closeup, ai_gen_grade: B, ai_fill_min_grade: A_core, person_framing: ai_local}
+      - {role: result, duration_ms: 4000, preferred_source_trust: high, hook_intent: tryon_result, ai_gen_grade: B, ai_fill_min_grade: A_core, person_framing: ai_local}
+      - {role: scene, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred}
+      - {role: ending, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred}
+
+  - template_id: AI_HAIR_CONTRAST_REVEAL_20S
+    duration_ms: 20000
+    default_moods: [cute_light, daily_clean]
+    suitable_categories: [hair_accessories]
+    template_objective: ai_hair_contrast_reveal
+    pacing: fast
+    required_roles: [hero, detail, result]
+    hook_profile: {hook_type: result_first, first_1s_goal: clear_product, required_visual_signal: product_visible_high, avoid: [watermark, subtitle_risk, low_trust]}
+    risk_policy: {require_no_watermark_for_first_slot: true, avoid_subtitle_risk_in_first_slot: true, allow_risky_segments_after_slot: 4, fail_only_on_severe_mismatch: true}
+    source_policy: {prefer_high_trust: true, allow_medium_trust: true, avoid_low_trust_core_slots: true}
+    bgm_profile: {moods: [cute_light, daily_clean], energy: medium, preferred_vocal_types: [instrumental], vocal_types: [instrumental, light_vocal]}
+    slots:
+      - {role: result, duration_ms: 4000, preferred_source_trust: high, preferred_binding: exact_sku, hook_intent: tryon_result, ai_gen_grade: A, ai_fill_min_grade: A_core, person_framing: ai_local, segment_type: tryon_result}
+      - {role: hero, duration_ms: 4000, preferred_source_trust: high, hook_intent: product_clarity, ai_gen_grade: A, ai_fill_min_grade: A_core, person_framing: ai_local, segment_type: product_display}
+      - {role: detail, duration_ms: 4000, preferred_source_trust: high, hook_intent: material_closeup, ai_gen_grade: B, ai_fill_min_grade: A_core, person_framing: ai_local, segment_type: detail_atmosphere}
+      - {role: scene, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred, segment_type: home_lifestyle}
+      - {role: ending, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred, segment_type: mirror_routine}
+
+  - template_id: AI_HAIR_LAZY_UPGRADE_16S
+    duration_ms: 16000
+    default_moods: [soft_feminine, calm_lifestyle]
+    suitable_categories: [hair_accessories]
+    template_objective: ai_hair_lazy_upgrade
+    pacing: balanced
+    required_roles: [hero, detail]
+    hook_profile: {hook_type: product_first, first_1s_goal: clear_product, required_visual_signal: product_visible_high, avoid: [watermark, subtitle_risk, low_trust]}
+    risk_policy: {require_no_watermark_for_first_slot: true, avoid_subtitle_risk_in_first_slot: true, allow_risky_segments_after_slot: 3, fail_only_on_severe_mismatch: true}
+    source_policy: {prefer_high_trust: true, allow_medium_trust: true, avoid_low_trust_core_slots: true}
+    bgm_profile: {moods: [soft_feminine, calm_lifestyle], energy: low, preferred_vocal_types: [instrumental], vocal_types: [instrumental, light_vocal]}
+    slots:
+      - {role: hero, duration_ms: 4000, preferred_source_trust: high, preferred_binding: exact_sku, hook_intent: product_clarity, ai_gen_grade: A, ai_fill_min_grade: A_core, person_framing: ai_local, segment_type: handheld_product}
+      - {role: detail, duration_ms: 4000, preferred_source_trust: high, hook_intent: material_closeup, ai_gen_grade: B, ai_fill_min_grade: A_core, person_framing: ai_local, segment_type: detail_atmosphere}
+      - {role: scene, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred, segment_type: before_go_out}
+      - {role: ending, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred, segment_type: home_lifestyle}
+
+  - template_id: AI_HAIR_LUCK_MOOD_20S
+    duration_ms: 20000
+    default_moods: [cute_light, fresh_summer]
+    suitable_categories: [hair_accessories]
+    template_objective: ai_hair_luck_mood
+    pacing: balanced
+    required_roles: [hero, scene]
+    hook_profile: {hook_type: lifestyle_scene, first_1s_goal: clear_product, required_visual_signal: product_visible_high, avoid: [watermark, subtitle_risk, low_trust]}
+    risk_policy: {require_no_watermark_for_first_slot: true, avoid_subtitle_risk_in_first_slot: true, allow_risky_segments_after_slot: 4, fail_only_on_severe_mismatch: true}
+    source_policy: {prefer_high_trust: true, allow_medium_trust: true, avoid_low_trust_core_slots: true}
+    bgm_profile: {moods: [cute_light, fresh_summer], energy: medium, preferred_vocal_types: [instrumental], vocal_types: [instrumental, light_vocal]}
+    slots:
+      - {role: hero, duration_ms: 4000, preferred_source_trust: high, preferred_binding: exact_sku, hook_intent: product_clarity, ai_gen_grade: A, ai_fill_min_grade: A_core, person_framing: ai_local, segment_type: product_display}
+      - {role: scene, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred, segment_type: seasonal_scene}
+      - {role: result, duration_ms: 4000, preferred_source_trust: high, hook_intent: tryon_result, ai_gen_grade: B, ai_fill_min_grade: A_core, person_framing: ai_local, segment_type: tryon_result}
+      - {role: scene, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred, segment_type: home_lifestyle}
+      - {role: ending, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred, segment_type: mirror_routine}
+
+  - template_id: AI_SCARF_PRODUCT_FIRST_20S
+    duration_ms: 20000
+    default_moods: [warm_cozy, daily_clean]
+    suitable_categories: [scarves_hats]
+    template_objective: ai_scarf_product_first
+    pacing: balanced
+    required_roles: [hero, detail, result]
+    hook_profile: {hook_type: product_first, first_1s_goal: clear_product, required_visual_signal: product_visible_high, avoid: [watermark, subtitle_risk, low_trust]}
+    risk_policy: {require_no_watermark_for_first_slot: true, avoid_subtitle_risk_in_first_slot: true, allow_risky_segments_after_slot: 4, fail_only_on_severe_mismatch: true}
+    source_policy: {prefer_high_trust: true, allow_medium_trust: true, avoid_low_trust_core_slots: true}
+    bgm_profile: {moods: [warm_cozy, daily_clean], energy: medium, preferred_vocal_types: [instrumental], vocal_types: [instrumental, light_vocal]}
+    slots:
+      - {role: hero, duration_ms: 4000, preferred_source_trust: high, preferred_binding: exact_sku, hook_intent: product_clarity, ai_gen_grade: A, ai_fill_min_grade: A_core, person_framing: ai_local, segment_type: product_display}
+      - {role: detail, duration_ms: 4000, preferred_source_trust: high, hook_intent: material_closeup, ai_gen_grade: B, ai_fill_min_grade: A_core, person_framing: ai_local, segment_type: detail_atmosphere}
+      - {role: result, duration_ms: 4000, preferred_source_trust: high, hook_intent: tryon_result, ai_gen_grade: B, ai_fill_min_grade: A_core, person_framing: ai_local, segment_type: tryon_result}
+      - {role: scene, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred, segment_type: seasonal_scene}
+      - {role: ending, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred, segment_type: home_lifestyle}
+
+  - template_id: AI_SCARF_LIFESTYLE_16S
+    duration_ms: 16000
+    default_moods: [warm_cozy, calm_lifestyle]
+    suitable_categories: [scarves_hats]
+    template_objective: ai_scarf_lifestyle
+    pacing: slow
+    required_roles: [hero, scene]
+    hook_profile: {hook_type: lifestyle_scene, first_1s_goal: clear_product, required_visual_signal: product_visible_high, avoid: [watermark, subtitle_risk, low_trust]}
+    risk_policy: {require_no_watermark_for_first_slot: true, avoid_subtitle_risk_in_first_slot: true, allow_risky_segments_after_slot: 3, fail_only_on_severe_mismatch: true}
+    source_policy: {prefer_high_trust: true, allow_medium_trust: true, avoid_low_trust_core_slots: true}
+    bgm_profile: {moods: [warm_cozy, calm_lifestyle], energy: low, preferred_vocal_types: [instrumental], vocal_types: [instrumental, light_vocal]}
+    slots:
+      - {role: hero, duration_ms: 4000, preferred_source_trust: high, preferred_binding: exact_sku, hook_intent: product_clarity, ai_gen_grade: A, ai_fill_min_grade: A_core, person_framing: ai_local, segment_type: handheld_product}
+      - {role: scene, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred, segment_type: seasonal_scene}
+      - {role: detail, duration_ms: 4000, preferred_source_trust: high, hook_intent: material_closeup, ai_gen_grade: B, ai_fill_min_grade: A_core, person_framing: ai_local, segment_type: detail_atmosphere}
+      - {role: ending, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred, segment_type: home_lifestyle}
+
+  - template_id: AI_EARRING_DETAIL_16S
+    duration_ms: 16000
+    default_moods: [premium_clean, soft_feminine]
+    suitable_categories: [earrings]
+    template_objective: ai_earring_detail
+    pacing: balanced
+    required_roles: [hero, detail]
+    hook_profile: {hook_type: texture_detail, first_1s_goal: material_closeup, required_visual_signal: product_visible_high, avoid: [watermark, subtitle_risk, low_trust]}
+    risk_policy: {require_no_watermark_for_first_slot: true, avoid_subtitle_risk_in_first_slot: true, allow_risky_segments_after_slot: 3, fail_only_on_severe_mismatch: true}
+    source_policy: {prefer_high_trust: true, allow_medium_trust: true, avoid_low_trust_core_slots: true}
+    bgm_profile: {moods: [premium_clean, soft_feminine], energy: medium, preferred_vocal_types: [instrumental], vocal_types: [instrumental, light_vocal]}
+    slots:
+      - {role: detail, duration_ms: 4000, preferred_source_trust: high, preferred_binding: exact_sku, hook_intent: material_closeup, ai_gen_grade: A, ai_fill_min_grade: A_core, person_framing: ai_local, segment_type: detail_atmosphere}
+      - {role: hero, duration_ms: 4000, preferred_source_trust: high, hook_intent: product_clarity, ai_gen_grade: A, ai_fill_min_grade: A_core, person_framing: ai_local, segment_type: product_display}
+      - {role: result, duration_ms: 4000, preferred_source_trust: high, hook_intent: tryon_result, ai_gen_grade: B, ai_fill_min_grade: A_core, person_framing: ai_local, segment_type: tryon_result}
+      - {role: ending, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred, segment_type: home_lifestyle}
+
+  - template_id: AI_EARRING_LIFESTYLE_20S
+    duration_ms: 20000
+    default_moods: [soft_feminine, calm_lifestyle]
+    suitable_categories: [earrings]
+    template_objective: ai_earring_lifestyle
+    pacing: balanced
+    required_roles: [hero, scene]
+    hook_profile: {hook_type: lifestyle_scene, first_1s_goal: clear_product, required_visual_signal: product_visible_high, avoid: [watermark, subtitle_risk, low_trust]}
+    risk_policy: {require_no_watermark_for_first_slot: true, avoid_subtitle_risk_in_first_slot: true, allow_risky_segments_after_slot: 4, fail_only_on_severe_mismatch: true}
+    source_policy: {prefer_high_trust: true, allow_medium_trust: true, avoid_low_trust_core_slots: true}
+    bgm_profile: {moods: [soft_feminine, calm_lifestyle], energy: low, preferred_vocal_types: [instrumental], vocal_types: [instrumental, light_vocal]}
+    slots:
+      - {role: hero, duration_ms: 4000, preferred_source_trust: high, preferred_binding: exact_sku, hook_intent: product_clarity, ai_gen_grade: A, ai_fill_min_grade: A_core, person_framing: ai_local, segment_type: product_display}
+      - {role: scene, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred, segment_type: home_lifestyle}
+      - {role: detail, duration_ms: 4000, preferred_source_trust: high, hook_intent: material_closeup, ai_gen_grade: B, ai_fill_min_grade: A_core, person_framing: ai_local, segment_type: detail_atmosphere}
+      - {role: scene, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred, segment_type: before_go_out}
+      - {role: ending, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred, segment_type: seasonal_scene}
+
+  - template_id: AI_OUTERWEAR_PRODUCT_FIRST_20S
+    duration_ms: 20000
+    default_moods: [fashion_chic, warm_cozy]
+    suitable_categories: [womens_outerwear]
+    template_objective: ai_outerwear_product_first
+    pacing: balanced
+    required_roles: [hero, detail, result]
+    hook_profile: {hook_type: product_first, first_1s_goal: clear_product, required_visual_signal: product_visible_high, avoid: [watermark, subtitle_risk, low_trust]}
+    risk_policy: {require_no_watermark_for_first_slot: true, avoid_subtitle_risk_in_first_slot: true, allow_risky_segments_after_slot: 4, fail_only_on_severe_mismatch: true}
+    source_policy: {prefer_high_trust: true, allow_medium_trust: true, avoid_low_trust_core_slots: true}
+    bgm_profile: {moods: [fashion_chic, warm_cozy], energy: medium, preferred_vocal_types: [instrumental], vocal_types: [instrumental, light_vocal]}
+    slots:
+      - {role: hero, duration_ms: 4000, preferred_source_trust: high, preferred_binding: exact_sku, hook_intent: product_clarity, ai_gen_grade: A, ai_fill_min_grade: A_core, person_framing: ai_local, segment_type: product_display}
+      - {role: detail, duration_ms: 4000, preferred_source_trust: high, hook_intent: material_closeup, ai_gen_grade: B, ai_fill_min_grade: A_core, person_framing: ai_local, segment_type: detail_atmosphere}
+      - {role: result, duration_ms: 4000, preferred_source_trust: high, hook_intent: tryon_result, ai_gen_grade: B, ai_fill_min_grade: A_core, person_framing: ai_local, segment_type: tryon_result}
+      - {role: scene, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred, segment_type: before_go_out}
+      - {role: ending, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred, segment_type: seasonal_scene}
+
+  - template_id: AI_OUTERWEAR_LIFESTYLE_20S
+    duration_ms: 20000
+    default_moods: [warm_cozy, calm_lifestyle]
+    suitable_categories: [womens_outerwear]
+    template_objective: ai_outerwear_lifestyle
+    pacing: slow
+    required_roles: [hero, scene]
+    hook_profile: {hook_type: lifestyle_scene, first_1s_goal: clear_product, required_visual_signal: product_visible_high, avoid: [watermark, subtitle_risk, low_trust]}
+    risk_policy: {require_no_watermark_for_first_slot: true, avoid_subtitle_risk_in_first_slot: true, allow_risky_segments_after_slot: 4, fail_only_on_severe_mismatch: true}
+    source_policy: {prefer_high_trust: true, allow_medium_trust: true, avoid_low_trust_core_slots: true}
+    bgm_profile: {moods: [warm_cozy, calm_lifestyle], energy: low, preferred_vocal_types: [instrumental], vocal_types: [instrumental, light_vocal]}
+    slots:
+      - {role: hero, duration_ms: 4000, preferred_source_trust: high, preferred_binding: exact_sku, hook_intent: product_clarity, ai_gen_grade: A, ai_fill_min_grade: A_core, person_framing: ai_local, segment_type: handheld_product}
+      - {role: scene, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred, segment_type: home_lifestyle}
+      - {role: detail, duration_ms: 4000, preferred_source_trust: high, hook_intent: material_closeup, ai_gen_grade: B, ai_fill_min_grade: A_core, person_framing: ai_local, segment_type: detail_atmosphere}
+      - {role: result, duration_ms: 4000, preferred_source_trust: high, hook_intent: tryon_result, ai_gen_grade: B, ai_fill_min_grade: A_core, person_framing: ai_local, segment_type: tryon_result}
+      - {role: ending, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred, segment_type: seasonal_scene}
+
   - template_id: COLD_START_IMAGE_ONLY_15S
     fallback_only: true
+    default_moods: [daily_clean]
+    description: 纯图片冷启动兜底版，V1.1 暂不进入视频混剪主模板池。
     roles: [product_image_hero, detail_image, product_image_result_or_model, selling_point_image, ending]
-
-render_plan_rules:
-  soft_local_language_subtitle:
-    max_per_output: 2
-    disallow_first_slot: true
-    prefer_clean_core_slots: true
-    preferred_roles: [scene, ending]

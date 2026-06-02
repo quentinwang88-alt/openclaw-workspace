@@ -4,7 +4,7 @@ import hashlib
 import os
 import shutil
 from pathlib import Path
-from typing import Dict
+from typing import Any, Dict
 
 from auto_mixcut.core.ids import new_id
 from auto_mixcut.core.result import Result
@@ -20,15 +20,26 @@ class LocalOSS:
         try:
             dest = self.root / object_key
             dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, dest)
+            source_size = source.stat().st_size
+            source_hash = file_sha256(source)
+            if source.resolve() != dest.resolve():
+                shutil.copy2(source, dest)
+            dest_size = dest.stat().st_size
+            dest_hash = file_sha256(dest)
+            if dest_size != source_size or dest_hash != source_hash:
+                return Result.fail(
+                    "OSS_UPLOAD_VERIFY_FAILED",
+                    "uploaded file size/hash does not match source",
+                    {"source": str(source), "object_key": object_key, "source_size": source_size, "dest_size": dest_size},
+                )
             meta = {
                 "object_id": new_id("OSS"),
                 "bucket": self.bucket,
                 "object_key": object_key,
                 "file_name": source.name,
                 "file_ext": source.suffix.lstrip("."),
-                "file_size": dest.stat().st_size,
-                "file_hash": file_sha256(dest),
+                "file_size": dest_size,
+                "file_hash": dest_hash,
                 "storage_status": "uploaded",
             }
             return Result.ok(meta)
@@ -51,9 +62,113 @@ class LocalOSS:
         return f"file://{self.root / object_key}?expires={expires_seconds}"
 
 
+class AliyunOSS:
+    def __init__(
+        self,
+        bucket: str,
+        endpoint: str,
+        access_key_id: str,
+        access_key_secret: str,
+        security_token: str = "",
+        public_base_url: str = "",
+    ):
+        missing = []
+        if not bucket:
+            missing.append("AUTO_MIXCUT_OSS_BUCKET")
+        if not endpoint:
+            missing.append("AUTO_MIXCUT_ALIYUN_OSS_ENDPOINT")
+        if not access_key_id:
+            missing.append("AUTO_MIXCUT_ALIYUN_ACCESS_KEY_ID")
+        if not access_key_secret:
+            missing.append("AUTO_MIXCUT_ALIYUN_ACCESS_KEY_SECRET")
+        if missing:
+            raise RuntimeError(f"Aliyun OSS config missing: {', '.join(missing)}")
+        try:
+            import oss2
+        except ImportError as exc:
+            raise RuntimeError("oss2 package is required for AUTO_MIXCUT_OSS_PROVIDER=aliyun") from exc
+
+        self.bucket_name = bucket
+        self.endpoint = endpoint
+        self.public_base_url = public_base_url.rstrip("/")
+        if security_token:
+            auth = oss2.StsAuth(access_key_id, access_key_secret, security_token)
+        else:
+            auth = oss2.Auth(access_key_id, access_key_secret)
+        self._bucket = oss2.Bucket(auth, endpoint, bucket)
+
+    def upload(self, source: Path, object_key: str) -> Result:
+        try:
+            source_size = source.stat().st_size
+            source_hash = file_sha256(source)
+            headers = {
+                "x-oss-meta-sha256": source_hash,
+                "x-oss-meta-file-size": str(source_size),
+            }
+            self._bucket.put_object_from_file(object_key, str(source), headers=headers)
+            head = self._bucket.head_object(object_key)
+            remote_size = int(getattr(head, "content_length", 0) or 0)
+            remote_hash = _header_get(getattr(head, "headers", {}), "x-oss-meta-sha256")
+            if remote_size != source_size or (remote_hash and remote_hash != source_hash):
+                return Result.fail(
+                    "OSS_UPLOAD_VERIFY_FAILED",
+                    "uploaded object size/hash metadata does not match source",
+                    {"source": str(source), "object_key": object_key, "source_size": source_size, "remote_size": remote_size},
+                )
+            meta = {
+                "object_id": new_id("OSS"),
+                "bucket": self.bucket_name,
+                "object_key": object_key,
+                "file_name": source.name,
+                "file_ext": source.suffix.lstrip("."),
+                "file_size": source_size,
+                "file_hash": source_hash,
+                "storage_status": "uploaded",
+            }
+            return Result.ok(meta)
+        except Exception as exc:
+            return Result.fail("OSS_UPLOAD_FAILED", str(exc), {"source": str(source), "object_key": object_key, "provider": "aliyun"})
+
+    def download(self, object_key: str, dest: Path) -> Result:
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            self._bucket.get_object_to_file(object_key, str(dest))
+            return Result.ok({"path": str(dest)})
+        except Exception as exc:
+            return Result.fail("OSS_DOWNLOAD_FAILED", str(exc), {"object_key": object_key, "provider": "aliyun"})
+
+    def signed_url(self, object_key: str, expires_seconds: int = 86400) -> str:
+        if self.public_base_url:
+            return f"{self.public_base_url}/{object_key}"
+        return self._bucket.sign_url("GET", object_key, expires_seconds, slash_safe=True)
+
+
+def build_oss(settings: Any):
+    if settings.oss_provider == "local":
+        return LocalOSS(settings.oss_root, settings.bucket)
+    if settings.oss_provider == "aliyun":
+        return AliyunOSS(
+            bucket=settings.bucket,
+            endpoint=settings.aliyun_oss_endpoint,
+            access_key_id=settings.aliyun_access_key_id,
+            access_key_secret=settings.aliyun_access_key_secret,
+            security_token=settings.aliyun_security_token,
+            public_base_url=settings.aliyun_public_base_url,
+        )
+    raise RuntimeError(f"unknown AUTO_MIXCUT_OSS_PROVIDER: {settings.oss_provider}")
+
+
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as fh:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _header_get(headers: Any, key: str) -> str:
+    if not headers:
+        return ""
+    if hasattr(headers, "get"):
+        return str(headers.get(key) or headers.get(key.lower()) or headers.get(key.upper()) or "").strip()
+    return ""

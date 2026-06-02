@@ -4,6 +4,7 @@ from pathlib import Path
 
 from auto_mixcut.core.ids import new_id
 from auto_mixcut.core.result import Result
+from auto_mixcut.core.storage_paths import require_oss_object_path
 
 from .context import SkillContext
 
@@ -55,8 +56,4 @@ class FrameSampleSkill:
 
 
 def _segment_path(ctx: SkillContext, segment: dict) -> Path | None:
-    obj = ctx.repo.get("oss_objects", "object_id", segment.get("segment_oss_object_id"))
-    if not obj:
-        return None
-    path = ctx.settings.oss_root / obj["object_key"]
-    return path if path.exists() else None
+    return require_oss_object_path(ctx, segment.get("segment_oss_object_id"), "frames_source")
