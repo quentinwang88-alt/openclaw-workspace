@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Iterable
 
-from auto_mixcut.adapters.oss import file_sha256
+from auto_mixcut.adapters.oss import AliyunOSS, file_sha256
 from auto_mixcut.core.result import Result
 
 from .context import SkillContext
@@ -98,6 +98,7 @@ class ProductReferenceImageSkill:
                 return write
             uploaded_images.append(row)
         primary = uploaded_images[0] if uploaded_images else {}
+        primary_object = _oss_object(self.ctx, primary.get("oss_object_id"))
         pack_row = {
             "reference_image_pack_id": pack_id,
             "market": market,
@@ -109,7 +110,7 @@ class ProductReferenceImageSkill:
             "source": source,
             "image_count": len(uploaded_images),
             "primary_image_oss_object_id": primary.get("oss_object_id", ""),
-            "primary_preview_url": self._preview_url(primary.get("object_key")),
+            "primary_preview_url": self._preview_url(primary.get("object_key"), primary_object),
             "anchor_snapshot_json": anchor_snapshot or {},
         }
         saved_pack = self.ctx.repo.upsert("product_reference_image_packs", "reference_image_pack_id", pack_row)
@@ -161,10 +162,21 @@ class ProductReferenceImageSkill:
             return ready
         return self.ctx.repo.update("product_reference_image_packs", "reference_image_pack_id", reference_image_pack_id, {"status": "archived"})
 
-    def _preview_url(self, object_key: str | None) -> str:
+    def _preview_url(self, object_key: str | None, oss_object: dict[str, Any] | None = None) -> str:
         if not object_key:
             return ""
         try:
+            bucket_name = str((oss_object or {}).get("bucket") or "")
+            if bucket_name and bucket_name != getattr(self.ctx.oss, "bucket_name", self.ctx.settings.bucket):
+                endpoint = _endpoint_for_bucket(bucket_name, self.ctx.settings.aliyun_oss_endpoint)
+                if self.ctx.settings.oss_provider == "aliyun" and self.ctx.settings.aliyun_access_key_id and self.ctx.settings.aliyun_access_key_secret:
+                    return AliyunOSS(
+                        bucket=bucket_name,
+                        endpoint=endpoint,
+                        access_key_id=self.ctx.settings.aliyun_access_key_id,
+                        access_key_secret=self.ctx.settings.aliyun_access_key_secret,
+                        security_token=self.ctx.settings.aliyun_security_token,
+                    ).signed_url(object_key)
             return self.ctx.oss.signed_url(object_key)
         except Exception:
             return ""
@@ -290,8 +302,28 @@ def _mysql_statements() -> list[str]:
 
 def _with_preview(skill: ProductReferenceImageSkill, image: dict[str, Any]) -> dict[str, Any]:
     item = dict(image)
-    item["preview_url"] = skill._preview_url(item.get("object_key"))
+    oss_object = _oss_object(skill.ctx, item.get("oss_object_id"))
+    if oss_object:
+        item["bucket"] = oss_object.get("bucket", "")
+        item["oss_bucket"] = oss_object.get("bucket", "")
+        item["oss_object_key"] = oss_object.get("object_key") or item.get("object_key", "")
+    item["preview_url"] = skill._preview_url(item.get("object_key"), oss_object)
     return item
+
+
+def _oss_object(ctx: SkillContext, oss_object_id: Any) -> dict[str, Any]:
+    object_id = str(oss_object_id or "").strip()
+    if not object_id:
+        return {}
+    return ctx.repo.get("oss_objects", "object_id", object_id) or {}
+
+
+def _endpoint_for_bucket(bucket: str, fallback: str) -> str:
+    text = str(bucket or "")
+    for marker in ("cn-shanghai", "cn-hangzhou", "cn-beijing", "cn-shenzhen", "cn-heyuan", "cn-guangzhou", "cn-hongkong", "ap-southeast-1"):
+        if marker in text:
+            return f"https://oss-{marker}.aliyuncs.com"
+    return fallback
 
 
 def _find_existing_image(ctx: SkillContext, market: str, product_id: str, sku_id: str, file_hash: str) -> dict[str, Any] | None:
