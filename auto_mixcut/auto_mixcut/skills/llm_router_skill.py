@@ -620,7 +620,7 @@ def _mock_response(call_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
                 "energy_level": "medium",
                 "vocal_type": "instrumental",
                 "category_tags": ["generic_fashion"],
-                "template_tags": ["GENERAL_BALANCED_15S"],
+                "template_tags": [],
             },
             "mix_suggestions": {
                 "recommended_start_sec": 12,

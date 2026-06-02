@@ -56,9 +56,11 @@ class RenderSkill:
             if not rendered.success:
                 return rendered
             bgm_object = rendered.data.get("bgm_object")
+            bgm_plan = rendered.data.get("bgm") or {}
         if self.ctx.ffmpeg.mock:
             subtitles = _subtitle_plan(self.ctx, plan)
             bgm_object = None
+            bgm_plan = _bgm_manifest(_default_bgm_plan())
         product = self.ctx.repo.get("products", "product_id", plan["product_id"]) or {}
         out_key = f"auto_mixcut/outputs/{product.get('market','NA')}/{product.get('category','uncategorized')}/{plan['product_id']}/{plan['batch_id']}/variant_{plan['variant_no']:03d}.mp4"
         cover_key = f"auto_mixcut/covers/{product.get('market','NA')}/{product.get('category','uncategorized')}/{plan['product_id']}/{plan['batch_id']}/variant_{plan['variant_no']:03d}.jpg"
@@ -77,7 +79,7 @@ class RenderSkill:
         self.ctx.repo.upsert("outputs", "output_id", output_row)
         for slot in segments:
             self.ctx.repo.insert("output_segments", {"output_id": output_id, "segment_id": slot["segment_id"], "asset_id": slot["asset_id"], "slot_index": slot["slot"], "role_used": slot["role"], "start_ms_in_output": slot["start_ms_in_output"], "end_ms_in_output": slot["end_ms_in_output"]})
-        manifest_data = {"output_id": output_id, "batch_id": plan["batch_id"], "product_id": plan["product_id"], "template_id": plan["template_id"], "duration_ms": duration_ms, "output_oss_object_id": out_obj["object_id"], "cover_oss_object_id": cover_obj["object_id"], "segments": segments, "subtitles": subtitles, "bgm": {"oss_object_id": bgm_object, "volume": 0.55, "loudness_normalized": True}, "machine_quality_status": "pending", "experiment_group": plan["template_id"], "experiment_batch": plan["batch_id"]}
+        manifest_data = {"output_id": output_id, "batch_id": plan["batch_id"], "product_id": plan["product_id"], "template_id": plan["template_id"], "duration_ms": duration_ms, "output_oss_object_id": out_obj["object_id"], "cover_oss_object_id": cover_obj["object_id"], "segments": segments, "subtitles": subtitles, "bgm": {**bgm_plan, "oss_object_id": bgm_object, "loudness_normalized": True}, "machine_quality_status": "pending", "experiment_group": plan["template_id"], "experiment_batch": plan["batch_id"]}
         manifest.write_text(json.dumps(manifest_data, ensure_ascii=False, indent=2), encoding="utf-8")
         man_key = f"auto_mixcut/manifests/{product.get('market','NA')}/{product.get('category','uncategorized')}/{plan['product_id']}/{plan['batch_id']}/variant_{plan['variant_no']:03d}.json"
         man_upload = self.ctx.oss.upload(manifest, man_key)
@@ -152,10 +154,12 @@ class RenderSkill:
             str(video_only),
             "-stream_loop",
             "-1",
+            "-ss",
+            f"{_safe_float(bgm.data.get('recommended_start_sec'), 0):.3f}",
             "-i",
             str(bgm.data["path"]),
             "-filter_complex",
-            f"[0:v]{drawtext}[v];[1:a]loudnorm=I=-18:TP=-1.5:LRA=11,volume=0.55[a]",
+            f"[0:v]{drawtext}[v];[1:a]{_bgm_audio_filter(bgm.data, _planned_duration_ms(plan, slots))}[a]",
             "-map",
             "[v]",
             "-map",
@@ -189,7 +193,7 @@ class RenderSkill:
         data = probed.data
         if data.get("width") != 1080 or data.get("height") != 1920 or not data.get("has_audio"):
             return Result.fail("RENDER_FAILED", "rendered output failed technical probe", {"probe": data})
-        return Result.ok({"path": str(output_path), "probe": data, "bgm_object": bgm.data.get("object_id")})
+        return Result.ok({"path": str(output_path), "probe": data, "bgm_object": bgm.data.get("object_id"), "bgm": _bgm_manifest(bgm.data)})
 
 
 def _planned_duration_ms(plan: dict, segments: list[dict]) -> int:
@@ -220,17 +224,29 @@ def _ensure_bgm(ctx: SkillContext, plan: dict | None = None) -> Result:
     try:
         from auto_mixcut.skills.bgm_library_skill import BgmLibrarySkill
         product_id = (plan or {}).get("product_id", "")
+        template_id = (plan or {}).get("template_id", "")
+        plan_template = ((plan or {}).get("plan_json") or {}).get("template") or {}
+        bgm_profile = plan_template.get("bgm_profile") or {}
+        moods = bgm_profile.get("moods") or plan_template.get("default_moods") or []
+        mood = str(moods[0]) if moods else ""
         category = ""
         if product_id:
             product = ctx.repo.get("products", "product_id", product_id) or {}
             category = product.get("category", "")
-        rec = BgmLibrarySkill(ctx).get_recommendation(product_id=product_id, category=category)
+        rec = BgmLibrarySkill(ctx).get_recommendation(product_id=product_id, category=category, mood=mood, template_id=template_id)
         recs = rec.data.get("recommendations", []) if rec.success else []
         if recs:
             best = recs[0]
             path = require_oss_object_path(ctx, best.get("oss_object_id", ""), "render_bgm")
             if path and path.exists():
-                return Result.ok({"path": str(path), "object_id": best.get("oss_object_id", "")})
+                return Result.ok({
+                    **_default_bgm_plan(),
+                    **best,
+                    "path": str(path),
+                    "object_id": best.get("oss_object_id", ""),
+                    "matched_template_id": template_id,
+                    "matched_mood": mood,
+                })
     except Exception:
         pass
 
@@ -266,13 +282,67 @@ def _register_bgm(ctx: SkillContext, path: Path) -> Result:
     object_key = f"auto_mixcut/bgm/{path.name}"
     existing = ctx.repo.list_where("oss_objects", "object_key=? AND object_type='bgm' ORDER BY id DESC", (object_key,))
     if existing:
-        return Result.ok({"path": str(path), "object_id": existing[0]["object_id"]})
+        return Result.ok({"path": str(path), "object_id": existing[0]["object_id"], **_default_bgm_plan(), "fallback_source": "local_bgm"})
     uploaded = ctx.oss.upload(path, object_key)
     if not uploaded.success:
         return uploaded
     row = dict(uploaded.data, object_type="bgm", mime_type="audio/mp4")
     saved = ctx.repo.upsert("oss_objects", "object_id", row)
-    return saved if not saved.success else Result.ok({"path": str(path), "object_id": row["object_id"]})
+    return saved if not saved.success else Result.ok({"path": str(path), "object_id": row["object_id"], **_default_bgm_plan(), "fallback_source": "local_bgm"})
+
+
+def _default_bgm_plan() -> dict:
+    return {
+        "bgm_id": "",
+        "track_name": "",
+        "recommended_start_sec": 0,
+        "default_volume": 0.2,
+        "fade_in_ms": 500,
+        "fade_out_ms": 800,
+        "matched_template_id": "",
+        "matched_mood": "",
+    }
+
+
+def _bgm_manifest(data: dict) -> dict:
+    return {
+        "bgm_id": data.get("bgm_id") or "",
+        "track_name": data.get("track_name") or "",
+        "volume": _safe_float(data.get("default_volume"), 0.2),
+        "recommended_start_sec": _safe_float(data.get("recommended_start_sec"), 0),
+        "fade_in_ms": _safe_int(data.get("fade_in_ms"), 500),
+        "fade_out_ms": _safe_int(data.get("fade_out_ms"), 800),
+        "matched_template_id": data.get("matched_template_id") or "",
+        "matched_mood": data.get("matched_mood") or "",
+        "fallback_source": data.get("fallback_source") or "",
+    }
+
+
+def _bgm_audio_filter(data: dict, duration_ms: int) -> str:
+    duration_sec = max(duration_ms, 500) / 1000
+    volume = min(max(_safe_float(data.get("default_volume"), 0.2), 0.02), 1.0)
+    fade_in = max(_safe_int(data.get("fade_in_ms"), 500), 0) / 1000
+    fade_out = max(_safe_int(data.get("fade_out_ms"), 800), 0) / 1000
+    parts = ["loudnorm=I=-18:TP=-1.5:LRA=11", f"volume={volume:.3f}"]
+    if fade_in > 0:
+        parts.append(f"afade=t=in:st=0:d={fade_in:.3f}")
+    if fade_out > 0:
+        parts.append(f"afade=t=out:st={max(duration_sec - fade_out, 0):.3f}:d={fade_out:.3f}")
+    return ",".join(parts)
+
+
+def _safe_float(value, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _subtitle_plan(ctx: SkillContext, plan: dict) -> list[dict]:

@@ -348,28 +348,33 @@ def _filter_constraints(ctx: SkillContext, pool: list[dict], constraints: dict, 
 
 
 def _choose_template(ctx: SkillContext, product: dict, templates: list[TemplateSpec], batch_state: dict, variant: int) -> dict[str, Any]:
-    legacy_order = ["GENERAL_BALANCED_15S", "RESULT_FIRST_15S", "DETAIL_HOOK_15S", "CLEAN_PRODUCT_PROOF_15S"]
-    ordered = [next((t for t in templates if t.template_id == template_id), None) for template_id in legacy_order]
-    ordered = [t for t in ordered if t is not None]
-    if variant <= len(ordered):
-        template = ordered[variant - 1]
-        batch_state.setdefault("templates", set()).add(template.template_id)
-        return {"template": template, "debug": {"strategy": "legacy_stable_opening_order", "variant": variant}}
     category = str(product.get("category") or "generic_fashion")
     category_keys = _category_keys(category)
+    aliases = _category_aliases(category)
     scored = []
     for index, template in enumerate(templates):
-        score = 0
-        if category_keys.intersection(template.suitable_categories) or "generic_fashion" in template.suitable_categories:
-            score += 30
+        score = _template_category_score(category, aliases, template)
+        if template.template_id.startswith("AI_"):
+            score += 12
         if variant > 1 and template.template_id in batch_state.get("templates", set()):
-            score -= 6
-        score += (variant + index) % 5
+            score -= 35
+        if template.duration_ms in batch_state.get("template_durations", []):
+            score -= 10
+        score += _template_stable_spread(template.template_id, variant, index)
         scored.append((score, -index, template))
     scored.sort(reverse=True)
     template = scored[0][2] if scored else templates[(variant - 1) % len(templates)]
     batch_state.setdefault("templates", set()).add(template.template_id)
-    return {"template": template, "debug": {"strategy": "template_v2_rule_score", "category": category, "score": scored[0][0] if scored else 0}}
+    batch_state.setdefault("template_durations", []).append(template.duration_ms)
+    return {
+        "template": template,
+        "debug": {
+            "strategy": "category_template_score_rotation",
+            "category": category,
+            "category_keys": sorted(category_keys),
+            "score": scored[0][0] if scored else 0,
+        },
+    }
 
 
 def _template_plan_json(template: TemplateSpec) -> dict[str, Any]:
@@ -398,6 +403,35 @@ def _category_keys(category: str) -> set[str]:
         "generic_fashion": {"generic_fashion"},
     }
     return aliases.get(category, {category, "generic_fashion"})
+
+
+def _category_aliases(category: str) -> set[str]:
+    aliases = {
+        "womens_outerwear": {"womens_top"},
+        "womens_top": {"womens_outerwear"},
+        "scarves_hats": {"scarf_hat", "scarves"},
+        "scarf_hat": {"scarves_hats", "scarves"},
+        "scarves": {"scarves_hats", "scarf_hat"},
+    }
+    return aliases.get(category, set())
+
+
+def _template_category_score(category: str, aliases: set[str], template: TemplateSpec) -> float:
+    categories = set(template.suitable_categories or [])
+    if category in categories and "generic_fashion" not in categories:
+        return 120.0
+    if category in categories:
+        return 95.0
+    if aliases.intersection(categories):
+        return 70.0
+    if "generic_fashion" in categories:
+        return 40.0
+    return 0.0
+
+
+def _template_stable_spread(template_id: str, variant: int, index: int) -> float:
+    seed = f"{template_id}:{variant}:{index}"
+    return (sum(ord(ch) for ch in seed) % 19) / 100
 
 
 def _passes_first_slot_floor(ctx: SkillContext, segment: dict, risk_policy: dict[str, Any]) -> tuple[bool, str]:

@@ -88,9 +88,14 @@ class BgmLibrarySkill:
 
         existing = self.ctx.repo.get("bgm_tracks", "bgm_id", bgm_id)
         if existing:
+            self._apply_metadata_fallback_if_missing(existing)
             return Result.ok({"bgm_id": bgm_id, "status": "existing"})
 
         metadata = self._parse_filename(file_name)
+        fallback_tags = self.check_metadata_tags({
+            "file_name": file_name,
+            "official_tags_json": json.dumps(metadata.get("official_tags", []) or [], ensure_ascii=False),
+        })
 
         oss_res = self.ctx.oss.upload(path, f"auto_mixcut/bgm_library/{path.relative_to(bgm_dir).as_posix()}")
         oss_object_id = oss_res.data.get("object_id", "") if oss_res.success else ""
@@ -109,11 +114,55 @@ class BgmLibrarySkill:
             "local_file_path": str(path),
             "official_tags_json": json.dumps(metadata.get("official_tags", []) or [], ensure_ascii=False),
             "license_note": metadata.get("license_note", ""),
-            "bgm_tag_status": "untagged",
+            "mood_tags_json": json.dumps(fallback_tags.get("mood_tags", []) or [], ensure_ascii=False),
+            "energy_level": fallback_tags.get("energy_level", "medium"),
+            "vocal_type": fallback_tags.get("vocal_type", "unknown"),
+            "category_tags_json": json.dumps(fallback_tags.get("category_tags", []) or [], ensure_ascii=False),
+            "template_tags_json": json.dumps(fallback_tags.get("template_tags", []) or [], ensure_ascii=False),
+            "recommended_start_sec": fallback_tags.get("recommended_start_sec", 0),
+            "default_volume": fallback_tags.get("default_volume", 0.2),
+            "fade_in_ms": fallback_tags.get("fade_in_ms", 500),
+            "fade_out_ms": fallback_tags.get("fade_out_ms", 800),
+            "suitable_for_intro": int(bool(fallback_tags.get("suitable_for_intro", True))),
+            "loop_friendly": int(bool(fallback_tags.get("loop_friendly", False))),
+            "voiceover_friendly": int(bool(fallback_tags.get("voiceover_friendly", True))),
+            "bgm_tag_status": "fallback",
+            "tag_confidence": "low",
             "tag_review_required": 0,
+            "bgm_tag_reason": "filename metadata fallback",
         }
 
         return self.ctx.repo.upsert("bgm_tracks", "bgm_id", row)
+
+    def _apply_metadata_fallback_if_missing(self, track: dict) -> None:
+        if track.get("bgm_tag_status") not in {"", None, "untagged"}:
+            return
+        if _parse_json_safe(track.get("mood_tags_json"), []):
+            return
+        fallback_tags = self.check_metadata_tags(track)
+        self.ctx.repo.update(
+            "bgm_tracks",
+            "bgm_id",
+            track["bgm_id"],
+            {
+                "mood_tags_json": json.dumps(fallback_tags.get("mood_tags", []) or [], ensure_ascii=False),
+                "energy_level": fallback_tags.get("energy_level", "medium"),
+                "vocal_type": fallback_tags.get("vocal_type", "unknown"),
+                "category_tags_json": json.dumps(fallback_tags.get("category_tags", []) or [], ensure_ascii=False),
+                "template_tags_json": json.dumps(fallback_tags.get("template_tags", []) or [], ensure_ascii=False),
+                "recommended_start_sec": fallback_tags.get("recommended_start_sec", 0),
+                "default_volume": fallback_tags.get("default_volume", 0.2),
+                "fade_in_ms": fallback_tags.get("fade_in_ms", 500),
+                "fade_out_ms": fallback_tags.get("fade_out_ms", 800),
+                "suitable_for_intro": int(bool(fallback_tags.get("suitable_for_intro", True))),
+                "loop_friendly": int(bool(fallback_tags.get("loop_friendly", False))),
+                "voiceover_friendly": int(bool(fallback_tags.get("voiceover_friendly", True))),
+                "bgm_tag_status": "fallback",
+                "tag_confidence": "low",
+                "tag_review_required": 0,
+                "bgm_tag_reason": "filename metadata fallback",
+            },
+        )
 
     def get_recommendation(self, product_id: str = "", category: str = "", mood: str = "", template_id: str = "") -> Result:
         tracks = self.ctx.repo.list_where("bgm_tracks", "1=1")
@@ -176,7 +225,7 @@ class BgmLibrarySkill:
             "energy_level": energy,
             "vocal_type": "unknown",
             "category_tags": ["generic_fashion"],
-            "template_tags": ["GENERAL_BALANCED_15S"],
+            "template_tags": [],
             "recommended_start_sec": 12,
             "default_volume": 0.2,
             "fade_in_ms": 500,
@@ -191,16 +240,23 @@ class BgmLibrarySkill:
         cat_tags = _parse_json_safe(track.get("category_tags_json"), [])
         if category and isinstance(cat_tags, list):
             if category in cat_tags:
-                score += 0.5
+                score += 0.45
             elif "generic_fashion" in cat_tags:
-                score += 0.2
+                score += 0.15
         else:
-            score += 0.2
+            score += 0.1
 
         mood_tags = _parse_json_safe(track.get("mood_tags_json"), [])
         if mood and isinstance(mood_tags, list):
             if mood in mood_tags:
                 score += 0.5
+
+        template_tags = _parse_json_safe(track.get("template_tags_json"), [])
+        if template_id and isinstance(template_tags, list):
+            if template_id in template_tags:
+                score += 0.7
+            elif any(str(tag).startswith("AI_") and template_id.startswith("AI_") for tag in template_tags):
+                score += 0.2
 
         confidence = track.get("tag_confidence", "medium")
         if confidence == "low":

@@ -31,7 +31,7 @@ class AIFactoryStrategyTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_ai_friendly_templates_do_not_disrupt_first_four_legacy_templates(self):
+    def test_ai_friendly_templates_are_selected_by_category_without_legacy_prefix(self):
         product_id = "VN_AI_TEMPLATE_ORDER"
         create = RDSRepositorySkill(self.ctx).create_product_task(product_id, "Clip", "VN", "hair_accessories", 5)
         self.assertTrue(create.success, create.to_dict())
@@ -54,8 +54,12 @@ class AIFactoryStrategyTest(unittest.TestCase):
         res = RenderPlanSkill(self.ctx).create_plans(product_id, 5)
         self.assertTrue(res.success, res.to_dict())
         plans = self.ctx.repo.list_where("render_plans", "batch_id=? ORDER BY variant_no", (res.data["batch_id"],))
-        self.assertEqual([p["template_id"] for p in plans[:4]], ["GENERAL_BALANCED_15S", "RESULT_FIRST_15S", "DETAIL_HOOK_15S", "CLEAN_PRODUCT_PROOF_15S"])
-        self.assertIn(plans[4]["planned_duration_ms"], {16000, 20000, 24000})
+        template_ids = [p["template_id"] for p in plans]
+        self.assertTrue(all(tid.startswith("AI_") for tid in template_ids[:4]), template_ids)
+        self.assertTrue(any(tid.startswith("AI_HAIR_") for tid in template_ids[:3]), template_ids)
+        self.assertNotEqual(template_ids[:4], ["GENERAL_BALANCED_15S", "RESULT_FIRST_15S", "DETAIL_HOOK_15S", "CLEAN_PRODUCT_PROOF_15S"])
+        self.assertTrue({16000, 20000}.intersection({p["planned_duration_ms"] for p in plans}), template_ids)
+        self.assertEqual(plans[0]["plan_json"]["template_selection"]["strategy"], "category_template_score_rotation")
 
     def test_quality_gate_accepts_twenty_second_template_duration(self):
         output_id = "OUT_20S_OK"

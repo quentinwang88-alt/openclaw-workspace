@@ -253,10 +253,16 @@ BGM_ALLOWED_LABELS = {
     "energy_level": ["low", "medium", "high"],
     "vocal_type": ["instrumental", "light_vocal", "vocal", "unknown"],
     "category_tags": [
-        "hair_accessories", "earrings", "womens_top", "scarf_hat", "generic_fashion",
+        "hair_accessories", "earrings", "womens_top", "womens_outerwear",
+        "scarf_hat", "scarves_hats", "scarves", "generic_fashion",
     ],
     "template_tags": [
         "GENERAL_BALANCED_15S", "RESULT_FIRST_15S", "DETAIL_HOOK_15S", "CLEAN_PRODUCT_PROOF_15S",
+        "AI_PRODUCT_FIRST_20S", "AI_LIFESTYLE_16S", "AI_DETAIL_PROOF_24S",
+        "AI_HAIR_CONTRAST_REVEAL_20S", "AI_HAIR_LAZY_UPGRADE_16S", "AI_HAIR_LUCK_MOOD_20S",
+        "AI_SCARF_PRODUCT_FIRST_20S", "AI_SCARF_LIFESTYLE_16S",
+        "AI_EARRING_DETAIL_16S", "AI_EARRING_LIFESTYLE_20S",
+        "AI_OUTERWEAR_PRODUCT_FIRST_20S", "AI_OUTERWEAR_LIFESTYLE_20S",
     ],
 }
 
@@ -300,7 +306,7 @@ def bgm_tagging_prompt(payload: dict) -> str:
     "energy_level": "medium",
     "vocal_type": "instrumental",
     "category_tags": ["generic_fashion"],
-    "template_tags": ["GENERAL_BALANCED_15S"]
+    "template_tags": []
   }},
   "mix_suggestions": {{
     "recommended_start_sec": 12,
@@ -339,7 +345,7 @@ def normalize_bgm_tag(data: Any) -> dict:
             "energy_level": energy,
             "vocal_type": vocal,
             "category_tags": category_tags or ["generic_fashion"],
-            "template_tags": template_tags or ["GENERAL_BALANCED_15S"],
+            "template_tags": template_tags,
         },
         "mix_suggestions": {
             "recommended_start_sec": float(mix.get("recommended_start_sec", 12)),
@@ -364,7 +370,7 @@ def _default_bgm_tag() -> dict:
             "energy_level": "medium",
             "vocal_type": "unknown",
             "category_tags": ["generic_fashion"],
-            "template_tags": ["GENERAL_BALANCED_15S"],
+            "template_tags": [],
         },
         "mix_suggestions": {
             "recommended_start_sec": 0,

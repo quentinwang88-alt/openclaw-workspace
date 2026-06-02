@@ -37,6 +37,8 @@ class BgmSystemTest(unittest.TestCase):
         self.assertGreater(sync.data["synced"], 0)
 
         track = self.ctx.repo.list_where("bgm_tracks", "1=1 ORDER BY bgm_id")[0]
+        self.assertEqual(track["bgm_tag_status"], "fallback")
+        self.assertTrue(track["mood_tags_json"])
         tag = BgmTaggingSkill(self.ctx).tag_track(track["bgm_id"], force=True)
         self.assertTrue(tag.success, tag.to_dict())
 
@@ -76,6 +78,45 @@ class BgmSystemTest(unittest.TestCase):
         rec = BgmLibrarySkill(self.ctx).get_recommendation(category="generic_fashion", mood="fashion_chic")
         self.assertTrue(rec.success, rec.to_dict())
         self.assertTrue(rec.data["recommendations"])
+
+    def test_bgm_recommendation_prefers_matching_template_tag(self):
+        self.ctx.repo.upsert(
+            "bgm_tracks",
+            "bgm_id",
+            {
+                "bgm_id": "BGM_GENERIC_MATCH",
+                "track_name": "Generic chic",
+                "mood_tags_json": json.dumps(["fashion_chic"]),
+                "category_tags_json": json.dumps(["generic_fashion"]),
+                "template_tags_json": json.dumps([]),
+                "bgm_tag_status": "tagged",
+                "tag_confidence": "high",
+                "default_volume": 0.2,
+            },
+        )
+        self.ctx.repo.upsert(
+            "bgm_tracks",
+            "bgm_id",
+            {
+                "bgm_id": "BGM_OUTERWEAR_TEMPLATE_MATCH",
+                "track_name": "Outerwear product first",
+                "mood_tags_json": json.dumps(["fashion_chic"]),
+                "category_tags_json": json.dumps(["womens_outerwear"]),
+                "template_tags_json": json.dumps(["AI_OUTERWEAR_PRODUCT_FIRST_20S"]),
+                "bgm_tag_status": "tagged",
+                "tag_confidence": "high",
+                "default_volume": 0.18,
+            },
+        )
+
+        rec = BgmLibrarySkill(self.ctx).get_recommendation(
+            category="womens_outerwear",
+            mood="fashion_chic",
+            template_id="AI_OUTERWEAR_PRODUCT_FIRST_20S",
+        )
+        self.assertTrue(rec.success, rec.to_dict())
+        self.assertEqual(rec.data["recommendations"][0]["bgm_id"], "BGM_OUTERWEAR_TEMPLATE_MATCH")
+        self.assertEqual(rec.data["recommendations"][0]["default_volume"], 0.18)
 
 
 if __name__ == "__main__":
