@@ -51,7 +51,7 @@ class Settings:
             aliyun_access_key_id=str(data.get("aliyun_access_key_id") or data.get("aliyun_oss_access_key_id") or _env_first("AUTO_MIXCUT_ALIYUN_ACCESS_KEY_ID", "ALIYUN_OSS_ACCESS_KEY_ID")).strip(),
             aliyun_access_key_secret=str(data.get("aliyun_access_key_secret") or data.get("aliyun_oss_access_key_secret") or _env_first("AUTO_MIXCUT_ALIYUN_ACCESS_KEY_SECRET", "ALIYUN_OSS_ACCESS_KEY_SECRET")).strip(),
             aliyun_security_token=str(data.get("aliyun_security_token") or _env_first("AUTO_MIXCUT_ALIYUN_SECURITY_TOKEN", "ALIYUN_OSS_SECURITY_TOKEN")).strip(),
-            aliyun_public_base_url=str(data.get("aliyun_public_base_url") or _env_first("AUTO_MIXCUT_ALIYUN_OSS_PUBLIC_BASE_URL", "ALIYUN_OSS_PUBLIC_BASE_URL", "AUTO_MIXCUT_PREVIEW_BASE_URL")).strip(),
+            aliyun_public_base_url=str(data.get("aliyun_public_base_url") or _env_first("AUTO_MIXCUT_ALIYUN_OSS_PUBLIC_BASE_URL", "ALIYUN_OSS_PUBLIC_BASE_URL")).strip(),
             mock_llm=str(data.get("mock_llm", os.environ.get("AUTO_MIXCUT_MOCK_LLM", "1"))).lower() in {"1", "true", "yes"},
             mock_ffmpeg=str(data.get("mock_ffmpeg", os.environ.get("AUTO_MIXCUT_MOCK_FFMPEG", "0"))).lower() in {"1", "true", "yes"},
             feishu_enabled=str(data.get("feishu_enabled", os.environ.get("AUTO_MIXCUT_FEISHU_ENABLED", "0"))).lower() in {"1", "true", "yes"},

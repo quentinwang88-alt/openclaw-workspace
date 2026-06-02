@@ -136,7 +136,11 @@ class ProductReferenceImageSkill:
             "reference_image_pack_id=? AND status='active' ORDER BY image_index",
             (pack["reference_image_pack_id"],),
         )
-        return Result.ok({"pack": pack, "images": [_with_preview(self, img) for img in images]})
+        images_with_preview = [_with_preview(self, img) for img in images]
+        if images_with_preview:
+            pack = dict(pack)
+            pack["primary_preview_url"] = images_with_preview[0].get("preview_url", "")
+        return Result.ok({"pack": pack, "images": images_with_preview})
 
     def get_active_images(self, product_id: str, market: str | None = None, sku_id: str = "DEFAULT", roles: list[str] | None = None) -> Result:
         pack = self.get_active_pack(product_id, market=market, sku_id=sku_id)

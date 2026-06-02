@@ -472,7 +472,7 @@ def _ensure_reference_pack(
 def _reference_pack_summary(data: Dict[str, Any]) -> Dict[str, Any]:
     pack = data.get("pack") or {}
     images = data.get("images") or []
-    preview = pack.get("primary_preview_url") or (images[0].get("preview_url") if images else "")
+    preview = (images[0].get("preview_url") if images else "") or pack.get("primary_preview_url") or ""
     return {
         "reference_image_pack_id": pack.get("reference_image_pack_id") or "",
         "reference_image_version": int(pack.get("version") or 0),

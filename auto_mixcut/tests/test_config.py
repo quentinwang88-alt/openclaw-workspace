@@ -10,7 +10,7 @@ from auto_mixcut.core.config import Settings
 
 
 class SettingsTest(unittest.TestCase):
-    def test_legacy_aliyun_config_keys_and_preview_base_are_supported(self):
+    def test_legacy_aliyun_config_keys_and_aliyun_public_base_are_supported(self):
         old_env = dict(os.environ)
         try:
             for key in [
@@ -19,10 +19,11 @@ class SettingsTest(unittest.TestCase):
                 "ALIYUN_OSS_ENDPOINT",
                 "ALIYUN_OSS_ACCESS_KEY_ID",
                 "ALIYUN_OSS_ACCESS_KEY_SECRET",
+                "AUTO_MIXCUT_ALIYUN_OSS_PUBLIC_BASE_URL",
                 "AUTO_MIXCUT_PREVIEW_BASE_URL",
             ]:
                 os.environ.pop(key, None)
-            os.environ["AUTO_MIXCUT_PREVIEW_BASE_URL"] = "https://preview.example.com"
+            os.environ["AUTO_MIXCUT_ALIYUN_OSS_PUBLIC_BASE_URL"] = "https://preview.example.com"
             with tempfile.TemporaryDirectory() as tmp:
                 config_path = Path(tmp) / "config.json"
                 config_path.write_text(
