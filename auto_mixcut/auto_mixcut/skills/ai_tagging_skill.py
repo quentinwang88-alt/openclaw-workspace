@@ -33,11 +33,15 @@ class AITaggingSkill:
         )
         return Result.ok({"ai_batch_id": batch_id, "total_segments": len(segments)})
 
-    def poll_results(self, product_id: str, prompt_version: str = "v1.0") -> Result:
+    def poll_results(self, product_id: str, prompt_version: str = "v1.0", force: bool = False) -> Result:
         segments = self.ctx.repo.list_where("segments", "product_id=?", (product_id,))
         segments = _limit_segments(segments)
         completed = 0
+        skipped = 0
         for idx, segment in enumerate(segments):
+            if not force and _latest_tag(self.ctx, segment["segment_id"]):
+                skipped += 1
+                continue
             call = self.router.call(
                 "segment_tagging_default",
                 {"segment_id": segment["segment_id"], "index": idx, "prompt_version": prompt_version, "image_count": _frame_count(self.ctx, segment["segment_id"])},
@@ -82,7 +86,7 @@ class AITaggingSkill:
             )
             completed += 1
         self.ctx.repo.update("content_tasks", "product_id", product_id, {"task_status": "AI_TAGGED"})
-        return Result.ok({"completed_segments": completed})
+        return Result.ok({"completed_segments": completed, "skipped_segments": skipped})
 
     def retry_failed(self, product_id: str) -> Result:
         return self.poll_results(product_id)
@@ -90,6 +94,11 @@ class AITaggingSkill:
 
 def _frame_count(ctx: SkillContext, segment_id: str) -> int:
     return len(ctx.repo.list_where("segment_frames", "segment_id=?", (segment_id,)))
+
+
+def _latest_tag(ctx: SkillContext, segment_id: str) -> dict:
+    rows = ctx.repo.list_where("segment_tags", "segment_id=? ORDER BY id DESC LIMIT 1", (segment_id,))
+    return rows[0] if rows else {}
 
 
 def _needs_review(segment, tag) -> bool:

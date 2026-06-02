@@ -13,17 +13,24 @@ class FrameSampleSkill:
     def __init__(self, ctx: SkillContext):
         self.ctx = ctx
 
-    def sample_product(self, product_id: str) -> Result:
-        segments = self.ctx.repo.list_where("segments", "product_id=? AND segment_status='created'", (product_id,))
-        results = [self.sample_segment(s["segment_id"]).to_dict() for s in segments]
+    def sample_product(self, product_id: str, force: bool = False) -> Result:
+        segments = self.ctx.repo.list_where("segments", "product_id=? AND segment_status IN ('created','qc_passed','qc_failed')", (product_id,))
+        results = [self.sample_segment(s["segment_id"], force=force).to_dict() for s in segments]
         self.ctx.repo.update("content_tasks", "product_id", product_id, {"task_status": "FRAMES_SAMPLED"})
         return Result.ok({"count": len(results), "results": results})
 
-    def sample_segment(self, segment_id: str) -> Result:
+    def sample_segment(self, segment_id: str, force: bool = False) -> Result:
         segment = self.ctx.repo.get("segments", "segment_id", segment_id)
         if not segment:
             return Result.fail("SEGMENT_NOT_FOUND", "segment not found", {"segment_id": segment_id})
         count = 9 if segment["source_type"] == "ai_generated" else 4
+        existing = self.ctx.repo.list_where("segment_frames", "segment_id=? ORDER BY frame_index", (segment_id,))
+        if len(existing) >= count and not force:
+            return Result.ok({"segment_id": segment_id, "frames": [row["frame_id"] for row in existing], "skipped": True, "reason": "frames_exist"})
+        if existing and force and hasattr(self.ctx.repo, "delete_where"):
+            deleted = self.ctx.repo.delete_where("segment_frames", "segment_id=?", (segment_id,))
+            if not deleted.success:
+                return deleted
         product = self.ctx.repo.get("products", "product_id", segment["product_id"]) or {}
         frames = []
         for idx in range(1, count + 1):

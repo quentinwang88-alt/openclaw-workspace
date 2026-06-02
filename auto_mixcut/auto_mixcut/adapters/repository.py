@@ -145,6 +145,14 @@ class SQLiteRepository:
             rows = conn.execute(f"SELECT * FROM {table} WHERE {where}", tuple(params)).fetchall()
         return [self._row(r) for r in rows]
 
+    def delete_where(self, table: str, where: str, params: Iterable[Any] = ()) -> Result:
+        try:
+            with self.connect() as conn:
+                cur = conn.execute(f"DELETE FROM {table} WHERE {where}", tuple(params))
+            return Result.ok({"table": table, "deleted": cur.rowcount})
+        except Exception as exc:
+            return Result.fail("RDS_DELETE_FAILED", str(exc), {"table": table, "where": where})
+
     def _row(self, row: sqlite3.Row) -> Dict[str, Any]:
         data = dict(row)
         for key in list(data):
@@ -382,6 +390,17 @@ class MySQLRepository:
                 cur.execute(f"SELECT * FROM {table} WHERE {where}", tuple(params))
                 rows = cur.fetchall()
         return [self._row(row) for row in rows]
+
+    def delete_where(self, table: str, where: str, params: Iterable[Any] = ()) -> Result:
+        where = where.replace("?", "%s")
+        try:
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"DELETE FROM {table} WHERE {where}", tuple(params))
+                    deleted = cur.rowcount
+            return Result.ok({"table": table, "deleted": deleted})
+        except Exception as exc:
+            return Result.fail("RDS_DELETE_FAILED", str(exc), {"table": table, "where": where})
 
     def _row(self, row: Dict[str, Any]) -> Dict[str, Any]:
         data = dict(row)

@@ -18,7 +18,18 @@ class AIGenerationQCSkill:
         if not job:
             return Result.fail("JOB_NOT_FOUND", "ai_generation_jobs not found", {"job_id": job_id})
 
-        segments = self.ctx.repo.list_where("segments", "product_id=? AND source_type='ai_generated'", (job["product_id"],))
+        checked = self._check_segments(str(job["product_id"] or ""))
+        if not checked.success:
+            return checked
+        data = checked.data or {}
+        self.ctx.repo.update("ai_generation_jobs", "job_id", job_id, {"status": "QC_COMPLETED", "accepted_count": data.get("passed", 0)})
+        return Result.ok({"job_id": job_id, **data})
+
+    def check_product(self, product_id: str) -> Result:
+        return self._check_segments(product_id)
+
+    def _check_segments(self, product_id: str) -> Result:
+        segments = self.ctx.repo.list_where("segments", "product_id=? AND source_type='ai_generated'", (product_id,))
         total = len(segments)
         passed = 0
         failed = 0
@@ -30,8 +41,8 @@ class AIGenerationQCSkill:
             else:
                 failed += 1
 
-        self.ctx.repo.update("ai_generation_jobs", "job_id", job_id, {"status": "QC_COMPLETED", "accepted_count": passed})
-        return Result.ok({"job_id": job_id, "checked": total, "passed": passed, "failed": failed})
+        self.ctx.repo.update("content_tasks", "product_id", product_id, {"task_status": "AI_GENERATION_QC_COMPLETED"})
+        return Result.ok({"product_id": product_id, "checked": total, "passed": passed, "failed": failed})
 
 def _basic_qc(segment: Dict[str, Any]) -> tuple[bool, List[str]]:
     issues = []
@@ -40,8 +51,12 @@ def _basic_qc(segment: Dict[str, Any]) -> tuple[bool, List[str]]:
     height = int(segment.get("height") or 0)
     if duration < 1500 or duration > 6000:
         issues.append(f"时长异常: {duration}ms")
-    if width != 1080 or height != 1920:
-        issues.append(f"分辨率异常: {width}x{height}")
+    if width <= 0 or height <= 0:
+        issues.append(f"分辨率缺失: {width}x{height}")
+    elif height < width:
+        issues.append(f"非竖屏素材: {width}x{height}")
+    elif width < 480 or height < 800:
+        issues.append(f"分辨率过低: {width}x{height}")
     if segment.get("source_type") != "ai_generated":
         issues.append("非AI生成素材")
     return len(issues) == 0, issues

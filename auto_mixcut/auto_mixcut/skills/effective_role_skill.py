@@ -43,6 +43,20 @@ def _compute_roles(segment: Dict[str, Any], asset: Dict[str, Any], tag: Dict[str
 
     if asset.get("has_watermark") == "yes":
         return [], "has watermark"
+
+    if segment.get("source_type") == "ai_generated":
+        if tag.get("risk_level") == "high":
+            if _is_soft_local_subtitle_issue(tag):
+                return _soft_local_subtitle_roles(tag), "soft local-language subtitle issue"
+            return [], "high risk"
+        if tag.get("mixcut_usability") == "no":
+            return [], "not usable"
+        if tag.get("mixcut_usability") == "needs_processing":
+            if _is_soft_local_subtitle_issue(tag):
+                return _soft_local_subtitle_roles(tag), "soft local-language subtitle issue"
+            return [], "needs processing before render"
+        return _ai_roles(segment, tag, config)
+
     if tag.get("risk_level") in {"medium", "high"}:
         if _is_soft_local_subtitle_issue(tag):
             return _soft_local_subtitle_roles(tag), "soft local-language subtitle issue"
@@ -53,9 +67,6 @@ def _compute_roles(segment: Dict[str, Any], asset: Dict[str, Any], tag: Dict[str
         if _is_soft_local_subtitle_issue(tag):
             return _soft_local_subtitle_roles(tag), "soft local-language subtitle issue"
         return [], "needs processing before render"
-
-    if segment.get("source_type") == "ai_generated":
-        return _ai_roles(segment, tag, config)
 
     if segment.get("source_type") == "ai_generated" and segment.get("frame_consistency_status") not in {None, "pass"}:
         return ["scene", "ending"], "ai generated consistency not pass"

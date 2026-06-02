@@ -24,13 +24,13 @@ class AIAnchorCheckSkill:
             self._router = LLMRouterSkill(self.ctx)
         return self._router
 
-    def check_product(self, product_id: str) -> Result:
+    def check_product(self, product_id: str, force: bool = False) -> Result:
         segments = self.ctx.repo.list_where(
             "segments",
             "product_id=? AND source_type='ai_generated' AND segment_status='qc_passed'",
             (product_id,),
         )
-        results = [self.check_segment(s["segment_id"]).to_dict() for s in segments]
+        results = [self.check_segment(s["segment_id"], force=force).to_dict() for s in segments]
         strict = sum(1 for r in results if r.get("data", {}).get("anchor_match_level") == "strict_pass")
         soft = sum(1 for r in results if r.get("data", {}).get("anchor_match_level") == "soft_pass")
         uncertain = sum(1 for r in results if r.get("data", {}).get("anchor_match_level") == "uncertain")
@@ -47,10 +47,19 @@ class AIAnchorCheckSkill:
             "results": results,
         })
 
-    def check_segment(self, segment_id: str) -> Result:
+    def check_segment(self, segment_id: str, force: bool = False) -> Result:
         segment = self.ctx.repo.get("segments", "segment_id", segment_id)
         if not segment:
             return Result.fail("SEGMENT_NOT_FOUND", "segment not found", {"segment_id": segment_id})
+        if segment.get("anchor_match_level") and not force:
+            return Result.ok({
+                "segment_id": segment_id,
+                "anchor_match_level": segment.get("anchor_match_level"),
+                "reason": segment.get("anchor_check_reason") or "anchor check exists",
+                "allowed_core_roles": segment.get("allowed_core_roles_json") or [],
+                "allowed_soft_roles": segment.get("allowed_soft_roles_json") or [],
+                "skipped": True,
+            })
 
         product = self.ctx.repo.get("products", "product_id", segment.get("product_id")) or {}
 

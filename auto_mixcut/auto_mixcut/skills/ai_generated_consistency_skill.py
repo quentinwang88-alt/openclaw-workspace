@@ -11,21 +11,23 @@ class AIGeneratedConsistencySkill:
         self.ctx = ctx
         self.router = LLMRouterSkill(ctx)
 
-    def check_product(self, product_id: str) -> Result:
+    def check_product(self, product_id: str, force: bool = False) -> Result:
         segments = self.ctx.repo.list_where("segments", "product_id=? AND source_type='ai_generated'", (product_id,))
         for segment in segments:
-            res = self.check_segment(segment["segment_id"])
+            res = self.check_segment(segment["segment_id"], force=force)
             if not res.success:
                 return res
         self.ctx.repo.update("content_tasks", "product_id", product_id, {"task_status": "CONSISTENCY_CHECKED"})
         return Result.ok({"checked_segments": len(segments)})
 
-    def check_segment(self, segment_id: str) -> Result:
+    def check_segment(self, segment_id: str, force: bool = False) -> Result:
         segment = self.ctx.repo.get("segments", "segment_id", segment_id)
         if not segment:
             return Result.fail("SEGMENT_NOT_FOUND", "segment not found", {"segment_id": segment_id})
         if segment["source_type"] != "ai_generated":
             return Result.ok({"segment_id": segment_id, "skipped": True})
+        if segment.get("frame_consistency_status") and not force:
+            return Result.ok({"segment_id": segment_id, "skipped": True, "reason": "consistency_exists", "frame_consistency_status": segment.get("frame_consistency_status")})
         call = self.router.call("ai_generated_consistency_check", {"segment_id": segment_id}, product_id=segment["product_id"], segment_id=segment_id, asset_id=segment["asset_id"])
         if not call.success:
             return call

@@ -23,7 +23,8 @@ def resolve_oss_object_path(ctx, object_id: str | None, cache_group: str = "obje
     if cache_path.exists() and _cache_valid(cache_path, obj):
         return Result.ok({"path": str(cache_path), "object": obj, "source": "cache"})
 
-    downloaded = ctx.oss.download(object_key, cache_path)
+    oss_client = _oss_for_object(ctx, obj)
+    downloaded = oss_client.download(object_key, cache_path)
     if not downloaded.success:
         return downloaded
     if not cache_path.exists():
@@ -49,3 +50,28 @@ def _cache_valid(path: Path, obj: dict) -> bool:
         from auto_mixcut.adapters.oss import file_sha256
         return file_sha256(path) == expected_hash
     return True
+
+
+def _oss_for_object(ctx, obj: dict):
+    bucket_name = str((obj or {}).get("bucket") or "")
+    current_bucket = getattr(ctx.oss, "bucket_name", getattr(ctx.settings, "bucket", ""))
+    if not bucket_name or bucket_name == current_bucket:
+        return ctx.oss
+    if getattr(ctx.settings, "oss_provider", "local") != "aliyun":
+        return ctx.oss
+    from auto_mixcut.adapters.oss import AliyunOSS
+
+    return AliyunOSS(
+        bucket=bucket_name,
+        endpoint=_endpoint_for_bucket(bucket_name, getattr(ctx.settings, "aliyun_oss_endpoint", "")),
+        access_key_id=getattr(ctx.settings, "aliyun_access_key_id", ""),
+        access_key_secret=getattr(ctx.settings, "aliyun_access_key_secret", ""),
+        security_token=getattr(ctx.settings, "aliyun_security_token", ""),
+    )
+
+
+def _endpoint_for_bucket(bucket: str, fallback: str) -> str:
+    for marker in ("cn-shanghai", "cn-hangzhou", "cn-beijing", "cn-shenzhen", "cn-heyuan", "cn-guangzhou", "cn-hongkong", "ap-southeast-1"):
+        if marker in str(bucket or ""):
+            return f"https://oss-{marker}.aliyuncs.com"
+    return fallback
