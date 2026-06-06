@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.likeu.jimeng-segment-asset-watch</string>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/likeu3/.openclaw/workspace/skills/jimeng-video-generator</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>./run-segment-package-asset-watch.sh /Users/likeu3/.openclaw/workspace/skills/jimeng-video-generator/segment-package.json --channel imini --limit 10 --first-delay-minutes 30 --interval-minutes 20 --max-empty 5</string>
+  </array>
+
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict>
+      <key>Hour</key>
+      <integer>22</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+    <dict>
+      <key>Hour</key>
+      <integer>0</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+  </array>
+
+  <key>StandardOutPath</key>
+  <string>/Users/likeu3/Library/Logs/jimeng-segment-asset-watch.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/Users/likeu3/Library/Logs/jimeng-segment-asset-watch.log</string>
+</dict>
+</plist>

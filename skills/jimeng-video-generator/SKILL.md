@@ -163,6 +163,15 @@ cd /Users/likeu3/.openclaw/workspace/skills/jimeng-video-generator
 node result-uploader.js --config segment-package.json --trace-id <TRACE_ID> --channel imini --ignore-generating-count --limit 1
 ```
 
+夜间资产自动抓取 watcher：
+
+```bash
+cd /Users/likeu3/.openclaw/workspace/skills/jimeng-video-generator
+./run-segment-package-asset-watch.sh segment-package.json --channel imini --limit 10 --first-delay-minutes 30 --interval-minutes 20 --max-empty 5
+```
+
+安装到 launchd 后，`com.likeu.jimeng-segment-asset-watch.plist` 会在每天 `22:00` 和 `00:00` 拉起 watcher；脚本内部有锁，同一时间只允许一个实例运行。
+
 旧入口仍可用于 download-only，但 imini 定向回流优先用上面的 `result-uploader.js`：
 
 ```bash
@@ -185,6 +194,18 @@ node skills/jimeng-video-generator/segment-package-worker.js --config skills/jim
 - 提单成功后不要立刻全量扫资产。等用户确认视频已生成，或执行回流命令时，再按 `content_id / script_id` 去 imini 资产页匹配下载。
 - 如果本地 trace 已经 `uploaded` 且有 `uploaded_file_token`，但飞书状态/附件不完整，优先用 `result-uploader.js` 补写，不要重复下载或重复提单。
 - 遇到异常先查 `_state/submissions/<TRACE_ID>.json`、下载目录和现有代码日志，再介入；不要手写绕过 pipeline 的临时自动化。
+
+### 夜间资产自动抓取机制
+
+`segment-package-asset-watch.js` 只负责夜间资产回流，不新增提单：
+
+1. `22:00` 后如果本夜有过 imini 提单任务，等最新一条提单后的 `30` 分钟自动执行资产扫描。
+2. 如果 `22:00` 后没有提单任务，则 `00:00` 自动执行一次资产扫描，用于覆盖白天可能已经提交但还没回流的任务。
+3. 扫描使用现有命令：`node result-uploader.js --config segment-package.json --channel imini --ignore-generating-count --limit 10`。
+4. 每次扫描后，如果有 `uploaded` 或 `downloaded`，连续空扫计数清零；如果仍有未闭环 trace，`20` 分钟后继续扫。
+5. 如果连续 `5` 次都没有抓到任何新资产，watcher 自动退出。
+6. 如果当前监控窗口内没有未闭环 trace，watcher 自动退出。
+7. `08:30-21:59` 属于白天手动窗口，watcher 不自动扫描资产页。
 
 生成资产回流完成后，不要在即梦 skill 内重跑混剪整批；交回 `auto-mixcut-pipeline` 走补差额入口：
 
