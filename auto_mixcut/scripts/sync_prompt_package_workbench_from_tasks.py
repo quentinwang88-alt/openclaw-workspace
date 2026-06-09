@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -65,6 +66,9 @@ SEGMENT_CN = {
     "home_lifestyle": "居家生活",
     "before_go_out": "出门前",
     "seasonal_scene": "季节场景",
+    "product_still": "纯物静物",
+    "unboxing": "拆包装",
+    "flatlay": "平铺摆拍",
 }
 GRADE_CN = {"A": "A-核心位", "B": "B-支撑位", "C": "C-氛围位"}
 
@@ -100,8 +104,9 @@ def sync_workbench(
     task_client = resolve_client(product_task_url)
     anchor_client = resolve_client(anchor_queue_url)
     prompt_client = resolve_client(prompt_workbench_url)
+    prompt_field_names = _field_names(prompt_client)
 
-    task_records = task_client.list_records(page_size=100)
+    task_records = _latest_task_records(task_client.list_records(page_size=100))
     anchor_by_product = _index_latest_anchor(anchor_client.list_records(page_size=100))
     existing_prompt_records = _existing_prompt_records(prompt_client.list_records(page_size=100))
     existing_keys = set(existing_prompt_records)
@@ -146,7 +151,7 @@ def sync_workbench(
         reference_key = (market, product_id, sku_id)
         reference_pack = reference_pack_cache.get(reference_key)
         if reference_pack is None:
-            reference_pack = _ensure_reference_pack(reference_images, anchor_client, product_id, market, sku_id, sku_label, anchor_fields, dry_run)
+            reference_pack = _ensure_reference_pack(reference_images, anchor_client, product_id, market, sku_id, sku_label, anchor_fields, fields, dry_run)
             reference_pack_cache[reference_key] = reference_pack
         for slot in slots:
             slot["sku_id"] = sku_id
@@ -159,16 +164,21 @@ def sync_workbench(
             continue
 
         for idx, slot in enumerate(slots):
-            dedupe_key = (product_id, SEGMENT_CN.get(slot["segment_type"], slot["segment_type"]), GRADE_CN.get(slot["ai_gen_grade"], slot["ai_gen_grade"]))
-            if dedupe_key in existing_keys:
+            dedupe_key = _prompt_dedupe_key(product_id, sku_id, slot)
+            legacy_dedupe_key = _legacy_prompt_dedupe_key(product_id, sku_id, slot)
+            role_dedupe_key = _role_prompt_dedupe_key(product_id, sku_id, slot)
+            existing_key = dedupe_key if dedupe_key in existing_keys else (legacy_dedupe_key if legacy_dedupe_key in existing_keys else None)
+            if not existing_key and refresh_existing_prompts and str(slot.get("slot_role") or "") in {"detail", "result"} and role_dedupe_key in existing_keys:
+                existing_key = role_dedupe_key
+            if existing_key:
                 if refresh_existing_prompts:
-                    refresh = _refresh_existing_prompt(factory, prompt_client, existing_prompt_records[dedupe_key], brief, slot, dry_run)
+                    refresh = _refresh_existing_prompt(factory, prompt_client, existing_prompt_records[existing_key], brief, slot, dry_run)
                     if refresh.get("failed"):
                         failed.append({"product_id": product_id, **refresh["failed"]})
                     else:
-                        skipped.append({"product_id": product_id, "reason": "refreshed_existing_prompt", "key": "|".join(dedupe_key), **refresh})
+                        skipped.append({"product_id": product_id, "reason": "refreshed_existing_prompt", "key": "|".join(existing_key), **refresh})
                     continue
-                skipped.append({"product_id": product_id, "reason": "already_exists", "key": "|".join(dedupe_key)})
+                skipped.append({"product_id": product_id, "reason": "already_exists", "key": "|".join(existing_key)})
                 continue
             package_result = factory.build_package(brief, slot, persist=not dry_run)
             if not package_result.success:
@@ -176,6 +186,7 @@ def sync_workbench(
                 continue
             package = package_result.data
             package["segment_script_id"] = _segment_script_id(package["segment_prompt_id"])
+            reference_ready = _package_reference_ready(package)
             row_fields = {
                 "提示词包ID": package["segment_prompt_id"],
                 "商品ID": product_id,
@@ -187,11 +198,13 @@ def sync_workbench(
                 "参考图状态": reference_pack.get("reference_image_status", "缺失"),
                 "市场": market,
                 "归一类目": category_cn,
+                "素材角色": slot.get("slot_role") or "",
+                "镜头意图": slot.get("hook_intent") or "",
                 "片段类型": SEGMENT_CN.get(package["segment_type"], package["segment_type"]),
                 "生成档位": GRADE_CN.get(package["ai_gen_grade"], package["ai_gen_grade"]),
-                "包状态": "待提单",
+                "包状态": "待提单" if reference_ready else "参考图异常",
                 "人工审核结论": "待审核",
-                "是否可提单": True,
+                "是否可提单": reference_ready,
                 "提单优先级": _priority(fields),
                 "短视频片段提示词": _format_prompt_package(package),
                 "备注": _note(fields, idx + 1, len(slots)),
@@ -201,7 +214,7 @@ def sync_workbench(
                 created.append({"product_id": product_id, "segment_prompt_id": package["segment_prompt_id"], "fields": _without_large_prompt(row_fields)})
             else:
                 try:
-                    prompt_client.batch_create_records([{"fields": _compact(row_fields)}])
+                    prompt_field_names = _safe_batch_create_prompt(prompt_client, row_fields, prompt_field_names)
                     created.append({"product_id": product_id, "segment_prompt_id": package["segment_prompt_id"], "segment_type": row_fields["片段类型"], "grade": row_fields["生成档位"]})
                 except Exception as exc:
                     existing_keys.discard(dedupe_key)
@@ -210,26 +223,131 @@ def sync_workbench(
     return {"created": created, "skipped": skipped, "failed": failed}
 
 
+def _safe_batch_create_prompt(client: FeishuBitableClient, row_fields: Dict[str, Any], field_names: set[str]) -> set[str]:
+    try:
+        client.batch_create_records([{"fields": _compact(_filter_fields(row_fields, field_names))}])
+        return field_names
+    except Exception as exc:
+        if "FieldNameNotFound" not in str(exc):
+            raise
+        latest = _field_names(client)
+        client.batch_create_records([{"fields": _compact(_filter_fields(row_fields, latest))}])
+        return latest
+
+
+def _filter_fields(row_fields: Dict[str, Any], field_names: set[str]) -> Dict[str, Any]:
+    if not field_names:
+        return row_fields
+    return {key: value for key, value in row_fields.items() if key in field_names}
+
+
+def _field_names(client: FeishuBitableClient) -> set[str]:
+    try:
+        return {field.field_name for field in client.list_fields()}
+    except Exception:
+        return set()
+
+
 def _index_latest_anchor(records: Iterable[Any]) -> Dict[str, Any]:
-    indexed: Dict[str, Any] = {}
+    grouped: Dict[str, List[Any]] = {}
     for record in records:
         product_id = _text((record.fields or {}).get("商品ID"))
         if product_id:
-            indexed[product_id] = record
+            grouped.setdefault(product_id, []).append(record)
+    indexed: Dict[str, Any] = {}
+    for product_id, items in grouped.items():
+        confirmed = [
+            item
+            for item in items
+            if _text((item.fields or {}).get("人工确认状态")) in {"已确认", "confirmed"}
+        ]
+        selected = confirmed[-1] if confirmed else items[-1]
+        if not _reference_image_attachments(selected.fields or {}, {})[1]:
+            image_record = next(
+                (item for item in reversed(items) if _reference_image_attachments(item.fields or {}, {})[1]),
+                None,
+            )
+            if image_record:
+                selected_fields = selected.fields or {}
+                image_fields = image_record.fields or {}
+                for field_name in ("商品主图", "产品图片", "商品图片", "图片", "主图", "参考图"):
+                    if not selected_fields.get(field_name) and image_fields.get(field_name):
+                        selected_fields[field_name] = image_fields.get(field_name)
+                        break
+        indexed[product_id] = selected
     return indexed
 
 
-def _existing_prompt_records(records: Iterable[Any]) -> Dict[tuple[str, str, str], Any]:
-    indexed: Dict[tuple[str, str, str], Any] = {}
+def _latest_task_records(records: Iterable[Any]) -> List[Any]:
+    indexed: Dict[str, Any] = {}
     for record in records:
         fields = record.fields or {}
         product_id = _text(fields.get("商品ID"))
+        if not product_id:
+            continue
+        current = indexed.get(product_id)
+        if current is None or _task_sort_key(fields) >= _task_sort_key(current.fields or {}):
+            indexed[product_id] = record
+    return list(indexed.values())
+
+
+def _task_sort_key(fields: Dict[str, Any]) -> tuple[int, str]:
+    task_no = _int(fields.get("任务编号"))
+    status = _text(fields.get("混剪状态"))
+    return (task_no, status)
+
+
+def _existing_prompt_records(records: Iterable[Any]) -> Dict[tuple[str, str, str, str, str, str], Any]:
+    indexed: Dict[tuple[str, str, str, str, str, str], Any] = {}
+    for record in records:
+        fields = record.fields or {}
+        product_id = _text(fields.get("商品ID"))
+        sku_id = _text(fields.get("SKU ID")) or "DEFAULT"
+        role = _text(fields.get("素材角色")) or _text(fields.get("片段角色"))
         segment_type = _text(fields.get("片段类型"))
         grade = _text(fields.get("生成档位"))
+        hook_intent = _text(fields.get("镜头意图")) or _text(fields.get("Hook意图"))
         status = _text(fields.get("包状态"))
         if product_id and segment_type and grade and status not in {"失败", "质检废弃"}:
-            indexed[(product_id, segment_type, grade)] = record
+            indexed[(product_id, sku_id, role, segment_type, grade, hook_intent)] = record
+            if not role and not hook_intent:
+                indexed[(product_id, sku_id, "", segment_type, grade, "")] = record
+            if role in {"detail", "result"} and hook_intent:
+                indexed[(product_id, sku_id, role, "", grade, hook_intent)] = record
     return indexed
+
+
+def _prompt_dedupe_key(product_id: str, sku_id: str, slot: Dict[str, Any]) -> tuple[str, str, str, str, str, str]:
+    return (
+        product_id,
+        sku_id or "DEFAULT",
+        _text(slot.get("slot_role") or slot.get("role")),
+        SEGMENT_CN.get(slot["segment_type"], slot["segment_type"]),
+        GRADE_CN.get(slot["ai_gen_grade"], slot["ai_gen_grade"]),
+        _text(slot.get("hook_intent")),
+    )
+
+
+def _legacy_prompt_dedupe_key(product_id: str, sku_id: str, slot: Dict[str, Any]) -> tuple[str, str, str, str, str, str]:
+    return (
+        product_id,
+        sku_id or "DEFAULT",
+        "",
+        SEGMENT_CN.get(slot["segment_type"], slot["segment_type"]),
+        GRADE_CN.get(slot["ai_gen_grade"], slot["ai_gen_grade"]),
+        "",
+    )
+
+
+def _role_prompt_dedupe_key(product_id: str, sku_id: str, slot: Dict[str, Any]) -> tuple[str, str, str, str, str, str]:
+    return (
+        product_id,
+        sku_id or "DEFAULT",
+        _text(slot.get("slot_role") or slot.get("role")),
+        "",
+        GRADE_CN.get(slot["ai_gen_grade"], slot["ai_gen_grade"]),
+        _text(slot.get("hook_intent")),
+    )
 
 
 def _refresh_existing_prompt(
@@ -252,12 +370,19 @@ def _refresh_existing_prompt(
     update_fields = {
         "提示词包ID": package["segment_prompt_id"],
         "SKU ID": package.get("sku_id") or "DEFAULT",
+        "素材角色": slot.get("slot_role") or "",
+        "镜头意图": slot.get("hook_intent") or "",
+        "片段类型": SEGMENT_CN.get(package["segment_type"], package["segment_type"]),
+        "生成档位": GRADE_CN.get(package["ai_gen_grade"], package["ai_gen_grade"]),
         "参考图包ID": package.get("reference_image_pack_id") or "",
         "参考图版本": package.get("reference_image_version") or 0,
         "参考图预览地址": _feishu_url(package.get("reference_image_preview_url") or "", "查看参考图"),
         "参考图状态": package.get("reference_image_status") or "缺失",
         "短视频片段提示词": _format_prompt_package(package),
     }
+    if not _package_reference_ready(package):
+        update_fields["包状态"] = "参考图异常"
+        update_fields["是否可提单"] = False
     if dry_run:
         return {"record_id": record.record_id, "segment_prompt_id": package["segment_prompt_id"], "action": "would_refresh"}
     saved = factory.save_package(package)
@@ -268,15 +393,15 @@ def _refresh_existing_prompt(
 
 
 def _gap_count(fields: Dict[str, Any]) -> int:
-    allowed = _int(fields.get("系统允许生成数量"))
+    gap_text = _text(fields.get("素材缺口说明"))
+    explicit = _explicit_ai_supplement_count(gap_text)
+    if explicit > 0:
+        return explicit
     target = _int(fields.get("目标生成数量"))
     actual = _int(fields.get("实际生成数量"))
-    if allowed > 0:
-        return allowed
-    if target > actual:
-        return target - actual
-    gap_text = _text(fields.get("素材缺口说明"))
     material_status = _text(fields.get("素材状态"))
+    if target > actual and material_status in {"not_ready", "blocked", "review_required"}:
+        return target - actual
     if gap_text or material_status in {"not_ready", "blocked", "review_required"}:
         return 1
     return 0
@@ -285,13 +410,21 @@ def _gap_count(fields: Dict[str, Any]) -> int:
 def _gap_slots(gap_text: str, category: str, count: int, max_packages_per_product: int) -> List[Dict[str, Any]]:
     lower = gap_text.lower()
     planned: List[tuple[str, str, str, str]] = []
-    if "hero" in lower or "首镜" in gap_text:
-        planned.append(("product_display", "A", "hero", "product_clarity"))
-    if "result" in lower or "效果" in gap_text or "佩戴" in gap_text or "上身" in gap_text:
-        planned.append(("tryon_result", "A", "result", "tryon_result"))
-    if "detail" in lower or "细节" in gap_text:
-        planned.append(("detail_atmosphere", "B", "detail", "material_closeup"))
-    if "usable" in lower or "可用" in gap_text or not planned:
+    explicit_roles = _explicit_ai_supplement_roles(gap_text)
+    for role, amount in explicit_roles:
+        role_plans = _slot_plans_for_role(role, category)
+        for index in range(max(1, amount)):
+            planned.append(role_plans[index % len(role_plans)])
+    if not explicit_roles:
+        if "hero" in lower or "首镜" in gap_text:
+            planned.append(("product_display", "A", "hero", "product_clarity"))
+        if "result" in lower or "效果" in gap_text or "佩戴" in gap_text or "上身" in gap_text:
+            planned.append(("tryon_result", "A", "result", "tryon_result"))
+        if "detail" in lower or "细节" in gap_text:
+            planned.append(("detail_atmosphere", "B", "detail", "material_closeup"))
+        if "scene" in lower or "场景" in gap_text:
+            planned.append(("home_lifestyle", "C", "scene", "atmosphere"))
+    if "usable" in lower or "可用" in gap_text or "多样性" in gap_text or not planned:
         planned.extend(_default_slot_plan(category))
 
     unique: List[tuple[str, str, str, str]] = []
@@ -311,30 +444,119 @@ def _gap_slots(gap_text: str, category: str, count: int, max_packages_per_produc
     return [_slot(idx, *item) for idx, item in enumerate(unique[:target])]
 
 
+def _explicit_ai_supplement_count(gap_text: str) -> int:
+    return sum(amount for _role, amount in _explicit_ai_supplement_roles(gap_text))
+
+
+def _explicit_ai_supplement_roles(gap_text: str) -> List[tuple[str, int]]:
+    if "AI补素材" not in gap_text and "ai补素材" not in gap_text.lower():
+        return []
+    role_aliases = {
+        "hero": ["hero", "首镜"],
+        "detail": ["detail", "细节"],
+        "result": ["result", "上身", "效果", "试穿", "试戴"],
+        "scene": ["scene", "场景"],
+        "ending": ["ending", "结尾"],
+    }
+    results: List[tuple[str, int]] = []
+    for role, aliases in role_aliases.items():
+        amount = 0
+        for alias in aliases:
+            for match in re.finditer(rf"{re.escape(alias)}\D{{0,8}}(\d+)", gap_text, flags=re.IGNORECASE):
+                amount = max(amount, int(match.group(1)))
+        if amount > 0:
+            results.append((role, amount))
+    return results
+
+
+def _slot_plan_for_role(role: str, category: str) -> tuple[str, str, str, str]:
+    return _slot_plans_for_role(role, category)[0]
+
+
+def _slot_plans_for_role(role: str, category: str) -> List[tuple[str, str, str, str]]:
+    if role == "hero":
+        plans = [
+            ("product_display", "A", "hero", "product_clarity"),
+            ("unboxing", "A", "hero", "product_clarity"),
+            ("product_still", "A", "hero", "product_clarity"),
+        ]
+        if category == "earrings":
+            plans[1] = ("product_still", "A", "hero", "product_clarity")
+            plans[2] = ("flatlay", "A", "hero", "product_clarity")
+        return plans
+    if role == "result":
+        if category == "earrings":
+            return [
+                ("mirror_routine", "A", "result", "tryon_result"),
+                ("product_display", "A", "result", "tryon_result"),
+                ("product_still", "A", "result", "product_clarity"),
+            ]
+        return [
+            ("tryon_result", "A", "result", "tryon_result"),
+            ("mirror_routine", "A", "result", "tryon_result"),
+            ("before_go_out", "A", "result", "tryon_result"),
+        ]
+    if role == "detail":
+        if category == "earrings":
+            return [
+                ("product_still", "B", "detail", "material_closeup"),
+                ("flatlay", "B", "detail", "material_closeup"),
+                ("product_display", "B", "detail", "material_closeup"),
+            ]
+        if category == "womens_outerwear":
+            return [
+                ("product_still", "B", "detail", "material_closeup"),
+                ("detail_atmosphere", "B", "detail", "material_closeup"),
+                ("flatlay", "B", "detail", "material_closeup"),
+            ]
+        return [
+            ("detail_atmosphere", "B", "detail", "material_closeup"),
+            ("product_still", "B", "detail", "material_closeup"),
+            ("flatlay", "B", "detail", "material_closeup"),
+        ]
+    if role == "ending":
+        return [
+            ("home_lifestyle", "C", "ending", "atmosphere"),
+            ("seasonal_scene", "C", "ending", "atmosphere"),
+        ]
+    return [
+        ("home_lifestyle", "C", "scene", "atmosphere"),
+        ("seasonal_scene", "C", "scene", "atmosphere"),
+        ("mirror_routine", "C", "scene", "atmosphere"),
+    ]
+
+
 def _default_slot_plan(category: str) -> List[tuple[str, str, str, str]]:
     if category == "earrings":
         return [
-            ("detail_atmosphere", "A", "detail", "material_closeup"),
             ("product_display", "A", "hero", "product_clarity"),
-            ("home_lifestyle", "C", "scene", "atmosphere"),
+            ("product_still", "B", "detail", "material_closeup"),
+            ("flatlay", "B", "detail", "material_closeup"),
+            ("mirror_routine", "A", "result", "tryon_result"),
+            ("product_display", "B", "detail", "material_closeup"),
         ]
     if category == "scarves_hats":
         return [
             ("product_display", "A", "hero", "product_clarity"),
+            ("product_still", "B", "detail", "material_closeup"),
             ("tryon_result", "B", "result", "tryon_result"),
+            ("flatlay", "B", "detail", "material_closeup"),
             ("seasonal_scene", "C", "scene", "atmosphere"),
         ]
     if category == "womens_outerwear":
         return [
             ("product_display", "A", "hero", "product_clarity"),
+            ("product_still", "B", "detail", "material_closeup"),
             ("detail_atmosphere", "B", "detail", "material_closeup"),
             ("tryon_result", "B", "result", "tryon_result"),
+            ("unboxing", "A", "hero", "product_clarity"),
             ("mirror_routine", "C", "scene", "atmosphere"),
             ("home_lifestyle", "C", "ending", "atmosphere"),
             ("seasonal_scene", "C", "scene", "atmosphere"),
         ]
     return [
         ("product_display", "A", "hero", "product_clarity"),
+        ("product_still", "B", "detail", "material_closeup"),
         ("detail_atmosphere", "B", "detail", "material_closeup"),
         ("home_lifestyle", "C", "scene", "atmosphere"),
     ]
@@ -348,17 +570,34 @@ def _slot(index: int, segment_type: str, grade: str, role: str, hook_intent: str
         "hook_intent": hook_intent,
         "ai_gen_grade": grade,
         "segment_type": segment_type,
-        "person_framing": "ai_local" if grade in {"A", "B"} else "real_preferred",
+        "person_framing": "product_only" if segment_type in {"product_still", "unboxing", "flatlay"} else ("ai_local" if grade in {"A", "B"} else "real_preferred"),
         "duration_sec": 4,
     }
 
 
 def _anchor_brief(product_id: str, product_name: str, category: str, anchor_fields: Dict[str, Any]) -> Dict[str, Any]:
     anchor_json = _jsonish(anchor_fields.get("AI生成锚点卡"))
-    core_points = _listish(anchor_fields.get("核心视觉点")) or _listish(anchor_json.get("core_visual_points"))
-    must_not_change = _listish(anchor_fields.get("不可错识别点")) or _listish(anchor_json.get("must_not_change_points"))
-    forbidden = _listish(anchor_fields.get("禁用错配项")) or _listish(anchor_json.get("forbidden_mismatch"))
-    hard = core_points or must_not_change
+    core_points = (
+        _anchor_texts(anchor_fields.get("核心视觉点"))
+        or _anchor_texts(anchor_json.get("core_visual_points"))
+        or _anchor_texts(anchor_json.get("hard_anchors"), ("anchor", "constraint", "text"))
+        or _anchor_texts(anchor_json.get("structure_anchors"))
+        or _anchor_texts(anchor_json.get("display_anchors"), ("anchor", "why_must_show", "text"))
+    )
+    must_not_change = (
+        _anchor_texts(anchor_fields.get("不可错识别点"))
+        or _anchor_texts(anchor_json.get("must_not_change_points"))
+        or _anchor_texts(anchor_json.get("key_visual_constraints"), ("constraint", "anchor", "text"))
+        or _anchor_texts(anchor_json.get("fixation_result_anchors"))
+        or core_points
+    )
+    forbidden = (
+        _anchor_texts(anchor_fields.get("禁用错配项"))
+        or _anchor_texts(anchor_json.get("forbidden_mismatch"))
+        or _anchor_texts(anchor_json.get("forbidden_actions"))
+        or _anchor_texts(anchor_json.get("distortion_alerts"))
+    )
+    hard = _dedupe(core_points + must_not_change)
     return {
         "material_anchor_brief": {
             "product_id": product_id,
@@ -381,7 +620,41 @@ def _anchor_brief(product_id: str, product_name: str, category: str, anchor_fiel
             "body_language_options": ["局部裁切，商品优先"],
             "forbidden_performance": ["夸张广告表演", "正脸主导的美妆广告感"],
         },
-    }
+}
+
+
+def _anchor_texts(value: Any, keys: tuple[str, ...] = ("anchor", "constraint", "text")) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        result: List[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                for key in keys:
+                    text = _text(item.get(key))
+                    if text:
+                        result.append(text)
+                        break
+            else:
+                result.extend(_listish(item))
+        return _dedupe(result)
+    if isinstance(value, dict):
+        for key in keys:
+            text = _text(value.get(key))
+            if text:
+                return [text]
+    return _listish(value)
+
+
+def _dedupe(values: List[str]) -> List[str]:
+    seen = set()
+    result = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+    return result
 
 
 def _product_label(product_name: str, category: str) -> str:
@@ -426,16 +699,20 @@ def _ensure_reference_pack(
     sku_id: str,
     sku_label: str,
     anchor_fields: Dict[str, Any],
+    task_fields: Dict[str, Any],
     dry_run: bool,
 ) -> Dict[str, Any]:
     active = reference_images.get_active_pack(product_id, market=market, sku_id=sku_id)
-    if active.success and active.data.get("pack"):
+    active_pack = active.data.get("pack") if active.success else None
+    if active_pack and active_pack.get("source") != "mixcut_anchor_pass_segment_frame":
         return _reference_pack_summary(active.data)
     if dry_run:
         return {"reference_image_pack_id": "", "reference_image_version": 0, "primary_preview_url": "", "reference_image_status": "缺失"}
-    images = _attachments(anchor_fields.get("商品主图"))
+    image_source, images = _reference_image_attachments(anchor_fields, task_fields)
+    if active_pack and not images:
+        return _reference_pack_summary(active.data)
     if not images:
-        return {"reference_image_pack_id": "", "reference_image_version": 0, "primary_preview_url": "", "reference_image_status": "缺失", "error": "anchor_card_missing_product_images"}
+        return {"reference_image_pack_id": "", "reference_image_version": 0, "primary_preview_url": "", "reference_image_status": "缺失", "error": "reference_images_missing_in_anchor_and_task"}
     source_images: List[Dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix=f"refpack_{product_id}_") as tmpdir:
         tmp_root = Path(tmpdir)
@@ -461,12 +738,21 @@ def _ensure_reference_pack(
             sku_id=sku_id,
             sku_label=sku_label,
             source_images=source_images,
-            source="feishu_anchor_card",
-            anchor_snapshot={"商品主图数量": len(images), "AI生成锚点卡": _text(anchor_fields.get("AI生成锚点卡"))[:2000]},
+            source=image_source,
+            anchor_snapshot={"商品主图数量": len(images), "图片来源": image_source, "AI生成锚点卡": _text(anchor_fields.get("AI生成锚点卡"))[:2000]},
         )
     if not packed.success:
         return {"reference_image_pack_id": "", "reference_image_version": 0, "primary_preview_url": "", "reference_image_status": "更新失败", "error": packed.to_dict()}
     return _reference_pack_summary(packed.data)
+
+
+def _reference_image_attachments(anchor_fields: Dict[str, Any], task_fields: Dict[str, Any]) -> tuple[str, List[Dict[str, Any]]]:
+    for source, fields in (("feishu_anchor_card", anchor_fields), ("feishu_product_task", task_fields)):
+        for field_name in ("商品主图", "产品图片", "商品图片", "图片", "主图", "参考图"):
+            images = _attachments(fields.get(field_name))
+            if images:
+                return source, images
+    return "", []
 
 
 def _reference_pack_summary(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -479,6 +765,14 @@ def _reference_pack_summary(data: Dict[str, Any]) -> Dict[str, Any]:
         "primary_preview_url": preview,
         "reference_image_status": "可用" if pack.get("reference_image_pack_id") else "缺失",
     }
+
+
+def _package_reference_ready(package: Dict[str, Any]) -> bool:
+    return bool(
+        _text(package.get("reference_image_pack_id"))
+        and _text(package.get("reference_image_status")) == "可用"
+        and _text(package.get("reference_image_preview_url"))
+    )
 
 
 def _safe_file_name(value: str) -> str:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -56,6 +57,8 @@ JSON_FIELDS = {
     "perturbation_seed_json",
     "budget_json",
     "alert_json",
+    "detail_json",
+    "ai_supplement_detail_json",
 }
 
 
@@ -223,6 +226,9 @@ class MySQLRepository:
             charset=self.charset,
             cursorclass=pymysql.cursors.DictCursor,
             autocommit=False,
+            connect_timeout=10,
+            read_timeout=45,
+            write_timeout=45,
         )
         try:
             yield conn
@@ -377,18 +383,24 @@ class MySQLRepository:
             return Result.fail("RDS_WRITE_FAILED", str(exc), {"table": table, "key": key, "key_value": key_value})
 
     def get(self, table: str, key: str, value: Any) -> Optional[Dict[str, Any]]:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(f"SELECT * FROM {table} WHERE {key}=%s", (value,))
-                row = cur.fetchone()
+        def op():
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"SELECT * FROM {table} WHERE {key}=%s", (value,))
+                    return cur.fetchone()
+
+        row = self._read_with_retry(op)
         return self._row(row) if row else None
 
     def list_where(self, table: str, where: str = "1=1", params: Iterable[Any] = ()) -> List[Dict[str, Any]]:
         where = where.replace("?", "%s")
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(f"SELECT * FROM {table} WHERE {where}", tuple(params))
-                rows = cur.fetchall()
+        def op():
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"SELECT * FROM {table} WHERE {where}", tuple(params))
+                    return cur.fetchall()
+
+        rows = self._read_with_retry(op)
         return [self._row(row) for row in rows]
 
     def delete_where(self, table: str, where: str, params: Iterable[Any] = ()) -> Result:
@@ -418,18 +430,33 @@ class MySQLRepository:
         return value
 
     def _has_column(self, table: str, column: str) -> bool:
-        with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT 1
-                    FROM information_schema.columns
-                    WHERE table_schema=%s AND table_name=%s AND column_name=%s
-                    LIMIT 1
-                    """,
-                    (self.database, table, column),
-                )
-                return cur.fetchone() is not None
+        def op():
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema=%s AND table_name=%s AND column_name=%s
+                        LIMIT 1
+                        """,
+                        (self.database, table, column),
+                    )
+                    return cur.fetchone() is not None
+
+        return bool(self._read_with_retry(op))
+
+    def _read_with_retry(self, op):
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                return op()
+            except Exception as exc:
+                last_exc = exc
+                if not _is_retryable_mysql_error(exc) or attempt >= 2:
+                    raise
+                time.sleep(0.5 * (attempt + 1))
+        raise last_exc or RuntimeError("mysql read failed")
 
 
 def _mysql_statements(sql: str) -> List[str]:
@@ -446,3 +473,21 @@ def _mysql_statements(sql: str) -> List[str]:
     if current:
         statements.append("\n".join(current))
     return statements
+
+
+def _is_retryable_mysql_error(exc: Exception) -> bool:
+    code = getattr(exc, "args", [None])[0] if getattr(exc, "args", None) else None
+    if code in {2003, 2006, 2013, 2055}:
+        return True
+    text = str(exc).lower()
+    return any(
+        token in text
+        for token in (
+            "lost connection",
+            "server has gone away",
+            "connection reset",
+            "read timed out",
+            "timed out",
+            "can't connect",
+        )
+    )

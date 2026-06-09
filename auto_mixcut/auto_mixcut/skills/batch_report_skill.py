@@ -9,7 +9,6 @@ from typing import Any
 from auto_mixcut.core.result import Result
 
 from .context import SkillContext
-from .quality_gate_skill import QualityGateSkill
 
 
 class BatchReportSkill:
@@ -27,7 +26,7 @@ class BatchReportSkill:
         plans = self.ctx.repo.list_where("render_plans", "batch_id=? ORDER BY variant_no", (batch_id,))
         segments = self.ctx.repo.list_where("segments", "product_id=?", (product_id,))
         latest_tags = _latest_tags(self.ctx, [s["segment_id"] for s in segments])
-        qc_results = [QualityGateSkill(self.ctx).check_output(o["output_id"]).data for o in outputs]
+        qc_results = [_cached_qc_result(o) for o in outputs]
 
         report = {
             "batch": batch,
@@ -83,6 +82,19 @@ def _summary(outputs: list[dict], plans: list[dict], qc_results: list[dict]) -> 
     }
 
 
+def _cached_qc_result(output: dict) -> dict:
+    final_qc = output.get("final_qc_json") or {}
+    reasons = []
+    if isinstance(final_qc, dict):
+        reasons.extend(final_qc.get("fail_reasons") or [])
+        reasons.extend(final_qc.get("review_reasons") or [])
+    return {
+        "output_id": output.get("output_id"),
+        "machine_quality_status": output.get("machine_quality_status") or "pending",
+        "reasons": reasons,
+    }
+
+
 def _material_summary(segments: list[dict], latest_tags: dict[str, dict], task: dict) -> dict:
     primary_roles = Counter()
     visibility = Counter()
@@ -128,12 +140,14 @@ def _material_summary(segments: list[dict], latest_tags: dict[str, dict], task: 
 
 def _output_summary(ctx: SkillContext, output: dict, qc_results: list[dict]) -> dict[str, Any]:
     slots = ctx.repo.list_where("output_segments", "output_id=? ORDER BY slot_index", (output["output_id"],))
+    plan_slots = _plan_slots_for_output(ctx, output)
     soft_slots = 0
     slot_rows = []
     for slot in slots:
         segment = ctx.repo.get("segments", "segment_id", slot["segment_id"]) or {}
         tags = ctx.repo.list_where("segment_tags", "segment_id=? ORDER BY id DESC", (slot["segment_id"],))
         tag = tags[0] if tags else {}
+        planned_slot = plan_slots.get(int(slot.get("slot_index") or 0), {})
         is_soft = segment.get("effective_roles_reason") == "soft local-language subtitle issue"
         soft_slots += 1 if is_soft else 0
         slot_rows.append(
@@ -147,13 +161,33 @@ def _output_summary(ctx: SkillContext, output: dict, qc_results: list[dict]) -> 
                 "hook": tag.get("hook_strength"),
                 "risk": tag.get("risk_level"),
                 "soft_local_subtitle": is_soft,
+                "source_type": planned_slot.get("source_type") or segment.get("source_type"),
+                "prompt_package_id": planned_slot.get("prompt_package_id") or segment.get("prompt_package_id"),
+                "asset_scene_tag": planned_slot.get("asset_scene_tag") or segment.get("scene_tag"),
+                "asset_slot_role": planned_slot.get("asset_slot_role") or segment.get("slot_role"),
+                "selection_score": planned_slot.get("selection_score"),
+                "selection_reason": planned_slot.get("selection_reason") or {},
             }
         )
     qc = next((q for q in qc_results if q.get("output_id") == output["output_id"]), {})
+    bgm_plan = output.get("bgm_plan_json") or {}
+    if isinstance(bgm_plan, str):
+        try:
+            bgm_plan = json.loads(bgm_plan)
+        except json.JSONDecodeError:
+            bgm_plan = {}
     return {
         "output_id": output["output_id"],
         "variant_no": output.get("variant_no"),
         "template_id": output.get("template_id"),
+        "bgm": {
+            "bgm_id": bgm_plan.get("bgm_id") if isinstance(bgm_plan, dict) else "",
+            "track_name": bgm_plan.get("track_name") if isinstance(bgm_plan, dict) else "",
+            "matched_mood": bgm_plan.get("matched_mood") if isinstance(bgm_plan, dict) else "",
+            "matched_template_id": bgm_plan.get("matched_template_id") if isinstance(bgm_plan, dict) else "",
+            "recommended_start_sec": bgm_plan.get("recommended_start_sec") if isinstance(bgm_plan, dict) else None,
+            "default_volume": bgm_plan.get("default_volume") if isinstance(bgm_plan, dict) else None,
+        },
         "machine_quality_status": qc.get("machine_quality_status") or output.get("machine_quality_status"),
         "human_quality_status": output.get("human_quality_status"),
         "soft_local_subtitle_slots": soft_slots,
@@ -161,6 +195,26 @@ def _output_summary(ctx: SkillContext, output: dict, qc_results: list[dict]) -> 
         "machine_fail_reasons": qc.get("reasons") or [],
         "slots": slot_rows,
     }
+
+
+def _plan_slots_for_output(ctx: SkillContext, output: dict) -> dict[int, dict]:
+    plans = ctx.repo.list_where(
+        "render_plans",
+        "batch_id=? AND variant_no=? ORDER BY id DESC LIMIT 1",
+        (output.get("batch_id"), output.get("variant_no")),
+    )
+    if not plans:
+        return {}
+    plan_json = plans[0].get("plan_json") or {}
+    slots = plan_json.get("segments") if isinstance(plan_json, dict) else []
+    result = {}
+    for index, slot in enumerate(slots or [], start=1):
+        try:
+            slot_index = int(slot.get("slot_index") or index)
+        except (TypeError, ValueError):
+            slot_index = index
+        result[slot_index] = slot
+    return result
 
 
 def _markdown(report: dict) -> str:
@@ -194,6 +248,9 @@ def _markdown(report: dict) -> str:
     for output in report["outputs"]:
         lines.append(f"### V{output['variant_no']} `{output['output_id']}`")
         lines.append(f"- 模板：{output['template_id']}")
+        if output.get("bgm", {}).get("track_name") or output.get("bgm", {}).get("bgm_id"):
+            bgm = output["bgm"]
+            lines.append(f"- BGM：{bgm.get('track_name') or bgm.get('bgm_id')} / mood={bgm.get('matched_mood') or '-'} / start={bgm.get('recommended_start_sec')}")
         lines.append(f"- 机器 / 人工：{output['machine_quality_status']} / {output['human_quality_status']}")
         lines.append(f"- 独立素材数：{output['unique_assets']}，软字幕片段数：{output['soft_local_subtitle_slots']}")
         if output["machine_fail_reasons"]:
@@ -201,6 +258,14 @@ def _markdown(report: dict) -> str:
         lines.append("- 槽位：")
         for slot in output["slots"]:
             soft = "，软字幕" if slot["soft_local_subtitle"] else ""
-            lines.append(f"  - {slot['slot']}. {slot['role']} / {slot['primary_role']} / {slot['visibility']} / {slot['hook']} / {slot['risk']}{soft} / `{slot['segment_id']}`")
+            reason = slot.get("selection_reason") or {}
+            why = ",".join(reason.get("why") or [])
+            prompt_pkg = f" / pkg={slot.get('prompt_package_id')}" if slot.get("prompt_package_id") else ""
+            lines.append(
+                f"  - {slot['slot']}. {slot['role']} / {slot['primary_role']} / {slot['visibility']} / {slot['hook']} / {slot['risk']}{soft}"
+                f" / src={slot.get('source_type') or '-'}{prompt_pkg} / score={slot.get('selection_score')} / `{slot['segment_id']}`"
+            )
+            if why:
+                lines.append(f"    - why: {why}")
         lines.append("")
     return "\n".join(lines)

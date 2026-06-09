@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from auto_mixcut.agent.gap_template_planner import GapTemplatePlanner, PlannerConfig
+from auto_mixcut.agent.gap_template_planner import GapTemplatePlanner, PlannerConfig, _template_slots
 
 
 def _planner(templates: list[dict]) -> GapTemplatePlanner:
@@ -25,6 +25,11 @@ def _planner(templates: list[dict]) -> GapTemplatePlanner:
                     "detail": "material_closeup",
                     "scene": "atmosphere",
                     "ending": "atmosphere",
+                },
+                "product_only_quota": {
+                    "product_only_ratio_cap": 0.40,
+                    "preferred_roles_for_product_only": ["detail", "hero"],
+                    "forbid_product_only_roles": ["result"],
                 },
                 "reuse": {"max_reuse_per_asset": 3, "reuse_penalty_weight": 1.0, "within_clip_reuse_max": 1},
                 "cost": {"unit_price_grade": {"A": 0, "B": 0, "C": 0}, "rerender_redundancy": 1.3, "round_budget_cap": 0},
@@ -88,3 +93,28 @@ def test_generation_tasks_equal_ai_gen_gap_and_respect_ai_cap() -> None:
     total_demand = sum(item["count"] for item in result.data["demand"][0]["demand"])
     assert len(result.data["generation_tasks"]) == gap_sum
     assert gap_sum <= round(total_demand * 0.5)
+
+
+def test_product_only_quota_turns_one_ai_slot_without_touching_result() -> None:
+    planner = _planner([
+        {
+            "template_id": "AI_TEST",
+            "slots": [
+                {"role": "hero", "duration_ms": 4000, "ai_gen_grade": "A", "person_framing": "ai_local", "segment_type": "product_display"},
+                {"role": "detail", "duration_ms": 4000, "ai_gen_grade": "B", "person_framing": "ai_local", "segment_type": "detail_atmosphere"},
+                {"role": "result", "duration_ms": 4000, "ai_gen_grade": "B", "person_framing": "ai_local", "segment_type": "tryon_result"},
+                {"role": "scene", "duration_ms": 4000, "ai_gen_grade": "C", "person_framing": "real_preferred", "segment_type": "home_lifestyle"},
+            ],
+        },
+        _template("T2"),
+    ])
+
+    slots = planner.templates[0]["slots"]
+    converted = _template_slots(planner.templates[0], planner.config)
+    product_only = [slot for slot in converted if slot.get("person_framing") == "product_only"]
+
+    assert len(product_only) == 1
+    assert product_only[0]["role"] in {"hero", "detail"}
+    assert product_only[0]["segment_type"] in {"product_still", "unboxing", "flatlay"}
+    assert all(slot.get("person_framing") != "product_only" for slot in converted if slot.get("role") == "result")
+    assert slots[2]["segment_type"] == "tryon_result"

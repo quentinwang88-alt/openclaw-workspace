@@ -145,6 +145,54 @@ segment_type_rules:
       scene_default: "柔和自然光近景，浅景深突出材质"
       action_default: "特写商品局部，光线在材质表面流动"
 
+  product_still:
+    risk_level: medium
+    default_roles: [hero, detail]
+    possible_roles: [hero, detail, scene, ending]
+    core_allowed: true
+    anchor_strength: strict
+    require_reference_image: true
+    preferred_generation_type: image_to_video
+    batch_friendly: true
+    require_frame_consistency: true
+    prompt:
+      cn: "纯物静物"
+      description: "无人产品挂拍、立体陈列或微距质感，展示完整形状、材质和做工细节。"
+      scene_default: "干净背景、柔和自然光、产品陈列台或衣架"
+      action_default: "镜头缓慢推近产品，焦点停留在材质、结构和做工细节"
+
+  unboxing:
+    risk_level: medium
+    default_roles: [hero, detail]
+    possible_roles: [hero, detail, scene, ending]
+    core_allowed: true
+    anchor_strength: strict
+    require_reference_image: true
+    preferred_generation_type: image_to_video
+    batch_friendly: true
+    require_frame_consistency: true
+    prompt:
+      cn: "拆包装"
+      description: "只拍手部、包装和产品逐渐露出，禁止面部和身体，适合钩子型开头。"
+      scene_default: "干净桌面、自然光、快递包装或产品盒"
+      action_default: "只出手部拆开包装，产品逐渐露出并推近展示"
+
+  flatlay:
+    risk_level: medium
+    default_roles: [detail, scene]
+    possible_roles: [detail, scene, ending]
+    core_allowed: true
+    anchor_strength: strict
+    require_reference_image: true
+    preferred_generation_type: image_to_video
+    batch_friendly: true
+    require_frame_consistency: true
+    prompt:
+      cn: "平铺摆拍"
+      description: "产品平铺俯拍，排布整齐，可带少量搭配小物，无人物，展示搭配和结构。"
+      scene_default: "干净台面、平铺俯拍、少量搭配小物"
+      action_default: "俯拍缓慢扫过产品排布，焦点逐件拉移"
+
 # 类目轻量禁用项
 category_light_rules:
   hair_accessories:

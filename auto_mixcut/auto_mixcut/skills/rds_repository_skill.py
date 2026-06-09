@@ -89,8 +89,37 @@ class RDSRepositorySkill:
 def _ensure_runtime_compatibility_columns(ctx: SkillContext) -> Result:
     additions = {
         "products": {"preferred_mood": "TEXT"},
-        "assets": {"source_identity": "TEXT", "scene_tag": "TEXT"},
-        "segments": {"visual_phash": "TEXT"},
+        "content_tasks": {
+            "ai_supplement_status": "TEXT",
+            "ai_supplement_package_count": "INTEGER DEFAULT 0",
+            "ai_supplement_detail_json": "TEXT",
+            "target_remaining_variant_count": "INTEGER DEFAULT 0",
+            "material_pool_extra_capacity": "INTEGER DEFAULT 0",
+            "first_slot_remaining_capacity": "INTEGER DEFAULT 0",
+            "current_bottleneck": "TEXT",
+            "capacity_note": "TEXT",
+            "pipeline_status": "TEXT",
+            "next_action": "TEXT",
+            "last_error": "TEXT",
+            "last_batch_id": "TEXT",
+            "guard_detail_json": "TEXT",
+        },
+        "assets": {
+            "source_identity": "TEXT",
+            "scene_tag": "TEXT",
+            "prompt_package_id": "TEXT",
+            "slot_role": "TEXT",
+            "ai_gen_grade": "TEXT",
+            "hook_intent": "TEXT",
+        },
+        "segments": {
+            "visual_phash": "TEXT",
+            "used_in_rejected_outputs_count": "INTEGER DEFAULT 0",
+            "prompt_package_id": "TEXT",
+            "slot_role": "TEXT",
+            "ai_gen_grade": "TEXT",
+            "hook_intent": "TEXT",
+        },
         "segment_tags": {"text_overlay_risk": "TEXT", "text_language": "TEXT", "text_overlay_reason": "TEXT"},
         "outputs": {
             "bgm_output_oss_object_id": "TEXT",
@@ -106,6 +135,8 @@ def _ensure_runtime_compatibility_columns(ctx: SkillContext) -> Result:
             "audio_analyzed_at": "TEXT",
             "audio_tag_source": "TEXT",
             "audio_tag_confidence": "TEXT",
+            "rejected_usage_count": "INTEGER DEFAULT 0",
+            "last_feedback_status": "TEXT",
         },
     }
     try:
@@ -148,6 +179,25 @@ def _ensure_runtime_compatibility_columns(ctx: SkillContext) -> Result:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pipeline_step_runs (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  step_run_id TEXT NOT NULL UNIQUE,
+                  product_id TEXT,
+                  batch_id TEXT,
+                  step_name TEXT,
+                  status TEXT,
+                  error_code TEXT,
+                  error_message TEXT,
+                  detail_json TEXT,
+                  started_at TEXT,
+                  finished_at TEXT,
+                  created_at TEXT,
+                  updated_at TEXT
+                )
+                """
+            )
         return Result.ok()
     except Exception as exc:
         return Result.fail("MIGRATION_FAILED", str(exc), {"db_path": str(ctx.settings.db_path)})
@@ -184,9 +234,22 @@ def _ensure_mysql_core_tables(ctx: SkillContext) -> Result:
           requested_variant_count INT DEFAULT 0,
           allowed_variant_count INT DEFAULT 0,
           actual_variant_count INT DEFAULT 0,
+          target_remaining_variant_count INT DEFAULT 0,
+          material_pool_extra_capacity INT DEFAULT 0,
+          first_slot_remaining_capacity INT DEFAULT 0,
+          current_bottleneck TEXT,
+          capacity_note TEXT,
           material_tier VARCHAR(64),
           material_status VARCHAR(64),
           task_status VARCHAR(128),
+          pipeline_status VARCHAR(64),
+          next_action TEXT,
+          last_error TEXT,
+          last_batch_id VARCHAR(128),
+          guard_detail_json JSON,
+          ai_supplement_status VARCHAR(64),
+          ai_supplement_package_count INT DEFAULT 0,
+          ai_supplement_detail_json JSON,
           anchor_required TINYINT DEFAULT 1,
           anchor_status_at_task_start VARCHAR(64),
           blocked_reason TEXT,
@@ -250,6 +313,10 @@ def _ensure_mysql_core_tables(ctx: SkillContext) -> Result:
           human_review_status VARCHAR(64),
           source_identity VARCHAR(256),
           scene_tag VARCHAR(256),
+          prompt_package_id VARCHAR(128),
+          slot_role VARCHAR(64),
+          ai_gen_grade VARCHAR(32),
+          hook_intent VARCHAR(128),
           generation_job_id VARCHAR(128),
           generation_type VARCHAR(128),
           generation_model VARCHAR(128),
@@ -291,6 +358,7 @@ def _ensure_mysql_core_tables(ctx: SkillContext) -> Result:
           is_image_generated TINYINT DEFAULT 0,
           usage_count INT DEFAULT 0,
           used_in_outputs_count INT DEFAULT 0,
+          used_in_rejected_outputs_count INT DEFAULT 0,
           avg_first_3s_retention DECIMAL(8, 4),
           avg_completion_rate DECIMAL(8, 4),
           performance_score DECIMAL(8, 4),
@@ -300,6 +368,10 @@ def _ensure_mysql_core_tables(ctx: SkillContext) -> Result:
           allowed_core_roles_json JSON,
           allowed_soft_roles_json JSON,
           segment_type VARCHAR(128),
+          prompt_package_id VARCHAR(128),
+          slot_role VARCHAR(64),
+          ai_gen_grade VARCHAR(32),
+          hook_intent VARCHAR(128),
           created_at DATETIME,
           updated_at DATETIME,
           KEY idx_segments_product (product_id),
@@ -431,6 +503,8 @@ def _ensure_mysql_core_tables(ctx: SkillContext) -> Result:
           bgm_plan_json JSON,
           avg_completion_rate DECIMAL(8, 4),
           published_at DATETIME,
+          publish_task_id VARCHAR(128),
+          publish_result TEXT,
           feishu_preview_status VARCHAR(64),
           feishu_record_id VARCHAR(128),
           preview_expire_at DATETIME,
@@ -453,7 +527,26 @@ def _ensure_mysql_core_tables(ctx: SkillContext) -> Result:
           start_ms_in_output INT,
           end_ms_in_output INT,
           created_at DATETIME,
-          KEY idx_output_segments_output (output_id)
+          KEY idx_output_segments_output (output_id),
+          KEY idx_output_segments_segment (segment_id)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS bgm_usage_events (
+          id BIGINT PRIMARY KEY AUTO_INCREMENT,
+          event_id VARCHAR(128) NOT NULL UNIQUE,
+          bgm_id VARCHAR(128),
+          output_id VARCHAR(128),
+          batch_id VARCHAR(128),
+          product_id VARCHAR(128),
+          template_id VARCHAR(128),
+          usage_status VARCHAR(64),
+          quality_status VARCHAR(64),
+          reason TEXT,
+          created_at DATETIME,
+          KEY idx_bgm_usage_bgm (bgm_id),
+          KEY idx_bgm_usage_output (output_id),
+          KEY idx_bgm_usage_product (product_id)
         )
         """,
         """
@@ -519,8 +612,38 @@ def _ensure_mysql_core_tables(ctx: SkillContext) -> Result:
 def _ensure_mysql_runtime_compatibility_columns(ctx: SkillContext) -> Result:
     additions = {
         "products": {"preferred_mood": "JSON"},
-        "assets": {"source_identity": "VARCHAR(256)", "scene_tag": "VARCHAR(256)"},
-        "segments": {"visual_phash": "VARCHAR(64)"},
+        "content_tasks": {
+            "ai_supplement_status": "VARCHAR(64)",
+            "ai_supplement_package_count": "INT DEFAULT 0",
+            "ai_supplement_detail_json": "JSON",
+            "target_remaining_variant_count": "INT DEFAULT 0",
+            "material_pool_extra_capacity": "INT DEFAULT 0",
+            "first_slot_remaining_capacity": "INT DEFAULT 0",
+            "current_bottleneck": "TEXT",
+            "capacity_note": "TEXT",
+            "pipeline_status": "VARCHAR(64)",
+            "next_action": "TEXT",
+            "last_error": "TEXT",
+            "last_batch_id": "VARCHAR(128)",
+            "guard_detail_json": "JSON",
+        },
+        "assets": {
+            "source_identity": "VARCHAR(256)",
+            "scene_tag": "VARCHAR(256)",
+            "prompt_package_id": "VARCHAR(128)",
+            "slot_role": "VARCHAR(64)",
+            "ai_gen_grade": "VARCHAR(32)",
+            "hook_intent": "VARCHAR(128)",
+        },
+        "segments": {
+            "visual_phash": "VARCHAR(64)",
+            "used_in_outputs_count": "INT DEFAULT 0",
+            "used_in_rejected_outputs_count": "INT DEFAULT 0",
+            "prompt_package_id": "VARCHAR(128)",
+            "slot_role": "VARCHAR(64)",
+            "ai_gen_grade": "VARCHAR(32)",
+            "hook_intent": "VARCHAR(128)",
+        },
         "segment_tags": {"text_overlay_risk": "VARCHAR(64)", "text_language": "VARCHAR(64)", "text_overlay_reason": "TEXT"},
         "outputs": {
             "bgm_output_oss_object_id": "VARCHAR(128)",
@@ -530,12 +653,17 @@ def _ensure_mysql_runtime_compatibility_columns(ctx: SkillContext) -> Result:
             "bgm_plan_json": "JSON",
             "avg_completion_rate": "DECIMAL(6, 4)",
             "published_at": "DATETIME",
+            "publish_task_id": "VARCHAR(128)",
+            "publish_result": "TEXT",
         },
         "bgm_tracks": {
             "audio_analysis_json": "JSON",
             "audio_analyzed_at": "DATETIME",
             "audio_tag_source": "VARCHAR(64)",
             "audio_tag_confidence": "VARCHAR(32)",
+            "usage_count": "INT DEFAULT 0",
+            "rejected_usage_count": "INT DEFAULT 0",
+            "last_feedback_status": "VARCHAR(64)",
         },
     }
     try:
@@ -586,6 +714,8 @@ def _ensure_mysql_runtime_compatibility_columns(ctx: SkillContext) -> Result:
                       mix_constraints_json JSON,
                       performance_tags_json JSON,
                       usage_count INT DEFAULT 0,
+                      rejected_usage_count INT DEFAULT 0,
+                      last_feedback_status VARCHAR(64),
                       created_at DATETIME,
                       updated_at DATETIME
                     )
@@ -627,6 +757,28 @@ def _ensure_mysql_runtime_compatibility_columns(ctx: SkillContext) -> Result:
                       status VARCHAR(64),
                       created_at DATETIME,
                       updated_at DATETIME
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS pipeline_step_runs (
+                      id BIGINT PRIMARY KEY AUTO_INCREMENT,
+                      step_run_id VARCHAR(128) NOT NULL UNIQUE,
+                      product_id VARCHAR(128),
+                      batch_id VARCHAR(128),
+                      step_name VARCHAR(128),
+                      status VARCHAR(64),
+                      error_code VARCHAR(128),
+                      error_message TEXT,
+                      detail_json JSON,
+                      started_at DATETIME,
+                      finished_at DATETIME,
+                      created_at DATETIME,
+                      updated_at DATETIME,
+                      KEY idx_pipeline_step_runs_product (product_id),
+                      KEY idx_pipeline_step_runs_batch (batch_id),
+                      KEY idx_pipeline_step_runs_step (step_name)
                     )
                     """
                 )

@@ -34,6 +34,18 @@ class VisionJSONClient:
         for index, path in enumerate(image_paths, 1):
             content.append({"type": "input_text", "text": f"Frame {index}:"})
             content.append({"type": "input_image", "image_url": image_path_to_data_url(path)})
+        return self._call_content(content, max_output_tokens=max_output_tokens)
+
+    def call_audio(self, prompt: str, audio_path: str, max_output_tokens: int = 1500) -> str:
+        if not self.api_key:
+            raise RuntimeError("缺少 OpenClaw/Codex access token，请先登录 OpenClaw/Codex")
+        content: list[dict[str, Any]] = [
+            {"type": "input_text", "text": prompt},
+            {"type": "input_audio", "input_audio": audio_path_to_input_audio(audio_path)},
+        ]
+        return self._call_content(content, max_output_tokens=max_output_tokens)
+
+    def _call_content(self, content: list[dict[str, Any]], max_output_tokens: int = 1800) -> str:
         text_chunks: list[str] = []
         fallback_text = ""
         try:
@@ -81,6 +93,14 @@ def image_path_to_data_url(image_path: str) -> str:
     if image_format == "jpg":
         image_format = "jpeg"
     return f"data:image/{image_format};base64,{base64.b64encode(path.read_bytes()).decode('utf-8')}"
+
+
+def audio_path_to_input_audio(audio_path: str) -> dict[str, str]:
+    path = Path(audio_path)
+    audio_format = path.suffix.lower().lstrip(".") or "mp3"
+    if audio_format == "m4a":
+        audio_format = "mp4"
+    return {"data": base64.b64encode(path.read_bytes()).decode("utf-8"), "format": audio_format}
 
 
 def parse_json(text: str) -> Any:

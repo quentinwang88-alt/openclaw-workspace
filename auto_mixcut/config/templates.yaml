@@ -444,7 +444,7 @@ templates:
 
   - template_id: AI_OUTERWEAR_LIFESTYLE_20S
     duration_ms: 20000
-    default_moods: [warm_cozy, calm_lifestyle]
+    default_moods: [fashion_chic, warm_cozy]
     suitable_categories: [womens_outerwear]
     template_objective: ai_outerwear_lifestyle
     pacing: slow
@@ -452,7 +452,7 @@ templates:
     hook_profile: {hook_type: lifestyle_scene, first_1s_goal: clear_product, required_visual_signal: product_visible_high, avoid: [watermark, subtitle_risk, low_trust]}
     risk_policy: {require_no_watermark_for_first_slot: true, avoid_subtitle_risk_in_first_slot: true, allow_risky_segments_after_slot: 4, fail_only_on_severe_mismatch: true}
     source_policy: {prefer_high_trust: true, allow_medium_trust: true, avoid_low_trust_core_slots: true}
-    bgm_profile: {moods: [warm_cozy, calm_lifestyle], energy: low, preferred_vocal_types: [instrumental], vocal_types: [instrumental, light_vocal]}
+    bgm_profile: {moods: [fashion_chic, warm_cozy], energy: medium, preferred_vocal_types: [instrumental], vocal_types: [instrumental, light_vocal]}
     slots:
       - {role: hero, duration_ms: 4000, preferred_source_trust: high, preferred_binding: exact_sku, hook_intent: product_clarity, ai_gen_grade: A, ai_fill_min_grade: A_core, person_framing: ai_local, segment_type: handheld_product}
       - {role: scene, duration_ms: 4000, hook_intent: atmosphere, ai_gen_grade: C, ai_fill_min_grade: B_scene, person_framing: real_preferred, segment_type: home_lifestyle}

@@ -63,6 +63,9 @@ def segment_tagging_prompt(product: dict, asset: dict, segment: dict) -> str:
   "hook_strength": "strong|medium|weak",
   "mixcut_usability": "yes|needs_processing|no",
   "risk_level": "low|medium|high",
+  "text_overlay_risk": "none|safe_product_label|bottom_caption_repairable|foreign_language_caption|large_obstructive_text|platform_ui_or_watermark",
+  "text_language": "中文/英文/越南语/泰语/外文/none",
+  "text_overlay_reason": "中文，说明画面文字位置、面积、是否遮挡商品；没有则为空",
   "confidence": "high|medium|low",
   "needs_human_review": true|false,
   "reason": "中文，简短说明判断依据"
@@ -76,6 +79,7 @@ def segment_tagging_prompt(product: dict, asset: dict, segment: dict) -> str:
 - ending：适合收尾、定格、轻氛围。
 - unusable：黑屏、严重模糊、商品不可见、明显错品、风险内容、水印/UI遮挡严重。
 - 如果商品与锚点不确定、AI生成漂移、画面含平台水印/账号UI/明显搬运痕迹，应提高 risk_level 或 needs_human_review。
+- 画面硬字幕判断：底部小面积外文字幕且不遮挡商品时，text_overlay_risk=bottom_caption_repairable，mixcut_usability=needs_processing；中部/大面积/多行/遮挡商品或脸手动作时，text_overlay_risk=large_obstructive_text，mixcut_usability=no；平台UI/账号/水印文字为 platform_ui_or_watermark。
 """.strip()
 
 
@@ -170,6 +174,7 @@ def normalize_segment_tag(data: Any) -> Dict[str, Any]:
     usability = {"yes", "needs_processing", "no"}
     risk = {"low", "medium", "high"}
     conf = {"high", "medium", "low"}
+    text_risks = {"none", "safe_product_label", "bottom_caption_repairable", "foreign_language_caption", "large_obstructive_text", "platform_ui_or_watermark"}
     primary = _enum(data.get("primary_shot_role"), roles, "unusable")
     secondary = [_enum(v, roles - {"unusable"}, "") for v in (data.get("secondary_roles") or [])]
     secondary = [v for v in secondary if v]
@@ -180,6 +185,9 @@ def normalize_segment_tag(data: Any) -> Dict[str, Any]:
         "hook_strength": _enum(data.get("hook_strength"), hooks, "weak"),
         "mixcut_usability": _enum(data.get("mixcut_usability"), usability, "needs_processing"),
         "risk_level": _enum(data.get("risk_level"), risk, "medium"),
+        "text_overlay_risk": _enum(data.get("text_overlay_risk"), text_risks, "none"),
+        "text_language": str(data.get("text_language") or "")[:64],
+        "text_overlay_reason": str(data.get("text_overlay_reason") or "").strip()[:500],
         "confidence": _enum(data.get("confidence"), conf, "low"),
         "needs_human_review": bool(data.get("needs_human_review")),
         "reason": str(data.get("reason") or "").strip()[:500],
@@ -273,11 +281,17 @@ def bgm_tagging_prompt(payload: dict) -> str:
     source_platform = payload.get("source_platform") or "unknown"
     download_version = payload.get("download_version") or ""
     existing_human_tags = payload.get("existing_human_tags") or {}
+    audio_analysis = payload.get("audio_analysis") or {}
     allowed_labels = payload.get("allowed_labels") or BGM_ALLOWED_LABELS
     import json
+    analysis_note = (
+        "请根据下方音频信号分析特征和曲目信息判断该曲目的标签，不要假装听到了未提供的信息。"
+        if audio_analysis
+        else "请仔细听这段音频，根据实际听感判断该曲目的标签。"
+    )
 
     return f"""你是一个 TikTok Shop 短视频混剪 BGM 标签助手。
-请仔细听这段音频，根据实际听感判断该曲目的标签。
+{analysis_note}
 
 参考信息（不一定准确，以实际听感为准）：
 - 曲名：{track_name}
@@ -285,6 +299,7 @@ def bgm_tagging_prompt(payload: dict) -> str:
 - 平台：{source_platform}
 - 下载版本：{download_version}
 - 现有标签：{json.dumps(existing_human_tags or {}, ensure_ascii=False)}
+- 音频信号分析：{json.dumps(audio_analysis or {}, ensure_ascii=False)}
 
 允许的标签值：
 {json.dumps(allowed_labels, ensure_ascii=False, indent=2)}

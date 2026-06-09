@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -110,7 +111,9 @@ def process_record(ctx, client: AutoMixcutFeishuClient, record: Any, dry_run: bo
         client.update_record(record.record_id, {"上传状态": "upload_failed", "处理状态": "failed", "处理失败原因": err, "最近处理时间": now_ms()})
         return {"record_id": record.record_id, "product_id": product_id, "status": "failed", "error": err}
     local_cleanup_status = cleanup_uploaded_temp_file(ctx, local_path)
+    feishu_attachment_cleanup_status = clear_feishu_attachment(client, record.record_id, "素材文件")
     asset_id = uploaded.data["asset_id"]
+    prompt_meta = backfill_prompt_package_metadata(ctx, product_id, asset_id, source_type, file_name)
     oss_obj = uploaded.data["oss_object"]
     media_type = "image" if str(file_name).lower().endswith((".jpg", ".jpeg", ".png", ".webp")) else "video"
     client.update_record(
@@ -123,13 +126,70 @@ def process_record(ctx, client: AutoMixcutFeishuClient, record: Any, dry_run: bo
             "文件类型": media_type,
             "文件大小": int(oss_obj.get("file_size") or size),
             "是否有水印": "pending",
-            "是否已清理飞书附件": local_cleanup_status,
+            "是否已清理飞书附件": feishu_attachment_cleanup_status,
             "最近处理时间": now_ms(),
         },
     )
-    upload_status = "local_cleaned" if local_cleanup_status == "是" else "oss_uploaded"
+    upload_status = "feishu_attachment_cleaned" if feishu_attachment_cleanup_status == "是" else "oss_uploaded"
     client.update_record(record.record_id, {"上传状态": upload_status, "最近处理时间": now_ms()})
-    return {"record_id": record.record_id, "product_id": product_id, "status": upload_status, "asset_id": asset_id, "local_cleanup_status": local_cleanup_status}
+    return {
+        "record_id": record.record_id,
+        "product_id": product_id,
+        "status": upload_status,
+        "asset_id": asset_id,
+        "prompt_package_id": prompt_meta.get("prompt_package_id", ""),
+        "local_cleanup_status": local_cleanup_status,
+        "feishu_attachment_cleanup_status": feishu_attachment_cleanup_status,
+    }
+
+
+def backfill_prompt_package_metadata(ctx, product_id: str, asset_id: str, source_type: str, file_name: str) -> Dict[str, Any]:
+    if source_type != "ai_generated":
+        return {}
+    prompt_id = infer_prompt_package_id(ctx, product_id, file_name)
+    if not prompt_id:
+        return {}
+    package = ctx.repo.get("segment_prompt_packages", "segment_prompt_id", prompt_id) or {}
+    if not package:
+        return {}
+    patch = {
+        "prompt_package_id": prompt_id,
+        "source_identity": prompt_id,
+        "scene_tag": str(package.get("segment_type") or ""),
+        "slot_role": str(package.get("slot_role") or ""),
+        "ai_gen_grade": str(package.get("ai_gen_grade") or ""),
+        "hook_intent": str(package.get("hook_intent") or ""),
+        "generation_type": "image_to_video",
+        "generation_model": "jimeng",
+    }
+    prompt_json = package.get("prompt_package_json") or {}
+    prompt = prompt_json.get("prompt") if isinstance(prompt_json, dict) else {}
+    if prompt:
+        patch["generation_prompt"] = json.dumps(prompt, ensure_ascii=False) if isinstance(prompt, dict) else str(prompt)
+    ctx.repo.update("assets", "asset_id", asset_id, patch)
+    return {**patch, "prompt_package_id": prompt_id}
+
+
+def infer_prompt_package_id(ctx, product_id: str, file_name: str) -> str:
+    text_value = str(file_name or "")
+    candidates = re.findall(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4,12}", text_value)
+    package_ids = {str(row.get("segment_prompt_id") or "") for row in ctx.repo.list_where("segment_prompt_packages", "product_id=?", (product_id,))}
+    for candidate in candidates:
+        for package_id in package_ids:
+            if package_id.startswith(candidate) or candidate.startswith(package_id[: len(candidate)]):
+                return package_id
+    for package_id in package_ids:
+        if package_id and package_id[:8] in text_value:
+            return package_id
+    return ""
+
+
+def clear_feishu_attachment(client: AutoMixcutFeishuClient, record_id: str, field_name: str) -> str:
+    try:
+        client.update_record(record_id, {field_name: []})
+        return "是"
+    except Exception:
+        return "失败"
 
 
 def cleanup_uploaded_temp_file(ctx, local_path: Path) -> str:

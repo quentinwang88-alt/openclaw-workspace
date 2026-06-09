@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from auto_mixcut.agent.ai_diversity_budget import AIDiversityBudget
 from auto_mixcut.core.result import Result
+from auto_mixcut.skills.ai_anchor_check_skill import AIAnchorCheckSkill
+from auto_mixcut.skills.ai_generation_qc_skill import AIGenerationQCSkill
 from auto_mixcut.skills.ai_generated_consistency_skill import AIGeneratedConsistencySkill
 from auto_mixcut.skills.ai_segment_factory_skill import AISegmentFactorySkill
+from auto_mixcut.skills.ai_supplement_workbench_skill import AISupplementWorkbenchSkill
 from auto_mixcut.skills.ai_tagging_skill import AITaggingSkill
 from auto_mixcut.skills.cleanup_skill import CleanupSkill
 from auto_mixcut.skills.effective_role_skill import EffectiveRoleSkill
@@ -11,6 +14,7 @@ from auto_mixcut.skills.feishu_review_skill import FeishuReviewSkill
 from auto_mixcut.skills.final_video_qc_skill import FinalVideoQCSkill
 from auto_mixcut.skills.frame_sample_skill import FrameSampleSkill
 from auto_mixcut.skills.media_probe_skill import MediaProbeSkill
+from auto_mixcut.skills.pipeline_run_skill import PipelineRunSkill
 from auto_mixcut.skills.product_anchor_skill import ProductAnchorSkill
 from auto_mixcut.skills.quality_gate_skill import QualityGateSkill
 from auto_mixcut.skills.readiness_check_skill import ReadinessCheckSkill
@@ -31,6 +35,7 @@ class AutoMixcutOrchestratorAgent:
 
     def run_product(self, product_id: str, requested_count: int | None = None, auto_confirm_anchor: bool = False) -> Result:
         steps = []
+        pipeline_log = PipelineRunSkill(self.ctx)
         anchor = ProductAnchorSkill(self.ctx)
         product = self.ctx.repo.get("products", "product_id", product_id)
         if not product:
@@ -48,6 +53,7 @@ class AutoMixcutOrchestratorAgent:
             steps.append(("anchor_confirm", confirmed.to_dict()))
             if not confirmed.success:
                 return confirmed
+            FeishuReviewSkill(self.ctx).sync_anchor_queue(product_id)
         pipeline = [
             ("probe", lambda: MediaProbeSkill(self.ctx).probe_product(product_id)),
             ("watermark", lambda: WatermarkDetectSkill(self.ctx).check_product(product_id)),
@@ -57,7 +63,9 @@ class AutoMixcutOrchestratorAgent:
             ("fingerprint", lambda: SegmentFingerprintSkill(self.ctx).fingerprint_product(product_id, only_ai_generated=False)),
             ("tag_submit", lambda: AITaggingSkill(self.ctx).submit_batch(product_id)),
             ("tag_poll", lambda: AITaggingSkill(self.ctx).poll_results(product_id)),
+            ("ai_generation_qc", lambda: AIGenerationQCSkill(self.ctx).check_product(product_id)),
             ("consistency", lambda: AIGeneratedConsistencySkill(self.ctx).check_product(product_id)),
+            ("ai_anchor_check", lambda: AIAnchorCheckSkill(self.ctx).check_product(product_id)),
             ("effective_roles", lambda: EffectiveRoleSkill(self.ctx).compute_product(product_id)),
             ("ai_diversity_budget", lambda: AIDiversityBudget(self.ctx).evaluate(product_id)),
             ("readiness", lambda: ReadinessCheckSkill(self.ctx).check_product(product_id, requested_count)),
@@ -65,22 +73,43 @@ class AutoMixcutOrchestratorAgent:
         ]
         batch_id = None
         for name, fn in pipeline:
-            res = fn()
+            step_run_id = pipeline_log.start_step(product_id, name, batch_id=batch_id or "")
+            try:
+                res = fn()
+            except Exception as exc:
+                res = Result.fail("PIPELINE_STEP_EXCEPTION", str(exc), {"product_id": product_id, "step": name, "exception_type": type(exc).__name__})
+                pipeline_log.fail_step(step_run_id, res.error.code, res.error.message, res.error.detail if res.error else {})
+                self.ctx.repo.update("content_tasks", "product_id", product_id, {"task_status": name.upper() + "_FAILED", "failure_reason": res.error.message if res.error else ""})
+                return res
+            pipeline_log.finish_step(step_run_id, res)
             steps.append((name, res.to_dict()))
             if not res.success:
                 self.ctx.repo.update("content_tasks", "product_id", product_id, {"task_status": name.upper() + "_FAILED", "failure_reason": res.error.message if res.error else ""})
                 return res
             if name == "render_plan":
                 batch_id = res.data["batch_id"]
-        rendered = RenderSkill(self.ctx).render_batch(batch_id)
+            if name == "readiness" and _needs_ai_supplement(res.data):
+                supplement_gap_text = "; ".join(str(item) for item in (res.data.get("gaps") or []))
+                supplement = _run_logged_step(
+                    pipeline_log,
+                    product_id,
+                    "ai_supplement_workbench",
+                    lambda: AISupplementWorkbenchSkill(self.ctx).sync_for_product(product_id, gap_text=supplement_gap_text),
+                    batch_id=batch_id,
+                )
+                steps.append(("ai_supplement_workbench", supplement.to_dict()))
+                if not supplement.success:
+                    self.ctx.repo.update("content_tasks", "product_id", product_id, {"task_status": "AI_SUPPLEMENT_WORKBENCH_FAILED", "failure_reason": supplement.error.message if supplement.error else ""})
+                    return supplement
+        rendered = _run_logged_step(pipeline_log, product_id, "render", lambda: RenderSkill(self.ctx).render_batch(batch_id), batch_id=batch_id)
         steps.append(("render", rendered.to_dict()))
         if not rendered.success:
             return rendered
-        qc = QualityGateSkill(self.ctx).check_batch(batch_id)
+        qc = _run_logged_step(pipeline_log, product_id, "quality", lambda: QualityGateSkill(self.ctx).check_batch(batch_id), batch_id=batch_id)
         steps.append(("quality", qc.to_dict()))
         if not qc.success:
             return qc
-        final_qc = FinalVideoQCSkill(self.ctx).check_batch(batch_id)
+        final_qc = _run_logged_step(pipeline_log, product_id, "final_video_qc", lambda: FinalVideoQCSkill(self.ctx).check_batch(batch_id), batch_id=batch_id)
         steps.append(("final_video_qc", final_qc.to_dict()))
         if not final_qc.success:
             return final_qc
@@ -107,3 +136,19 @@ class AutoMixcutOrchestratorAgent:
 
     def cleanup(self, task_id: str | None = None) -> Result:
         return CleanupSkill(self.ctx).cleanup_task(task_id)
+
+
+def _needs_ai_supplement(data: dict) -> bool:
+    return any("AI补素材" in str(item) for item in (data.get("gaps") or []))
+
+
+def _run_logged_step(pipeline_log: PipelineRunSkill, product_id: str, name: str, fn, batch_id: str | None = None) -> Result:
+    step_run_id = pipeline_log.start_step(product_id, name, batch_id=batch_id or "")
+    try:
+        res = fn()
+    except Exception as exc:
+        res = Result.fail("PIPELINE_STEP_EXCEPTION", str(exc), {"product_id": product_id, "step": name, "exception_type": type(exc).__name__})
+        pipeline_log.fail_step(step_run_id, res.error.code, res.error.message, res.error.detail if res.error else {})
+        return res
+    pipeline_log.finish_step(step_run_id, res)
+    return res

@@ -11,10 +11,14 @@ effective_role_rules:
   - name: ai_generated_consistency_not_pass
     when: source_type=ai_generated and frame_consistency_status!=pass
     effective_roles: [scene, ending]
-  - name: soft_local_language_subtitle
-    when: reason contains local-language subtitle only and no watermark/platform_ui/sku_drift/mismatch/severe_occlusion
+  - name: repairable_bottom_subtitle
+    when: text_overlay_risk=bottom_caption_repairable or reason contains bottom local-language subtitle without product/face/hand obstruction
     effective_roles: [detail, result, scene, ending]
-    notes: local market subtitles are allowed as soft risk; render_plan must avoid first slot and cap usage per output.
+    notes: only bottom small-area hard subtitles are allowed; render applies light bottom crop and avoids first slot.
+  - name: unusable_hard_subtitle
+    when: foreign/local subtitle is middle/large/multi-line/scrolling or obstructs product/face/hands, or platform UI/watermark text
+    effective_roles: []
+    notes: do not enter render plan; no AI inpainting or heavy repair by default.
   - name: blocked
     when: risk_level in [medium, high] or has_watermark=yes or mixcut_usability=no
     effective_roles: []

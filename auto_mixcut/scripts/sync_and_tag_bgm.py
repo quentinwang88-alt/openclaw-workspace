@@ -91,14 +91,6 @@ def main():
         has_file = "AUDIO" if local and Path(local).exists() else "no-file"
         print(f"  {t['bgm_id']:22s} | {t.get('track_name','')[:30]:30s} | {t.get('bgm_tag_status',''):8s} | {has_file}")
 
-    print("\nRunning BGM audio tagging...")
-    tagger = BgmTaggingSkill(ctx)
-    result = tagger.calibrate_all(force=False, max_concurrency=2)
-    d = result.data
-    print(f"Tagged: {d.get('tagged',0)}  Skipped: {d.get('skipped',0)}  Errors: {len(d.get('errors',[]))}")
-    for err in d.get("errors", []):
-        print(f"  ERROR {err['bgm_id']}: {err['error']}")
-
     print("\nRunning BGM audio signal analysis...")
     audio = BgmAudioAnalysisSkill(ctx).analyze_all(only_missing=True, apply_tags=False)
     audio_data = audio.data or {}
@@ -106,6 +98,14 @@ def main():
     print(f"Analyzed: {audio_data.get('count', 0)}  Errors: {len(audio_errors)}")
     for err in audio_errors[:10]:
         print(f"  AUDIO ERROR {err.get('error', {}).get('code')}: {err.get('error', {}).get('message')}")
+
+    print("\nRunning BGM audio tagging...")
+    tagger = BgmTaggingSkill(ctx)
+    result = tagger.calibrate_all(force=False, max_concurrency=2)
+    d = result.data
+    print(f"Tagged: {d.get('tagged',0)}  Skipped: {d.get('skipped',0)}  Errors: {len(d.get('errors',[]))}")
+    for err in d.get("errors", []):
+        print(f"  ERROR {err['bgm_id']}: {err['error']}")
 
     print("\nFusing metadata and audio tags...")
     fusion = BgmTagFusionSkill(ctx).fuse_all()

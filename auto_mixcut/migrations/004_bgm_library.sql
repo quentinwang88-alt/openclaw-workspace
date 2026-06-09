@@ -63,3 +63,22 @@ CREATE INDEX IF NOT EXISTS idx_bgm_tracks_mood ON bgm_tracks(mood_tags_json);
 CREATE INDEX IF NOT EXISTS idx_bgm_tracks_energy ON bgm_tracks(energy_level);
 CREATE INDEX IF NOT EXISTS idx_bgm_tracks_category ON bgm_tracks(category_tags_json);
 CREATE INDEX IF NOT EXISTS idx_bgm_tracks_tag_status ON bgm_tracks(bgm_tag_status);
+
+CREATE TABLE IF NOT EXISTS bgm_usage_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id TEXT NOT NULL UNIQUE,
+  bgm_id TEXT NOT NULL,
+  output_id TEXT,
+  batch_id TEXT,
+  product_id TEXT,
+  template_id TEXT,
+  usage_status TEXT,
+  quality_status TEXT,
+  reason TEXT,
+  created_at TEXT,
+  updated_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_bgm_usage_bgm ON bgm_usage_events(bgm_id);
+CREATE INDEX IF NOT EXISTS idx_bgm_usage_output ON bgm_usage_events(output_id);
+CREATE INDEX IF NOT EXISTS idx_bgm_usage_product ON bgm_usage_events(product_id);

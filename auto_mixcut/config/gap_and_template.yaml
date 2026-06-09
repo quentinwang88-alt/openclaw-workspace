@@ -17,6 +17,10 @@ gap_and_template:
     detail: product_display
     scene: seasonal_scene
     ending: home_lifestyle
+  product_only_quota:
+    product_only_ratio_cap: 0.40
+    preferred_roles_for_product_only: [detail, hero]
+    forbid_product_only_roles: [result]
   role_to_hook_intent:
     hero: product_clarity
     result: tryon_result

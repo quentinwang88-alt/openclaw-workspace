@@ -83,11 +83,15 @@ def url_cell(url: Optional[str], text: str) -> Optional[Dict[str, str]]:
     return {"link": url, "text": text, "type": "url"}
 
 
-def datetime_cell(value: str | None) -> Optional[int]:
+def datetime_cell(value: Any | None) -> Optional[int]:
     if not value:
         return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, datetime):
+        return int(value.timestamp() * 1000)
     try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
         return None
     return int(dt.timestamp() * 1000)

@@ -12,12 +12,21 @@ class WatermarkProcessSkill:
     def __init__(self, ctx: SkillContext):
         self.ctx = ctx
 
-    def process_product(self, product_id: str) -> Result:
-        assets = self.ctx.repo.list_where(
-            "assets",
-            "product_id=? AND probe_status='done' AND has_watermark='yes'",
-            (product_id,),
-        )
+    def process_product(self, product_id: str, source_types: list[str] | None = None) -> Result:
+        source_types = [str(item) for item in (source_types or []) if str(item or "").strip()]
+        if source_types:
+            placeholders = ",".join("?" for _ in source_types)
+            assets = self.ctx.repo.list_where(
+                "assets",
+                f"product_id=? AND probe_status='done' AND has_watermark='yes' AND source_type IN ({placeholders})",
+                (product_id, *source_types),
+            )
+        else:
+            assets = self.ctx.repo.list_where(
+                "assets",
+                "product_id=? AND probe_status='done' AND has_watermark='yes'",
+                (product_id,),
+            )
         results = [self.process_asset(asset["asset_id"]).to_dict() for asset in assets]
         self.ctx.repo.update("content_tasks", "product_id", product_id, {"task_status": "WATERMARK_PROCESSED"})
         return Result.ok({"count": len(results), "results": results})

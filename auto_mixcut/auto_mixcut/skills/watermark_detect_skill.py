@@ -16,8 +16,17 @@ class WatermarkDetectSkill:
     def __init__(self, ctx: SkillContext):
         self.ctx = ctx
 
-    def check_product(self, product_id: str, unknown_policy: str = "review") -> Result:
-        assets = self.ctx.repo.list_where("assets", "product_id=? AND probe_status='done'", (product_id,))
+    def check_product(self, product_id: str, unknown_policy: str = "review", source_types: list[str] | None = None) -> Result:
+        source_types = [str(item) for item in (source_types or []) if str(item or "").strip()]
+        if source_types:
+            placeholders = ",".join("?" for _ in source_types)
+            assets = self.ctx.repo.list_where(
+                "assets",
+                f"product_id=? AND probe_status='done' AND source_type IN ({placeholders})",
+                (product_id, *source_types),
+            )
+        else:
+            assets = self.ctx.repo.list_where("assets", "product_id=? AND probe_status='done'", (product_id,))
         results = [self.check_asset(a["asset_id"], unknown_policy).to_dict() for a in assets]
         self.ctx.repo.update("content_tasks", "product_id", product_id, {"task_status": "WATERMARK_CHECKED"})
         return Result.ok({"count": len(results), "results": results})

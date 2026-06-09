@@ -9,10 +9,13 @@ from typing import Any, Dict, List
 
 
 WORKSPACE = Path("/Users/likeu3/.openclaw/workspace")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(WORKSPACE / "skills" / "script-run-manager-sync"))
 
 from core.bitable import FeishuBitableClient, resolve_wiki_bitable_app_token  # type: ignore  # noqa: E402
 from core.feishu_url_parser import parse_feishu_bitable_url  # type: ignore  # noqa: E402
+from auto_mixcut.adapters.feishu import TABLES as DIRECT_TABLES  # noqa: E402
 
 
 TEXT = {"type": 1, "ui_type": "Text"}
@@ -57,6 +60,20 @@ PRIORITIES = ["low", "normal", "high", "urgent"]
 TASK_TYPES = ["mixcut", "benchmark", "rerender"]
 MATERIAL_TIERS = ["tier_0_not_ready", "tier_1_minimum", "tier_2_standard", "tier_3_full"]
 MATERIAL_STATUS = ["not_ready", "ready", "review_required", "blocked", "failed"]
+AI_SUPPLEMENT_STATUS = ["未触发", "已创建", "已跳过", "已阻塞", "失败"]
+GUARD_STATUS = ["RUNNING", "DONE", "WAITING_AI_RETURN", "READY_TO_CONTINUE", "BLOCKED", "ERROR"]
+GUARD_ACTIONS = [
+    "NONE",
+    "GUARD_PASS_STARTED",
+    "RUN_GUARD_AGAIN",
+    "WAIT_AI_SEGMENT_RETURN",
+    "WAIT_ANCHOR_CONFIRMATION",
+    "NEED_CREATE_TASK_FIELDS",
+    "NEED_MATERIAL_UPLOAD",
+    "NEED_MORE_MATERIAL_OR_AI_SUPPLEMENT",
+    "CHECK_PIPELINE_LOG",
+    "CHECK_ERROR",
+]
 TASK_STATUS = [
     "CREATED",
     "ANCHOR_PENDING",
@@ -72,7 +89,12 @@ TASK_STATUS = [
     "REVIEW_REQUIRED",
     "REVIEW_SKIPPED",
     "READINESS_CHECKED",
+    "AI_SUPPLEMENT_CREATED",
+    "AI_SUPPLEMENT_BLOCKED",
+    "AI_SUPPLEMENT_FAILED",
     "RENDER_PLAN_CREATED",
+    "RENDER_PLAN_SKIPPED_ALLOWED_CAP",
+    "RENDER_PLAN_TIMEOUT",
     "RENDERING",
     "RENDERED",
     "MACHINE_QC_PASSED",
@@ -132,9 +154,20 @@ TABLE_FIELDS: Dict[str, List[Dict[str, Any]]] = {
         {"name": "目标生成数量", **NUMBER},
         {"name": "系统允许生成数量", **NUMBER},
         {"name": "实际生成数量", **NUMBER},
+        {"name": "目标剩余可补成片数", **NUMBER},
+        {"name": "素材池剩余成片容量", **NUMBER},
+        {"name": "首镜剩余容量", **NUMBER},
+        {"name": "当前瓶颈", **TEXT},
+        {"name": "剩余容量说明", **TEXT},
         {"name": "素材等级", **single_select(MATERIAL_TIERS)},
         {"name": "素材状态", **single_select(MATERIAL_STATUS)},
         {"name": "混剪状态", **single_select(TASK_STATUS)},
+        {"name": "守护状态", **single_select(GUARD_STATUS)},
+        {"name": "下一步动作", **single_select(GUARD_ACTIONS)},
+        {"name": "守护异常", **TEXT},
+        {"name": "最近批次ID", **TEXT},
+        {"name": "AI补素材状态", **single_select(AI_SUPPLEMENT_STATUS)},
+        {"name": "AI补素材包数量", **NUMBER},
         {"name": "锚点状态", **single_select(ANCHOR_STATUS)},
         {"name": "素材缺口说明", **TEXT},
         {"name": "失败原因", **TEXT},
@@ -225,7 +258,12 @@ TABLE_FIELDS: Dict[str, List[Dict[str, Any]]] = {
 }
 
 
-def resolve_client(feishu_url: str) -> FeishuBitableClient:
+def resolve_client(feishu_url: str, table_name: str | None = None, direct: bool = False) -> FeishuBitableClient:
+    if direct and table_name:
+        table = DIRECT_TABLES.get(table_name)
+        if not table:
+            raise RuntimeError(f"未配置直连表: {table_name}")
+        return FeishuBitableClient(app_token=table.app_token, table_id=table.table_id)
     info = parse_feishu_bitable_url(feishu_url)
     if not info:
         raise RuntimeError(f"无法解析飞书 URL: {feishu_url}")
@@ -235,8 +273,8 @@ def resolve_client(feishu_url: str) -> FeishuBitableClient:
     return FeishuBitableClient(app_token=app_token, table_id=info.table_id)
 
 
-def ensure_table(table_name: str, feishu_url: str, dry_run: bool = False) -> Dict[str, Any]:
-    client = resolve_client(feishu_url)
+def ensure_table(table_name: str, feishu_url: str, dry_run: bool = False, direct: bool = False) -> Dict[str, Any]:
+    client = resolve_client(feishu_url, table_name=table_name, direct=direct)
     existing = {field.field_name for field in client.list_fields()}
     existing_fields = {field.field_name: field for field in client.list_fields()}
     created: List[str] = []
@@ -312,8 +350,11 @@ def update_field_property(client: FeishuBitableClient, field_id: str, spec: Dict
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--table", choices=sorted(DEFAULT_URLS), help="只检查/补齐指定表")
+    parser.add_argument("--direct", action="store_true", help="使用生产代码里的固定 app_token/table_id，跳过 wiki 解析")
     args = parser.parse_args()
-    results = [ensure_table(name, url, dry_run=args.dry_run) for name, url in DEFAULT_URLS.items()]
+    table_urls = {args.table: DEFAULT_URLS[args.table]} if args.table else DEFAULT_URLS
+    results = [ensure_table(name, url, dry_run=args.dry_run, direct=args.direct) for name, url in table_urls.items()]
     print(json.dumps(results, ensure_ascii=False, indent=2))
     return 1 if any(item["failed"] for item in results) else 0
 

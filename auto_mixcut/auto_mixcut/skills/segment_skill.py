@@ -13,12 +13,21 @@ class SegmentSkill:
     def __init__(self, ctx: SkillContext):
         self.ctx = ctx
 
-    def segment_product(self, product_id: str) -> Result:
-        assets = self.ctx.repo.list_where(
-            "assets",
-            "product_id=? AND probe_status='done' AND has_watermark='no'",
-            (product_id,),
-        )
+    def segment_product(self, product_id: str, source_types: list[str] | None = None) -> Result:
+        source_types = [str(item) for item in (source_types or []) if str(item or "").strip()]
+        if source_types:
+            placeholders = ",".join("?" for _ in source_types)
+            assets = self.ctx.repo.list_where(
+                "assets",
+                f"product_id=? AND probe_status='done' AND has_watermark='no' AND source_type IN ({placeholders})",
+                (product_id, *source_types),
+            )
+        else:
+            assets = self.ctx.repo.list_where(
+                "assets",
+                "product_id=? AND probe_status='done' AND has_watermark='no'",
+                (product_id,),
+            )
         results = [self.segment_asset(a["asset_id"]).to_dict() for a in assets]
         self.ctx.repo.update("content_tasks", "product_id", product_id, {"task_status": "SEGMENTED"})
         return Result.ok({"count": len(results), "results": results})
@@ -32,8 +41,18 @@ class SegmentSkill:
         duration = int(asset.get("duration_ms") or 3000)
         windows = [(0, min(duration, 3000))] if duration <= 5000 or asset["media_type"] == "image" else _windows(duration)
         product = self.ctx.repo.get("products", "product_id", asset["product_id"]) or {}
+        existing = self.ctx.repo.list_where("segments", "asset_id=?", (asset_id,))
+        existing_windows = {
+            (int(seg.get("start_ms") or 0), int(seg.get("end_ms") or 0)): seg.get("segment_id")
+            for seg in existing
+        }
         created = []
+        skipped = []
         for idx, (start, end) in enumerate(windows, start=1):
+            existing_segment_id = existing_windows.get((start, end))
+            if existing_segment_id:
+                skipped.append(existing_segment_id)
+                continue
             segment_id = new_id("SEG")
             local = self.ctx.settings.temp_root / "segments" / asset["product_id"] / f"{segment_id}.mp4"
             local.parent.mkdir(parents=True, exist_ok=True)
@@ -73,12 +92,17 @@ class SegmentSkill:
                 "product_match_status": _default_match(asset),
                 "product_match_confidence": "high" if asset["source_trust_level"] == "high" else "medium",
                 "is_image_generated": int(asset["media_type"] == "image"),
+                "segment_type": asset.get("scene_tag") or "",
+                "prompt_package_id": asset.get("prompt_package_id") or "",
+                "slot_role": asset.get("slot_role") or "",
+                "ai_gen_grade": asset.get("ai_gen_grade") or "",
+                "hook_intent": asset.get("hook_intent") or "",
             }
             write = self.ctx.repo.upsert("segments", "segment_id", seg_row)
             if not write.success:
                 return write
             created.append(segment_id)
-        return Result.ok({"asset_id": asset_id, "segments": created})
+        return Result.ok({"asset_id": asset_id, "segments": created, "skipped_segments": skipped})
 
 
 def _windows(duration_ms: int):

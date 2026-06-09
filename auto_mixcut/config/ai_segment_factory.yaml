@@ -32,10 +32,220 @@ prompt_rules:
       B: "纹理、边缘、结扣、帽檐或编织细节可识别"
       C: "季节生活氛围自然，配饰自然出现"
   category_negative:
-    womens_outerwear: ["全身正脸硬广构图", "外套轮廓变形", "衣长错误", "领口袖口下摆结构错误"]
+    womens_outerwear: ["全身正面导致版型失真", "外套轮廓变形", "衣长错误", "领口袖口下摆结构错误"]
     hair_accessories: ["发饰品类错误", "发饰消失在头发里", "佩戴位置错误"]
     earrings: ["首饰品类错误", "耳饰没有出现在耳侧", "耳饰结构变形"]
     scarves_hats: ["配饰品类错误", "围巾或帽子变形", "季节感错位"]
+
+category_execution_contract:
+  earrings:
+    forbidden_actions: [戴耳环动作, 手指进入耳部, 手触耳饰调整, 撩头发到耳后过程帧, 大幅转头, 剧烈流苏摆动]
+    allowed_segment_types: [product_display, product_still, flatlay, mirror_routine]
+    forbidden_segment_types: [before_go_out, tryon_result]
+    variable_pool_key: earrings
+    forbidden_cross_category_words: [衣摆, 衣形, 领口, 袖, collar, sleeve, coat edge]
+    product_only_wear_effect_tokens: [佩戴, 佩戴效果, 耳垂, 耳侧近景, 侧脸裁切, 随转头, 跟拍]
+    product_only_scene_tokens: [卧室, 床头灯, 镜前, 耳侧近景, 侧脸裁切, 肩部以上]
+  womens_outerwear:
+    allowed_segment_types: [product_display, product_still, flatlay, mirror_routine, before_go_out, tryon_result, detail_atmosphere, home_lifestyle, seasonal_scene, unboxing]
+    forbidden_segment_types: []
+    variable_pool_key: womens_outerwear
+  hair_accessories:
+    allowed_segment_types: [product_display, product_still, flatlay, mirror_routine, tryon_result, detail_atmosphere, home_lifestyle, unboxing]
+    forbidden_segment_types: [before_go_out]
+    variable_pool_key: hair_accessories
+  scarves_hats:
+    allowed_segment_types: [product_display, product_still, flatlay, mirror_routine, before_go_out, tryon_result, detail_atmosphere, home_lifestyle, seasonal_scene, unboxing]
+    forbidden_segment_types: []
+    variable_pool_key: scarves_hats
+  generic_fashion:
+    allowed_segment_types: [product_display, product_still, flatlay, mirror_routine, detail_atmosphere, home_lifestyle, seasonal_scene, unboxing]
+    forbidden_segment_types: []
+    variable_pool_key: generic_fashion
+
+post_assembly_validation:
+  reserved_enum_tokens: [ai_local, ai_full_face, real_preferred, exact_sku, category_generic, A_core, B_scene, usable_core, usable_scene]
+  enum_to_natural_zh:
+    ai_local: "背影或侧面"
+    ai_full_face: "正面出镜"
+  motion_arc_by_segment_type:
+    product_display: small_adjust
+    handheld_product: small_adjust
+    detail_atmosphere: small_adjust
+    mirror_routine: small_adjust
+    home_lifestyle: small_adjust
+    seasonal_scene: small_adjust
+    before_go_out: wearing
+    tryon_result: wearing
+    product_still: small_adjust
+    unboxing: small_adjust
+    flatlay: small_adjust
+  motion_arc_class_tokens:
+    small_adjust: [手扶衣摆, 轻微侧转, 衣形停留, 整理衣领, 整理袖口, 镜前轻转身, 局部移动, 轻微移动, 清楚停留, 稳定停留]
+    wearing: [拿起, 穿上, 披上, 戴上, 扣上, 夹上, 整理肩部, 穿衣动作]
+  motion_arc_defaults:
+    small_adjust: "手扶衣摆，然后轻微侧转，然后衣形停留"
+    wearing: "拿起商品，然后穿上，然后整理肩部"
+  l1_negative_fixed_ordered: [不要切镜, 不要转场, 不要分屏, 不要水印, 不要字幕, 不要文字, 不要竞品logo]
+  category_l1_negative_fixed_ordered:
+    womens_outerwear: [商品变形, 错品类, 前后帧衣服不一致, 全身正面导致版型失真]
+  scene_light_lexicon:
+    indoor:
+      scenes: [玄关, 卧室, 试衣镜前, 居家, 室内, 舒适房间, 衣柜旁, 卧室落地灯旁]
+      lights: [玄关光, 卧室落地灯, 室内暖光, 居家柔光, 试衣镜前柔和顶光, 室内玄关暖光]
+    outdoor:
+      scenes: [街角, 户外, 户外冷风街景, 街边店铺, 窗边, 咖啡店门口, 商场走廊]
+      lights: [街边橱窗光, 户外自然光, 冬日户外冷白光, 咖啡店门口自然侧光]
+    neutral:
+      lights: [傍晚金色光线, 柔和自然光, 自然光]
+      tones: [秋季暖调, 冬季清冷色调, 冷调低饱和, 干净高级灰调, 自然色彩]
+  scene_space_conflict:
+    enforce_at_sampling: true
+    enforce_at_post_assembly: true
+    prefer_keep: fixed_scene_space
+    room_level_dedup: false
+  anti_regression:
+    enabled: true
+    reverted_origin_tokens:
+      - 来源=原创脚本
+      - 人物状态=R3
+      - 轻判断型
+      - 外观锚点=
+      - 发型规则=
+      - 穿搭规则=
+      - 情绪弧线=
+      - outfit_fit_area
+      - mirror_full_body
+    timecode_pattern: "\\d+\\s*-\\s*\\d+\\s*s"
+    garment_in_persona_tokens: [夹克, 外套, 皮质, 拉链, 连衣裙, 大衣, 衬衫, 卫衣, T恤, 裙子, 牛仔]
+  segment_type_fixed_space:
+    mirror_routine: indoor
+    home_lifestyle: indoor
+    before_go_out: indoor
+    tryon_result: indoor
+    seasonal_scene: outdoor
+    product_still: any
+    unboxing: indoor
+    flatlay: indoor
+  product_only_guard:
+    person_tokens: [人物画像, 单beat, 看向, 眼神, 侧头, 半步后退, 微笑, 整理商品]
+    wear_effect_tokens: [佩戴, 佩戴效果, 耳垂, 耳侧近景, 侧脸裁切, 随转头, 跟拍]
+    scene_tokens: [卧室, 床头灯, 镜前, 耳侧近景, 侧脸裁切, 肩部以上]
+  on_fail:
+    enum_leak_no_mapping: error
+    missing_l1_negative: error
+    others: auto_fix_with_warning
+
+scene_space_sampling:
+  enforce_at_sampling: true
+  space_by_segment_type:
+    mirror_routine: indoor
+    home_lifestyle: indoor
+    before_go_out: indoor
+    seasonal_scene: outdoor
+    product_display: any
+    tryon_result: indoor
+    product_still: any
+    unboxing: indoor
+    flatlay: indoor
+  any_resolves_once_per_segment: true
+
+product_still_lexicon:
+  product_still:
+    common: "产品静物特写,稳定构图,干净背景,柔和自然光,无人物,对焦在产品质感与做工"
+    by_category:
+      hair_accessories: "发饰平铺或立式陈列,齿距/材质/光泽清晰,微距质感,无人无手"
+      earrings: "耳饰悬挂或托盘陈列,金属光泽/流苏细节微距,无人无手"
+      scarves_hats: "围巾垂坠展示或帽子立体陈列,面料纹理/编织细节,无人无手"
+      womens_outerwear: "外套挂拍展示完整廓形,衣长/领口/面料垂感清晰,衣架或立体挂展,无人"
+      generic_fashion: "商品立体陈列,材质纹理和关键结构清晰,无人无手"
+  unboxing:
+    common: "开箱过程,只出手部与包装,产品逐渐露出,真实生活感,无面部无身体"
+    by_category:
+      hair_accessories: "拆开小包装取出发饰,指尖展示,无面部"
+      earrings: "打开耳饰盒,取出展示光泽,只出手部,无面部"
+      scarves_hats: "拆快递取出围巾/帽子,展开瞬间,只出手部"
+      womens_outerwear: "拆包装取出外套,抖开展示廓形,只出手部,无面部全身"
+      generic_fashion: "拆开包装取出商品,只出手部,无面部"
+  flatlay:
+    common: "产品平铺俯拍,排布整齐,可带少量搭配小物,无人物,干净台面"
+    by_category:
+      hair_accessories: "多款发饰平铺成组,色系排布,俯拍"
+      earrings: "耳饰成对平铺,配卡片或干花点缀,俯拍"
+      scarves_hats: "围巾折叠平铺配帽子,季节感小物,俯拍"
+      womens_outerwear: "外套平铺配内搭或配饰,展示搭配方案,俯拍"
+      generic_fashion: "商品平铺俯拍,搭配小物克制,关键结构清晰"
+
+product_still_motion:
+  product_still: [缓慢推近, 轻微环绕, 焦点拉移, 静止微距停留]
+  unboxing: [跟随手部拆开, 产品露出推近, 展开瞬间定格]
+  flatlay: [俯拍缓降, 平移扫过排布, 焦点逐件拉移]
+
+product_only_quota:
+  product_only_ratio_cap: 0.40
+  preferred_roles_for_product_only: [detail, hero]
+  forbid_product_only_roles: [result]
+
+persona_pool:
+  participate_in_perturbation: true
+  dimensions:
+    age_band: [少女感, 轻熟, 成熟]
+    gender_by_category:
+      hair_accessories: 女
+      earrings: 女
+      scarves_hats: [女, 中性]
+      womens_outerwear: 女
+      generic_fashion: 女
+    skin_tone: [东南亚自然肤色, 偏白皙, 小麦健康色]
+    hair: [黑长直, 棕色微卷, 短发, 扎发]
+    hair_by_category:
+      hair_accessories: [黑长直, 棕色微卷, 扎发]
+    style: [清新学院, 甜辣, 简约通勤, 居家随性]
+  sea_presets:
+    VN_清新学院: {age_band: 少女感, skin_tone: 东南亚自然肤色, hair: 黑长直, style: 清新学院}
+    TH_甜辣: {age_band: 轻熟, skin_tone: 小麦健康色, hair: 棕色微卷, style: 甜辣}
+    MY_简约通勤: {age_band: 轻熟, skin_tone: 偏白皙, hair: 短发, style: 简约通勤}
+
+performance_beats:
+  beat_by_segment_type:
+    product_display: observe
+    handheld_product: observe
+    detail_atmosphere: observe
+    hero: satisfied
+    tryon_result: satisfied
+    mirror_routine: confirm
+    before_go_out: action
+    home_lifestyle: immersive
+    seasonal_scene: mood
+  beats:
+    observe: {gaze: 看向商品, expression: 专注端详, micro_reaction: 眼神聚焦商品, body_language: 轻微侧头, product_interaction: 自然托起查看}
+    satisfied: {gaze: 可看镜头, expression: 满意微笑, micro_reaction: 眼神变亮轻点头, body_language: 半步后退看整体, product_interaction: 轻整理后确认}
+    confirm: {gaze: 看镜头确认, expression: 自信, micro_reaction: 镜中对视确认, body_language: 满意轻转身, product_interaction: 最后轻调整}
+    action: {gaze: 自然随动作, expression: 自然, micro_reaction: 出门前一瞥, body_language: 利落整理, product_interaction: 戴好或穿好的动机动作}
+    immersive: {gaze: 自然不看镜头, expression: 放松, micro_reaction: 沉浸自然状态, body_language: 居家随性, product_interaction: 不经意自然带到}
+    mood: {gaze: 随氛围, expression: 与场景呼应, micro_reaction: 自然情绪流露, body_language: 配合氛围, product_interaction: 轻触感受}
+  forbidden_performance: [人物动作只是摆拍商品无动机, 全程固定微笑无变化, 动作僵硬像道具, 眼神空洞无交流]
+  remove_legacy_fixed_phrases: [自然看向旁边，避免直视镜头, 自然看向旁边, 避免直视镜头, 手部小幅整理商品]
+
+ai_shot_risk:
+  forbidden_to_negative: true
+  high_risk_to_negative: true
+  face_policy: allow_all
+  clothing_full_upper_body: encourage
+  registry:
+    earrings:
+      forbidden: [戴耳环动作, 手指进入耳部, 手触耳饰调整, 撩头发到耳后过程帧, 大幅转头, 剧烈流苏摆动]
+      high_risk: [只拍近景细节不拍佩戴结果, 关键结构被遮挡, 人物比商品更抢眼]
+    hair_accessories:
+      forbidden: [手头发发饰长时间纠缠同框, 复杂盘发过程, 大幅甩头, 反复调整发饰位置]
+      high_risk: [发饰被头发遮住, 只拍发型不拍发饰结果, 人物动作压过商品]
+    womens_outerwear:
+      forbidden: [长时间只拍局部不拍轮廓, 过度走位致版型看不清, 拍成纯情绪片不给上身结果]
+      high_risk: [缺少至少一个完整上身结果镜, proof没有回答版型或搭配问题, 人物穿搭层级过强压过主商品]
+      positive_encouragement: [保留完整上身结果镜, 半步后退看整体轮廓]
+    scarves_hats:
+      forbidden: [关键佩戴结果被遮挡, 用特效代替proof]
+      high_risk: [配饰被衣领或头发遮住, 人物动作压过商品]
 
 diversity_budget:
   thresholds:

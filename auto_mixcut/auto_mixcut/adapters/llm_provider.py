@@ -98,6 +98,22 @@ class OpenAICodexProvider(LLMProvider):
             latency = int((time.time() - started) * 1000)
             raise
 
+    def call_audio(self, prompt: str, audio_path: str, model: str, max_output_tokens: int = 1500, timeout_ms: int = 120000) -> LLMResponse:
+        started = time.time()
+        try:
+            client = self._get_client()
+            original_model = client.model
+            client.model = model
+            client.timeout = max(timeout_ms // 1000, 30)
+            text = client.call_audio(prompt, audio_path, max_output_tokens=max_output_tokens)
+            client.model = original_model
+            latency = int((time.time() - started) * 1000)
+            parsed = _parse_json_safe(text)
+            return LLMResponse(text=text, parsed=parsed, model=model, provider_name=self.name(), latency_ms=latency)
+        except Exception:
+            latency = int((time.time() - started) * 1000)
+            raise
+
 
 class OpenAICompatibleProvider(LLMProvider):
     def __init__(self, config: Dict[str, Any]):
@@ -129,7 +145,7 @@ class OpenAICompatibleProvider(LLMProvider):
             fmt = "jpeg" if suffix == "jpg" else suffix
             data_url = f"data:image/{fmt};base64,{base64.b64encode(p.read_bytes()).decode()}"
             messages[0]["content"].append({"type": "image_url", "image_url": {"url": data_url}})
-        response = client.chat.completions.create(model=model, messages=messages, max_tokens=max_output_tokens)
+        response = client.chat.completions.create(model=model, messages=messages, max_tokens=max_output_tokens, timeout=timeout_ms / 1000.0)
         latency = int((time.time() - started) * 1000)
         text = response.choices[0].message.content or ""
         usage = {"input": response.usage.prompt_tokens if response.usage else 0, "output": response.usage.completion_tokens if response.usage else 0}

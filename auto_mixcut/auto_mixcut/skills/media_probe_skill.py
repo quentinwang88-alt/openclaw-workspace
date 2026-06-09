@@ -12,12 +12,29 @@ class MediaProbeSkill:
     def __init__(self, ctx: SkillContext):
         self.ctx = ctx
 
-    def probe_product(self, product_id: str) -> Result:
-        assets = self.ctx.repo.list_where("assets", "product_id=? AND probe_status!='done'", (product_id,))
+    def probe_product(self, product_id: str, source_types: list[str] | None = None) -> Result:
+        source_types = [str(item) for item in (source_types or []) if str(item or "").strip()]
+        if source_types:
+            placeholders = ",".join("?" for _ in source_types)
+            assets = self.ctx.repo.list_where(
+                "assets",
+                f"product_id=? AND probe_status!='done' AND source_type IN ({placeholders})",
+                (product_id, *source_types),
+            )
+        else:
+            assets = self.ctx.repo.list_where("assets", "product_id=? AND probe_status!='done'", (product_id,))
         results = []
         for asset in assets:
             res = self.probe_asset(asset["asset_id"])
             results.append(res.to_dict())
+        failed = [item for item in results if not item.get("success")]
+        if failed:
+            self.ctx.repo.update("content_tasks", "product_id", product_id, {"task_status": "PROBE_FAILED", "failure_reason": "asset probe failed"})
+            return Result.fail(
+                "ASSET_PROBE_FAILED",
+                "one or more assets failed media probe",
+                {"product_id": product_id, "count": len(results), "failed_count": len(failed), "results": results},
+            )
         self.ctx.repo.update("content_tasks", "product_id", product_id, {"task_status": "PROBED"})
         return Result.ok({"count": len(results), "results": results})
 

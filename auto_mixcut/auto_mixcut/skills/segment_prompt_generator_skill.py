@@ -18,6 +18,9 @@ SEGMENT_TYPE_CN: Dict[str, str] = {
     "home_lifestyle": "居家生活场景",
     "before_go_out": "出门前场景",
     "seasonal_scene": "季节/场景氛围",
+    "product_still": "纯物静物",
+    "unboxing": "拆包装",
+    "flatlay": "平铺摆拍",
 }
 
 
@@ -43,7 +46,12 @@ class SegmentPromptGeneratorSkill:
         scene = scene_preference or rule.prompt_scene_default
         action = rule.prompt_action_default
         style = style_preference or "真实日常"
-        character = character_requirement or "年轻女性，真实日常风格，可侧脸或不露脸"
+        if segment_type in {"product_still", "flatlay"}:
+            character = character_requirement or "无人物，无人手，只拍产品、包装或陈列"
+        elif segment_type == "unboxing":
+            character = character_requirement or "只允许手部开箱，无面部无身体"
+        else:
+            character = character_requirement or "年轻女性，真实日常风格，可侧脸或不露脸"
         anchor_text = json.dumps(anchor_data, ensure_ascii=False) if anchor_data else ""
 
         use_refinement = not self.ctx.settings.mock_llm and anchor_data and anchor_version.startswith("p1_")

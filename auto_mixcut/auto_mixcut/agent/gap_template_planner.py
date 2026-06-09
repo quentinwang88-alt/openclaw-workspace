@@ -23,7 +23,11 @@ VALID_SEGMENT_TYPES = {
     "home_lifestyle",
     "before_go_out",
     "seasonal_scene",
+    "product_still",
+    "unboxing",
+    "flatlay",
 }
+PRODUCT_ONLY_SEGMENT_TYPES = {"product_still", "unboxing", "flatlay"}
 
 
 @dataclass
@@ -348,7 +352,7 @@ def _load_templates(path: Path) -> list[dict[str, Any]]:
 def _template_slots(template: dict[str, Any], config: PlannerConfig) -> list[dict[str, Any]]:
     slots = template.get("slots")
     if slots:
-        return [dict(slot or {}) for slot in slots]
+        return _apply_product_only_quota([dict(slot or {}) for slot in slots], config, str(template.get("template_id") or ""))
     roles = template.get("roles") or template.get("required_roles") or []
     normalized = []
     for idx, role in enumerate(roles):
@@ -363,7 +367,53 @@ def _template_slots(template: dict[str, Any], config: PlannerConfig) -> list[dic
             "hook_intent": config.get("role_to_hook_intent", role, default="atmosphere"),
             "person_framing": "ai_local" if grade in {"A", "B"} else "real_preferred",
         })
-    return normalized
+    return _apply_product_only_quota(normalized, config, str(template.get("template_id") or ""))
+
+
+def _apply_product_only_quota(slots: list[dict[str, Any]], config: PlannerConfig, template_id: str = "") -> list[dict[str, Any]]:
+    quota = config.get("product_only_quota", default={}) or {}
+    ratio_cap = float(quota.get("product_only_ratio_cap", 0.40) or 0.40)
+    preferred_roles = set(quota.get("preferred_roles_for_product_only") or ["detail", "hero"])
+    forbid_roles = set(quota.get("forbid_product_only_roles") or ["result"])
+    ai_slots_all = [
+        idx for idx, slot in enumerate(slots)
+        if str(slot.get("person_framing") or "ai_local") in {"ai_local", "ai_full_face", "product_only"}
+    ]
+    convertible_slots = [idx for idx in ai_slots_all if str(slots[idx].get("role") or "") not in forbid_roles]
+    if not ai_slots_all or not convertible_slots:
+        return slots
+    max_product_only = int(len(ai_slots_all) * ratio_cap)
+    if max_product_only <= 0:
+        return slots
+    minimum = 1 if len(ai_slots_all) >= 3 else 0
+    existing = [idx for idx in convertible_slots if str(slots[idx].get("person_framing") or "") == "product_only"]
+    target = min(max_product_only, max(minimum, len(existing)))
+    if len(existing) >= target:
+        return slots
+    candidates = [
+        idx for idx in convertible_slots
+        if idx not in existing
+        and str(slots[idx].get("role") or "") in preferred_roles
+    ]
+    if not candidates and minimum:
+        candidates = [idx for idx in convertible_slots if idx not in existing]
+    needed = max(0, target - len(existing))
+    for offset, idx in enumerate(candidates[:needed]):
+        slot = slots[idx]
+        slot["person_framing"] = "product_only"
+        slot["segment_type"] = _product_only_segment_type_for_slot(slot, template_id, offset)
+        slot.setdefault("hook_intent", "material_closeup" if slot.get("role") == "detail" else "product_clarity")
+    return slots
+
+
+def _product_only_segment_type_for_slot(slot: dict[str, Any], template_id: str, offset: int) -> str:
+    role = str(slot.get("role") or "")
+    seed = sum(ord(ch) for ch in f"{template_id}:{role}:{slot.get('hook_intent')}:{offset}")
+    if role == "hero":
+        return ["unboxing", "product_still"][seed % 2]
+    if role == "detail":
+        return ["product_still", "flatlay"][seed % 2]
+    return ["product_still", "flatlay", "unboxing"][seed % 3]
 
 
 def _index_available_assets(product_id: str, assets: list[dict[str, Any]], max_reuse: int) -> dict[tuple[str, str, str], list[dict[str, Any]]]:

@@ -8,6 +8,9 @@ from auto_mixcut.core.result import Result
 from auto_mixcut.core.storage_paths import require_oss_object_path
 
 from .context import SkillContext
+from .bgm_usage_skill import BgmUsageSkill
+from .capacity_counter_skill import CapacityCounterSkill
+from .usage_counter_skill import reconcile_product_segment_usage, refresh_output_segment_usage
 
 
 class FeishuReviewSkill:
@@ -15,6 +18,7 @@ class FeishuReviewSkill:
         self.ctx = ctx
 
     def sync_task(self, product_id: str) -> Result:
+        CapacityCounterSkill(self.ctx).refresh_product(product_id)
         task = self.ctx.repo.list_where("content_tasks", "product_id=? ORDER BY id DESC", (product_id,))
         if not task:
             return Result.fail("TASK_NOT_FOUND", "task not found", {"product_id": product_id})
@@ -31,9 +35,20 @@ class FeishuReviewSkill:
             "目标生成数量": task[0].get("requested_variant_count"),
             "系统允许生成数量": task[0].get("allowed_variant_count"),
             "实际生成数量": task[0].get("actual_variant_count"),
+            "目标剩余可补成片数": task[0].get("target_remaining_variant_count"),
+            "素材池剩余成片容量": task[0].get("material_pool_extra_capacity"),
+            "首镜剩余容量": task[0].get("first_slot_remaining_capacity"),
+            "当前瓶颈": task[0].get("current_bottleneck"),
+            "剩余容量说明": task[0].get("capacity_note"),
             "素材等级": task[0].get("material_tier"),
             "素材状态": task[0].get("material_status"),
             "混剪状态": task[0].get("task_status"),
+            "守护状态": task[0].get("pipeline_status"),
+            "下一步动作": task[0].get("next_action"),
+            "守护异常": task[0].get("last_error"),
+            "最近批次ID": task[0].get("last_batch_id"),
+            "AI补素材状态": task[0].get("ai_supplement_status"),
+            "AI补素材包数量": task[0].get("ai_supplement_package_count"),
             "锚点状态": product.get("anchor_status"),
             "素材缺口说明": task[0].get("blocked_reason"),
             "失败原因": task[0].get("failure_reason"),
@@ -52,9 +67,9 @@ class FeishuReviewSkill:
             "市场": product.get("market"),
             "类目": product.get("category"),
             "AI生成锚点卡": _json_text(anchor),
-            "核心视觉点": "\n".join(anchor.get("core_visual_points") or []),
-            "不可错识别点": "\n".join(anchor.get("must_not_change_points") or []),
-            "禁用错配项": "\n".join(anchor.get("forbidden_mismatch") or []),
+            "核心视觉点": "\n".join(_anchor_texts(anchor.get("core_visual_points")) or _anchor_texts(anchor.get("hard_anchors")) or _anchor_texts(anchor.get("structure_anchors"))),
+            "不可错识别点": "\n".join(_anchor_texts(anchor.get("must_not_change_points")) or _anchor_texts(anchor.get("key_visual_constraints"), ("constraint", "anchor", "text"))),
+            "禁用错配项": "\n".join(_anchor_texts(anchor.get("forbidden_mismatch")) or _anchor_texts(anchor.get("forbidden_actions")) or _anchor_texts(anchor.get("distortion_alerts"))),
             "适用核心镜头": anchor.get("strict_roles"),
             "人工确认状态": "已确认" if product.get("anchor_status") == "confirmed" else "待确认",
             "确认人": product.get("anchor_confirmed_by"),
@@ -133,7 +148,11 @@ class FeishuReviewSkill:
         return Result.ok({"synced_segments": synced})
 
     def sync_output_qc(self, batch_id: str) -> Result:
-        outputs = self.ctx.repo.list_where("outputs", "batch_id=? AND machine_quality_status='passed'", (batch_id,))
+        outputs = self.ctx.repo.list_where(
+            "outputs",
+            "batch_id=? AND machine_quality_status IN ('passed','passed_with_warning','needs_review','publish_ready','draft_only')",
+            (batch_id,),
+        )
         synced = []
         for output in outputs:
             fields = {
@@ -157,13 +176,41 @@ class FeishuReviewSkill:
             synced.append(output["output_id"])
         return Result.ok({"synced_outputs": synced})
 
-    def pull_output_qc(self, batch_id: str | None = None) -> Result:
+    def pull_output_qc(self, batch_id: str | None = None, product_id: str | None = None) -> Result:
         if not self.ctx.settings.feishu_enabled:
             return Result.fail("FEISHU_DISABLED", "set AUTO_MIXCUT_FEISHU_ENABLED=1 to pull output QC")
         client = AutoMixcutFeishuClient("成片质检表")
-        records = client.list_records(limit=500)
         updated = []
         skipped = []
+        if batch_id or product_id:
+            clauses = []
+            params = []
+            if batch_id:
+                clauses.append("batch_id=?")
+                params.append(batch_id)
+            if product_id:
+                clauses.append("product_id=?")
+                params.append(product_id)
+            outputs = self.ctx.repo.list_where("outputs", " AND ".join(clauses), tuple(params))
+            product_ids = {str(output.get("product_id") or "") for output in outputs if output.get("product_id")}
+            for output in outputs:
+                output_id = output.get("output_id")
+                record_id = output.get("feishu_record_id")
+                if not output_id or not record_id:
+                    skipped.append({"output_id": output_id, "error": "missing feishu_record_id"})
+                    continue
+                try:
+                    fields = client.get_record(record_id)
+                except Exception as exc:
+                    skipped.append({"output_id": output_id, "error": str(exc)})
+                    continue
+                _apply_output_qc_status(self.ctx, output_id, fields, updated, skipped, refresh_usage=False)
+            usage_reconciled = [reconcile_product_segment_usage(self.ctx, pid) for pid in sorted(product_ids) if pid]
+            task_sync = [sync_product_task_best_effort(self.ctx, pid) for pid in sorted(product_ids) if pid]
+            return Result.ok({"updated": updated, "skipped": skipped, "usage_reconciled": usage_reconciled, "task_sync": task_sync})
+
+        product_ids = set()
+        records = client.list_records(limit=500)
         for record in records:
             fields = record.fields
             output_id = _cell_text(fields.get("输出ID"))
@@ -174,15 +221,13 @@ class FeishuReviewSkill:
                 continue
             if batch_id and output.get("batch_id") != batch_id:
                 continue
-            human_status = _cell_text(fields.get("人工质检状态")) or "待检查"
-            publishable = _bool_cell(fields.get("是否可发布")) or human_status in {"可发布", "通过", "发布"}
-            status = "passed" if publishable or human_status in {"可发布", "通过", "发布"} else "rejected" if human_status in {"不可发布", "需修改", "驳回"} else "pending"
-            res = self.ctx.repo.update("outputs", "output_id", output_id, {"human_quality_status": status})
-            if res.success:
-                updated.append({"output_id": output_id, "human_quality_status": status, "feishu_status": human_status})
-            else:
-                skipped.append({"output_id": output_id, "error": res.error.message if res.error else "unknown"})
-        return Result.ok({"updated": updated, "skipped": skipped})
+            if product_id and output.get("product_id") != product_id:
+                continue
+            if output.get("product_id"):
+                product_ids.add(str(output.get("product_id")))
+            _apply_output_qc_status(self.ctx, output_id, fields, updated, skipped)
+        task_sync = [sync_product_task_best_effort(self.ctx, pid) for pid in sorted(product_ids) if pid]
+        return Result.ok({"updated": updated, "skipped": skipped, "task_sync": task_sync})
 
     def apply_human_review(self, segment_id: str, overrides: dict, reviewer_id: str = "human") -> Result:
         latest = self.ctx.repo.list_where("segment_tags", "segment_id=? ORDER BY id DESC", (segment_id,))
@@ -199,6 +244,36 @@ class FeishuReviewSkill:
             self.ctx.repo.update("feishu_sync_records", "sync_id", rec["sync_id"], {"cleanup_status": "cleaned"})
         return Result.ok({"cleaned": len(records)})
 
+    def cleanup_output_attachments(self, rejected_grace_days: int = 7, delete_oss: bool = True) -> Result:
+        if not self.ctx.settings.feishu_enabled:
+            return Result.ok({"cleaned": [], "skipped": [], "failed": [], "reason": "feishu_disabled"})
+        now = datetime.utcnow()
+        outputs = self.ctx.repo.list_where("outputs", "feishu_record_id IS NOT NULL AND feishu_record_id!=''", ())
+        client = AutoMixcutFeishuClient("成片质检表")
+        cleaned = []
+        skipped = []
+        failed = []
+        for output in outputs:
+            reason = _output_cleanup_reason(output, now, rejected_grace_days)
+            if not reason:
+                skipped.append({"output_id": output.get("output_id"), "reason": "not_terminal"})
+                continue
+            record_id = output.get("feishu_record_id")
+            try:
+                fields = client.get_record(record_id)
+                if _attachments(fields.get("成片文件")):
+                    client.update_record(record_id, {"成片文件": []})
+                oss_result = _cleanup_output_oss(self.ctx, output) if delete_oss else {"skipped": "delete_oss_disabled"}
+                status = "published_cleaned" if reason == "published" else "rejected_cleaned"
+                self.ctx.repo.update("outputs", "output_id", output["output_id"], {"feishu_preview_status": status})
+                sync_rows = self.ctx.repo.list_where("feishu_sync_records", "object_type='output_qc' AND object_id=?", (output["output_id"],))
+                for sync in sync_rows:
+                    self.ctx.repo.update("feishu_sync_records", "sync_id", sync["sync_id"], {"cleanup_status": "cleaned"})
+                cleaned.append({"output_id": output["output_id"], "reason": reason, "feishu_record_id": record_id, "oss": oss_result})
+            except Exception as exc:
+                failed.append({"output_id": output.get("output_id"), "feishu_record_id": record_id, "error": str(exc)})
+        return Result.ok({"cleaned": cleaned, "skipped": skipped, "failed": failed})
+
     def _sync(self, object_type: str, object_id: str, table: str, days: int, fields: dict | None = None) -> Result:
         sync_id = new_id("FS")
         expire_at = (datetime.utcnow() + timedelta(days=days)).isoformat(timespec="seconds")
@@ -213,10 +288,10 @@ class FeishuReviewSkill:
                 client = AutoMixcutFeishuClient(table)
                 if existing and existing[0].get("feishu_record_id", "").startswith("rec"):
                     feishu_record_id = existing[0]["feishu_record_id"]
-                    client.update_record(feishu_record_id, fields or {})
+                    _safe_update_record(client, feishu_record_id, fields or {})
                     sync_id = existing[0]["sync_id"]
                 else:
-                    feishu_record_id = client.create_record(fields or {})
+                    feishu_record_id = _safe_create_record(client, fields or {})
             except Exception as exc:
                 return Result.fail("FEISHU_SYNC_FAILED", str(exc), {"object_type": object_type, "object_id": object_id, "table": table})
         res = self.ctx.repo.upsert(
@@ -225,6 +300,51 @@ class FeishuReviewSkill:
             {"sync_id": sync_id, "object_type": object_type, "object_id": object_id, "feishu_table": table, "feishu_record_id": feishu_record_id, "sync_status": "synced", "expire_at": expire_at, "cleanup_status": "pending"},
         )
         return res if not res.success else Result.ok({"sync_id": sync_id, "feishu_record_id": feishu_record_id, "expire_at": expire_at})
+
+
+def sync_product_task_best_effort(ctx: SkillContext, product_id: str) -> dict:
+    product_id = str(product_id or "").strip()
+    if not product_id:
+        return {"product_id": product_id, "status": "skipped", "reason": "product_id_missing"}
+    if not ctx.settings.feishu_enabled:
+        return {"product_id": product_id, "status": "skipped", "reason": "feishu_disabled"}
+    try:
+        res = FeishuReviewSkill(ctx).sync_task(product_id)
+    except Exception as exc:
+        return {"product_id": product_id, "status": "failed", "error": str(exc)}
+    if not res.success:
+        return {"product_id": product_id, "status": "failed", "error": res.to_dict()}
+    return {"product_id": product_id, "status": "synced", **(res.data or {})}
+
+
+def _safe_update_record(client: AutoMixcutFeishuClient, record_id: str, fields: dict) -> None:
+    try:
+        client.update_record(record_id, fields)
+    except Exception as exc:
+        if not _is_missing_field_error(exc):
+            raise
+        client.update_record(record_id, _filter_existing_fields(client, fields))
+
+
+def _safe_create_record(client: AutoMixcutFeishuClient, fields: dict) -> str:
+    try:
+        return client.create_record(fields)
+    except Exception as exc:
+        if not _is_missing_field_error(exc):
+            raise
+        return client.create_record(_filter_existing_fields(client, fields))
+
+
+def _filter_existing_fields(client: AutoMixcutFeishuClient, fields: dict) -> dict:
+    if not fields:
+        return {}
+    existing = {field.field_name for field in client.client.list_fields()}
+    return {key: value for key, value in fields.items() if key in existing}
+
+
+def _is_missing_field_error(exc: Exception) -> bool:
+    text = str(exc)
+    return "FieldNameNotFound" in text or "字段" in text and "不存在" in text
 
 
 def _json_text(value: object) -> str:
@@ -258,6 +378,90 @@ def _bool_cell(value: object) -> bool:
         return bool(value)
     text = _cell_text(value).lower()
     return text in {"true", "1", "yes", "是", "可发布", "通过"}
+
+
+def _apply_output_qc_status(ctx: SkillContext, output_id: str, fields: dict, updated: list, skipped: list, refresh_usage: bool = True) -> None:
+    human_status = _cell_text(fields.get("人工质检状态")) or "待检查"
+    publishable = _bool_cell(fields.get("是否可发布")) or human_status in {"可发布", "通过", "发布"}
+    if publishable or human_status in {"可发布", "通过", "发布"}:
+        status = "passed"
+    elif human_status in {"不可发布", "需修改", "驳回", "废弃", "不可用", "不发布", "拒绝"}:
+        status = "rejected"
+    else:
+        status = "pending"
+    res = ctx.repo.update("outputs", "output_id", output_id, {"human_quality_status": status})
+    if res.success:
+        BgmUsageSkill(ctx).record_output_feedback(output_id, _bgm_human_feedback_status(status), f"feishu:{human_status}")
+        if refresh_usage:
+            refresh_output_segment_usage(ctx, output_id)
+        updated.append({"output_id": output_id, "human_quality_status": status, "feishu_status": human_status})
+    else:
+        skipped.append({"output_id": output_id, "error": res.error.message if res.error else "unknown"})
+
+
+def _output_cleanup_reason(output: dict, now: datetime | None = None, rejected_grace_days: int = 0) -> str:
+    if output.get("published_at"):
+        return "published"
+    if str(output.get("human_quality_status") or "") != "rejected":
+        return ""
+    if rejected_grace_days <= 0:
+        return "rejected"
+    now = now or datetime.utcnow()
+    reference = _parse_dt(output.get("updated_at")) or _parse_dt(output.get("created_at"))
+    if reference and now - reference >= timedelta(days=rejected_grace_days):
+        return "rejected"
+    return ""
+
+
+def _bgm_human_feedback_status(human_quality_status: str) -> str:
+    if human_quality_status == "passed":
+        return "human_passed"
+    if human_quality_status == "rejected":
+        return "human_rejected"
+    return "human_pending"
+
+
+def _parse_dt(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00").replace("+00:00", ""))
+    except ValueError:
+        return None
+
+
+def _attachments(value: object) -> list[dict]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict) and item.get("file_token")]
+    if isinstance(value, dict) and value.get("file_token"):
+        return [value]
+    return []
+
+
+def _cleanup_output_oss(ctx: SkillContext, output: dict) -> dict:
+    object_ids = [output.get("output_oss_object_id"), output.get("bgm_output_oss_object_id")]
+    cleaned = []
+    skipped = []
+    failed = []
+    for object_id in [str(item or "") for item in object_ids if item]:
+        obj = ctx.repo.get("oss_objects", "object_id", object_id)
+        if not obj:
+            skipped.append({"object_id": object_id, "reason": "oss_object_missing"})
+            continue
+        if obj.get("storage_status") == "deleted":
+            skipped.append({"object_id": object_id, "reason": "already_deleted"})
+            continue
+        delete = getattr(ctx.oss, "delete", None)
+        if not callable(delete):
+            failed.append({"object_id": object_id, "reason": "oss_delete_unavailable"})
+            continue
+        result = delete(obj["object_key"])
+        if result.success:
+            ctx.repo.update("oss_objects", "object_id", object_id, {"storage_status": "deleted"})
+            cleaned.append({"object_id": object_id, "object_key": obj.get("object_key")})
+        else:
+            failed.append({"object_id": object_id, "error": result.error.message if result.error else "unknown"})
+    return {"cleaned": cleaned, "skipped": skipped, "failed": failed}
 
 
 def _merge_manual_anchor(ctx: SkillContext, product_id: str, manual_text: str) -> dict:
@@ -330,3 +534,40 @@ def _get_bitable_client():
 def _latest_output(ctx: SkillContext, product_id: str) -> dict | None:
     rows = ctx.repo.list_where("outputs", "product_id=? ORDER BY id DESC", (product_id,))
     return rows[0] if rows else None
+
+
+def _anchor_texts(value, keys=("anchor", "constraint", "text")) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        result = []
+        for item in value:
+            if isinstance(item, dict):
+                for key in keys:
+                    text = str(item.get(key) or "").strip()
+                    if text:
+                        result.append(text)
+                        break
+            else:
+                text = str(item or "").strip()
+                if text:
+                    result.append(text)
+        return _dedupe(result)
+    if isinstance(value, dict):
+        for key in keys:
+            text = str(value.get(key) or "").strip()
+            if text:
+                return [text]
+    text = str(value or "").strip()
+    return [text] if text else []
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen = set()
+    result = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+    return result

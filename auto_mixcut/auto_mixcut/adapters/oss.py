@@ -4,6 +4,7 @@ import hashlib
 import mimetypes
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Any, Dict
 
@@ -62,6 +63,14 @@ class LocalOSS:
             return f"{base_url}/{object_key}?expires={expires_seconds}"
         return f"file://{self.root / object_key}?expires={expires_seconds}"
 
+    def delete(self, object_key: str) -> Result:
+        try:
+            path = self.root / object_key
+            path.unlink(missing_ok=True)
+            return Result.ok({"object_key": object_key, "storage_status": "deleted"})
+        except Exception as exc:
+            return Result.fail("OSS_DELETE_FAILED", str(exc), {"object_key": object_key})
+
 
 class AliyunOSS:
     def __init__(
@@ -99,6 +108,19 @@ class AliyunOSS:
         self._bucket = oss2.Bucket(auth, endpoint, bucket)
 
     def upload(self, source: Path, object_key: str) -> Result:
+        last_exc: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                return self._upload_once(source, object_key)
+            except Exception as exc:
+                last_exc = exc
+                if not _is_retryable_oss_error(exc) or attempt >= 3:
+                    break
+                time.sleep(0.5 * attempt)
+        exc = last_exc or RuntimeError("unknown upload error")
+        return Result.fail("OSS_UPLOAD_FAILED", str(exc), {"source": str(source), "object_key": object_key, "provider": "aliyun", "retry_attempts": 3})
+
+    def _upload_once(self, source: Path, object_key: str) -> Result:
         try:
             source_size = source.stat().st_size
             source_hash = file_sha256(source)
@@ -130,7 +152,7 @@ class AliyunOSS:
             }
             return Result.ok(meta)
         except Exception as exc:
-            return Result.fail("OSS_UPLOAD_FAILED", str(exc), {"source": str(source), "object_key": object_key, "provider": "aliyun"})
+            raise exc
 
     def download(self, object_key: str, dest: Path) -> Result:
         try:
@@ -148,6 +170,13 @@ class AliyunOSS:
             params["response-content-disposition"] = f'inline; filename="{_ascii_header_filename(Path(object_key).name)}"'
         return self._bucket.sign_url("GET", object_key, expires_seconds, params=params, slash_safe=True)
 
+    def delete(self, object_key: str) -> Result:
+        try:
+            self._bucket.delete_object(object_key)
+            return Result.ok({"object_key": object_key, "storage_status": "deleted", "provider": "aliyun"})
+        except Exception as exc:
+            return Result.fail("OSS_DELETE_FAILED", str(exc), {"object_key": object_key, "provider": "aliyun"})
+
 
 def build_oss(settings: Any):
     if settings.oss_provider == "local":
@@ -162,6 +191,26 @@ def build_oss(settings: Any):
             public_base_url=settings.aliyun_public_base_url,
         )
     raise RuntimeError(f"unknown AUTO_MIXCUT_OSS_PROVIDER: {settings.oss_provider}")
+
+
+def _is_retryable_oss_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    if any(token in text for token in ["accessdenied", "forbidden", "invalidaccesskeyid", "signaturedoesnotmatch", "status': 403", "status=403"]):
+        return False
+    return any(
+        token in text
+        for token in [
+            "ssleoferror",
+            "eof occurred",
+            "connection reset",
+            "connection aborted",
+            "read timed out",
+            "connect timeout",
+            "max retries exceeded",
+            "temporarily unavailable",
+            "service unavailable",
+        ]
+    )
 
 
 def file_sha256(path: Path) -> str:

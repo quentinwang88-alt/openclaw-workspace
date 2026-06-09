@@ -172,6 +172,10 @@ def import_record(
         "human_review_status": "pending",
         "source_identity": prompt_id,
         "scene_tag": str(package.get("segment_type") or ""),
+        "prompt_package_id": prompt_id,
+        "slot_role": str(package.get("slot_role") or ""),
+        "ai_gen_grade": str(package.get("ai_gen_grade") or ""),
+        "hook_intent": str(package.get("hook_intent") or ""),
         "generation_type": "image_to_video",
         "generation_model": "jimeng",
         "generation_prompt": prompt_text,
@@ -200,6 +204,10 @@ def import_record(
         "product_match_review_required": 1,
         "is_image_generated": 0,
         "segment_type": str(package.get("segment_type") or ""),
+        "prompt_package_id": prompt_id,
+        "slot_role": str(package.get("slot_role") or ""),
+        "ai_gen_grade": str(package.get("ai_gen_grade") or ""),
+        "hook_intent": str(package.get("hook_intent") or ""),
     }
     segment_write = ctx.repo.upsert("segments", "segment_id", segment_row)
     if not segment_write.success:
@@ -211,6 +219,7 @@ def import_record(
         record_id,
         {
             FIELD_PREVIEW_URL: url_cell(preview_url, "OSS预览"),
+            FIELD_ATTACHMENT: [],
             FIELD_RESULT: f"已导入素材池 asset={asset_id} segment={segment_id}",
             FIELD_STATUS: "质检中",
         },
@@ -245,6 +254,7 @@ def maybe_backfill_feishu(ctx: Any, client: FeishuBitableClient, record_id: str,
     }
     if preview_url:
         fields[FIELD_PREVIEW_URL] = url_cell(preview_url, "OSS预览")
+        fields[FIELD_ATTACHMENT] = []
     client.update_record_fields(record_id, fields)
 
 

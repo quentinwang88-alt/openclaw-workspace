@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from auto_mixcut.core.ids import new_id
@@ -15,7 +17,20 @@ class FrameSampleSkill:
 
     def sample_product(self, product_id: str, force: bool = False) -> Result:
         segments = self.ctx.repo.list_where("segments", "product_id=? AND segment_status IN ('created','qc_passed','qc_failed')", (product_id,))
-        results = [self.sample_segment(s["segment_id"], force=force).to_dict() for s in segments]
+        max_workers = _frame_concurrency()
+        if max_workers <= 1 or len(segments) <= 1:
+            results = [self.sample_segment(s["segment_id"], force=force).to_dict() for s in segments]
+        else:
+            results_by_id = {}
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {pool.submit(self.sample_segment, s["segment_id"], force): s["segment_id"] for s in segments}
+                for future in as_completed(futures):
+                    segment_id = futures[future]
+                    try:
+                        results_by_id[segment_id] = future.result().to_dict()
+                    except Exception as exc:
+                        results_by_id[segment_id] = Result.fail("FRAME_SAMPLE_EXCEPTION", str(exc), {"segment_id": segment_id, "exception_type": type(exc).__name__}).to_dict()
+            results = [results_by_id[s["segment_id"]] for s in segments]
         self.ctx.repo.update("content_tasks", "product_id", product_id, {"task_status": "FRAMES_SAMPLED"})
         return Result.ok({"count": len(results), "results": results})
 
@@ -64,3 +79,10 @@ class FrameSampleSkill:
 
 def _segment_path(ctx: SkillContext, segment: dict) -> Path | None:
     return require_oss_object_path(ctx, segment.get("segment_oss_object_id"), "frames_source")
+
+
+def _frame_concurrency() -> int:
+    try:
+        return max(1, min(8, int(os.environ.get("AUTO_MIXCUT_FRAME_CONCURRENCY", "3") or "3")))
+    except ValueError:
+        return 3

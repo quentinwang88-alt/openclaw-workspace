@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 
 from auto_mixcut.core.ids import new_id
 from auto_mixcut.core.result import Result
+from auto_mixcut.core.storage_paths import resolve_oss_object_path
 
 from .context import SkillContext
 
@@ -22,6 +24,9 @@ class SegmentFingerprintSkill:
         segments = self.ctx.repo.list_where("segments", where, params)
         results = []
         for segment in segments:
+            if segment.get("visual_phash"):
+                results.append({"segment_id": segment["segment_id"], "phash": segment["visual_phash"], "frame_count": 0, "skipped": True, "reason": "fingerprint_exists"})
+                continue
             res = self.fingerprint_segment(segment["segment_id"])
             if not res.success:
                 return res
@@ -32,13 +37,15 @@ class SegmentFingerprintSkill:
         segment = self.ctx.repo.get("segments", "segment_id", segment_id)
         if not segment:
             return Result.fail("SEGMENT_NOT_FOUND", "segment not found", {"segment_id": segment_id})
+        if segment.get("visual_phash"):
+            return Result.ok({"segment_id": segment_id, "phash": segment["visual_phash"], "frame_count": 0, "skipped": True, "reason": "fingerprint_exists"})
         frame_rows = self.ctx.repo.list_where("segment_frames", "segment_id=? ORDER BY frame_index", (segment_id,))
         frame_bytes = []
         for row in frame_rows:
-            obj = self.ctx.repo.get("oss_objects", "object_id", row.get("oss_object_id"))
-            if not obj:
+            resolved = resolve_oss_object_path(self.ctx, row.get("oss_object_id"), "fingerprint_frame")
+            if not resolved.success:
                 continue
-            path = self.ctx.settings.oss_root / obj["object_key"]
+            path = Path(resolved.data["path"])
             if path.exists():
                 frame_bytes.append(path.read_bytes())
         if not frame_bytes:

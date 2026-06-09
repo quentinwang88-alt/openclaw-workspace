@@ -25,10 +25,12 @@ class CleanupSkill:
             else:
                 shutil.rmtree(self.ctx.settings.temp_root)
             cleaned_local = True
-        feishu = FeishuReviewSkill(self.ctx).cleanup_expired_previews()
+        feishu_review = FeishuReviewSkill(self.ctx)
+        feishu = feishu_review.cleanup_expired_previews()
+        output_files = feishu_review.cleanup_output_attachments()
         if task_id:
             self.ctx.repo.update("content_tasks", "task_id", task_id, {"task_status": "CLEANED"})
-        return Result.ok({"local_temp_cleaned": cleaned_local, "pruned_upload_backups": pruned_upload_backups, "feishu": feishu.to_dict()})
+        return Result.ok({"local_temp_cleaned": cleaned_local, "pruned_upload_backups": pruned_upload_backups, "feishu": feishu.to_dict(), "output_files": output_files.to_dict()})
 
 
 def _prune_old_upload_backups(root: Path, keep_days: int) -> int:

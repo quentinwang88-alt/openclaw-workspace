@@ -178,18 +178,22 @@ class BgmLibrarySkill:
         scored.sort(key=lambda x: x[0], reverse=True)
 
         top = []
-        for score, track in scored[:5]:
+        for score, track in scored[:12]:
+            mix_suggestions = _audio_mix_suggestions(track)
             top.append({
                 "bgm_id": track.get("bgm_id"),
                 "track_name": track.get("track_name"),
                 "mood_tags": _parse_json_safe(track.get("mood_tags_json"), []),
                 "energy_level": track.get("energy_level", "medium"),
                 "score": score,
-                "recommended_start_sec": track.get("recommended_start_sec", 0),
-                "default_volume": track.get("default_volume", 0.2),
-                "fade_in_ms": track.get("fade_in_ms", 500),
-                "fade_out_ms": track.get("fade_out_ms", 800),
+                "usage_count": int(track.get("usage_count") or 0),
+                "degrade_mode": "observe",
+                "recommended_start_sec": mix_suggestions.get("recommended_start_sec", track.get("recommended_start_sec", 0)),
+                "default_volume": mix_suggestions.get("default_volume", track.get("default_volume", 0.2)),
+                "fade_in_ms": mix_suggestions.get("fade_in_ms", track.get("fade_in_ms", 500)),
+                "fade_out_ms": mix_suggestions.get("fade_out_ms", track.get("fade_out_ms", 800)),
                 "oss_object_id": track.get("oss_object_id"),
+                "local_file_path": track.get("local_file_path"),
             })
 
         return Result.ok({"recommendations": top})
@@ -228,7 +232,7 @@ class BgmLibrarySkill:
             "template_tags": [],
             "recommended_start_sec": 12,
             "default_volume": 0.2,
-            "fade_in_ms": 500,
+            "fade_in_ms": 180,
             "fade_out_ms": 800,
             "suitable_for_intro": True,
             "loop_friendly": False,
@@ -261,6 +265,46 @@ class BgmLibrarySkill:
         confidence = track.get("tag_confidence", "medium")
         if confidence == "low":
             score *= 0.5
+
+        energy_level = str(track.get("energy_level") or "")
+        if energy_level == "high":
+            score += 0.25
+        elif energy_level == "medium":
+            score += 0.1
+        elif energy_level == "low":
+            score -= 0.15
+
+        analysis = _parse_json_safe(track.get("audio_analysis_json"), {})
+        features = analysis.get("features") if isinstance(analysis, dict) else {}
+        suggestions = analysis.get("mix_suggestions") if isinstance(analysis, dict) else {}
+        if isinstance(features, dict):
+            energy_score = _safe_float(features.get("energy_score"), 0)
+            beat_confidence = _safe_float(features.get("beat_confidence"), 0)
+            brightness = _safe_float(features.get("brightness_score"), 0)
+            bpm = _safe_float(features.get("estimated_bpm"), 0)
+            score += min(max(energy_score, 0), 1) * 0.45
+            score += min(max(beat_confidence, 0), 1) * 0.25
+            score += min(max(brightness, 0), 1) * 0.18
+            if 105 <= bpm <= 145:
+                score += 0.25
+            elif 95 <= bpm < 105:
+                score += 0.1
+            elif 0 < bpm < 90:
+                score -= 0.2
+        if isinstance(suggestions, dict):
+            if suggestions.get("suitable_for_intro") is True:
+                score += 0.2
+            start = _safe_float(suggestions.get("recommended_start_sec"), -1)
+            if 4 <= start <= 30:
+                score += 0.12
+            elif start == 0:
+                score -= 0.08
+
+        rejected = int(track.get("rejected_usage_count") or 0)
+        usage = max(int(track.get("usage_count") or 0), rejected)
+        if rejected >= 2 and usage:
+            rejection_ratio = rejected / max(usage, 1)
+            score -= min(0.45, 0.12 + rejection_ratio * 0.35)
 
         return score
 
@@ -304,3 +348,18 @@ def _parse_json_safe(value, default=None):
         except (json.JSONDecodeError, TypeError):
             return default
     return default
+
+
+def _audio_mix_suggestions(track: dict) -> dict:
+    analysis = _parse_json_safe(track.get("audio_analysis_json"), {})
+    if not isinstance(analysis, dict):
+        return {}
+    suggestions = analysis.get("mix_suggestions") or {}
+    return suggestions if isinstance(suggestions, dict) else {}
+
+
+def _safe_float(value, default=0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)

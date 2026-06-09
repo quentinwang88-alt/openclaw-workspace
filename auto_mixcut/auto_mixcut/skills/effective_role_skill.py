@@ -7,6 +7,7 @@ from auto_mixcut.core.result import Result
 
 from .ai_segment_factory_config import AISegmentFactoryConfig, get_config
 from .context import SkillContext
+from .hard_subtitle_policy import is_repairable_bottom_caption, is_unusable_hard_subtitle
 
 
 class EffectiveRoleSkill:
@@ -14,11 +15,11 @@ class EffectiveRoleSkill:
         self.ctx = ctx
         self.config = config or get_config()
 
-    def compute_product(self, product_id: str) -> Result:
-        segments = self.ctx.repo.list_where("segments", "product_id=?", (product_id,))
+    def compute_product(self, product_id: str, source_types: list[str] | None = None) -> Result:
+        segments = _segments_for_source_types(self.ctx, product_id, source_types)
         results = [self.compute_segment(s["segment_id"]).to_dict() for s in segments]
         self.ctx.repo.update("content_tasks", "product_id", product_id, {"task_status": "EFFECTIVE_ROLES_COMPUTED"})
-        return Result.ok({"count": len(results), "results": results})
+        return Result.ok({"count": len(results), "results": results, "source_types": source_types or []})
 
     def compute_segment(self, segment_id: str) -> Result:
         segment = self.ctx.repo.get("segments", "segment_id", segment_id)
@@ -39,33 +40,78 @@ def _latest_tag(ctx: SkillContext, segment_id: str) -> Dict[str, Any]:
     return rows[0] if rows else {}
 
 
+def _segments_for_source_types(ctx: SkillContext, product_id: str, source_types: list[str] | None = None) -> list[dict]:
+    if not source_types:
+        return ctx.repo.list_where("segments", "product_id=?", (product_id,))
+    placeholders = ",".join("?" for _ in source_types)
+    return ctx.repo.list_where(
+        "segments",
+        f"product_id=? AND source_type IN ({placeholders})",
+        (product_id, *source_types),
+    )
+
+
 def _compute_roles(segment: Dict[str, Any], asset: Dict[str, Any], tag: Dict[str, Any], config: AISegmentFactoryConfig) -> tuple[List[str], str]:
 
     if asset.get("has_watermark") == "yes":
         return [], "has watermark"
+    if is_unusable_hard_subtitle(tag):
+        return [], "hard subtitle unusable"
 
     if segment.get("source_type") == "ai_generated":
+        if str(segment.get("anchor_match_level") or "") == "fail":
+            return [], "ai anchor fail"
         if tag.get("risk_level") == "high":
-            if _is_soft_local_subtitle_issue(tag):
-                return _soft_local_subtitle_roles(tag), "soft local-language subtitle issue"
+            if is_repairable_bottom_caption(tag):
+                return _subtitle_repair_roles(tag), "repairable bottom subtitle: crop before render"
             return [], "high risk"
         if tag.get("mixcut_usability") == "no":
             return [], "not usable"
         if tag.get("mixcut_usability") == "needs_processing":
-            if _is_soft_local_subtitle_issue(tag):
-                return _soft_local_subtitle_roles(tag), "soft local-language subtitle issue"
+            if is_repairable_bottom_caption(tag):
+                return _subtitle_repair_roles(tag), "repairable bottom subtitle: crop before render"
             return [], "needs processing before render"
         return _ai_roles(segment, tag, config)
 
+    trusted_exact = _is_trusted_exact_sku_source(segment, asset)
+    clear_product = _tag_has_clear_product(tag)
+    low_trust_exact = _is_low_trust_exact_sku_source(segment, asset)
+    if _has_hard_product_mismatch(tag):
+        return [], "medium/high risk"
+    if trusted_exact and clear_product:
+        if tag.get("risk_level") == "high":
+            if is_repairable_bottom_caption(tag):
+                return _subtitle_repair_roles(tag), "repairable bottom subtitle: crop before render"
+            return [], "high risk"
+        if tag.get("mixcut_usability") == "no":
+            return [], "not usable"
+        if tag.get("mixcut_usability") == "needs_processing":
+            if is_repairable_bottom_caption(tag):
+                return _subtitle_repair_roles(tag), "repairable bottom subtitle: crop before render"
+            if _is_soft_anchor_uncertainty_issue(tag):
+                allow_hero = segment.get("source_trust_level") == "high"
+                return _trusted_source_roles(tag, allow_hero=allow_hero), "trusted exact_sku source with soft anchor uncertainty"
+            return [], "needs processing before render"
+        if tag.get("risk_level") == "medium" and _is_soft_anchor_uncertainty_issue(tag):
+            return _trusted_source_roles(tag, allow_hero=True), "trusted exact_sku source with medium soft anchor risk"
+
+    if low_trust_exact and clear_product and tag.get("risk_level") in {"low", "medium"}:
+        if _is_low_trust_core_review_candidate(tag):
+            return _trusted_source_roles(tag, allow_hero=_allow_low_trust_hero(tag)), "low trust exact_sku core role allowed for review"
+        if tag.get("mixcut_usability") == "yes" and _is_soft_anchor_uncertainty_issue(tag):
+            return _trusted_source_roles(tag, allow_hero=_allow_low_trust_hero(tag)), "low trust exact_sku source with soft anchor uncertainty"
+        if tag.get("mixcut_usability") == "needs_processing" and is_repairable_bottom_caption(tag):
+            return _subtitle_repair_roles(tag), "low trust exact_sku repairable bottom subtitle: crop before render"
+
     if tag.get("risk_level") in {"medium", "high"}:
-        if _is_soft_local_subtitle_issue(tag):
-            return _soft_local_subtitle_roles(tag), "soft local-language subtitle issue"
+        if is_repairable_bottom_caption(tag):
+            return _subtitle_repair_roles(tag), "repairable bottom subtitle: crop before render"
         return [], "medium/high risk"
     if tag.get("mixcut_usability") == "no":
-        return [], "not usable"
+        return ["scene", "ending"], "declared unusable but retained as scene/ending"
     if tag.get("mixcut_usability") == "needs_processing":
-        if _is_soft_local_subtitle_issue(tag):
-            return _soft_local_subtitle_roles(tag), "soft local-language subtitle issue"
+        if is_repairable_bottom_caption(tag):
+            return _subtitle_repair_roles(tag), "repairable bottom subtitle: crop before render"
         return [], "needs processing before render"
 
     if segment.get("source_type") == "ai_generated" and segment.get("frame_consistency_status") not in {None, "pass"}:
@@ -88,19 +134,23 @@ def _compute_roles(segment: Dict[str, Any], asset: Dict[str, Any], tag: Dict[str
 
 def _ai_roles(segment: Dict[str, Any], tag: Dict[str, Any], config: AISegmentFactoryConfig) -> tuple[List[str], str]:
     segment_type = str(segment.get("segment_type") or "")
-    rule = config.get_segment_type_rule(segment_type)
     anchor_level = str(segment.get("anchor_match_level") or "")
 
     if anchor_level == "fail":
         return [], "ai anchor fail"
 
     if anchor_level == "uncertain":
+        rule = config.get_segment_type_rule(segment_type)
         return [r for r in rule.possible_roles if r in {"scene", "ending"}] or ["scene", "ending"], "ai anchor uncertain: scene/ending only"
 
     if anchor_level == "soft_pass":
+        rule = config.get_segment_type_rule(segment_type)
         return [r for r in rule.possible_roles if r in {"scene", "ending"}] or ["scene", "ending"], "ai anchor soft_pass: scene/ending only"
 
     if anchor_level == "strict_pass":
+        if not segment_type:
+            return _ai_roles_for_missing_segment_type(segment, tag)
+        rule = config.get_segment_type_rule(segment_type)
         consistency = str(segment.get("frame_consistency_status") or "")
         risk_level = str(tag.get("risk_level") or "medium")
         visibility = str(tag.get("product_visibility") or "medium")
@@ -109,13 +159,14 @@ def _ai_roles(segment: Dict[str, Any], tag: Dict[str, Any], config: AISegmentFac
         if getattr(rule, "require_frame_consistency", False) and consistency not in {None, "pass"}:
             return [r for r in rule.possible_roles if r in {"scene", "ending"}] or ["scene", "ending"], "strict_pass but frame consistency not pass"
 
-        if risk_level not in {"low"}:
-            return [r for r in rule.possible_roles if r in {"scene", "ending"}] or ["scene", "ending"], "strict_pass but risk not low"
-
         if usability != "yes":
             return [r for r in rule.possible_roles if r in {"scene", "ending"}] or ["scene", "ending"], "strict_pass but not mixcut usable"
 
-        if rule.core_allowed in {True, "yes"} and visibility in {"high", "medium"}:
+        confidence = str(tag.get("confidence") or "low")
+        if risk_level not in {"low", "medium"} or visibility not in {"high", "medium"} or confidence not in {"high", "medium"}:
+            return [r for r in rule.possible_roles if r in {"scene", "ending"}] or ["scene", "ending"], "strict_pass but core confidence insufficient"
+
+        if rule.core_allowed in {True, "yes"}:
             primary = tag.get("primary_shot_role")
             secondary = tag.get("secondary_roles_json") or []
             roles = set()
@@ -132,23 +183,122 @@ def _ai_roles(segment: Dict[str, Any], tag: Dict[str, Any], config: AISegmentFac
     if segment.get("frame_consistency_status") not in {None, "pass"}:
         return ["scene", "ending"], "ai generated consistency not pass"
 
+    rule = config.get_segment_type_rule(segment_type)
     return [r for r in rule.possible_roles if r in {"scene", "ending"}] or ["scene", "ending"], "ai default fallback"
 
 
+def _ai_roles_for_missing_segment_type(segment: Dict[str, Any], tag: Dict[str, Any]) -> tuple[List[str], str]:
+    consistency = str(segment.get("frame_consistency_status") or "")
+    risk_level = str(tag.get("risk_level") or "medium")
+    visibility = str(tag.get("product_visibility") or "medium")
+    usability = str(tag.get("mixcut_usability") or "no")
+    confidence = str(tag.get("confidence") or "low")
 
-def _is_soft_local_subtitle_issue(tag) -> bool:
-    reason = str(tag.get("reason") or "")
-    if not any(token in reason for token in ["字幕", "越南语", "当地语言", "底部文字"]):
-        return False
-    hard_tokens = ["水印", "平台", "账号", "logo", "Logo", "错款", "SKU一致性", "漂移", "无关元素", "品牌包", "遮挡严重"]
-    return not any(token in reason for token in hard_tokens)
+    if consistency not in {None, "pass"}:
+        return ["scene", "ending"], "strict_pass missing segment_type but frame consistency not pass"
+    if usability != "yes":
+        return ["scene", "ending"], "strict_pass missing segment_type but not mixcut usable"
+    if risk_level not in {"low", "medium"} or visibility not in {"high", "medium"} or confidence not in {"high", "medium"}:
+        return ["scene", "ending"], "strict_pass missing segment_type but core confidence insufficient"
+
+    roles = {"scene", "ending"}
+    primary = tag.get("primary_shot_role")
+    secondary = tag.get("secondary_roles_json") or []
+    for role in [primary, *secondary]:
+        if role in {"hero", "detail", "result", "scene", "ending"}:
+            roles.add(role)
+    return sorted(roles), "ai strict_pass missing segment_type; roles inferred from vision tag"
 
 
-def _soft_local_subtitle_roles(tag) -> list[str]:
+
+def _subtitle_repair_roles(tag) -> list[str]:
     roles = {"scene", "ending"}
     primary = tag.get("primary_shot_role")
     secondary = tag.get("secondary_roles_json") or []
     for role in [primary, *secondary]:
         if role in {"detail", "result", "scene", "ending"}:
+            roles.add(role)
+    return sorted(roles)
+
+
+def _is_trusted_exact_sku_source(segment: Dict[str, Any], asset: Dict[str, Any]) -> bool:
+    source_type = str(segment.get("source_type") or asset.get("source_type") or "")
+    trust = str(segment.get("source_trust_level") or asset.get("source_trust_level") or "")
+    binding = str(segment.get("product_binding_type") or asset.get("product_binding_type") or "")
+    match = str(segment.get("product_match_status") or "")
+    return (
+        source_type in {"authorized_creator", "self_shot", "original_script", "creator_original"}
+        and trust in {"high", "medium"}
+        and binding == "exact_sku"
+        and match in {"trusted_by_source", "anchor_pass"}
+    )
+
+
+def _is_low_trust_exact_sku_source(segment: Dict[str, Any], asset: Dict[str, Any]) -> bool:
+    source_type = str(segment.get("source_type") or asset.get("source_type") or "")
+    trust = str(segment.get("source_trust_level") or asset.get("source_trust_level") or "")
+    binding = str(segment.get("product_binding_type") or asset.get("product_binding_type") or "")
+    match = str(segment.get("product_match_status") or "")
+    return (
+        source_type in {"douyin_repost", "competitor"}
+        and trust == "low"
+        and binding == "exact_sku"
+        and match in {"uncertain", "trusted_by_source", "anchor_pass"}
+    )
+
+
+def _tag_has_clear_product(tag: Dict[str, Any]) -> bool:
+    return (
+        str(tag.get("product_visibility") or "") in {"high", "medium"}
+        and str(tag.get("confidence") or "") in {"high", "medium"}
+    )
+
+
+def _is_soft_anchor_uncertainty_issue(tag: Dict[str, Any]) -> bool:
+    reason = str(tag.get("reason") or "")
+    soft_tokens = ["锚点未知", "锚点不确定", "锚点缺失", "商品锚点", "商品信息缺失", "需核对", "需复核", "需确认", "人工确认", "人工核实"]
+    if not any(token in reason for token in soft_tokens):
+        return False
+    hard_tokens = ["水印", "平台", "账号", "logo", "Logo", "错款", "错品类", "竞品", "SKU一致性", "漂移", "无关元素", "品牌包", "遮挡严重"]
+    return not any(token in reason for token in hard_tokens)
+
+
+def _has_hard_product_mismatch(tag: Dict[str, Any]) -> bool:
+    reason = str(tag.get("reason") or "")
+    hard_tokens = ["错款", "错品类", "SKU一致性", "漂移", "无关元素", "品牌包"]
+    return any(token in reason for token in hard_tokens)
+
+
+def _allow_low_trust_hero(tag: Dict[str, Any]) -> bool:
+    return (
+        str(tag.get("primary_shot_role") or "") == "hero"
+        and str(tag.get("product_visibility") or "") == "high"
+        and str(tag.get("confidence") or "") == "high"
+        and str(tag.get("mixcut_usability") or "") == "yes"
+    )
+
+
+def _is_low_trust_core_review_candidate(tag: Dict[str, Any]) -> bool:
+    if str(tag.get("product_visibility") or "") != "high":
+        return False
+    if str(tag.get("confidence") or "") != "high":
+        return False
+    if str(tag.get("risk_level") or "") not in {"low", "medium"}:
+        return False
+    if str(tag.get("mixcut_usability") or "") not in {"yes", "needs_processing"}:
+        return False
+    if str(tag.get("text_overlay_risk") or "none") in {"foreign_language_caption", "platform_ui_or_watermark", "large_obstructive_text"}:
+        return False
+    roles = {tag.get("primary_shot_role"), *(tag.get("secondary_roles_json") or [])}
+    return bool(roles.intersection({"hero", "detail", "result"}))
+
+
+def _trusted_source_roles(tag: Dict[str, Any], allow_hero: bool = True) -> list[str]:
+    roles = {"scene", "ending"}
+    allowed = {"hero", "detail", "result", "scene", "ending"} if allow_hero else {"detail", "result", "scene", "ending"}
+    primary = tag.get("primary_shot_role")
+    secondary = tag.get("secondary_roles_json") or []
+    for role in [primary, *secondary]:
+        if role in allowed:
             roles.add(role)
     return sorted(roles)

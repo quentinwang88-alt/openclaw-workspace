@@ -26,7 +26,7 @@ class BgmTaggingSkill:
 
     def tag_track_row(self, track: dict, force: bool = False) -> Result:
         bgm_id = track.get("bgm_id", "")
-        current_version = "bgm_tagging_v1.0"
+        current_version = "bgm_tagging_v1.2_gpt55"
 
         if not force and self._should_skip(track, current_version):
             return Result.ok({
@@ -144,6 +144,7 @@ class BgmTaggingSkill:
             "official_tags": official_tags if isinstance(official_tags, list) else [],
             "license_note": track.get("license_note", ""),
             "existing_human_tags": existing_human if isinstance(existing_human, dict) else {},
+            "audio_analysis": _parse_json_safe(track.get("audio_analysis_json"), {}) or {},
             "allowed_labels": BGM_ALLOWED_LABELS,
         }
 
@@ -222,7 +223,7 @@ class BgmTaggingSkill:
             "bgm_tag_reason": f"LLM fallback: {call_result.error.message if call_result.error else 'unknown'}",
             "bgm_tag_status": "fallback",
             "bgm_tagged_at": datetime.utcnow().isoformat(timespec="seconds"),
-            "bgm_tag_prompt_version": "bgm_tagging_v1.0",
+            "bgm_tag_prompt_version": "bgm_tagging_v1.2_gpt55",
         }
 
         has_human = any([

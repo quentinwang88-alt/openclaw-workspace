@@ -55,7 +55,7 @@ class LLMRouterSkill:
             return Result.fail("UNKNOWN_TIER", f"no tier config for: {tier_name}", {"tier": tier_name})
 
         prompt_version = payload.get("prompt_version", "v1.0")
-        input_hash = _compute_input_hash(call_type, payload, product_id, segment_id, asset_id, tier_name, prompt_version, self.ctx)
+        input_hash = _compute_input_hash(call_type, payload, product_id, segment_id, asset_id, tier, tier_name, prompt_version, self.ctx)
 
         if self.ctx.settings.mock_llm:
             return self._execute_mock(call_type, payload, tier, tier_name, prompt_version, input_hash, product_id, segment_id, asset_id, output_id, task_id)
@@ -77,7 +77,7 @@ class LLMRouterSkill:
         image_paths = _frame_paths(self.ctx, segment_id, max_count=9) if segment_id else payload.get("image_paths") or []
 
         audio_path = ""
-        if self._is_audio_call(call_type):
+        if self._is_audio_call(call_type) and tier.get("audio_input", True) is not False:
             audio_path = payload.get("audio_path") or _find_audio_path(self.ctx, asset_id)
 
         provider_name = tier.get("primary_provider", "mock")
@@ -86,11 +86,12 @@ class LLMRouterSkill:
 
         route_policy = self._resolve_route_policy(call_type, tier_name)
 
-        def exec_fn(tier_cfg: dict, tier_label: str, escalated_from: str = "") -> Tuple[Optional[Dict[str, Any]], str, int, int]:
-            model = tier_cfg.get("model_name", "unknown")
-            provider = self._get_provider(provider_name)
+        def exec_fn(tier_cfg: dict, tier_label: str, provider_label: str = "", model_name: str = "", escalated_from: str = "") -> Tuple[Optional[Dict[str, Any]], str, int, int, str]:
+            model = model_name or tier_cfg.get("model_name", "unknown")
+            selected_provider = provider_label or tier_cfg.get("primary_provider") or provider_name
+            provider = self._get_provider(selected_provider)
             if self._is_mock_provider(provider):
-                return _mock_response(call_type, payload), "mock", 0, 0
+                return _mock_response(call_type, payload), "mock", 0, 0, selected_provider
 
             max_retries = int(tier_cfg.get("max_retries", 2))
             retry_delays = tier_cfg.get("retry_delays_ms", [5000, 20000])
@@ -118,22 +119,32 @@ class LLMRouterSkill:
                                                        max_output_tokens=max_tokens, timeout_ms=timeout)
                         latency = int((time.time() - started) * 1000)
                         if resp.parsed is not None:
-                            return resp.parsed, model, attempt, latency
+                            return resp.parsed, model, attempt, latency, selected_provider
                         if resp.text:
-                            return {"text": resp.text}, model, attempt, latency
+                            return {"text": resp.text}, model, attempt, latency, selected_provider
                         if attempt < max_retries:
                             time.sleep(retry_delays[min(attempt, len(retry_delays) - 1)] / 1000.0)
                             continue
-                        return None, model, attempt, latency
+                        return None, model, attempt, latency, selected_provider
                     except Exception as exc:
                         latency = int((time.time() - started) * 1000)
                         if not _is_retryable(exc) or attempt >= max_retries:
-                            return None, model, attempt, latency
+                            return None, model, attempt, latency, selected_provider
                         delay = retry_delays[min(attempt, len(retry_delays) - 1)] / 1000.0
                         time.sleep(delay)
-            return None, model, max_retries, 0
+            return None, model, max_retries, 0, selected_provider
 
-        response, model_used, retry_count, latency_ms = exec_fn(tier, tier_name)
+        response, model_used, retry_count, latency_ms, provider_used = exec_fn(tier, tier_name, provider_name)
+        if response is None and fallback_name and tier.get("fallback_model"):
+            fallback_tier = {**tier, "model_name": tier.get("fallback_model")}
+            response, model_used, retry_count2, latency_ms2, provider_used = exec_fn(
+                fallback_tier,
+                tier_name,
+                fallback_name,
+                str(tier.get("fallback_model") or ""),
+            )
+            retry_count += retry_count2
+            latency_ms += latency_ms2
 
         escalation_count = 0
         escalated_from = ""
@@ -142,11 +153,20 @@ class LLMRouterSkill:
             if escalated:
                 escalation_count = 1
                 escalated_from = tier_name
-                response, model_used, retry_count2, latency_ms2 = exec_fn(escalated, escalation_tier, escalated_from=tier_name)
+                response, model_used, retry_count2, latency_ms2, provider_used = exec_fn(escalated, escalation_tier, escalated.get("primary_provider", ""), escalated_from=tier_name)
                 retry_count += retry_count2
                 latency_ms += latency_ms2
+                if response is None and escalated.get("fallback_provider") and escalated.get("fallback_model"):
+                    response, model_used, retry_count3, latency_ms3, provider_used = exec_fn(
+                        {**escalated, "model_name": escalated.get("fallback_model")},
+                        escalation_tier,
+                        escalated.get("fallback_provider", ""),
+                        str(escalated.get("fallback_model") or ""),
+                        escalated_from=tier_name,
+                    )
+                    retry_count += retry_count3
+                    latency_ms += latency_ms3
                 tier_name = escalation_tier
-                model_used = escalated.get("model_name", model_used)
 
         if response is None:
             self._write_log(
@@ -157,7 +177,7 @@ class LLMRouterSkill:
                 output_id=output_id, task_id=task_id, retry_count=retry_count,
                 escalation_count=escalation_count, escalated_from=escalated_from,
                 image_count=len(image_paths), latency_ms=latency_ms,
-                route_policy=route_policy, provider=provider_name,
+                route_policy=route_policy, provider=provider_used,
             )
             return Result.fail("LLM_CALL_EXHAUSTED", "all retries and escalations exhausted", {
                 "call_type": call_type, "tier": tier_name, "retry_count": retry_count,
@@ -165,7 +185,8 @@ class LLMRouterSkill:
             })
 
         response = self._normalize_response(call_type, response, payload)
-        self._write_cache(input_hash, call_type, response, payload, product_id, segment_id, asset_id, tier)
+        if provider_used == provider_name and model_used == tier.get("model_name"):
+            self._write_cache(input_hash, call_type, response, payload, product_id, segment_id, asset_id, tier)
         self._write_log(
             call_id=new_id("LLM"), call_type=call_type, tier=tier,
             model_name=model_used, prompt_version=prompt_version, input_hash=input_hash,
@@ -173,11 +194,11 @@ class LLMRouterSkill:
             asset_id=asset_id, output_id=output_id, task_id=task_id,
             retry_count=retry_count, escalation_count=escalation_count,
             escalated_from=escalated_from, image_count=len(image_paths),
-            latency_ms=latency_ms, route_policy=route_policy, provider=provider_name,
+            latency_ms=latency_ms, route_policy=route_policy, provider=provider_used,
         )
 
         return Result.ok({
-            "route": {"model_tier": tier_name, "model_name": model_used, "provider": provider_name, "route_policy": route_policy},
+            "route": {"model_tier": tier_name, "model_name": model_used, "provider": provider_used, "route_policy": route_policy},
             "response": response,
             "cache_hit": False,
             "meta": {"call_id": "OK", "call_type": call_type, "model_tier": tier_name, "model_name": model_used, "prompt_version": prompt_version, "retry_count": retry_count, "latency_ms": latency_ms, "escalation_count": escalation_count},
@@ -211,6 +232,7 @@ class LLMRouterSkill:
     def _resolve_route_policy(self, call_type: str, tier_name: str) -> str:
         tier_to_policy = {
             "cheap_text": "cheap_text",
+            "audio_model": "audio_model",
             "medium_vision": "medium_vision",
             "high_vision": "high_vision",
         }
@@ -465,7 +487,7 @@ def _default_config() -> Dict[str, Any]:
     }
 
 
-def _compute_input_hash(call_type: str, payload: Dict[str, Any], product_id: str, segment_id: str, asset_id: str, tier_name: str, prompt_version: str, ctx: SkillContext) -> str:
+def _compute_input_hash(call_type: str, payload: Dict[str, Any], product_id: str, segment_id: str, asset_id: str, tier: Dict[str, Any], tier_name: str, prompt_version: str, ctx: SkillContext) -> str:
     material = {
         "call_type": call_type,
         "payload": payload,
@@ -473,6 +495,8 @@ def _compute_input_hash(call_type: str, payload: Dict[str, Any], product_id: str
         "segment_id": segment_id,
         "asset_id": asset_id,
         "model_tier": tier_name,
+        "primary_provider": tier.get("primary_provider", ""),
+        "model_name": tier.get("model_name", ""),
         "prompt_version": prompt_version,
         "frame_hashes": _frame_hashes(ctx, segment_id),
         "image_path_hashes": _image_path_hashes(payload.get("image_paths") or []),
