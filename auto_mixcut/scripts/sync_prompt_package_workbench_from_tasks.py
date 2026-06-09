@@ -423,7 +423,7 @@ def _gap_slots(gap_text: str, category: str, count: int, max_packages_per_produc
         if "detail" in lower or "细节" in gap_text:
             planned.append(("detail_atmosphere", "B", "detail", "material_closeup"))
         if "scene" in lower or "场景" in gap_text:
-            planned.append(("home_lifestyle", "C", "scene", "atmosphere"))
+            planned.append(_slot_plan_for_role("scene", category))
     if "usable" in lower or "可用" in gap_text or "多样性" in gap_text or not planned:
         planned.extend(_default_slot_plan(category))
 
@@ -515,9 +515,20 @@ def _slot_plans_for_role(role: str, category: str) -> List[tuple[str, str, str, 
             ("flatlay", "B", "detail", "material_closeup"),
         ]
     if role == "ending":
+        if category == "earrings":
+            return [
+                ("flatlay", "C", "ending", "atmosphere"),
+                ("product_still", "C", "ending", "atmosphere"),
+            ]
         return [
             ("home_lifestyle", "C", "ending", "atmosphere"),
             ("seasonal_scene", "C", "ending", "atmosphere"),
+        ]
+    if category == "earrings":
+        return [
+            ("flatlay", "C", "scene", "atmosphere"),
+            ("product_still", "C", "scene", "atmosphere"),
+            ("mirror_routine", "C", "scene", "atmosphere"),
         ]
     return [
         ("home_lifestyle", "C", "scene", "atmosphere"),

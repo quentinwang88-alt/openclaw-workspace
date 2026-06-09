@@ -7,6 +7,7 @@ from typing import Any
 
 from auto_mixcut.core.result import Result
 
+from .capacity_counter_skill import CapacityCounterSkill
 from .context import SkillContext
 from .feishu_review_skill import FeishuReviewSkill
 
@@ -19,11 +20,14 @@ class AISupplementWorkbenchSkill:
         task = _latest_task(self.ctx, product_id)
         if not task:
             return Result.fail("TASK_NOT_FOUND", "task not found", {"product_id": product_id})
-        gap_text = str(gap_text or task.get("blocked_reason") or "")
+        gap_text = _resolve_gap_text(self.ctx, task, gap_text)
         if "AI补素材" not in gap_text:
             data = {"product_id": product_id, "skipped": True, "reason": "no_ai_supplement_gap"}
             _update_task_ai_supplement(self.ctx, task, "skipped", 0, data)
             return Result.ok(data)
+        if gap_text != str(task.get("blocked_reason") or ""):
+            self.ctx.repo.update("content_tasks", "task_id", task["task_id"], {"blocked_reason": gap_text})
+            task = _latest_task(self.ctx, product_id) or task
         if not self.ctx.settings.feishu_enabled:
             data = {"product_id": product_id, "skipped": True, "reason": "feishu_disabled"}
             _update_task_ai_supplement(self.ctx, task, "blocked", 0, data)
@@ -107,6 +111,49 @@ def _update_task_ai_supplement(ctx: SkillContext, task: dict, status: str, packa
         patch["next_action"] = "NEED_MORE_MATERIAL_OR_AI_SUPPLEMENT" if status == "blocked" else "CHECK_ERROR"
         patch["last_error"] = (detail or {}).get("error") or status
     ctx.repo.update("content_tasks", "task_id", task_id, patch)
+
+
+def _resolve_gap_text(ctx: SkillContext, task: dict, explicit_gap_text: str = "") -> str:
+    gap_text = str(explicit_gap_text or task.get("blocked_reason") or "")
+    if "AI补素材" in gap_text or "ai补素材" in gap_text.lower():
+        return gap_text
+    inferred = _infer_capacity_gap_text(ctx, task)
+    return inferred or gap_text
+
+
+def _infer_capacity_gap_text(ctx: SkillContext, task: dict) -> str:
+    product_id = str(task.get("product_id") or "")
+    if product_id:
+        refreshed = CapacityCounterSkill(ctx).refresh_product(product_id)
+        if refreshed.success:
+            task = _latest_task(ctx, product_id) or task
+
+    target = int(task.get("requested_variant_count") or task.get("allowed_variant_count") or 0)
+    actual = int(task.get("actual_variant_count") or 0)
+    remaining = int(task.get("target_remaining_variant_count") or max(0, target - actual) or 0)
+    extra_capacity = int(task.get("material_pool_extra_capacity") or 0)
+    shortfall = max(0, remaining - extra_capacity)
+    if shortfall <= 0:
+        return ""
+
+    need = min(max(shortfall, 1), 6)
+    bottleneck = str(task.get("current_bottleneck") or task.get("capacity_note") or "")
+    first_slot_remaining = int(task.get("first_slot_remaining_capacity") or 0)
+    if "首镜" in bottleneck or first_slot_remaining <= 0:
+        return f"AI补素材: hero首镜{min(max(need, 1), 6)}"
+
+    hero = max(1, min(2, need))
+    detail = max(1, min(2, need - 1)) if need >= 2 else 0
+    result = 1 if need >= 3 else 0
+    scene = 1 if need >= 4 else 0
+    parts = [f"hero首镜{hero}"]
+    if detail:
+        parts.append(f"detail细节{detail}")
+    if result:
+        parts.append(f"result上身{result}")
+    if scene:
+        parts.append(f"scene场景{scene}")
+    return "AI补素材: " + "; ".join(parts)
 
 
 def _supplement_state_summary(gap_text: str, created: list, skipped: list, failed: list) -> dict[str, Any]:

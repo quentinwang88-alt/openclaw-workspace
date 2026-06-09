@@ -24,7 +24,7 @@ from auto_mixcut.skills.usage_counter_skill import refresh_segment_usage
 from auto_mixcut.skills.feishu_review_skill import _output_cleanup_reason
 from auto_mixcut.skills.final_video_qc_skill import _normalize_final_qc_response
 from auto_mixcut.skills.pipeline_run_skill import PipelineRunSkill
-from auto_mixcut.skills.ai_supplement_workbench_skill import _supplement_state_summary
+from auto_mixcut.skills.ai_supplement_workbench_skill import _infer_capacity_gap_text, _supplement_state_summary
 from scripts.run_mixcut_guard import _ensure_anchor_confirmed, _stale_repair_source_types, _stale_segment_summary, run_guard_pass
 from scripts.run_mixcut_guard_loop import _dynamic_round_timeout, _parse_guard_stdout, _status_action_from_result
 from auto_mixcut.cli import _cap_round_count, _create_render_plans_with_timeout, _skip_final_video_qc, _top_up_snapshot
@@ -320,6 +320,23 @@ class AIFactoryStrategyTest(unittest.TestCase):
             self.assertFalse(_skip_final_video_qc())
         finally:
             _restore_env("AUTO_MIXCUT_SKIP_FINAL_VIDEO_QC", old_value)
+
+    def test_ai_supplement_infers_gap_from_capacity_shortfall(self):
+        gap_text = _infer_capacity_gap_text(
+            self.ctx,
+            {
+                "requested_variant_count": 30,
+                "actual_variant_count": 10,
+                "target_remaining_variant_count": 20,
+                "material_pool_extra_capacity": 10,
+                "first_slot_remaining_capacity": 28,
+                "current_bottleneck": "已进入复用模式",
+            },
+        )
+
+        self.assertIn("AI补素材", gap_text)
+        self.assertIn("hero首镜", gap_text)
+        self.assertIn("detail细节", gap_text)
 
     def test_probe_product_fails_when_any_asset_probe_fails(self):
         product_id = "PROD_PROBE_FAIL"
