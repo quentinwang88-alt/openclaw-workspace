@@ -33,10 +33,12 @@ class ReadinessCheckSkill:
             for role in counts:
                 if role in roles:
                     counts[role] += 1
-        tier, max_variants, gaps = _tier(counts, total_usable)
+        tier, baseline_variants, gaps = _tier(counts, total_usable)
         product = self.ctx.repo.get("products", "product_id", product_id) or {}
         diversity = _diversity_capacity(self.ctx, product, segments)
-        role_allowed = min(requested or max_variants, max_variants)
+        role_allowed = int(requested or baseline_variants or 0)
+        if baseline_variants <= 0:
+            role_allowed = 0
         recommended = min(role_allowed, diversity["recommended_capacity"])
         no_ai_max = min(role_allowed, diversity["no_ai_max_capacity"])
         plan_estimate = _calibrate_render_plan_capacity(self.ctx, product_id, segments, no_ai_max)
@@ -63,9 +65,8 @@ class ReadinessCheckSkill:
             )
             gaps.append(_render_plan_ai_supplement_message(diversity, plan_shortfall))
         material_status = "ready" if allowed > 0 else "not_ready"
-        self.ctx.repo.update(
-            "content_tasks",
-            "product_id",
+        write = _update_latest_task(
+            self.ctx,
             product_id,
             _readiness_task_patch(
                 tier=tier,
@@ -76,6 +77,8 @@ class ReadinessCheckSkill:
                 current_bottleneck=_current_bottleneck(diversity, gaps),
             ),
         )
+        if not write.success:
+            return write
         task_sync = sync_product_task_best_effort(self.ctx, product_id)
         return Result.ok({
             "product_id": product_id,
@@ -86,6 +89,7 @@ class ReadinessCheckSkill:
             "recommended_variant_count": recommended,
             "no_ai_max_variant_count": no_ai_max,
             "role_allowed_variant_count": role_allowed,
+            "baseline_variant_count": baseline_variants,
             "counts": counts,
             "total_usable": total_usable,
             "diversity_capacity": diversity,
@@ -113,6 +117,13 @@ def _readiness_task_patch(tier: str, material_status: str, allowed: int, gaps: l
 def _task(ctx: SkillContext, product_id: str):
     tasks = ctx.repo.list_where("content_tasks", "product_id=? ORDER BY id DESC", (product_id,))
     return tasks[0] if tasks else None
+
+
+def _update_latest_task(ctx: SkillContext, product_id: str, patch: dict) -> Result:
+    task = _task(ctx, product_id)
+    if not task:
+        return Result.fail("TASK_NOT_FOUND", "task not found", {"product_id": product_id})
+    return ctx.repo.update("content_tasks", "task_id", task["task_id"], patch)
 
 
 def _tier(counts, total):

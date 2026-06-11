@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Dict, List, Optional
 
 from auto_mixcut.core.result import Result
@@ -72,6 +73,8 @@ class AIAnchorCheckSkill:
         )
         if local_forbidden:
             match_level, reason, core_roles, soft_roles = "fail", local_forbidden, [], []
+        elif _use_local_ai_anchor_fallback(segment, asset, tag, local_level):
+            match_level, reason, core_roles, soft_roles = _local_ai_anchor_fallback(local_level, local_reason, tag, segment, asset)
         elif _is_prompt_package_exact_sku_core_candidate(tag, segment, asset) and local_level == "strict_pass":
             match_level, reason, core_roles, soft_roles = (
                 local_level,
@@ -222,6 +225,71 @@ def _is_prompt_package_exact_sku_core_candidate(tag: Dict[str, Any], segment: Di
         and str(tag.get("confidence") or "") in {"high", "medium"}
         and str(segment.get("frame_consistency_status") or "") in {"", "pass"}
     )
+
+
+def _use_local_ai_anchor_fallback(segment: Dict[str, Any], asset: Dict[str, Any], tag: Dict[str, Any], local_level: str) -> bool:
+    if os.environ.get("AUTO_MIXCUT_AI_ANCHOR_LOCAL_FALLBACK", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    source_type = str(segment.get("source_type") or asset.get("source_type") or "")
+    binding = str(segment.get("product_binding_type") or asset.get("product_binding_type") or "")
+    has_prompt_package = bool(segment.get("prompt_package_id") or asset.get("prompt_package_id"))
+    reliable_exact = (
+        str(tag.get("mixcut_usability") or "") in {"yes", "needs_processing"}
+        and str(tag.get("risk_level") or "") in {"low", "medium"}
+        and str(tag.get("product_visibility") or "") in {"high", "medium"}
+        and str(tag.get("confidence") or "") in {"high", "medium"}
+    )
+    if source_type != "ai_generated" or binding != "exact_sku" or not (has_prompt_package or reliable_exact):
+        return False
+    if local_level == "fail":
+        return False
+    if str(tag.get("mixcut_usability") or "") not in {"yes", "needs_processing"}:
+        return False
+    if str(tag.get("risk_level") or "") == "high":
+        return False
+    if str(tag.get("product_visibility") or "") not in {"high", "medium"}:
+        return False
+    if str(tag.get("confidence") or "") not in {"high", "medium"}:
+        return False
+    primary = str(tag.get("primary_shot_role") or "")
+    secondary = {str(role) for role in (tag.get("secondary_roles_json") or [])}
+    return bool({primary, *secondary}.intersection(ALLOWED_ROLES))
+
+
+def _local_ai_anchor_fallback(
+    local_level: str,
+    local_reason: str,
+    tag: Dict[str, Any],
+    segment: Dict[str, Any],
+    asset: Dict[str, Any],
+) -> tuple[str, str, list[str], list[str]]:
+    roles = _tag_roles(tag)
+    segment_type = str(segment.get("segment_type") or asset.get("scene_tag") or "")
+    slot_role = str(segment.get("slot_role") or asset.get("slot_role") or "")
+    consistency = str(segment.get("frame_consistency_status") or "")
+    core_roles = sorted(roles.intersection(CORE_ROLES))
+    soft_roles = sorted(roles.intersection(SOFT_ROLES)) or list(SOFT_ROLES)
+    core_type = segment_type in {"product_display", "tryon_result", "product_still", "unboxing", "flatlay"}
+    core_slot = slot_role in {"hero", "detail", "result"}
+    if local_level == "strict_pass" or (core_roles and core_type and core_slot and consistency in {"", "pass"}):
+        return (
+            "strict_pass",
+            f"AI生成 exact_sku Prompt Package，本地标签/参考图兜底放行: {local_reason}",
+            core_roles or list(CORE_ROLES),
+            soft_roles,
+        )
+    return (
+        "soft_pass",
+        f"AI生成 exact_sku Prompt Package，本地标签/参考图兜底为场景位: {local_reason}",
+        [],
+        soft_roles,
+    )
+
+
+def _tag_roles(tag: Dict[str, Any]) -> set[str]:
+    roles = {str(tag.get("primary_shot_role") or "")}
+    roles.update(str(role) for role in (tag.get("secondary_roles_json") or []))
+    return {role for role in roles if role in ALLOWED_ROLES}
 
 
 COLOR_TOKENS = [

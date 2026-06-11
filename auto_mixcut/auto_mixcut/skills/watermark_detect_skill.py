@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 from datetime import datetime
+import os
 from pathlib import Path
 
 from auto_mixcut.core.result import Result
@@ -27,14 +28,35 @@ class WatermarkDetectSkill:
             )
         else:
             assets = self.ctx.repo.list_where("assets", "product_id=? AND probe_status='done'", (product_id,))
-        results = [self.check_asset(a["asset_id"], unknown_policy).to_dict() for a in assets]
+        pending = [a for a in assets if str(a.get("has_watermark") or "pending") in {"", "pending", "unknown"}]
+        already_checked = len(assets) - len(pending)
+        limit = _watermark_check_limit()
+        selected = pending[:limit] if limit > 0 else pending
+        results = [self.check_asset(a["asset_id"], unknown_policy).to_dict() for a in selected]
+        remaining_pending = max(0, len(pending) - len(selected))
         self.ctx.repo.update("content_tasks", "product_id", product_id, {"task_status": "WATERMARK_CHECKED"})
-        return Result.ok({"count": len(results), "results": results})
+        return Result.ok({
+            "count": len(results),
+            "asset_count": len(assets),
+            "already_checked_count": already_checked,
+            "pending_before_count": len(pending),
+            "remaining_pending_count": remaining_pending,
+            "limit": limit,
+            "results": results,
+        })
 
     def check_asset(self, asset_id: str, unknown_policy: str = "review") -> Result:
         asset = self.ctx.repo.get("assets", "asset_id", asset_id)
         if not asset:
             return Result.fail("ASSET_NOT_FOUND", "asset not found", {"asset_id": asset_id})
+        if str(asset.get("has_watermark") or "pending") not in {"", "pending", "unknown"}:
+            return Result.ok({
+                "asset_id": asset_id,
+                "skipped": True,
+                "reason": "watermark_already_checked",
+                "has_watermark": asset.get("has_watermark"),
+                "asset_status": asset.get("asset_status"),
+            })
 
         must_check = asset["source_type"] in LOW_TRUST_SOURCES or asset["source_trust_level"] == "low"
         if not must_check:
@@ -121,6 +143,13 @@ class WatermarkDetectSkill:
 
 def _now() -> str:
     return datetime.utcnow().isoformat(timespec="seconds")
+
+
+def _watermark_check_limit() -> int:
+    try:
+        return max(0, int(os.environ.get("AUTO_MIXCUT_WATERMARK_CHECK_LIMIT", "12") or "12"))
+    except ValueError:
+        return 12
 
 
 def _to_enum(value: str, allowed: list[str]) -> str:

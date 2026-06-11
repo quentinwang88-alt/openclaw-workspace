@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
-WORKSPACE = Path("/Users/likeu3/.openclaw/workspace")
+import os as _os
+WORKSPACE = Path(_os.environ.get("AUTO_MIXCUT_WORKSPACE", "/Users/likeu3/.openclaw/workspace"))
 BITABLE_PATH = WORKSPACE / "skills" / "script-run-manager-sync"
 if str(BITABLE_PATH) not in sys.path:
     sys.path.insert(0, str(BITABLE_PATH))

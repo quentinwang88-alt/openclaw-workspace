@@ -121,6 +121,9 @@ def _ensure_runtime_compatibility_columns(ctx: SkillContext) -> Result:
             "hook_intent": "TEXT",
         },
         "segment_tags": {"text_overlay_risk": "TEXT", "text_language": "TEXT", "text_overlay_reason": "TEXT"},
+        "render_plans": {
+            "output_id": "TEXT",
+        },
         "outputs": {
             "bgm_output_oss_object_id": "TEXT",
             "human_feedback_reason": "TEXT",
@@ -469,6 +472,7 @@ def _ensure_mysql_core_tables(ctx: SkillContext) -> Result:
           render_plan_id VARCHAR(128) NOT NULL UNIQUE,
           batch_id VARCHAR(128),
           product_id VARCHAR(128),
+          output_id VARCHAR(128),
           variant_no INT,
           template_id VARCHAR(128),
           planned_duration_ms INT,
@@ -645,6 +649,9 @@ def _ensure_mysql_runtime_compatibility_columns(ctx: SkillContext) -> Result:
             "hook_intent": "VARCHAR(128)",
         },
         "segment_tags": {"text_overlay_risk": "VARCHAR(64)", "text_language": "VARCHAR(64)", "text_overlay_reason": "TEXT"},
+        "render_plans": {
+            "output_id": "VARCHAR(128)",
+        },
         "outputs": {
             "bgm_output_oss_object_id": "VARCHAR(128)",
             "human_feedback_reason": "TEXT",

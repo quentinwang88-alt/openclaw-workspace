@@ -220,6 +220,7 @@ def _top_up(ctx, product_id, count, max_rounds=2):
     rounds = []
     batch_ids = []
     stop_reason = ""
+    deferred_ai_supplement_gaps = []
     for round_no in range(1, max_rounds + 1):
         before = _top_up_snapshot(ctx, product_id, count, refresh_capacity=False)
         if before.get("error"):
@@ -230,12 +231,31 @@ def _top_up(ctx, product_id, count, max_rounds=2):
         before = _top_up_snapshot(ctx, product_id, count, refresh_capacity=True)
         if before.get("error"):
             return Result.fail("TOP_UP_SNAPSHOT_FAILED", "failed to read top-up snapshot", {"product_id": product_id, "snapshot": before, "rounds": rounds})
+        pending_ai = _pending_ai_postprocess_summary(ctx, product_id)
+        if pending_ai["count"] > 0:
+            stop_reason = "waiting_ai_postprocess"
+            rounds.append(
+                {
+                    "round_no": round_no,
+                    "batch_id": "",
+                    "before": before,
+                    "steps": {
+                        "ai_postprocess_gate": {
+                            "success": True,
+                            "data": pending_ai,
+                        }
+                    },
+                }
+            )
+            break
         capacity_supplement = None
         capacity_gap_text = _capacity_ai_supplement_gap_text(before)
-        if capacity_gap_text:
+        if capacity_gap_text and before["material_pool_extra_capacity"] <= 0:
             capacity_supplement = AISupplementWorkbenchSkill(ctx).sync_for_product(product_id, gap_text=capacity_gap_text)
             if not capacity_supplement.success:
                 return _top_up_fail("ai_supplement_workbench", capacity_supplement, product_id, rounds, before)
+        elif capacity_gap_text:
+            deferred_ai_supplement_gaps.append(capacity_gap_text)
         if before["material_pool_extra_capacity"] <= 0:
             stop_reason = "ai_supplement_created" if capacity_supplement else "no_material_pool_capacity"
             if capacity_supplement:
@@ -258,12 +278,13 @@ def _top_up(ctx, product_id, count, max_rounds=2):
 
         supplement = capacity_supplement
         if _readiness_needs_ai_supplement(readiness.data or {}):
-            supplement = AISupplementWorkbenchSkill(ctx).sync_for_product(
-                product_id,
-                gap_text="; ".join(str(item) for item in ((readiness.data or {}).get("gaps") or [])),
-            )
-            if not supplement.success:
-                return _top_up_fail("ai_supplement_workbench", supplement, product_id, rounds, before)
+            gap_text = "; ".join(str(item) for item in ((readiness.data or {}).get("gaps") or []))
+            if before["material_pool_extra_capacity"] <= 0:
+                supplement = AISupplementWorkbenchSkill(ctx).sync_for_product(product_id, gap_text=gap_text)
+                if not supplement.success:
+                    return _top_up_fail("ai_supplement_workbench", supplement, product_id, rounds, before)
+            else:
+                deferred_ai_supplement_gaps.append(gap_text)
 
         planned = _create_render_plans_with_timeout(ctx, product_id, count=_cap_round_count(before, count))
         if not planned.success:
@@ -272,6 +293,11 @@ def _top_up(ctx, product_id, count, max_rounds=2):
         plan_ids = (planned.data or {}).get("render_plan_ids") or []
         if not batch_id or not plan_ids:
             stop_reason = "render_plan_empty"
+            if not supplement and deferred_ai_supplement_gaps:
+                gap_text = "; ".join(str(item) for item in deferred_ai_supplement_gaps if str(item or "").strip())
+                supplement = AISupplementWorkbenchSkill(ctx).sync_for_product(product_id, gap_text=gap_text)
+                if not supplement.success:
+                    return _top_up_fail("ai_supplement_workbench", supplement, product_id, rounds, before)
             rounds.append(_top_up_round_summary(ctx, round_no, batch_id, before, readiness, planned, supplement=supplement))
             break
 
@@ -321,6 +347,7 @@ def _top_up(ctx, product_id, count, max_rounds=2):
         "rounds": rounds,
         "final": final,
         "stop_reason": stop_reason,
+        "deferred_ai_supplement_gaps": deferred_ai_supplement_gaps,
         "task_sync": task_sync.data,
     })
 
@@ -532,11 +559,50 @@ def _cap_round_count(snapshot: dict, count: int | None) -> int:
     max_per_round = int(os.environ.get("AUTO_MIXCUT_TOP_UP_MAX_PER_ROUND", "5") or "5")
     remaining = int(snapshot.get("target_remaining_variant_count") or 0)
     extra = int(snapshot.get("material_pool_extra_capacity") or 0)
-    allowed = min(remaining, extra)
-    requested = int(count or snapshot.get("target_variant_count") or remaining or allowed or 0)
-    if requested <= 0:
-        requested = allowed
-    return max(0, min(allowed, max_per_round, requested))
+    effective = int(snapshot.get("effective_outputs") or 0)
+    target = int(count or snapshot.get("target_variant_count") or 0)
+    add_count = max(0, min(remaining, extra, max_per_round))
+    if target > 0:
+        add_count = min(add_count, max(0, target - effective))
+    return effective + add_count if add_count > 0 else 0
+
+
+def _pending_ai_postprocess_summary(ctx, product_id: str) -> dict:
+    rows = ctx.repo.list_where("segments", "product_id=? AND source_type='ai_generated'", (product_id,))
+    tag_ids = _tagged_segment_ids(ctx, [str(row.get("segment_id") or "") for row in rows])
+    pending = []
+    for segment in rows:
+        segment_id = str(segment.get("segment_id") or "")
+        status = str(segment.get("segment_status") or "")
+        if status in {"qc_failed", "frame_sample_failed", "frame_sample_timeout", "fingerprint_failed", "tag_failed", "effective_role_failed", "ai_stage_failed"}:
+            continue
+        reasons = []
+        if status in {"", "created"}:
+            reasons.append("ai_qc_missing")
+        if segment_id not in tag_ids:
+            reasons.append("tag_missing")
+        if status == "qc_passed" and not segment.get("anchor_match_level"):
+            reasons.append("ai_anchor_check_missing")
+        if not segment.get("effective_roles_updated_at"):
+            reasons.append("effective_roles_missing")
+        if reasons:
+            pending.append({"segment_id": segment_id, "status": status, "reasons": reasons})
+    return {"count": len(pending), "sample": pending[:20]}
+
+
+def _tagged_segment_ids(ctx, segment_ids: list[str]) -> set[str]:
+    tagged: set[str] = set()
+    segment_ids = [item for item in segment_ids if item]
+    for chunk in _chunked(segment_ids, 200):
+        placeholders = ",".join("?" for _ in chunk)
+        rows = ctx.repo.list_where("segment_tags", f"segment_id IN ({placeholders})", tuple(chunk))
+        tagged.update(str(row.get("segment_id") or "") for row in rows if row.get("segment_id"))
+    return tagged
+
+
+def _chunked(items: list[str], size: int):
+    for idx in range(0, len(items), max(1, size)):
+        yield items[idx : idx + size]
 
 
 def _skip_final_video_qc() -> bool:

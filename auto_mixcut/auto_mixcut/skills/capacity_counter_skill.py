@@ -35,9 +35,10 @@ class CapacityCounterSkill:
             estimate = estimate_render_plan_capacity(self.ctx, product_id, probe_count, allow_fill_mode=True)
         else:
             estimate = _lightweight_capacity_estimate(segments, probe_count)
-        pool_extra = int(estimate.get("planned_count") or 0)
+        raw_pool_extra = int(estimate.get("planned_count") or 0)
         skipped = int(estimate.get("skipped_count") or 0)
         first_slot_remaining = max(0, int(estimate.get("first_slot_capacity") or 0) - actual)
+        pool_extra = raw_pool_extra
         bottleneck = _bottleneck_text(estimate)
         note = _capacity_note(target, actual, target_remaining, pool_extra, skipped, estimate, first_slot_remaining, bottleneck)
         patch = {
@@ -51,7 +52,7 @@ class CapacityCounterSkill:
         write = self.ctx.repo.update("content_tasks", "task_id", task["task_id"], patch)
         if not write.success:
             return write
-        return Result.ok({"product_id": product_id, **patch, "estimate": estimate})
+        return Result.ok({"product_id": product_id, **patch, "estimate": {**estimate, "raw_material_pool_extra_capacity": raw_pool_extra}})
 
 
 def _actual_good_outputs(ctx: SkillContext, product_id: str) -> int:

@@ -408,6 +408,47 @@ class SegmentPromptFactoryTest(unittest.TestCase):
         self.assertIn(perturbation["camera_motion"], shared_pool["camera_motion"])
         self.assertIn(perturbation["props_env"], shared_pool["props_env"])
 
+    def test_bracelet_inferred_from_generic_category_uses_wrist_prompt(self):
+        res = SegmentPromptFactorySkill(self.ctx).build_package(
+            _bracelets_brief(category="general"),
+            _slot(ai_gen_grade="A", segment_type="mirror_routine"),
+            persist=False,
+        )
+        self.assertTrue(res.success, res.to_dict())
+        package = res.data
+        prompt_text = "；".join(package["prompt"].values())
+
+        self.assertEqual(package["raw_category"], "general")
+        self.assertEqual(package["category"], "bracelets")
+        self.assertIn("手链", prompt_text)
+        self.assertIn("手腕", prompt_text)
+        self.assertNotIn("女装外套", prompt_text)
+        self.assertNotIn("衣摆", prompt_text)
+        self.assertNotIn("衣领", prompt_text)
+        self.assertNotIn("耳垂", prompt_text)
+        self.assertNotIn("耳侧", prompt_text)
+        perturbation = package["gen_policy"]["perturbation_seed_group"]
+        bracelet_pool = (_load_prompt_variables_config(self.ctx).get("variable_pools") or {})["bracelets"]
+        self.assertIn(perturbation["camera_motion"], bracelet_pool["camera_motion"])
+        self.assertIn(perturbation["micro_arc"], bracelet_pool["micro_arc"])
+
+    def test_bracelet_product_only_uses_product_form_without_wrist_wearing(self):
+        res = SegmentPromptFactorySkill(self.ctx).build_package(
+            _bracelets_brief(),
+            _slot(ai_gen_grade="A", person_framing="product_only", segment_type="product_still"),
+            persist=False,
+        )
+        self.assertTrue(res.success, res.to_dict())
+        positive = res.data["prompt"]["positive"]
+
+        self.assertEqual(res.data["category"], "bracelets")
+        self.assertIn("手链托盘陈列", positive)
+        self.assertNotIn("人物画像：", positive)
+        self.assertNotIn("单beat表演：", positive)
+        self.assertNotIn("手腕近景", positive)
+        self.assertNotIn("耳饰", positive)
+        self.assertNotIn("外套", positive)
+
     def test_product_only_blocks_wear_effect_leak(self):
         package = _manual_package(
             positive="产品静物特写,稳定构图,干净背景,柔和自然光,无人物,对焦在产品质感与做工；耳饰悬挂或托盘陈列,金属光泽/流苏细节微距,无人无手；随转头轻微跟拍",
@@ -481,6 +522,25 @@ def _earrings_brief() -> dict:
             "must_show": ["蓝色四瓣花朵", "短款贴耳比例"],
             "key_visual_constraints": ["不要改成蝴蝶或星星", "不要生成长流苏"],
             "forbidden_actions": ["戴耳环动作", "手指进入耳部", "手触耳饰调整", "大幅转头"],
+        }
+    )
+    return data
+
+
+def _bracelets_brief(category: str = "bracelets") -> dict:
+    data = _brief(category=category, hard_anchors=["金色四瓣花吊坠手链", "细链结构"])
+    brief = data["material_anchor_brief"]
+    brief.update(
+        {
+            "product_id": "TH_BRACELET_PROMPT_001",
+            "display_family": "สร้อยข้อมือ",
+            "product_subtype": "สร้อยข้อมือดอกไม้四瓣花手链",
+            "product_form": ["金色四瓣花吊坠手链", "细链结构"],
+            "wear_effect": ["佩戴在手腕上，吊坠靠近手背侧的佩戴效果"],
+            "primary_visual_result": "手链在手腕上清楚可见",
+            "must_show": ["四瓣花吊坠", "细链结构"],
+            "key_visual_constraints": ["不要改成项链或耳饰", "不要生成多余吊坠"],
+            "forbidden_actions": ["复杂扣戴过程", "大幅甩手", "拍成项链或耳饰"],
         }
     )
     return data

@@ -14,18 +14,20 @@ from auto_mixcut.skills.quality_gate_skill import QualityGateSkill
 from auto_mixcut.skills.rds_repository_skill import RDSRepositorySkill
 from scripts.sync_prompt_package_workbench_from_tasks import _gap_slots
 from auto_mixcut.skills.readiness_check_skill import ReadinessCheckSkill, _calibrate_render_plan_capacity
-from auto_mixcut.skills.render_plan_skill import RenderPlanSkill, _choose_template, _load_templates, _segment_score, _select_segments
+from auto_mixcut.skills.render_plan_skill import RenderPlanSkill, _choose_template, _load_templates, _passes_first_slot_floor, _segment_score, _select_segments
 from auto_mixcut.skills.render_skill import _actual_generated_count, _bgm_audio_filter, _default_bgm_plan, _drawtext_filter, _subtitle_plan
 from auto_mixcut.skills.batch_control_skill import BatchControlSkill
 from auto_mixcut.skills.batch_report_skill import BatchReportSkill
 from auto_mixcut.skills.capacity_counter_skill import CapacityCounterSkill
+from auto_mixcut.skills.effective_role_skill import EffectiveRoleSkill
 from auto_mixcut.skills.segment_fingerprint_skill import SegmentFingerprintSkill
 from auto_mixcut.skills.usage_counter_skill import refresh_segment_usage
 from auto_mixcut.skills.feishu_review_skill import _output_cleanup_reason
 from auto_mixcut.skills.final_video_qc_skill import _normalize_final_qc_response
 from auto_mixcut.skills.pipeline_run_skill import PipelineRunSkill
 from auto_mixcut.skills.ai_supplement_workbench_skill import _infer_capacity_gap_text, _supplement_state_summary
-from scripts.run_mixcut_guard import _ensure_anchor_confirmed, _stale_repair_source_types, _stale_segment_summary, run_guard_pass
+from auto_mixcut.skills.ai_tagging_skill import AITaggingSkill
+from scripts.run_mixcut_guard import _compute_missing_effective_roles, _ensure_anchor_confirmed, _stale_repair_source_types, _stale_segment_summary, run_guard_pass
 from scripts.run_mixcut_guard_loop import _dynamic_round_timeout, _parse_guard_stdout, _status_action_from_result
 from auto_mixcut.cli import _cap_round_count, _create_render_plans_with_timeout, _skip_final_video_qc, _top_up_snapshot
 
@@ -162,6 +164,9 @@ class AIFactoryStrategyTest(unittest.TestCase):
         self.assertEqual(product["anchor_status"], "confirmed")
 
     def test_guard_detects_stale_segments_missing_downstream_processing(self):
+        old_require_phash = os.environ.get("AUTO_MIXCUT_GUARD_REQUIRE_PHASH")
+        os.environ["AUTO_MIXCUT_GUARD_REQUIRE_PHASH"] = "1"
+        self.addCleanup(_restore_env, "AUTO_MIXCUT_GUARD_REQUIRE_PHASH", old_require_phash)
         product_id = "PROD_GUARD_STALE"
         self.ctx.repo.upsert(
             "segments",
@@ -219,6 +224,114 @@ class AIFactoryStrategyTest(unittest.TestCase):
         self.assertTrue(res.success, res.to_dict())
         repair.assert_called_once()
         self.assertEqual(repair.call_args.kwargs["source_types"], ["competitor"])
+
+    def test_guard_bootstraps_missing_task_from_feishu_product_table(self):
+        product_id = "PROD_FEISHU_BOOTSTRAP"
+        feishu_row = {
+            "product_name": "Feishu product",
+            "market": "TH",
+            "category": "womens_tops",
+            "requested_variant_count": 5,
+            "shop_id": "SHOP_TH_1",
+            "priority": "normal",
+            "record_id": "rec_feishu_bootstrap",
+        }
+
+        with patch("scripts.run_mixcut_guard._fetch_product_task_from_feishu", return_value=Result.ok(feishu_row)):
+            with patch("scripts.run_mixcut_guard._ensure_anchor_confirmed", return_value=Result.ok({"anchor_status": "confirmed"})):
+                res = run_guard_pass(self.ctx, product_id, process_uploads=False)
+
+        self.assertTrue(res.success, res.to_dict())
+        product = self.ctx.repo.get("products", "product_id", product_id)
+        task = self.ctx.repo.list_where("content_tasks", "product_id=? ORDER BY id DESC", (product_id,))[0]
+        self.assertEqual(product["product_name"], "Feishu product")
+        self.assertEqual(product["market"], "TH")
+        self.assertEqual(product["category"], "womens_tops")
+        self.assertEqual(product["shop_id"], "SHOP_TH_1")
+        self.assertEqual(task["requested_variant_count"], 5)
+        self.assertEqual(task["created_by"], "feishu_product_task")
+
+    def test_ai_tag_submit_counts_only_missing_tags(self):
+        product_id = "PROD_TAG_CACHE"
+        for idx in range(2):
+            self.ctx.repo.upsert(
+                "segments",
+                "segment_id",
+                {
+                    "segment_id": f"SEG_TAG_CACHE_{idx}",
+                    "asset_id": f"ASSET_TAG_CACHE_{idx}",
+                    "product_id": product_id,
+                    "source_type": "creator_authorized",
+                },
+            )
+        self.ctx.repo.insert(
+            "segment_tags",
+            {
+                "segment_id": "SEG_TAG_CACHE_0",
+                "tag_source": "test",
+                "primary_shot_role": "detail",
+                "secondary_roles_json": ["scene"],
+                "mixcut_usability": "yes",
+                "risk_level": "low",
+            },
+        )
+
+        res = AITaggingSkill(self.ctx).submit_batch(product_id, source_types=["creator_authorized"])
+
+        self.assertTrue(res.success, res.to_dict())
+        self.assertEqual(res.data["total_segments"], 1)
+        batch = self.ctx.repo.get("ai_batches", "ai_batch_id", res.data["ai_batch_id"])
+        self.assertEqual(batch["total_segments"], 1)
+
+    def test_guard_recomputes_roles_after_missing_tag_backfill(self):
+        product_id = "PROD_RETAG_ROLE_REFRESH"
+        self.ctx.repo.upsert(
+            "assets",
+            "asset_id",
+            {
+                "asset_id": "ASSET_RETAG_ROLE_REFRESH",
+                "product_id": product_id,
+                "source_type": "creator_authorized",
+                "source_trust_level": "high",
+                "product_binding_type": "exact_sku",
+            },
+        )
+        self.ctx.repo.upsert(
+            "segments",
+            "segment_id",
+            {
+                "segment_id": "SEG_RETAG_ROLE_REFRESH",
+                "asset_id": "ASSET_RETAG_ROLE_REFRESH",
+                "product_id": product_id,
+                "source_type": "creator_authorized",
+                "source_trust_level": "high",
+                "product_binding_type": "exact_sku",
+                "product_match_status": "anchor_pass",
+                "effective_roles_json": ["scene", "ending"],
+                "effective_roles_updated_at": "2026-06-10T00:00:00",
+            },
+        )
+        self.ctx.repo.insert(
+            "segment_tags",
+            {
+                "segment_id": "SEG_RETAG_ROLE_REFRESH",
+                "tag_source": "test",
+                "primary_shot_role": "hero",
+                "secondary_roles_json": ["detail", "result"],
+                "product_visibility": "high",
+                "hook_strength": "strong",
+                "mixcut_usability": "yes",
+                "risk_level": "low",
+                "confidence": "high",
+            },
+        )
+
+        res = _compute_missing_effective_roles(self.ctx, product_id, ["creator_authorized"], force_segment_ids=["SEG_RETAG_ROLE_REFRESH"])
+
+        self.assertTrue(res.success, res.to_dict())
+        segment = self.ctx.repo.get("segments", "segment_id", "SEG_RETAG_ROLE_REFRESH")
+        self.assertIn("hero", segment["effective_roles_json"])
+        self.assertIn("result", segment["effective_roles_json"])
 
     def test_guard_target_filled_does_not_full_rerun_for_stale_segments(self):
         product_id = "PROD_GUARD_FILLED"
@@ -659,6 +772,55 @@ class AIFactoryStrategyTest(unittest.TestCase):
         self.assertNotIn("detail_atmosphere", segment_types)
         self.assertTrue(segment_types.issubset({"product_display", "product_still", "flatlay", "mirror_routine"}))
 
+    def test_bracelet_ai_supplement_uses_jewelry_safe_slots(self):
+        slots = _gap_slots("AI补素材: hero首镜2; detail细节1; result试戴2", "bracelets", 5, 6)
+        segment_types = {slot["segment_type"] for slot in slots}
+
+        self.assertNotIn("before_go_out", segment_types)
+        self.assertNotIn("tryon_result", segment_types)
+        self.assertNotIn("detail_atmosphere", segment_types)
+        self.assertTrue(segment_types.issubset({"product_display", "product_still", "flatlay", "mirror_routine"}))
+        self.assertEqual(sum(1 for slot in slots if slot["slot_role"] == "result"), 2)
+
+    def test_ai_prompt_package_slot_role_can_restore_result_role(self):
+        product_id = "TH_BRACELET_RESULT_SLOT"
+        segment_id = "SEG_BRACELET_RESULT_SLOT"
+        self.ctx.repo.upsert(
+            "segments",
+            "segment_id",
+            {
+                "segment_id": segment_id,
+                "asset_id": "ASSET_BRACELET_RESULT_SLOT",
+                "product_id": product_id,
+                "source_type": "ai_generated",
+                "source_trust_level": "medium",
+                "anchor_match_level": "strict_pass",
+                "allowed_core_roles_json": ["detail", "result"],
+                "segment_type": "product_display",
+                "slot_role": "result",
+                "frame_consistency_status": "pass",
+            },
+        )
+        self.ctx.repo.insert(
+            "segment_tags",
+            {
+                "segment_id": segment_id,
+                "tag_source": "test",
+                "primary_shot_role": "result",
+                "secondary_roles_json": ["detail", "scene"],
+                "product_visibility": "high",
+                "mixcut_usability": "yes",
+                "risk_level": "low",
+                "confidence": "high",
+            },
+        )
+
+        res = EffectiveRoleSkill(self.ctx).compute_segment(segment_id)
+
+        self.assertTrue(res.success, res.to_dict())
+        self.assertIn("result", res.data["effective_roles"])
+        self.assertIn("detail", res.data["effective_roles"])
+
     def test_render_plan_enforces_batch_segment_reuse_cap(self):
         product_id = "VN_RENDER_REUSE_CAP"
         RDSRepositorySkill(self.ctx).create_product_task(product_id, "Jacket", "VN", "womens_outerwear", 10)
@@ -803,6 +965,126 @@ class AIFactoryStrategyTest(unittest.TestCase):
         self.assertEqual(task["allowed_variant_count"], 10)
         self.assertEqual(task["actual_variant_count"], 8)
         self.assertIn("补差额: 目标=10; 已有效=8; 本轮计划=2", task["blocked_reason"])
+
+    def test_render_plan_skips_when_active_planning_batch_exists(self):
+        product_id = "VN_ACTIVE_BATCH_GUARD"
+        RDSRepositorySkill(self.ctx).create_product_task(product_id, "Jacket", "VN", "womens_outerwear", 5)
+        self.ctx.repo.update("content_tasks", "product_id", product_id, {"allowed_variant_count": 5, "material_tier": "tier_3_full", "material_status": "ready"})
+        self.ctx.repo.upsert(
+            "mixcut_batches",
+            "batch_id",
+            {
+                "batch_id": "BATCH_ACTIVE_PLANNING",
+                "product_id": product_id,
+                "requested_count": 5,
+                "allowed_count": 5,
+                "rendered_count": 0,
+                "batch_status": "planning",
+            },
+        )
+
+        res = RenderPlanSkill(self.ctx).create_plans(product_id)
+
+        self.assertTrue(res.success, res.to_dict())
+        self.assertTrue(res.data["skipped"])
+        self.assertEqual(res.data["reason"], "active_planning_batch_exists")
+        self.assertEqual(res.data["active_batch_id"], "BATCH_ACTIVE_PLANNING")
+        batches = self.ctx.repo.list_where("mixcut_batches", "product_id=?", (product_id,))
+        self.assertEqual(len(batches), 1)
+        task = self.ctx.repo.get("content_tasks", "product_id", product_id)
+        self.assertEqual(task["task_status"], "RENDER_PLAN_SKIPPED_ACTIVE_BATCH")
+
+    def test_render_plan_skips_when_pending_output_qc_exists(self):
+        product_id = "VN_PENDING_OUTPUT_GUARD"
+        RDSRepositorySkill(self.ctx).create_product_task(product_id, "Jacket", "VN", "womens_outerwear", 5)
+        self.ctx.repo.update("content_tasks", "product_id", product_id, {"allowed_variant_count": 5, "material_tier": "tier_3_full", "material_status": "ready"})
+        self.ctx.repo.upsert(
+            "mixcut_batches",
+            "batch_id",
+            {
+                "batch_id": "BATCH_PENDING_OUTPUT",
+                "product_id": product_id,
+                "requested_count": 5,
+                "allowed_count": 5,
+                "rendered_count": 1,
+                "batch_status": "rendered",
+            },
+        )
+        self.ctx.repo.upsert(
+            "outputs",
+            "output_id",
+            {
+                "output_id": "OUT_PENDING_OUTPUT",
+                "batch_id": "BATCH_PENDING_OUTPUT",
+                "product_id": product_id,
+                "variant_no": 1,
+                "template_id": "AI_OUTERWEAR_PRODUCT_FIRST_20S",
+                "render_status": "rendered",
+                "machine_quality_status": "pending",
+                "human_quality_status": "pending",
+            },
+        )
+
+        res = RenderPlanSkill(self.ctx).create_plans(product_id)
+
+        self.assertTrue(res.success, res.to_dict())
+        self.assertTrue(res.data["skipped"])
+        self.assertEqual(res.data["reason"], "pending_output_qc_exists")
+        self.assertEqual(res.data["active_batch_id"], "BATCH_PENDING_OUTPUT")
+        batches = self.ctx.repo.list_where("mixcut_batches", "product_id=?", (product_id,))
+        self.assertEqual(len(batches), 1)
+        task = self.ctx.repo.get("content_tasks", "product_id", product_id)
+        self.assertEqual(task["task_status"], "RENDER_PLAN_SKIPPED_PENDING_OUTPUT_QC")
+
+    def test_low_trust_validated_hero_can_pass_first_slot_floor(self):
+        segment_id = "SEG_LOW_TRUST_FIRST_SLOT"
+        asset_id = "ASSET_LOW_TRUST_FIRST_SLOT"
+        self.ctx.repo.upsert(
+            "assets",
+            "asset_id",
+            {
+                "asset_id": asset_id,
+                "product_id": "PROD_LOW_TRUST_FIRST_SLOT",
+                "source_type": "douyin_repost",
+                "source_trust_level": "low",
+                "product_binding_type": "exact_sku",
+                "has_watermark": "no",
+            },
+        )
+        segment = {
+            "segment_id": segment_id,
+            "asset_id": asset_id,
+            "product_id": "PROD_LOW_TRUST_FIRST_SLOT",
+            "source_type": "douyin_repost",
+            "source_trust_level": "low",
+            "product_binding_type": "exact_sku",
+            "product_match_status": "uncertain",
+            "effective_roles_json": ["hero", "detail", "scene", "ending"],
+        }
+        self.ctx.repo.upsert("segments", "segment_id", segment)
+        self.ctx.repo.insert(
+            "segment_tags",
+            {
+                "segment_id": segment_id,
+                "tag_source": "test",
+                "primary_shot_role": "hero",
+                "secondary_roles_json": ["detail"],
+                "product_visibility": "high",
+                "hook_strength": "strong",
+                "mixcut_usability": "yes",
+                "risk_level": "low",
+                "confidence": "high",
+                "text_overlay_risk": "none",
+            },
+        )
+
+        passed, reason = _passes_first_slot_floor(
+            self.ctx,
+            segment,
+            {"require_no_watermark_for_first_slot": True, "avoid_subtitle_risk_in_first_slot": True},
+        )
+
+        self.assertTrue(passed, reason)
 
     def test_render_plan_full_refresh_ignores_existing_outputs(self):
         product_id = "VN_FULL_REFRESH"
@@ -1078,8 +1360,8 @@ class AIFactoryStrategyTest(unittest.TestCase):
 
         audio_filter = _bgm_audio_filter(bgm_plan, 15000)
 
-        self.assertIn("loudnorm=I=-16", audio_filter)
-        self.assertIn("volume=0.820", audio_filter)
+        self.assertIn("loudnorm=I=-10", audio_filter)
+        self.assertIn("volume=1.000", audio_filter)
         self.assertIn("atrim=0:15.000", audio_filter)
         self.assertNotIn("apad", audio_filter)
 

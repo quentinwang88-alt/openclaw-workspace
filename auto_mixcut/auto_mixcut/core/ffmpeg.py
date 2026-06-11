@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -73,7 +74,16 @@ class FFmpeg:
     def run(self, args: Iterable[str], error_code: str) -> Result:
         if self.mock:
             return Result.ok({"mock": True, "args": list(args)})
-        proc = subprocess.run(["ffmpeg", *args], capture_output=True, text=True)
+        cmd = ["ffmpeg", *args]
+        timeout = _ffmpeg_timeout_sec()
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout or None)
+        except subprocess.TimeoutExpired as exc:
+            return Result.fail(
+                error_code,
+                f"ffmpeg timed out after {timeout}s",
+                {"stderr": (exc.stderr or ""), "stdout": (exc.stdout or ""), "args": cmd, "timeout_seconds": timeout},
+            )
         if proc.returncode != 0:
             return Result.fail(error_code, "ffmpeg failed", {"stderr": proc.stderr, "args": list(args)})
         return Result.ok({"stdout": proc.stdout})
@@ -87,3 +97,10 @@ def _parse_fps(value: str) -> float:
         return float(value)
     except (TypeError, ValueError, ZeroDivisionError):
         return 0.0
+
+
+def _ffmpeg_timeout_sec() -> int:
+    try:
+        return max(0, int(os.environ.get("AUTO_MIXCUT_FFMPEG_TIMEOUT_SEC", "0") or "0"))
+    except ValueError:
+        return 0

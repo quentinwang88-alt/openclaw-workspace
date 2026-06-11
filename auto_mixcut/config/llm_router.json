@@ -69,7 +69,7 @@
       "fallback_provider": "",
       "model_name": "doubao-seed-2-0-pro-260215",
       "fallback_model": "",
-      "max_concurrency": 2,
+      "max_concurrency": 1,
       "max_retries": 2,
       "retry_delays_ms": [5000, 20000],
       "timeout_ms": 180000,

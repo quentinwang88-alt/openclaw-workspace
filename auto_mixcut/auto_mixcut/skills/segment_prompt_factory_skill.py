@@ -24,13 +24,13 @@ PROMPT_BANK_SEGMENT_ALIASES = {
     "detail_atmosphere": "product_display",
     "tryon_result": "before_go_out",
 }
-PROMPT_BANK_REQUIRED_CATEGORIES = {"hair_accessories", "scarves_hats", "earrings", "womens_outerwear"}
+PROMPT_BANK_REQUIRED_CATEGORIES = {"hair_accessories", "scarves_hats", "earrings", "bracelets", "womens_outerwear"}
 PROMPT_BANK_REQUIRED_SEGMENTS = {"product_display", "mirror_routine", "home_lifestyle", "before_go_out", "seasonal_scene"}
 PRODUCT_ONLY_SEGMENT_TYPES = {"product_still", "unboxing", "flatlay"}
 GRADE_VARIANTS = {"A": 4, "B": 2, "C": 2}
 PERTURBATION_DIMS = ["camera_motion", "time_light", "composition", "color_tone", "props_env", "micro_arc"]
 MAX_PROMPT_CHARS = 1600
-RICH_PERTURBATION_CATEGORIES = {"womens_outerwear", "earrings"}
+RICH_PERTURBATION_CATEGORIES = {"womens_outerwear", "earrings", "bracelets"}
 ORIGINAL_SCRIPT_DB_ENV = "ORIGINAL_SCRIPT_GENERATOR_DB_PATH"
 DEFAULT_ORIGINAL_SCRIPT_DB = Path.home() / ".openclaw" / "shared" / "data" / "original_script_generator.sqlite3"
 
@@ -47,7 +47,8 @@ class SegmentPromptFactorySkill:
         if not validation.success:
             return validation
         raw_category = str(brief.get("category") or "").strip()
-        category = _normalize_category(self.ctx, raw_category)
+        category = _normalize_category(self.ctx, raw_category, brief)
+        normalized_brief = {**brief, "category": category}
         segment_type = str(template_slot.get("segment_type") or "home_lifestyle").strip()
         grade = _grade(template_slot)
         person_framing = _person_framing(template_slot, grade)
@@ -61,11 +62,11 @@ class SegmentPromptFactorySkill:
         if not pool_validation.success:
             return pool_validation
         perturbation_slot = {**template_slot, "person_framing": person_framing, "segment_type": segment_type}
-        perturbation = _choose_perturbation(brief, perturbation_slot, pools, batch_seen if batch_seen is not None else set(), _load_factory_config(self.ctx))
-        hard_anchors = _list(brief.get("hard_anchors"))
-        forbidden_actions = _list(brief.get("forbidden_actions")) or _list(brief.get("must_not_show"))
-        key_constraints = _list(brief.get("key_visual_constraints")) or _list(brief.get("must_show"))
-        prompt_result = _build_prompt_from_bank(self.ctx, category, segment_type, grade, brief, local_human, person_framing, perturbation)
+        perturbation = _choose_perturbation(normalized_brief, perturbation_slot, pools, batch_seen if batch_seen is not None else set(), _load_factory_config(self.ctx))
+        hard_anchors = _list(normalized_brief.get("hard_anchors"))
+        forbidden_actions = _list(normalized_brief.get("forbidden_actions")) or _list(normalized_brief.get("must_not_show"))
+        key_constraints = _list(normalized_brief.get("key_visual_constraints")) or _list(normalized_brief.get("must_show"))
+        prompt_result = _build_prompt_from_bank(self.ctx, category, segment_type, grade, normalized_brief, local_human, person_framing, perturbation)
         if not prompt_result.success:
             return prompt_result
         prompt_payload = prompt_result.data
@@ -75,12 +76,12 @@ class SegmentPromptFactorySkill:
         package = {
             "segment_prompt_id": segment_prompt_id,
             "segment_script_id": _segment_script_id(segment_prompt_id),
-            "product_id": brief.get("product_id"),
-            "sku_id": str(template_slot.get("sku_id") or brief.get("sku_id") or "DEFAULT"),
-            "reference_image_pack_id": str(template_slot.get("reference_image_pack_id") or brief.get("reference_image_pack_id") or ""),
-            "reference_image_version": int(template_slot.get("reference_image_version") or brief.get("reference_image_version") or 0),
-            "reference_image_preview_url": str(template_slot.get("reference_image_preview_url") or brief.get("reference_image_preview_url") or ""),
-            "reference_image_status": str(template_slot.get("reference_image_status") or brief.get("reference_image_status") or ""),
+            "product_id": normalized_brief.get("product_id"),
+            "sku_id": str(template_slot.get("sku_id") or normalized_brief.get("sku_id") or "DEFAULT"),
+            "reference_image_pack_id": str(template_slot.get("reference_image_pack_id") or normalized_brief.get("reference_image_pack_id") or ""),
+            "reference_image_version": int(template_slot.get("reference_image_version") or normalized_brief.get("reference_image_version") or 0),
+            "reference_image_preview_url": str(template_slot.get("reference_image_preview_url") or normalized_brief.get("reference_image_preview_url") or ""),
+            "reference_image_status": str(template_slot.get("reference_image_status") or normalized_brief.get("reference_image_status") or ""),
             "raw_category": raw_category,
             "category": category,
             "template_id": template_slot.get("template_id"),
@@ -328,10 +329,29 @@ def _package_row(package: dict[str, Any], status: str) -> dict[str, Any]:
     }
 
 
-def _normalize_category(ctx: SkillContext, raw_category: str) -> str:
+def _normalize_category(ctx: SkillContext, raw_category: str, brief: dict[str, Any] | None = None) -> str:
     aliases = _load_factory_config(ctx).get("category_normalization", {}).get("aliases", {})
     key = str(raw_category or "").strip()
-    return str(aliases.get(key) or key or "generic_fashion")
+    normalized = str(aliases.get(key) or _category_alias(key) or key or "generic_fashion")
+    if normalized == "generic_fashion":
+        inferred = _infer_category_from_text(brief or {})
+        if inferred:
+            return inferred
+    return normalized
+
+
+def _infer_category_from_text(brief: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in ("product_subtype", "display_family", "primary_visual_result"):
+        value = brief.get(key)
+        if value:
+            parts.append(str(value))
+    for key in ("hard_anchors", "display_anchors", "key_visual_constraints", "must_show"):
+        parts.extend(str(item) for item in _list(brief.get(key)))
+    text = " ".join(parts).lower()
+    if any(token in text for token in ("สร้อยข้อมือ", "กำไล", "手链", "手镯", "手串", "腕饰", "bracelet", "bangle")):
+        return "bracelets"
+    return ""
 
 
 def _segment_script_id(segment_prompt_id: str) -> str:
@@ -824,7 +844,25 @@ def _stable_index(seed: str, dim: str, size: int) -> int:
 
 
 def _category_alias(category: str) -> str:
-    return {"scarf_hat": "scarves_hats", "scarves": "scarves_hats", "womens_top": "womens_outerwear"}.get(category, category)
+    return {
+        "scarf_hat": "scarves_hats",
+        "scarves": "scarves_hats",
+        "womens_top": "womens_outerwear",
+        "womens_tops": "womens_outerwear",
+        "bracelet": "bracelets",
+        "bangle": "bracelets",
+        "wrist_accessory": "bracelets",
+        "jewelry_bracelet": "bracelets",
+        "general": "generic_fashion",
+        "小饰品": "generic_fashion",
+        "通用服饰": "generic_fashion",
+        "手链": "bracelets",
+        "手镯": "bracelets",
+        "手串": "bracelets",
+        "腕饰": "bracelets",
+        "สร้อยข้อมือ": "bracelets",
+        "กำไล": "bracelets",
+    }.get(category, category)
 
 
 def _grade(slot: dict[str, Any]) -> str:

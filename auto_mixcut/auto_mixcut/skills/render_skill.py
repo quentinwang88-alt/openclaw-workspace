@@ -15,7 +15,10 @@ from .feishu_review_skill import sync_product_task_best_effort
 from .hard_subtitle_policy import is_repairable_bottom_caption
 from .usage_counter_skill import is_good_rendered_output, refresh_segment_usage
 
-MIN_BGM_VOLUME = 0.82
+MIN_BGM_VOLUME = 1.0
+BGM_LOUDNORM_TARGET_I = -10
+BGM_LOUDNORM_TRUE_PEAK = -0.5
+BGM_LOUDNORM_LRA = 7
 BGM_BATCH_ID_CAP = 1
 BGM_BATCH_TRACK_NAME_CAP = 1
 
@@ -113,7 +116,7 @@ class RenderSkill:
         man_upload = self.ctx.oss.upload(manifest, man_key)
         if man_upload.success:
             self.ctx.repo.upsert("oss_objects", "object_id", dict(man_upload.data, object_type="manifest", mime_type="application/json"))
-        self.ctx.repo.update("render_plans", "render_plan_id", render_plan_id, {"render_status": "rendered"})
+        self.ctx.repo.update("render_plans", "render_plan_id", render_plan_id, {"render_status": "rendered", "output_id": output_id})
         return Result.ok({"output_id": output_id, "manifest": manifest_data})
 
     def _render_real(self, plan: dict, slots: list[dict], output_path: Path, cover_path: Path, subtitles: list[dict]) -> Result:
@@ -443,7 +446,7 @@ def _default_bgm_plan() -> dict:
         "track_name": "",
         "recommended_start_sec": 0,
         "default_volume": MIN_BGM_VOLUME,
-        "fade_in_ms": 180,
+        "fade_in_ms": 60,
         "fade_out_ms": 0,
         "matched_template_id": "",
         "matched_mood": "",
@@ -462,7 +465,7 @@ def _normalize_bgm_mix(ctx: SkillContext, track: dict, path: Path, planned_durat
         start_sec = 0.0
     updated["recommended_start_sec"] = round(start_sec, 3)
     updated["default_volume"] = max(_safe_float(updated.get("default_volume"), MIN_BGM_VOLUME), MIN_BGM_VOLUME)
-    updated["fade_in_ms"] = min(int(_safe_float(updated.get("fade_in_ms"), 180)), 250)
+    updated["fade_in_ms"] = min(int(_safe_float(updated.get("fade_in_ms"), 60)), 80)
     updated["fade_out_ms"] = 0
     if duration_sec:
         updated["source_duration_sec"] = round(duration_sec, 3)
@@ -509,13 +512,16 @@ def _apply_audio_mix_suggestions(track: dict) -> dict:
 
 
 def _bgm_manifest(data: dict) -> dict:
+    volume = _safe_float(data.get("default_volume"), MIN_BGM_VOLUME)
     return {
         "bgm_id": data.get("bgm_id") or "",
         "track_name": data.get("track_name") or "",
-        "volume": _safe_float(data.get("default_volume"), MIN_BGM_VOLUME),
+        "default_volume": volume,
+        "volume": volume,
         "recommended_start_sec": _safe_float(data.get("recommended_start_sec"), 0),
         "fade_in_ms": _safe_int(data.get("fade_in_ms"), 500),
         "fade_out_ms": _safe_int(data.get("fade_out_ms"), 0),
+        "loudnorm_target_i": BGM_LOUDNORM_TARGET_I,
         "matched_template_id": data.get("matched_template_id") or "",
         "matched_mood": data.get("matched_mood") or "",
         "fallback_source": data.get("fallback_source") or "",
@@ -524,10 +530,14 @@ def _bgm_manifest(data: dict) -> dict:
 
 def _bgm_audio_filter(data: dict, duration_ms: int) -> str:
     duration_sec = max(duration_ms, 500) / 1000
-    volume = min(max(_safe_float(data.get("default_volume"), MIN_BGM_VOLUME), 0.5), 1.0)
+    volume = min(max(_safe_float(data.get("default_volume"), MIN_BGM_VOLUME), MIN_BGM_VOLUME), 1.0)
     fade_in = max(_safe_int(data.get("fade_in_ms"), 500), 0) / 1000
     fade_out = max(_safe_int(data.get("fade_out_ms"), 0), 0) / 1000
-    parts = ["loudnorm=I=-16:TP=-1.5:LRA=11", f"volume={volume:.3f}", f"atrim=0:{duration_sec:.3f}"]
+    parts = [
+        f"loudnorm=I={BGM_LOUDNORM_TARGET_I}:TP={BGM_LOUDNORM_TRUE_PEAK}:LRA={BGM_LOUDNORM_LRA}",
+        f"volume={volume:.3f}",
+        f"atrim=0:{duration_sec:.3f}",
+    ]
     if fade_in > 0:
         parts.append(f"afade=t=in:st=0:d={fade_in:.3f}")
     if fade_out > 0:

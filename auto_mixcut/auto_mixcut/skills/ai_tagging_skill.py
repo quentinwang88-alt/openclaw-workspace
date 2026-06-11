@@ -21,6 +21,8 @@ class AITaggingSkill:
     def submit_batch(self, product_id: str, prompt_version: str = "v1.0", source_types: list[str] | None = None) -> Result:
         segments = _segments_for_source_types(self.ctx, product_id, source_types)
         segments = _limit_segments(segments)
+        latest_tags = _latest_tags_by_segment(self.ctx, [str(segment.get("segment_id") or "") for segment in segments])
+        segments = [segment for segment in segments if str(segment.get("segment_id") or "") not in latest_tags]
         batch_id = new_id("AIBATCH")
         self.ctx.repo.upsert(
             "ai_batches",
@@ -41,6 +43,12 @@ class AITaggingSkill:
         segments = _segments_for_source_types(self.ctx, product_id, source_types)
         segments = _limit_segments(segments)
         completed = skipped = failed = 0
+        segment_ids = [str(segment.get("segment_id") or "") for segment in segments if segment.get("segment_id")]
+        latest_tags = _latest_tags_by_segment(self.ctx, segment_ids)
+        if not force:
+            skipped = sum(1 for segment in segments if str(segment.get("segment_id") or "") in latest_tags)
+            segments = [segment for segment in segments if str(segment.get("segment_id") or "") not in latest_tags]
+        frame_counts = _frame_counts_by_segment(self.ctx, [str(segment.get("segment_id") or "") for segment in segments if segment.get("segment_id")])
         max_workers = _tag_concurrency()
         indexed = list(enumerate(segments))
         total = len(indexed)
@@ -53,12 +61,25 @@ class AITaggingSkill:
                 if timeout_sec and time.monotonic() - started_at > timeout_sec:
                     results.append({"status": "failed", "segment_id": segment["segment_id"], "error_code": "TAG_TOTAL_TIMEOUT"})
                     continue
-                results.append(self._poll_segment(product_id, segment, idx, prompt_version, force).data)
+                segment_id = str(segment.get("segment_id") or "")
+                results.append(self._poll_segment(product_id, segment, idx, prompt_version, force, latest_tags.get(segment_id, {}), frame_counts.get(segment_id)).data)
                 _emit_progress(product_id, len(results), total, started_at, progress_every)
         else:
             results_by_segment = {}
             pool = ThreadPoolExecutor(max_workers=max_workers)
-            futures = {pool.submit(self._poll_segment, product_id, segment, idx, prompt_version, force): segment["segment_id"] for idx, segment in indexed}
+            futures = {
+                pool.submit(
+                    self._poll_segment,
+                    product_id,
+                    segment,
+                    idx,
+                    prompt_version,
+                    force,
+                    latest_tags.get(str(segment.get("segment_id") or ""), {}),
+                    frame_counts.get(str(segment.get("segment_id") or "")),
+                ): segment["segment_id"]
+                for idx, segment in indexed
+            }
             try:
                 seen = 0
                 for future in as_completed(futures, timeout=timeout_sec or None):
@@ -111,12 +132,12 @@ class AITaggingSkill:
     def retry_failed(self, product_id: str) -> Result:
         return self.poll_results(product_id)
 
-    def _poll_segment(self, product_id: str, segment: dict, idx: int, prompt_version: str, force: bool) -> Result:
-        if not force and _latest_tag(self.ctx, segment["segment_id"]):
+    def _poll_segment(self, product_id: str, segment: dict, idx: int, prompt_version: str, force: bool, latest_tag: dict | None = None, frame_count: int | None = None) -> Result:
+        if not force and (latest_tag if latest_tag is not None else _latest_tag(self.ctx, segment["segment_id"])):
             return Result.ok({"status": "skipped", "segment_id": segment["segment_id"], "reason": "tag_exists"})
         call = self.router.call(
             "segment_tagging_default",
-            {"segment_id": segment["segment_id"], "index": idx, "prompt_version": prompt_version, "image_count": _frame_count(self.ctx, segment["segment_id"])},
+            {"segment_id": segment["segment_id"], "index": idx, "prompt_version": prompt_version, "image_count": frame_count if frame_count is not None else _frame_count(self.ctx, segment["segment_id"])},
             product_id=product_id,
             segment_id=segment["segment_id"],
             asset_id=segment["asset_id"],
@@ -170,9 +191,39 @@ def _frame_count(ctx: SkillContext, segment_id: str) -> int:
     return len(ctx.repo.list_where("segment_frames", "segment_id=?", (segment_id,)))
 
 
+def _frame_counts_by_segment(ctx: SkillContext, segment_ids: list[str]) -> dict[str, int]:
+    segment_ids = [str(item) for item in segment_ids if str(item or "").strip()]
+    if not segment_ids:
+        return {}
+    counts: dict[str, int] = {}
+    for chunk in _chunks(segment_ids, 200):
+        placeholders = ",".join("?" for _ in chunk)
+        rows = ctx.repo.list_where("segment_frames", f"segment_id IN ({placeholders})", tuple(chunk))
+        for row in rows:
+            segment_id = str(row.get("segment_id") or "")
+            if segment_id:
+                counts[segment_id] = counts.get(segment_id, 0) + 1
+    return counts
+
+
 def _latest_tag(ctx: SkillContext, segment_id: str) -> dict:
     rows = ctx.repo.list_where("segment_tags", "segment_id=? ORDER BY id DESC LIMIT 1", (segment_id,))
     return rows[0] if rows else {}
+
+
+def _latest_tags_by_segment(ctx: SkillContext, segment_ids: list[str]) -> dict[str, dict]:
+    segment_ids = [str(item) for item in segment_ids if str(item or "").strip()]
+    if not segment_ids:
+        return {}
+    latest: dict[str, dict] = {}
+    for chunk in _chunks(segment_ids, 200):
+        placeholders = ",".join("?" for _ in chunk)
+        rows = ctx.repo.list_where("segment_tags", f"segment_id IN ({placeholders}) ORDER BY segment_id, id DESC", tuple(chunk))
+        for row in rows:
+            segment_id = str(row.get("segment_id") or "")
+            if segment_id and segment_id not in latest:
+                latest[segment_id] = row
+    return latest
 
 
 def _segments_for_source_types(ctx: SkillContext, product_id: str, source_types: list[str] | None = None) -> list[dict]:
@@ -240,11 +291,7 @@ def _material_quality_summary(ctx: SkillContext, segments: list[dict]) -> dict:
     segment_ids = [str(segment.get("segment_id") or "") for segment in segments if segment.get("segment_id")]
     if not segment_ids:
         return {"tagged": 0, "blocked": False}
-    tags = []
-    for segment_id in segment_ids:
-        tag = _latest_tag(ctx, segment_id)
-        if tag:
-            tags.append(tag)
+    tags = list(_latest_tags_by_segment(ctx, segment_ids).values())
     total = len(tags)
     unusable = sum(1 for tag in tags if tag.get("primary_shot_role") == "unusable" or tag.get("mixcut_usability") == "no")
     core = sum(1 for tag in tags if {tag.get("primary_shot_role"), *(tag.get("secondary_roles_json") or [])}.intersection({"hero", "detail", "result"}))
@@ -268,3 +315,8 @@ def _quality_min_total() -> int:
         return max(1, int(os.environ.get("AUTO_MIXCUT_QUALITY_ALERT_MIN_TAGGED", "20") or "20"))
     except ValueError:
         return 20
+
+
+def _chunks(items: list[str], size: int):
+    for idx in range(0, len(items), max(1, size)):
+        yield items[idx : idx + size]

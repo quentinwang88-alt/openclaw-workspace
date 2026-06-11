@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from auto_mixcut.core.ids import new_id
@@ -28,9 +29,22 @@ class SegmentSkill:
                 "product_id=? AND probe_status='done' AND has_watermark='no'",
                 (product_id,),
             )
-        results = [self.segment_asset(a["asset_id"]).to_dict() for a in assets]
+        candidate_assets = [a for a in assets if not self.ctx.repo.list_where("segments", "asset_id=? LIMIT 1", (a["asset_id"],))]
+        already_segmented = len(assets) - len(candidate_assets)
+        limit = _segment_asset_limit()
+        selected = candidate_assets[:limit] if limit > 0 else candidate_assets
+        results = [self.segment_asset(a["asset_id"]).to_dict() for a in selected]
+        remaining = max(0, len(candidate_assets) - len(selected))
         self.ctx.repo.update("content_tasks", "product_id", product_id, {"task_status": "SEGMENTED"})
-        return Result.ok({"count": len(results), "results": results})
+        return Result.ok({
+            "count": len(results),
+            "asset_count": len(assets),
+            "already_segmented_count": already_segmented,
+            "candidate_asset_count": len(candidate_assets),
+            "remaining_candidate_count": remaining,
+            "limit": limit,
+            "results": results,
+        })
 
     def segment_asset(self, asset_id: str) -> Result:
         asset = self.ctx.repo.get("assets", "asset_id", asset_id)
@@ -115,6 +129,13 @@ def _windows(duration_ms: int):
             windows.append((start, end))
         start += 3000
     return windows or [(0, min(duration_ms, 3000))]
+
+
+def _segment_asset_limit() -> int:
+    try:
+        return max(0, int(os.environ.get("AUTO_MIXCUT_SEGMENT_ASSET_LIMIT", "0") or "0"))
+    except ValueError:
+        return 0
 
 
 def _default_match(asset):

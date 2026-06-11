@@ -36,6 +36,16 @@ CATEGORY_CN_TO_KEY = {
     "耳饰": "earrings",
     "耳环": "earrings",
     "earrings": "earrings",
+    "手链": "bracelets",
+    "手镯": "bracelets",
+    "手串": "bracelets",
+    "腕饰": "bracelets",
+    "bracelet": "bracelets",
+    "bracelets": "bracelets",
+    "bangle": "bracelets",
+    "wrist_accessory": "bracelets",
+    "สร้อยข้อมือ": "bracelets",
+    "กำไล": "bracelets",
     "女装轻上装": "womens_outerwear",
     "女装上衣": "womens_outerwear",
     "女装外套": "womens_outerwear",
@@ -53,6 +63,7 @@ CATEGORY_CN_TO_KEY = {
 CATEGORY_KEY_TO_CN = {
     "hair_accessories": "发饰",
     "earrings": "耳环",
+    "bracelets": "手链",
     "scarves_hats": "围巾/帽子",
     "womens_outerwear": "女装外套",
     "generic_fashion": "通用服饰",
@@ -139,7 +150,7 @@ def sync_workbench(
         market = _text(fields.get("市场")) or _text(anchor_fields.get("市场")) or "VN"
         sku_id = _sku_id(fields, anchor_fields)
         sku_label = _sku_label(fields, anchor_fields)
-        category = _category_key(_text(fields.get("类目")) or _text(anchor_fields.get("类目")))
+        category = _category_key(_text(fields.get("类目")) or _text(anchor_fields.get("类目")), product_name)
         category_cn = CATEGORY_KEY_TO_CN.get(category, "通用服饰")
         brief = _anchor_brief(product_id, product_name, category, anchor_fields)
         brief["material_anchor_brief"]["sku_id"] = sku_id
@@ -480,12 +491,12 @@ def _slot_plans_for_role(role: str, category: str) -> List[tuple[str, str, str, 
             ("unboxing", "A", "hero", "product_clarity"),
             ("product_still", "A", "hero", "product_clarity"),
         ]
-        if category == "earrings":
+        if category in {"earrings", "bracelets"}:
             plans[1] = ("product_still", "A", "hero", "product_clarity")
             plans[2] = ("flatlay", "A", "hero", "product_clarity")
         return plans
     if role == "result":
-        if category == "earrings":
+        if category in {"earrings", "bracelets"}:
             return [
                 ("mirror_routine", "A", "result", "tryon_result"),
                 ("product_display", "A", "result", "tryon_result"),
@@ -497,7 +508,7 @@ def _slot_plans_for_role(role: str, category: str) -> List[tuple[str, str, str, 
             ("before_go_out", "A", "result", "tryon_result"),
         ]
     if role == "detail":
-        if category == "earrings":
+        if category in {"earrings", "bracelets"}:
             return [
                 ("product_still", "B", "detail", "material_closeup"),
                 ("flatlay", "B", "detail", "material_closeup"),
@@ -515,7 +526,7 @@ def _slot_plans_for_role(role: str, category: str) -> List[tuple[str, str, str, 
             ("flatlay", "B", "detail", "material_closeup"),
         ]
     if role == "ending":
-        if category == "earrings":
+        if category in {"earrings", "bracelets"}:
             return [
                 ("flatlay", "C", "ending", "atmosphere"),
                 ("product_still", "C", "ending", "atmosphere"),
@@ -524,7 +535,7 @@ def _slot_plans_for_role(role: str, category: str) -> List[tuple[str, str, str, 
             ("home_lifestyle", "C", "ending", "atmosphere"),
             ("seasonal_scene", "C", "ending", "atmosphere"),
         ]
-    if category == "earrings":
+    if category in {"earrings", "bracelets"}:
         return [
             ("flatlay", "C", "scene", "atmosphere"),
             ("product_still", "C", "scene", "atmosphere"),
@@ -538,7 +549,7 @@ def _slot_plans_for_role(role: str, category: str) -> List[tuple[str, str, str, 
 
 
 def _default_slot_plan(category: str) -> List[tuple[str, str, str, str]]:
-    if category == "earrings":
+    if category in {"earrings", "bracelets"}:
         return [
             ("product_display", "A", "hero", "product_clarity"),
             ("product_still", "B", "detail", "material_closeup"),
@@ -839,8 +850,13 @@ def _sku_label(task_fields: Dict[str, Any], anchor_fields: Dict[str, Any]) -> st
     return ""
 
 
-def _category_key(value: str) -> str:
-    return CATEGORY_CN_TO_KEY.get(value, value or "generic_fashion")
+def _category_key(value: str, hint_text: str = "") -> str:
+    key = CATEGORY_CN_TO_KEY.get(value, value or "generic_fashion")
+    if key in {"generic_fashion", "general", "小饰品", ""}:
+        hint = f"{value} {hint_text}".lower()
+        if any(token in hint for token in ("สร้อยข้อมือ", "กำไล", "手链", "手镯", "手串", "腕饰", "bracelet", "bangle")):
+            return "bracelets"
+    return CATEGORY_CN_TO_KEY.get(key, key or "generic_fashion")
 
 
 def _jsonish(value: Any) -> Dict[str, Any]:

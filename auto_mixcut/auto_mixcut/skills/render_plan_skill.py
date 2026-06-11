@@ -106,6 +106,64 @@ class RenderPlanSkill:
                 "fill_gap_count": 0,
                 "task_sync": task_sync,
             })
+        active_batch = _active_planning_batch(self.ctx, product_id)
+        if fill_gap_only and active_batch:
+            self.ctx.repo.update(
+                "content_tasks",
+                "product_id",
+                product_id,
+                {
+                    "task_status": "RENDER_PLAN_SKIPPED_ACTIVE_BATCH",
+                    "actual_variant_count": existing_count,
+                    "blocked_reason": f"已有未完成混剪批次 {active_batch.get('batch_id')}，等待其渲染/同步完成或先 abort 冗余批次",
+                    "failure_reason": "",
+                },
+            )
+            from .feishu_review_skill import sync_product_task_best_effort
+
+            task_sync = sync_product_task_best_effort(self.ctx, product_id)
+            return Result.ok({
+                "batch_id": "",
+                "render_plan_ids": [],
+                "skipped_render_plan_ids": [],
+                "fill_gap_only": fill_gap_only,
+                "target_variant_count": target_total,
+                "existing_usable_outputs": existing_count,
+                "fill_gap_count": 0,
+                "skipped": True,
+                "reason": "active_planning_batch_exists",
+                "active_batch_id": active_batch.get("batch_id"),
+                "task_sync": task_sync,
+            })
+        pending_output_batch = _active_pending_output_batch(self.ctx, product_id)
+        if fill_gap_only and pending_output_batch:
+            self.ctx.repo.update(
+                "content_tasks",
+                "product_id",
+                product_id,
+                {
+                    "task_status": "RENDER_PLAN_SKIPPED_PENDING_OUTPUT_QC",
+                    "actual_variant_count": existing_count,
+                    "blocked_reason": f"已有未完成质检/同步的成片批次 {pending_output_batch.get('batch_id')}，等待 quality/sync 完成后再补差额",
+                    "failure_reason": "",
+                },
+            )
+            from .feishu_review_skill import sync_product_task_best_effort
+
+            task_sync = sync_product_task_best_effort(self.ctx, product_id)
+            return Result.ok({
+                "batch_id": "",
+                "render_plan_ids": [],
+                "skipped_render_plan_ids": [],
+                "fill_gap_only": fill_gap_only,
+                "target_variant_count": target_total,
+                "existing_usable_outputs": existing_count,
+                "fill_gap_count": 0,
+                "skipped": True,
+                "reason": "pending_output_qc_exists",
+                "active_batch_id": pending_output_batch.get("batch_id"),
+                "task_sync": task_sync,
+            })
         templates = _load_templates(self.ctx)
         product = self.ctx.repo.get("products", "product_id", product_id) or {}
         batch_id = new_id("BATCH")
@@ -365,6 +423,27 @@ def estimate_render_plan_capacity(ctx: SkillContext, product_id: str, count: int
 def _usable_existing_outputs(ctx: SkillContext, product_id: str) -> list[dict[str, Any]]:
     outputs = ctx.repo.list_where("outputs", "product_id=? ORDER BY created_at, id", (product_id,))
     return [output for output in outputs if is_good_rendered_output(output)]
+
+
+def _active_planning_batch(ctx: SkillContext, product_id: str) -> dict[str, Any] | None:
+    batches = ctx.repo.list_where(
+        "mixcut_batches",
+        "product_id=? AND batch_status='planning' ORDER BY id DESC LIMIT 1",
+        (product_id,),
+    )
+    return batches[0] if batches else None
+
+
+def _active_pending_output_batch(ctx: SkillContext, product_id: str) -> dict[str, Any] | None:
+    outputs = ctx.repo.list_where(
+        "outputs",
+        "product_id=? AND render_status='rendered' AND (machine_quality_status IS NULL OR machine_quality_status='pending') ORDER BY id DESC LIMIT 1",
+        (product_id,),
+    )
+    if not outputs:
+        return None
+    batch_id = outputs[0].get("batch_id")
+    return {"batch_id": batch_id} if batch_id else {"batch_id": ""}
 
 
 def _top_up_summary(target_total: int, existing_count: int, planned_count: int, skipped_count: int, previous_reason: object = "") -> str:
@@ -735,6 +814,8 @@ def _enrich_segments_for_selection(ctx: SkillContext, segments: list[dict]) -> l
         "text_overlay_risk",
         "text_language",
         "text_overlay_reason",
+        "primary_shot_role",
+        "secondary_roles_json",
         "reason",
     }
     segment_ids = [str(segment.get("segment_id") or "") for segment in segments if segment.get("segment_id")]
@@ -744,6 +825,7 @@ def _enrich_segments_for_selection(ctx: SkillContext, segments: list[dict]) -> l
     for segment in segments:
         item = dict(segment)
         tag = latest_tags.get(str(segment.get("segment_id") or "")) or {}
+        item["_latest_tag_loaded"] = True
         for key in tag_keys:
             if key in tag:
                 item[key] = tag.get(key)
@@ -938,7 +1020,11 @@ def _passes_first_slot_floor(ctx: SkillContext, segment: dict, risk_policy: dict
     visibility = _latest_tag_value(ctx, segment, "product_visibility")
     if visibility == "low":
         return False, "first slot product visibility low"
-    if segment.get("product_match_status") not in {"trusted_by_source", "anchor_pass"} and not ai_anchor_trusted:
+    if (
+        segment.get("product_match_status") not in {"trusted_by_source", "anchor_pass"}
+        and not ai_anchor_trusted
+        and not _low_trust_first_slot_review_candidate(ctx, segment)
+    ):
         return False, "first slot product match is not trusted"
     return True, ""
 
@@ -962,6 +1048,30 @@ def _trusted_real_first_segment(ctx: SkillContext, segment: dict) -> bool:
     soft_tokens = ["锚点未知", "锚点不确定", "锚点缺失", "商品锚点", "商品信息缺失", "需核对", "需复核", "需确认", "人工确认", "人工核实"]
     hard_tokens = ["水印", "平台", "账号", "logo", "Logo", "错款", "错品类", "竞品", "SKU一致性", "漂移", "无关元素", "品牌包", "遮挡严重"]
     return any(token in reason for token in soft_tokens) and not any(token in reason for token in hard_tokens)
+
+
+def _low_trust_first_slot_review_candidate(ctx: SkillContext, segment: dict) -> bool:
+    source_type = str(segment.get("source_type") or "")
+    trust = str(segment.get("source_trust_level") or "")
+    binding = str(segment.get("product_binding_type") or "")
+    match = str(segment.get("product_match_status") or "")
+    if source_type not in {"douyin_repost", "competitor"}:
+        return False
+    if trust != "low" or binding not in {"exact_sku", "same_style"}:
+        return False
+    if match not in {"", "uncertain", "trusted_by_source", "anchor_pass"}:
+        return False
+    if "hero" not in (segment.get("effective_roles_json") or []):
+        return False
+    return (
+        str(_latest_tag_value(ctx, segment, "primary_shot_role") or "") == "hero"
+        and str(_latest_tag_value(ctx, segment, "product_visibility") or "") == "high"
+        and str(_latest_tag_value(ctx, segment, "confidence") or "") == "high"
+        and str(_latest_tag_value(ctx, segment, "risk_level") or "") == "low"
+        and str(_latest_tag_value(ctx, segment, "mixcut_usability") or "") == "yes"
+        and not _has_subtitle_risk(ctx, segment)
+        and not _asset_has_watermark(ctx, segment)
+    )
 
 
 def _prefer_first_slot_pool(ctx: SkillContext, pool: list[dict]) -> list[dict]:
@@ -1034,6 +1144,8 @@ def _sync_material_supplement_queue(ctx: SkillContext, row: dict, detail: dict) 
 def _latest_tag_value(ctx: SkillContext, segment: dict, key: str):
     if key in segment:
         return segment.get(key)
+    if segment.get("_latest_tag_loaded"):
+        return None
     rows = ctx.repo.list_where("segment_tags", "segment_id=? ORDER BY id DESC LIMIT 1", (segment["segment_id"],))
     return rows[0].get(key) if rows else None
 

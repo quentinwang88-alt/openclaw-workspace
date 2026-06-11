@@ -141,6 +141,46 @@ class EffectiveRoleSkillTest(unittest.TestCase):
         self.assertEqual(roles, ["detail", "ending", "hero", "scene"])
         self.assertIn("trusted exact_sku", reason)
 
+    def test_trusted_exact_sku_creator_without_tag_can_still_support_detail(self):
+        roles, reason = _compute_roles(
+            {
+                "source_type": "creator_authorized",
+                "source_trust_level": "high",
+                "product_binding_type": "exact_sku",
+                "product_match_status": "trusted_by_source",
+            },
+            {},
+            {},
+            _config(),
+        )
+
+        self.assertEqual(roles, ["detail", "scene", "ending"])
+        self.assertIn("without tag", reason)
+
+    def test_trusted_exact_sku_creator_low_risk_tag_keeps_core_roles(self):
+        roles, reason = _compute_roles(
+            {
+                "source_type": "authorized_creator",
+                "source_trust_level": "high",
+                "product_binding_type": "exact_sku",
+                "product_match_status": "trusted_by_source",
+            },
+            {},
+            {
+                "risk_level": "low",
+                "mixcut_usability": "yes",
+                "product_visibility": "high",
+                "confidence": "high",
+                "primary_shot_role": "result",
+                "secondary_roles_json": ["detail"],
+                "reason": "商品清晰，同款佩戴结果可用",
+            },
+            _config(),
+        )
+
+        self.assertEqual(roles, ["detail", "ending", "result", "scene"])
+        self.assertIn("roles inferred", reason)
+
     def test_trusted_exact_sku_creator_still_blocks_hard_wrong_category(self):
         roles, reason = _compute_roles(
             {
@@ -210,6 +250,69 @@ class EffectiveRoleSkillTest(unittest.TestCase):
 
         self.assertEqual(roles, ["ending", "hero", "scene"])
         self.assertIn("low trust exact_sku", reason)
+
+    def test_validated_competitor_same_style_can_enter_detail_result(self):
+        roles, reason = _compute_roles(
+            {
+                "source_type": "competitor",
+                "source_trust_level": "low",
+                "product_binding_type": "same_style",
+                "product_match_status": "uncertain",
+            },
+            {},
+            {
+                "risk_level": "low",
+                "mixcut_usability": "yes",
+                "product_visibility": "high",
+                "confidence": "high",
+                "primary_shot_role": "detail",
+                "secondary_roles_json": ["result"],
+                "reason": "选品阶段已校验同款信息，商品近景清晰",
+            },
+            _config(),
+        )
+
+        self.assertEqual(roles, ["detail", "ending", "result", "scene"])
+        self.assertIn("validated low trust", reason)
+
+    def test_validated_competitor_without_tag_can_still_support_detail(self):
+        roles, reason = _compute_roles(
+            {
+                "source_type": "competitor",
+                "source_trust_level": "low",
+                "product_binding_type": "same_style",
+                "product_match_status": "uncertain",
+            },
+            {},
+            {},
+            _config(),
+        )
+
+        self.assertEqual(roles, ["detail", "scene", "ending"])
+        self.assertIn("validated low trust", reason)
+
+    def test_validated_repost_can_use_hero_when_confident(self):
+        roles, reason = _compute_roles(
+            {
+                "source_type": "douyin_repost",
+                "source_trust_level": "low",
+                "product_binding_type": "same_style",
+                "product_match_status": "uncertain",
+            },
+            {},
+            {
+                "risk_level": "low",
+                "mixcut_usability": "yes",
+                "product_visibility": "high",
+                "confidence": "high",
+                "primary_shot_role": "hero",
+                "reason": "商品开头完整清晰",
+            },
+            _config(),
+        )
+
+        self.assertEqual(roles, ["ending", "hero", "scene"])
+        self.assertIn("validated low trust", reason)
 
     def test_low_trust_exact_sku_still_blocks_hard_wrong_category(self):
         roles, reason = _compute_roles(

@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import selectors
+import signal
 import subprocess
 import sys
 import time
@@ -30,7 +32,14 @@ def main() -> int:
     parser.add_argument("--round-timeout", type=int, default=480)
     parser.add_argument("--max-consecutive-timeouts", type=int, default=2)
     parser.add_argument("--skip-upload-sync", action="store_true")
+    parser.add_argument("--detach", action="store_true", help="Start the guard loop in the background and return immediately.")
+    parser.add_argument("--log-dir", default=str(ROOT / "logs"), help="Directory for detached guard logs.")
     args = parser.parse_args()
+
+    if args.detach:
+        summary = _detach_guard_loop(args)
+        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+        return 0 if summary.get("success") else 1
 
     summary = run_guard_loop(
         product_id=args.product_id,
@@ -46,6 +55,68 @@ def main() -> int:
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
     return 0 if summary.get("success") else 1
+
+
+def _detach_guard_loop(args: argparse.Namespace) -> dict[str, Any]:
+    log_dir = Path(args.log_dir).expanduser().resolve()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d%H%M%S")
+    safe_product = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in str(args.product_id))
+    log_path = log_dir / f"guard_loop_{safe_product}_{stamp}.log"
+
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--product-id",
+        str(args.product_id),
+        "--max-passes",
+        str(args.max_passes),
+        "--max-rounds",
+        str(args.max_rounds),
+        "--round-timeout",
+        str(args.round_timeout),
+        "--max-consecutive-timeouts",
+        str(args.max_consecutive_timeouts),
+        "--log-dir",
+        str(log_dir),
+    ]
+    if args.target is not None:
+        cmd.extend(["--target", str(args.target)])
+    if args.name:
+        cmd.extend(["--name", args.name])
+    if args.market:
+        cmd.extend(["--market", args.market])
+    if args.category:
+        cmd.extend(["--category", args.category])
+    if args.skip_upload_sync:
+        cmd.append("--skip-upload-sync")
+
+    env = os.environ.copy()
+    log_fh = log_path.open("a", encoding="utf-8")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(ROOT),
+            env=env,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+    finally:
+        log_fh.close()
+
+    pid_path = log_dir / f"guard_loop_{safe_product}.pid"
+    pid_path.write_text(str(proc.pid), encoding="utf-8")
+    return {
+        "success": True,
+        "detached": True,
+        "product_id": str(args.product_id),
+        "pid": proc.pid,
+        "pid_path": str(pid_path),
+        "log_path": str(log_path),
+        "message": "guard loop started in background; monitor the log/RDS status instead of waiting in bash",
+    }
 
 
 def run_guard_loop(
@@ -73,24 +144,33 @@ def run_guard_loop(
         child_env = os.environ.copy()
         child_env.setdefault("AUTO_MIXCUT_SKIP_FINAL_VIDEO_QC", "1")
         child_env.setdefault("AUTO_MIXCUT_TOP_UP_MAX_PER_ROUND", "5")
-        try:
-            proc = subprocess.run(
-                cmd,
-                cwd=str(ROOT),
-                env=child_env,
-                capture_output=True,
-                text=True,
-                timeout=effective_timeout,
-            )
-        except subprocess.TimeoutExpired as exc:
+        child_env.setdefault("AUTO_MIXCUT_WATERMARK_CHECK_LIMIT", "8")
+        child_env.setdefault("AUTO_MIXCUT_SEGMENT_ASSET_LIMIT", "8")
+        child_env.setdefault("AUTO_MIXCUT_GUARD_TOP_UP_WITH_STALE", "1")
+        child_env.setdefault("AUTO_MIXCUT_GUARD_SEGMENT_SUBPROCESS", "1")
+        child_env.setdefault("AUTO_MIXCUT_GUARD_FRAME_LIMIT", "20")
+        child_env.setdefault("AUTO_MIXCUT_GUARD_FRAME_TIMEOUT", "60")
+        child_env.setdefault("AUTO_MIXCUT_GUARD_FINGERPRINT_LIMIT", "20")
+        child_env.setdefault("AUTO_MIXCUT_GUARD_FINGERPRINT_TIMEOUT", "45")
+        child_env.setdefault("AUTO_MIXCUT_GUARD_RETAG_LIMIT", "20")
+        child_env.setdefault("AUTO_MIXCUT_GUARD_TAG_CONCURRENCY", "2")
+        child_env.setdefault("AUTO_MIXCUT_GUARD_EFFECTIVE_ROLE_LIMIT", "20")
+        child_env.setdefault("AUTO_MIXCUT_GUARD_EFFECTIVE_ROLE_TIMEOUT", "20")
+        child_env.setdefault("AUTO_MIXCUT_GUARD_AI_STAGE_LIMIT", "10")
+        child_env.setdefault("AUTO_MIXCUT_GUARD_AI_STAGE_TIMEOUT", "45")
+        child_env.setdefault("AUTO_MIXCUT_TAG_TOTAL_TIMEOUT_SEC", "240")
+        child_env.setdefault("AUTO_MIXCUT_TAG_PROGRESS_EVERY", "5")
+        child_env.setdefault("AUTO_MIXCUT_FFMPEG_TIMEOUT_SEC", "45")
+        proc_result = _run_guard_subprocess_streaming(cmd, child_env, effective_timeout)
+        if proc_result["timed_out"]:
             consecutive_timeouts += 1
             pass_item = {
                 "pass_no": pass_no,
                 "status": "timeout",
                 "timeout_seconds": effective_timeout,
                 "elapsed_seconds": round(time.time() - pass_started, 1),
-                "stdout_tail": _tail(exc.stdout),
-                "stderr_tail": _tail(exc.stderr),
+                "stdout_tail": _tail(proc_result.get("stdout")),
+                "stderr_tail": "",
             }
             passes.append(pass_item)
             if consecutive_timeouts >= max(1, max_consecutive_timeouts):
@@ -98,19 +178,19 @@ def run_guard_loop(
             continue
 
         consecutive_timeouts = 0
-        parsed = _parse_guard_stdout(proc.stdout)
+        parsed = _parse_guard_stdout(proc_result.get("stdout"))
         pass_item = {
             "pass_no": pass_no,
             "status": "completed",
-            "returncode": proc.returncode,
+            "returncode": proc_result["returncode"],
             "elapsed_seconds": round(time.time() - pass_started, 1),
-            "stdout_tail": _tail(proc.stdout),
-            "stderr_tail": _tail(proc.stderr),
+            "stdout_tail": _tail(proc_result.get("stdout")),
+            "stderr_tail": "",
             "guard_result": _compact_guard_result(parsed),
         }
         passes.append(pass_item)
 
-        if proc.returncode != 0:
+        if proc_result["returncode"] != 0:
             status, action = _status_action_from_result(parsed, default_status="ERROR", default_action="CHECK_PIPELINE_LOG")
             return _summary(False, product_id, status, action, started, passes, "guard pass failed")
 
@@ -121,6 +201,71 @@ def run_guard_loop(
             return _summary(True, product_id, status, action, started, passes)
 
     return _summary(True, product_id, "READY_TO_CONTINUE", "RUN_GUARD_AGAIN", started, passes, f"max passes reached: {max_passes}")
+
+
+def _run_guard_subprocess_streaming(cmd: list[str], env: dict[str, str], timeout_seconds: int) -> dict[str, Any]:
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(ROOT),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        start_new_session=True,
+    )
+    stdout_parts: list[str] = []
+    selector = selectors.DefaultSelector()
+    if proc.stdout is not None:
+        selector.register(proc.stdout, selectors.EVENT_READ)
+    started = time.time()
+    timed_out = False
+    try:
+        while True:
+            if time.time() - started > timeout_seconds:
+                timed_out = True
+                _terminate_process_group(proc)
+                break
+            if proc.poll() is not None:
+                break
+            events = selector.select(timeout=1.0)
+            for key, _ in events:
+                line = key.fileobj.readline()
+                if not line:
+                    continue
+                stdout_parts.append(line)
+                print(line, end="", flush=True)
+        if proc.stdout is not None:
+            for line in proc.stdout:
+                stdout_parts.append(line)
+                print(line, end="", flush=True)
+    finally:
+        selector.close()
+    return {
+        "returncode": proc.wait(timeout=5) if proc.poll() is not None else None,
+        "timed_out": timed_out,
+        "stdout": "".join(stdout_parts),
+    }
+
+
+def _terminate_process_group(proc: subprocess.Popen) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except Exception:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
 
 def _guard_command(product_id: str, target: int | None, name: str, market: str, category: str, max_rounds: int, skip_upload_sync: bool) -> list[str]:
@@ -211,8 +356,11 @@ def _dynamic_round_timeout(product_id: str, base_timeout: int) -> int:
         task = ctx.repo.list_where("content_tasks", "product_id=? ORDER BY id DESC", (product_id,))
         if task:
             allowed = int(task[0].get("allowed_variant_count") or 0)
-            if allowed > 0:
-                return max(base_timeout, allowed * minute_per_output + buffer)
+            actual = int(task[0].get("actual_variant_count") or 0)
+            remaining = int(task[0].get("target_remaining_variant_count") or 0)
+            planned = max(0, min(max(0, allowed - actual), remaining or allowed))
+            if planned > 0:
+                return max(base_timeout, planned * minute_per_output + buffer)
     except Exception:
         pass
     return base_timeout

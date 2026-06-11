@@ -10,6 +10,10 @@ from .context import SkillContext
 from .usage_counter_skill import refresh_output_segment_usage
 
 
+AUDIO_MEAN_MIN_DB = -16.0
+AUDIO_TAIL_MIN_DB = -16.0
+
+
 class QualityGateSkill:
     def __init__(self, ctx: SkillContext):
         self.ctx = ctx
@@ -37,7 +41,7 @@ class QualityGateSkill:
         volume = _audio_volume(self.ctx, output)
         if volume is None:
             reasons.append("audio volume could not be measured")
-        elif volume < -28.0:
+        elif volume < AUDIO_MEAN_MIN_DB:
             reasons.append(f"audio mean volume too low ({volume:.1f} dB)")
         reasons.extend(_audio_tail_window_reasons(self.ctx, output, actual_duration))
         if first:
@@ -52,7 +56,11 @@ class QualityGateSkill:
                 reasons.append("first segment risk is not low")
             if tag.get("hook_strength") not in {"strong", "medium"}:
                 reasons.append("first segment hook is weak")
-            if segment.get("product_match_status") not in {"trusted_by_source", "anchor_pass"} and not ai_anchor_trusted:
+            if (
+                segment.get("product_match_status") not in {"trusted_by_source", "anchor_pass"}
+                and not ai_anchor_trusted
+                and not _low_trust_first_slot_review_candidate(first)
+            ):
                 reasons.append("first segment product match is not trusted")
             if not set(roles).intersection({"hero", "result", "detail"}):
                 reasons.append("first segment lacks core effective role")
@@ -67,6 +75,7 @@ class QualityGateSkill:
             reasons.append("unique_source_assets < 3")
         status = "passed" if not reasons else "failed"
         self.ctx.repo.update("outputs", "output_id", output_id, {"machine_quality_status": status})
+        _sync_render_plan_quality_status(self.ctx, output, status)
         refresh_output_segment_usage(self.ctx, output_id)
         return Result.ok({"output_id": output_id, "machine_quality_status": status, "score": 100 if status == "passed" else 60, "reasons": reasons})
 
@@ -76,6 +85,19 @@ def _segment_bundle(ctx: SkillContext, segment_id: str):
     asset = ctx.repo.get("assets", "asset_id", segment.get("asset_id")) if segment.get("asset_id") else {}
     tags = ctx.repo.list_where("segment_tags", "segment_id=? ORDER BY id DESC", (segment_id,))
     return {"segment": segment, "asset": asset or {}, "tag": tags[0] if tags else {}}
+
+
+def _sync_render_plan_quality_status(ctx: SkillContext, output: dict, status: str) -> None:
+    output_id = str(output.get("output_id") or "")
+    plans = ctx.repo.list_where("render_plans", "output_id=?", (output_id,)) if output_id else []
+    if not plans:
+        plans = ctx.repo.list_where(
+            "render_plans",
+            "batch_id=? AND variant_no=?",
+            (output.get("batch_id"), output.get("variant_no")),
+        )
+    for plan in plans:
+        ctx.repo.update("render_plans", "render_plan_id", plan["render_plan_id"], {"quality_gate_status": status})
 
 
 def _trusted_real_first_segment(bundle: dict) -> bool:
@@ -100,6 +122,33 @@ def _trusted_real_first_segment(bundle: dict) -> bool:
     soft_tokens = ["锚点未知", "锚点不确定", "锚点缺失", "商品锚点", "商品信息缺失", "需核对", "需复核", "需确认", "人工确认", "人工核实"]
     hard_tokens = ["水印", "平台", "账号", "logo", "Logo", "错款", "错品类", "竞品", "SKU一致性", "漂移", "无关元素", "品牌包", "遮挡严重"]
     return any(token in reason for token in soft_tokens) and not any(token in reason for token in hard_tokens)
+
+
+def _low_trust_first_slot_review_candidate(bundle: dict) -> bool:
+    segment = bundle.get("segment") or {}
+    asset = bundle.get("asset") or {}
+    tag = bundle.get("tag") or {}
+    source_type = str(segment.get("source_type") or asset.get("source_type") or "")
+    trust = str(segment.get("source_trust_level") or asset.get("source_trust_level") or "")
+    binding = str(segment.get("product_binding_type") or asset.get("product_binding_type") or "")
+    match = str(segment.get("product_match_status") or "")
+    if source_type not in {"douyin_repost", "competitor"}:
+        return False
+    if trust != "low" or binding not in {"exact_sku", "same_style"}:
+        return False
+    if match not in {"", "uncertain", "trusted_by_source", "anchor_pass"}:
+        return False
+    if "hero" not in (segment.get("effective_roles_json") or []):
+        return False
+    return (
+        str(tag.get("primary_shot_role") or "") == "hero"
+        and str(tag.get("product_visibility") or "") == "high"
+        and str(tag.get("confidence") or "") == "high"
+        and str(tag.get("risk_level") or "") == "low"
+        and str(tag.get("mixcut_usability") or "") == "yes"
+        and str(tag.get("text_overlay_risk") or "none") in {"", "none", "low", "minor"}
+        and str(asset.get("has_watermark") or segment.get("has_watermark") or "no") != "yes"
+    )
 
 
 def _audio_volume(ctx: SkillContext, output: dict, start_sec: float | None = None, duration_sec: float | None = None) -> float | None:
@@ -130,7 +179,7 @@ def _audio_tail_window_reasons(ctx: SkillContext, output: dict, actual_duration_
         volume = _audio_volume(ctx, output, start_sec=start, duration_sec=1.0)
         if volume is None:
             reasons.append(f"audio tail window t-{offset}s could not be measured")
-        elif volume < -28.0:
+        elif volume < AUDIO_TAIL_MIN_DB:
             reasons.append(f"audio tail window t-{offset}s too low ({volume:.1f} dB)")
     return reasons
 
