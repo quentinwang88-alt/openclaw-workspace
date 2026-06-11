@@ -64,6 +64,16 @@ STRUCTURE_KEYWORDS = (
     "下摆",
     "拉链",
     "腰带",
+    "发饰",
+    "发夹",
+    "鲨鱼夹",
+    "发箍",
+    "发圈",
+    "蝴蝶结",
+    "夹齿",
+    "扣齿",
+    "珍珠",
+    "水钻",
 )
 
 PROMPT_TEMPLATE_PATH = SKILL_DIR / "prompts" / "feedback_fix.md"
@@ -83,7 +93,7 @@ def build_feedback_fix_prompt(
     scene_ref_label = _image_range_label(2 + product_ref_count, scene_ref_count) if scene_ref_count else ""
     scene_ref_note = (
         f"- **{scene_ref_label}（原始场景参考图）**：供应商或原始场景图，"
-        "只用于辅助确认真实穿着结构、扣子/口袋位置、开合方式和材质呈现\n"
+        "只用于辅助确认真实穿着/佩戴结构、扣子/口袋/发饰固定位置、开合方式、尺寸比例和材质呈现\n"
         if scene_ref_count
         else ""
     )
@@ -92,10 +102,10 @@ def build_feedback_fix_prompt(
         method_context = (
             "\n## 修正模式：结构优先重生\n\n"
             "本次采用「结构优先重生」模式。优先保证反馈点名的产品结构准确、清晰、可验证，"
-            "包括扣子/扣钮数量、单侧位置、口袋位置、领型、袖口、下摆等。"
-            "为了让结构清楚呈现，可以调整手臂遮挡、衣襟开合、局部姿态、裁切和角度，"
+            "包括扣子/扣钮数量、单侧位置、口袋位置、领型、袖口、下摆、发饰夹齿/固定结构、装饰元素、颜色和件数等。"
+            "为了让结构清楚呈现，可以调整手臂/头发遮挡、衣襟开合、局部姿态、裁切和角度，"
             "但不得改变原始商品图和原始场景参考图中的真实产品结构。\n\n"
-            "结构证明构图要求：半身正面或微侧正面，衣服主体占画面约 70%，"
+            "结构证明构图要求：商品主体占画面约 70%，"
             "双手和头发不要遮挡被反馈点名的结构；背景保持简单真实，"
             "模特可裁脸、侧脸或弱露脸，不要让人脸成为画面重点。"
         )
@@ -176,6 +186,14 @@ def expand_feedback_issues(issues: str) -> str:
         additions.append(
             "被反馈点名的结构必须完整露出并可验证，可以采用半身正面或微侧正面结构证明构图。"
         )
+    if re.search(r"(发饰|发夹|鲨鱼夹|发箍|发圈|蝴蝶结|夹齿|扣齿|珍珠|水钻|头饰|头发)", issue_text):
+        additions.append(
+            "发饰必须按原始商品图保持颜色、尺寸比例、固定结构和装饰元素；不要新增未观察到的珍珠、水钻、蝴蝶结、花朵、logo、额外颜色或额外件数。"
+        )
+    if re.search(r"(夹齿|扣齿|齿|夹子|固定|卡扣)", issue_text):
+        additions.append("夹持/固定结构必须清晰可见，形状、方向和数量参考原始商品图，不要被头发或手遮挡。")
+    if re.search(r"(套装|数量|几件|件数|多了|少了|颜色)", issue_text):
+        additions.append("如果反馈涉及颜色或数量，最终图只能保留被确认的颜色/件数；不确定套装数量时不要生成套装。")
 
     if not additions:
         return issue_text
@@ -206,7 +224,7 @@ def find_scene_image_path(
     target_slot: str,
     output_dir: Path,
 ) -> Optional[str]:
-    """Find and download a specific scene image by slot label (S1-S6).
+    """Find and download a specific scene image by slot label (S1-S6 or H1-H6).
 
     Uses 场景图生成明细 to locate the correct attachment in 场景图结果.
     """
@@ -298,7 +316,7 @@ def process_feedback_record(
 
     # Separate targets
     main_targets = [t for t in targets if t == "首图"]
-    scene_targets = [t for t in targets if t.upper().startswith("S")]
+    scene_targets = [t for t in targets if t.upper().startswith(("S", "H"))]
 
     fix_results_main: List[Dict[str, Any]] = []
     fix_results_scene: List[Dict[str, Any]] = []

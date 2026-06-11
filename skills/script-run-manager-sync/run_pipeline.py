@@ -71,8 +71,12 @@ def print_field_mapping(title: str, mapping: dict) -> None:
         print(f"   {key}: {value or '未找到'}")
 
 
-def ensure_reference_free_field(client: FeishuBitableClient, field_names: List[str]) -> List[str]:
+def ensure_target_default_fields(client: FeishuBitableClient, field_names: List[str]) -> List[str]:
     changed = False
+    if "店铺ID" not in field_names:
+        print("🧩 目标运行表缺少字段【店铺ID】，正在创建...")
+        client.create_field("店铺ID", field_type=1, ui_type="Text")
+        changed = True
     if "免参考图" not in field_names:
         print("🧩 目标运行表缺少字段【免参考图】，正在创建...")
         try:
@@ -214,7 +218,7 @@ def build_existing_target_updates(
     ):
         updates[prompt_field] = fields[prompt_field]
 
-    for logical_name in ("script_id", "internal_script_key", "task_name"):
+    for logical_name in ("script_id", "store_id", "internal_script_key", "task_name"):
         field_name = mapping.get(logical_name)
         if field_name and fields.get(field_name) and (allow_full_patch or not existing_target.fields.get(field_name)):
             updates[field_name] = fields[field_name]
@@ -333,7 +337,7 @@ def _main_with_lock(args: argparse.Namespace) -> None:
     target_client = FeishuBitableClient(app_token=target_app_token, table_id=target_table_id)
 
     source_field_names = source_client.list_field_names()
-    target_field_names = ensure_reference_free_field(target_client, target_client.list_field_names())
+    target_field_names = ensure_target_default_fields(target_client, target_client.list_field_names())
     source_mapping = resolve_field_mapping(source_field_names, SOURCE_FIELD_ALIASES)
     target_mapping = resolve_field_mapping(target_field_names, TARGET_FIELD_ALIASES)
 

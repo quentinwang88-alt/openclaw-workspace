@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Code-based title QA for likeU womens outerwear TikTok titles.
+"""Code-based title QA for likeU TikTok titles.
 
 Does NOT call an LLM — pure rule checks against product truth.
 """
@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 
 THAI_CHAR_RANGE = re.compile(r"[\u0E00-\u0E7F]")
+LATIN_CHAR_RANGE = re.compile(r"[A-Za-zÀ-ỹĐđ]")
 CHINESE_CHAR_RANGE = re.compile(r"[\u4E00-\u9FFF]")
 PROMO_PATTERNS = re.compile(
     r"(จัดส่งฟรี|ส่งฟรี|ลดราคา|โปรโมชั่น|โปร\s?ฯ|ส่วนลด|โค้ด|Flash\s*Sale|"
@@ -38,6 +39,8 @@ def qa_title(
     tk_title: str,
     product_truth: Optional[Dict[str, Any]] = None,
     original_title: str = "",
+    category: str = "女装上装/外套",
+    country: str = "TH",
 ) -> Dict[str, Any]:
     issues: List[str] = []
     compliance_risk = False
@@ -50,9 +53,10 @@ def qa_title(
     _check_absolute(title, issues)
     _check_brand(title, issues)
     _check_year(title, issues)
-    _check_core_term(title, issues)
+    _check_core_term(title, issues, category=category, country=country)
     _check_style_overload(title, issues)
     _check_thai_naturalness(title, issues)
+    _check_hair_accessory_generic_title(title, issues, category=category, country=country)
     _check_info_block_count(title, issues)
 
     if product_truth:
@@ -137,9 +141,41 @@ def _check_year(title: str, issues: List[str]) -> None:
         issues.append("标题包含年份数字")
 
 
-def _check_core_term(title: str, issues: List[str]) -> None:
+def _check_core_term(
+    title: str,
+    issues: List[str],
+    *,
+    category: str = "女装上装/外套",
+    country: str = "TH",
+) -> None:
+    normalized_country = (country or "TH").strip().upper()
+    normalized_category = (category or "女装上装/外套").strip()
+    if normalized_country == "VN":
+        if not LATIN_CHAR_RANGE.search(title):
+            issues.append("标题缺少越南语/拉丁字母内容")
+            return
+        if normalized_category == "发饰":
+            core_patterns = [
+                "kẹp tóc", "kẹp càng cua", "kẹp mái", "băng đô", "cài tóc",
+                "scrunchies", "dây buộc tóc", "thun cột tóc", "nơ tóc", "phụ kiện tóc",
+            ]
+            has_core = any(p in title.lower() for p in core_patterns)
+            if not has_core:
+                issues.append("标题缺少发饰核心品类词（如 kẹp tóc / băng đô / scrunchies）")
+            return
+        return
+
     if not THAI_CHAR_RANGE.search(title):
         issues.append("标题缺少泰语内容")
+        return
+    if normalized_category == "发饰":
+        core_patterns = [
+            "กิ๊บ", "ที่คาดผม", "คาดผม", "ยางมัดผม", "ยางรัดผม",
+            "โบว์ติดผม", "เครื่องประดับผม", "อุปกรณ์ตกแต่งผม",
+        ]
+        has_core = any(p in title for p in core_patterns)
+        if not has_core:
+            issues.append("标题缺少发饰核心品类词（如 กิ๊บติดผม / ที่คาดผม / ยางมัดผม）")
         return
     core_patterns = [
         "เสื้อ", "แจ็คเก็ต", "แจ็กเก็ต", "โค้ท", "คลุม", "สเวตเตอร์",
@@ -166,13 +202,40 @@ def _check_thai_naturalness(title: str, issues: List[str]) -> None:
         (r"ทรงครอปหลวม(?!\s*แบบ)", "ทรงครอปหลวม 应改为 ทรงครอปแบบหลวม"),
         (r"ทรงสั้นทรงหลวม", "ทรงสั้นทรงหลวม 应改为 ทรงสั้นแบบหลวม"),
         (r"ดีไซน์เปิดหน้า", "ดีไซน์เปิดหน้า 不自然，应改为 แบบเปิดหน้า 或 เปิดหน้า"),
-        (r"ดีไซน์", "避免机械使用 ดีไซน์ 翻译\"设计\""),
+        (r"ดีไซน์เรียบง่าย", "发饰标题避免空泛的 ดีไซน์เรียบง่าย，应尽量写具体颜色/图案/结构"),
         (r"ขนฟูเนื้อนุ่ม", "ขนฟูเนื้อนุ่ม 应改为 ขนฟูนุ่ม 或 เนื้อขนฟูนุ่ม"),
         (r"มีกระเป๋าฝาปิดใหญ่", "มีกระเป๋าฝาปิดใหญ่ 非必要不加 ใหญ่，应改为 กระเป๋าฝาปิด"),
     ]
     for pattern, message in unnatural_patterns:
         if re.search(pattern, title):
             issues.append(f"泰语自然度: {message}")
+
+
+def _check_hair_accessory_generic_title(
+    title: str,
+    issues: List[str],
+    *,
+    category: str = "女装上装/外套",
+    country: str = "TH",
+) -> None:
+    if (category or "").strip() != "发饰" or (country or "TH").strip().upper() != "TH":
+        return
+    generic_groups = [
+        ("รวบผมง่าย", "จัดทรง"),
+        ("ใช้ได้ทุกวัน", "ใส่ง่ายทุกวัน", "ประจำวัน"),
+        ("ลุคเรียบมินิมอล", "ลุคมินิมอล", "สไตล์มินิมอล"),
+    ]
+    generic_hits = 0
+    for group in generic_groups:
+        if any(term in title for term in group):
+            generic_hits += 1
+    concrete_terms = [
+        "ลาย", "สี", "ทรง", "แม่เหล็ก", "ประดับ", "มุก", "คริสตัล",
+        "หัวใจ", "ขอบสูง", "ฟันหนีบ", "ผ้าซาติน", "อะคริลิก", "กำมะหยี่",
+    ]
+    has_concrete = any(term in title for term in concrete_terms)
+    if generic_hits >= 3 and not has_concrete:
+        issues.append("发饰标题过于通用，建议保留原标题中的颜色/图案/形状/结构差异点")
 
 
 def _check_info_block_count(title: str, issues: List[str]) -> None:

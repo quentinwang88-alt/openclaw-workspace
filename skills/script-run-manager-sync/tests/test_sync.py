@@ -30,6 +30,7 @@ from core.sync import (
     summarize_sync_scope,
 )
 from run_pipeline import (
+    build_existing_target_updates,
     build_target_record_indexes,
     existing_target_conflict_reason,
     resolve_task_action,
@@ -44,6 +45,7 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
             "一级类目",
             "产品参数信息",
             "任务编号",
+            "店铺ID",
             "产品图片",
             "视频时长",
             "是否可同步",
@@ -65,6 +67,7 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
             "提示词",
             "参考图",
             "脚本ID",
+            "店铺ID",
             "内部脚本键",
             "脚本来源",
             "发布用途",
@@ -90,6 +93,7 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
                     "一级类目": "配饰",
                     "产品参数信息": "细手圈，内径约56mm，圈宽2mm，开口可微调",
                     "任务编号": "003",
+                    "店铺ID": "MYPS01",
                     "是否可同步": True,
                     "产品图片": [{"file_token": "file_1"}],
                     "视频时长": "28秒",
@@ -116,6 +120,7 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
         self.assertEqual(tasks[0].business_category, "配饰")
         self.assertEqual(tasks[0].product_params, "细手圈，内径约56mm，圈宽2mm，开口可微调")
         self.assertEqual(tasks[0].video_duration, 28)
+        self.assertEqual(tasks[0].store_id, "MYPS01")
         self.assertEqual(tasks[0].script_id, "003_M1_M")
         self.assertEqual(tasks[0].internal_script_key, "rec_1:S1")
         self.assertEqual(tasks[1].script_id, "003_M1_V1")
@@ -256,6 +261,7 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
                     "一级类目": "配饰",
                     "产品参数信息": "细手圈，内径约56mm，圈宽2mm，开口可微调",
                     "任务编号": "003",
+                    "店铺ID": "MYPS01",
                     "是否可同步": True,
                     "产品图片": [{"file_token": "file_1"}],
                     "所属母版1": "M1",
@@ -272,8 +278,45 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
         self.assertTrue(fields["提示词"].startswith("【脚本ID】\n- 003_M1_M\n\n产品锚点：手镯｜细手圈，内径约56mm，圈宽2mm，开口可微调\n"))
         self.assertTrue(fields["提示词"].endswith("script one"))
         self.assertEqual(fields["脚本ID"], "003_M1_M")
+        self.assertEqual(fields["店铺ID"], "MYPS01")
         self.assertEqual(fields["内部脚本键"], "rec_1:S1")
         self.assertEqual(fields["视频时长"], 15)
+
+    def test_existing_script_id_backfills_store_id_when_empty(self) -> None:
+        existing_target = TableRecord(
+            record_id="target_1",
+            fields={
+                "任务名": "OLD.S1",
+                "内部脚本键": "OLD.S1",
+                "脚本ID": "003_M1_M",
+                "状态": "待处理",
+            },
+        )
+        task = build_sync_tasks(
+            [
+                TableRecord(
+                    record_id="source_1",
+                    fields={
+                        "产品编码": "ABC001",
+                        "任务编号": "003",
+                        "店铺ID": "TH01",
+                        "是否可同步母版": True,
+                        "脚本方向一": "same script",
+                    },
+                )
+            ],
+            self.mapping,
+        )[0]
+
+        fields = build_target_fields(task, self.target_mapping)
+        updates = build_existing_target_updates(
+            existing_target,
+            fields,
+            self.target_mapping,
+            allow_full_patch=False,
+        )
+
+        self.assertEqual(updates["店铺ID"], "TH01")
 
     def test_build_target_fields_carries_video_duration(self) -> None:
         records = [

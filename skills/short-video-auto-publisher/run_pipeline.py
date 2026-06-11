@@ -30,6 +30,7 @@ from app.metadata import (  # noqa: E402
     sanitize_title,
 )
 from app.models import ScriptMetadata  # noqa: E402
+from app.mixcut import sync_mixcut_publish_results, sync_mixcut_videos  # noqa: E402
 from app.notifications import (  # noqa: E402
     default_queue_date,
     default_summary_date,
@@ -44,6 +45,7 @@ from app.reporting import (  # noqa: E402
     apply_manual_publish_statuses_from_table,
     product_publish_periods,
     sync_manual_publish_queue_table,
+    sync_product_schedule_preferences_table,
     sync_product_publish_report_table,
     sync_publish_report_table,
 )
@@ -204,6 +206,61 @@ def apply_disabled_store_overrides(db: AutoPublishDB, args: argparse.Namespace) 
         "paused_accounts": paused_accounts,
         "deleted_future_pending_slots": deleted_slots,
     }
+
+
+def resolve_account_id_overrides(args: argparse.Namespace) -> Dict[str, str]:
+    """读取本地账号 ID 覆盖，用于源表暂时无法写回但 GeeLark ID 已修正的场景。
+
+    支持配置：
+    {
+      "account_id_overrides": {
+        "VNPS01:越南配饰3": "621288192900859568",
+        "old-account-id": "new-account-id"
+      }
+    }
+    """
+    config = load_local_config(getattr(args, "config_path", DEFAULT_CONFIG_PATH))
+    raw = config.get("account_id_overrides")
+    overrides: Dict[str, str] = {}
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            source = str(key or "").strip()
+            target = str(value or "").strip()
+            if source and target:
+                overrides[source] = target
+    return overrides
+
+
+def apply_account_id_overrides_to_records(
+    records: list[Any],
+    mapping: Dict[str, Optional[str]],
+    args: argparse.Namespace,
+) -> Dict[str, int]:
+    account_id_field = mapping.get("account_id")
+    account_name_field = mapping.get("account_name")
+    store_id_field = mapping.get("store_id")
+    if not account_id_field:
+        return {"configured": 0, "records_overridden": 0}
+
+    overrides = resolve_account_id_overrides(args)
+    if not overrides:
+        return {"configured": 0, "records_overridden": 0}
+
+    changed = 0
+    for record in records:
+        fields = record.fields
+        account_id = str(fields.get(account_id_field) or "").strip()
+        account_name = str(fields.get(account_name_field) or "").strip() if account_name_field else ""
+        store_id = str(fields.get(store_id_field) or "").strip() if store_id_field else ""
+        candidates = [account_id]
+        if store_id and account_name:
+            candidates.append(f"{store_id}:{account_name}")
+            candidates.append(f"{store_id}/{account_name}")
+        target = next((overrides[key] for key in candidates if key in overrides), "")
+        if target and target != account_id:
+            fields[account_id_field] = target
+            changed += 1
+    return {"configured": len(overrides), "records_overridden": changed}
 
 
 def sync_recent_manual_publish_statuses(db: AutoPublishDB, args: argparse.Namespace) -> Dict[str, int]:
@@ -458,6 +515,29 @@ def command_sync_videos(args: argparse.Namespace) -> None:
     print(stats)
 
 
+def command_sync_mixcut_videos(args: argparse.Namespace) -> None:
+    ensure_video_storage_ready(args.video_dir)
+    db = AutoPublishDB(Path(args.db_path))
+    stats = sync_mixcut_videos(
+        auto_publish_db=db,
+        product_id=args.product_id or "",
+        batch_id=args.batch_id or "",
+        output_id=args.output_id or "",
+        video_dir=Path(args.video_dir),
+        limit=args.limit,
+        store_id_override=args.store_id or "",
+        pull_output_qc=not args.no_pull_output_qc,
+        dry_run=args.dry_run,
+    )
+    print(json.dumps(stats, ensure_ascii=False, indent=2))
+
+
+def command_sync_mixcut_results(args: argparse.Namespace) -> None:
+    db = AutoPublishDB(Path(args.db_path))
+    stats = sync_mixcut_publish_results(auto_publish_db=db, product_id=args.product_id or "", dry_run=args.dry_run)
+    print(json.dumps(stats, ensure_ascii=False, indent=2))
+
+
 def command_sync_accounts(args: argparse.Namespace) -> None:
     db = AutoPublishDB(Path(args.db_path))
     app_token, table_id = resolve_feishu_config(args.account_feishu_url)
@@ -465,9 +545,22 @@ def command_sync_accounts(args: argparse.Namespace) -> None:
     field_names = ensure_account_nurture_fields(client, client.list_field_names())
     mapping = resolve_table_mapping(field_names, ACCOUNT_FIELD_ALIASES)
     records = client.list_records(page_size=100, limit=args.limit)
+    account_override_stats = apply_account_id_overrides_to_records(records, mapping, args)
     count = sync_accounts(records, mapping, db)
     override_stats = apply_disabled_store_overrides(db, args)
-    print({"accounts_upserted": count, "disabled_store_overrides": override_stats})
+    print({"accounts_upserted": count, "account_id_overrides": account_override_stats, "disabled_store_overrides": override_stats})
+
+
+def sync_product_schedule_preferences_before_schedule(db: AutoPublishDB, args: argparse.Namespace) -> Dict[str, Any]:
+    report_url = str(getattr(args, "product_report_feishu_url", "") or "").strip()
+    if not report_url:
+        return {"skipped": 1, "reason": "未配置 product_report_feishu_url"}
+    try:
+        app_token, table_id = resolve_feishu_config(report_url)
+        client = FeishuBitableClient(app_token=app_token, table_id=table_id)
+        return sync_product_schedule_preferences_table(db, client)
+    except Exception as exc:
+        return {"failed": 1, "error": str(exc)}
 
 
 def command_schedule(args: argparse.Namespace) -> None:
@@ -477,6 +570,8 @@ def command_schedule(args: argparse.Namespace) -> None:
         override_stats = apply_disabled_store_overrides(db, args)
         if override_stats["disabled_stores"]:
             print({"disabled_store_overrides": override_stats}, flush=True)
+        preference_stats = sync_product_schedule_preferences_before_schedule(db, args)
+        print({"product_schedule_preferences": preference_stats}, flush=True)
         sample_paths = [str(row["local_file_path"] or "") for row in db.list_scheduled_tasks()[:10]]
         ensure_video_storage_ready(video_dir, sample_paths=sample_paths)
         publisher = build_publish_adapter(args)
@@ -807,9 +902,12 @@ def _command_run_all_locked(args: argparse.Namespace) -> None:
     account_field_names = ensure_account_nurture_fields(account_client, account_client.list_field_names())
     account_mapping = resolve_table_mapping(account_field_names, ACCOUNT_FIELD_ALIASES)
     account_records = account_client.list_records(page_size=100, limit=args.limit)
+    summary["account_id_overrides"] = apply_account_id_overrides_to_records(account_records, account_mapping, args)
     summary["sync_accounts"] = {"accounts_upserted": sync_accounts(account_records, account_mapping, db)}
     summary["disabled_store_overrides"] = apply_disabled_store_overrides(db, args)
     print(f"[run-all] sync_accounts done {summary['sync_accounts']}", flush=True)
+    if summary["account_id_overrides"]["records_overridden"]:
+        print(f"[run-all] account_id_overrides {summary['account_id_overrides']}", flush=True)
     if summary["disabled_store_overrides"]["disabled_stores"]:
         print(f"[run-all] disabled_store_overrides {summary['disabled_store_overrides']}", flush=True)
 
@@ -828,10 +926,31 @@ def _command_run_all_locked(args: argparse.Namespace) -> None:
     )
     print(f"[run-all] sync_videos done {summary['sync_videos']}", flush=True)
 
-    print("[run-all] schedule start", flush=True)
+    if not args.no_sync_mixcut:
+        print("[run-all] sync_mixcut_videos start", flush=True)
+        try:
+            summary["sync_mixcut_videos"] = sync_mixcut_videos(
+                auto_publish_db=db,
+                product_id=args.product_id or "",
+                video_dir=video_dir,
+                limit=args.mixcut_sync_limit,
+            )
+        except Exception as exc:
+            summary["sync_mixcut_videos"] = {"failed": 1, "error": str(exc)}
+        print(f"[run-all] sync_mixcut_videos done {summary['sync_mixcut_videos']}", flush=True)
+
     sample_paths = [str(row["local_file_path"] or "") for row in db.list_scheduled_tasks()[:10]]
     ensure_video_storage_ready(video_dir, sample_paths=sample_paths)
     publisher = build_publish_adapter(args)
+
+    print("[run-all] sync_results before schedule start", flush=True)
+    summary["sync_results_before_schedule"] = sync_publish_results(db, publisher)
+    print(f"[run-all] sync_results before schedule done {summary['sync_results_before_schedule']}", flush=True)
+
+    print("[run-all] schedule start", flush=True)
+    print("[run-all] sync_product_schedule_preferences start", flush=True)
+    summary["sync_product_schedule_preferences"] = sync_product_schedule_preferences_before_schedule(db, args)
+    print(f"[run-all] sync_product_schedule_preferences done {summary['sync_product_schedule_preferences']}", flush=True)
     print("[run-all] sync_recent_manual_statuses start", flush=True)
     summary["sync_recent_manual_statuses"] = sync_recent_manual_publish_statuses(db, args)
     print(f"[run-all] sync_recent_manual_statuses done {summary['sync_recent_manual_statuses']}", flush=True)
@@ -895,6 +1014,21 @@ def build_parser() -> argparse.ArgumentParser:
     sync_video.add_argument("--run-manager-feishu-url", default=DEFAULT_RUN_MANAGER_FEISHU_URL, help="运行管理表飞书 URL")
     sync_video.add_argument("--limit", type=int, help="限制处理数量")
     sync_video.set_defaults(func=command_sync_videos)
+
+    sync_mixcut = subparsers.add_parser("sync-mixcut-videos", help="从 auto_mixcut RDS 同步人工通过的混剪成片到发布池")
+    sync_mixcut.add_argument("--product-id", help="只同步指定商品 ID")
+    sync_mixcut.add_argument("--batch-id", help="只同步指定混剪批次")
+    sync_mixcut.add_argument("--output-id", help="只同步指定成片/素材 ID")
+    sync_mixcut.add_argument("--store-id", default="", help="当产品表 shop_id 缺失时显式指定店铺 ID")
+    sync_mixcut.add_argument("--limit", type=int, help="限制同步数量")
+    sync_mixcut.add_argument("--no-pull-output-qc", action="store_true", help="不从飞书成片质检表拉取可发布状态")
+    sync_mixcut.add_argument("--dry-run", action="store_true", help="只检查候选，不写入发布库、不复制视频")
+    sync_mixcut.set_defaults(func=command_sync_mixcut_videos)
+
+    sync_mixcut_results = subparsers.add_parser("sync-mixcut-results", help="把已发布的混剪视频结果回写 auto_mixcut RDS")
+    sync_mixcut_results.add_argument("--product-id", help="只回写指定商品 ID")
+    sync_mixcut_results.add_argument("--dry-run", action="store_true", help="只检查，不写回 auto_mixcut RDS")
+    sync_mixcut_results.set_defaults(func=command_sync_mixcut_results)
 
     sync_account = subparsers.add_parser("sync-accounts", help="同步账号配置表到数据库")
     sync_account.add_argument("--account-feishu-url", default=DEFAULT_ACCOUNT_FEISHU_URL, help="账号配置飞书 URL")
@@ -987,7 +1121,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_notification_args(notify_product_weekly)
     notify_product_weekly.set_defaults(func=command_notify_product_publish_weekly)
 
-    schedule = subparsers.add_parser("schedule", help="按 24 小时窗口增量补排")
+    schedule = subparsers.add_parser("schedule", help="按 48 小时窗口增量补排")
+    schedule.add_argument("--product-report-feishu-url", default=DEFAULT_PRODUCT_PUBLISH_REPORT_FEISHU_URL, help="店铺产品发布汇总表飞书 URL，用于排期策略回读")
     schedule.add_argument("--publish-mode", choices=["dry-run", "http", "geelark"], default="dry-run")
     schedule.add_argument("--publish-api-base-url", default="", help="自动发布 API Base URL")
     schedule.add_argument("--publish-api-token", default="", help="自动发布 API Token")
@@ -1071,10 +1206,13 @@ def build_parser() -> argparse.ArgumentParser:
     run_all.add_argument("--account-feishu-url", default=DEFAULT_ACCOUNT_FEISHU_URL, help="账号配置飞书 URL")
     run_all.add_argument("--report-feishu-url", default=DEFAULT_REPORT_FEISHU_URL, help="发布追踪表飞书 URL")
     run_all.add_argument("--manual-queue-feishu-url", default=DEFAULT_MANUAL_QUEUE_FEISHU_URL, help="人工发布清单表飞书 URL")
+    run_all.add_argument("--product-report-feishu-url", default=DEFAULT_PRODUCT_PUBLISH_REPORT_FEISHU_URL, help="店铺产品发布汇总表飞书 URL，用于排期策略回读")
     run_all.add_argument("--video-dir", default=str(default_video_dir()), help="本地视频目录")
     run_all.add_argument("--product-id", help="只处理指定产品 ID")
     run_all.add_argument("--record-id", help="只处理指定 record_id")
     run_all.add_argument("--limit", type=int, help="限制处理数量")
+    run_all.add_argument("--mixcut-sync-limit", type=int, default=20, help="每轮最多同步多少条混剪成片到发布池，默认 20")
+    run_all.add_argument("--no-sync-mixcut", action="store_true", help="本轮不自动同步混剪成片")
     run_all.add_argument("--title-mode", choices=["heuristic", "llm", "fallback"], default="fallback")
     run_all.add_argument("--llm-route", default="auto", help="标题生成 LLM 线路")
     run_all.add_argument("--cleanup-published-days", type=int, default=60, help="已发布本地视频保留天数，默认 60；传 0 可关闭")

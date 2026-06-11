@@ -1,0 +1,16 @@
+{
+  "product_name": "居家休闲轻上装",
+  "product_category": "轻上装",
+  "specific_product_type": "居家服/睡衣风上衣",
+  "target_scene": ["居家", "下楼取快递", "遛狗", "周末休闲"],
+  "creator_shooting_scene": ["家中生活流随手试穿", "居家也能穿出门也能穿", "镜前随手搭"],
+  "main_content_hook": "在家穿舒服、出门也不违和，一件搞定",
+  "fit_body_or_style": ["宽松", "舒适", "居家休闲"],
+  "selling_points": ["面料柔软亲肤", "居家出门两穿", "版型宽松不勒"],
+  "shooting_scenarios": ["在家随手试穿", "居家到出门自然过渡"],
+  "price_tier": "中低",
+  "avoid_claims": ["不要夸大功能性", "不要承诺显瘦"],
+  "sample_available": "可寄样",
+  "commission_info": "佣金 10-15%",
+  "support_info": "提供拍摄参考和文案模板"
+}

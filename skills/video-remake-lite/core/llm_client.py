@@ -43,12 +43,21 @@ HAN_RE = re.compile(r"[\u3400-\u9fff]")
 SPOKEN_TEXT_LABEL_RE = re.compile(
     r"(?im)^(?P<label>.*(?:字幕|旁白|口播|台词|屏幕文字|显示文字|画面文字|on-screen text|subtitle|voiceover|spoken line).{0,30}?[:：])(?P<value>.*)$"
 )
+SPOKEN_TEXT_FIELD_RE = re.compile(
+    r"(?i)(?:[\u3400-\u9fff]{0,16})?"
+    r"(?:字幕|旁白|口播|台词|屏幕文字|显示文字|画面文字|on-screen text|subtitle|voiceover|spoken line)"
+    r"(?:[/／、和与](?:字幕|旁白|口播|台词|屏幕文字|显示文字|画面文字|on-screen text|subtitle|voiceover|spoken line))*"
+    r"[^\n:：|。；;，,\"“”']{0,20}[:：]"
+)
 NO_SPOKEN_TEXT_VALUES = {
     "",
     "无",
     "无字幕",
     "无口播",
     "无旁白",
+    "无屏幕文字",
+    "无显示文字",
+    "无画面文字",
     "无字幕/无口播",
     "无字幕/无旁白",
     "无字幕，无口播",
@@ -56,6 +65,19 @@ NO_SPOKEN_TEXT_VALUES = {
     "none",
     "no",
 }
+INSTRUCTION_CHINESE_SEGMENT_RE = re.compile(
+    r"[（(][^）)]*(?:执行说明|不显示|不可显示|不可发声|不要显示|不要发声|不朗读|不出现在画面)[^）)]*[）)]"
+)
+INSTRUCTION_CHINESE_CLAUSE_RE = re.compile(
+    r"(?:^|[。；;，,、])[^。；;，,、]*(?:必须|禁止|不要|不得|不可|只显示|只展示|显示|出现|持续|核心|说明|执行|保留|使用|目标语言|其他语言文字|账号ID|画面|发声|朗读|无字幕|无口播|无旁白|全片|前\d*秒|尾页|允许|仅允许|仅限|顶部|中间|下方|右下角|按钮|搜索框|搜索词|搜索界面|界面文字|平台标识|真实平台|BGM|尾音|淡出|停留|结束|可放|装饰|图标|字体|字号|描边|颜色|白色|小字|居中|偏下|遮脸|简洁|中文|水印|logo|字幕样式|样式说明|样式如|注释|前半段|后半段|固定镜头|对焦|切镜|本片|上半段|下半段|建议|完全|镜头描述)[^。；;，,、]*"
+)
+SCREEN_TEXT_LABEL_RE = re.compile(
+    r"(?:按钮|搜索框|下方|上方|中间|顶部|底部|左侧|右侧|界面|页面|标题|说明|提示|文案)?文字\s*[:：]"
+)
+QUOTED_VISIBLE_TEXT_RE = re.compile(r"[\"“”']([^\"“”']+)[\"“”']")
+VISIBLE_TEXT_CONTENT_MARKER_RE = re.compile(
+    r"(?:内容只能是|内容仅限|字幕内容(?:只能是|仅限)?|实际字幕(?:为|是)?|实际显示文字只能是|显示文字只能是)\s*[:：]\s*(?P<text>.*)"
+)
 
 
 class VideoRemakeLLMClient:
@@ -175,15 +197,62 @@ class VideoRemakeLLMClient:
         """Find likely subtitle/voiceover values that contain Chinese."""
         bad_lines: List[str] = []
         for line in str(text or "").splitlines():
-            match = SPOKEN_TEXT_LABEL_RE.match(line.strip())
-            if not match:
+            stripped_line = line.strip()
+            line_quoted_values = QUOTED_VISIBLE_TEXT_RE.findall(stripped_line)
+            if (
+                re.search(r"(?:要求|样式|规则)", stripped_line)
+                and line_quoted_values
+                and not HAN_RE.search("".join(line_quoted_values))
+            ):
                 continue
-            value = match.group("value").strip().strip("\"'` ")
-            normalized = re.sub(r"\s+", "", value).lower()
-            if normalized in NO_SPOKEN_TEXT_VALUES:
+            style_content_marker = VISIBLE_TEXT_CONTENT_MARKER_RE.search(stripped_line)
+            if (
+                "字幕样式" in stripped_line
+                and style_content_marker
+                and not HAN_RE.search(style_content_marker.group("text"))
+            ):
                 continue
-            if HAN_RE.search(value):
-                bad_lines.append(line)
+            matches = list(SPOKEN_TEXT_FIELD_RE.finditer(stripped_line))
+            if not matches:
+                continue
+            for index, match in enumerate(matches):
+                end = (
+                    len(line)
+                    if "要求" in match.group(0)
+                    else matches[index + 1].start() if index + 1 < len(matches) else len(line)
+                )
+                value = line[match.end():end].strip().strip("\"'` ")
+                if " | " in value:
+                    value = value.split(" | ", 1)[0].strip()
+                normalized = re.sub(r"\s+", "", value).lower()
+                if normalized in NO_SPOKEN_TEXT_VALUES:
+                    continue
+                no_spoken_prefixes = ("无字幕", "无口播", "无旁白", "无屏幕文字", "无显示文字", "无画面文字")
+                if any(normalized.startswith(p) for p in no_spoken_prefixes):
+                    continue
+                quoted_visible_values = QUOTED_VISIBLE_TEXT_RE.findall(value)
+                if quoted_visible_values:
+                    if HAN_RE.search("".join(quoted_visible_values)):
+                        bad_lines.append(line)
+                        break
+                    current_clause_prefix = re.split(r"[。；;，,、]", line[: match.start()])[-1]
+                    if "要求" in match.group(0) or "要求" in current_clause_prefix:
+                        continue
+                    spoken_value = QUOTED_VISIBLE_TEXT_RE.sub("", value)
+                else:
+                    spoken_value = value
+                spoken_value = INSTRUCTION_CHINESE_SEGMENT_RE.sub("", spoken_value)
+                content_marker = VISIBLE_TEXT_CONTENT_MARKER_RE.search(spoken_value)
+                if content_marker and "样式" in match.group(0):
+                    spoken_value = content_marker.group("text")
+                spoken_value = INSTRUCTION_CHINESE_CLAUSE_RE.sub("", spoken_value)
+                spoken_value = SCREEN_TEXT_LABEL_RE.sub("", spoken_value)
+                normalized_spoken_value = re.sub(r"[\s。；;，,、.]+", "", spoken_value).lower()
+                if normalized_spoken_value in NO_SPOKEN_TEXT_VALUES:
+                    continue
+                if HAN_RE.search(spoken_value):
+                    bad_lines.append(line)
+                    break
         return bad_lines
 
     def _ensure_spoken_text_no_chinese(self, final_prompt: str, context: Dict[str, str]) -> str:

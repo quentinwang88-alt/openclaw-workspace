@@ -92,9 +92,24 @@ MANUAL_QUEUE_FIELDS: Sequence[Dict[str, Any]] = (
 
 PRODUCT_PUBLISH_REPORT_FIELDS: Sequence[Dict[str, Any]] = (
     {"name": "汇总唯一键", "type": 1, "ui_type": "Text"},
+    {
+        "name": "汇总类型",
+        "type": 3,
+        "ui_type": "SingleSelect",
+        "property": {"options": [{"name": "店铺汇总"}, {"name": "产品明细"}]},
+    },
     {"name": "店铺ID", "type": 1, "ui_type": "Text"},
     {"name": "产品ID", "type": 1, "ui_type": "Text"},
     {"name": "产品主图", "type": 17, "ui_type": "Attachment"},
+    {"name": "产品待发布视频数量", "type": 2, "ui_type": "Number"},
+    {
+        "name": "排期策略",
+        "type": 3,
+        "ui_type": "SingleSelect",
+        "property": {"options": [{"name": "普通"}, {"name": "优先"}, {"name": "暂停"}]},
+    },
+    {"name": "排期备注", "type": 1, "ui_type": "Text"},
+    {"name": "优先排期更新时间", "type": 1, "ui_type": "Text"},
     {"name": "本周已发布视频数", "type": 2, "ui_type": "Number"},
     {"name": "上周已发布视频数", "type": 2, "ui_type": "Number"},
     {"name": "本月已发布视频数", "type": 2, "ui_type": "Number"},
@@ -284,6 +299,8 @@ def product_publish_periods(reference_date: str = "") -> Dict[str, str]:
 
 
 def _product_report_key(row: Dict[str, Any]) -> str:
+    if _normalize_text(row.get("row_type")) == "store_summary":
+        return f"店铺汇总|{_normalize_text(row.get('store_id'))}"
     return f"{_normalize_text(row.get('store_id'))}|{_normalize_text(row.get('product_id'))}"
 
 
@@ -332,10 +349,16 @@ def build_product_publish_report_fields(
     *,
     product_image: List[Dict[str, Any]] | None = None,
 ) -> Dict[str, Any]:
+    row_type = _normalize_text(row.get("row_type"))
     fields: Dict[str, Any] = {
         "汇总唯一键": _product_report_key(row),
+        "汇总类型": "店铺汇总" if row_type == "store_summary" else "产品明细",
         "店铺ID": _normalize_text(row.get("store_id")),
         "产品ID": _normalize_text(row.get("product_id")),
+        "产品待发布视频数量": int(row.get("pending_video_count") or 0),
+        "排期策略": _normalize_text(row.get("schedule_strategy")) or "普通",
+        "排期备注": _normalize_text(row.get("schedule_note")),
+        "优先排期更新时间": _normalize_text(row.get("priority_updated_at")),
         "本周已发布视频数": int(row.get("this_week_published") or 0),
         "上周已发布视频数": int(row.get("last_week_published") or 0),
         "本月已发布视频数": int(row.get("current_month_published") or 0),
@@ -351,6 +374,37 @@ def build_product_publish_report_fields(
     if product_image:
         fields["产品主图"] = product_image
     return fields
+
+
+def sync_product_schedule_preferences_from_report(db: AutoPublishDB, records: Sequence[Any]) -> Dict[str, int]:
+    preferences: List[Dict[str, Any]] = []
+    for record in records:
+        fields = record.fields or {}
+        row_type = _field_text(fields.get("汇总类型"))
+        product_id = _field_text(fields.get("产品ID"))
+        store_id = _field_text(fields.get("店铺ID"))
+        if row_type == "店铺汇总" or not store_id or not product_id:
+            continue
+        preferences.append(
+            {
+                "store_id": store_id,
+                "product_id": product_id,
+                "schedule_strategy": _field_text(fields.get("排期策略")) or "普通",
+                "schedule_note": _field_text(fields.get("排期备注")),
+            }
+        )
+    return db.upsert_product_schedule_preferences(preferences)
+
+
+def sync_product_schedule_preferences_table(db: AutoPublishDB, client: Any) -> Dict[str, int]:
+    field_stats = ensure_product_publish_report_fields(client)
+    records = client.list_records(page_size=500)
+    preference_stats = sync_product_schedule_preferences_from_report(db, records)
+    return {
+        "created_fields": field_stats["created_fields"],
+        "report_rows_checked": len(records),
+        **preference_stats,
+    }
 
 
 def _manual_status_from_existing(existing: Any | None) -> str:
@@ -630,8 +684,10 @@ def sync_product_publish_report_table(
     force_upload_images: bool = False,
 ) -> Dict[str, int]:
     field_stats = ensure_product_publish_report_fields(target_client)
+    existing_records = target_client.list_records(page_size=500)
+    preference_stats = sync_product_schedule_preferences_from_report(db, existing_records)
     periods = product_publish_periods(reference_date)
-    rows = db.list_product_publish_summary_rows(
+    store_rows = db.list_store_publish_summary_rows(
         this_week_start=periods["this_week_start"],
         this_week_end=periods["this_week_end"],
         last_week_start=periods["last_week_start"],
@@ -641,10 +697,25 @@ def sync_product_publish_report_table(
         previous_month_start=periods["previous_month_start"],
         previous_month_end=periods["previous_month_end"],
     )
+    for row in store_rows:
+        row["row_type"] = "store_summary"
+    product_rows = db.list_product_publish_summary_rows(
+        this_week_start=periods["this_week_start"],
+        this_week_end=periods["this_week_end"],
+        last_week_start=periods["last_week_start"],
+        last_week_end=periods["last_week_end"],
+        current_month_start=periods["current_month_start"],
+        current_month_end=periods["current_month_end"],
+        previous_month_start=periods["previous_month_start"],
+        previous_month_end=periods["previous_month_end"],
+    )
+    for row in product_rows:
+        row["row_type"] = "product_detail"
+    rows = store_rows + product_rows
 
     image_lookup = _product_image_lookup(source_client, source_image_field) if source_client and upload_images else {}
     existing_map: Dict[str, Any] = {}
-    for record in target_client.list_records(page_size=500):
+    for record in existing_records:
         key = _normalize_text(record.fields.get("汇总唯一键"))
         if key and key not in existing_map:
             existing_map[key] = record
@@ -658,7 +729,12 @@ def sync_product_publish_report_table(
         existing = existing_map.get(key)
         existing_has_image = bool(existing and _has_attachment(existing.fields.get("产品主图")))
         image_payload: List[Dict[str, Any]] = []
-        if upload_images and source_client and (force_upload_images or not existing_has_image):
+        if (
+            _normalize_text(row.get("row_type")) != "store_summary"
+            and upload_images
+            and source_client
+            and (force_upload_images or not existing_has_image)
+        ):
             try:
                 image_payload = _copy_product_image(
                     source_client=source_client,
@@ -687,4 +763,5 @@ def sync_product_publish_report_table(
         "updated_records": len(updates),
         "images_uploaded": images_uploaded,
         "image_upload_failed": image_upload_failed,
+        **preference_stats,
     }

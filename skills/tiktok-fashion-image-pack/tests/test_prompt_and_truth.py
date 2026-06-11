@@ -8,21 +8,28 @@ from pathlib import Path
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 CORE_DIR = SKILL_DIR / "core"
+sys.path.insert(0, str(SKILL_DIR))
 sys.path.insert(0, str(CORE_DIR))
 
 from product_truth import heuristic_product_truth, normalize_product_truth, repair_multicolor_truth_from_sources  # noqa: E402
 from prompt_builder import build_label, build_main_image_prompt, select_main_image_layout  # noqa: E402
 from qa import normalize_qa_result  # noqa: E402
+from qa import build_scene_qa_prompt, build_visual_qa_prompt  # noqa: E402
 from scene_prompt_builder import build_scene_image_prompts, choose_detail_action, parse_scene_slots  # noqa: E402
 from feedback_processor import (  # noqa: E402
     FIX_METHOD_STRUCTURE,
     build_feedback_fix_prompt,
     expand_feedback_issues,
+    parse_feedback_targets,
     resolve_feedback_fix_method,
 )
 from feedback_qa import classify_feedback_qa_issue, qa_feedback_fix  # noqa: E402
 from circuit_breaker import CircuitBreakerOpen, ModelCircuitBreaker, classify_failure  # noqa: E402
 from feishu import unique_download_path  # noqa: E402
+from title_keywords import build_keywords_prompt_text, get_series_info  # noqa: E402
+from title_qa import qa_title  # noqa: E402
+from title_optimizer import build_title_prompt  # noqa: E402
+from run_pipeline import build_title_fallback_truth, infer_title_context_from_text  # noqa: E402
 
 
 class ProductTruthTests(unittest.TestCase):
@@ -35,6 +42,98 @@ class ProductTruthTests(unittest.TestCase):
         self.assertEqual(truth["product_type_name_en"], "SUEDE JACKET")
         self.assertEqual(truth["confidence"], 1.0)
         self.assertIn("leather shine", truth["must_not_add"])
+
+    def test_hair_accessory_keywords_load_by_country(self) -> None:
+        th_text = build_keywords_prompt_text("claw_clip", category="发饰", country="TH")
+        vn_text = build_keywords_prompt_text("claw_clip", category="发饰", country="VN")
+        self.assertIn("กิ๊บหนีบผม", th_text)
+        self.assertIn("kẹp tóc càng cua", vn_text)
+        self.assertEqual(get_series_info("claw_clip", category="发饰", country="VN")["series_code_prefix"], "CC")
+
+    def test_hair_accessory_title_prompt_uses_vn_template(self) -> None:
+        prompt = build_title_prompt(
+            product_truth={"subtype": "scrunchie", "material": "satin fabric"},
+            subtype="scrunchie",
+            category="发饰",
+            country="VN",
+        )
+        self.assertIn("TikTok Shop Việt Nam", prompt)
+        self.assertIn("scrunchies cột tóc", prompt)
+
+    def test_vietnam_hair_accessory_title_qa_accepts_vietnamese_core_term(self) -> None:
+        result = qa_title(
+            tk_title="kẹp tóc càng cua nữ màu trơn cỡ lớn kẹp chắc tóc phong cách Hàn Quốc",
+            category="发饰",
+            country="VN",
+        )
+        self.assertNotIn("标题缺少泰语内容", result["issues"])
+        self.assertNotIn("标题缺少发饰核心品类词（如 kẹp tóc / băng đô / scrunchies）", result["issues"])
+
+    def test_hair_accessory_title_qa_flags_generic_repetition(self) -> None:
+        result = qa_title(
+            tk_title="กิ๊บหนีบผมผู้หญิง สำหรับรวบผมง่าย ใช้ได้ทุกวัน ลุคเรียบมินิมอล",
+            category="发饰",
+            country="TH",
+        )
+        self.assertTrue(any("过于通用" in issue for issue in result["issues"]))
+
+    def test_hair_accessory_truth_normalization(self) -> None:
+        truth = normalize_product_truth({
+            "category": "hair_accessory",
+            "subtype": "claw_clip",
+            "product_type_name_en": "",
+            "material": "acrylic",
+            "grip_structure": "claw teeth",
+        })
+        self.assertEqual(truth["category"], "hair_accessory")
+        self.assertEqual(truth["subtype"], "claw_clip")
+        self.assertEqual(truth["product_type_name_en"], "CLAW CLIP")
+        self.assertIn("actual size scale", truth["must_preserve"])
+
+    def test_hair_accessory_heuristic_uses_category(self) -> None:
+        truth = heuristic_product_truth(["large_claw_clip_black.jpg"], category="发饰")
+        self.assertEqual(truth["category"], "hair_accessory")
+        self.assertEqual(truth["subtype"], "claw_clip")
+        self.assertEqual(truth["product_type_name_en"], "CLAW CLIP")
+
+    def test_title_only_context_infers_th_hair_accessory(self) -> None:
+        category, country = infer_title_context_from_text(
+            original_title="กิ๊บหนีบผมทรงฉลามแบบเกาหลี",
+            category="",
+            country="",
+        )
+        self.assertEqual(category, "发饰")
+        self.assertEqual(country, "TH")
+
+    def test_title_only_fallback_truth_for_hair_accessory(self) -> None:
+        truth = build_title_fallback_truth(
+            original_title="กิ๊บหนีบผมทรงฉลามแบบเกาหลี",
+            category="发饰",
+            country="TH",
+        )
+        self.assertEqual(truth["category"], "hair_accessory")
+        self.assertEqual(truth["subtype"], "claw_clip")
+        self.assertIn("title-only fallback", "; ".join(truth["review_reasons"]))
+
+    def test_title_only_fallback_extracts_hair_accessory_differentiators(self) -> None:
+        truth = build_title_fallback_truth(
+            original_title="สุดเก๋!กิ๊บหนีบผมลายจุดสีเหลืองเขียวมัสตาร์ดแบบใหม่ ใช้งานได้หลากหลาย",
+            category="发饰",
+            country="TH",
+        )
+        self.assertEqual(truth["subtype"], "claw_clip")
+        self.assertIn("เหลืองเขียวมัสตาร์ด", truth["main_color"])
+        self.assertIn("ลายจุด", truth["decorative_elements"])
+        self.assertIn("ลายจุด", truth["core_selling_points"])
+
+    def test_title_only_fallback_extracts_magnetic_hair_clip(self) -> None:
+        truth = build_title_fallback_truth(
+            original_title="กิ๊บติดผมแม่เหล็กอัจฉริยะ กิ๊บติดผมแบบแม่เหล็กดีไซน์สร้างสรรค์",
+            category="发饰",
+            country="TH",
+        )
+        self.assertEqual(truth["subtype"], "hair_clip")
+        self.assertIn("แม่เหล็ก", truth["grip_structure"])
 
     def test_heuristic_infers_leather(self) -> None:
         truth = heuristic_product_truth(["black_pu_leather_jacket.jpg"])
@@ -109,6 +208,25 @@ class PromptBuilderTests(unittest.TestCase):
         layout = select_main_image_layout(truth)
         self.assertEqual(layout["template"], "womens_tops_material_mood_split")
 
+    def test_hair_accessory_uses_hair_layout(self) -> None:
+        truth = normalize_product_truth({
+            "category": "hair_accessory",
+            "subtype": "claw_clip",
+            "source_image_type": "product_only",
+            "has_on_body_model": False,
+            "main_color": "black",
+            "material": "acrylic",
+            "size_scale": "large",
+            "grip_structure": "claw teeth",
+            "decorative_elements": "solid color",
+        })
+        layout = select_main_image_layout(truth)
+        prompt = build_main_image_prompt(product_truth=truth, brand_name="likeU", country="TH")
+        self.assertEqual(layout["template"], "hair_accessory_product_detail_split")
+        self.assertIn("hair accessories", prompt)
+        self.assertIn("claw teeth", prompt)
+        self.assertNotIn("collar, closure, pocket", prompt)
+
     def test_product_only_reference_uses_faceless_tryon_layout(self) -> None:
         truth = normalize_product_truth({
             "subtype": "puffer_jacket",
@@ -169,7 +287,7 @@ class FeedbackFixTests(unittest.TestCase):
             scene_ref_count=1,
         )
         self.assertIn("结构优先重生", prompt)
-        self.assertIn("衣服主体占画面约 70%", prompt)
+        self.assertIn("商品主体占画面约 70%", prompt)
         self.assertIn("不要遮挡被反馈点名的结构", prompt)
 
     def test_feedback_qa_receives_previous_and_references(self) -> None:
@@ -299,6 +417,73 @@ class ScenePromptBuilderTests(unittest.TestCase):
         self.assertEqual(prompts[4]["target_color"], "pink")
         self.assertEqual(prompts[5]["target_color"], "cream")
         self.assertIn("alternate color on-body try-on", prompts[4]["prompt"])
+
+    def test_hair_accessory_scene_slots_map_from_s_to_h(self) -> None:
+        truth = normalize_product_truth({
+            "category": "hair_accessory",
+            "subtype": "hair_bow",
+            "source_image_type": "product_only",
+            "has_on_body_model": False,
+            "main_color": "cream",
+            "material": "satin",
+            "size_scale": "large",
+            "grip_structure": "bow clip",
+            "decorative_elements": "large bow",
+        })
+        prompts = build_scene_image_prompts(
+            product_truth=truth,
+            brand_name="likeU",
+            country="TH",
+            scene_slots=["S1 主点击试穿", "S4 材质结构细节"],
+        )
+        self.assertEqual([item["image_id"] for item in prompts], ["H1", "H4"])
+        self.assertIn("hair accessory", prompts[0]["prompt"])
+        self.assertIn("large bow", prompts[1]["prompt"])
+
+    def test_hair_accessory_multicolor_default_scene_prompts_expand_to_h_six(self) -> None:
+        truth = normalize_product_truth({
+            "category": "hair_accessory",
+            "subtype": "claw_clip",
+            "source_image_type": "mixed",
+            "has_on_body_model": True,
+            "main_color": "black",
+            "is_probably_multicolor": True,
+            "sellable_colors_observed": ["black", "cream", "brown"],
+            "material": "acrylic",
+            "size_scale": "large",
+            "grip_structure": "claw teeth",
+            "decorative_elements": "solid color",
+        })
+        prompts = build_scene_image_prompts(product_truth=truth, brand_name="likeU", country="VN")
+        self.assertEqual([item["image_id"] for item in prompts], ["H1", "H2", "H3", "H4", "H5", "H6"])
+        self.assertEqual(prompts[4]["target_color"], "cream")
+        self.assertIn("alternate color worn", prompts[4]["image_role"])
+
+    def test_hair_accessory_qa_prompts_use_accessory_checks(self) -> None:
+        truth = normalize_product_truth({
+            "category": "hair_accessory",
+            "subtype": "headband",
+            "main_color": "black",
+            "material": "velvet",
+            "size_scale": "medium",
+            "grip_structure": "headband frame",
+            "decorative_elements": "solid color",
+        })
+        main_prompt = build_visual_qa_prompt(truth)
+        scene_prompt = build_scene_qa_prompt(truth, "worn close-up hero")
+        self.assertIn("发饰主图质检员", main_prompt)
+        self.assertIn("发饰场景图质检员", scene_prompt)
+        self.assertIn("固定结构", main_prompt)
+        self.assertNotIn("领型、门襟、扣子/拉链、口袋", main_prompt)
+
+    def test_feedback_targets_accept_h_slots(self) -> None:
+        self.assertEqual(parse_feedback_targets("首图,H1,H4"), ["首图", "H1", "H4"])
+
+    def test_hair_accessory_feedback_expansion(self) -> None:
+        expanded = expand_feedback_issues("H1 发夹夹齿不对，多了珍珠")
+        self.assertIn("发饰必须按原始商品图保持颜色、尺寸比例、固定结构和装饰元素", expanded)
+        self.assertIn("夹持/固定结构必须清晰可见", expanded)
+        self.assertEqual(classify_feedback_qa_issue("发夹夹齿不对", "多了珍珠"), "发饰细节错误")
 
     def test_scene_prompt_discourages_perfect_front_face(self) -> None:
         truth = normalize_product_truth({

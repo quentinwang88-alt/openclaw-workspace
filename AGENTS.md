@@ -25,6 +25,16 @@ Before doing anything else:
 5. **If in MAIN SESSION** (direct chat with your human): Also read `MEMORY.md`
 6. **⚠️ 强制检查**: 创建任何 Skill 前，先检查 `skills/` 目录是否已存在类似功能
 
+### 🔁 Lightweight Session Handoff
+
+Use `runtime/current-handoff.md` as the single lightweight handoff file across `/new` sessions.
+
+- When the user asks for "上轮总结", "上轮对话的任务总结", "接着上轮", "继续刚才", or similar, read `runtime/current-handoff.md` first.
+- If that file has a relevant handoff, use it directly and continue. Do not search `memory/*.md` or scan multiple daily memory files unless the user explicitly asks for historical context.
+- If the handoff file is missing, empty, or irrelevant, ask the user for the prior summary or exact task pointer instead of browsing days of memory.
+- When the user asks to summarize before `/new`, write or refresh `runtime/current-handoff.md` with a compact handoff: current goal, latest state, important files/commands, open decisions, next step.
+- Keep this file short and operational. It is a bridge between sessions, not long-term memory.
+
 ### 🎭 角色切换规则
 
 根据任务类型自动切换角色：

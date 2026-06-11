@@ -1,0 +1,22 @@
+{
+  "appId": "cli_xxx",
+  "appSecret": "xxx",
+  "appToken": "bascnxxxxxxxx",
+  "tableId": "tblxxxxxxxx",
+  "viewId": "",
+  "outputDir": "~/Desktop/jimeng",
+  "pageSize": 100,
+  "skipExisting": true,
+  "pendingOnly": true,
+  "statusField": "状态",
+  "pendingValues": ["待处理", "待开始", "未开始"],
+  "fields": {
+    "taskName": "SKU编码",
+    "prompt": "整合提示词",
+    "images": ["产品主图", "参考图"],
+    "model": "视频生成模型",
+    "mode": "参考模式",
+    "ratio": "视频比例",
+    "duration": "视频时长"
+  }
+}

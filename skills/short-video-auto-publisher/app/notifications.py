@@ -35,6 +35,8 @@ def _compact_reason(reason: str, limit: int = 80) -> str:
 
 def format_daily_publish_summary(summary: Dict[str, Any], *, max_failure_lines: int = 20) -> str:
     failures: List[Dict[str, Any]] = list(summary.get("failures") or [])
+    abnormal_cancellations: List[Dict[str, Any]] = list(summary.get("abnormal_cancellations") or [])
+    abnormal_events = failures + abnormal_cancellations
     accounts: List[Dict[str, Any]] = list(summary.get("accounts") or [])
 
     lines = [
@@ -45,6 +47,7 @@ def format_daily_publish_summary(summary: Dict[str, Any], *, max_failure_lines: 
         f"仍在排期：{int(summary.get('scheduled') or 0)}",
         f"待排期空槽：{int(summary.get('pending') or 0)}",
         f"已取消：{int(summary.get('cancelled') or 0)}",
+        f"异常取消：{int(summary.get('abnormal_cancelled') or 0)}",
     ]
 
     successful_accounts = [
@@ -74,46 +77,49 @@ def format_daily_publish_summary(summary: Dict[str, Any], *, max_failure_lines: 
     failed_accounts = [
         account
         for account in accounts
-        if int(account.get("failed") or 0) > 0
+        if int(account.get("failed") or 0) > 0 or int(account.get("abnormal_cancelled") or 0) > 0
     ]
     if failed_accounts:
         lines.append("")
-        lines.append("失败主要环境：")
+        lines.append("异常主要环境：")
         for account in failed_accounts[:8]:
             lines.append(
                 "- "
                 f"{_text(account.get('store_id'))} / {_text(account.get('account_name'))}"
                 f"（{_text(account.get('account_id'))}）："
                 f"失败 {int(account.get('failed') or 0)}，成功 {int(account.get('published') or 0)}"
+                f"，异常取消 {int(account.get('abnormal_cancelled') or 0)}"
             )
 
-    if failures:
-        reason_counter = Counter(_compact_reason(row.get("error_message"), limit=60) for row in failures)
+    if abnormal_events:
+        reason_counter = Counter(_compact_reason(row.get("error_message"), limit=60) for row in abnormal_events)
         lines.append("")
-        lines.append("失败原因 Top：")
+        lines.append("异常原因 Top：")
         for reason, count in reason_counter.most_common(5):
             lines.append(f"- {reason}：{count}")
 
         lines.append("")
-        lines.append("失败明细：")
-        for row in failures[:max_failure_lines]:
+        lines.append("异常明细：")
+        for row in abnormal_events[:max_failure_lines]:
             scheduled_for = _text(row.get("scheduled_for"))
             time_text = scheduled_for[11:16] if len(scheduled_for) >= 16 else scheduled_for
+            event_type = "发布失败" if row in failures else "异常取消"
             lines.append(
                 "- "
                 f"{time_text} "
+                f"{event_type} "
                 f"{_text(row.get('store_id'))}/{_text(row.get('account_name'))} "
                 f"脚本ID={_text(row.get('script_id')) or '-'} "
                 f"产品ID={_text(row.get('product_id')) or '-'} "
                 f"任务ID={_text(row.get('publish_task_id')) or '-'} "
                 f"原因={_compact_reason(row.get('error_message'))}"
             )
-        remaining = len(failures) - max_failure_lines
+        remaining = len(abnormal_events) - max_failure_lines
         if remaining > 0:
-            lines.append(f"- 还有 {remaining} 条失败明细未展开，请看发布追踪表。")
+            lines.append(f"- 还有 {remaining} 条异常明细未展开，请看发布追踪表。")
     else:
         lines.append("")
-        lines.append("昨天没有发布失败任务。")
+        lines.append("昨天没有发布失败或异常取消任务。")
 
     return "\n".join(lines)
 

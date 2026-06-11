@@ -1,0 +1,16 @@
+{
+  "product_name": "宽松轻薄开衫",
+  "product_category": "轻上装",
+  "specific_product_type": "薄开衫",
+  "target_scene": ["空调房", "通勤", "出门前搭配"],
+  "creator_shooting_scene": ["镜前半身试穿", "出门前快速换装", "一衣两搭"],
+  "main_content_hook": "空调房冷、外面热，一件薄开衫刚好过渡",
+  "fit_body_or_style": ["宽松", "遮手臂", "日常休闲"],
+  "selling_points": ["轻薄透气", "多色可选", "四季可穿"],
+  "shooting_scenarios": ["出门前快速换装", "镜前半身一镜到底试穿"],
+  "price_tier": "中等",
+  "avoid_claims": ["防晒效果不要夸大", "不要承诺显瘦"],
+  "sample_available": "可寄样",
+  "commission_info": "佣金 15%",
+  "support_info": "提供拍摄参考和文案模板"
+}

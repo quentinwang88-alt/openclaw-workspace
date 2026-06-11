@@ -46,8 +46,8 @@ DEFAULT_LLM_BACKEND = (
     or "openclaw"
 )
 DEFAULT_OPENCLAW_MODEL = (
-    os.environ.get("HERMES_PRODUCT_ANALYSIS_OPENCLAW_MODEL", "openai-codex/gpt-5.5").strip()
-    or "openai-codex/gpt-5.5"
+    os.environ.get("HERMES_PRODUCT_ANALYSIS_OPENCLAW_MODEL", "volces-api/Doubao-Seed-2.0-pro").strip()
+    or "volces-api/Doubao-Seed-2.0-pro"
 )
 DEFAULT_OPENCLAW_MODELS_CONFIG = (
     Path.home() / ".openclaw" / "agents" / "main" / "agent" / "models.json"

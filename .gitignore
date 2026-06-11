@@ -35,6 +35,8 @@ eggs/
 .eggs/
 lib/
 lib64/
+!skills/jimeng-video-generator/lib/
+!skills/jimeng-video-generator/lib/**
 parts/
 sdist/
 var/
@@ -143,3 +145,30 @@ skills/restock_analysis_*.md
 skills/inventory-alert/IN_TRANSIT_GUIDE.md
 skills/inventory-query/debug_response*.json
 skills/1688-title-fetcher/
+
+# =========================
+# 即梦平台机器级配置
+# =========================
+skills/jimeng-video-generator/*.plist
+skills/jimeng-video-generator/*.plist.disabled
+skills/jimeng-video-generator/config.json
+skills/jimeng-video-generator/feishu-direct.json
+skills/jimeng-video-generator/segment-package.json
+
+# =========================
+# 运行时产物 / 调试文件
+# =========================
+auto_mixcut/reg_report_final.json
+output_*.json
+runtime/current-handoff.md
+skills/jimeng-video-generator/debug-*.png
+
+# =========================
+# AI dreaming 日志（每日自动生成）
+# =========================
+memory/dreaming/
+
+# =========================
+# 外部卷符号链接
+# =========================
+skills/tiktok-fashion-image-pack/output

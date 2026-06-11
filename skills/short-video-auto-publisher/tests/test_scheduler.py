@@ -20,7 +20,7 @@ from app.models import PublishTaskStatus
 from app.models import AccountConfig, ScriptMetadata
 from app.notifications import format_daily_publish_summary
 from app.publishers import BasePublishAdapter, DryRunPublishAdapter
-from app.scheduler import RUN_MANAGER_FIELD_ALIASES, resolve_field_mapping, schedule_slots, sync_videos
+from app.scheduler import RUN_MANAGER_FIELD_ALIASES, resolve_field_mapping, schedule_slots, sync_publish_results, sync_videos
 
 
 class DummyRecord:
@@ -64,6 +64,34 @@ class RealishPublisher(BasePublishAdapter):
         return PublishTaskStatus(state="pending", result="待执行")
 
 
+class StatusPublisher(RealishPublisher):
+    def __init__(self, statuses: dict[str, PublishTaskStatus]) -> None:
+        super().__init__()
+        self.statuses = statuses
+        self.queries = []
+
+    def query_task_status(self, *, task_id: str, scheduled_for: datetime) -> PublishTaskStatus:
+        self.queries.append(task_id)
+        return self.statuses.get(task_id, PublishTaskStatus(state="pending", result="待执行"))
+
+
+class FailingAccountPublisher(RealishPublisher):
+    def __init__(self, failing_account_id: str) -> None:
+        super().__init__()
+        self.failing_account_id = failing_account_id
+
+    def create_scheduled_task(self, **kwargs) -> str:
+        if kwargs.get("account_id") == self.failing_account_id:
+            raise RuntimeError("GeeLark task-add 未返回任务 ID: {'data': 'phone env not found'}")
+        return super().create_scheduled_task(**kwargs)
+
+
+class BalanceNotEnoughPublisher(RealishPublisher):
+    def create_scheduled_task(self, **kwargs) -> str:
+        self.calls.append(kwargs)
+        raise RuntimeError("GeeLark task-add 未返回任务 ID: {'code': 41001, 'msg': 'balance not enough'}")
+
+
 class SchedulerTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -85,7 +113,17 @@ class SchedulerTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def _upsert_script(self, script_id: str, product_id: str, family: str) -> None:
+    def _upsert_script(
+        self,
+        script_id: str,
+        product_id: str,
+        family: str,
+        *,
+        script_source: str = "",
+        publish_purpose: str = "",
+        cart_enabled: str = "",
+        content_branch: str = "",
+    ) -> None:
         self.db.upsert_script_metadata(
             [
                 ScriptMetadata(
@@ -104,6 +142,10 @@ class SchedulerTest(unittest.TestCase):
                     script_text="script",
                     short_video_title=f"title-{script_id}",
                     title_source="test",
+                    script_source=script_source,
+                    publish_purpose=publish_purpose,
+                    cart_enabled=cart_enabled,
+                    content_branch=content_branch,
                 )
             ]
         )
@@ -173,6 +215,233 @@ class SchedulerTest(unittest.TestCase):
             now=datetime(2026, 4, 9, 16, 0, 0),
         )
         self.assertEqual(second_run.scheduled, 0)
+
+    def test_schedule_slots_allows_two_same_product_per_account_in_24h(self) -> None:
+        self._upsert_script("021_M1_M", "P1021", "P1021_M1")
+        self._upsert_script("021_M2_M", "P1021", "P1021_M2")
+        self._upsert_script("021_M3_M", "P1021", "P1021_M3")
+
+        stats = schedule_slots(
+            self.db,
+            DryRunPublishAdapter(),
+            now=datetime(2026, 4, 9, 11, 0, 0),
+            window_hours=24,
+        )
+
+        self.assertEqual(stats.scheduled, 2)
+
+    def test_schedule_slots_keeps_running_when_one_account_env_is_missing(self) -> None:
+        self.db.upsert_account_configs(
+            [
+                AccountConfig(
+                    account_id="acc-2",
+                    account_name="账号2",
+                    store_id="SHOP-01",
+                    account_status="可用",
+                    publish_time_1="12:00",
+                    publish_time_2="",
+                    publish_time_3="",
+                )
+            ]
+        )
+        self._upsert_script("022_M1_M", "P1022", "P1022_M1")
+
+        stats = schedule_slots(
+            self.db,
+            FailingAccountPublisher("acc-1"),
+            now=datetime(2099, 6, 3, 11, 0, 0),
+        )
+
+        self.assertEqual(stats.create_failed, 1)
+        self.assertEqual(stats.scheduled, 1)
+        self.assertEqual(self.db.get_account_config("acc-1")["account_status"], "暂停")
+        rows = self.db._connect().execute(
+            "SELECT account_id, schedule_status, error_message FROM publish_slots WHERE scheduled_for = ? ORDER BY account_id",
+            ("2099-06-03 12:00:00",),
+        ).fetchall()
+        self.assertEqual(rows[0]["schedule_status"], "已取消")
+        self.assertIn("phone env not found", rows[0]["error_message"])
+        self.assertEqual(rows[1]["schedule_status"], "已排期")
+
+    def test_schedule_slots_keeps_retryable_create_failures_pending(self) -> None:
+        self._upsert_script("023_M1_M", "P1023", "P1023_M1")
+        self._upsert_script("024_M2_M", "P1024", "P1024_M2")
+        publisher = BalanceNotEnoughPublisher()
+
+        stats = schedule_slots(
+            self.db,
+            publisher,
+            now=datetime(2026, 4, 9, 11, 0, 0),
+        )
+
+        self.assertEqual(stats.create_failed, 1)
+        self.assertEqual(stats.retryable_create_failed, 1)
+        self.assertEqual(stats.scheduled, 0)
+        self.assertEqual(len(publisher.calls), 1)
+        rows = self.db._connect().execute(
+            "SELECT schedule_status, error_message FROM publish_slots ORDER BY scheduled_for ASC"
+        ).fetchall()
+        self.assertEqual(rows[0]["schedule_status"], "待排期")
+        self.assertIn("balance not enough", rows[0]["error_message"])
+        self.assertEqual(rows[1]["schedule_status"], "待排期")
+
+    def test_schedule_slots_prioritizes_priority_product(self) -> None:
+        self._upsert_script("031_M1_M", "P-NORMAL", "P-NORMAL_M1")
+        self._upsert_script("032_M1_M", "P-PRIORITY", "P-PRIORITY_M1")
+        self.db.upsert_product_schedule_preferences(
+            [
+                {
+                    "store_id": "SHOP-01",
+                    "product_id": "P-PRIORITY",
+                    "schedule_strategy": "优先",
+                    "schedule_note": "主推",
+                }
+            ]
+        )
+        publisher = RealishPublisher()
+
+        stats = schedule_slots(
+            self.db,
+            publisher,
+            now=datetime(2026, 4, 9, 11, 0, 0),
+        )
+
+        self.assertGreaterEqual(stats.scheduled, 1)
+        self.assertEqual(publisher.calls[0]["script_id"], "032_M1_M")
+
+    def test_schedule_slots_skips_paused_product(self) -> None:
+        self._upsert_script("041_M1_M", "P-PAUSED", "P-PAUSED_M1")
+        self._upsert_script("042_M1_M", "P-ACTIVE", "P-ACTIVE_M1")
+        self.db.upsert_product_schedule_preferences(
+            [
+                {
+                    "store_id": "SHOP-01",
+                    "product_id": "P-PAUSED",
+                    "schedule_strategy": "暂停",
+                }
+            ]
+        )
+        publisher = RealishPublisher()
+
+        stats = schedule_slots(
+            self.db,
+            publisher,
+            now=datetime(2026, 4, 9, 11, 0, 0),
+        )
+
+        self.assertGreaterEqual(stats.scheduled, 1)
+        self.assertEqual(publisher.calls[0]["script_id"], "042_M1_M")
+
+    def test_ready_candidates_prioritize_merch_content_source_without_new_schema(self) -> None:
+        self._upsert_script("051_M1_M", "P-ORIGINAL", "P-ORIGINAL_M1")
+        self._upsert_script(
+            "052_M1_M",
+            "P-REMAKE",
+            "P-REMAKE_M1",
+            script_source="短视频复刻",
+            publish_purpose="短视频复刻",
+        )
+        self._upsert_script(
+            "053_M1_M",
+            "P-MIXCUT",
+            "P-MIXCUT_M1",
+            script_source="混剪视频",
+            publish_purpose="混剪视频",
+        )
+
+        candidates = self.db.list_ready_candidates("SHOP-01")
+
+        self.assertEqual([item.script_id for item in candidates[:3]], ["052_M1_M", "053_M1_M", "051_M1_M"])
+
+    def test_product_priority_stays_above_content_source_priority(self) -> None:
+        self._upsert_script(
+            "061_M1_M",
+            "P-REMAKE",
+            "P-REMAKE_M1",
+            script_source="短视频复刻",
+            publish_purpose="短视频复刻",
+        )
+        self._upsert_script("062_M1_M", "P-PRIORITY-ORIGINAL", "P-PRIORITY-ORIGINAL_M1")
+        self.db.upsert_product_schedule_preferences(
+            [
+                {
+                    "store_id": "SHOP-01",
+                    "product_id": "P-PRIORITY-ORIGINAL",
+                    "schedule_strategy": "优先",
+                }
+            ]
+        )
+
+        candidates = self.db.list_ready_candidates("SHOP-01")
+
+        self.assertEqual(candidates[0].script_id, "062_M1_M")
+
+    def test_ready_candidates_exclude_already_published_same_script(self) -> None:
+        self._upsert_script("071_M1_M", "P-ONCE", "P-ONCE_M1")
+        self.db.generate_future_slots(datetime(2026, 4, 9, 11, 0, 0), 24)
+        slot = self.db.list_pending_slots(datetime(2026, 4, 9, 11, 0, 0), 24)[0]
+        self.db.assign_slot(
+            slot_id=int(slot["slot_id"]),
+            script_id="071_M1_M",
+            publish_task_id="task-already-published",
+            account_id="acc-1",
+            account_name="账号1",
+            planned_publish_at=datetime.strptime(str(slot["scheduled_for"]), "%Y-%m-%d %H:%M:%S"),
+        )
+        self.db.mark_publish_result(
+            script_id="071_M1_M",
+            publish_task_id="task-already-published",
+            schedule_status="已发布",
+            publish_status="已发布",
+            publish_result="发布成功",
+            published_at=str(slot["scheduled_for"]),
+        )
+        self.db.upsert_video_asset(
+            script_id="071_M1_M",
+            run_manager_record_id="run-071_M1_M",
+            video_source_type="link",
+            video_source_value="https://example.com/video.mp4",
+            local_file_path="/tmp/071_M1_M.mp4",
+            download_status="下载成功",
+            run_video_status="成功",
+            publish_status="待排期",
+        )
+
+        candidates = self.db.list_ready_candidates("SHOP-01")
+
+        self.assertEqual([item.script_id for item in candidates], [])
+
+    def test_ready_candidates_exclude_already_active_same_script(self) -> None:
+        self._upsert_script("072_M1_M", "P-ACTIVE", "P-ACTIVE_M1")
+        self.db.generate_future_slots(datetime(2026, 4, 9, 11, 0, 0), 24)
+        slot = self.db.list_pending_slots(datetime(2026, 4, 9, 11, 0, 0), 24)[0]
+        self.db.assign_slot(
+            slot_id=int(slot["slot_id"]),
+            script_id="072_M1_M",
+            publish_task_id="task-active",
+            account_id="acc-1",
+            account_name="账号1",
+            planned_publish_at=datetime.strptime(str(slot["scheduled_for"]), "%Y-%m-%d %H:%M:%S"),
+        )
+        self.db.upsert_video_asset(
+            script_id="072_M1_M",
+            run_manager_record_id="run-072_M1_M",
+            video_source_type="link",
+            video_source_value="https://example.com/video.mp4",
+            local_file_path="/tmp/072_M1_M.mp4",
+            download_status="下载成功",
+            run_video_status="成功",
+            publish_status="待排期",
+        )
+        with self.db._connect() as conn:
+            conn.execute(
+                "UPDATE video_assets SET publish_status = '待排期' WHERE script_id = ?",
+                ("072_M1_M",),
+            )
+
+        candidates = self.db.list_ready_candidates("SHOP-01")
+
+        self.assertEqual([item.script_id for item in candidates], [])
 
     def test_schedule_slots_blocks_same_family_at_same_time_across_accounts(self) -> None:
         self.db.upsert_account_configs(
@@ -449,7 +718,7 @@ class SchedulerTest(unittest.TestCase):
         self.assertEqual(asset["error_message"], None)
         self.assertEqual(asset["published_at"], None)
 
-    def test_schedule_slots_allows_retry_after_product_failures(self) -> None:
+    def test_schedule_slots_does_not_auto_retry_after_product_failures(self) -> None:
         self._upsert_script("010_M1_V1", "P1010", "P1010_M1")
 
         self.db.generate_future_slots(datetime(2026, 4, 13, 11, 0, 0), 24)
@@ -487,8 +756,10 @@ class SchedulerTest(unittest.TestCase):
         publisher = RealishPublisher()
         stats = schedule_slots(self.db, publisher, now=datetime(2026, 4, 14, 11, 0, 0))
 
-        self.assertEqual(stats.scheduled, 1)
-        self.assertEqual([call["script_id"] for call in publisher.calls], ["010_M1_V1"])
+        self.assertEqual(stats.scheduled, 0)
+        self.assertEqual(publisher.calls, [])
+        asset = self.db.get_video_asset("010_M1_V1")
+        self.assertEqual(asset["publish_status"], "发布失败")
 
     def test_disable_product_blocks_future_candidates(self) -> None:
         self._upsert_script("011_M1_V1", "P1011", "P1011_M1")
@@ -564,6 +835,95 @@ class SchedulerTest(unittest.TestCase):
         ).fetchall()
         self.assertEqual(rows[0]["error_message"], "account blocked")
 
+    def test_failed_asset_is_not_revived_by_video_sync(self) -> None:
+        self._upsert_script("013_M1_V2", "P1013", "P1013_M1")
+        self.db.mark_publish_result(
+            script_id="013_M1_V2",
+            publish_task_id="task-failed-sync",
+            schedule_status="发布失败",
+            publish_status="发布失败",
+            publish_result="发布失败",
+            error_message="Product not found",
+        )
+
+        self.db.upsert_video_asset(
+            script_id="013_M1_V2",
+            run_manager_record_id="run-013_M1_V2",
+            video_source_type="link",
+            video_source_value="https://example.com/video.mp4",
+            local_file_path="/tmp/013_M1_V2.mp4",
+            download_status="下载成功",
+            run_video_status="成功",
+            publish_status="待排期",
+        )
+
+        asset = self.db.get_video_asset("013_M1_V2")
+        self.assertEqual(asset["publish_status"], "发布失败")
+
+    def test_recent_failed_geelark_status_stays_scheduled_during_grace_period(self) -> None:
+        self._upsert_script("013_M1_V3", "P1013", "P1013_M1")
+        metadata = self.db.get_script_metadata("013_M1_V3")
+        scheduled_for = (datetime.now() - timedelta(hours=1)).replace(microsecond=0)
+        now_text = self.db._now_text()
+        with self.db._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO publish_slots (
+                    store_id, account_id, account_name, scheduled_for,
+                    canonical_script_key, script_id, schedule_status,
+                    publish_task_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, '已排期', ?, ?, ?)
+                """,
+                (
+                    "SHOP-01",
+                    "acc-1",
+                    "账号1",
+                    scheduled_for.strftime("%Y-%m-%d %H:%M:%S"),
+                    metadata["canonical_script_key"],
+                    "013_M1_V3",
+                    "task-transient-failed",
+                    now_text,
+                    now_text,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE video_assets
+                SET publish_status = '已排期',
+                    publish_task_id = ?,
+                    planned_publish_at = ?
+                WHERE canonical_script_key = ?
+                """,
+                (
+                    "task-transient-failed",
+                    scheduled_for.strftime("%Y-%m-%d %H:%M:%S"),
+                    metadata["canonical_script_key"],
+                ),
+            )
+
+        stats = sync_publish_results(
+            self.db,
+            StatusPublisher(
+                {
+                    "task-transient-failed": PublishTaskStatus(
+                        state="failed",
+                        result="发布失败",
+                        error_message="Product not found",
+                    )
+                }
+            ),
+            failure_grace_hours=12,
+        )
+
+        self.assertEqual(stats["pending"], 1)
+        slot = self.db._connect().execute(
+            "SELECT schedule_status FROM publish_slots WHERE publish_task_id = ?",
+            ("task-transient-failed",),
+        ).fetchone()
+        asset = self.db.get_video_asset("013_M1_V3")
+        self.assertEqual(slot["schedule_status"], "已排期")
+        self.assertEqual(asset["publish_status"], "已排期")
+
     def test_manual_publish_marks_asset_and_cancels_future_active_slot(self) -> None:
         self._upsert_script("013_M2_V1", "P1013", "P1013_M2")
         self.db.generate_future_slots(datetime(2026, 4, 13, 11, 0, 0), 72)
@@ -610,11 +970,11 @@ class SchedulerTest(unittest.TestCase):
         self.assertEqual(rows[1]["schedule_status"], "已取消")
         self.assertIn("已人工发布", rows[1]["error_message"])
 
-    def test_enforce_retry_limit_requeues_product_failure(self) -> None:
+    def test_enforce_retry_limit_keeps_active_remote_product_task_for_result_sync(self) -> None:
         self._upsert_script("014_M1_V1", "P1014", "P1014_M1")
         self.db.generate_future_slots(datetime(2026, 4, 13, 11, 0, 0), 72)
         slots = self.db.list_pending_slots(datetime(2026, 4, 13, 11, 0, 0), 72)
-        for index, slot in enumerate(slots[:3], start=1):
+        for index, slot in enumerate(slots[:4], start=1):
             self.db.assign_slot(
                 slot_id=int(slot["slot_id"]),
                 script_id="014_M1_V1",
@@ -653,17 +1013,16 @@ class SchedulerTest(unittest.TestCase):
 
         stats = self.db.enforce_retry_limit(max_auto_retries=2)
 
-        self.assertEqual(stats["candidates"], 1)
+        self.assertEqual(stats["candidates"], 0)
         self.assertEqual(stats["video_assets_skipped"], 0)
-        self.assertEqual(stats["video_assets_requeued"], 1)
-        self.assertGreaterEqual(stats["active_slots_cancelled"], 1)
-        self.assertIn("task-legacy-active", stats["remote_task_ids"])
+        self.assertEqual(stats["video_assets_requeued"], 0)
+        self.assertEqual(stats["active_slots_cancelled"], 0)
+        self.assertNotIn("task-legacy-active", stats["remote_task_ids"])
         asset = self.db.get_video_asset("014_M1_V1")
-        self.assertEqual(asset["publish_status"], "待排期")
-        self.assertEqual(asset["publish_task_id"], None)
-        self.assertIn("复活待重新排期", asset["error_message"])
+        self.assertEqual(asset["publish_status"], "已排期")
+        self.assertEqual(asset["publish_task_id"], "task-legacy-active")
 
-    def test_enforce_retry_limit_requeues_account_environment_failures(self) -> None:
+    def test_enforce_retry_limit_keeps_active_remote_environment_task_for_result_sync(self) -> None:
         self._upsert_script("014_M2_V1", "P1014", "P1014_M2")
         self.db.generate_future_slots(datetime(2026, 4, 13, 11, 0, 0), 72)
         slots = self.db.list_pending_slots(datetime(2026, 4, 13, 11, 0, 0), 72)
@@ -706,16 +1065,61 @@ class SchedulerTest(unittest.TestCase):
 
         stats = self.db.enforce_retry_limit(max_auto_retries=2)
 
-        self.assertEqual(stats["candidates"], 1)
+        self.assertEqual(stats["candidates"], 0)
         self.assertEqual(stats["video_assets_skipped"], 0)
-        self.assertEqual(stats["video_assets_requeued"], 1)
-        self.assertGreaterEqual(stats["active_slots_cancelled"], 1)
+        self.assertEqual(stats["video_assets_requeued"], 0)
+        self.assertEqual(stats["active_slots_cancelled"], 0)
         asset = self.db.get_video_asset("014_M2_V1")
-        self.assertEqual(asset["publish_status"], "待排期")
-        self.assertEqual(asset["publish_task_id"], None)
-        self.assertIn("复活待重新排期", asset["error_message"])
+        self.assertEqual(asset["publish_status"], "已排期")
+        self.assertEqual(asset["publish_task_id"], "task-env-active")
 
-    def test_schedule_slots_allows_requeued_account_environment_failures(self) -> None:
+    def test_sync_results_repairs_retry_limit_cancelled_remote_success(self) -> None:
+        self._upsert_script("014_M5_V1", "P1014", "P1014_M5")
+        self.db.generate_future_slots(datetime(2026, 4, 13, 11, 0, 0), 24)
+        slot = self.db.list_pending_slots(datetime(2026, 4, 13, 11, 0, 0), 24)[0]
+        scheduled_for = datetime.strptime(str(slot["scheduled_for"]), "%Y-%m-%d %H:%M:%S")
+        self.db.assign_slot(
+            slot_id=int(slot["slot_id"]),
+            script_id="014_M5_V1",
+            publish_task_id="task-cancelled-but-success",
+            account_id="acc-1",
+            account_name="账号1",
+            planned_publish_at=scheduled_for,
+        )
+        with self.db._connect() as conn:
+            conn.execute(
+                """
+                UPDATE publish_slots
+                SET schedule_status = '已取消',
+                    error_message = '超过自动重试上限，已复活待重新排期；失败次数 > 2'
+                WHERE publish_task_id = ?
+                """,
+                ("task-cancelled-but-success",),
+            )
+
+        stats = sync_publish_results(
+            self.db,
+            StatusPublisher(
+                {
+                    "task-cancelled-but-success": PublishTaskStatus(
+                        state="success",
+                        result="发布成功",
+                        published_at="2026-04-13 12:00:00",
+                    )
+                }
+            ),
+        )
+
+        self.assertEqual(stats["published"], 1)
+        asset = self.db.get_video_asset("014_M5_V1")
+        self.assertEqual(asset["publish_status"], "已发布")
+        rows = self.db._connect().execute(
+            "SELECT schedule_status FROM publish_slots WHERE publish_task_id = ?",
+            ("task-cancelled-but-success",),
+        ).fetchall()
+        self.assertEqual(rows[0]["schedule_status"], "已发布")
+
+    def test_schedule_slots_does_not_auto_retry_after_account_environment_failures(self) -> None:
         self._upsert_script("014_M3_V1", "P1014", "P1014_M3")
         self.db.generate_future_slots(datetime(2026, 4, 13, 11, 0, 0), 72)
         slots = self.db.list_pending_slots(datetime(2026, 4, 13, 11, 0, 0), 72)
@@ -749,9 +1153,11 @@ class SchedulerTest(unittest.TestCase):
 
         stats = schedule_slots(self.db, RealishPublisher(), now=datetime(2026, 4, 14, 11, 0, 0))
 
-        self.assertEqual(stats.scheduled, 1)
+        self.assertEqual(stats.scheduled, 0)
+        asset = self.db.get_video_asset("014_M3_V1")
+        self.assertEqual(asset["publish_status"], "发布失败")
 
-    def test_enforce_retry_limit_can_revive_previously_skipped_failure(self) -> None:
+    def test_enforce_retry_limit_keeps_previously_skipped_failure_out_of_queue(self) -> None:
         self._upsert_script("014_M4_V1", "P1014", "P1014_M4")
         self.db.generate_future_slots(datetime(2026, 4, 13, 11, 0, 0), 72)
         slots = self.db.list_pending_slots(datetime(2026, 4, 13, 11, 0, 0), 72)
@@ -786,9 +1192,57 @@ class SchedulerTest(unittest.TestCase):
 
         stats = self.db.enforce_retry_limit(max_auto_retries=2)
 
-        self.assertEqual(stats["video_assets_requeued"], 1)
+        self.assertEqual(stats["video_assets_requeued"], 0)
+        self.assertEqual(stats["video_assets_skipped"], 1)
         asset = self.db.get_video_asset("014_M4_V1")
-        self.assertEqual(asset["publish_status"], "待排期")
+        self.assertEqual(asset["publish_status"], "已跳过")
+        self.assertEqual(asset["publish_result"], "发布失败")
+
+    def test_enforce_retry_limit_does_not_revive_already_published_script(self) -> None:
+        self._upsert_script("014_M6_V1", "P1014", "P1014_M6")
+        self.db.generate_future_slots(datetime(2026, 4, 13, 11, 0, 0), 72)
+        slots = self.db.list_pending_slots(datetime(2026, 4, 13, 11, 0, 0), 72)
+        for index, slot in enumerate(slots[:3], start=1):
+            self.db.assign_slot(
+                slot_id=int(slot["slot_id"]),
+                script_id="014_M6_V1",
+                publish_task_id=f"task-published-failed-{index}",
+                account_id="acc-1",
+                account_name="账号1",
+                planned_publish_at=datetime.strptime(str(slot["scheduled_for"]), "%Y-%m-%d %H:%M:%S"),
+            )
+            self.db.mark_publish_result(
+                script_id="014_M6_V1",
+                publish_task_id=f"task-published-failed-{index}",
+                schedule_status="发布失败",
+                publish_status="发布失败",
+                publish_result="发布失败",
+                error_message="Product not found",
+            )
+        self.db.mark_publish_result(
+            script_id="014_M6_V1",
+            publish_task_id="task-published-failed-1",
+            schedule_status="已发布",
+            publish_status="已发布",
+            publish_result="发布成功",
+            published_at="2026-04-13 12:00:00",
+        )
+        self.db.upsert_video_asset(
+            script_id="014_M6_V1",
+            run_manager_record_id="run-014_M6_V1",
+            video_source_type="link",
+            video_source_value="https://example.com/video.mp4",
+            local_file_path="/tmp/014_M6_V1.mp4",
+            download_status="下载成功",
+            run_video_status="成功",
+            publish_status="待排期",
+        )
+
+        stats = self.db.enforce_retry_limit(max_auto_retries=2)
+
+        self.assertEqual(stats["candidates"], 0)
+        asset = self.db.get_video_asset("014_M6_V1")
+        self.assertEqual(asset["publish_status"], "已发布")
 
     def test_daily_publish_summary_message_includes_failure_context(self) -> None:
         self._upsert_script("015_M1_V1", "P1015", "P1015_M1")
@@ -818,6 +1272,39 @@ class SchedulerTest(unittest.TestCase):
         self.assertIn("账号1", message)
         self.assertIn("脚本ID=015_M1_V1", message)
         self.assertIn("Product unavailable", message)
+
+    def test_daily_publish_summary_includes_retry_limit_cancellations_as_abnormal(self) -> None:
+        self._upsert_script("016_M1_V1", "P1016", "P1016_M1")
+        self.db.generate_future_slots(datetime(2026, 4, 13, 11, 0, 0), 24)
+        slot = self.db.list_pending_slots(datetime(2026, 4, 13, 11, 0, 0), 24)[0]
+        self.db.assign_slot(
+            slot_id=int(slot["slot_id"]),
+            script_id="016_M1_V1",
+            publish_task_id="task-summary-cancelled",
+            account_id="acc-1",
+            account_name="账号1",
+            planned_publish_at=datetime.strptime(str(slot["scheduled_for"]), "%Y-%m-%d %H:%M:%S"),
+        )
+        with self.db._connect() as conn:
+            conn.execute(
+                """
+                UPDATE publish_slots
+                SET schedule_status = '已取消',
+                    error_message = '超过自动重试上限，已复活待重新排期；失败次数 > 2'
+                WHERE publish_task_id = ?
+                """,
+                ("task-summary-cancelled",),
+            )
+
+        summary = self.db.build_daily_publish_summary("2026-04-13")
+        message = format_daily_publish_summary(summary)
+
+        self.assertEqual(summary["abnormal_cancelled"], 1)
+        self.assertIn("异常取消：1", message)
+        self.assertIn("异常主要环境", message)
+        self.assertIn("异常取消", message)
+        self.assertIn("脚本ID=016_M1_V1", message)
+        self.assertIn("超过自动重试上限", message)
 
 
 if __name__ == "__main__":

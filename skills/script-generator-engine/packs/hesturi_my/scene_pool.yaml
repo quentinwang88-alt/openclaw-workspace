@@ -1,0 +1,87 @@
+# ==============================================================================
+# 马来真实场景池 —— 解绑"家中场景"垄断
+# ==============================================================================
+# 设计原则(已与用户确认):
+#  - 现有系统把"家中穿衣区/镜前/梳妆台"钉死,导致所有视频长一个样。
+#  - 真实马来 TikTok 远比这杂:路边/店里/车里/厨房/抱娃/对着乱桌子拍。
+#  - 真实感加成越高的场景,AI 模型越难生成得"塑料"(环境复杂度压制美颜惯性)。
+#  - 场景作为 S1-S4 差异化的主维度之一,强制轮换防雷同。
+# ==============================================================================
+
+meta:
+  category: hesturi
+  country: MY
+
+# ------------------------------------------------------------------------------
+# 场景定义
+#  - authenticity_boost : 真实感加成(low/mid/high/very_high)
+#  - good_for_hooks     : 该场景特别适配的痛点钩子
+#  - proof_friendly     : 是否便于拍清楚 proof 证明镜头(决策2 相关)
+#  - visual_brief       : 给 AI 视频模型的场景画面指令
+# ------------------------------------------------------------------------------
+scenes:
+
+  S_HOME_MIRROR:
+    label: "家里镜子前随手戴"
+    authenticity_boost: mid
+    good_for_hooks: [H_SIZE_FIT, H_NO_FLYAWAY]
+    proof_friendly: true
+    visual_brief: "家里普通镜子前,自然光,镜中能看清佩戴过程与发际线"
+
+  S_HOME_MESSY:
+    label: "家里乱糟糟角落/床边/桌边"
+    authenticity_boost: high
+    good_for_hooks: [H_NO_MARK]
+    proof_friendly: true
+    visual_brief: "床边或桌边,背景有生活杂物(衣物/水杯),摘下头巾展示额头无勒痕"
+
+  S_CAR:
+    label: "车里(出门前/副驾)"
+    authenticity_boost: high
+    good_for_hooks: [H_NO_FLYAWAY]
+    proof_friendly: true
+    visual_brief: "车内副驾,车窗自然光,有风感,展示碎发不乱"
+
+  S_SHOP:
+    label: "店里/货架前试戴"
+    authenticity_boost: high
+    good_for_hooks: [H_BUNDLE_COUNT, H_SIZE_FIT]
+    proof_friendly: true
+    visual_brief: "店铺货架前,背景有商品,摊开数套装数量或试戴对比"
+
+  S_KITCHEN:
+    label: "厨房/做事间隙"
+    authenticity_boost: high
+    good_for_hooks: [H_BREATHABLE]
+    proof_friendly: false
+    visual_brief: "厨房做事间隙,体现日常戴着不闷热的真实生活感"
+
+  S_WITH_KID:
+    label: "抱娃/带孩子边戴边说"
+    authenticity_boost: very_high
+    good_for_hooks: [H_NO_MARK, H_BREATHABLE]
+    proof_friendly: false
+    visual_brief: "抱着孩子或孩子在旁,极强生活感,边照顾孩子边自然分享"
+
+  S_OUTDOOR:
+    label: "门口/院子/路边自然光"
+    authenticity_boost: high
+    good_for_hooks: [H_NO_FLYAWAY]
+    proof_friendly: true
+    visual_brief: "门口或院子,户外自然光,有微风,展示碎发服帖"
+
+  S_BED_MORNING:
+    label: "早起床边/刚醒"
+    authenticity_boost: high
+    good_for_hooks: [H_NO_MARK]
+    proof_friendly: true
+    visual_brief: "清晨床边刚醒,慵懒生活感,摘下/戴上展示无勒痕、舒适"
+
+# ------------------------------------------------------------------------------
+# 场景轮换规则(供反雷同引擎读取)
+# ------------------------------------------------------------------------------
+rotation_rules:
+  max_repeat_per_5: 2            # 同一场景每 5 条最多出现 2 次
+  prefer_high_boost: true       # 优先选真实感加成高的场景(压制塑料感)
+  proof_shot_scene_constraint: "当 proof 镜头要求高清晰度时,优先选 proof_friendly=true 的场景"
+  match_scene_to_hook: true     # 优先选与主钩子 good_for_hooks 匹配的场景

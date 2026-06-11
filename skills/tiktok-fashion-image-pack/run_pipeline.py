@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -323,7 +324,19 @@ def process_record(
         ] if item
     )
 
-    if args.no_vision or args.dry_run:
+    existing_truth_raw = normalize_cell_value(record.fields.get(FIELD["truth_json"]))
+    review_reason = normalize_cell_value(record.fields.get(FIELD["review_reason"]))
+    should_reuse_truth = bool(existing_truth_raw) and review_reason == "skip-image-generation"
+    if should_reuse_truth:
+        try:
+            truth = json.loads(existing_truth_raw)
+            print("  复用已有 Product Truth JSON（skip-image-generation 续跑）")
+        except json.JSONDecodeError:
+            should_reuse_truth = False
+
+    if should_reuse_truth:
+        pass
+    elif args.no_vision or args.dry_run:
         truth = heuristic_product_truth([str(path) for path in source_paths], category=category)
     else:
         try:
@@ -505,6 +518,8 @@ def _run_title_inline(
         return None
 
     subtype = str(product_truth.get("subtype") or "unknown_womens_top")
+    category = normalize_cell_value(record.fields.get(FIELD["category"])) or "女装上装/外套"
+    country = normalize_cell_value(record.fields.get(FIELD["country"])) or "TH"
     try:
         args.circuit_breaker.before_model_call()
         result = generate_title(
@@ -512,13 +527,15 @@ def _run_title_inline(
             subtype=subtype,
             original_title=original_title,
             human_requirement=human_req,
+            category=category,
+            country=country,
         )
         args.circuit_breaker.record_model_success()
     except Exception as exc:
         args.circuit_breaker.record_model_failure(exc)
         raise
-    series = get_series_info(subtype)
-    series_code = _make_series_code(subtype, record.record_id)
+    series = get_series_info(subtype, category=category, country=country)
+    series_code = _make_series_code(subtype, record.record_id, category=category, country=country)
     qa_r = result.get("qa_result", "")
     normalized = result.get("normalized_title", result["tk_title"])
     compliance_risk = result.get("compliance_risk", False)
@@ -788,16 +805,45 @@ def process_title_record(
     run_root: Path,
 ) -> str:
     print(f"\n📝 标题生成 {record.record_id}")
-    product_truth_raw = normalize_cell_value(record.fields.get(FIELD["truth_json"]))
-    if not product_truth_raw:
-        print(f"  ⚠️ 缺少 Product Truth JSON，跳过")
-        return "failed"
+    original_title = normalize_cell_value(record.fields.get(FIELD["original_title"]))
+    if not original_title:
+        original_title = normalize_cell_value(record.fields.get(FIELD["brand_name"])) or ""
+    human_req = normalize_cell_value(record.fields.get(FIELD["title_human_req"])) or ""
+    raw_category = normalize_cell_value(record.fields.get(FIELD["category"]))
+    raw_country = normalize_cell_value(record.fields.get(FIELD["country"]))
+    category, country = infer_title_context_from_text(
+        original_title=original_title,
+        category=raw_category,
+        country=raw_country,
+    )
 
-    try:
-        product_truth = json.loads(product_truth_raw)
-    except json.JSONDecodeError:
-        print(f"  ❌ Product Truth JSON 解析失败")
-        return "failed"
+    product_truth_raw = normalize_cell_value(record.fields.get(FIELD["truth_json"]))
+    fallback_truth_used = False
+    if not product_truth_raw:
+        if not original_title:
+            print(f"  ⚠️ 缺少 Product Truth JSON 且无原标题，跳过")
+            return "failed"
+        product_truth = build_title_fallback_truth(
+            original_title=original_title,
+            category=category,
+            country=country,
+        )
+        fallback_truth_used = True
+        print(f"  ℹ️ 缺少 Product Truth JSON，已基于原标题生成轻量商品事实: {category}/{country}/{product_truth.get('subtype')}")
+    else:
+        try:
+            product_truth = json.loads(product_truth_raw)
+        except json.JSONDecodeError:
+            if not original_title:
+                print(f"  ❌ Product Truth JSON 解析失败，且无原标题可兜底")
+                return "failed"
+            product_truth = build_title_fallback_truth(
+                original_title=original_title,
+                category=category,
+                country=country,
+            )
+            fallback_truth_used = True
+            print(f"  ⚠️ Product Truth JSON 解析失败，已基于原标题生成轻量商品事实: {category}/{country}/{product_truth.get('subtype')}")
 
     title_status = normalize_cell_value(record.fields.get(FIELD["title_status"]))
     if title_status == TITLE_STATUS_DONE and not args.overwrite_title:
@@ -812,11 +858,6 @@ def process_title_record(
             FIELD["title_last_run"]: now_ms(),
         })
 
-    original_title = normalize_cell_value(record.fields.get(FIELD["original_title"]))
-    if not original_title:
-        original_title = normalize_cell_value(record.fields.get(FIELD["brand_name"])) or ""
-    human_req = normalize_cell_value(record.fields.get(FIELD["title_human_req"])) or ""
-    category = normalize_cell_value(record.fields.get(FIELD["category"])) or "女装上装/外套"
     subtype = str(product_truth.get("subtype") or "unknown_womens_top")
 
     result = generate_title(
@@ -824,11 +865,13 @@ def process_title_record(
         subtype=subtype,
         original_title=original_title,
         human_requirement=human_req,
+        category=category,
+        country=country,
     )
 
-    series = get_series_info(subtype)
+    series = get_series_info(subtype, category=category, country=country)
     series_name = series["series_name_cn"]
-    series_code = _make_series_code(subtype, record.record_id)
+    series_code = _make_series_code(subtype, record.record_id, category=category, country=country)
     normalized = result.get("normalized_title", result["tk_title"])
     compliance_risk = result.get("compliance_risk", False)
 
@@ -843,6 +886,11 @@ def process_title_record(
         FIELD["title_prompt"]: result.get("prompt", ""),
         FIELD["title_last_run"]: now_ms(),
     }
+    if fallback_truth_used:
+        update[FIELD["truth_json"]] = dumps_pretty(product_truth)
+        update[FIELD["category"]] = category
+        update[FIELD["country"]] = country
+        update.update(build_truth_update(product_truth))
 
     qa_result = result.get("qa_result", "")
     if compliance_risk:
@@ -872,8 +920,191 @@ def process_title_record(
     return "done" if qa_result in ("通过", "轻微问题可用") else "review"
 
 
-def _make_series_code(subtype: str, record_id: str = "") -> str:
-    series = get_series_info(subtype)
+def infer_title_context_from_text(
+    *,
+    original_title: str,
+    category: str = "",
+    country: str = "",
+) -> Tuple[str, str]:
+    resolved_country = (country or "").strip().upper()
+    text = original_title or ""
+    if not resolved_country:
+        if re.search(r"[\u0E00-\u0E7F]", text):
+            resolved_country = "TH"
+        elif re.search(r"[À-ỹĐđ]", text) or any(token in text.lower() for token in ("kẹp", "băng đô", "dây buộc", "scrunchie")):
+            resolved_country = "VN"
+        else:
+            resolved_country = "TH"
+
+    resolved_category = (category or "").strip()
+    if not resolved_category:
+        lower = text.lower()
+        hair_terms = (
+            "กิ๊บ", "ที่คาดผม", "ยางมัดผม", "ยางรัดผม", "โบว์ติดผม",
+            "เครื่องประดับผม", "อุปกรณ์ตกแต่งผม", "kẹp tóc", "kẹp càng cua",
+            "kẹp mái", "băng đô", "dây buộc tóc", "thun cột tóc", "nơ tóc",
+            "scrunchie", "scrunchies", "发夹", "发箍", "发圈", "头饰",
+        )
+        resolved_category = "发饰" if any(term in lower or term in text for term in hair_terms) else "女装上装/外套"
+
+    return resolved_category, resolved_country
+
+
+def build_title_fallback_truth(
+    *,
+    original_title: str,
+    category: str,
+    country: str,
+) -> Dict[str, Any]:
+    truth = heuristic_product_truth([original_title or "title_only"], category=category)
+    if str(truth.get("category") or "").strip().lower() == "hair_accessory":
+        enrich_hair_accessory_truth_from_title(truth, original_title, country)
+    truth["source_image_type"] = "title_only"
+    truth["confidence"] = min(float(truth.get("confidence") or 0.35), 0.45)
+    reasons = truth.get("review_reasons") if isinstance(truth.get("review_reasons"), list) else []
+    reasons = [str(item).strip() for item in reasons if str(item).strip()]
+    reasons.append("title-only fallback; no Product Truth JSON or source image")
+    truth["review_reasons"] = []
+    for item in reasons:
+        if item not in truth["review_reasons"]:
+            truth["review_reasons"].append(item)
+    truth["target_customer"] = truth.get("target_customer") or ("Thai shoppers" if country == "TH" else "Vietnam shoppers")
+    return truth
+
+
+def enrich_hair_accessory_truth_from_title(truth: Dict[str, Any], original_title: str, country: str) -> None:
+    """Extract lightweight differentiators from marketplace titles for title-only hair accessory tasks."""
+    text = original_title or ""
+    lower = text.lower()
+    subtype = str(truth.get("subtype") or "")
+
+    if subtype == "unknown_hair_accessory":
+        truth["subtype"] = infer_hair_subtype_from_title(text)
+        subtype = str(truth.get("subtype") or "")
+        truth["product_type_name_en"] = {
+            "claw_clip": "CLAW CLIP",
+            "hair_clip": "HAIR CLIP",
+            "hair_bow": "HAIR BOW",
+            "headband": "HEADBAND",
+            "scrunchie": "SCRUNCHIE",
+            "hair_tie": "HAIR TIE",
+            "hair_pin": "HAIR PIN",
+        }.get(subtype, "HAIR ACCESSORY")
+
+    colors = extract_hair_title_terms(text, HAIR_TITLE_COLOR_TERMS)
+    patterns = extract_hair_title_terms(text, HAIR_TITLE_PATTERN_TERMS)
+    shapes = extract_hair_title_terms(text, HAIR_TITLE_SHAPE_TERMS)
+    structures = extract_hair_title_terms(text, HAIR_TITLE_STRUCTURE_TERMS)
+    use_cases = extract_hair_title_terms(text, HAIR_TITLE_USE_TERMS)
+    style_terms = extract_hair_title_terms(text, HAIR_TITLE_STYLE_TERMS)
+
+    if colors:
+        truth["main_color"] = colors[0]
+        truth["sellable_colors_observed"] = colors[:3]
+        truth["is_probably_multicolor"] = len(colors[:3]) > 1
+    if patterns or shapes:
+        truth["decorative_elements"] = ", ".join([*patterns, *shapes])
+    elif structures:
+        truth["decorative_elements"] = truth.get("decorative_elements") or "unknown"
+
+    if structures:
+        truth["grip_structure"] = ", ".join(structures)
+    if any(term in lower or term in text for term in ("ใหญ่", "ขนาดใหญ่", "big", "large", "to", "cỡ lớn")):
+        truth["size_scale"] = "large"
+    elif any(term in lower or term in text for term in ("เล็ก", "ขนาดเล็ก", "small", "mini", "cỡ nhỏ")):
+        truth["size_scale"] = "small"
+
+    selling_points = []
+    for item in [*colors[:1], *patterns[:1], *shapes[:1], *structures[:2], *use_cases[:2], *style_terms[:1]]:
+        if item and item not in selling_points:
+            selling_points.append(item)
+    if selling_points:
+        truth["core_selling_points"] = selling_points
+
+    preserve = truth.get("must_preserve") if isinstance(truth.get("must_preserve"), list) else []
+    for item in [*colors[:2], *patterns[:2], *shapes[:2], *structures[:2]]:
+        if item and item not in preserve:
+            preserve.append(item)
+    if preserve:
+        truth["must_preserve"] = preserve
+
+    avoid_generic = [
+        "avoid generic repeated title if original title contains color, pattern, shape, or structure",
+        "preserve at least one title-only differentiator in TK title",
+    ]
+    reasons = truth.get("review_reasons") if isinstance(truth.get("review_reasons"), list) else []
+    for item in avoid_generic:
+        if item not in reasons:
+            reasons.append(item)
+    truth["review_reasons"] = reasons
+
+
+def infer_hair_subtype_from_title(text: str) -> str:
+    lower = (text or "").lower()
+    if any(term in lower or term in text for term in ("ทรงฉลาม", "กิ๊บหนีบ", "claw", "càng cua", "鲨鱼夹")):
+        return "claw_clip"
+    if any(term in lower or term in text for term in ("โบว์", "bow", "nơ", "蝴蝶结")):
+        return "hair_bow"
+    if any(term in lower or term in text for term in ("ที่คาดผม", "headband", "băng đô", "发箍")):
+        return "headband"
+    if any(term in lower or term in text for term in ("scrunchie", "ยางมัดผม", "dây buộc tóc", "大肠")):
+        return "scrunchie"
+    if any(term in lower or term in text for term in ("ยางรัดผม", "hair tie", "thun cột tóc", "发圈")):
+        return "hair_tie"
+    if any(term in lower or term in text for term in ("กิ๊บเป๊าะแป๊ะ", "kẹp mái", "pin", "边夹")):
+        return "hair_pin"
+    if any(term in lower or term in text for term in ("กิ๊บ", "kẹp tóc", "发夹")):
+        return "hair_clip"
+    return "unknown_hair_accessory"
+
+
+def extract_hair_title_terms(text: str, terms: Tuple[str, ...]) -> List[str]:
+    lower = (text or "").lower()
+    found: List[str] = []
+    for term in sorted(terms, key=len, reverse=True):
+        if term.lower() in lower or term in text:
+            if term not in found and not any(term in existing for existing in found):
+                found.append(term)
+    return found
+
+
+HAIR_TITLE_COLOR_TERMS = (
+    "สีดำ", "สีขาว", "สีครีม", "สีเบจ", "สีน้ำตาล", "สีชมพู", "สีแดง", "สีเหลือง",
+    "สีเขียว", "สีฟ้า", "สีม่วง", "สีเงิน", "สีทอง", "สีมัสตาร์ด", "เหลืองเขียวมัสตาร์ด",
+    "ดำ", "ขาว", "ครีม", "เบจ", "น้ำตาล", "ชมพู", "แดง", "เหลือง", "เขียว", "มัสตาร์ด",
+    "đen", "trắng", "kem", "be", "nâu", "hồng", "đỏ", "vàng", "xanh", "tím",
+)
+HAIR_TITLE_PATTERN_TERMS = (
+    "ลายจุด", "ลายดอก", "ลายหินอ่อน", "ลายเสือ", "ลายตาราง", "สีพื้น",
+    "chấm bi", "hoa", "vân đá", "da báo", "kẻ caro", "màu trơn",
+)
+HAIR_TITLE_SHAPE_TERMS = (
+    "ทรงหัวใจ", "รูปหัวใจ", "ทรงฉลาม", "โบว์ใหญ่", "โบว์เล็ก", "ขอบสูง", "มินิ",
+    "hình tim", "nơ to", "nơ nhỏ", "mini",
+)
+HAIR_TITLE_STRUCTURE_TERMS = (
+    "แม่เหล็ก", "แบบแม่เหล็ก", "ฟันหนีบ", "ฟันหนีบแข็งแรง", "กิ๊บเป๊าะแป๊ะ",
+    "อะคริลิก", "พลาสติก", "ผ้าซาติน", "ผ้ากำมะหยี่", "ประดับมุก", "ประดับคริสตัล",
+    "nam châm", "răng kẹp", "nhựa acrylic", "nhựa", "vải satin", "nhung", "đính ngọc trai", "đính đá",
+)
+HAIR_TITLE_USE_TERMS = (
+    "รวบผม", "จัดทรงผม", "ติดหน้าม้า", "ผมด้านข้าง", "มวยผม", "หางม้า", "ผมหนา",
+    "búi tóc", "tóc mái", "tóc dày", "buộc tóc", "giữ tóc",
+)
+HAIR_TITLE_STYLE_TERMS = (
+    "สไตล์เกาหลี", "มินิมอล", "ลุคหวาน", "น่ารัก", "สดใส", "หรูหรา", "เรียบง่าย",
+    "Hàn Quốc", "tối giản", "xinh xắn", "tiểu thư", "sang nhẹ",
+)
+
+
+def _make_series_code(
+    subtype: str,
+    record_id: str = "",
+    *,
+    category: str = "女装上装/外套",
+    country: str = "TH",
+) -> str:
+    series = get_series_info(subtype, category=category, country=country)
     prefix = series.get("series_code_prefix") or "U"
     suffix = abs(hash(record_id)) % 900 + 100 if record_id else 200
     return f"{prefix}{suffix}"
@@ -896,6 +1127,30 @@ def download_scene_reference_images(client: FeishuBitableClient, record: TableRe
 
 
 def build_truth_update(truth: Dict[str, Any]) -> Dict[str, Any]:
+    if str(truth.get("category") or "").strip().lower() in {"hair_accessory", "hair_accessories", "发饰"}:
+        return {
+            FIELD["subtype"]: truth.get("subtype"),
+            FIELD["main_color"]: truth.get("main_color"),
+            FIELD["multicolor"]: bool(truth.get("is_probably_multicolor")),
+            FIELD["sellable_colors"]: join_list(truth.get("sellable_colors_observed")),
+            FIELD["material"]: truth.get("material"),
+            FIELD["silhouette"]: truth.get("size_scale"),
+            FIELD["length"]: truth.get("wearing_position"),
+            FIELD["collar"]: truth.get("decorative_elements"),
+            FIELD["closure"]: truth.get("grip_structure"),
+            FIELD["pockets"]: truth.get("pack_count"),
+            FIELD["sleeves"]: "",
+            FIELD["hem"]: "",
+            FIELD["selling_points"]: join_list(truth.get("core_selling_points")),
+            FIELD["scenes"]: join_list(truth.get("recommended_scenes")),
+            FIELD["customer"]: truth.get("target_customer"),
+            FIELD["must_preserve"]: join_list(truth.get("must_preserve")),
+            FIELD["must_not_add"]: join_list(truth.get("must_not_add")),
+            FIELD["template"]: truth.get("main_image_template"),
+            FIELD["detail_sequence"]: join_list(truth.get("detail_image_sequence")),
+            FIELD["confidence"]: truth.get("confidence"),
+            FIELD["review_reason"]: join_list(truth.get("review_reasons")),
+        }
     return {
         FIELD["subtype"]: truth.get("subtype"),
         FIELD["main_color"]: truth.get("main_color"),

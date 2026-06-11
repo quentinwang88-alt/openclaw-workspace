@@ -2,6 +2,7 @@
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from core.llm_client import OriginalScriptLLMClient
 
@@ -56,6 +57,27 @@ class LLMClientStreamTests(unittest.TestCase):
         self.assertEqual(response["choices"][0]["message"]["content"], '{"ok": true}')
         self.assertTrue(stream.closed)
         self.assertFalse(stream.final_response_requested)
+
+    def test_resolves_openclaw_explicit_proxy_for_codex_backend(self) -> None:
+        payload = {
+            "models": {
+                "providers": {
+                    "openai-codex": {
+                        "request": {
+                            "allowPrivateNetwork": True,
+                            "proxy": {
+                                "mode": "explicit-proxy",
+                                "url": "http://127.0.0.1:18080",
+                            },
+                        }
+                    }
+                }
+            }
+        }
+        with patch("core.llm_client._safe_read_json", return_value=payload):
+            client = OriginalScriptLLMClient(primary_api_key="token")
+
+        self.assertEqual(client.primary_proxy_url, "http://127.0.0.1:18080")
 
 
 if __name__ == "__main__":

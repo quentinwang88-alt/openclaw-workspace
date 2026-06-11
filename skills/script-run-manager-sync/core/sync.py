@@ -472,6 +472,8 @@ def build_target_fields(
         fields[mapping["reference_images"]] = task.reference_images
     if mapping.get("script_id") and task.script_id:
         fields[mapping["script_id"]] = task.script_id
+    if mapping.get("store_id") and task.store_id:
+        fields[mapping["store_id"]] = task.store_id
     if mapping.get("internal_script_key"):
         internal_key = task.internal_script_key or task.task_name
         if internal_key:
@@ -479,8 +481,6 @@ def build_target_fields(
     if include_publish_metadata:
         if mapping.get("short_video_title") and task.short_video_title:
             fields[mapping["short_video_title"]] = task.short_video_title
-        if mapping.get("store_id") and task.store_id:
-            fields[mapping["store_id"]] = task.store_id
         if mapping.get("product_id") and task.product_id:
             fields[mapping["product_id"]] = task.product_id
         if mapping.get("parent_slot") and task.parent_slot:

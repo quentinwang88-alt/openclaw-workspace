@@ -1,0 +1,52 @@
+# ==============================================================================
+# 素人人物画像池 —— 内头巾(供 S1-S4 人物轮换,防雷同 + 强化真实感)
+# ==============================================================================
+# 原则:都是普通马来女性,日常长相,不要网红脸;不同画像制造差异化。
+# 引擎在 S1-S4 间轮换不同 persona,配合场景/角度共同防同质化。
+# ==============================================================================
+
+meta:
+  category: hesturi
+  country: MY
+
+personas:
+
+  P_YOUNG_STUDENT:
+    label: "年轻学生/职场新人(20-24)"
+    look: "清爽日常,素颜或淡妆,校园/通勤穿着"
+    vibe: "轻快、随性,像跟朋友分享"
+    speech_style: "语速稍快,口语化,爱用 kan / tau tak"
+    good_for_scenes: [S_HOME_MIRROR, S_CAR, S_OUTDOOR]
+
+  P_YOUNG_MOM:
+    label: "年轻妈妈(25-32)"
+    look: "居家舒适,素颜感,可能抱着孩子"
+    vibe: "亲切、接地气,边照顾孩子边说"
+    speech_style: "自然停顿多,真实生活口吻"
+    good_for_scenes: [S_WITH_KID, S_KITCHEN, S_HOME_MESSY, S_BED_MORNING]
+
+  P_WORKING_WOMAN:
+    label: "上班族女性(28-38)"
+    look: "得体但不精致,通勤/办公日常"
+    vibe: "务实、讲重点,像同事推荐"
+    speech_style: "条理清楚但仍口语,不播音腔"
+    good_for_scenes: [S_CAR, S_SHOP, S_HOME_MIRROR]
+
+  P_HOMEMAKER:
+    label: "家庭主妇(30-45)"
+    look: "居家,朴实,素颜"
+    vibe: "实在、唠家常,像邻居大姐分享"
+    speech_style: "慢、絮叨、生活化,可重复强调"
+    good_for_scenes: [S_KITCHEN, S_HOME_MESSY, S_SHOP, S_WITH_KID]
+
+  P_SHOP_SELLER:
+    label: "小店店主/微商(25-40)"
+    look: "店里,随意,真实"
+    vibe: "热情、会带货但不油,真诚介绍"
+    speech_style: "口语带点推荐感,但避免硬广测评腔"
+    good_for_scenes: [S_SHOP]
+
+rotation_rules:
+  rotate_across_s1_s4: true        # S1-S4 尽量用不同 persona
+  match_persona_to_scene: true     # 优先选与场景匹配的 persona
+  max_repeat_per_5: 2              # 同一 persona 每 5 条最多 2 次

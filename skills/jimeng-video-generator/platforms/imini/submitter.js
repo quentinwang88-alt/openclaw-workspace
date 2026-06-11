@@ -432,24 +432,36 @@ async function selectModel(page, modelName) {
   const targetLower = String(modelName || '').toLowerCase().replace(/\s+/g, ' ').trim();
 
   try {
+    const currentModel = await readCurrentIminiModel(page);
+    if (modelMatchesTarget(currentModel, modelName)) {
+      console.log(`  imini 模型已为 ${modelName}，跳过`);
+      return true;
+    }
+
     // Step 1: Find and click the compact model selector in the left tool form.
     const modelArea = await page.evaluate(() => {
       const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
-      const candidates = Array.from(document.querySelectorAll('.cursor-pointer'))
+      const candidates = Array.from(document.querySelectorAll('.cursor-pointer, .imini-form-item, .imini-form-item-control-input-content, div'))
         .map(el => {
           const rect = el.getBoundingClientRect();
           return { el, rect, text: normalize(el.innerText || el.textContent || '') };
         })
         .filter(item =>
           item.rect.x > 80 && item.rect.x < 460 &&
-          item.rect.y > 120 && item.rect.y < 260 &&
+          item.rect.y > 85 && item.rect.y < 260 &&
           item.rect.width > 180 && item.rect.height > 20 && item.rect.height < 90 &&
           /模型|Sora|Seedance|Kling|Wan|Veo/i.test(item.text)
         )
-        .sort((a, b) => (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height));
-      const target = candidates[0];
+        .sort((a, b) => {
+          const aText = /模型/.test(a.text) ? 0 : 1;
+          const bText = /模型/.test(b.text) ? 0 : 1;
+          if (aText !== bText) return aText - bText;
+          return (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height);
+        });
+      const target = candidates.find(item => item.el.className && String(item.el.className).includes('cursor-pointer')) || candidates[0];
       if (!target) return { found: false };
-      target.el.click();
+      const clickTarget = target.el.closest('.cursor-pointer, button, [role="button"]') || target.el;
+      clickTarget.click();
       return {
         found: true,
         x: Math.round(target.rect.left + target.rect.width / 2),
@@ -583,6 +595,47 @@ async function selectModel(page, modelName) {
     console.log(`  ⚠️ imini 模型选择失败: ${error.message}`);
     return false;
   }
+}
+
+function normalizeModelText(value) {
+  return String(value || '')
+    .replace(/^模型\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function modelMatchesTarget(current, target) {
+  const currentNorm = normalizeModelText(current);
+  const targetNorm = normalizeModelText(target);
+  if (!currentNorm || !targetNorm) return false;
+  if (currentNorm === targetNorm) return true;
+  if (targetNorm === 'seedance 2.0') {
+    return currentNorm.includes('seedance 2.0') && !currentNorm.includes('fast');
+  }
+  if (targetNorm === 'seedance 2.0 fast') {
+    return currentNorm.includes('seedance 2.0') && currentNorm.includes('fast');
+  }
+  return currentNorm.includes(targetNorm) || targetNorm.includes(currentNorm);
+}
+
+async function readCurrentIminiModel(page) {
+  return page.evaluate(() => {
+    const candidates = Array.from(document.querySelectorAll('div, span'))
+      .map(el => {
+        const rect = el.getBoundingClientRect();
+        const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        return { rect, text };
+      })
+      .filter(item =>
+        item.rect.x > 80 && item.rect.x < 460 &&
+        item.rect.y > 85 && item.rect.y < 180 &&
+        item.rect.width > 40 && item.rect.height > 10 &&
+        /Sora|Seedance|Kling|Wan|Veo/i.test(item.text)
+      )
+      .sort((a, b) => a.text.length - b.text.length);
+    return candidates[0]?.text || '';
+  }).catch(() => '');
 }
 
 async function isIminiModelMenuOpen(page) {

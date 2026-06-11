@@ -1,0 +1,38 @@
+# ==============================================================================
+# 配置包元信息 —— 内头巾 · 马来西亚(第一个配置包,也是模板范本)
+# ==============================================================================
+# 引擎通过 category_router 加载本包;未来加类目只需复制此目录结构。
+# ==============================================================================
+
+pack_id: hesturi_my
+country: MY
+category: hesturi
+display_name: "内头巾(inner/anak tudung)· 马来西亚"
+language: ms                      # 口播生成语言:马来语
+
+# 本包包含的配置文件(引擎按此清单加载)
+files:
+  pain_hooks: pain_hooks.yaml             # 痛点钩子库 + 卖点路由表
+  raw_texture: raw_texture_lexicon.yaml   # 真实感/瑕疵词库 + 三档配置
+  scene_pool: scene_pool.yaml             # 马来真实场景池
+  authenticity: raw_texture_lexicon.yaml  # 三档真实感配置(并入 raw_texture)
+  prompt_overrides: prompt_overrides.yaml # 覆盖引擎通用 prompt 的内头巾专属措辞(待写)
+  performance_profiles: performance_profiles.yaml  # 素人不完美画像(待写)
+
+# 默认参数
+defaults:
+  authenticity_level: natural     # 决策3:内头巾默认 natural
+  proof_clarity_over_authenticity: true  # 决策2
+  main_hook_source: selling_point # 决策1:卖点驱动钩子
+  variant_count: 4                # S1-S4
+  dedup_window: 30                # 反雷同:回看最近 30 条同产品脚本
+
+# 商品硬约束(category_execution_contract):内头巾不可违背的事实
+category_contract:
+  product_truth:
+    - "内头巾是穆斯林女性戴外层头巾时贴身打底的'头巾内衬'"
+    - "日常每天必戴、高频复购的功能型刚需品"
+    - "佩戴在头部,贴合发际线,包覆头发"
+  must_not:
+    - "不可表现为外层时尚头巾/盖头本身(那是另一品类)"
+    - "不可凭空编造数据/认证/夸大功效"

@@ -1,13 +1,13 @@
 ---
 name: tiktok-fashion-image-pack
-description: Generate and QA likeU TikTok Shop fashion product image packs from Feishu bitable records. Use when the user wants OpenClaw to read supplier/product images from Feishu, infer product facts, create high-trust CHUUCHOP-inspired main images for womens tops/jackets with `likeU · product type` microcopy, upload results back to Feishu, or develop/operate this image-generation pipeline.
+description: Generate and QA likeU TikTok Shop fashion product image packs from Feishu bitable records. Use when the user wants OpenClaw to read supplier/product images from Feishu, infer product facts, create high-trust CHUUCHOP-inspired main images for womens tops/jackets or hair accessories with `likeU · product type` microcopy, upload results back to Feishu, or develop/operate this image-generation pipeline.
 ---
 
 # TikTok Fashion Image Pack
 
 ## Overview
 
-Create product-truth-driven TikTok Shop images for likeU. The MVP supports `女装上装/外套`, generates 1:1 main images and optional S1-S4 lifestyle scene images, writes `Product Truth JSON`, prompts, generated attachments, and QA fields back to Feishu.
+Create product-truth-driven TikTok Shop images for likeU. The mature flow supports `女装上装/外套`; the lightweight category extension supports `发饰`. It generates 1:1 main images and optional scene images, writes `Product Truth JSON`, prompts, generated attachments, and QA fields back to Feishu.
 
 The system intentionally avoids pure AI fashion posters. It follows this sequence:
 
@@ -16,7 +16,7 @@ The system intentionally avoids pure AI fashion posters. It follows this sequenc
 3. Infer `Product Truth JSON`.
 4. Route by `生成图类型`.
 5. Build a strict main-image prompt with `likeU · PRODUCT TYPE` microcopy when needed.
-6. Build S1-S4 scene prompts when needed.
+6. Build category-specific scene prompts when needed (`S1-S6` for womens tops, `H1-H6` for hair accessories).
 7. Generate images through the existing `openai-image` skill.
 8. Run visual QA unless skipped.
 9. Upload images and write results back to Feishu.
@@ -79,10 +79,10 @@ Set `生成状态` to `待生成` to enqueue a record. Records paused by workflo
 Supported `生成图类型` values:
 
 - `只首图`: generate only the main product image.
-- `只场景图`: generate only S1-S4 scene images.
-- `首图+场景图`: generate main image, then S1-S4 scene images.
+- `只场景图`: generate only category scene images.
+- `首图+场景图`: generate main image, then category scene images.
 - `首图+详情图`: legacy value; currently behaves as main image only.
-- `全套图包`: currently behaves as main image plus S1-S4 scene images.
+- `全套图包`: currently behaves as main image plus category scene images.
 
 System fields include `Product Truth JSON`, `生成Prompt`, `场景图Prompt`, `首图结果`, `场景图结果`, QA fields, and AI-expanded product facts. See `references/field_schema.md` when editing the schema.
 
@@ -100,6 +100,19 @@ Main image layout is selected automatically:
 - `womens_tops_structure_feature_split`: single-color products with visible structure selling points such as pockets, buttons/snaps, zipper, belt, drawstring, hardware, bomber/baseball details.
 - `womens_tops_material_mood_split`: single-color texture-led products such as faux fur, suede, knit, PU leather, plush, or fleece when structure is not the main selling point.
 
+## Hair Accessories Extension
+
+Use `references/hair_accessory_category_plan.md` for category behavior. The first implementation supports hair clip, claw clip, hair bow, headband, scrunchie, hair tie, hair pin, and unknown hair accessory subtypes.
+
+Main image layout is selected automatically:
+
+- `hair_accessory_worn_closeup_split`: real/model references. Worn close-up plus product proof and detail panels.
+- `hair_accessory_product_detail_split`: product-only references. Weak-human-context usage plus product-only proof and detail/scale panels.
+- `hair_accessory_multicolor_options`: multi-color products. IMAGE 1 is the promoted hero color; other colors appear as compact product-only options.
+- `hair_accessory_set_flatlay`: confirmed multi-piece sets only. Shows exact pack contents without inventing quantity.
+
+Hair accessory scene slots use `H1-H6`. If Feishu still passes the old S slots, the runner maps `S1-S6` to `H1-H6` for `类目=发饰`.
+
 ## QA
 
 QA compares source image and generated image against `Product Truth JSON`. It rejects material changes, invented structural details, misleading accessories, and obvious AI distortions. See `references/qa_rules.md`.
@@ -113,8 +126,9 @@ If QA fails, the runner retries once by default with the issue list appended to 
 - Default brand microcopy is `likeU · PRODUCT TYPE` in English. Do not translate product type microcopy into Thai.
 - Do not add non-sold accessories in product-only panels.
 - Scene images are not generated from the already-generated main image. Use supplier references plus `Product Truth JSON`; the main image can be treated only as style context in future extensions.
-- Default scene slots are `S1,S2,S3,S4`: hero lifestyle try-on, daily use atmosphere, fit/color proof, and material/construction detail.
-- Multi-color products auto-expand from default S1-S4 to S1-S6. S5 and S6 are alternate observed-color try-on images, so multi-color SKUs provide 2-3 worn color references.
+- Default womenswear scene slots are `S1,S2,S3,S4`: hero lifestyle try-on, daily use atmosphere, fit/color proof, and material/construction detail.
+- Default hair accessory scene slots are `H1,H2,H3,H4`: worn close-up hero, daily hairstyle scene, product detail/scale, and product/color proof.
+- Multi-color womenswear products auto-expand from S1-S4 to S1-S6. Multi-color hair accessories auto-expand from H1-H4 to H1-H6.
 - Scene preferences are optional. Blank or `自动匹配` uses automatic scene choice.
 
 ## Feedback Fix

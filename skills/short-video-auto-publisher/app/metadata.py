@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import re
 import sys
 from dataclasses import dataclass
@@ -122,6 +123,18 @@ COUNTRY_LANGUAGE_HINTS = {
     "新加坡": ("新加坡", "英语或当地主要使用语言"),
     "china": ("中国", "中文"),
     "中国": ("中国", "中文"),
+}
+
+
+STORE_COUNTRY_PREFIXES = {
+    "TH": "泰国",
+    "VN": "越南",
+    "MY": "马来西亚",
+    "ID": "印度尼西亚",
+    "JP": "日本",
+    "KR": "韩国",
+    "PH": "菲律宾",
+    "SG": "新加坡",
 }
 
 
@@ -273,10 +286,66 @@ def heuristic_title(script_text: str) -> str:
     return sanitize_title(cleaned[:50])
 
 
+def localized_template_title(metadata: ScriptMetadata) -> str:
+    country = str(metadata.target_country or "").strip().lower()
+    is_nurture = is_nurture_metadata(
+        metadata.script_source,
+        metadata.publish_purpose,
+        metadata.content_branch,
+    )
+    seed = metadata.canonical_script_key or metadata.script_id or metadata.script_text
+    index = int(hashlib.md5(str(seed or "").encode("utf-8")).hexdigest()[:8], 16)
+    if country in {"thailand", "thai", "泰国"}:
+        templates = (
+            "บรรยากาศวันสบายๆ ที่ดูน่าจำ",
+            "มุมเล็กๆ ที่ดูเข้ากับวันนี้",
+            "ฟีลเรียบง่ายที่ดูดีแบบธรรมชาติ",
+        ) if is_nurture else (
+            "ดีเทลเล็กๆ ที่ทำให้ลุคดูดีขึ้น",
+            "ไอเดียเล็กๆ สำหรับลุคสบายๆ",
+            "มุมนี้ทำให้ของชิ้นนี้ดูน่ารักขึ้น",
+        )
+    elif country in {"vietnam", "vietnamese", "越南"}:
+        templates = (
+            "Một khoảnh khắc đời thường rất dễ nhớ",
+            "Một chút bình yên trong ngày thường",
+            "Góc nhỏ nhìn rất tự nhiên",
+        ) if is_nurture else (
+            "Một chi tiết nhỏ mà nhìn xinh hơn hẳn",
+            "Nhìn đơn giản mà rất dễ hợp mỗi ngày",
+            "Một điểm nhỏ làm tổng thể gọn hơn",
+        )
+    elif country in {"malaysia", "malay", "马来西亚"}:
+        templates = (
+            "Momen harian yang terasa tenang",
+            "Suasana ringkas yang nampak natural",
+            "Satu momen kecil untuk hari biasa",
+        ) if is_nurture else (
+            "Detail kecil yang buat gaya nampak kemas",
+            "Nampak ringkas tapi manis dipakai",
+            "Sentuhan kecil untuk gaya harian",
+        )
+    else:
+        templates = (
+            "A small everyday moment worth saving",
+            "Simple details that feel natural",
+            "An easy little detail for today",
+        )
+    return sanitize_title(templates[index % len(templates)])
+
+
 def language_hint_for_country(target_country: str) -> Tuple[str, str]:
     normalized = str(target_country or "").strip()
     key = normalized.lower()
     return COUNTRY_LANGUAGE_HINTS.get(key, (normalized or "未知国家", "当地语言"))
+
+
+def infer_country_from_store_id(store_id: str) -> str:
+    normalized = re.sub(r"[^A-Za-z]", "", str(store_id or "").strip()).upper()
+    for prefix, country in STORE_COUNTRY_PREFIXES.items():
+        if normalized.startswith(prefix):
+            return country
+    return ""
 
 
 def contains_cjk(text: str) -> bool:
@@ -335,7 +404,8 @@ def is_title_compatible_with_country(title: str, target_country: str) -> bool:
         "新加坡",
     }:
         return not contains_cjk(text)
-    return True
+    # 未知国家时也不要接受中文兜底标题，避免把中文脚本提示词截断后直接发布。
+    return not contains_cjk(text)
 
 
 class BaseTitleGenerator:
@@ -349,7 +419,10 @@ class HeuristicTitleGenerator(BaseTitleGenerator):
     source = "heuristic"
 
     def generate(self, metadata: ScriptMetadata) -> str:
-        return heuristic_title(metadata.script_text)
+        title = heuristic_title(metadata.script_text)
+        if is_title_compatible_with_country(title, metadata.target_country):
+            return title
+        return localized_template_title(metadata)
 
 
 class LLMTitleGenerator(BaseTitleGenerator):
@@ -500,6 +573,7 @@ def build_script_metadata_records(
             resolved_family_key = content_family_key(resolved_product_id, parent_slot)
             if is_nurture and not resolved_family_key:
                 resolved_family_key = f"{build_canonical_script_key(record.record_id, spec['task_suffix'])}:养号"
+            resolved_target_country = target_country or infer_country_from_store_id(store_id)
             metadata = ScriptMetadata(
                 script_id=build_script_id(task_no, parent_slot, variant_no),
                 source_record_id=record.record_id,
@@ -510,7 +584,7 @@ def build_script_metadata_records(
                 parent_slot=parent_slot,
                 direction_label=direction_label,
                 variant_strength=variant_strength_label(variant_no),
-                target_country=target_country,
+                target_country=resolved_target_country,
                 product_type=product_type,
                 content_family_key=resolved_family_key,
                 script_text=script_text,

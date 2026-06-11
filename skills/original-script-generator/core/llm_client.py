@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+import httpx
 from openai import OpenAI
 
 from core.json_parser import JSONParseError, parse_json_text
@@ -172,17 +173,27 @@ class OriginalScriptLLMClient:
         self.primary_api_url = self._resolve_primary_api_url(primary_api_url)
         self.primary_api_key = self._resolve_primary_api_key(primary_api_key)
         self.primary_model = self._resolve_primary_model(primary_model)
+        self.primary_proxy_url = self._resolve_primary_proxy_url()
         self.route_order = normalize_route_order(route_order)
 
     def _get_primary_client(self) -> OpenAI:
         if self._primary_client is None:
             if not self.primary_api_key:
                 raise Exception("主线路未找到 openai-codex access token，请先登录当前 OpenClaw / Hermes 账号")
+            kwargs: Dict[str, Any] = {
+                "api_key": self.primary_api_key,
+                "base_url": self.primary_api_url,
+                "timeout": self.timeout,
+                "max_retries": 0,
+            }
+            if self.primary_proxy_url:
+                kwargs["http_client"] = httpx.Client(
+                    proxy=self.primary_proxy_url,
+                    timeout=self.timeout,
+                    trust_env=False,
+                )
             self._primary_client = OpenAI(
-                api_key=self.primary_api_key,
-                base_url=self.primary_api_url,
-                timeout=self.timeout,
-                max_retries=0,
+                **kwargs,
             )
         return self._primary_client
 
@@ -436,6 +447,29 @@ class OriginalScriptLLMClient:
         if env_value:
             return env_value
         return _extract_codex_access_token()
+
+    @staticmethod
+    def _resolve_primary_proxy_url() -> str:
+        override = str(os.environ.get("ORIGINAL_SCRIPT_PRIMARY_LLM_PROXY_URL", "") or "").strip()
+        if override:
+            return override
+        payload = _safe_read_json(OPENCLAW_CONFIG_PATH)
+        provider = (
+            ((payload.get("models") or {}).get("providers") or {}).get("openai-codex")
+            if isinstance(payload, dict)
+            else {}
+        )
+        request_cfg = provider.get("request") if isinstance(provider, dict) else {}
+        if not isinstance(request_cfg, dict):
+            return ""
+        proxy_cfg = request_cfg.get("proxy")
+        if not isinstance(proxy_cfg, dict):
+            return ""
+        mode = str(proxy_cfg.get("mode") or "").strip()
+        url = str(proxy_cfg.get("url") or "").strip()
+        if mode == "explicit-proxy" and url:
+            return url
+        return ""
 
     @staticmethod
     def _is_rate_limit_error(exc: Exception) -> bool:

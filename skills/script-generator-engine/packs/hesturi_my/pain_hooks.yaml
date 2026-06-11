@@ -1,0 +1,124 @@
+# ==============================================================================
+# 内头巾(inner / anak tudung)· 马来西亚 —— 痛点钩子库 + 卖点路由表
+# ==============================================================================
+# 设计原则(已与用户确认):
+#  1. 钩子由"产品主打卖点"驱动选择(卖点驱动钩子),不由 skill 自行轮换。
+#  2. 同一产品的所有视频统一证明同一主卖点(把主卖点打穿)。
+#  3. S1-S4 差异化靠"证明角度/场景/句式/人物",不靠换痛点。
+#  4. proof 证明镜头清晰度优先于真实粗糙感(看得清结果)。
+# ==============================================================================
+
+meta:
+  category: hesturi          # 内头巾
+  country: MY                # 马来西亚
+  language: ms               # 口播生成语言:马来语
+  voc_source: "跨价位交叉验证 VOC 痛点排序(内头巾.xlsx / 即时盖头.xlsx + 评论)"
+
+# ------------------------------------------------------------------------------
+# 一、痛点钩子定义(5 大钩子,对应 VOC 痛点排序)
+# ------------------------------------------------------------------------------
+# 每个钩子含:
+#  - voc_rank      : VOC 痛点排序(1=最高频)
+#  - pain_desc     : 痛点描述
+#  - proof_angles  : 该钩子下的多个"证明角度"(S1-S4 轮换用,防雷同)
+#  - visual_brief  : 给 AI 视频模型的画面指令(proof 镜头必须清晰)
+#  - voice_intent  : 口播意图(马来语生成方向,非最终文案)
+#  - ai_shot_risk  : 该钩子对 AI 视频模型的生成难度/易翻车点
+# ------------------------------------------------------------------------------
+hooks:
+
+  H_SIZE_FIT:
+    voc_rank: 1
+    pain_desc: "尺寸不准——低价款常被嫌太小爆头,高价款常被嫌太大松垮"
+    proof_angles:
+      - "对比角度:别家太小爆头勒出形 vs 这条刚好包住发际线"
+      - "包覆角度:手拉边缘展示完整盖住发际线与鬓角"
+      - "佩戴角度:正面戴上后无凸起、无松垮、贴合头型"
+      - "细节角度:后脑/耳后包覆到位特写"
+    visual_brief: "近景清晰展示头巾边缘与发际线的贴合关系;对比镜两条并排同框"
+    voice_intent: "saiz lain selalu ketat atau longgar / ini cukup ngam ikut kepala"
+    ai_shot_risk: "对比同框需稳定构图;发际线贴合细节需对焦准,避免糊"
+
+  H_NO_MARK:
+    voc_rank: 2
+    pain_desc: "太紧/勒(ketat,约 28% 抱怨)——戴一段时间额头太阳穴勒痕、头痛"
+    proof_angles:
+      - "勒痕角度:戴一整天后摘下,额头/太阳穴无勒痕特写"
+      - "余量角度:手指伸进边缘'还有空间',展示不勒"
+      - "日常角度:vlog 式'戴了一天都没感觉'的自述"
+      - "材质角度:边缘软料不硌,轻压回弹展示"
+    visual_brief: "摘下后额头皮肤特写必须清晰、光线足,让用户肉眼确认无勒痕;手指塞边缘动作稳"
+    voice_intent: "pakai sehari pun takde kesan ketat / takde sakit kepala"
+    ai_shot_risk: "★高难:'无勒痕的皮肤'AI 难生成有说服力;需替代镜头(手指塞边缘余量)兜底"
+
+  H_NO_FLYAWAY:
+    voc_rank: 3
+    pain_desc: "漏发/碎发飞出——低头转头碎发跑出来、发际线不干净"
+    proof_angles:
+      - "动作角度:低头→转头→抬头,碎发纹丝不跑"
+      - "发际线角度:干净发际线特写,无碎发翘出"
+      - "风吹角度:车里/门口有风,碎发仍不乱"
+      - "对比角度:别家戴完碎发乱翘 vs 这条服帖"
+    visual_brief: "发际线与碎发特写需清晰;动作镜头(低头转头)保持碎发可见且稳定可辨"
+    voice_intent: "anak rambut tak keluar langsung walaupun tunduk pusing kepala"
+    ai_shot_risk: "★高难:'碎发不跑'的动态细节 AI 难精准;优先静态发际线特写"
+
+  H_BUNDLE_COUNT:
+    voc_rank: 4
+    pain_desc: "套装少发/量不够——买套装结果给的条数少、不划算"
+    proof_angles:
+      - "数数角度:摊开怼镜头数数量'satu set… 1,2,3,4,5'"
+      - "铺满角度:一叠头巾铺满整个画面,视觉冲击量大"
+      - "性价比角度:一套多少钱÷条数,单价划算"
+      - "颜色角度:一套含多色,逐条展示配色"
+    visual_brief: "数量镜头需清晰可数,每条头巾轮廓分明;铺满构图填满画幅"
+    voice_intent: "satu set dapat berapa helai / berbaloi sangat"
+    ai_shot_risk: "中等:多件同框易混乱,需构图规整、逐条可辨"
+
+  H_BREATHABLE:
+    voc_rank: 5
+    pain_desc: "闷热/薄/色差——不透气闷汗、料子太薄、实物与图片色差"
+    proof_angles:
+      - "手感角度:揉搓棉质,展示厚实柔软手感"
+      - "透光角度:对着光看'不透',证明不薄"
+      - "色差角度:实物色 vs 手机屏幕色并排,证明无色差"
+      - "凉爽角度:棉质透气,夏天/做事戴不闷的场景"
+    visual_brief: "材质特写需清晰展示纹理;对光透光镜光线对比明显;色差镜实物与屏幕同框"
+    voice_intent: "kain cotton, sejuk, tak nipis, warna sama macam gambar"
+    ai_shot_risk: "中等:'透气/凉爽'是体感,需靠材质特写+场景间接表达"
+
+# ------------------------------------------------------------------------------
+# 二、卖点 → 主钩子路由表(产品上架时填 selling_point,自动锁定主钩子)
+# ------------------------------------------------------------------------------
+# 用户上架产品时在 selling_point 填关键词,系统模糊匹配到对应主钩子。
+# 匹配不到 → 回退 fallback。
+# ------------------------------------------------------------------------------
+selling_point_routing:
+  # 关键词(支持中文/马来语/英文片段) -> 主钩子
+  rules:
+    - keywords: ["不勒", "不紧", "舒适", "戴一天", "ketat", "selesa", "comfortable"]
+      hook: H_NO_MARK
+    - keywords: ["尺寸", "合头", "精准", "贴合", "saiz", "ngam", "fit", "size"]
+      hook: H_SIZE_FIT
+    - keywords: ["碎发", "不跑", "固定", "服帖", "anak rambut", "secure"]
+      hook: H_NO_FLYAWAY
+    - keywords: ["套装", "足量", "划算", "几条", "set", "berbaloi", "bundle", "value"]
+      hook: H_BUNDLE_COUNT
+    - keywords: ["透气", "棉质", "凉爽", "不闷", "不薄", "cotton", "sejuk", "breathable"]
+      hook: H_BREATHABLE
+  fallback:
+    # 未填或多卖点时:回退到 VOC 最高频两项
+    primary: H_SIZE_FIT
+    aux: H_NO_MARK
+
+# ------------------------------------------------------------------------------
+# 三、钩子使用规则(供引擎读取执行)
+# ------------------------------------------------------------------------------
+usage_rules:
+  main_hook_source: "selling_point"        # 主钩子来源=产品卖点
+  main_hook_locked_per_product: true       # 同产品主钩子锁定不变
+  max_aux_hooks: 1                          # 至多 1 个辅钩子(挂第二卖点)
+  aux_must_not_steal_main: true            # 辅钩子不得抢主钩子戏份
+  s1_s4_differentiate_by: ["proof_angle", "scene", "phrasing", "persona"]
+  proof_angle_rotation: "每 4 条不重复证明角度"
+  proof_clarity_over_authenticity: true    # proof 镜头清晰度优先(决策2)

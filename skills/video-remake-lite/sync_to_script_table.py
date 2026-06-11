@@ -42,6 +42,18 @@ SCRIPT_TYPE_NURTURE_REMAKE = "养号复刻"
 PUBLISH_PURPOSE_NURTURE = "养号"
 PROFILE_SHORT_VIDEO = "short-video"
 PROFILE_NURTURE = "nurture"
+TRANSIENT_SYNC_ERROR_PATTERNS = (
+    "Expecting value",
+    "飞书 API 请求失败",
+    "Read timed out",
+    "Connection",
+    "EOF",
+    "temporarily unavailable",
+    "Too Many Requests",
+    "502",
+    "503",
+    "504",
+)
 
 
 def _build_script_id(task_no: str, parent_slot: str, variant_no: Optional[int]) -> str:
@@ -342,11 +354,14 @@ def should_process_source_record(
     status = normalize_text(fields.get(status_field)) if status_field else ""
     sync_status = normalize_text(fields.get(source_mapping.get("sync_status")))
     final_storyboard = normalize_text(fields.get(source_mapping.get("final_storyboard")))
+    retryable_failure = sync_status.startswith("同步失败") and any(
+        pattern in sync_status for pattern in TRANSIENT_SYNC_ERROR_PATTERNS
+    )
     return (
         (not status_field or status == STATUS_DONE)
         and bool(final_storyboard)
         and sync_status != SYNC_DONE
-        and not sync_status.startswith("同步失败")
+        and (not sync_status.startswith("同步失败") or retryable_failure)
     )
 
 
@@ -354,15 +369,26 @@ def transfer_attachments(
     source_client: FeishuBitableClient,
     target_client: FeishuBitableClient,
     attachments: List[Dict[str, Any]],
-    cache: Dict[str, Dict[str, Any]],
+    token_cache: Dict[str, Dict[str, Any]],
+    *,
+    product_cache_key: str = "",
+    product_cache: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    stats: Optional[Dict[str, int]] = None,
 ) -> List[Dict[str, Any]]:
+    if product_cache_key and product_cache is not None and product_cache_key in product_cache:
+        if stats is not None:
+            stats["product_image_cache_hits"] = stats.get("product_image_cache_hits", 0) + 1
+        return [dict(item) for item in product_cache[product_cache_key]]
+
     transferred: List[Dict[str, Any]] = []
     for attachment in attachments:
         source_file_token = str(attachment.get("file_token", "")).strip()
         if not source_file_token:
             continue
-        if source_file_token in cache:
-            transferred.append(dict(cache[source_file_token]))
+        if source_file_token in token_cache:
+            if stats is not None:
+                stats["image_token_cache_hits"] = stats.get("image_token_cache_hits", 0) + 1
+            transferred.append(dict(token_cache[source_file_token]))
             continue
         content, file_name, content_type, size = source_client.download_attachment_bytes(attachment)
         uploaded = target_client.upload_attachment(
@@ -371,8 +397,11 @@ def transfer_attachments(
             content_type=content_type,
             size=size,
         )
-        cache[source_file_token] = uploaded
+        token_cache[source_file_token] = uploaded
         transferred.append(dict(uploaded))
+
+    if product_cache_key and product_cache is not None and transferred:
+        product_cache[product_cache_key] = [dict(item) for item in transferred]
     return transferred
 
 
@@ -521,8 +550,16 @@ def sync_records(args: argparse.Namespace) -> Dict[str, int]:
 
     source_records = source_client.list_records(page_size=100, limit=args.limit)
     target_records = target_client.list_records(page_size=100)
-    stats = {"scanned": len(source_records), "created": 0, "skipped": 0, "failed": 0}
+    stats = {
+        "scanned": len(source_records),
+        "created": 0,
+        "skipped": 0,
+        "failed": 0,
+        "image_token_cache_hits": 0,
+        "product_image_cache_hits": 0,
+    }
     image_cache: Dict[str, Dict[str, Any]] = {}
+    product_image_cache: Dict[str, List[Dict[str, Any]]] = {}
 
     for record in source_records:
         fields = record.fields
@@ -569,15 +606,47 @@ def sync_records(args: argparse.Namespace) -> Dict[str, int]:
 
         try:
             print(f"➡️ 同步记录: record_id={record.record_id} script_id={script_id}", flush=True)
+            fresh_target_records = target_client.list_records(page_size=100)
+            duplicated_script_id = find_existing_script_id(
+                fresh_target_records,
+                target_mapping,
+                source_record_id=record.record_id,
+                task_no=task_no,
+                profile=profile,
+            )
+            if duplicated_script_id:
+                print(f"🔁 创建前发现已存在，回写源表: record_id={record.record_id} script_id={duplicated_script_id}", flush=True)
+                source_client.update_record_fields(
+                    record.record_id,
+                    build_source_synced_fields(
+                        source_mapping,
+                        duplicated_script_id,
+                        final_storyboard if profile == PROFILE_SHORT_VIDEO else "",
+                    ),
+                )
+                stats["skipped"] += 1
+                continue
+
             source_client.update_record_fields(record.record_id, {source_mapping["sync_status"]: SYNC_IN_PROGRESS})
             product_images_field = target_mapping.get("product_images")
             if product_images_field:
-                print(f"   上传产品图片: {len(target_payload.get(product_images_field, []))} 张", flush=True)
+                product_cache_key = f"{profile}:{task_no}" if task_no else ""
+                source_images = target_payload.get(product_images_field, [])
+                if product_cache_key and product_cache_key in product_image_cache:
+                    print(
+                        f"   复用产品图片缓存: {len(product_image_cache[product_cache_key])} 张",
+                        flush=True,
+                    )
+                else:
+                    print(f"   上传产品图片: {len(source_images)} 张", flush=True)
                 target_payload[product_images_field] = transfer_attachments(
                     source_client,
                     target_client,
-                    target_payload.get(product_images_field, []),
+                    source_images,
                     image_cache,
+                    product_cache_key=product_cache_key,
+                    product_cache=product_image_cache,
+                    stats=stats,
                 )
             target_client.batch_create_records([{"fields": target_payload}])
             source_client.update_record_fields(

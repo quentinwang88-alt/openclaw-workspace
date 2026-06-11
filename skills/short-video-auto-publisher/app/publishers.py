@@ -9,7 +9,7 @@ import time
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 from urllib.parse import parse_qsl, urlparse, urlunparse
 
 import requests
@@ -36,6 +36,14 @@ class BasePublishAdapter(ABC):
     @abstractmethod
     def query_task_status(self, *, task_id: str, scheduled_for: datetime) -> PublishTaskStatus:
         raise NotImplementedError
+
+    def query_task_statuses(self, tasks: Iterable[Any]) -> Dict[str, PublishTaskStatus]:
+        statuses: Dict[str, PublishTaskStatus] = {}
+        for task in tasks:
+            task_id = str(task["publish_task_id"] or "")
+            scheduled_for = datetime.strptime(str(task["scheduled_for"]), "%Y-%m-%d %H:%M:%S")
+            statuses[task_id] = self.query_task_status(task_id=task_id, scheduled_for=scheduled_for)
+        return statuses
 
 
 class DryRunPublishAdapter(BasePublishAdapter):
@@ -461,6 +469,32 @@ class GeeLarkPublishAdapter(BasePublishAdapter):
                 return str(value).strip()
         raise RuntimeError(f"GeeLark task-add 未返回任务 ID: {result}")
 
+    def _parse_task_status_payload(self, result: Dict[str, Any]) -> PublishTaskStatus:
+        state = ""
+        for path in self.status_value_paths:
+            value = _deep_get(result, path)
+            if value not in (None, ""):
+                state = str(value).strip().lower()
+                break
+        published_at = ""
+        for path in self.published_at_paths:
+            value = _deep_get(result, path)
+            if value not in (None, ""):
+                published_at = str(value).strip()
+                break
+        error_message = ""
+        for path in self.error_message_paths:
+            value = _deep_get(result, path)
+            if value not in (None, ""):
+                error_message = str(value).strip()
+                break
+
+        if state in self.success_values:
+            return PublishTaskStatus(state="success", result="发布成功", published_at=published_at)
+        if state in self.failure_values:
+            return PublishTaskStatus(state="failed", result="发布失败", error_message=error_message)
+        return PublishTaskStatus(state="pending", result="待执行")
+
     def query_task_status(self, *, task_id: str, scheduled_for: datetime) -> PublishTaskStatus:
         if not self.status_endpoint:
             return PublishTaskStatus(state="pending", result="待执行")
@@ -488,28 +522,38 @@ class GeeLarkPublishAdapter(BasePublishAdapter):
             )
         response.raise_for_status()
         result: Dict[str, Any] = response.json()
+        return self._parse_task_status_payload(result)
 
-        state = ""
-        for path in self.status_value_paths:
-            value = _deep_get(result, path)
-            if value not in (None, ""):
-                state = str(value).strip().lower()
-                break
-        published_at = ""
-        for path in self.published_at_paths:
-            value = _deep_get(result, path)
-            if value not in (None, ""):
-                published_at = str(value).strip()
-                break
-        error_message = ""
-        for path in self.error_message_paths:
-            value = _deep_get(result, path)
-            if value not in (None, ""):
-                error_message = str(value).strip()
-                break
+    def query_task_statuses(self, tasks: Iterable[Any]) -> Dict[str, PublishTaskStatus]:
+        task_rows = list(tasks)
+        if not task_rows:
+            return {}
+        if not self.status_endpoint or self.status_method != "POST" or self.status_task_id_field != "ids":
+            return super().query_task_statuses(task_rows)
 
-        if state in self.success_values:
-            return PublishTaskStatus(state="success", result="发布成功", published_at=published_at)
-        if state in self.failure_values:
-            return PublishTaskStatus(state="failed", result="发布失败", error_message=error_message)
-        return PublishTaskStatus(state="pending", result="待执行")
+        task_ids = [str(task["publish_task_id"] or "").strip() for task in task_rows if str(task["publish_task_id"] or "").strip()]
+        if not task_ids:
+            return {}
+        response = self._request_with_retry(
+            "POST",
+            self.status_endpoint,
+            headers=self._headers(),
+            json={self.status_task_id_field: task_ids},
+            timeout=60,
+        )
+        response.raise_for_status()
+        result: Dict[str, Any] = response.json()
+        raw_items = _deep_get(result, "data.items")
+        if not isinstance(raw_items, list):
+            raw_items = _deep_get(result, "items")
+        items = raw_items if isinstance(raw_items, list) else []
+        item_by_id = {str(item.get("id") or "").strip(): item for item in items if isinstance(item, dict)}
+
+        statuses: Dict[str, PublishTaskStatus] = {}
+        for task_id in task_ids:
+            item = item_by_id.get(task_id)
+            if item is None:
+                statuses[task_id] = PublishTaskStatus(state="pending", result="待执行")
+                continue
+            statuses[task_id] = self._parse_task_status_payload({"data": {"items": [item]}, "items": [item], **item})
+        return statuses

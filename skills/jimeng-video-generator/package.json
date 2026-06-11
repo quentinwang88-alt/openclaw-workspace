@@ -1,0 +1,25 @@
+{
+  "name": "jimeng-video-generator",
+  "version": "1.0.0",
+  "description": "即梦AI视频自动生成器",
+  "main": "generate-video.js",
+  "scripts": {
+    "start": "node generate-video.js",
+    "test": "node generate-video.js --prompt '测试视频'",
+    "sync-feishu": "node feishu-sync-to-local.js",
+    "run-feishu": "./run-from-feishu.sh",
+    "run-feishu-direct": "./run-feishu-direct.sh",
+    "dry-feishu-direct": "node feishu-direct-monitor.js --config ./feishu-direct.json --dry-run",
+    "segment-package": "node segment-package-worker.js --config ./segment-package.json",
+    "segment-package-dry": "node segment-package-worker.js --config ./segment-package.json --dry-run --submit-only",
+    "segment-package-download": "node segment-package-worker.js --config ./segment-package.json --download-only",
+    "clear-submit-pause": "node clear-submit-pause.js --config ./feishu-direct.json",
+    "daily-report": "node send-jimeng-daily-report.js --config ./feishu-direct.json"
+  },
+  "dependencies": {
+    "puppeteer": "^22.0.0",
+    "puppeteer-core": "^24.39.1"
+  },
+  "author": "",
+  "license": "MIT"
+}

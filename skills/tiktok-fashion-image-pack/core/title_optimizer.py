@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Title optimizer for likeU TikTok Shop womens outerwear."""
+"""Title optimizer for likeU TikTok Shop categories."""
 from __future__ import annotations
 
 import json
@@ -12,6 +12,8 @@ from title_keywords import (
     get_available_terms,
     get_series_info,
     load_keywords,
+    normalize_category,
+    normalize_country,
 )
 from title_postprocess import normalize_title
 from title_qa import qa_title
@@ -20,6 +22,11 @@ from vision_client import VisionJSONClient
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_TEMPLATE_PATH = SKILL_DIR / "prompts" / "女装外套_泰国.md"
+TITLE_TEMPLATE_PATHS = {
+    ("女装上装/外套", "TH"): DEFAULT_TEMPLATE_PATH,
+    ("发饰", "TH"): SKILL_DIR / "prompts" / "发饰_泰国.md",
+    ("发饰", "VN"): SKILL_DIR / "prompts" / "发饰_越南.md",
+}
 
 
 TITLE_PARSE_PATTERN = re.compile(
@@ -37,12 +44,23 @@ def build_title_prompt(
     subtype: str,
     original_title: str = "",
     human_requirement: str = "",
+    category: str = "女装上装/外套",
+    country: str = "TH",
     template_path: Optional[Path] = None,
 ) -> str:
-    template_path = template_path or DEFAULT_TEMPLATE_PATH
+    normalized_category = normalize_category(category)
+    normalized_country = normalize_country(country)
+    template_path = template_path or TITLE_TEMPLATE_PATHS.get(
+        (normalized_category, normalized_country),
+        DEFAULT_TEMPLATE_PATH,
+    )
     template = template_path.read_text(encoding="utf-8")
 
-    keywords_text = build_keywords_prompt_text(subtype)
+    keywords_text = build_keywords_prompt_text(
+        subtype,
+        category=normalized_category,
+        country=normalized_country,
+    )
     truth_json = json.dumps(product_truth, ensure_ascii=False, indent=2)
     req = human_requirement or "（无特殊要求，按默认规则生成标题）"
 
@@ -96,6 +114,8 @@ def generate_title(
     subtype: str,
     original_title: str = "",
     human_requirement: str = "",
+    category: str = "女装上装/外套",
+    country: str = "TH",
     vision_client: Optional[VisionJSONClient] = None,
 ) -> Dict[str, Any]:
     prompt = build_title_prompt(
@@ -103,6 +123,8 @@ def generate_title(
         subtype=subtype,
         original_title=original_title,
         human_requirement=human_requirement,
+        category=category,
+        country=country,
     )
     client = vision_client or VisionJSONClient()
     raw_text = client.call_text(prompt, image_paths=[], max_output_tokens=1000)
@@ -113,8 +135,8 @@ def generate_title(
     parsed["normalized_title"] = normalize_title(raw_title)
     parsed["postprocess_applied"] = raw_title != parsed["normalized_title"]
 
-    series = get_series_info(subtype)
-    terms = get_available_terms(subtype)
+    series = get_series_info(subtype, category=category, country=country)
+    terms = get_available_terms(subtype, category=category, country=country)
 
     parsed["series_name_cn"] = series["series_name_cn"]
     parsed["series_code_prefix"] = series["series_code_prefix"]
@@ -124,6 +146,8 @@ def generate_title(
         tk_title=parsed["normalized_title"],
         product_truth=product_truth,
         original_title=original_title,
+        category=category,
+        country=country,
     )
     parsed["qa_result"] = qa_result["result"]
     parsed["qa_issues"] = qa_result["issues"]
@@ -151,7 +175,9 @@ def generate_series_code(
     subtype: str,
     product_truth: Dict[str, Any],
     record_index: int = 0,
+    category: str = "女装上装/外套",
+    country: str = "TH",
 ) -> str:
-    series = get_series_info(subtype)
+    series = get_series_info(subtype, category=category, country=country)
     prefix = series["series_code_prefix"] or "U"
     return f"{prefix}{200 + record_index}"

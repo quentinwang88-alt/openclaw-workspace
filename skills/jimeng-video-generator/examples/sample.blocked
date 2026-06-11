@@ -1,0 +1,36 @@
+{
+  "status": "blocked",
+  "blockedAt": "2026-03-20T16:18:42.123Z",
+  "reason": "按钮被禁用 - 可能需要上传图片或输入提示词",
+  "code": "button_disabled",
+  "taskName": "MY001TL",
+  "taskFolder": "/Users/likeu/Desktop/jimeng/MY001TL",
+  "pageUrl": "https://jimeng.jianying.com/ai-tool/home?workspace=0&type=video",
+  "expected": {
+    "model": "Seedance 2.0 Fast",
+    "mode": "全能参考",
+    "ratio": "9:16",
+    "duration": 4,
+    "promptLength": 1567,
+    "imageCount": 5
+  },
+  "observed": {
+    "generationType": "视频生成",
+    "model": "Seedance 2.0 Fast",
+    "mode": "全能参考",
+    "ratio": "9:16",
+    "duration": "4s",
+    "promptFound": true,
+    "promptLength": 1567,
+    "promptPreview": "全局设定 输出规格：9:16竖屏，1080x1920，高清，极致真实物理渲染，总时长约15秒。",
+    "uploadedPreviewCount": 5,
+    "generateButton": {
+      "found": true,
+      "disabled": true,
+      "text": "生成",
+      "className": "submit-button primary disabled"
+    }
+  },
+  "screenshot": "/Users/likeu/Desktop/jimeng/MY001TL/.blocked-2026-03-20T16-18-42-123Z.png",
+  "nextAction": "请人工检查即梦页面；处理完成后删除该任务目录下的 .blocked 文件，再重新运行脚本。"
+}

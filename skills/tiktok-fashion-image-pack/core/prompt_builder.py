@@ -14,6 +14,14 @@ def build_main_image_prompt(
     label_override: str = "",
     country: str = "TH",
 ) -> str:
+    if is_hair_accessory(product_truth):
+        return build_hair_accessory_main_image_prompt(
+            product_truth=product_truth,
+            brand_name=brand_name,
+            label_strategy=label_strategy,
+            label_override=label_override,
+            country=country,
+        )
     label = build_label(
         brand_name=brand_name,
         product_type=str(product_truth.get("product_type_name_en") or "FASHION JACKET"),
@@ -74,6 +82,8 @@ Suggested scenes: {scenes}.
 
 
 def select_main_image_layout(product_truth: Dict[str, Any]) -> Dict[str, str]:
+    if is_hair_accessory(product_truth):
+        return select_hair_accessory_layout(product_truth)
     colors = [str(item).strip() for item in product_truth.get("sellable_colors_observed") or [] if str(item).strip()]
     is_multicolor = bool(product_truth.get("is_probably_multicolor")) or len(colors) > 1
     if is_product_only_reference(product_truth):
@@ -100,6 +110,154 @@ def select_main_image_layout(product_truth: Dict[str, Any]) -> Dict[str, str]:
         "template": "womens_tops_single_hero_detail_sidebar",
         "instructions": build_default_single_layout(),
     }
+
+
+def build_hair_accessory_main_image_prompt(
+    *,
+    product_truth: Dict[str, Any],
+    brand_name: str,
+    label_strategy: str,
+    label_override: str,
+    country: str,
+) -> str:
+    label = build_label(
+        brand_name=brand_name,
+        product_type=str(product_truth.get("product_type_name_en") or "HAIR ACCESSORY"),
+        strategy=label_strategy,
+        override=label_override,
+    )
+    preserve = join_list(product_truth.get("must_preserve"))
+    must_not_add = join_list(product_truth.get("must_not_add"))
+    scenes = join_list(product_truth.get("recommended_scenes"))
+    colors = [str(item).strip() for item in product_truth.get("sellable_colors_observed") or [] if str(item).strip()]
+    layout = select_hair_accessory_layout(product_truth)
+    product_truth["main_image_template"] = layout["template"]
+    multicolor_guidance = build_hair_accessory_multicolor_guidance(colors) if is_multicolor_product(product_truth) else ""
+    details = [
+        f"subtype: {product_truth.get('subtype')}",
+        f"source image type: {product_truth.get('source_image_type')}",
+        f"has worn/model reference: {product_truth.get('has_on_body_model')}",
+        f"main color: {product_truth.get('main_color')}",
+        f"material: {product_truth.get('material')}",
+        f"size/scale: {product_truth.get('size_scale')}",
+        f"wearing position: {product_truth.get('wearing_position')}",
+        f"grip/fastening structure: {product_truth.get('grip_structure')}",
+        f"decorative elements: {product_truth.get('decorative_elements')}",
+        f"pack count: {product_truth.get('pack_count')}",
+    ]
+    return f"""
+Create a 1:1 square TikTok Shop main product image for likeU hair accessories, using the attached supplier images as strict product-truth references.
+
+Target market: {country or "TH"}.
+Goal: high-trust Thai/Vietnamese/Korean-style ecommerce main image, optimized for product accuracy, click appeal, and low-AI-feeling realism. It should feel clean and branded, not a beauty portrait, not a cheap marketplace poster.
+
+STRICT PRODUCT FIDELITY:
+- Reference image order matters: IMAGE 1 is the default promoted hero color/style and must dominate the main image. Images 2+ are auxiliary color references only.
+- Preserve the product exactly according to these facts: {'; '.join(details)}.
+- Must preserve: {preserve}.
+- Do NOT add or change: {must_not_add}.
+- Do not invent extra pieces, colors, pearls, rhinestones, bows, flowers, logos, cartoon IP, jewelry, or pack quantity.
+- Keep the accessory scale believable on hair/head/hand. Do not make it oversized unless the source is clearly oversized.
+- If pack count is unknown, do not show a set/combo; show only the observed product.
+{multicolor_guidance}
+
+LAYOUT:
+{layout["instructions"]}
+
+TEXT LABEL:
+- No price, no sale badge, no Chinese/Thai/Vietnamese promotional text.
+- Keep only one small elegant English label: "{label}".
+- Product type text should stay in English for brand tone; do not translate it.
+
+STYLE:
+Warm neutral daylight, cream/soft gray/wood/vanity/cafe palette, subtle shadows, realistic material texture, polished ecommerce look.
+Human realism: if hair/head/hand appears, use natural everyday Asian shopper styling, partial face or back/side hair crop, ordinary skin/hair texture, and product-first composition. Avoid perfect influencer face, glossy beauty retouching, symmetrical AI face, fantasy hair, luxury editorial posing, and unrelated jewelry focus.
+
+Suggested scenes: {scenes}.
+""".strip()
+
+
+def select_hair_accessory_layout(product_truth: Dict[str, Any]) -> Dict[str, str]:
+    colors = [str(item).strip() for item in product_truth.get("sellable_colors_observed") or [] if str(item).strip()]
+    if is_multicolor_product(product_truth):
+        return {
+            "template": "hair_accessory_multicolor_options",
+            "instructions": build_hair_accessory_multicolor_layout(colors),
+        }
+    if has_confirmed_pack_count(product_truth):
+        return {
+            "template": "hair_accessory_set_flatlay",
+            "instructions": build_hair_accessory_set_flatlay_layout(),
+        }
+    if is_product_only_reference(product_truth):
+        return {
+            "template": "hair_accessory_product_detail_split",
+            "instructions": build_hair_accessory_product_detail_layout(),
+        }
+    return {
+        "template": "hair_accessory_worn_closeup_split",
+        "instructions": build_hair_accessory_worn_closeup_layout(),
+    }
+
+
+def build_hair_accessory_worn_closeup_layout() -> str:
+    return (
+        "Use a premium worn-closeup + product proof layout.\n"
+        "LEFT HERO ZONE, about 60-65% width and full height: close-up worn effect from IMAGE 1, using side hair, back bun, "
+        "partial-face, or cropped-head composition. The accessory must be the first read and remain faithful in color, size, "
+        "material, grip structure, and decorative elements.\n"
+        "RIGHT TOP ZONE, about 35-40% width and 50-55% height: clean product-only proof on a neutral surface or simple hair/hand "
+        "scale reference. Do not imply extra pieces are included.\n"
+        "RIGHT BOTTOM ZONE, about 35-40% width and 45-50% height: 2-3 close detail crops such as claw teeth, clip spring, bow fabric, "
+        "pearl/rhinestone decoration, elastic texture, or headband edge. No unrelated jewelry or cosmetics."
+    )
+
+
+def build_hair_accessory_product_detail_layout() -> str:
+    return (
+        "Use a product-only-to-usage truth split layout for references without a real wearing model.\n"
+        "LEFT HERO ZONE, about 58-63% width and full height: create a believable close usage context, such as back/side hair crop, "
+        "hand holding near hair, or vanity-table hand scale. Avoid full AI beauty face. Keep the accessory's exact shape, color, "
+        "material, size, grip structure, and decoration.\n"
+        "RIGHT TOP ZONE, about 37-42% width and 50-55% height: refined product-only proof from the source, with clean background, "
+        "natural shadow, and sharp edges.\n"
+        "RIGHT BOTTOM ZONE, about 37-42% width and 45-50% height: product-only detail/scale panel showing fastening/grip and material. "
+        "Do not add extra pieces, pearls, bows, labels, jewelry, makeup, or set quantity."
+    )
+
+
+def build_hair_accessory_multicolor_layout(colors: List[str]) -> str:
+    color_text = ", ".join(colors) if colors else "observed colors"
+    return (
+        "Use a premium multi-color hair accessory three-zone split layout.\n"
+        "LEFT HERO ZONE, about 60-65% width and full height: IMAGE 1 promoted color worn close-up or hand/hair usage context. "
+        "The IMAGE 1 color/style must dominate.\n"
+        "RIGHT TOP ZONE, about 35-40% width and 50-55% height: second controlled usage/detail panel in the same promoted IMAGE 1 color only.\n"
+        "RIGHT BOTTOM ZONE, about 35-40% width and 45-50% height: compact product-only color options for observed colors "
+        f"({color_text}). Keep the same accessory shape and material across colors. Other colors must stay smaller than the IMAGE 1 hero. "
+        "No extra unobserved colors, no extra set quantity, no unrelated jewelry/cosmetics."
+    )
+
+
+def build_hair_accessory_set_flatlay_layout() -> str:
+    return (
+        "Use a clean set/pack proof layout only for confirmed multi-piece products.\n"
+        "LEFT HERO ZONE, about 58-63% width and full height: show the main promoted piece in a close worn or hand-scale context.\n"
+        "RIGHT TOP ZONE: product-only flat-lay showing the exact confirmed pack contents, with no extra pieces.\n"
+        "RIGHT BOTTOM ZONE: close detail crops of material, grip/fastening structure, and decoration. Keep the pack count accurate."
+    )
+
+
+def build_hair_accessory_multicolor_guidance(colors: List[str]) -> str:
+    color_text = ", ".join(colors) if colors else "the observed colors"
+    return f"""
+
+MULTI-COLOR HAIR ACCESSORY RULES:
+- This product has multiple sellable colors observed: {color_text}.
+- The first reference image is the promoted hero color and must dominate the hero/usage panels.
+- Show other colors only as compact product-only options unless a later scene slot explicitly asks for alternate color wearing.
+- Do not invent new colors or make different colors look like different accessory shapes.
+""".rstrip()
 
 
 def build_multicolor_triptych_layout(colors: List[str]) -> str:
@@ -247,6 +405,22 @@ def has_material_mood(product_truth: Dict[str, Any]) -> bool:
     )
     material_terms = ("faux fur", "fur", "suede", "nubuck", "knit", "pu leather", "leather", "plush", "fleece")
     return any(term in text for term in material_terms)
+
+
+def is_hair_accessory(product_truth: Dict[str, Any]) -> bool:
+    return str(product_truth.get("category") or "").strip().lower() in {"hair_accessory", "hair_accessories", "发饰"}
+
+
+def is_multicolor_product(product_truth: Dict[str, Any]) -> bool:
+    colors = [str(item).strip() for item in product_truth.get("sellable_colors_observed") or [] if str(item).strip()]
+    return bool(product_truth.get("is_probably_multicolor")) or len(colors) > 1
+
+
+def has_confirmed_pack_count(product_truth: Dict[str, Any]) -> bool:
+    text = str(product_truth.get("pack_count") or "").strip().lower()
+    if not text or text in {"unknown", "ไม่ทราบ", "không rõ", "n/a", "none"}:
+        return False
+    return any(char.isdigit() for char in text) or any(token in text for token in ("pair", "set", "pack", "คู่", "เซต", "bộ", "cặp"))
 
 
 def build_label(*, brand_name: str, product_type: str, strategy: str, override: str = "") -> str:

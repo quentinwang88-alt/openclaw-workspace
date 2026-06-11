@@ -1,0 +1,16 @@
+{
+  "product_name": "宽松日常上衣",
+  "product_category": "轻上装",
+  "specific_product_type": "宽松上衣",
+  "target_scene": ["日常出门", "通勤", "休闲聚会"],
+  "creator_shooting_scene": ["镜前半身试穿", "遮手臂上身效果", "一套衣服日常出门"],
+  "main_content_hook": "一件宽松上衣就能出门，不用复杂搭配",
+  "fit_body_or_style": ["宽松", "遮肚子", "日常休闲"],
+  "selling_points": ["版型宽松不挑身材", "面料舒适", "多色可选"],
+  "shooting_scenarios": ["镜前半身一镜到底试穿", "遮手臂/遮肚子真实上身效果"],
+  "price_tier": "中低",
+  "avoid_claims": ["不要承诺显瘦", "不要夸大面料功效"],
+  "sample_available": "可寄样",
+  "commission_info": "佣金 10-15%",
+  "support_info": "提供拍摄参考和文案模板"
+}

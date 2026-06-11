@@ -86,6 +86,7 @@ class AutoPublishDB:
             self._ensure_column(conn, "account_configs", "nurture_only", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "publish_slots", "error_message", "TEXT")
             self._ensure_disabled_products_table(conn)
+            self._ensure_product_schedule_preferences_table(conn)
             self._ensure_notification_log_table(conn)
             self._ensure_indexes(conn)
 
@@ -181,6 +182,7 @@ class AutoPublishDB:
             """
         )
         self._ensure_disabled_products_table(conn)
+        self._ensure_product_schedule_preferences_table(conn)
         self._ensure_notification_log_table(conn)
         self._ensure_indexes(conn)
 
@@ -192,6 +194,22 @@ class AutoPublishDB:
                 reason TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            )
+            """
+        )
+
+    def _ensure_product_schedule_preferences_table(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS product_schedule_preferences (
+                store_id TEXT NOT NULL,
+                product_id TEXT NOT NULL,
+                schedule_strategy TEXT NOT NULL DEFAULT '普通',
+                schedule_note TEXT,
+                priority_updated_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(store_id, product_id)
             )
             """
         )
@@ -238,6 +256,9 @@ class AutoPublishDB:
 
             CREATE INDEX IF NOT EXISTS idx_publish_slots_task_id
             ON publish_slots(publish_task_id);
+
+            CREATE INDEX IF NOT EXISTS idx_product_schedule_preferences_strategy
+            ON product_schedule_preferences(schedule_strategy, store_id, product_id);
             """
         )
 
@@ -577,7 +598,7 @@ class AutoPublishDB:
                     download_status = excluded.download_status,
                     run_video_status = excluded.run_video_status,
                     publish_status = CASE
-                        WHEN video_assets.publish_status IN ('已排期', '已发布', '已跳过') THEN video_assets.publish_status
+                        WHEN video_assets.publish_status IN ('已排期', '已发布', '发布失败', '已跳过') THEN video_assets.publish_status
                         ELSE excluded.publish_status
                     END,
                     updated_at = excluded.updated_at
@@ -718,16 +739,89 @@ class AutoPublishDB:
             "assets_requeued": int(assets or 0),
         }
 
-    def enforce_retry_limit(self, max_auto_retries: int = 2, reason: str = "") -> Dict[str, Any]:
-        """把超过自动重试上限的视频复活回待排期池。
+    @staticmethod
+    def normalize_schedule_strategy(value: str) -> str:
+        text = str(value or "").strip()
+        if text in {"优先", "暂停"}:
+            return text
+        return "普通"
 
-        这里的 max_auto_retries 表示“失败后最多再自动尝试几次”。当前业务约定是
-        原始发布失败 + 2 次自动重试。超过上限后取消旧活跃排期并清空旧账号/任务，
-        让后续调度可以换账号或换环境继续尝试。
+    def upsert_product_schedule_preferences(self, preferences: Iterable[Dict[str, Any]]) -> Dict[str, int]:
+        rows = [
+            {
+                "store_id": str(item.get("store_id") or "").strip(),
+                "product_id": str(item.get("product_id") or "").strip(),
+                "schedule_strategy": self.normalize_schedule_strategy(str(item.get("schedule_strategy") or "")),
+                "schedule_note": str(item.get("schedule_note") or "").strip(),
+            }
+            for item in preferences
+        ]
+        rows = [item for item in rows if item["store_id"] and item["product_id"]]
+        if not rows:
+            return {"preferences_upserted": 0, "priority_timestamps_updated": 0}
+
+        now = self._now_text()
+        upserted = 0
+        priority_timestamps_updated = 0
+        with self._connect() as conn:
+            for item in rows:
+                existing = conn.execute(
+                    """
+                    SELECT schedule_strategy, schedule_note, priority_updated_at
+                    FROM product_schedule_preferences
+                    WHERE store_id = ? AND product_id = ?
+                    """,
+                    (item["store_id"], item["product_id"]),
+                ).fetchone()
+                old_strategy = str(existing["schedule_strategy"] or "普通").strip() if existing else "普通"
+                old_note = str(existing["schedule_note"] or "").strip() if existing else ""
+                old_priority_updated_at = str(existing["priority_updated_at"] or "").strip() if existing else ""
+                priority_updated_at = old_priority_updated_at
+                if item["schedule_strategy"] == "优先" and (
+                    old_strategy != "优先" or old_note != item["schedule_note"]
+                ):
+                    priority_updated_at = now
+                    priority_timestamps_updated += 1
+                if item["schedule_strategy"] != "优先":
+                    priority_updated_at = ""
+
+                conn.execute(
+                    """
+                    INSERT INTO product_schedule_preferences (
+                        store_id, product_id, schedule_strategy, schedule_note,
+                        priority_updated_at, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(store_id, product_id) DO UPDATE SET
+                        schedule_strategy = excluded.schedule_strategy,
+                        schedule_note = excluded.schedule_note,
+                        priority_updated_at = excluded.priority_updated_at,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        item["store_id"],
+                        item["product_id"],
+                        item["schedule_strategy"],
+                        item["schedule_note"],
+                        priority_updated_at,
+                        now,
+                        now,
+                    ),
+                )
+                upserted += 1
+        return {
+            "preferences_upserted": upserted,
+            "priority_timestamps_updated": priority_timestamps_updated,
+        }
+
+    def enforce_retry_limit(self, max_auto_retries: int = 2, reason: str = "") -> Dict[str, Any]:
+        """把超过自动重试上限的视频移出自动排期池。
+
+        这里的 max_auto_retries 表示“失败后最多再自动尝试几次”。超过上限后不再
+        自动复活，否则同一个异常脚本会在每轮补排中反复进入候选池。
         """
         limit = max(0, int(max_auto_retries))
         now = self._now_text()
-        message = str(reason or f"超过自动重试上限，已复活待重新排期；失败次数 > {limit}").strip()
+        message = str(reason or f"超过自动重试上限，已停止自动重排；失败次数 > {limit}").strip()
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -748,6 +842,19 @@ class AutoPublishDB:
                 INNER JOIN video_assets va ON va.canonical_script_key = failed.canonical_script_key
                 WHERE failed.failed_count > ?
                   AND va.publish_status IN ('待排期', '已排期', '发布失败', '已跳过')
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM publish_slots published
+                      WHERE published.canonical_script_key = va.canonical_script_key
+                        AND published.schedule_status = '已发布'
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM publish_slots active
+                      WHERE active.canonical_script_key = va.canonical_script_key
+                        AND active.schedule_status = '已排期'
+                        AND COALESCE(active.publish_task_id, '') <> ''
+                  )
                 ORDER BY failed.failed_count DESC, va.script_id ASC
                 """,
                 (limit,),
@@ -762,18 +869,18 @@ class AutoPublishDB:
                 for row in rows
                 if str(row["publish_task_id"] or "").strip()
             ]
-            requeued = 0
+            skipped = 0
             slots = 0
             for key in keys:
-                requeued += conn.execute(
+                skipped += conn.execute(
                     """
                     UPDATE video_assets
-                    SET publish_status = '待排期',
+                    SET publish_status = '已跳过',
                         account_id = NULL,
                         account_name = NULL,
                         planned_publish_at = NULL,
                         publish_task_id = NULL,
-                        publish_result = NULL,
+                        publish_result = '发布失败',
                         error_message = ?,
                         updated_at = ?
                     WHERE canonical_script_key = ?
@@ -796,8 +903,8 @@ class AutoPublishDB:
         return {
             "max_auto_retries": limit,
             "candidates": len(rows),
-            "video_assets_skipped": 0,
-            "video_assets_requeued": int(requeued or 0),
+            "video_assets_skipped": int(skipped or 0),
+            "video_assets_requeued": 0,
             "active_slots_cancelled": int(slots or 0),
             "remote_task_ids": remote_task_ids,
             "items": [
@@ -805,7 +912,7 @@ class AutoPublishDB:
                     "script_id": str(row["script_id"] or ""),
                     "canonical_script_key": str(row["canonical_script_key"] or ""),
                     "failed_count": int(row["failed_count"] or 0),
-                    "revived": True,
+                    "skipped": True,
                     "account_id": str(row["account_id"] or ""),
                     "account_name": str(row["account_name"] or ""),
                     "planned_publish_at": str(row["planned_publish_at"] or ""),
@@ -858,6 +965,57 @@ class AutoPublishDB:
                     for item in rows
                 ],
             )
+            active_keys = {
+                (str(item.store_id or "").strip(), str(item.account_name or "").strip())
+                for item in rows
+                if str(item.store_id or "").strip() and str(item.account_name or "").strip()
+            }
+            for store_id, account_name in active_keys:
+                current_ids = [
+                    str(item.account_id or "").strip()
+                    for item in rows
+                    if str(item.store_id or "").strip() == store_id
+                    and str(item.account_name or "").strip() == account_name
+                    and str(item.account_id or "").strip()
+                ]
+                if not current_ids:
+                    continue
+                placeholders = ",".join("?" for _ in current_ids)
+                stale_accounts = conn.execute(
+                    f"""
+                    SELECT account_id
+                    FROM account_configs
+                    WHERE store_id = ?
+                      AND account_name = ?
+                      AND account_id NOT IN ({placeholders})
+                      AND account_status <> '暂停'
+                    """,
+                    (store_id, account_name, *current_ids),
+                ).fetchall()
+                for stale in stale_accounts:
+                    stale_account_id = str(stale["account_id"] or "").strip()
+                    if not stale_account_id:
+                        continue
+                    conn.execute(
+                        """
+                        UPDATE account_configs
+                        SET account_status = '暂停', updated_at = ?
+                        WHERE account_id = ?
+                        """,
+                        (now, stale_account_id),
+                    )
+                    conn.execute(
+                        """
+                        UPDATE publish_slots
+                        SET schedule_status = '已取消',
+                            error_message = ?,
+                            updated_at = ?
+                        WHERE account_id = ?
+                          AND scheduled_for >= ?
+                          AND schedule_status IN ('待排期', '已排期')
+                        """,
+                        ("账号ID已在源表更新，旧账号自动暂停并取消未来排期", now, stale_account_id, now),
+                    )
         return len(rows)
 
     def generate_future_slots(self, now: datetime, window_hours: int = 24) -> int:
@@ -924,12 +1082,14 @@ class AutoPublishDB:
         with self._connect() as conn:
             return conn.execute(
                 """
-                SELECT *
-                FROM publish_slots
-                WHERE scheduled_for >= ?
-                  AND scheduled_for <= ?
-                  AND (canonical_script_key IS NULL OR schedule_status = '待排期')
-                ORDER BY scheduled_for ASC, account_id ASC
+                SELECT ps.*
+                FROM publish_slots ps
+                INNER JOIN account_configs ac ON ac.account_id = ps.account_id
+                WHERE ps.scheduled_for >= ?
+                  AND ps.scheduled_for <= ?
+                  AND ps.schedule_status = '待排期'
+                  AND ac.account_status = '可用'
+                ORDER BY ps.scheduled_for ASC, ps.account_id ASC
                 """,
                 (now.strftime("%Y-%m-%d %H:%M:%S"), end_at.strftime("%Y-%m-%d %H:%M:%S")),
             ).fetchall()
@@ -941,20 +1101,57 @@ class AutoPublishDB:
                 SELECT sm.canonical_script_key, sm.script_id, sm.store_id, sm.product_id, sm.content_family_key,
                        sm.short_video_title, va.local_file_path, va.video_source_type, va.video_source_value,
                        sm.source_record_id, sm.script_slot,
-                       sm.script_source, sm.publish_purpose, sm.cart_enabled, sm.content_branch
+                       sm.script_source, sm.publish_purpose, sm.cart_enabled, sm.content_branch,
+                       COALESCE(psp.schedule_strategy, '普通') AS schedule_strategy,
+                       COALESCE(psp.priority_updated_at, '') AS priority_updated_at
                 FROM script_metadata sm
                 INNER JOIN video_assets va ON va.canonical_script_key = sm.canonical_script_key
+                LEFT JOIN product_schedule_preferences psp
+                    ON psp.store_id = sm.store_id AND psp.product_id = sm.product_id
                 WHERE sm.store_id = ?
                   AND COALESCE(sm.short_video_title, '') <> ''
                   AND COALESCE(va.local_file_path, '') <> ''
                   AND va.download_status = '下载成功'
                   AND va.publish_status = '待排期'
+                  AND COALESCE(psp.schedule_strategy, '普通') <> '暂停'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM publish_slots published
+                      WHERE published.canonical_script_key = sm.canonical_script_key
+                        AND published.schedule_status = '已发布'
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM publish_slots active
+                      WHERE active.canonical_script_key = sm.canonical_script_key
+                        AND active.schedule_status = '已排期'
+                        AND COALESCE(active.publish_task_id, '') <> ''
+                  )
                   AND NOT EXISTS (
                       SELECT 1
                       FROM disabled_products dp
                       WHERE dp.product_id = sm.product_id
                   )
-                ORDER BY sm.updated_at ASC, sm.script_id ASC, sm.canonical_script_key ASC
+                ORDER BY CASE WHEN COALESCE(psp.schedule_strategy, '普通') = '优先' THEN 0 ELSE 1 END ASC,
+                         COALESCE(psp.priority_updated_at, '') DESC,
+                         CASE
+                             WHEN COALESCE(sm.product_id, '') = ''
+                                  OR COALESCE(sm.cart_enabled, '') = '否'
+                                  OR COALESCE(sm.script_source, '') = '养号复刻'
+                                  OR COALESCE(sm.publish_purpose, '') = '养号'
+                                  OR COALESCE(sm.content_branch, '') = '非商品展示型'
+                             THEN 9
+                             WHEN COALESCE(sm.script_source, '') LIKE '%复刻%'
+                                  OR COALESCE(sm.publish_purpose, '') LIKE '%复刻%'
+                             THEN 0
+                             WHEN COALESCE(sm.script_source, '') LIKE '%混剪%'
+                                  OR COALESCE(sm.publish_purpose, '') LIKE '%混剪%'
+                             THEN 1
+                             ELSE 2
+                         END ASC,
+                         sm.updated_at ASC,
+                         sm.script_id ASC,
+                         sm.canonical_script_key ASC
                 """,
                 (store_id,),
             ).fetchall()
@@ -1056,15 +1253,15 @@ class AutoPublishDB:
                 )
         return len(canonical_keys)
 
-    def has_recent_product_conflict(self, account_id: str, product_id: str, target_time: datetime, hours: int = 24) -> bool:
+    def count_recent_product_for_account(self, account_id: str, product_id: str, target_time: datetime, hours: int = 24) -> int:
         if not str(product_id or "").strip():
-            return False
+            return 0
         start_at = (target_time - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
         end_at = target_time.strftime("%Y-%m-%d %H:%M:%S")
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT 1
+                SELECT COUNT(*) AS count
                 FROM publish_slots ps
                 INNER JOIN script_metadata sm ON sm.canonical_script_key = ps.canonical_script_key
                 WHERE ps.account_id = ?
@@ -1072,11 +1269,13 @@ class AutoPublishDB:
                   AND ps.scheduled_for >= ?
                   AND ps.scheduled_for <= ?
                   AND ps.schedule_status IN ('已排期', '已发布')
-                LIMIT 1
                 """,
                 (account_id, product_id, start_at, end_at),
             ).fetchone()
-        return row is not None
+        return int(row["count"] or 0) if row else 0
+
+    def has_recent_product_conflict(self, account_id: str, product_id: str, target_time: datetime, hours: int = 24) -> bool:
+        return self.count_recent_product_for_account(account_id, product_id, target_time, hours=hours) > 0
 
     def has_recent_family_conflict(self, store_id: str, content_family_key: str, target_time: datetime, hours: int = 48) -> bool:
         if not str(content_family_key or "").strip():
@@ -1136,6 +1335,43 @@ class AutoPublishDB:
                 WHERE canonical_script_key = ?
                 """,
                 (script_id, account_id, account_name, planned_text, publish_task_id, now, resolved_key),
+            )
+
+    def cancel_slot(self, slot_id: int, reason: str = "") -> int:
+        now = self._now_text()
+        message = str(reason or "创建发布任务失败，已跳过当前槽位").strip()
+        with self._connect() as conn:
+            return int(
+                conn.execute(
+                    """
+                    UPDATE publish_slots
+                    SET schedule_status = '已取消',
+                        error_message = ?,
+                        updated_at = ?
+                    WHERE slot_id = ?
+                      AND schedule_status IN ('待排期', '已排期')
+                    """,
+                    (message, now, slot_id),
+                ).rowcount
+                or 0
+            )
+
+    def mark_slot_pending_reason(self, slot_id: int, reason: str = "") -> int:
+        now = self._now_text()
+        message = str(reason or "暂未找到符合规则的候选视频，等待后续自动补排").strip()
+        with self._connect() as conn:
+            return int(
+                conn.execute(
+                    """
+                    UPDATE publish_slots
+                    SET error_message = ?,
+                        updated_at = ?
+                    WHERE slot_id = ?
+                      AND schedule_status = '待排期'
+                    """,
+                    (message, now, slot_id),
+                ).rowcount
+                or 0
             )
 
     def mark_publish_result(
@@ -1240,9 +1476,18 @@ class AutoPublishDB:
                 FROM publish_slots ps
                 INNER JOIN video_assets va ON va.canonical_script_key = ps.canonical_script_key
                 INNER JOIN script_metadata sm ON sm.canonical_script_key = ps.canonical_script_key
-                WHERE ps.schedule_status = '已排期'
+                WHERE (
+                    ps.schedule_status = '已排期'
+                    OR (
+                        ps.schedule_status = '已取消'
+                        AND COALESCE(ps.error_message, '') LIKE '%超过自动重试上限%'
+                        AND COALESCE(ps.publish_task_id, '') <> ''
+                        AND ps.scheduled_for <= ?
+                    )
+                )
                 ORDER BY ps.scheduled_for ASC
-                """
+                """,
+                (self._now_text(),),
             ).fetchall()
 
     def cleanup_published_videos(
@@ -1408,6 +1653,27 @@ class AutoPublishDB:
                 """,
                 (start_at, end_at),
             ).fetchall()
+            abnormal_cancellations = conn.execute(
+                """
+                SELECT ps.scheduled_for,
+                       ps.canonical_script_key,
+                       ps.store_id,
+                       ps.account_id,
+                       ps.account_name,
+                       ps.script_id,
+                       ps.publish_task_id,
+                       sm.product_id,
+                       COALESCE(NULLIF(ps.error_message, ''), '超过自动重试上限') AS error_message
+                FROM publish_slots ps
+                LEFT JOIN script_metadata sm ON sm.canonical_script_key = ps.canonical_script_key
+                WHERE ps.scheduled_for >= ?
+                  AND ps.scheduled_for < ?
+                  AND ps.schedule_status = '已取消'
+                  AND COALESCE(ps.error_message, '') LIKE '%超过自动重试上限%'
+                ORDER BY ps.store_id ASC, ps.account_name ASC, ps.scheduled_for ASC
+                """,
+                (start_at, end_at),
+            ).fetchall()
             account_rows = conn.execute(
                 """
                 SELECT store_id,
@@ -1415,13 +1681,20 @@ class AutoPublishDB:
                        account_name,
                        COUNT(*) AS total,
                        SUM(CASE WHEN schedule_status = '已发布' THEN 1 ELSE 0 END) AS published,
-                       SUM(CASE WHEN schedule_status = '发布失败' THEN 1 ELSE 0 END) AS failed
+                       SUM(CASE WHEN schedule_status = '发布失败' THEN 1 ELSE 0 END) AS failed,
+                       SUM(
+                           CASE
+                               WHEN schedule_status = '已取消'
+                                    AND COALESCE(error_message, '') LIKE '%超过自动重试上限%'
+                               THEN 1 ELSE 0
+                           END
+                       ) AS abnormal_cancelled
                 FROM publish_slots
                 WHERE scheduled_for >= ?
                   AND scheduled_for < ?
                 GROUP BY store_id, account_id, account_name
                 HAVING total > 0
-                ORDER BY failed DESC, published DESC, account_name ASC
+                ORDER BY failed DESC, abnormal_cancelled DESC, published DESC, account_name ASC
                 """,
                 (start_at, end_at),
             ).fetchall()
@@ -1434,9 +1707,125 @@ class AutoPublishDB:
             "scheduled": int(totals["scheduled"] or 0),
             "pending": int(totals["pending"] or 0),
             "cancelled": int(totals["cancelled"] or 0),
+            "abnormal_cancelled": len(abnormal_cancellations),
             "failures": [dict(row) for row in failures],
+            "abnormal_cancellations": [dict(row) for row in abnormal_cancellations],
             "accounts": [dict(row) for row in account_rows],
         }
+
+    def list_store_publish_summary_rows(
+        self,
+        *,
+        this_week_start: str,
+        this_week_end: str,
+        last_week_start: str,
+        last_week_end: str,
+        current_month_start: str,
+        current_month_end: str,
+        previous_month_start: str,
+        previous_month_end: str,
+    ) -> List[Dict[str, Any]]:
+        min_start = min(this_week_start, last_week_start, current_month_start, previous_month_start)
+        max_end = max(this_week_end, last_week_end, current_month_end, previous_month_end)
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                WITH published AS (
+                    SELECT sm.store_id,
+                           COUNT(DISTINCT sm.canonical_script_key) AS script_count,
+                           COUNT(DISTINCT sm.product_id) AS product_count,
+                           MAX(ps.scheduled_for) AS latest_published_at,
+                           SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
+                               AS this_week_published,
+                           SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
+                               AS last_week_published,
+                           SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
+                               AS current_month_published,
+                           SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
+                               AS previous_month_published
+                    FROM publish_slots ps
+                    INNER JOIN script_metadata sm ON sm.canonical_script_key = ps.canonical_script_key
+                    WHERE ps.schedule_status = '已发布'
+                      AND ps.scheduled_for >= ?
+                      AND ps.scheduled_for < ?
+                      AND COALESCE(sm.store_id, '') <> ''
+                    GROUP BY sm.store_id
+                ),
+                pending AS (
+                    SELECT sm.store_id,
+                           COUNT(DISTINCT sm.canonical_script_key) AS pending_video_count,
+                           COUNT(DISTINCT sm.product_id) AS pending_product_count
+                    FROM script_metadata sm
+                    INNER JOIN video_assets va ON va.canonical_script_key = sm.canonical_script_key
+                    WHERE COALESCE(sm.store_id, '') <> ''
+                      AND COALESCE(sm.product_id, '') <> ''
+                      AND COALESCE(sm.short_video_title, '') <> ''
+                      AND COALESCE(va.local_file_path, '') <> ''
+                      AND va.download_status = '下载成功'
+                      AND va.publish_status = '待排期'
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM disabled_products dp
+                          WHERE dp.product_id = sm.product_id
+                      )
+                    GROUP BY sm.store_id
+                ),
+                prefs AS (
+                    SELECT store_id,
+                           MAX(CASE WHEN schedule_strategy = '优先' THEN 1 ELSE 0 END) AS has_priority,
+                           MAX(CASE WHEN schedule_strategy = '暂停' THEN 1 ELSE 0 END) AS has_paused,
+                           MAX(priority_updated_at) AS priority_updated_at
+                    FROM product_schedule_preferences
+                    GROUP BY store_id
+                ),
+                keys AS (
+                    SELECT store_id FROM published
+                    UNION
+                    SELECT store_id FROM pending
+                )
+                SELECT keys.store_id,
+                       '' AS product_id,
+                       '' AS source_record_id,
+                       COALESCE(published.script_count, 0) AS script_count,
+                       COALESCE(published.product_count, pending.pending_product_count, 0) AS product_count,
+                       COALESCE(pending.pending_video_count, 0) AS pending_video_count,
+                       CASE
+                           WHEN COALESCE(prefs.has_priority, 0) = 1 THEN '优先'
+                           WHEN COALESCE(prefs.has_paused, 0) = 1 THEN '暂停'
+                           ELSE '普通'
+                       END AS schedule_strategy,
+                       '' AS schedule_note,
+                       COALESCE(prefs.priority_updated_at, '') AS priority_updated_at,
+                       COALESCE(published.latest_published_at, '') AS latest_published_at,
+                       COALESCE(published.this_week_published, 0) AS this_week_published,
+                       COALESCE(published.last_week_published, 0) AS last_week_published,
+                       COALESCE(published.current_month_published, 0) AS current_month_published,
+                       COALESCE(published.previous_month_published, 0) AS previous_month_published
+                FROM keys
+                LEFT JOIN published ON published.store_id = keys.store_id
+                LEFT JOIN pending ON pending.store_id = keys.store_id
+                LEFT JOIN prefs ON prefs.store_id = keys.store_id
+                WHERE COALESCE(published.this_week_published, 0) > 0
+                   OR COALESCE(published.last_week_published, 0) > 0
+                   OR COALESCE(published.current_month_published, 0) > 0
+                   OR COALESCE(published.previous_month_published, 0) > 0
+                   OR COALESCE(pending.pending_video_count, 0) > 0
+                ORDER BY this_week_published DESC, current_month_published DESC, keys.store_id ASC
+                """,
+                (
+                    this_week_start,
+                    this_week_end,
+                    last_week_start,
+                    last_week_end,
+                    current_month_start,
+                    current_month_end,
+                    previous_month_start,
+                    previous_month_end,
+                    min_start,
+                    max_end,
+                ),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def list_product_publish_summary_rows(
         self,
@@ -1455,32 +1844,78 @@ class AutoPublishDB:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT sm.store_id,
-                       sm.product_id,
-                       MIN(sm.source_record_id) AS source_record_id,
-                       COUNT(DISTINCT sm.canonical_script_key) AS script_count,
-                       MAX(ps.scheduled_for) AS latest_published_at,
-                       SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
-                           AS this_week_published,
-                       SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
-                           AS last_week_published,
-                       SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
-                           AS current_month_published,
-                       SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
-                           AS previous_month_published
-                FROM publish_slots ps
-                INNER JOIN script_metadata sm ON sm.canonical_script_key = ps.canonical_script_key
-                WHERE ps.schedule_status = '已发布'
-                  AND ps.scheduled_for >= ?
-                  AND ps.scheduled_for < ?
-                  AND COALESCE(sm.store_id, '') <> ''
-                  AND COALESCE(sm.product_id, '') <> ''
-                GROUP BY sm.store_id, sm.product_id
-                HAVING this_week_published > 0
-                    OR last_week_published > 0
-                    OR current_month_published > 0
-                    OR previous_month_published > 0
-                ORDER BY sm.store_id ASC, this_week_published DESC, current_month_published DESC, sm.product_id ASC
+                WITH published AS (
+                    SELECT sm.store_id,
+                           sm.product_id,
+                           MIN(sm.source_record_id) AS source_record_id,
+                           COUNT(DISTINCT sm.canonical_script_key) AS script_count,
+                           MAX(ps.scheduled_for) AS latest_published_at,
+                           SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
+                               AS this_week_published,
+                           SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
+                               AS last_week_published,
+                           SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
+                               AS current_month_published,
+                           SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
+                               AS previous_month_published
+                    FROM publish_slots ps
+                    INNER JOIN script_metadata sm ON sm.canonical_script_key = ps.canonical_script_key
+                    WHERE ps.schedule_status = '已发布'
+                      AND ps.scheduled_for >= ?
+                      AND ps.scheduled_for < ?
+                      AND COALESCE(sm.store_id, '') <> ''
+                      AND COALESCE(sm.product_id, '') <> ''
+                    GROUP BY sm.store_id, sm.product_id
+                ),
+                pending AS (
+                    SELECT sm.store_id,
+                           sm.product_id,
+                           MIN(sm.source_record_id) AS source_record_id,
+                           COUNT(DISTINCT sm.canonical_script_key) AS pending_video_count
+                    FROM script_metadata sm
+                    INNER JOIN video_assets va ON va.canonical_script_key = sm.canonical_script_key
+                    WHERE COALESCE(sm.store_id, '') <> ''
+                      AND COALESCE(sm.product_id, '') <> ''
+                      AND COALESCE(sm.short_video_title, '') <> ''
+                      AND COALESCE(va.local_file_path, '') <> ''
+                      AND va.download_status = '下载成功'
+                      AND va.publish_status = '待排期'
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM disabled_products dp
+                          WHERE dp.product_id = sm.product_id
+                      )
+                    GROUP BY sm.store_id, sm.product_id
+                ),
+                keys AS (
+                    SELECT store_id, product_id FROM published
+                    UNION
+                    SELECT store_id, product_id FROM pending
+                )
+                SELECT keys.store_id,
+                       keys.product_id,
+                       COALESCE(published.source_record_id, pending.source_record_id, '') AS source_record_id,
+                       COALESCE(published.script_count, 0) AS script_count,
+                       COALESCE(pending.pending_video_count, 0) AS pending_video_count,
+                       COALESCE(psp.schedule_strategy, '普通') AS schedule_strategy,
+                       COALESCE(psp.schedule_note, '') AS schedule_note,
+                       COALESCE(psp.priority_updated_at, '') AS priority_updated_at,
+                       COALESCE(published.latest_published_at, '') AS latest_published_at,
+                       COALESCE(published.this_week_published, 0) AS this_week_published,
+                       COALESCE(published.last_week_published, 0) AS last_week_published,
+                       COALESCE(published.current_month_published, 0) AS current_month_published,
+                       COALESCE(published.previous_month_published, 0) AS previous_month_published
+                FROM keys
+                LEFT JOIN published ON published.store_id = keys.store_id AND published.product_id = keys.product_id
+                LEFT JOIN pending ON pending.store_id = keys.store_id AND pending.product_id = keys.product_id
+                LEFT JOIN product_schedule_preferences psp
+                    ON psp.store_id = keys.store_id AND psp.product_id = keys.product_id
+                WHERE COALESCE(published.this_week_published, 0) > 0
+                   OR COALESCE(published.last_week_published, 0) > 0
+                   OR COALESCE(published.current_month_published, 0) > 0
+                   OR COALESCE(published.previous_month_published, 0) > 0
+                   OR COALESCE(pending.pending_video_count, 0) > 0
+                ORDER BY keys.store_id ASC, this_week_published DESC, current_month_published DESC, pending_video_count DESC, keys.product_id ASC
                 """,
                 (
                     this_week_start,

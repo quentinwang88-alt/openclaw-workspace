@@ -232,6 +232,19 @@ brief 缺失时允许 fallback，但必须打：
 - 提示词在 `prompts/`
 - 输出 schema 在 `schemas/`
 
+## 选品视觉模型
+
+产品分析子流程默认走 OpenClaw 方舟兼容接口，而不是 Hermes 外层默认模型：
+
+```text
+HERMES_PRODUCT_ANALYSIS_LLM_BACKEND=openclaw
+HERMES_PRODUCT_ANALYSIS_OPENCLAW_MODEL=volces-api/Doubao-Seed-2.0-pro
+HERMES_MARKET_REPORT_COPY_BACKEND=openclaw
+HERMES_MARKET_REPORT_COPY_OPENCLAW_MODEL=volces-api/Doubao-Seed-2.0-pro
+```
+
+`volces-api` provider 配置在 `~/.openclaw/agents/main/agent/models.json`。
+
 ## 验证命令
 
 ```bash

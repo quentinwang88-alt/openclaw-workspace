@@ -1,0 +1,150 @@
+{
+  "TH": {
+    "hair_clip": {
+      "series_name_cn": "发夹系列",
+      "series_code_prefix": "HC",
+      "core_terms": ["กิ๊บติดผมผู้หญิง", "กิ๊บหนีบผม", "กิ๊บผม"],
+      "material_terms": ["ผ้าซาติน", "ผ้ากำมะหยี่", "ประดับมุก", "ประดับคริสตัล", "ผิววาว", "สีพื้น", "ลายจุด", "สีมัสตาร์ด"],
+      "fit_terms": ["ขนาดเล็ก", "ขนาดกลาง", "ขนาดใหญ่", "น้ำหนักเบา", "ทรงหัวใจ", "ขอบสูง"],
+      "structure_terms": ["หนีบง่าย", "จับผมแน่น", "ไม่เจ็บศีรษะ", "แบบแม่เหล็ก", "ติดหน้าม้า", "ติดผมด้านข้าง"],
+      "style_terms": ["สไตล์เกาหลี", "ลุคมินิมอล", "ลุคหวาน", "ลุคสดใส", "น่ารัก", "ใส่ง่ายทุกวัน"]
+    },
+    "claw_clip": {
+      "series_name_cn": "鲨鱼夹系列",
+      "series_code_prefix": "CC",
+      "core_terms": ["กิ๊บหนีบผม", "กิ๊บหนีบผมใหญ่", "กิ๊บหนีบผมผู้หญิง"],
+      "material_terms": ["อะคริลิก", "พลาสติก", "ผิวด้าน", "ผิววาว", "สีพื้น", "ลายจุด", "ลายหินอ่อน", "สีมัสตาร์ด"],
+      "fit_terms": ["ขนาดใหญ่", "เหมาะกับผมหนา", "น้ำหนักเบา", "มินิ", "ขอบสูง"],
+      "structure_terms": ["หนีบผมแน่น", "ฟันหนีบแข็งแรง", "รวบผมง่าย", "มวยผมง่าย", "ใช้กับผมหนา", "แบบแม่เหล็ก"],
+      "style_terms": ["สไตล์เกาหลี", "เรียบมินิมอล", "ลุคหรู", "ลุคสดใส", "ลุคหวาน", "ใช้ได้ทุกวัน"]
+    },
+    "hair_bow": {
+      "series_name_cn": "蝴蝶结发饰系列",
+      "series_code_prefix": "HB",
+      "core_terms": ["กิ๊บติดผมโบว์", "โบว์ติดผม", "กิ๊บโบว์ติดผม"],
+      "material_terms": ["ผ้าซาติน", "ผ้ากำมะหยี่", "ผ้าลูกไม้", "โบว์ใหญ่", "โบว์เล็ก", "สีพื้น", "ลายจุด"],
+      "fit_terms": ["ขนาดใหญ่", "ขนาดเล็ก", "น้ำหนักเบา", "ทรงโบว์", "โบว์ฟู"],
+      "structure_terms": ["ติดผมง่าย", "หนีบแน่น", "จัดทรงง่าย", "ติดหน้าม้า", "ติดผมด้านข้าง"],
+      "style_terms": ["สไตล์เกาหลี", "ลุคหวาน", "ลุคคุณหนู", "น่ารัก", "ใส่ไปเรียน", "ใส่ไปเที่ยว"]
+    },
+    "headband": {
+      "series_name_cn": "发箍系列",
+      "series_code_prefix": "HD",
+      "core_terms": ["ที่คาดผมผู้หญิง", "ที่คาดผม", "คาดผม"],
+      "material_terms": ["ผ้าซาติน", "ผ้ากำมะหยี่", "ผ้านุ่ม", "สีพื้น", "ลายเรียบ"],
+      "fit_terms": ["ใส่สบาย", "น้ำหนักเบา", "ไม่บีบศีรษะ"],
+      "structure_terms": ["เก็บผมหน้า", "จัดทรงง่าย", "ยืดหยุ่น"],
+      "style_terms": ["สไตล์เกาหลี", "ลุคมินิมอล", "น่ารัก", "ใช้ได้ทุกวัน"]
+    },
+    "scrunchie": {
+      "series_name_cn": "大肠发圈系列",
+      "series_code_prefix": "SC",
+      "core_terms": ["ยางมัดผม scrunchie", "ยางมัดผมผ้า", "ยางรัดผมโดนัท"],
+      "material_terms": ["ผ้าซาติน", "ผ้าไหม", "ผ้านุ่ม", "ผ้าฟู", "สีพื้น"],
+      "fit_terms": ["ขนาดใหญ่", "ขนาดกลาง", "ยืดหยุ่น"],
+      "structure_terms": ["มัดผมง่าย", "ไม่ดึงผม", "ไม่เจ็บศีรษะ"],
+      "style_terms": ["สไตล์เกาหลี", "ลุคหวาน", "น่ารัก", "ใส่ง่ายทุกวัน"]
+    },
+    "hair_tie": {
+      "series_name_cn": "发圈/皮筋系列",
+      "series_code_prefix": "HT",
+      "core_terms": ["ยางมัดผม", "ยางรัดผม", "เชือกผูกผม"],
+      "material_terms": ["ผ้ายืด", "ยางยืด", "สีพื้น", "มีโบว์"],
+      "fit_terms": ["ยืดหยุ่น", "น้ำหนักเบา", "ขนาดพอดี"],
+      "structure_terms": ["มัดผมแน่น", "ใช้ง่าย", "ไม่ดึงผม"],
+      "style_terms": ["น่ารัก", "ใช้ได้ทุกวัน", "สไตล์เกาหลี"]
+    },
+    "hair_pin": {
+      "series_name_cn": "边夹/发卡系列",
+      "series_code_prefix": "HP",
+      "core_terms": ["กิ๊บติดผม", "กิ๊บติดผมผู้หญิง", "กิ๊บเป๊าะแป๊ะ"],
+      "material_terms": ["โลหะ", "ประดับมุก", "ประดับคริสตัล", "สีพื้น"],
+      "fit_terms": ["ขนาดเล็ก", "ขนาดกลาง", "น้ำหนักเบา"],
+      "structure_terms": ["ติดผมง่าย", "เก็บผมหน้า", "จับผมแน่น"],
+      "style_terms": ["น่ารัก", "ลุคมินิมอล", "สไตล์เกาหลี"]
+    },
+    "unknown_hair_accessory": {
+      "series_name_cn": "发饰系列",
+      "series_code_prefix": "HA",
+      "core_terms": ["เครื่องประดับผมผู้หญิง", "อุปกรณ์ตกแต่งผม", "กิ๊บติดผม"],
+      "material_terms": ["สีพื้น", "ผ้านุ่ม", "ประดับมุก"],
+      "fit_terms": ["น้ำหนักเบา", "ใส่สบาย"],
+      "structure_terms": ["ใช้ง่าย", "จัดทรงง่าย"],
+      "style_terms": ["สไตล์เกาหลี", "น่ารัก", "ใส่ง่ายทุกวัน"]
+    }
+  },
+  "VN": {
+    "hair_clip": {
+      "series_name_cn": "发夹系列",
+      "series_code_prefix": "HC",
+      "core_terms": ["kẹp tóc nữ", "kẹp tóc", "phụ kiện tóc nữ"],
+      "material_terms": ["vải satin", "nhung", "đính ngọc trai", "bóng nhẹ", "màu trơn"],
+      "fit_terms": ["cỡ nhỏ", "cỡ vừa", "cỡ lớn", "nhẹ đầu"],
+      "structure_terms": ["kẹp chắc", "dễ kẹp", "giữ tóc gọn"],
+      "style_terms": ["phong cách Hàn Quốc", "tối giản", "xinh xắn", "dễ phối"]
+    },
+    "claw_clip": {
+      "series_name_cn": "鲨鱼夹系列",
+      "series_code_prefix": "CC",
+      "core_terms": ["kẹp tóc càng cua", "kẹp càng cua", "kẹp tóc nữ"],
+      "material_terms": ["nhựa acrylic", "nhựa", "màu trơn", "bóng nhẹ", "vân đá"],
+      "fit_terms": ["cỡ lớn", "phù hợp tóc dày", "nhẹ đầu"],
+      "structure_terms": ["kẹp chắc tóc", "răng kẹp chắc", "búi tóc dễ dàng"],
+      "style_terms": ["phong cách Hàn Quốc", "tối giản", "sang nhẹ", "dùng hằng ngày"]
+    },
+    "hair_bow": {
+      "series_name_cn": "蝴蝶结发饰系列",
+      "series_code_prefix": "HB",
+      "core_terms": ["kẹp tóc nơ", "nơ tóc", "kẹp nơ tóc"],
+      "material_terms": ["vải satin", "nhung", "ren", "nơ to", "nơ nhỏ"],
+      "fit_terms": ["cỡ lớn", "cỡ nhỏ", "nhẹ đầu"],
+      "structure_terms": ["dễ kẹp", "kẹp chắc", "dễ tạo kiểu"],
+      "style_terms": ["phong cách Hàn Quốc", "tiểu thư", "xinh xắn", "đi học", "đi chơi"]
+    },
+    "headband": {
+      "series_name_cn": "发箍系列",
+      "series_code_prefix": "HD",
+      "core_terms": ["băng đô tóc nữ", "băng đô", "cài tóc nữ"],
+      "material_terms": ["vải satin", "nhung", "vải mềm", "màu trơn", "họa tiết đơn giản"],
+      "fit_terms": ["đeo thoải mái", "nhẹ đầu", "không đau đầu"],
+      "structure_terms": ["giữ tóc mái", "dễ tạo kiểu", "co giãn"],
+      "style_terms": ["phong cách Hàn Quốc", "tối giản", "xinh xắn", "dùng hằng ngày"]
+    },
+    "scrunchie": {
+      "series_name_cn": "大肠发圈系列",
+      "series_code_prefix": "SC",
+      "core_terms": ["scrunchies cột tóc", "dây buộc tóc scrunchies", "dây buộc tóc vải"],
+      "material_terms": ["vải satin", "lụa", "vải mềm", "phồng", "màu trơn"],
+      "fit_terms": ["cỡ lớn", "cỡ vừa", "co giãn"],
+      "structure_terms": ["buộc tóc dễ", "không kéo tóc", "không đau đầu"],
+      "style_terms": ["phong cách Hàn Quốc", "xinh xắn", "dễ phối", "dùng hằng ngày"]
+    },
+    "hair_tie": {
+      "series_name_cn": "发圈/皮筋系列",
+      "series_code_prefix": "HT",
+      "core_terms": ["dây buộc tóc", "thun cột tóc", "cột tóc nữ"],
+      "material_terms": ["dây thun", "vải co giãn", "màu trơn", "có nơ"],
+      "fit_terms": ["co giãn", "nhẹ đầu", "vừa tóc"],
+      "structure_terms": ["buộc chắc", "dễ dùng", "không kéo tóc"],
+      "style_terms": ["xinh xắn", "dùng hằng ngày", "phong cách Hàn Quốc"]
+    },
+    "hair_pin": {
+      "series_name_cn": "边夹/发卡系列",
+      "series_code_prefix": "HP",
+      "core_terms": ["kẹp tóc mái", "kẹp mái", "kẹp tóc nhỏ"],
+      "material_terms": ["kim loại", "đính ngọc trai", "đính đá", "màu trơn"],
+      "fit_terms": ["cỡ nhỏ", "cỡ vừa", "nhẹ đầu"],
+      "structure_terms": ["dễ kẹp", "giữ tóc mái", "kẹp chắc"],
+      "style_terms": ["xinh xắn", "tối giản", "phong cách Hàn Quốc"]
+    },
+    "unknown_hair_accessory": {
+      "series_name_cn": "发饰系列",
+      "series_code_prefix": "HA",
+      "core_terms": ["phụ kiện tóc nữ", "phụ kiện tóc", "kẹp tóc nữ"],
+      "material_terms": ["màu trơn", "vải mềm", "đính ngọc trai"],
+      "fit_terms": ["nhẹ đầu", "đeo thoải mái"],
+      "structure_terms": ["dễ dùng", "dễ tạo kiểu"],
+      "style_terms": ["phong cách Hàn Quốc", "xinh xắn", "dùng hằng ngày"]
+    }
+  }
+}

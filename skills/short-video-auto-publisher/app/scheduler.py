@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -205,21 +205,59 @@ class SchedulingStats:
     slots_examined: int = 0
     scheduled: int = 0
     skipped: int = 0
+    create_failed: int = 0
+    blocked_by_rules: int = 0
+    retryable_create_failed: int = 0
 
 
-def schedule_slots(db: AutoPublishDB, publisher: BasePublishAdapter, now: Optional[datetime] = None) -> SchedulingStats:
+DEFAULT_SCHEDULE_WINDOW_HOURS = 48
+
+
+def _is_retryable_create_error(error_message: str) -> bool:
+    text = str(error_message or "").lower()
+    return any(
+        marker in text
+        for marker in (
+            "balance not enough",
+            "too many requests",
+            "rate limit",
+            "timeout",
+            "temporarily",
+            "temporary",
+            "connection",
+            "network",
+        )
+    )
+
+
+def schedule_slots(
+    db: AutoPublishDB,
+    publisher: BasePublishAdapter,
+    now: Optional[datetime] = None,
+    *,
+    window_hours: int = DEFAULT_SCHEDULE_WINDOW_HOURS,
+) -> SchedulingStats:
     current_time = now or datetime.now()
     if not isinstance(publisher, DryRunPublishAdapter):
         db.recycle_dryrun_schedules()
-    slots_created = db.generate_future_slots(current_time, window_hours=24)
-    pending_slots = db.list_pending_slots(current_time, window_hours=24)
+    slots_created = db.generate_future_slots(current_time, window_hours=window_hours)
+    pending_slots = db.list_pending_slots(current_time, window_hours=window_hours)
 
     scheduled = 0
     skipped = 0
+    create_failed = 0
+    blocked_by_rules = 0
+    retryable_create_failed = 0
+    disabled_accounts: set[str] = set()
     for slot in pending_slots:
+        account_id = str(slot["account_id"] or "")
+        account_name = str(slot["account_name"] or "")
+        if account_id in disabled_accounts:
+            skipped += 1
+            continue
         target_time = datetime.strptime(str(slot["scheduled_for"]), "%Y-%m-%d %H:%M:%S")
         candidates = db.list_ready_candidates(str(slot["store_id"] or ""))
-        account = db.get_account_config(str(slot["account_id"] or ""))
+        account = db.get_account_config(account_id)
         nurture_enabled = bool(account and int(account["nurture_enabled"] or 0))
         nurture_quota = int(account["nurture_daily_count"] or 2) if account else 0
         nurture_only = bool(account and int(account["nurture_only"] or 0))
@@ -245,7 +283,7 @@ def schedule_slots(db: AutoPublishDB, publisher: BasePublishAdapter, now: Option
             if prefer_nurture and has_nurture_candidate and not is_nurture_candidate(candidate):
                 break
             if not is_nurture_candidate(candidate):
-                if db.has_recent_product_conflict(str(slot["account_id"] or ""), candidate.product_id, target_time, hours=24):
+                if db.count_recent_product_for_account(str(slot["account_id"] or ""), candidate.product_id, target_time, hours=24) >= 2:
                     continue
                 if db.has_recent_family_conflict(str(slot["store_id"] or ""), candidate.content_family_key, target_time, hours=48):
                     continue
@@ -253,24 +291,44 @@ def schedule_slots(db: AutoPublishDB, publisher: BasePublishAdapter, now: Option
             break
         if selected is None:
             skipped += 1
+            blocked_by_rules += 1
+            db.mark_slot_pending_reason(
+                int(slot["slot_id"]),
+                reason="暂未找到符合规则的候选视频，等待后续自动补排",
+            )
             continue
-        task_id = publisher.create_scheduled_task(
-            account_id=str(slot["account_id"] or ""),
-            video_path=selected.publish_video_value,
-            title=selected.short_video_title,
-            publish_at=target_time,
-            script_id=selected.script_id,
-            product_id="" if is_nurture_candidate(selected) or str(selected.cart_enabled or "").strip() == "否" else selected.product_id,
-            product_title=selected.product_title,
-            ref_video_id=selected.ref_video_id,
-        )
+        try:
+            task_id = publisher.create_scheduled_task(
+                account_id=account_id,
+                video_path=selected.publish_video_value,
+                title=selected.short_video_title,
+                publish_at=target_time,
+                script_id=selected.script_id,
+                product_id="" if is_nurture_candidate(selected) or str(selected.cart_enabled or "").strip() == "否" else selected.product_id,
+                product_title=selected.product_title,
+                ref_video_id=selected.ref_video_id,
+            )
+        except Exception as exc:
+            create_failed += 1
+            skipped += 1
+            error_message = str(exc)
+            if "phone env not found" in error_message.lower():
+                disabled_accounts.add(account_id)
+                db.disable_account(account_id, reason=f"GeeLark 云手机环境不存在，已暂停账号：{error_message}")
+            elif _is_retryable_create_error(error_message):
+                retryable_create_failed += 1
+                disabled_accounts.add(account_id)
+                db.mark_slot_pending_reason(int(slot["slot_id"]), reason=f"创建 GeeLark 定时任务暂时失败，等待重试：{error_message}")
+            else:
+                db.cancel_slot(int(slot["slot_id"]), reason=f"创建 GeeLark 定时任务失败：{error_message}")
+            continue
         db.assign_slot(
             slot_id=int(slot["slot_id"]),
             canonical_script_key=selected.canonical_script_key,
             script_id=selected.script_id,
             publish_task_id=task_id,
-            account_id=str(slot["account_id"] or ""),
-            account_name=str(slot["account_name"] or ""),
+            account_id=account_id,
+            account_name=account_name,
             planned_publish_at=target_time,
         )
         scheduled += 1
@@ -280,19 +338,32 @@ def schedule_slots(db: AutoPublishDB, publisher: BasePublishAdapter, now: Option
         slots_examined=len(pending_slots),
         scheduled=scheduled,
         skipped=skipped,
+        create_failed=create_failed,
+        blocked_by_rules=blocked_by_rules,
+        retryable_create_failed=retryable_create_failed,
     )
 
 
-def sync_publish_results(db: AutoPublishDB, publisher: BasePublishAdapter) -> Dict[str, int]:
+def sync_publish_results(
+    db: AutoPublishDB,
+    publisher: BasePublishAdapter,
+    *,
+    failure_grace_hours: int = 12,
+) -> Dict[str, int]:
     stats = {"published": 0, "failed": 0, "pending": 0}
-    for task in db.list_scheduled_tasks():
+    tasks = db.list_scheduled_tasks()
+    task_statuses = publisher.query_task_statuses(tasks)
+    now = datetime.now()
+    grace = timedelta(hours=max(0, int(failure_grace_hours)))
+    for task in tasks:
         scheduled_for = datetime.strptime(str(task["scheduled_for"]), "%Y-%m-%d %H:%M:%S")
-        status = publisher.query_task_status(task_id=str(task["publish_task_id"]), scheduled_for=scheduled_for)
+        task_id = str(task["publish_task_id"])
+        status = task_statuses.get(task_id) or publisher.query_task_status(task_id=task_id, scheduled_for=scheduled_for)
         if status.state == "success":
             db.mark_publish_result(
                 canonical_script_key=str(task["canonical_script_key"] or ""),
                 script_id=str(task["script_id"]),
-                publish_task_id=str(task["publish_task_id"]),
+                publish_task_id=task_id,
                 schedule_status="已发布",
                 publish_status="已发布",
                 publish_result="发布成功",
@@ -300,10 +371,13 @@ def sync_publish_results(db: AutoPublishDB, publisher: BasePublishAdapter) -> Di
             )
             stats["published"] += 1
         elif status.state == "failed":
+            if scheduled_for + grace > now:
+                stats["pending"] += 1
+                continue
             db.mark_publish_result(
                 canonical_script_key=str(task["canonical_script_key"] or ""),
                 script_id=str(task["script_id"]),
-                publish_task_id=str(task["publish_task_id"]),
+                publish_task_id=task_id,
                 schedule_status="发布失败",
                 publish_status="发布失败",
                 publish_result="发布失败",

@@ -4,12 +4,18 @@
 """
 
 import json
+import mimetypes
 import time
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+
+
+class FeishuAPIError(Exception):
+    """飞书 API 异常。"""
 
 
 FIELD_ALIASES = {
@@ -76,15 +82,23 @@ def get_tenant_access_token() -> str:
     app_id = config["channels"]["feishu"]["appId"]
     app_secret = config["channels"]["feishu"]["appSecret"]
 
-    response = requests.post(
-        "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
-        json={"app_id": app_id, "app_secret": app_secret},
-        timeout=30,
-    )
-    result = response.json()
-    if result.get("code") != 0:
-        raise Exception(f"获取飞书 access_token 失败: {result.get('msg')}")
-    return result["tenant_access_token"]
+    last_error: Optional[Exception] = None
+    for attempt in range(4):
+        try:
+            response = requests.post(
+                "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+                json={"app_id": app_id, "app_secret": app_secret},
+                timeout=30,
+            )
+            result = response.json()
+            if result.get("code") != 0:
+                raise FeishuAPIError(f"获取飞书 access_token 失败: {result.get('msg')}")
+            return result["tenant_access_token"]
+        except (requests.exceptions.RequestException, ValueError, FeishuAPIError) as exc:
+            last_error = exc
+            if attempt < 3:
+                time.sleep(2 ** attempt)
+    raise FeishuAPIError(f"获取飞书 access_token 最终失败: {last_error}")
 
 
 def resolve_wiki_bitable_app_token(wiki_token: str) -> str:
@@ -93,25 +107,33 @@ def resolve_wiki_bitable_app_token(wiki_token: str) -> str:
 
     读取通常可直接用 wiki token，但写入往往需要底层 obj_token。
     """
-    headers = {"Authorization": f"Bearer {get_tenant_access_token()}"}
-    response = requests.get(
-        "https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node",
-        headers=headers,
-        params={"token": wiki_token},
-        timeout=30,
-    )
-    result = response.json()
-    if result.get("code") != 0:
-        raise Exception(f"解析 wiki token 失败: {result.get('msg')}")
+    last_error: Optional[Exception] = None
+    for attempt in range(4):
+        try:
+            headers = {"Authorization": f"Bearer {get_tenant_access_token()}"}
+            response = requests.get(
+                "https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node",
+                headers=headers,
+                params={"token": wiki_token},
+                timeout=30,
+            )
+            result = response.json()
+            if result.get("code") != 0:
+                raise FeishuAPIError(f"解析 wiki token 失败: {result.get('msg')}")
 
-    node = result.get("data", {}).get("node", {})
-    if node.get("obj_type") != "bitable":
-        raise Exception(f"当前 wiki 节点不是 bitable: {node.get('obj_type')}")
+            node = result.get("data", {}).get("node", {})
+            if node.get("obj_type") != "bitable":
+                raise FeishuAPIError(f"当前 wiki 节点不是 bitable: {node.get('obj_type')}")
 
-    obj_token = node.get("obj_token")
-    if not obj_token:
-        raise Exception("wiki 节点未返回底层 bitable obj_token")
-    return obj_token
+            obj_token = node.get("obj_token")
+            if not obj_token:
+                raise FeishuAPIError("wiki 节点未返回底层 bitable obj_token")
+            return obj_token
+        except (requests.exceptions.RequestException, ValueError, FeishuAPIError) as exc:
+            last_error = exc
+            if attempt < 3:
+                time.sleep(2 ** attempt)
+    raise FeishuAPIError(f"解析 wiki token 最终失败: {last_error}")
 
 
 class FeishuBitableClient:
@@ -140,20 +162,22 @@ class FeishuBitableClient:
 
     def _request(self, method: str, url: str, **kwargs) -> requests.Response:
         """
-        对飞书 API 请求做轻量重试，避免偶发 SSL EOF / 网络抖动中断整条流水线。
+        对飞书 API 请求做轻量重试，避免偶发 SSL EOF / 空 JSON / 网络抖动中断整条流水线。
         """
         last_error: Optional[Exception] = None
         for attempt in range(3):
             try:
                 response = requests.request(method, url, timeout=30, **kwargs)
+                response.raise_for_status()
+                response.json()
                 return response
-            except requests.exceptions.RequestException as exc:
+            except (requests.exceptions.RequestException, ValueError) as exc:
                 last_error = exc
                 if attempt < 2:
                     wait_time = 2 ** attempt
                     print(f"    ⚠️ 飞书 API 请求异常，{wait_time} 秒后重试...")
                     time.sleep(wait_time)
-        raise Exception(f"飞书 API 请求失败: {last_error}")
+        raise FeishuAPIError(f"飞书 API 请求失败: {last_error}")
 
     def list_field_names(self) -> List[str]:
         url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/fields"
@@ -161,24 +185,41 @@ class FeishuBitableClient:
         response = self._request("GET", url, headers=self._headers(), params=params)
         result = response.json()
         if result.get("code") != 0:
-            raise Exception(f"获取字段定义失败: {result.get('msg')}")
+            raise FeishuAPIError(f"获取字段定义失败: {result.get('msg')}")
         items = result.get("data", {}).get("items", [])
         return [item.get("field_name", "") for item in items if item.get("field_name")]
 
-    def list_records(self, page_size: int = 100) -> List[RemakeRecord]:
+    def create_field(
+        self,
+        field_name: str,
+        field_type: int = 1,
+        ui_type: str = "Text",
+        property: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/fields"
+        payload: Dict[str, Any] = {"field_name": field_name, "type": field_type, "ui_type": ui_type}
+        if property is not None:
+            payload["property"] = property
+        response = self._request("POST", url, headers=self._headers(), json=payload)
+        result = response.json()
+        if result.get("code") != 0:
+            raise FeishuAPIError(f"创建字段失败: {result.get('msg')}")
+        return result.get("data", {})
+
+    def list_records(self, page_size: int = 100, limit: Optional[int] = None) -> List[RemakeRecord]:
         url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/records"
-        params = {"page_size": page_size}
         page_token = None
         has_more = True
         records: List[RemakeRecord] = []
 
         while has_more:
+            params: Dict[str, Any] = {"page_size": min(max(page_size, 1), 500)}
             if page_token:
                 params["page_token"] = page_token
             response = self._request("GET", url, headers=self._headers(), params=params)
             result = response.json()
             if result.get("code") != 0:
-                raise Exception(f"读取记录失败: {result.get('msg')}")
+                raise FeishuAPIError(f"读取记录失败: {result.get('msg')}")
 
             data = result.get("data", {})
             for item in data.get("items", []):
@@ -188,10 +229,24 @@ class FeishuBitableClient:
                         fields=item.get("fields", {}),
                     )
                 )
+                if limit is not None and len(records) >= limit:
+                    return records
             has_more = data.get("has_more", False)
             page_token = data.get("page_token")
 
         return records
+
+    def batch_create_records(self, records: List[Dict[str, Any]]) -> None:
+        if not records:
+            return
+        url = (
+            f"https://open.feishu.cn/open-apis/bitable/v1/apps/"
+            f"{self.app_token}/tables/{self.table_id}/records/batch_create"
+        )
+        response = self._request("POST", url, headers=self._headers(), json={"records": records})
+        result = response.json()
+        if result.get("code") != 0:
+            raise FeishuAPIError(f"批量创建记录失败: {result.get('msg')}")
 
     def update_record_fields(self, record_id: str, fields: Dict[str, Any]) -> bool:
         url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/records/{record_id}"
@@ -199,7 +254,15 @@ class FeishuBitableClient:
         response = self._request("PUT", url, headers=self._headers(), json=payload)
         result = response.json()
         if result.get("code") != 0:
-            raise Exception(f"更新记录失败: {result.get('msg')}")
+            raise FeishuAPIError(f"更新记录失败: {result.get('msg')}")
+        return True
+
+    def delete_record(self, record_id: str) -> bool:
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/records/{record_id}"
+        response = self._request("DELETE", url, headers=self._headers())
+        result = response.json()
+        if result.get("code") != 0:
+            raise FeishuAPIError(f"删除记录失败: {result.get('msg')}")
         return True
 
     def get_tmp_download_url(self, file_token: str) -> str:
@@ -208,11 +271,57 @@ class FeishuBitableClient:
         response = self._request("GET", url, headers=self._headers(), params=params)
         result = response.json()
         if result.get("code") != 0:
-            raise Exception(f"获取视频临时下载链接失败: {result.get('msg')}")
+            raise FeishuAPIError(f"获取视频临时下载链接失败: {result.get('msg')}")
         urls = result.get("data", {}).get("tmp_download_urls", [])
         if not urls:
-            raise Exception("飞书未返回临时下载链接")
+            raise FeishuAPIError("飞书未返回临时下载链接")
         return urls[0]["tmp_download_url"]
+
+    def download_attachment_bytes(self, attachment: Dict[str, Any]) -> Tuple[bytes, str, str, int]:
+        file_token = str(attachment.get("file_token", "")).strip()
+        if not file_token:
+            raise FeishuAPIError("附件缺少 file_token")
+
+        tmp_url = self.get_tmp_download_url(file_token)
+        response = requests.get(tmp_url, timeout=60)
+        response.raise_for_status()
+        content = response.content
+        file_name = str(attachment.get("name") or f"{file_token}.bin")
+        content_type = str(attachment.get("type") or mimetypes.guess_type(file_name)[0] or "application/octet-stream")
+        size = int(attachment.get("size") or len(content))
+        return content, file_name, content_type, size
+
+    def upload_attachment(
+        self,
+        content: bytes,
+        file_name: str,
+        content_type: str,
+        size: Optional[int] = None,
+        parent_type: str = "bitable_image",
+    ) -> Dict[str, Any]:
+        upload_url = "https://open.feishu.cn/open-apis/drive/v1/medias/upload_all"
+        payload = {
+            "file_name": file_name,
+            "parent_type": str(parent_type or "bitable_image"),
+            "parent_node": self.app_token,
+            "size": str(size or len(content)),
+        }
+        files = {"file": (file_name, BytesIO(content), content_type)}
+        headers = {"Authorization": f"Bearer {self._get_access_token()}"}
+        response = self._request("POST", upload_url, headers=headers, data=payload, files=files)
+        result = response.json()
+        if result.get("code") != 0:
+            raise FeishuAPIError(f"上传附件失败: {result.get('msg')}")
+
+        file_token = result.get("data", {}).get("file_token")
+        if not file_token:
+            raise FeishuAPIError("飞书未返回上传后的 file_token")
+        return {
+            "file_token": file_token,
+            "name": file_name,
+            "size": int(size or len(content)),
+            "type": content_type,
+        }
 
 
 def resolve_field_mapping(field_names: List[str]) -> Dict[str, Optional[str]]:
