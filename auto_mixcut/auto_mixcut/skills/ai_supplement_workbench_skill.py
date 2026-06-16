@@ -33,6 +33,31 @@ class AISupplementWorkbenchSkill:
             _update_task_ai_supplement(self.ctx, task, "blocked", 0, data)
             return Result.ok(data)
 
+        existing_state = _existing_prompt_package_state(self.ctx, product_id)
+        requested_total = _requested_package_count(gap_text, max_packages)
+        available_existing = existing_state["inflight_count"] + existing_state["ready_to_submit_count"] + existing_state["recoverable_failed_count"]
+        if existing_state["inflight_count"] >= requested_total:
+            data = {
+                "product_id": product_id,
+                "skipped": True,
+                "reason": "ai_package_inflight_sufficient",
+                "requested_total": requested_total,
+                "existing_state": existing_state,
+            }
+            _update_task_ai_supplement(self.ctx, task, "created", existing_state["inflight_count"], data)
+            return Result.ok(data)
+        if available_existing >= requested_total and (existing_state["ready_to_submit_count"] or existing_state["recoverable_failed_count"]):
+            data = {
+                "product_id": product_id,
+                "skipped": True,
+                "reason": "created_or_recoverable_packages_need_submit",
+                "requested_total": requested_total,
+                "existing_state": existing_state,
+            }
+            _update_task_ai_supplement(self.ctx, task, "needs_submit_retry", available_existing, data)
+            return Result.ok(data)
+        max_packages = max(1, min(max_packages, max(0, requested_total - available_existing) or max_packages))
+
         feishu = FeishuReviewSkill(self.ctx)
         anchor_sync = feishu.sync_anchor_queue(product_id)
         if not anchor_sync.success:
@@ -105,6 +130,11 @@ def _update_task_ai_supplement(ctx: SkillContext, task: dict, status: str, packa
         patch["pipeline_status"] = "WAITING_AI_RETURN"
         patch["next_action"] = "WAIT_AI_SEGMENT_RETURN"
         patch["last_error"] = ""
+    elif status == "needs_submit_retry":
+        patch["task_status"] = "AI_SUPPLEMENT_CREATED"
+        patch["pipeline_status"] = "WAITING_AI_RETURN"
+        patch["next_action"] = "RUN_AI_SEGMENT_WORKER"
+        patch["last_error"] = (detail or {}).get("reason") or "recoverable_failed_packages_need_retry"
     elif status in {"blocked", "failed"}:
         patch["task_status"] = "AI_SUPPLEMENT_BLOCKED" if status == "blocked" else "AI_SUPPLEMENT_FAILED"
         patch["pipeline_status"] = "BLOCKED" if status == "blocked" else "ERROR"
@@ -174,6 +204,65 @@ def _supplement_state_summary(gap_text: str, created: list, skipped: list, faile
         "state": "waiting_ai_return" if created_count or existing_count else ("failed" if failed_count else "blocked_or_skipped"),
         "next_trigger": "AI素材回流后只跑容量重算和top-up补差额",
     }
+
+
+AI_PACKAGE_INFLIGHT_STATUSES = {
+    "submitted",
+    "generating",
+    "returned",
+    "imported",
+    "已提单",
+    "生成中",
+    "已生成",
+    "已回流",
+    "质检中",
+    "质检通过",
+    "uploaded",
+    "downloaded",
+    "rendering",
+    "observing",
+}
+
+
+AI_PACKAGE_READY_TO_SUBMIT_STATUSES = {"created", "待提单", "已创建"}
+
+
+def _existing_prompt_package_state(ctx: SkillContext, product_id: str) -> dict[str, int]:
+    inflight = 0
+    ready_to_submit = 0
+    recoverable_failed = 0
+    total = 0
+    for row in ctx.repo.list_where("segment_prompt_packages", "product_id=?", (product_id,)):
+        total += 1
+        status = str(row.get("package_status") or row.get("status") or "").strip()
+        result_sync = str(row.get("result_sync_status") or "").strip()
+        failure = str(row.get("failure_reason") or "").strip()
+        if row.get("generated_asset_id") or row.get("generated_segment_id"):
+            inflight += 1
+        elif status in AI_PACKAGE_INFLIGHT_STATUSES or result_sync in AI_PACKAGE_INFLIGHT_STATUSES:
+            inflight += 1
+        elif status in AI_PACKAGE_READY_TO_SUBMIT_STATUSES or result_sync in AI_PACKAGE_READY_TO_SUBMIT_STATUSES:
+            ready_to_submit += 1
+        elif status in {"failed", "失败"} and _is_recoverable_submit_failure(failure):
+            recoverable_failed += 1
+    return {
+        "total_count": total,
+        "inflight_count": inflight,
+        "ready_to_submit_count": ready_to_submit,
+        "recoverable_failed_count": recoverable_failed,
+    }
+
+
+def _is_recoverable_submit_failure(text: str) -> bool:
+    lower = text.lower()
+    return any(token in lower for token in ["imini_allow_real_submit", "real_submit_disabled", "真实提交默认关闭"])
+
+
+def _requested_package_count(gap_text: str, max_packages: int) -> int:
+    requested = sum(_parse_requested_slots(gap_text).values())
+    if requested <= 0:
+        requested = max_packages
+    return max(1, min(requested, max(max_packages, 1)))
 
 
 def _parse_requested_slots(text: str) -> dict[str, int]:

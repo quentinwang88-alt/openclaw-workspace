@@ -53,6 +53,7 @@ def main() -> int:
 
     ctx = build_context()
     imported: List[Dict[str, Any]] = []
+    status_sync: List[Dict[str, Any]] = []
     product_ids: Set[str] = set()
 
     if not args.no_import:
@@ -68,6 +69,8 @@ def main() -> int:
                 continue
             if not prompt_id or not product_id:
                 continue
+            if not args.dry_run:
+                status_sync.append(importer.sync_submission_status(ctx, record.record_id, fields))
             files = importer.attachments(fields.get(importer.FIELD_ATTACHMENT))
             if not files:
                 continue
@@ -94,8 +97,15 @@ def main() -> int:
             postprocess.append(process_product(ctx, product_id, force=args.force_postprocess, force_frames=args.force_frames))
 
     result = {
+        "done": True,
+        "mode": "import_only" if args.no_postprocess else "import_and_postprocess",
+        "status_sync": {
+            "count": len([item for item in status_sync if item.get("updated")]),
+            "results": status_sync,
+        },
         "import": {"count": len(imported), "results": imported},
         "postprocess": postprocess,
+        "postprocess_skipped": bool(args.no_postprocess or args.dry_run),
     }
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
     failed = any(item.get("status") == "failed" for item in imported)

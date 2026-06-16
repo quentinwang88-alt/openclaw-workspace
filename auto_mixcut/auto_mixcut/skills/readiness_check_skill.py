@@ -45,17 +45,26 @@ class ReadinessCheckSkill:
         actual_plannable = int(plan_estimate.get("planned_count") or 0) if plan_estimate else no_ai_max
         strict_allowed = min(no_ai_max, actual_plannable)
         unique_first_slot_allowed = min(role_allowed, int(diversity.get("first_slot_candidates") or 0))
-        allowed = min(role_allowed, unique_first_slot_allowed) if strict_allowed > 0 else 0
+        first_slot_reuse_allowed = _first_slot_allowed_with_reuse(tier, role_allowed, diversity)
+        allowed = min(role_allowed, first_slot_reuse_allowed) if strict_allowed > 0 else 0
         if role_allowed > recommended:
             gaps.extend(_diversity_gap_messages(diversity, role_allowed, recommended, no_ai_max))
-        if role_allowed > unique_first_slot_allowed:
-            first_shortfall = role_allowed - unique_first_slot_allowed
+        if role_allowed > first_slot_reuse_allowed:
+            first_shortfall = role_allowed - first_slot_reuse_allowed
             gaps.append(
                 "first slot uniqueness limited: "
                 f"requested={role_allowed}, first_slot_candidates={diversity.get('first_slot_candidates')}, "
-                f"allowed_without_repeated_opening={unique_first_slot_allowed}"
+                f"allowed_without_repeated_opening={unique_first_slot_allowed}, "
+                f"allowed_with_controlled_reuse={first_slot_reuse_allowed}"
             )
             gaps.append(_first_slot_ai_supplement_message(first_shortfall))
+        elif role_allowed > unique_first_slot_allowed:
+            gaps.append(
+                "first slot controlled reuse enabled: "
+                f"requested={role_allowed}, first_slot_candidates={diversity.get('first_slot_candidates')}, "
+                f"allowed_without_repeated_opening={unique_first_slot_allowed}, "
+                f"allowed_with_controlled_reuse={first_slot_reuse_allowed}"
+            )
         if plan_estimate and role_allowed > strict_allowed:
             plan_shortfall = role_allowed - strict_allowed
             gaps.append(
@@ -86,6 +95,7 @@ class ReadinessCheckSkill:
             "allowed_variant_count": allowed,
             "strict_plannable_variant_count": strict_allowed,
             "unique_first_slot_allowed_variant_count": unique_first_slot_allowed,
+            "first_slot_reuse_allowed_variant_count": first_slot_reuse_allowed,
             "recommended_variant_count": recommended,
             "no_ai_max_variant_count": no_ai_max,
             "role_allowed_variant_count": role_allowed,
@@ -112,6 +122,12 @@ def _readiness_task_patch(tier: str, material_status: str, allowed: int, gaps: l
     if allowed > 0:
         patch["failure_reason"] = ""
     return patch
+
+
+def _first_slot_allowed_with_reuse(tier: str, role_allowed: int, diversity: dict) -> int:
+    if tier != "tier_3_full":
+        return min(role_allowed, int(diversity.get("first_slot_candidates") or 0))
+    return min(role_allowed, int(diversity.get("first_slot_capacity") or 0))
 
 
 def _task(ctx: SkillContext, product_id: str):

@@ -264,6 +264,37 @@ AI 补素材是异步支线。素材回流后，不要自动重跑完整 10 条�
 
 如果同时存在 AI 素材缺口，也应保留 `AI补素材: ...` 说明，便于继续异步提单。
 
+如果守护器返回 `next_action=RUN_AI_SEGMENT_WORKER` 或 `WAIT_AI_SUPPLEMENT_APPROVAL`，说明 Prompt Package 已建好但还没有进入即梦真实生成。不要重建包，优先走 AI 补素材心跳调度层。
+
+白天不实时监控、不逐商品即时提醒。自动化只在每天 12:00 和 18:00 跑一次汇总确认，把当天需要新增 AI 补素材提单的商品合成一条消息；已有在途素材覆盖缺口的商品不重复提醒、不重复提单。
+
+```bash
+cd /Users/likeu3/.openclaw/workspace/auto_mixcut
+env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy \
+  AUTO_MIXCUT_DB_PROVIDER=mysql AUTO_MIXCUT_OSS_PROVIDER=aliyun \
+  python3 scripts/run_ai_supplement_heartbeat.py --mode daytime
+```
+
+老板同意后，执行通知里的 approve-all 命令，心跳会把所有待确认商品标为 `approved` 并立刻真实提单：
+
+```bash
+cd /Users/likeu3/.openclaw/workspace/auto_mixcut
+env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy \
+  AUTO_MIXCUT_DB_PROVIDER=mysql AUTO_MIXCUT_OSS_PROVIDER=aliyun \
+  python3 scripts/run_ai_supplement_heartbeat.py --approve-all --run-now
+```
+
+23:00 后由夜间心跳统一 review 当天待补素材，自动执行：提交 Prompt Package -> 尝试抓回即梦结果 -> 导入回混剪素材池 -> 多轮 guard 补差额。夜间心跳会对每个商品最多推进 5 轮，直到 `DONE`、`BLOCKED`、`WAITING_AI_RETURN` 或没有更多即时工作；AI 素材本轮导入后会继续跑后处理/渲染，不停在 `RUN_GUARD_AGAIN` 等下一天。
+
+```bash
+cd /Users/likeu3/.openclaw/workspace/auto_mixcut
+env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy \
+  AUTO_MIXCUT_DB_PROVIDER=mysql AUTO_MIXCUT_OSS_PROVIDER=aliyun \
+  python3 scripts/run_ai_supplement_heartbeat.py --mode nightly
+```
+
+只有排查心跳脚本本身失败时，才直接调用 `segment-package-worker.js`；正常流程不要绕过心跳，否则白天审批、去重、夜间统一抓回都会失效。
+
 ## 守护式运行原则
 
 OpenClaw 守护跑时：

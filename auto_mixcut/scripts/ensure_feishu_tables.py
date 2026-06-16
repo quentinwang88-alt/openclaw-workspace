@@ -60,13 +60,29 @@ PRIORITIES = ["low", "normal", "high", "urgent"]
 TASK_TYPES = ["mixcut", "benchmark", "rerender"]
 MATERIAL_TIERS = ["tier_0_not_ready", "tier_1_minimum", "tier_2_standard", "tier_3_full"]
 MATERIAL_STATUS = ["not_ready", "ready", "review_required", "blocked", "failed"]
-AI_SUPPLEMENT_STATUS = ["未触发", "已创建", "已跳过", "已阻塞", "失败"]
+AI_SUPPLEMENT_STATUS = [
+    "未触发",
+    "已创建",
+    "已跳过",
+    "已阻塞",
+    "失败",
+    "已完成",
+    "created",
+    "skipped",
+    "blocked",
+    "failed",
+    "needs_submit_retry",
+    "approval_requested",
+    "approved",
+    "fulfilled",
+]
 GUARD_STATUS = ["RUNNING", "DONE", "WAITING_AI_RETURN", "READY_TO_CONTINUE", "BLOCKED", "ERROR"]
 GUARD_ACTIONS = [
     "NONE",
     "GUARD_PASS_STARTED",
     "RUN_GUARD_AGAIN",
     "WAIT_AI_SEGMENT_RETURN",
+    "WAIT_AI_SUPPLEMENT_APPROVAL",
     "WAIT_ANCHOR_CONFIRMATION",
     "NEED_CREATE_TASK_FIELDS",
     "NEED_MATERIAL_UPLOAD",

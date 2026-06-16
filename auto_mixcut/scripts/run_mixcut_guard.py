@@ -24,6 +24,8 @@ from auto_mixcut.core.bootstrap import build_context  # noqa: E402
 from auto_mixcut.core.ids import new_id  # noqa: E402
 from auto_mixcut.core.result import Result  # noqa: E402
 from auto_mixcut.skills.capacity_counter_skill import CapacityCounterSkill  # noqa: E402
+from auto_mixcut.skills.ai_supplement_workbench_skill import AISupplementWorkbenchSkill  # noqa: E402
+from auto_mixcut.skills.ai_supplement_scheduler_skill import daytime_approval_required, queue_daytime_approval  # noqa: E402
 from auto_mixcut.skills.ai_anchor_check_skill import AIAnchorCheckSkill  # noqa: E402
 from auto_mixcut.skills.ai_generated_consistency_skill import AIGeneratedConsistencySkill  # noqa: E402
 from auto_mixcut.skills.ai_generation_qc_skill import _basic_qc  # noqa: E402
@@ -114,9 +116,11 @@ def run_guard_pass(ctx, product_id: str, target: int | None = None, name: str = 
     initial_detail = _status_detail(ctx, product_id, target)
     if int(initial_detail.get("remaining_count") or 0) <= 0:
         _safe_guard_update(ctx, product_id, "DONE", "NONE", "", initial_detail)
-        return Result.ok({"product_id": product_id, "pipeline_status": "DONE", "next_action": "NONE", "detail": initial_detail})
+        refreshed_detail = _status_detail(ctx, product_id, target)
+        return Result.ok({"product_id": product_id, "pipeline_status": "DONE", "next_action": "NONE", "detail": refreshed_detail})
 
-    _safe_guard_update(ctx, product_id, "RUNNING", "GUARD_PASS_STARTED", "", initial_detail)
+    start_status, start_action = _guard_start_status(initial_detail)
+    _safe_guard_update(ctx, product_id, start_status, start_action, "", initial_detail)
 
     _guard_log("ensure_anchor", product_id=product_id)
     anchor = _ensure_anchor_confirmed(ctx, product_id)
@@ -130,7 +134,7 @@ def run_guard_pass(ctx, product_id: str, target: int | None = None, name: str = 
     if process_uploads:
         _guard_log("process_uploads", product_id=product_id)
         upload_sync = _process_uploads(product_id)
-    ai_return_sync = _process_prompt_package_returns(product_id) if process_uploads else {"status": "skipped", "reason": "upload_sync_disabled"}
+    ai_return_sync = _process_prompt_package_returns(ctx, product_id, target) if process_uploads else {"status": "skipped", "reason": "upload_sync_disabled"}
 
     assets = ctx.repo.list_where("assets", "product_id=?", (product_id,))
     segments = ctx.repo.list_where("segments", "product_id=?", (product_id,))
@@ -207,9 +211,23 @@ def run_guard_pass(ctx, product_id: str, target: int | None = None, name: str = 
                     material_pool_extra_capacity=ready_detail.get("material_pool_extra_capacity"),
                     remaining_count=ready_detail.get("remaining_count"),
                 )
+                supplement_gate = _maybe_create_ai_supplement_for_capacity_gap(ctx, product_id, ready_detail)
+                if supplement_gate.get("status") != "skipped":
+                    detail["ai_supplement_gate"] = supplement_gate
+                    next_action = "RUN_AI_SEGMENT_WORKER" if supplement_gate.get("ai_submit", {}).get("status") in {"manual_required", "failed", "timeout"} else "WAIT_AI_SEGMENT_RETURN"
+                    last_error = supplement_gate.get("ai_submit", {}).get("error") or supplement_gate.get("ai_submit", {}).get("reason") or ""
+                    _safe_guard_update(ctx, product_id, "WAITING_AI_RETURN", next_action, last_error, detail)
+                    return Result.ok({"product_id": product_id, "pipeline_status": "WAITING_AI_RETURN", "next_action": next_action, "detail": detail})
                 _safe_guard_update(ctx, product_id, "READY_TO_CONTINUE", "RUN_GUARD_AGAIN", "", detail)
                 return Result.ok({"product_id": product_id, "pipeline_status": "READY_TO_CONTINUE", "next_action": "RUN_GUARD_AGAIN", "detail": detail})
             if not _guard_allows_top_up_with_stale() or int(ready_detail.get("material_pool_extra_capacity") or 0) <= 0 or int(ready_detail.get("remaining_count") or 0) <= 0:
+                supplement_gate = _maybe_create_ai_supplement_for_capacity_gap(ctx, product_id, ready_detail)
+                if supplement_gate.get("status") != "skipped":
+                    detail["ai_supplement_gate"] = supplement_gate
+                    next_action = "RUN_AI_SEGMENT_WORKER" if supplement_gate.get("ai_submit", {}).get("status") in {"manual_required", "failed", "timeout"} else "WAIT_AI_SEGMENT_RETURN"
+                    last_error = supplement_gate.get("ai_submit", {}).get("error") or supplement_gate.get("ai_submit", {}).get("reason") or ""
+                    _safe_guard_update(ctx, product_id, "WAITING_AI_RETURN", next_action, last_error, detail)
+                    return Result.ok({"product_id": product_id, "pipeline_status": "WAITING_AI_RETURN", "next_action": next_action, "detail": detail})
                 _safe_guard_update(ctx, product_id, "READY_TO_CONTINUE", "RUN_GUARD_AGAIN", "", detail)
                 return Result.ok({"product_id": product_id, "pipeline_status": "READY_TO_CONTINUE", "next_action": "RUN_GUARD_AGAIN", "detail": detail})
             _guard_log(
@@ -222,11 +240,11 @@ def run_guard_pass(ctx, product_id: str, target: int | None = None, name: str = 
 
     _guard_log("top_up_start", product_id=product_id, target=target)
     top_up = _top_up(ctx, product_id, target, max_rounds=max_rounds)
-    ai_submit = _maybe_prepare_ai_submit(product_id, top_up.data or {}) if top_up.success else {"status": "skipped", "reason": "top_up_failed"}
+    ai_submit = _maybe_prepare_ai_submit(ctx, product_id, top_up.data or {}) if top_up.success else {"status": "skipped", "reason": "top_up_failed"}
     final = _status_after_top_up(ctx, product_id, target, top_up)
-    if ai_submit.get("status") in {"manual_required", "failed"} and final.get("pipeline_status") == "WAITING_AI_RETURN":
+    if ai_submit.get("status") in {"manual_required", "failed", "timeout"} and final.get("pipeline_status") == "WAITING_AI_RETURN":
         final["next_action"] = "RUN_AI_SEGMENT_WORKER"
-        final["last_error"] = ai_submit.get("error") or ai_submit.get("reason") or ""
+        final["last_error"] = ai_submit.get("error") or ai_submit.get("reason") or f"ai submit {ai_submit.get('status')}"
     detail = {
         **_status_detail(ctx, product_id, target),
         "upload_sync": upload_sync,
@@ -360,9 +378,12 @@ def _cell_number(value: Any) -> int:
         return 0
 
 
-def _process_prompt_package_returns(product_id: str) -> dict[str, Any]:
+def _process_prompt_package_returns(ctx, product_id: str, target: int | None) -> dict[str, Any]:
     if os.environ.get("AUTO_MIXCUT_GUARD_PROCESS_AI_RETURNS", "1").strip().lower() in {"0", "false", "no", "off"}:
         return {"status": "skipped", "reason": "disabled"}
+    remaining = int(_status_detail(ctx, product_id, target).get("remaining_count") or 0)
+    if remaining <= 0:
+        return {"status": "skipped", "reason": "target_already_filled", "remaining_count": remaining}
     timeout = _guard_ai_return_timeout()
     cmd = [
         sys.executable,
@@ -374,8 +395,11 @@ def _process_prompt_package_returns(product_id: str) -> dict[str, Any]:
         limit = int(os.environ.get("AUTO_MIXCUT_GUARD_AI_RETURN_IMPORT_LIMIT", "0") or "0")
     except ValueError:
         limit = 0
-    if limit > 0:
-        cmd.extend(["--limit", str(limit)])
+    import_limit = min(limit, remaining) if limit > 0 else remaining
+    if import_limit > 0:
+        cmd.extend(["--limit", str(import_limit)])
+    if os.environ.get("AUTO_MIXCUT_GUARD_IMPORT_RUN_POSTPROCESS", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+        cmd.append("--no-postprocess")
     try:
         proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -386,7 +410,7 @@ def _process_prompt_package_returns(product_id: str) -> dict[str, Any]:
     if proc.returncode != 0:
         return {"status": "failed", "returncode": proc.returncode, "stdout": (proc.stdout or "")[-2000:], "stderr": (proc.stderr or "")[-2000:], "result": payload}
     imported = int(((payload.get("import") or {}).get("count") or 0)) if isinstance(payload, dict) else 0
-    return {"status": "ok", "imported_count": imported, "result": payload}
+    return {"status": "ok", "imported_count": imported, "import_limit": import_limit, "remaining_count": remaining, "result": payload}
 
 
 def _guard_ai_return_timeout() -> int:
@@ -396,18 +420,93 @@ def _guard_ai_return_timeout() -> int:
         return 240
 
 
-def _maybe_prepare_ai_submit(product_id: str, top_up_data: dict[str, Any]) -> dict[str, Any]:
+def _guard_start_status(detail: dict[str, Any]) -> tuple[str, str]:
+    if (
+        str(detail.get("ai_supplement_status") or "") == "created"
+        and int(detail.get("remaining_count") or 0) > 0
+        and int(detail.get("first_slot_remaining_capacity") or 0) <= 0
+    ):
+        return "WAITING_AI_RETURN", "CHECK_AI_RETURN_THEN_CONTINUE"
+    return "RUNNING", "GUARD_PASS_STARTED"
+
+
+def _maybe_create_ai_supplement_for_capacity_gap(ctx, product_id: str, detail: dict[str, Any]) -> dict[str, Any]:
+    remaining = int((detail or {}).get("remaining_count") or (detail or {}).get("target_remaining_variant_count") or 0)
+    extra_capacity = int((detail or {}).get("material_pool_extra_capacity") or 0)
+    if remaining <= 0:
+        return {"status": "skipped", "reason": "target_already_filled", "remaining_count": remaining}
+    if extra_capacity > 0:
+        return {"status": "skipped", "reason": "material_capacity_available", "material_pool_extra_capacity": extra_capacity}
+    gap_text = _guard_capacity_ai_supplement_gap_text(detail)
+    if not gap_text:
+        return {"status": "skipped", "reason": "no_capacity_gap_text", "remaining_count": remaining, "material_pool_extra_capacity": extra_capacity}
+    supplement = AISupplementWorkbenchSkill(ctx).sync_for_product(product_id, gap_text=gap_text)
+    result: dict[str, Any] = {
+        "status": "created" if supplement.success else "failed",
+        "gap_text": gap_text,
+        "supplement": supplement.to_dict(),
+    }
+    if not supplement.success:
+        return result
+    fake_top_up_data = {"rounds": [{"steps": {"ai_supplement_workbench": supplement.to_dict()}}]}
+    result["ai_submit"] = _maybe_prepare_ai_submit(ctx, product_id, fake_top_up_data)
+    return result
+
+
+def _guard_capacity_ai_supplement_gap_text(detail: dict[str, Any]) -> str:
+    remaining = int((detail or {}).get("remaining_count") or (detail or {}).get("target_remaining_variant_count") or 0)
+    extra_capacity = int((detail or {}).get("material_pool_extra_capacity") or 0)
+    shortfall = max(0, remaining - extra_capacity)
+    if shortfall <= 0:
+        return ""
+    need = min(max(shortfall, 1), 6)
+    bottleneck = str((detail or {}).get("current_bottleneck") or (detail or {}).get("capacity_note") or "")
+    if "首镜" in bottleneck or "first_slot" in bottleneck or int((detail or {}).get("first_slot_remaining_capacity") or 0) <= 0:
+        return f"AI补素材: hero首镜{min(max(need, 1), 6)}"
+    hero = max(1, min(2, need))
+    detail_count = max(1, min(2, need - 1)) if need >= 2 else 0
+    result = 1 if need >= 3 else 0
+    scene = 1 if need >= 4 else 0
+    parts = [f"hero首镜{hero}"]
+    if detail_count:
+        parts.append(f"detail细节{detail_count}")
+    if result:
+        parts.append(f"result上身{result}")
+    if scene:
+        parts.append(f"scene场景{scene}")
+    return "AI补素材: " + "; ".join(parts)
+
+
+def _maybe_prepare_ai_submit(ctx, product_id: str, top_up_data: dict[str, Any]) -> dict[str, Any]:
     if not _top_up_created_ai_supplement(top_up_data):
         return {"status": "skipped", "reason": "no_ai_supplement_created"}
+    budget = _ai_submit_budget(ctx, product_id)
+    if budget["submit_limit"] <= 0:
+        return {
+            "status": "skipped",
+            "reason": "ai_submit_inflight_capacity_filled",
+            "product_id": product_id,
+            **budget,
+        }
+    command = _ai_segment_worker_command(product_id, budget["submit_limit"], budget["target_remaining"])
+    if daytime_approval_required(ctx, product_id):
+        approval = queue_daytime_approval(ctx, product_id, budget, command)
+        return {
+            "status": "manual_required",
+            "reason": "daytime_ai_supplement_approval_required",
+            "approval": approval,
+            "command": " ".join(command),
+            "product_id": product_id,
+            **budget,
+        }
     if os.environ.get("AUTO_MIXCUT_GUARD_SUBMIT_AI_PACKAGES", "1").strip().lower() in {"0", "false", "no", "off"}:
-        command = _ai_segment_worker_command(product_id)
         return {
             "status": "manual_required",
             "reason": "auto submit disabled",
             "command": " ".join(command),
             "product_id": product_id,
+            **budget,
         }
-    command = _ai_segment_worker_command(product_id)
     timeout = _guard_ai_submit_timeout()
     try:
         proc = subprocess.run(
@@ -416,6 +515,7 @@ def _maybe_prepare_ai_submit(product_id: str, top_up_data: dict[str, Any]) -> di
             capture_output=True,
             text=True,
             timeout=timeout,
+            env={**os.environ, "IMINI_ALLOW_REAL_SUBMIT": "1"},
         )
     except subprocess.TimeoutExpired:
         return {
@@ -423,6 +523,7 @@ def _maybe_prepare_ai_submit(product_id: str, top_up_data: dict[str, Any]) -> di
             "timeout_seconds": timeout,
             "command": " ".join(command),
             "product_id": product_id,
+            **budget,
         }
     except Exception as exc:
         return {
@@ -430,6 +531,7 @@ def _maybe_prepare_ai_submit(product_id: str, top_up_data: dict[str, Any]) -> di
             "error": str(exc),
             "command": " ".join(command),
             "product_id": product_id,
+            **budget,
         }
     if proc.returncode != 0:
         return {
@@ -439,35 +541,101 @@ def _maybe_prepare_ai_submit(product_id: str, top_up_data: dict[str, Any]) -> di
             "stderr": (proc.stderr or "")[-2000:],
             "command": " ".join(command),
             "product_id": product_id,
+            **budget,
+        }
+    stdout_tail = (proc.stdout or "")[-2000:]
+    if "没有找到可提单的 Prompt Package 记录" in stdout_tail:
+        return {
+            "status": "manual_required",
+            "reason": "no_prompt_package_candidate",
+            "stdout": stdout_tail,
+            "command": " ".join(command),
+            "product_id": product_id,
+            **budget,
+        }
+    if ("❌ 提单失败" in stdout_tail or "real_submit_disabled" in stdout_tail or "真实提交默认关闭" in stdout_tail) and "✅ 已提单" not in stdout_tail:
+        return {
+            "status": "failed",
+            "reason": "ai_segment_submit_failed",
+            "stdout": stdout_tail,
+            "command": " ".join(command),
+            "product_id": product_id,
+            **budget,
         }
     return {
         "status": "ok",
-        "stdout": (proc.stdout or "")[-2000:],
+        "stdout": stdout_tail,
         "command": " ".join(command),
         "product_id": product_id,
+        **budget,
     }
 
 
-def _ai_segment_worker_command(product_id: str) -> list[str]:
-    try:
-        limit = max(1, int(os.environ.get("AUTO_MIXCUT_GUARD_AI_SUBMIT_LIMIT", "5") or "5"))
-    except ValueError:
-        limit = 5
+def _ai_segment_worker_command(product_id: str, limit: int, max_submit_needed: int) -> list[str]:
     return [
         "node",
         str(ROOT.parent / "skills" / "jimeng-video-generator" / "segment-package-worker.js"),
         "--submit-only",
         "--one-shot",
         f"--product-id={product_id}",
-        f"--limit={limit}",
+        f"--limit={max(1, int(limit or 1))}",
+        f"--max-submit-needed={max(1, int(max_submit_needed or limit or 1))}",
     ]
+
+
+AI_SUBMIT_INFLIGHT_STATUSES = {
+    "submitted",
+    "generating",
+    "returned",
+    "imported",
+    "已提单",
+    "生成中",
+    "已生成",
+    "已回流",
+    "质检中",
+    "质检通过",
+    "uploaded",
+    "downloaded",
+    "rendering",
+    "observing",
+}
+
+
+def _ai_submit_budget(ctx, product_id: str) -> dict[str, int]:
+    try:
+        configured_limit = max(1, int(os.environ.get("AUTO_MIXCUT_GUARD_AI_SUBMIT_LIMIT", "5") or "5"))
+    except ValueError:
+        configured_limit = 5
+    detail = _status_detail(ctx, product_id, None)
+    target_remaining = int(detail.get("target_remaining_variant_count") or detail.get("remaining_count") or 0)
+    inflight = _ai_inflight_package_count(ctx, product_id)
+    needed_after_inflight = max(0, target_remaining - inflight)
+    return {
+        "target_remaining": target_remaining,
+        "ai_submit_inflight_count": inflight,
+        "needed_after_inflight": needed_after_inflight,
+        "submit_limit": min(configured_limit, needed_after_inflight),
+    }
+
+
+def _ai_inflight_package_count(ctx, product_id: str) -> int:
+    count = 0
+    for row in ctx.repo.list_where("segment_prompt_packages", "product_id=?", (product_id,)):
+        status = str(row.get("package_status") or row.get("status") or "").strip()
+        result_sync = str(row.get("result_sync_status") or "").strip()
+        if row.get("generated_asset_id") or row.get("generated_segment_id"):
+            count += 1
+            continue
+        if status in AI_SUBMIT_INFLIGHT_STATUSES or result_sync in AI_SUBMIT_INFLIGHT_STATUSES:
+            count += 1
+    return count
 
 
 def _guard_ai_submit_timeout() -> int:
     try:
-        return max(30, int(os.environ.get("AUTO_MIXCUT_GUARD_AI_SUBMIT_TIMEOUT", "300") or "300"))
+        return max(30, int(os.environ.get("AUTO_MIXCUT_GUARD_AI_SUBMIT_TIMEOUT", "900") or "900"))
     except ValueError:
-        return 300
+        return 900
 
 
 def _ensure_anchor_confirmed(ctx, product_id: str) -> Result:
@@ -599,7 +767,7 @@ def _stale_segment_reasons(ctx, segment: dict[str, Any], stale_index: dict[str, 
     if segment.get("source_type") == "ai_generated":
         if str(segment.get("segment_status") or "") in {"", "created"}:
             reasons.append("ai_qc_missing")
-        if not segment.get("frame_consistency_status"):
+        if _guard_runs_consistency() and not segment.get("frame_consistency_status"):
             reasons.append("ai_consistency_missing")
         if str(segment.get("segment_status") or "") == "qc_passed" and not segment.get("anchor_match_level"):
             reasons.append("ai_anchor_check_missing")
@@ -679,10 +847,10 @@ def _top_up_created_ai_supplement(data: dict[str, Any]) -> bool:
         if not supplement.get("success", True):
             continue
         payload = supplement.get("data") or {}
-        if payload.get("skipped"):
+        if payload.get("skipped") and payload.get("reason") not in {"created_or_recoverable_packages_need_submit", "recoverable_failed_packages_need_retry"}:
             continue
         workbench = payload.get("workbench") or {}
-        if workbench.get("created") or payload.get("final_task_sync"):
+        if workbench.get("created") or payload.get("final_task_sync") or payload.get("reason") in {"created_or_recoverable_packages_need_submit", "recoverable_failed_packages_need_retry"}:
             return True
     return False
 
@@ -1438,11 +1606,13 @@ def _safe_guard_update(ctx, product_id: str, status: str, next_action: str, last
     task = _latest_task(ctx, product_id)
     if not task:
         return
+    completion_values = _fulfilled_ai_supplement_values(ctx, product_id, detail) if status == "DONE" and next_action == "NONE" else {}
     base_values = {
         "pipeline_status": status,
         "next_action": next_action,
         "last_error": last_error,
         "last_batch_id": last_batch_id,
+        **completion_values,
     }
     first = ctx.repo.update(
         "content_tasks",
@@ -1453,6 +1623,45 @@ def _safe_guard_update(ctx, product_id: str, status: str, next_action: str, last
     if first.success:
         return
     ctx.repo.update("content_tasks", "task_id", task["task_id"], base_values)
+
+
+def _fulfilled_ai_supplement_values(ctx, product_id: str, detail: dict[str, Any]) -> dict[str, Any]:
+    if int((detail or {}).get("remaining_count") or 0) > 0:
+        return {}
+    packages = ctx.repo.list_where("segment_prompt_packages", "product_id=?", (product_id,))
+    if not packages:
+        return {}
+    generated = [
+        row
+        for row in packages
+        if row.get("generated_asset_id") or row.get("generated_segment_id") or str(row.get("package_status") or "") in {"imported", "consumed"}
+    ]
+    if not generated:
+        return {}
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    consumed_ids = []
+    for row in generated:
+        prompt_id = str(row.get("segment_prompt_id") or "")
+        if not prompt_id:
+            continue
+        status = str(row.get("package_status") or "")
+        if status != "consumed":
+            ctx.repo.update("segment_prompt_packages", "segment_prompt_id", prompt_id, {"package_status": "consumed"})
+        consumed_ids.append(prompt_id)
+    return {
+        "task_status": "DONE",
+        "ai_supplement_status": "fulfilled",
+        "ai_supplement_package_count": len(generated),
+        "ai_supplement_detail_json": {
+            "state": "fulfilled",
+            "fulfilled_at": now,
+            "target_count": (detail or {}).get("target_count"),
+            "effective_count": (detail or {}).get("effective_count"),
+            "remaining_count": (detail or {}).get("remaining_count"),
+            "consumed_package_count": len(generated),
+            "consumed_segment_prompt_ids": consumed_ids[:20],
+        },
+    }
 
 
 def _update_latest_task(ctx, product_id: str, values: dict[str, Any]) -> Result:

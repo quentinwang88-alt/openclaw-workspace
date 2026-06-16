@@ -219,7 +219,7 @@ def _ai_roles(segment: Dict[str, Any], asset: Dict[str, Any], tag: Dict[str, Any
         visibility = str(tag.get("product_visibility") or "medium")
         usability = str(tag.get("mixcut_usability") or "no")
 
-        if getattr(rule, "require_frame_consistency", False) and consistency not in {None, "pass"}:
+        if getattr(rule, "require_frame_consistency", False) and consistency not in {"", "pass"}:
             return [r for r in rule.possible_roles if r in {"scene", "ending"}] or ["scene", "ending"], "strict_pass but frame consistency not pass"
 
         if usability != "yes":
@@ -265,7 +265,7 @@ def _ai_roles_for_missing_segment_type(segment: Dict[str, Any], tag: Dict[str, A
     usability = str(tag.get("mixcut_usability") or "no")
     confidence = str(tag.get("confidence") or "low")
 
-    if consistency not in {None, "pass"}:
+    if consistency not in {"", "pass"}:
         return ["scene", "ending"], "strict_pass missing segment_type but frame consistency not pass"
     if usability != "yes":
         return ["scene", "ending"], "strict_pass missing segment_type but not mixcut usable"

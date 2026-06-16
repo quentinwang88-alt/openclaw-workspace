@@ -39,6 +39,8 @@ FIELD_ATTACHMENT = "生成视频回流"
 FIELD_VIDEO_FILE_NAME = "生成视频文件名"
 FIELD_PREVIEW_URL = "预览地址"
 FIELD_RESULT = "提单结果"
+FIELD_LATEST_TRACE_ID = "最新追踪ID"
+FIELD_PLATFORM_TASK_ID = "平台任务ID"
 
 IMPORTED_STATUSES = {"已回流", "已导入", "质检中", "质检通过", "质检废弃"}
 RESULT_SYNC_READY = {"uploaded", "downloaded", "已回流", "已上传"}
@@ -70,6 +72,9 @@ def main() -> int:
         if not prompt_id or not product_id:
             continue
 
+        if not args.dry_run:
+            sync_submission_status(ctx, record.record_id, fields)
+
         status = text(fields.get(FIELD_STATUS))
         result_sync = text(fields.get(FIELD_RESULT_SYNC))
         files = attachments(fields.get(FIELD_ATTACHMENT))
@@ -93,6 +98,68 @@ def resolve_client(feishu_url: str) -> FeishuBitableClient:
         raise RuntimeError(f"无法解析飞书 URL: {feishu_url}")
     app_token = resolve_wiki_bitable_app_token(info.app_token) if "/wiki/" in info.original_url else info.app_token
     return FeishuBitableClient(app_token=app_token, table_id=info.table_id)
+
+
+def sync_submission_status(ctx: Any, record_id: str, fields: Dict[str, Any]) -> Dict[str, Any]:
+    prompt_id = text(fields.get(FIELD_PROMPT_ID))
+    if not prompt_id:
+        return {"updated": False, "reason": "prompt_id_missing"}
+    package = ctx.repo.get("segment_prompt_packages", "segment_prompt_id", prompt_id)
+    if not package:
+        return {"updated": False, "reason": "prompt_package_missing", "segment_prompt_id": prompt_id}
+
+    current_status = str(package.get("package_status") or "")
+    if current_status in {"imported", "consumed", "fulfilled", "质检中", "质检通过", "质检参考", "质检废弃"} and (
+        package.get("generated_asset_id") or package.get("generated_segment_id")
+    ):
+        return {"updated": False, "reason": "already_imported", "segment_prompt_id": prompt_id}
+
+    feishu_status = text(fields.get(FIELD_STATUS))
+    result_sync = text(fields.get(FIELD_RESULT_SYNC))
+    next_status = _rds_package_status(feishu_status, result_sync)
+    external_job_id = text(fields.get(FIELD_PLATFORM_TASK_ID)) or text(fields.get(FIELD_LATEST_TRACE_ID))
+    patch: Dict[str, Any] = {"feishu_record_id": record_id}
+    if next_status:
+        patch["package_status"] = next_status
+    if external_job_id:
+        patch["external_job_id"] = external_job_id
+        if not package.get("external_provider"):
+            patch["external_provider"] = _provider_from_job_id(external_job_id)
+    if next_status == "failed":
+        failure = text(fields.get(FIELD_RESULT)) or result_sync or feishu_status
+        if failure:
+            patch["failure_reason"] = failure
+
+    patch = {key: value for key, value in patch.items() if value is not None and str(value) != str(package.get(key) or "")}
+    if not patch:
+        return {"updated": False, "reason": "no_change", "segment_prompt_id": prompt_id}
+    ctx.repo.update("segment_prompt_packages", "segment_prompt_id", prompt_id, patch)
+    return {"updated": True, "segment_prompt_id": prompt_id, "patch": patch}
+
+
+def _rds_package_status(feishu_status: str, result_sync: str) -> str:
+    status = str(feishu_status or "").strip()
+    sync = str(result_sync or "").strip().lower()
+    if status in {"质检中", "已导入"} or sync in {"uploaded", "downloaded", "已回流", "已上传"}:
+        return "imported"
+    if status in {"已回流", "已生成"}:
+        return "returned"
+    if status in {"已提单"}:
+        return "submitted"
+    if status in {"生成中"} or sync in {"rendering", "observing"}:
+        return "generating"
+    if status in {"失败"} or sync in {"failed", "blocked", "review_failed", "review_failed_or_missing_asset", "claim_failed", "timed_out"}:
+        return "failed"
+    if status in {"待提单", "已创建"}:
+        return "created"
+    return ""
+
+
+def _provider_from_job_id(external_job_id: str) -> str:
+    value = str(external_job_id or "").lower()
+    if "imini" in value or value.startswith("jm_"):
+        return "imini"
+    return "jimeng"
 
 
 def import_record(

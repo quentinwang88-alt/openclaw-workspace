@@ -170,6 +170,20 @@ class SegmentPromptFactorySkill:
             {"package_status": "imported", "generated_asset_id": generated_asset_id, "generated_segment_id": generated_segment_id},
         )
 
+    def mark_consumed(self, segment_prompt_id: str) -> Result:
+        table = _ensure_prompt_package_table(self.ctx)
+        if not table.success:
+            return table
+        package = self.ctx.repo.get("segment_prompt_packages", "segment_prompt_id", segment_prompt_id)
+        if not package:
+            return Result.fail("PROMPT_PACKAGE_NOT_FOUND", "segment prompt package not found", {"segment_prompt_id": segment_prompt_id})
+        return self.ctx.repo.update(
+            "segment_prompt_packages",
+            "segment_prompt_id",
+            segment_prompt_id,
+            {"package_status": "consumed"},
+        )
+
 
 def _unwrap_brief(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     brief = payload.get("material_anchor_brief") if isinstance(payload.get("material_anchor_brief"), dict) else payload

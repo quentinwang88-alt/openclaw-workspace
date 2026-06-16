@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
+import os
 from typing import Any
 
 import yaml
@@ -376,6 +378,8 @@ def estimate_render_plan_capacity(ctx: SkillContext, product_id: str, count: int
         return {"planned_count": 0, "skipped_count": 0, "template_counts": {}, "segment_counts": {}}
     templates = _load_templates(ctx)
     product = ctx.repo.get("products", "product_id", product_id) or {}
+    segments = ctx.repo.list_where("segments", "product_id=?", (product_id,))
+    first_slot_candidates = sum(1 for segment in segments if "hero" in (segment.get("effective_roles_json") or []))
     batch_state = {"segments": set(), "segment_counts": {}, "core_segment_counts": {}, "assets": {}, "first_assets": set(), "first_asset_counts": {}, "first_segment_counts": {}, "template_counts": {}}
     planned = 0
     skipped = 0
@@ -417,6 +421,8 @@ def estimate_render_plan_capacity(ctx: SkillContext, product_id: str, count: int
         "reuse_mode": batch_state.get("reuse_mode", "strict"),
         "fill_mode_activated_at_variant": batch_state.get("fill_mode_activated_at_variant"),
         "final_fill_mode_activated_at_variant": batch_state.get("final_fill_mode_activated_at_variant"),
+        "first_slot_candidates": first_slot_candidates,
+        "first_slot_capacity": first_slot_candidates * FILL_MODE_FIRST_SEGMENT_REUSE_PER_BATCH,
     }
 
 
@@ -428,10 +434,26 @@ def _usable_existing_outputs(ctx: SkillContext, product_id: str) -> list[dict[st
 def _active_planning_batch(ctx: SkillContext, product_id: str) -> dict[str, Any] | None:
     batches = ctx.repo.list_where(
         "mixcut_batches",
-        "product_id=? AND batch_status='planning' ORDER BY id DESC LIMIT 1",
+        "product_id=? AND batch_status='planning' ORDER BY id DESC",
         (product_id,),
     )
-    return batches[0] if batches else None
+    for batch in batches:
+        batch_id = str(batch.get("batch_id") or "")
+        if _batch_has_active_work(ctx, batch_id):
+            return batch
+        if _is_stale_batch(batch):
+            ctx.repo.update(
+                "mixcut_batches",
+                "batch_id",
+                batch_id,
+                {
+                    "batch_status": "aborted_stale_planning",
+                    "updated_at": datetime.utcnow().isoformat(timespec="seconds"),
+                },
+            )
+            continue
+        return batch
+    return None
 
 
 def _active_pending_output_batch(ctx: SkillContext, product_id: str) -> dict[str, Any] | None:
@@ -440,10 +462,76 @@ def _active_pending_output_batch(ctx: SkillContext, product_id: str) -> dict[str
         "product_id=? AND render_status='rendered' AND (machine_quality_status IS NULL OR machine_quality_status='pending') ORDER BY id DESC LIMIT 1",
         (product_id,),
     )
-    if not outputs:
-        return None
-    batch_id = outputs[0].get("batch_id")
-    return {"batch_id": batch_id} if batch_id else {"batch_id": ""}
+    for output in outputs:
+        if str(output.get("human_quality_status") or "").lower() in {"rejected", "aborted"}:
+            continue
+        batch_id = str(output.get("batch_id") or "")
+        if _is_aborted_batch(ctx, batch_id):
+            continue
+        if _output_plan_is_aborted(ctx, str(output.get("output_id") or "")):
+            continue
+        return {"batch_id": batch_id} if batch_id else {"batch_id": ""}
+    return None
+
+
+def _batch_has_active_work(ctx: SkillContext, batch_id: str) -> bool:
+    if not batch_id:
+        return False
+    plans = ctx.repo.list_where("render_plans", "batch_id=?", (batch_id,))
+    outputs = ctx.repo.list_where("outputs", "batch_id=?", (batch_id,))
+    if not plans and not outputs:
+        return False
+    terminal = {"rendered", "aborted", "failed", "skipped", "done"}
+    for plan in plans:
+        status = str(plan.get("render_status") or plan.get("quality_gate_status") or plan.get("plan_status") or "").strip().lower()
+        if status and status not in terminal:
+            return True
+        if not status:
+            return True
+    for output in outputs:
+        machine_status = str(output.get("machine_quality_status") or "").strip().lower()
+        human_status = str(output.get("human_quality_status") or "").strip().lower()
+        if human_status in {"rejected", "aborted"}:
+            continue
+        if machine_status in {"", "pending"}:
+            return True
+    return False
+
+
+def _is_stale_batch(batch: dict[str, Any]) -> bool:
+    created_at = _as_datetime(batch.get("created_at"))
+    if not created_at:
+        return False
+    try:
+        stale_hours = max(1, int(os.environ.get("AUTO_MIXCUT_STALE_PLANNING_BATCH_HOURS", "2") or "2"))
+    except ValueError:
+        stale_hours = 2
+    return datetime.utcnow() - created_at > timedelta(hours=stale_hours)
+
+
+def _is_aborted_batch(ctx: SkillContext, batch_id: str) -> bool:
+    if not batch_id:
+        return False
+    batch = ctx.repo.get("mixcut_batches", "batch_id", batch_id) or {}
+    return str(batch.get("batch_status") or "").startswith("aborted")
+
+
+def _output_plan_is_aborted(ctx: SkillContext, output_id: str) -> bool:
+    if not output_id:
+        return False
+    plans = ctx.repo.list_where("render_plans", "output_id=?", (output_id,))
+    return bool(plans) and all(str(plan.get("render_status") or "").lower() == "aborted" for plan in plans)
+
+
+def _as_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return datetime.fromisoformat(value.strip().replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            return None
+    return None
 
 
 def _top_up_summary(target_total: int, existing_count: int, planned_count: int, skipped_count: int, previous_reason: object = "") -> str:
