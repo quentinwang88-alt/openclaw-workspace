@@ -23,6 +23,8 @@ class AutoMixcutMockE2ETest(unittest.TestCase):
         os.environ["AUTO_MIXCUT_TEMP_ROOT"] = str(root / "tmp")
         os.environ["AUTO_MIXCUT_MOCK_FFMPEG"] = "1"
         os.environ["AUTO_MIXCUT_MOCK_LLM"] = "1"
+        # 测试必须禁飞书，防止 run_product 的 sync_task 把测试商品写进飞书任务表
+        os.environ["AUTO_MIXCUT_FEISHU_ENABLED"] = "0"
         self.ctx = build_context()
         init = RDSRepositorySkill(self.ctx).init_db()
         self.assertTrue(init.success, init.to_dict())
@@ -43,8 +45,13 @@ class AutoMixcutMockE2ETest(unittest.TestCase):
         self.assertTrue(run.success, run.to_dict())
         outputs = self.ctx.repo.list_where("outputs", "product_id=?", ("VN_HAIR_001",))
         self.assertGreaterEqual(len(outputs), 1)
-        lineage = self.ctx.repo.list_where("output_segments", "output_id=?", (outputs[0]["output_id"],))
-        self.assertEqual(len(lineage), 5)
+        # 钩子加权（改动1）会改变 variant 间的选片顺序，不再假定 outputs[0] 恒为 5 段模板。
+        # 这里验证"至少一条成片有完整 5 段 lineage"，不依赖 variant 顺序。
+        lineage_counts = []
+        for output in outputs:
+            lineage = self.ctx.repo.list_where("output_segments", "output_id=?", (output["output_id"],))
+            lineage_counts.append(len(lineage))
+        self.assertIn(5, lineage_counts, f"expected at least one output with 5-segment lineage, got {lineage_counts}")
         self.assertTrue(self.ctx.repo.list_where("llm_calls", "product_id=?", ("VN_HAIR_001",)))
 
     def test_watermarked_low_trust_asset_is_excluded_even_after_processing(self):

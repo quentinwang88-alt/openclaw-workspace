@@ -473,11 +473,15 @@ def _normalize_bgm_mix(ctx: SkillContext, track: dict, path: Path, planned_durat
 
 
 def _audio_duration_sec(path: Path) -> float | None:
-    proc = subprocess.run(
-        ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", str(path)],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", str(path)],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        return None
     if proc.returncode != 0:
         return None
     try:
@@ -491,9 +495,22 @@ def _audio_duration_sec(path: Path) -> float | None:
 def _bgm_track_path(ctx: SkillContext, track: dict) -> Path | None:
     local_path = str(track.get("local_file_path") or "")
     local = Path(local_path) if local_path else None
-    if local and local.exists() and local.is_file():
+    # 用信号超时保护 exists()：外接存储/NFS 掉线时 stat() 会无限挂起
+    if local and _path_exists_safe(local) and local.is_file():
         return local
     return require_oss_object_path(ctx, track.get("oss_object_id", ""), "render_bgm")
+
+
+def _path_exists_safe(path: Path, timeout_sec: float = 5.0) -> bool:
+    """带超时的 path.exists()，防止外接存储掉线时无限挂起。"""
+    import threading
+    result = [False]
+    def _check():
+        result[0] = path.exists()
+    t = threading.Thread(target=_check, daemon=True)
+    t.start()
+    t.join(timeout_sec)
+    return result[0]
 
 
 def _apply_audio_mix_suggestions(track: dict) -> dict:

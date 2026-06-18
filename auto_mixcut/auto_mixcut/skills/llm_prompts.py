@@ -61,6 +61,7 @@ def segment_tagging_prompt(product: dict, asset: dict, segment: dict) -> str:
   "secondary_roles": ["hero|detail|result|scene|ending"],
   "product_visibility": "high|medium|low",
   "hook_strength": "strong|medium|weak",
+  "hook_visual_type": "unboxing|before_after|effect_reveal|detail_macro|action|face_emotion|product_reveal|none",
   "mixcut_usability": "yes|needs_processing|no",
   "risk_level": "low|medium|high",
   "text_overlay_risk": "none|safe_product_label|bottom_caption_repairable|foreign_language_caption|large_obstructive_text|platform_ui_or_watermark",
@@ -80,6 +81,7 @@ def segment_tagging_prompt(product: dict, asset: dict, segment: dict) -> str:
 - unusable：黑屏、严重模糊、商品不可见、明显错品、风险内容、水印/UI遮挡严重。
 - 如果商品与锚点不确定、AI生成漂移、画面含平台水印/账号UI/明显搬运痕迹，应提高 risk_level 或 needs_human_review。
 - 画面硬字幕判断：底部小面积外文字幕且不遮挡商品时，text_overlay_risk=bottom_caption_repairable，mixcut_usability=needs_processing；中部/大面积/多行/遮挡商品或脸手动作时，text_overlay_risk=large_obstructive_text，mixcut_usability=no；平台UI/账号/水印文字为 platform_ui_or_watermark。
+- hook_visual_type 只描述画面里客观可见的视觉钩子类型，不要推测文案/口播钩子：开箱拆封=unboxing；同画面或相邻镜头有使用前后对比=before_after；佩戴/使用后效果亮出来的瞬间(转头、甩发、定妆)=effect_reveal；材质做工局部强特写=detail_macro；戴上/系上/穿上的连续动作=action；清晰人脸表情或看镜头=face_emotion；产品作为主体首次清晰呈现且无强动作=product_reveal；平稳氛围/背景镜头等无明显视觉钩子=none。一个镜头只选最主要的一类。
 """.strip()
 
 
@@ -171,6 +173,7 @@ def normalize_segment_tag(data: Any) -> Dict[str, Any]:
     roles = {"hero", "detail", "result", "scene", "ending", "unusable"}
     vis = {"high", "medium", "low"}
     hooks = {"strong", "medium", "weak"}
+    hook_visual_types = {"unboxing", "before_after", "effect_reveal", "detail_macro", "action", "face_emotion", "product_reveal", "none"}
     usability = {"yes", "needs_processing", "no"}
     risk = {"low", "medium", "high"}
     conf = {"high", "medium", "low"}
@@ -183,6 +186,7 @@ def normalize_segment_tag(data: Any) -> Dict[str, Any]:
         "secondary_roles": secondary[:3],
         "product_visibility": _enum(data.get("product_visibility"), vis, "low"),
         "hook_strength": _enum(data.get("hook_strength"), hooks, "weak"),
+        "hook_visual_type": _enum(data.get("hook_visual_type"), hook_visual_types, "none"),
         "mixcut_usability": _enum(data.get("mixcut_usability"), usability, "needs_processing"),
         "risk_level": _enum(data.get("risk_level"), risk, "medium"),
         "text_overlay_risk": _enum(data.get("text_overlay_risk"), text_risks, "none"),

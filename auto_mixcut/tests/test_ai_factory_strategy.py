@@ -50,6 +50,8 @@ class AIFactoryStrategyTest(unittest.TestCase):
         os.environ["AUTO_MIXCUT_TEMP_ROOT"] = str(root / "tmp")
         os.environ["AUTO_MIXCUT_MOCK_FFMPEG"] = "1"
         os.environ["AUTO_MIXCUT_MOCK_LLM"] = "1"
+        # 测试必须禁飞书，防止 sync_task/sync_anchor_queue 把测试商品写进飞书表
+        os.environ["AUTO_MIXCUT_FEISHU_ENABLED"] = "0"
         self.ctx = build_context()
         init = RDSRepositorySkill(self.ctx).init_db()
         self.assertTrue(init.success, init.to_dict())

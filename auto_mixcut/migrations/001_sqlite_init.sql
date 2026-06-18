@@ -195,6 +195,7 @@ CREATE TABLE IF NOT EXISTS segment_tags (
   secondary_roles_json TEXT,
   product_visibility TEXT,
   hook_strength TEXT,
+  hook_visual_type TEXT,
   mixcut_usability TEXT,
   risk_level TEXT,
   confidence TEXT,
@@ -406,6 +407,7 @@ CREATE TABLE IF NOT EXISTS feishu_sync_records (
   sync_status TEXT,
   expire_at TEXT,
   cleanup_status TEXT,
+  payload_json TEXT,
   created_at TEXT,
   updated_at TEXT
 );

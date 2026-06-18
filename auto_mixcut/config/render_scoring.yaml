@@ -1,0 +1,20 @@
+# 渲染选片打分配置 (render_plan_skill._segment_score)
+#
+# 钩子强度加权（改动1）：让强钩子片在选片时被优先选中。
+# 现状根因：hook_strength 已在打标产出，但 _segment_score 不消费它，
+# 强钩子片会被信任分稍低或被用过的普通片挤掉。
+#
+# 数值标定依据：
+#   - 现有最高单项加分 = 可信实拍 is_real_source +35
+#   - strong=40 + 首镜×2 = 80（首镜位），能盖过单 trust 项(+25)，但不会盖过可信实拍组合(+35+25+20+20+20=120)
+#   - 非首镜 strong=40，不会无脑碾压 trust/binding 组合(+20+20+20=60)，保留多样性
+#   - AI 钩子素材拿不到 is_real_source +35，strong=80 让强钩子 AI 片大幅胜出 AI 普通片（投流想要的效果）
+#
+# 回归开关：把 strong/medium 全置 0 即可一键回退改动前行为。
+# 决策：方案 A —— 种草线与投流线同受益钩子加权，默认不关闭，用 A/B 数据验证。
+hook_score_weights:
+  strong: 40
+  medium: 15
+  weak: 0
+  none: 0          # 未打标/无钩子（_latest_tag_value 返回 None 时归一化为 "none"）
+  first_slot_multiplier: 2.0   # 首镜钩子权重翻倍（钩子在前 3 秒最值钱）

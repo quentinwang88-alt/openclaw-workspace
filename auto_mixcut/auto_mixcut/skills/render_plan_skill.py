@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+import json
 import os
 from typing import Any
 
@@ -60,6 +61,9 @@ class TemplateSpec:
     risk_policy: dict[str, Any]
     source_policy: dict[str, Any]
     bgm_profile: dict[str, Any]
+    # 投流模板专属选片策略（改动3 预埋）。种草模板无此键 → 空 dict → 行为不变。
+    # 消费方：_build_template_constraints → constraints → _segment_score / _filter_constraints。
+    selection_policy: dict[str, Any] = field(default_factory=dict)
 
 
 class RenderPlanSkill:
@@ -205,7 +209,10 @@ class RenderPlanSkill:
                         continue
                     break
                 template = choice["template"]
-                selected = _select_segments(self.ctx, product_id, template.slots, batch_state=batch_state, variant_no=variant, template=template)
+                # 改动3：从模板 selection_policy 组装 constraints（种草模板返回空 dict，零侵入）。
+                # 改动1：投流模板的 hook_weight_scale 经此注入 _segment_score。
+                template_constraints = _build_template_constraints(template)
+                selected = _select_segments(self.ctx, product_id, template.slots, batch_state=batch_state, variant_no=variant, template=template, constraints=template_constraints)
                 if selected.success:
                     break
                 if selected.error and selected.error.code == "SKIPPED_LOW_QUALITY":
@@ -285,6 +292,17 @@ class RenderPlanSkill:
             self.ctx.repo.upsert("render_plans", "render_plan_id", row)
             _record_selection(self.ctx, selected.data, batch_state)
             plans.append(plan_id)
+        # render_plans 全部创建完后，把 batch 状态从 planning 推进到 planned，
+        # 否则 render_batch / _top_up 会认为批次还在 planning 而跳过渲染。
+        self.ctx.repo.update(
+            "mixcut_batches",
+            "batch_id",
+            batch_id,
+            {
+                "batch_status": "planned",
+                "planned_count": len(plans),
+            },
+        )
         self.ctx.repo.update(
             "content_tasks",
             "product_id",
@@ -397,7 +415,7 @@ def estimate_render_plan_capacity(ctx: SkillContext, product_id: str, count: int
                     continue
                 break
             template = choice["template"]
-            selected = _select_segments(ctx, product_id, template.slots, batch_state=batch_state, variant_no=variant, template=template)
+            selected = _select_segments(ctx, product_id, template.slots, batch_state=batch_state, variant_no=variant, template=template, constraints=_build_template_constraints(template))
             if selected.success:
                 break
             if selected.error and selected.error.code == "SKIPPED_LOW_QUALITY":
@@ -799,6 +817,21 @@ def _segment_score(ctx: SkillContext, segment: dict, selected: list[dict], batch
     if slot_index <= 3 and segment.get("source_trust_level") == "low":
         score -= 35
 
+    # —— 钩子强度加权（改动1）。全部数值走 config，不硬编码。——
+    # 现状根因：hook_strength 已在打标产出，但 _segment_score 不消费它，
+    # 强钩子片会被信任分稍低或被用过的普通片挤掉。这里让强钩子在选美阶段主动胜出。
+    # 种草模板 constraints 为空 → hook_weight_scale 默认 1.0，两线同受益（方案 A）。
+    # 投流模板经 _build_template_constraints 注入 hook_weight_scale=2.0 进一步放大。
+    # 回归开关：config hook_score_weights strong/medium 置 0 即退化为改动前行为。
+    hook_value = _latest_tag_value(ctx, segment, "hook_strength")
+    hook_key = "none" if hook_value is None else str(hook_value)
+    hook_weights = _hook_score_weights(ctx)
+    hook_base = float(hook_weights.get(hook_key, 0.0) or 0.0)
+    if slot_index == 1:
+        hook_base *= float(hook_weights.get("first_slot_multiplier", 1.0) or 1.0)
+    hook_base *= float(constraints.get("hook_weight_scale", 1.0) or 1.0)
+    score += hook_base
+
     # Deterministic spread so equal candidates do not always pick the same early id.
     score += _stable_spread(segment["segment_id"], variant_no, slot_index)
     return score
@@ -896,6 +929,7 @@ def _enrich_segments_for_selection(ctx: SkillContext, segments: list[dict]) -> l
         "risk_level",
         "product_visibility",
         "hook_strength",
+        "hook_visual_type",
         "confidence",
         "mixcut_usability",
         "needs_human_review",
@@ -1214,6 +1248,21 @@ def _subtitle_cleanup_plan(segment: dict) -> dict[str, Any]:
 
 
 def _sync_material_supplement_queue(ctx: SkillContext, row: dict, detail: dict) -> None:
+    # 改动3B：把缺口画像写进 payload_json，供 HookSupplementSkill 驱动即梦补钩子提示词。
+    # detail 是选片失败时的 error.detail（含 role/first_slot_failures 等），这里提取缺口信息。
+    # 现有消费方不读 payload_json，零侵入；新消费方（HookSupplementSkill）读它。
+    product_id = row.get("product_id") or ""
+    task = _task(ctx, product_id) if product_id else {}
+    payload = {
+        "product_id": product_id,
+        "category": task.get("category") or "",
+        "missing_role": detail.get("role") if isinstance(detail, dict) else "",
+        "expected_hook_visual_type": "any",
+        "expected_segment_type": "home_lifestyle",
+        "shortfall": 1,
+        "source": "render_plan_skipped_low_quality",
+        "render_plan_id": row.get("render_plan_id") or "",
+    }
     ctx.repo.upsert(
         "feishu_sync_records",
         "sync_id",
@@ -1225,8 +1274,51 @@ def _sync_material_supplement_queue(ctx: SkillContext, row: dict, detail: dict) 
             "feishu_record_id": new_id("FSREC"),
             "sync_status": "pending",
             "cleanup_status": "pending",
+            "payload_json": json.dumps(payload, ensure_ascii=False),
         },
     )
+
+
+def precheck_hook_coverage(ctx: SkillContext, product_id: str, required_count: int = 1) -> dict[str, Any]:
+    """预检：该 product 库里有没有足够的钩子型首镜素材（改动3B）。
+
+    不进主流水线，由补钩子入口（如 CLI create-ad-task 或手动）显式调用。
+    返回 {"ok": bool, "gap": {...}}：
+      - ok=True：库里有 >= required_count 个强钩子首镜候选，无需补。
+      - ok=False：缺口，gap 含 missing_role/expected_hook_visual_type/shortfall，供补充队列消费。
+
+    判定标准：同时满足
+      1. effective_roles 含 hero（能当首镜）
+      2. hook_strength ∈ {strong, medium}（钩子够强，与 _prefer_first_slot_pool 一致）
+      3. hook_visual_type ≠ none（有视觉钩子，改动2 字段；老素材 NULL 视为无钩子）
+      4. 无水印、risk=low 或受信任（沿用 _passes_first_slot_floor 口径）
+    """
+    segments = ctx.repo.list_where("segments", "product_id=?", (product_id,))
+    if not segments:
+        return {"ok": False, "gap": {"product_id": product_id, "missing_role": "hero", "expected_hook_visual_type": "any", "expected_segment_type": "home_lifestyle", "shortfall": required_count}}
+    enriched = _enrich_segments_for_selection(ctx, segments)
+    candidates = []
+    for seg in enriched:
+        roles = seg.get("effective_roles_json") or []
+        if "hero" not in roles:
+            continue
+        if _asset_has_watermark(ctx, seg):
+            continue
+        hook_strength = _latest_tag_value(ctx, seg, "hook_strength")
+        if hook_strength not in {"strong", "medium"}:
+            continue
+        hook_visual = _latest_tag_value(ctx, seg, "hook_visual_type")
+        if not hook_visual or hook_visual == "none":
+            continue
+        risk = _latest_tag_value(ctx, seg, "risk_level") or seg.get("risk_level")
+        ai_anchor_trusted = seg.get("source_type") == "ai_generated" and seg.get("anchor_match_level") == "strict_pass"
+        if risk not in {"low", None} and not ai_anchor_trusted and not _trusted_real_first_segment(ctx, seg):
+            continue
+        candidates.append(seg)
+    shortfall = max(0, required_count - len(candidates))
+    if shortfall > 0:
+        return {"ok": False, "gap": {"product_id": product_id, "missing_role": "hero", "expected_hook_visual_type": "any", "expected_segment_type": "home_lifestyle", "shortfall": shortfall, "current_candidates": len(candidates)}}
+    return {"ok": True, "gap": {}, "current_candidates": len(candidates)}
 
 
 def _latest_tag_value(ctx: SkillContext, segment: dict, key: str):
@@ -1236,6 +1328,39 @@ def _latest_tag_value(ctx: SkillContext, segment: dict, key: str):
         return None
     rows = ctx.repo.list_where("segment_tags", "segment_id=? ORDER BY id DESC LIMIT 1", (segment["segment_id"],))
     return rows[0].get(key) if rows else None
+
+
+def _load_render_scoring_config(ctx: SkillContext) -> dict[str, Any]:
+    path = ctx.settings.root_dir / "config" / "render_scoring.yaml"
+    if not path.exists():
+        return {}
+    with open(path, "r", encoding="utf-8") as fh:
+        return yaml.safe_load(fh) or {}
+
+
+def _hook_score_weights(ctx: SkillContext) -> dict[str, float]:
+    """钩子强度加分权重（改动1）。全部走 config，不硬编码。
+
+    回归开关：config 里 strong/medium 置 0 即退化为改动前行为。
+    """
+    cfg = _load_render_scoring_config(ctx)
+    return dict(cfg.get("hook_score_weights") or {})
+
+
+def _build_template_constraints(template: TemplateSpec) -> dict[str, Any]:
+    """从模板 selection_policy 组装选片 constraints（改动3 预埋，改动1 消费 hook_weight_scale）。
+
+    零侵入：种草模板 selection_policy 为空 dict → 返回空 dict →
+    _select_segments 收到空 constraints，与改动前（传 None→{}）完全等价。
+    投流模板经此把 hook_weight_scale / require_hook_visual_first_slot 注入选片。
+    """
+    sp = getattr(template, "selection_policy", {}) or {}
+    constraints: dict[str, Any] = {}
+    if sp.get("hook_weight_scale") is not None:
+        constraints["hook_weight_scale"] = sp["hook_weight_scale"]
+    if sp.get("require_hook_visual_first_slot"):
+        constraints["require_hook_visual_first_slot"] = True
+    return constraints
 
 
 def _text_overlay_risk(ctx: SkillContext, segment: dict) -> str:
@@ -1413,6 +1538,7 @@ def _template_from_spec(spec: dict[str, Any], slots: list[dict[str, Any]]) -> Te
         risk_policy=dict(spec.get("risk_policy") or {}),
         source_policy=dict(spec.get("source_policy") or {}),
         bgm_profile=dict(spec.get("bgm_profile") or {}),
+        selection_policy=dict(spec.get("selection_policy") or {}),
     )
 
 

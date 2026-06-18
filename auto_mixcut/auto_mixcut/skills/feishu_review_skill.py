@@ -134,6 +134,7 @@ class FeishuReviewSkill:
                     "AI镜头用途": row.get("primary_shot_role"),
                     "AI商品可见度": row.get("product_visibility"),
                     "AI首镜强度": row.get("hook_strength"),
+                    "AI视觉钩子类型": row.get("hook_visual_type"),
                     "AI可混剪判断": row.get("mixcut_usability"),
                     "AI风险等级": row.get("risk_level"),
                     "AI置信度": row.get("confidence"),
@@ -234,7 +235,7 @@ class FeishuReviewSkill:
         base = latest[0] if latest else {}
         base.update(overrides)
         base.update({"segment_id": segment_id, "tag_source": "human", "reviewer_id": reviewer_id, "reviewed_at": datetime.utcnow().isoformat(timespec="seconds"), "needs_human_review": 0})
-        allowed = {k: base.get(k) for k in ["segment_id", "tag_source", "primary_shot_role", "secondary_roles_json", "product_visibility", "hook_strength", "mixcut_usability", "risk_level", "confidence", "needs_human_review", "reason", "reviewer_id", "reviewed_at"]}
+        allowed = {k: base.get(k) for k in ["segment_id", "tag_source", "primary_shot_role", "secondary_roles_json", "product_visibility", "hook_strength", "hook_visual_type", "mixcut_usability", "risk_level", "confidence", "needs_human_review", "reason", "reviewer_id", "reviewed_at"]}
         return self.ctx.repo.insert("segment_tags", allowed)
 
     def cleanup_expired_previews(self) -> Result:
