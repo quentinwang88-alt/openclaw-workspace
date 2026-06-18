@@ -620,14 +620,23 @@ def _anchor_brief(product_id: str, product_name: str, category: str, anchor_fiel
         or _anchor_texts(anchor_json.get("distortion_alerts"))
     )
     hard = _dedupe(core_points + must_not_change)
+    # 改动3B：从锚点卡提取 AI 分析的卖点，注入 primary_visual_result / must_show。
+    # candidate_primary_selling_points 来自 original-script-generator P1 锚点卡。
+    # 卖点经 _selling_positive_layer 融进即梦提示词 positive。
+    selling_points = _extract_selling_points(anchor_json)
+    primary_visual = "；".join(core_points[:3]) or product_name
+    must_show = core_points
+    if selling_points:
+        primary_visual = selling_points[0] or primary_visual
+        must_show = selling_points + must_show
     return {
         "material_anchor_brief": {
             "product_id": product_id,
             "display_family": CATEGORY_KEY_TO_CN.get(category, category),
             "product_subtype": _product_label(product_name, category),
             "category": category,
-            "primary_visual_result": "；".join(core_points[:3]) or product_name,
-            "must_show": core_points,
+            "primary_visual_result": primary_visual,
+            "must_show": must_show,
             "must_not_show": forbidden,
             "hard_anchors": hard,
             "display_anchors": core_points,
@@ -666,6 +675,26 @@ def _anchor_texts(value: Any, keys: tuple[str, ...] = ("anchor", "constraint", "
             if text:
                 return [text]
     return _listish(value)
+
+
+def _extract_selling_points(anchor_json: Dict[str, Any]) -> List[str]:
+    """从锚点卡提取 AI 分析的卖点（candidate_primary_selling_points）。
+
+    来自 original-script-generator P1 锚点卡。提取 selling_point 文本。
+    不做规则转译（留待 LLM 升级），直接输出中文卖点。
+    _selling_positive_layer 会以"核心视觉结果：xxx；必须出现：xxx"格式融进 prompt。
+    """
+    candidates = anchor_json.get("candidate_primary_selling_points")
+    if not candidates or not isinstance(candidates, list):
+        return []
+    result: List[str] = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        sp = _text(item.get("selling_point"))
+        if sp:
+            result.append(sp)
+    return result[:3]  # 最多 3 个卖点，避免 prompt 过长
 
 
 def _dedupe(values: List[str]) -> List[str]:

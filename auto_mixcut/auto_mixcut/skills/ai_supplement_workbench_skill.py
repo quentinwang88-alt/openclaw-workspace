@@ -237,6 +237,9 @@ def _existing_prompt_package_state(ctx: SkillContext, product_id: str) -> dict[s
         status = str(row.get("package_status") or row.get("status") or "").strip()
         result_sync = str(row.get("result_sync_status") or "").strip()
         failure = str(row.get("failure_reason") or "").strip()
+        # consumed 包已被混剪消费完毕，不算 inflight，避免阻塞新补钩子
+        if status == "consumed":
+            continue
         if row.get("generated_asset_id") or row.get("generated_segment_id"):
             inflight += 1
         elif status in AI_PACKAGE_INFLIGHT_STATUSES or result_sync in AI_PACKAGE_INFLIGHT_STATUSES:
