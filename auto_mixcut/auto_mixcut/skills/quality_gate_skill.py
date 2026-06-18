@@ -34,7 +34,9 @@ class QualityGateSkill:
         actual_duration = int(output.get("duration_ms") or 0)
         if expected_duration and abs(actual_duration - expected_duration) > 500:
             reasons.append("duration does not match render plan")
-        elif actual_duration < 12000 or actual_duration > 30000:
+        elif not expected_duration and (actual_duration < 12000 or actual_duration > 30000):
+            # 只在没有预期时长（无 output_segments）时才检查 12-30s 范围。
+            # 投流片 6-10s 有预期时长且匹配，不应被此规则拦截。
             reasons.append("duration out of supported range")
         if output.get("width") != 1080 or output.get("height") != 1920:
             reasons.append("resolution is not 1080x1920")

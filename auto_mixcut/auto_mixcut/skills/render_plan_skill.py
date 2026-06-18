@@ -70,7 +70,7 @@ class RenderPlanSkill:
     def __init__(self, ctx: SkillContext):
         self.ctx = ctx
 
-    def create_plans(self, product_id: str, count: int | None = None, fill_gap_only: bool = True) -> Result:
+    def create_plans(self, product_id: str, count: int | None = None, fill_gap_only: bool = True, template_id: str | None = None) -> Result:
         task = _task(self.ctx, product_id)
         allowed = int((task or {}).get("allowed_variant_count") or 0)
         target_total = min(count or allowed, allowed)
@@ -171,6 +171,13 @@ class RenderPlanSkill:
                 "task_sync": task_sync,
             })
         templates = _load_templates(self.ctx)
+        # 投流模板（fallback_only）指定时单独加载
+        if template_id:
+            forced = _load_template_by_id(self.ctx, template_id)
+            if forced:
+                templates = [forced]
+            else:
+                return Result.fail("TEMPLATE_NOT_FOUND", f"template {template_id} not found", {"template_id": template_id})
         product = self.ctx.repo.get("products", "product_id", product_id) or {}
         batch_id = new_id("BATCH")
         self.ctx.repo.upsert(
@@ -920,6 +927,12 @@ def _filter_constraints(ctx: SkillContext, pool: list[dict], constraints: dict, 
         filtered = [s for s in candidates if preferred.intersection(s.get("effective_roles_json") or [])]
         if filtered:
             candidates = filtered
+    # 改动3A：投流模板首镜必须有视觉钩子（hook_visual_type ≠ none/null）。
+    # 全被过滤则返回空池 → _select_segments 返回 SKIPPED_LOW_QUALITY → 触发补钩子链路。
+    # 禁静默 fallback：不偷偷降级选无钩子片。
+    if slot_index == 1 and constraints.get("require_hook_visual_first_slot"):
+        candidates = [s for s in candidates
+                      if (_latest_tag_value(ctx, s, "hook_visual_type") or "none") != "none"]
     return candidates
 
 
@@ -1516,6 +1529,26 @@ def _load_templates(ctx: SkillContext) -> list[TemplateSpec]:
             continue
         templates.append(_template_from_spec(spec, slots))
     return templates or _load_default_templates()
+
+
+def _load_template_by_id(ctx: SkillContext, template_id: str) -> TemplateSpec | None:
+    """按 ID 加载单个模板（包括 fallback_only 的投流模板）。"""
+    path = ctx.settings.root_dir / "config" / "templates.yaml"
+    if not path.exists():
+        return None
+    with open(path, "r", encoding="utf-8") as fh:
+        loaded = yaml.safe_load(fh) or {}
+    for spec in loaded.get("templates") or []:
+        if spec.get("template_id") != template_id:
+            continue
+        slots = spec.get("slots")
+        if not slots:
+            slots = [{"role": role, "duration_ms": 3000} for role in spec.get("roles") or []]
+        slots = _normalize_slots(slots, int(spec.get("duration_ms") or 15000))
+        if not slots:
+            return None
+        return _template_from_spec(spec, slots)
+    return None
 
 
 def _load_default_templates() -> list[TemplateSpec]:
