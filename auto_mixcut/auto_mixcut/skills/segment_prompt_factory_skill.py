@@ -425,6 +425,10 @@ def _build_prompt_from_bank(
         key_anchor = _product_only_key_anchor(brief, selected_anchors, family_word)
         positive_core = _product_only_anchor_core(segment_type, key_anchor, family_word)
     persona_context = {} if product_only else _resolve_persona_context(ctx, category, segment_type, brief, perturbation)
+    # 改动3B/4.11.4：卖点→视觉短语融进 positive（只取 primary_visual_result + must_show，
+    # 不取 key_visual_constraints/safe_micro_actions——那些是约束不是卖点，走 negative 侧）。
+    # 只在带人镜片段注入；product_only（纯静物）不加，避免佩戴语境卖点触发 wear_effect_leak。
+    selling_layer = "" if product_only else _selling_positive_layer(brief)
     if product_only:
         positive_parts = [
             "真实TikTok商品静物风格，单镜头一镜到底，真实光线，4秒",
@@ -441,6 +445,7 @@ def _build_prompt_from_bank(
             _grade_positive_suffix(grade),
             _person_layer(ctx, category, segment_type, local_human, persona_context),
             _perturbation_layer(perturbation),
+            selling_layer,
         ]
         motion_arc = _cn_arrow(_motion_from_bank(row, grade) or str(perturbation.get("micro_arc") or "开始静止 -> 轻微变化 -> 清楚停留"))
     negative_l1, negative_l2 = _negative_layers(ctx, bank, category_bank, category, brief, local_human, persona_context, person_framing, segment_type)
@@ -948,6 +953,22 @@ def _constraint_positive_layer(brief: dict[str, Any]) -> str:
     actions = _list(brief.get("safe_micro_actions"))
     if actions:
         parts.append("安全微动作：" + actions[0])
+    return "；".join(parts)
+
+
+def _selling_positive_layer(brief: dict[str, Any]) -> str:
+    """只取卖点相关字段融进 positive（改动3B/4.11.4）。
+
+    与 _constraint_positive_layer 的区别：不取 key_visual_constraints/safe_micro_actions，
+    避免约束性文本（如"不要完整正脸全身"）被误拼进 positive。
+    无卖点时返回空字符串，_join_prompt 会安全跳过。
+    """
+    parts = []
+    if brief.get("primary_visual_result"):
+        parts.append(f"核心视觉结果：{brief.get('primary_visual_result')}")
+    must_show = _list(brief.get("must_show"))
+    if must_show:
+        parts.append("必须出现：" + "、".join(must_show))
     return "；".join(parts)
 
 

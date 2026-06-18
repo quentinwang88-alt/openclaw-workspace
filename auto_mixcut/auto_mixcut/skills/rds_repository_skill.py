@@ -120,7 +120,7 @@ def _ensure_runtime_compatibility_columns(ctx: SkillContext) -> Result:
             "ai_gen_grade": "TEXT",
             "hook_intent": "TEXT",
         },
-        "segment_tags": {"text_overlay_risk": "TEXT", "text_language": "TEXT", "text_overlay_reason": "TEXT"},
+        "segment_tags": {"text_overlay_risk": "TEXT", "text_language": "TEXT", "text_overlay_reason": "TEXT", "hook_visual_type": "TEXT"},
         "render_plans": {
             "output_id": "TEXT",
         },
@@ -141,11 +141,18 @@ def _ensure_runtime_compatibility_columns(ctx: SkillContext) -> Result:
             "rejected_usage_count": "INTEGER DEFAULT 0",
             "last_feedback_status": "TEXT",
         },
+        "feishu_sync_records": {
+            "payload_json": "TEXT",
+        },
     }
     try:
         with ctx.repo.connect() as conn:
             for table, columns in additions.items():
-                existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+                # SQLite 用 PRAGMA table_info，MySQL 用 SHOW COLUMNS（PRAGMA 在 MySQL 上会报错）
+                if hasattr(ctx.repo, "host"):  # MySQLRepository
+                    existing = {r["Field"] for r in conn.execute(f"SHOW COLUMNS FROM {table}").fetchall()}
+                else:  # SQLiteRepository
+                    existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
                 for column, spec in columns.items():
                     if column not in existing:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {spec}")
@@ -402,6 +409,7 @@ def _ensure_mysql_core_tables(ctx: SkillContext) -> Result:
           secondary_roles_json JSON,
           product_visibility VARCHAR(64),
           hook_strength VARCHAR(64),
+          hook_visual_type VARCHAR(64),
           mixcut_usability VARCHAR(64),
           risk_level VARCHAR(64),
           confidence VARCHAR(64),
@@ -564,6 +572,7 @@ def _ensure_mysql_core_tables(ctx: SkillContext) -> Result:
           sync_status VARCHAR(64),
           expire_at DATETIME,
           cleanup_status VARCHAR(64),
+          payload_json JSON,
           created_at DATETIME,
           updated_at DATETIME
         )

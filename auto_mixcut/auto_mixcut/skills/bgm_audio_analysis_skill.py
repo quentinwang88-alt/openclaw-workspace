@@ -165,7 +165,10 @@ def _decode_audio(path: Path, sample_rate: int = 22050, max_seconds: int = 120) 
         "f32le",
         "-",
     ]
-    proc = subprocess.run(cmd, capture_output=True)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        return Result.fail("BGM_AUDIO_DECODE_TIMEOUT", "ffmpeg decode timed out (60s)", {"path": str(path)})
     if proc.returncode != 0:
         return Result.fail("BGM_AUDIO_DECODE_FAILED", proc.stderr.decode("utf-8", errors="ignore"), {"path": str(path)})
     samples = np.frombuffer(proc.stdout, dtype=np.float32)

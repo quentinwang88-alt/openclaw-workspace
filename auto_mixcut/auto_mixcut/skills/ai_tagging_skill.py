@@ -174,6 +174,7 @@ class AITaggingSkill:
                 "secondary_roles_json": tag["secondary_roles"],
                 "product_visibility": tag["product_visibility"],
                 "hook_strength": tag["hook_strength"],
+                "hook_visual_type": tag.get("hook_visual_type", "none"),
                 "mixcut_usability": tag["mixcut_usability"],
                 "risk_level": tag["risk_level"],
                 "text_overlay_risk": tag["text_overlay_risk"],

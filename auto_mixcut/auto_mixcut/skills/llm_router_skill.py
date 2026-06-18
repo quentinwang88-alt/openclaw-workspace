@@ -577,6 +577,7 @@ def _mock_response(call_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             "secondary_roles": secondary,
             "product_visibility": "high" if role in {"hero", "detail", "result"} else "medium",
             "hook_strength": "strong" if role in {"hero", "result"} else "medium",
+            "hook_visual_type": {"hero": "product_reveal", "detail": "detail_macro", "result": "effect_reveal", "scene": "none", "ending": "none"}[role],
             "mixcut_usability": "yes",
             "risk_level": "low",
             "confidence": "high",
