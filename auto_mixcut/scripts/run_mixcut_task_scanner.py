@@ -233,7 +233,9 @@ def release_lock(ctx: Any, product_id: str, shop_id: str, owner: str) -> None:
 
 
 def _guard_command(item: dict[str, Any]) -> list[str]:
-    cmd = [sys.executable, str(ROOT / "scripts" / "run_mixcut_guard.py"), "--product-id", str(item["product_id"]), "--max-rounds", "1"]
+    # max-rounds=3：让新商品在一个 scanner 周期内多跑几轮（probe→segment→tag→render），
+    # 避免 --max-rounds 1 时新商品要等好几个 2 小时周期才出成片。
+    cmd = [sys.executable, str(ROOT / "scripts" / "run_mixcut_guard.py"), "--product-id", str(item["product_id"]), "--max-rounds", "3"]
     if item.get("target"):
         cmd.extend(["--target", str(int(item["target"]))])
     if item.get("product_name"):
