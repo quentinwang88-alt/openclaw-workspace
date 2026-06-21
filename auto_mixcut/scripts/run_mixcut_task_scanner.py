@@ -141,6 +141,24 @@ def run_candidate(item: dict[str, Any], args: argparse.Namespace) -> dict[str, A
     RDSRepositorySkill(ctx).init_db()
     product_id = str(item.get("product_id") or "")
     shop_id = str(item.get("shop_id") or "")
+    field_issue = _candidate_field_issue(item)
+    if field_issue:
+        finished_at = datetime.utcnow()
+        _update_feishu_record(
+            item.get("record_id"),
+            {
+                "混剪任务状态": "阻断需人工处理",
+                "混剪最后运行时间": datetime_cell(finished_at),
+                "混剪阻断原因": field_issue,
+            },
+        )
+        return {
+            "success": True,
+            "product_id": product_id,
+            "status": "skipped",
+            "reason": "missing_required_fields",
+            "message": field_issue,
+        }
     owner = _owner()
     lock = acquire_lock(ctx, product_id, shop_id, owner, ttl_minutes=int(args.lock_ttl_minutes or 60))
     if not lock.get("acquired"):
@@ -181,6 +199,25 @@ def run_candidate(item: dict[str, Any], args: argparse.Namespace) -> dict[str, A
         }
     finally:
         release_lock(build_context(), product_id, shop_id, owner)
+
+
+def _candidate_field_issue(item: dict[str, Any]) -> str:
+    missing: list[str] = []
+    if not str(item.get("product_name") or "").strip():
+        missing.append("商品名称")
+    if not str(item.get("market") or "").strip():
+        missing.append("市场")
+    if not str(item.get("category") or "").strip():
+        missing.append("归一类目/类目")
+    try:
+        target = int(item.get("target") or 0)
+    except (TypeError, ValueError):
+        target = 0
+    if target <= 0:
+        missing.append("目标混剪数量/目标生成数量")
+    if not missing:
+        return ""
+    return "缺少必填字段：" + "、".join(missing) + "，无法创建/续跑混剪任务"
 
 
 def acquire_lock(ctx: Any, product_id: str, shop_id: str, owner: str, ttl_minutes: int) -> dict[str, Any]:
@@ -266,6 +303,7 @@ def _run(cmd: list[str], timeout: int) -> dict[str, Any]:
         env.pop(key, None)
     env.setdefault("AUTO_MIXCUT_DB_PROVIDER", "mysql")
     env.setdefault("AUTO_MIXCUT_OSS_PROVIDER", "aliyun")
+    _ensure_tool_path(env)
     try:
         proc = subprocess.run(cmd, cwd=ROOT, env=env, text=True, capture_output=True, timeout=timeout)
         return {
@@ -276,6 +314,22 @@ def _run(cmd: list[str], timeout: int) -> dict[str, Any]:
         }
     except subprocess.TimeoutExpired as exc:
         return {"status": "timeout", "timeout_seconds": timeout, "stdout": (exc.stdout or "")[-3000:], "stderr": (exc.stderr or "")[-3000:]}
+
+
+def _ensure_tool_path(env: dict[str, str]) -> None:
+    extra = [
+        str(Path.home() / ".local" / "bin"),
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+    ]
+    current = env.get("PATH") or ""
+    parts = [item for item in current.split(os.pathsep) if item]
+    for item in reversed(extra):
+        if item not in parts:
+            parts.insert(0, item)
+    env["PATH"] = os.pathsep.join(parts)
 
 
 def _mark_task_started(ctx: Any, product_id: str, owner: str, started_at: datetime) -> None:

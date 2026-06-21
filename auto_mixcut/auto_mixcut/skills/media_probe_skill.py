@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from auto_mixcut.core.result import Result
@@ -23,8 +24,10 @@ class MediaProbeSkill:
             )
         else:
             assets = self.ctx.repo.list_where("assets", "product_id=? AND probe_status!='done'", (product_id,))
+        limit = _probe_asset_limit()
+        selected = assets[:limit] if limit > 0 else assets
         results = []
-        for asset in assets:
+        for asset in selected:
             res = self.probe_asset(asset["asset_id"])
             results.append(res.to_dict())
         failed = [item for item in results if not item.get("success")]
@@ -36,7 +39,14 @@ class MediaProbeSkill:
                 {"product_id": product_id, "count": len(results), "failed_count": len(failed), "results": results},
             )
         self.ctx.repo.update("content_tasks", "product_id", product_id, {"task_status": "PROBED"})
-        return Result.ok({"count": len(results), "results": results})
+        return Result.ok({
+            "count": len(results),
+            "asset_count": len(assets),
+            "pending_before_count": len(assets),
+            "remaining_pending_count": max(0, len(assets) - len(selected)),
+            "limit": limit,
+            "results": results,
+        })
 
     def probe_asset(self, asset_id: str) -> Result:
         asset = self.ctx.repo.get("assets", "asset_id", asset_id)
@@ -70,3 +80,14 @@ class MediaProbeSkill:
             },
         )
         return Result.ok({"asset_id": asset_id, **data})
+
+
+def _probe_asset_limit() -> int:
+    for key in ("AUTO_MIXCUT_PROBE_LIMIT", "AUTO_MIXCUT_GUARD_PROBE_LIMIT"):
+        try:
+            value = int(os.environ.get(key, "0") or "0")
+        except ValueError:
+            value = 0
+        if value > 0:
+            return value
+    return 0

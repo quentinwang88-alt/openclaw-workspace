@@ -315,7 +315,6 @@ def _submit_command(product_id: str, budget: dict[str, Any]) -> list[str]:
         "node",
         str(WORKSPACE / "skills" / "jimeng-video-generator" / "segment-package-worker.js"),
         "--submit-only",
-        "--one-shot",
         f"--product-id={product_id}",
         f"--limit={limit}",
         f"--max-submit-needed={needed}",
@@ -343,6 +342,8 @@ def _run(cmd: list[str], cwd: Path, dry_run: bool, timeout: int, env_extra: dict
     env.update(env_extra or {})
     env.setdefault("AUTO_MIXCUT_DB_PROVIDER", "mysql")
     env.setdefault("AUTO_MIXCUT_OSS_PROVIDER", "aliyun")
+    env.setdefault("IMINI_ALLOW_REAL_SUBMIT", "1")
+    _ensure_tool_path(env)
     for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
         env.pop(key, None)
     try:
@@ -363,6 +364,22 @@ def _timeout(name: str, default: int) -> int:
         return max(30, int(os.environ.get(name, str(default)) or default))
     except ValueError:
         return default
+
+
+def _ensure_tool_path(env: dict[str, str]) -> None:
+    extra = [
+        str(Path.home() / ".local" / "bin"),
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+    ]
+    current = env.get("PATH") or ""
+    parts = [item for item in current.split(os.pathsep) if item]
+    for item in reversed(extra):
+        if item not in parts:
+            parts.insert(0, item)
+    env["PATH"] = os.pathsep.join(parts)
 
 
 def _ok(item: dict[str, Any]) -> bool:

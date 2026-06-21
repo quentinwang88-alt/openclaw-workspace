@@ -576,7 +576,6 @@ def _ai_segment_worker_command(product_id: str, limit: int, max_submit_needed: i
         "node",
         str(ROOT.parent / "skills" / "jimeng-video-generator" / "segment-package-worker.js"),
         "--submit-only",
-        "--one-shot",
         f"--product-id={product_id}",
         f"--limit={max(1, int(limit or 1))}",
         f"--max-submit-needed={max(1, int(max_submit_needed or limit or 1))}",
