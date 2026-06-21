@@ -12,28 +12,11 @@ import requests
 
 from auto_mixcut.core.result import Result
 
+from .ai_supplement_gateway_skill import AISupplementGatewaySkill, submit_budget_from_state
 from .context import SkillContext
 
 
 APPROVAL_PENDING_STATUSES = {"approval_requested", "needs_submit_retry", "created", "approved"}
-READY_TO_SUBMIT_PACKAGE_STATUSES = {"created", "待提单", "已创建", "failed", "失败"}
-IN_FLIGHT_PACKAGE_STATUSES = {
-    "submitted",
-    "generating",
-    "returned",
-    "imported",
-    "consumed",
-    "已提单",
-    "生成中",
-    "已生成",
-    "已回流",
-    "质检中",
-    "质检通过",
-    "uploaded",
-    "downloaded",
-    "rendering",
-    "observing",
-}
 
 
 def daytime_approval_required(ctx: SkillContext, product_id: str) -> bool:
@@ -240,8 +223,7 @@ def pending_ai_supplement_products(ctx: SkillContext, include_waiting_return: bo
         remaining = int(task.get("target_remaining_variant_count") or max(0, target - actual))
         if remaining <= 0:
             continue
-        packages = ctx.repo.list_where("segment_prompt_packages", "product_id=?", (product_id,))
-        package_state = _package_state(packages)
+        package_state = AISupplementGatewaySkill(ctx).package_state(product_id)
         ai_status = str(task.get("ai_supplement_status") or "")
         next_action = str(task.get("next_action") or "")
         pipeline_status = str(task.get("pipeline_status") or "")
@@ -285,26 +267,6 @@ def should_submit_now(ctx: SkillContext, product_id: str, mode: str) -> bool:
     if not daytime_approval_required(ctx, product_id):
         return True
     return False
-
-
-def _package_state(packages: list[dict[str, Any]]) -> dict[str, int]:
-    ready = 0
-    inflight = 0
-    imported = 0
-    for package in packages:
-        status = str(package.get("package_status") or package.get("status") or "").strip()
-        if package.get("generated_asset_id") or package.get("generated_segment_id") or status in {"imported", "consumed"}:
-            imported += 1
-        elif status in IN_FLIGHT_PACKAGE_STATUSES:
-            inflight += 1
-        elif status in READY_TO_SUBMIT_PACKAGE_STATUSES:
-            ready += 1
-    return {
-        "package_count": len(packages),
-        "ready_to_submit_count": ready,
-        "inflight_count": inflight,
-        "imported_package_count": imported,
-    }
 
 
 def _approval_message(product: dict[str, Any], task: dict[str, Any], budget: dict[str, Any], approval_command: str) -> str:
@@ -443,16 +405,7 @@ def _submit_command(product_id: str, budget: dict[str, Any]) -> list[str]:
 
 def _budget_from_item(item: dict[str, Any]) -> dict[str, int]:
     remaining = max(1, int(item.get("remaining_count") or 1))
-    ready = int(item.get("ready_to_submit_count") or 0)
-    inflight = int(item.get("inflight_count") or 0)
-    submit_limit = min(ready, remaining) if ready > 0 else max(0, remaining - inflight)
-    return {
-        "remaining_count": remaining,
-        "target_remaining": remaining,
-        "ready_to_submit_count": ready,
-        "ai_submit_inflight_count": inflight,
-        "submit_limit": max(0, submit_limit),
-    }
+    return submit_budget_from_state(remaining, item)
 
 
 def _approval_slot() -> str:

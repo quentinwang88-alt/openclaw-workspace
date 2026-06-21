@@ -7,6 +7,7 @@ from typing import Any
 
 from auto_mixcut.core.result import Result
 
+from .ai_supplement_gateway_skill import AISupplementGatewaySkill, is_recoverable_submit_failure
 from .capacity_counter_skill import CapacityCounterSkill
 from .context import SkillContext
 from .feishu_review_skill import FeishuReviewSkill
@@ -35,8 +36,8 @@ class AISupplementWorkbenchSkill:
 
         existing_state = _existing_prompt_package_state(self.ctx, product_id)
         requested_total = _requested_package_count(gap_text, max_packages)
-        available_existing = existing_state["inflight_count"] + existing_state["ready_to_submit_count"] + existing_state["recoverable_failed_count"]
-        if existing_state["inflight_count"] >= requested_total:
+        available_existing = existing_state["active_package_count"]
+        if existing_state["active_package_count"] >= requested_total:
             data = {
                 "product_id": product_id,
                 "skipped": True,
@@ -44,7 +45,7 @@ class AISupplementWorkbenchSkill:
                 "requested_total": requested_total,
                 "existing_state": existing_state,
             }
-            _update_task_ai_supplement(self.ctx, task, "created", existing_state["inflight_count"], data)
+            _update_task_ai_supplement(self.ctx, task, "created", existing_state["active_package_count"], data)
             return Result.ok(data)
         if available_existing >= requested_total and (existing_state["ready_to_submit_count"] or existing_state["recoverable_failed_count"]):
             data = {
@@ -206,59 +207,21 @@ def _supplement_state_summary(gap_text: str, created: list, skipped: list, faile
     }
 
 
-AI_PACKAGE_INFLIGHT_STATUSES = {
-    "submitted",
-    "generating",
-    "returned",
-    "imported",
-    "已提单",
-    "生成中",
-    "已生成",
-    "已回流",
-    "质检中",
-    "质检通过",
-    "uploaded",
-    "downloaded",
-    "rendering",
-    "observing",
-}
-
-
-AI_PACKAGE_READY_TO_SUBMIT_STATUSES = {"created", "待提单", "已创建"}
-
-
 def _existing_prompt_package_state(ctx: SkillContext, product_id: str) -> dict[str, int]:
-    inflight = 0
-    ready_to_submit = 0
-    recoverable_failed = 0
-    total = 0
-    for row in ctx.repo.list_where("segment_prompt_packages", "product_id=?", (product_id,)):
-        total += 1
-        status = str(row.get("package_status") or row.get("status") or "").strip()
-        result_sync = str(row.get("result_sync_status") or "").strip()
-        failure = str(row.get("failure_reason") or "").strip()
-        # consumed 包已被混剪消费完毕，不算 inflight，避免阻塞新补钩子
-        if status == "consumed":
-            continue
-        if row.get("generated_asset_id") or row.get("generated_segment_id"):
-            inflight += 1
-        elif status in AI_PACKAGE_INFLIGHT_STATUSES or result_sync in AI_PACKAGE_INFLIGHT_STATUSES:
-            inflight += 1
-        elif status in AI_PACKAGE_READY_TO_SUBMIT_STATUSES or result_sync in AI_PACKAGE_READY_TO_SUBMIT_STATUSES:
-            ready_to_submit += 1
-        elif status in {"failed", "失败"} and _is_recoverable_submit_failure(failure):
-            recoverable_failed += 1
+    state = AISupplementGatewaySkill(ctx).package_state(product_id)
     return {
-        "total_count": total,
-        "inflight_count": inflight,
-        "ready_to_submit_count": ready_to_submit,
-        "recoverable_failed_count": recoverable_failed,
+        "total_count": state["package_count"],
+        "inflight_count": state["inflight_count"],
+        "ready_to_submit_count": state["ready_to_submit_count"],
+        "recoverable_failed_count": state["recoverable_failed_count"],
+        "imported_package_count": state["imported_package_count"],
+        "consumed_package_count": state["consumed_package_count"],
+        "active_package_count": state["active_package_count"],
     }
 
 
 def _is_recoverable_submit_failure(text: str) -> bool:
-    lower = text.lower()
-    return any(token in lower for token in ["imini_allow_real_submit", "real_submit_disabled", "真实提交默认关闭"])
+    return is_recoverable_submit_failure(text)
 
 
 def _requested_package_count(gap_text: str, max_packages: int) -> int:

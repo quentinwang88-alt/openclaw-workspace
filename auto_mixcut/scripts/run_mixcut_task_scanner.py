@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
 from auto_mixcut.adapters.feishu import AutoMixcutFeishuClient, datetime_cell  # noqa: E402
 from auto_mixcut.core.bootstrap import build_context  # noqa: E402
 from auto_mixcut.skills.feishu_review_skill import sync_product_task_best_effort  # noqa: E402
+from auto_mixcut.skills.mixcut_state_machine_skill import decide_mixcut_state  # noqa: E402
 from auto_mixcut.skills.rds_repository_skill import RDSRepositorySkill  # noqa: E402
 
 
@@ -393,20 +394,7 @@ def _feishu_status_fields(task: dict[str, Any] | None, finished_at: datetime) ->
 
 
 def _display_state(task: dict[str, Any]) -> str:
-    pipeline_status = str(task.get("pipeline_status") or "")
-    next_action = str(task.get("next_action") or "")
-    task_status = str(task.get("task_status") or "")
-    if pipeline_status == "DONE" or task_status == "DONE":
-        return "已完成"
-    if pipeline_status == "BLOCKED":
-        return "阻断需人工处理"
-    if pipeline_status == "WAITING_AI_RETURN" or next_action == "WAIT_AI_SEGMENT_RETURN":
-        return "等待AI回流"
-    if next_action == "WAIT_AI_SUPPLEMENT_APPROVAL":
-        return "等待AI补素材"
-    if pipeline_status in {"RUNNING", "READY_TO_CONTINUE"} or next_action in {"GUARD_PASS_STARTED", "RUN_GUARD_AGAIN", "RUN_AI_SEGMENT_WORKER"}:
-        return "运行中"
-    return ""
+    return decide_mixcut_state(task).display_state
 
 
 def _update_feishu_record(record_id: Any, fields: dict[str, Any]) -> None:
@@ -429,29 +417,22 @@ def _latest_task(ctx: Any, product_id: str) -> dict[str, Any] | None:
 
 
 def _task_done(task: dict[str, Any] | None) -> bool:
-    if not task:
-        return False
-    return str(task.get("pipeline_status") or "") == "DONE" or str(task.get("task_status") or "") == "DONE"
+    return decide_mixcut_state(task).is_done
 
 
 def _rds_needs_scanner(task: dict[str, Any] | None) -> bool:
-    if not task:
-        return False
-    pipeline_status = str(task.get("pipeline_status") or "")
-    next_action = str(task.get("next_action") or "")
-    return pipeline_status in {"RUNNING", "READY_TO_CONTINUE", "WAITING_AI_RETURN"} or next_action in {
-        "RUN_GUARD_AGAIN",
-        "WAIT_AI_SEGMENT_RETURN",
-        "RUN_AI_SEGMENT_WORKER",
-    }
+    return decide_mixcut_state(task).should_scan_from_rds
 
 
 def _should_run_ai_return_heartbeat(ctx: Any, item: dict[str, Any]) -> bool:
     task = _latest_task(ctx, str(item.get("product_id") or ""))
     state = str(item.get("feishu_state") or "")
-    pipeline_status = str((task or {}).get("pipeline_status") or item.get("pipeline_status") or "")
-    next_action = str((task or {}).get("next_action") or item.get("next_action") or "")
-    return state == "等待AI回流" or pipeline_status == "WAITING_AI_RETURN" or next_action == "WAIT_AI_SEGMENT_RETURN"
+    fallback = {
+        "pipeline_status": item.get("pipeline_status"),
+        "next_action": item.get("next_action"),
+        "task_status": item.get("task_status"),
+    }
+    return decide_mixcut_state(task or fallback, feishu_state=state).scanner_mode == "ai_return_heartbeat"
 
 
 def _next_retry_in_future(task: dict[str, Any] | None, now: datetime) -> bool:

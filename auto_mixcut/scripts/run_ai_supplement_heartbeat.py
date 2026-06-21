@@ -22,6 +22,7 @@ from auto_mixcut.skills.ai_supplement_scheduler_skill import (  # noqa: E402
     request_daytime_batch_approval,
     should_submit_now,
 )
+from auto_mixcut.skills.ai_supplement_gateway_skill import AISupplementGatewaySkill, submit_budget_from_state  # noqa: E402
 from auto_mixcut.skills.rds_repository_skill import RDSRepositorySkill  # noqa: E402
 
 
@@ -158,7 +159,10 @@ def process_nightly_product(ctx: Any, product_id: str, args: argparse.Namespace)
 
 def submit_product(ctx: Any, product_id: str, dry_run: bool = False) -> dict[str, Any]:
     pending = [item for item in pending_ai_supplement_products(ctx) if item["product_id"] == product_id]
-    budget = _budget_from_pending(pending[0] if pending else {"remaining_count": 1, "ready_to_submit_count": 1})
+    if pending:
+        budget = _budget_from_pending(pending[0])
+    else:
+        budget = AISupplementGatewaySkill(ctx).submit_budget(product_id, remaining_count=1, configured_limit=1)
     if int(budget.get("submit_limit") or 0) <= 0:
         return {
             "success": True,
@@ -224,7 +228,7 @@ def _task_state(ctx: Any, product_id: str) -> dict[str, Any]:
     rows = ctx.repo.list_where("content_tasks", "product_id=? ORDER BY id DESC", (product_id,))
     task = rows[0] if rows else {}
     pending = [item for item in pending_ai_supplement_products(ctx) if item["product_id"] == product_id]
-    package_state = pending[0] if pending else {}
+    package_state = pending[0] if pending else AISupplementGatewaySkill(ctx).package_state(product_id)
     return {
         "task_id": task.get("task_id"),
         "target_count": task.get("requested_variant_count"),
@@ -323,16 +327,7 @@ def _submit_command(product_id: str, budget: dict[str, Any]) -> list[str]:
 
 def _budget_from_pending(item: dict[str, Any]) -> dict[str, int]:
     remaining = max(1, int(item.get("remaining_count") or 1))
-    ready = int(item.get("ready_to_submit_count") or 0)
-    inflight = int(item.get("inflight_count") or 0)
-    submit_limit = min(ready, remaining) if ready > 0 else max(0, remaining - inflight)
-    return {
-        "remaining_count": remaining,
-        "target_remaining": remaining,
-        "ready_to_submit_count": ready,
-        "ai_submit_inflight_count": inflight,
-        "submit_limit": max(0, submit_limit),
-    }
+    return submit_budget_from_state(remaining, item)
 
 
 def _run(cmd: list[str], cwd: Path, dry_run: bool, timeout: int, env_extra: dict[str, str] | None = None) -> dict[str, Any]:

@@ -26,6 +26,7 @@ from auto_mixcut.core.result import Result  # noqa: E402
 from auto_mixcut.skills.capacity_counter_skill import CapacityCounterSkill  # noqa: E402
 from auto_mixcut.skills.ai_supplement_workbench_skill import AISupplementWorkbenchSkill  # noqa: E402
 from auto_mixcut.skills.ai_supplement_scheduler_skill import daytime_approval_required, queue_daytime_approval  # noqa: E402
+from auto_mixcut.skills.ai_supplement_gateway_skill import AISupplementGatewaySkill  # noqa: E402
 from auto_mixcut.skills.ai_anchor_check_skill import AIAnchorCheckSkill  # noqa: E402
 from auto_mixcut.skills.ai_generated_consistency_skill import AIGeneratedConsistencySkill  # noqa: E402
 from auto_mixcut.skills.ai_generation_qc_skill import _basic_qc  # noqa: E402
@@ -33,6 +34,8 @@ from auto_mixcut.skills.ai_tagging_skill import AITaggingSkill  # noqa: E402
 from auto_mixcut.skills.effective_role_skill import EffectiveRoleSkill  # noqa: E402
 from auto_mixcut.skills.frame_sample_skill import FrameSampleSkill  # noqa: E402
 from auto_mixcut.skills.media_probe_skill import MediaProbeSkill  # noqa: E402
+from auto_mixcut.skills.mixcut_state_machine_skill import guard_start_status as decide_guard_start_status  # noqa: E402
+from auto_mixcut.skills.pipeline_run_skill import PipelineRunSkill  # noqa: E402
 from auto_mixcut.skills.product_anchor_skill import ProductAnchorSkill  # noqa: E402
 from auto_mixcut.skills.rds_repository_skill import RDSRepositorySkill  # noqa: E402
 from auto_mixcut.skills.segment_fingerprint_skill import SegmentFingerprintSkill  # noqa: E402
@@ -421,13 +424,7 @@ def _guard_ai_return_timeout() -> int:
 
 
 def _guard_start_status(detail: dict[str, Any]) -> tuple[str, str]:
-    if (
-        str(detail.get("ai_supplement_status") or "") == "created"
-        and int(detail.get("remaining_count") or 0) > 0
-        and int(detail.get("first_slot_remaining_capacity") or 0) <= 0
-    ):
-        return "WAITING_AI_RETURN", "CHECK_AI_RETURN_THEN_CONTINUE"
-    return "RUNNING", "GUARD_PASS_STARTED"
+    return decide_guard_start_status(detail)
 
 
 def _maybe_create_ai_supplement_for_capacity_gap(ctx, product_id: str, detail: dict[str, Any]) -> dict[str, Any]:
@@ -582,24 +579,6 @@ def _ai_segment_worker_command(product_id: str, limit: int, max_submit_needed: i
     ]
 
 
-AI_SUBMIT_INFLIGHT_STATUSES = {
-    "submitted",
-    "generating",
-    "returned",
-    "imported",
-    "已提单",
-    "生成中",
-    "已生成",
-    "已回流",
-    "质检中",
-    "质检通过",
-    "uploaded",
-    "downloaded",
-    "rendering",
-    "observing",
-}
-
-
 def _ai_submit_budget(ctx, product_id: str) -> dict[str, int]:
     try:
         configured_limit = max(1, int(os.environ.get("AUTO_MIXCUT_GUARD_AI_SUBMIT_LIMIT", "5") or "5"))
@@ -607,27 +586,11 @@ def _ai_submit_budget(ctx, product_id: str) -> dict[str, int]:
         configured_limit = 5
     detail = _status_detail(ctx, product_id, None)
     target_remaining = int(detail.get("target_remaining_variant_count") or detail.get("remaining_count") or 0)
-    inflight = _ai_inflight_package_count(ctx, product_id)
-    needed_after_inflight = max(0, target_remaining - inflight)
-    return {
-        "target_remaining": target_remaining,
-        "ai_submit_inflight_count": inflight,
-        "needed_after_inflight": needed_after_inflight,
-        "submit_limit": min(configured_limit, needed_after_inflight),
-    }
+    return AISupplementGatewaySkill(ctx).submit_budget(product_id, remaining_count=target_remaining, configured_limit=configured_limit)
 
 
 def _ai_inflight_package_count(ctx, product_id: str) -> int:
-    count = 0
-    for row in ctx.repo.list_where("segment_prompt_packages", "product_id=?", (product_id,)):
-        status = str(row.get("package_status") or row.get("status") or "").strip()
-        result_sync = str(row.get("result_sync_status") or "").strip()
-        if row.get("generated_asset_id") or row.get("generated_segment_id"):
-            count += 1
-            continue
-        if status in AI_SUBMIT_INFLIGHT_STATUSES or result_sync in AI_SUBMIT_INFLIGHT_STATUSES:
-            count += 1
-    return count
+    return int(AISupplementGatewaySkill(ctx).package_state(product_id).get("inflight_count") or 0)
 
 
 def _guard_ai_submit_timeout() -> int:
@@ -887,8 +850,19 @@ def _run_incremental_postprocess(ctx, product_id: str, source_types: list[str] |
         planned_steps.extend(postprocess_steps)
     for name, fn in planned_steps:
         _guard_log("step_start", product_id=product_id, step=name, source_types=source_types)
-        res = fn()
+        step_run_id = _start_guard_step_run(
+            ctx,
+            product_id,
+            f"guard.{name}",
+            detail={"source_types": source_types, "material_only": material_only, "include_material_steps": include_material_steps},
+        )
+        try:
+            res = fn()
+        except Exception as exc:
+            _fail_guard_step_run(ctx, step_run_id, "GUARD_STEP_EXCEPTION", str(exc), {"step": name, "source_types": source_types})
+            raise
         steps.append({"step": name, **res.to_dict()})
+        _finish_guard_step_run(ctx, step_run_id, res, detail=_compact_step_run_detail(name, res))
         _guard_log("step_done", product_id=product_id, step=name, success=res.success)
         if not res.success:
             return Result.fail(
@@ -982,7 +956,7 @@ def _sample_missing_frames(ctx, product_id: str, source_types: list[str]) -> Res
         _guard_log("segment_step_start", product_id=product_id, step="frame_sample", segment_id=segment_id, attempt=sampled_or_attempted, limit=limit)
         try:
             if _guard_segment_subprocess_enabled():
-                res = _run_segment_guard_step("frame_sample", segment_id, timeout_seconds)
+                res = _run_segment_guard_step("frame_sample", segment_id, timeout_seconds, product_id=product_id, ctx=ctx)
             else:
                 with _guard_timeout(timeout_seconds):
                     res = skill.sample_segment(segment_id)
@@ -1034,7 +1008,7 @@ def _fingerprint_missing(ctx, product_id: str, source_types: list[str]) -> Resul
         _guard_log("segment_step_start", product_id=product_id, step="fingerprint", segment_id=segment_id, attempt=attempted, limit=limit)
         try:
             if _guard_segment_subprocess_enabled():
-                res = _run_segment_guard_step("fingerprint", segment_id, timeout_seconds)
+                res = _run_segment_guard_step("fingerprint", segment_id, timeout_seconds, product_id=product_id, ctx=ctx)
             else:
                 with _guard_timeout(timeout_seconds):
                     res = skill.fingerprint_segment(segment_id)
@@ -1143,7 +1117,7 @@ def _poll_missing_tags(ctx, product_id: str, source_types: list[str], force_segm
         _guard_log("segment_step_start", product_id=product_id, step="tag_poll", segment_id=segment_id, timeout_seconds=remaining_timeout)
         try:
             if _guard_segment_subprocess_enabled():
-                res = _run_segment_guard_step("tag_poll", segment_id, remaining_timeout, product_id=product_id, index=idx, force=False)
+                res = _run_segment_guard_step("tag_poll", segment_id, remaining_timeout, product_id=product_id, index=idx, force=False, ctx=ctx)
             else:
                 tagger = tagger or AITaggingSkill(ctx)
                 with _guard_timeout(remaining_timeout):
@@ -1197,7 +1171,7 @@ def _poll_tag_segments_parallel(ctx, product_id: str, runnable: list[tuple[int, 
         for idx, segment, timeout_seconds in runnable:
             segment_id = str(segment.get("segment_id") or "")
             _guard_log("segment_step_queued", product_id=product_id, step="tag_poll", segment_id=segment_id, timeout_seconds=timeout_seconds, parallel=True)
-            futures[executor.submit(_poll_tag_segment_subprocess, product_id, segment_id, idx, timeout_seconds, False)] = (idx, segment_id, timeout_seconds)
+            futures[executor.submit(_poll_tag_segment_subprocess, ctx, product_id, segment_id, idx, timeout_seconds, False)] = (idx, segment_id, timeout_seconds)
         for future in as_completed(futures):
             idx, segment_id, timeout_seconds = futures[future]
             try:
@@ -1219,9 +1193,9 @@ def _poll_tag_segments_parallel(ctx, product_id: str, runnable: list[tuple[int, 
     return [results_by_index[idx] for idx, _, _ in runnable if idx in results_by_index]
 
 
-def _poll_tag_segment_subprocess(product_id: str, segment_id: str, index: int, timeout_seconds: int, force: bool) -> dict[str, Any]:
+def _poll_tag_segment_subprocess(ctx, product_id: str, segment_id: str, index: int, timeout_seconds: int, force: bool) -> dict[str, Any]:
     _guard_log("segment_step_start", product_id=product_id, step="tag_poll", segment_id=segment_id, timeout_seconds=timeout_seconds, parallel=True)
-    res = _run_segment_guard_step("tag_poll", segment_id, timeout_seconds, product_id=product_id, index=index, force=force)
+    res = _run_segment_guard_step("tag_poll", segment_id, timeout_seconds, product_id=product_id, index=index, force=force, ctx=ctx)
     return res.data if res.success else {"status": "failed", "segment_id": segment_id, "error": res.to_dict()}
 
 
@@ -1257,8 +1231,11 @@ def _compute_missing_effective_roles(ctx, product_id: str, source_types: list[st
         attempted += 1
         _guard_log("segment_step_start", product_id=product_id, step="effective_roles", segment_id=segment_id, attempt=attempted, limit=limit)
         try:
-            with _guard_timeout(_guard_effective_role_timeout()):
-                res = skill.compute_segment(segment_id)
+            if _guard_segment_subprocess_enabled():
+                res = _run_segment_guard_step("effective_roles", segment_id, _guard_effective_role_timeout(), product_id=product_id, ctx=ctx)
+            else:
+                with _guard_timeout(_guard_effective_role_timeout()):
+                    res = skill.compute_segment(segment_id)
         except _GuardTimeout:
             _mark_segment_guard_failed(ctx, segment_id, "effective_role_failed", f"effective roles timed out after {_guard_effective_role_timeout()}s")
             results.append({"segment_id": segment_id, "status": "warning", "error_code": "EFFECTIVE_ROLE_TIMEOUT", "timeout_seconds": _guard_effective_role_timeout()})
@@ -1330,7 +1307,7 @@ def _ai_consistency_missing(ctx, product_id: str) -> Result:
         _guard_log("segment_step_start", product_id=product_id, step="consistency", segment_id=segment_id, attempt=attempted, limit=limit)
         try:
             if _guard_segment_subprocess_enabled():
-                res = _run_segment_guard_step("consistency", segment_id, timeout)
+                res = _run_segment_guard_step("consistency", segment_id, timeout, product_id=product_id, ctx=ctx)
             else:
                 with _guard_timeout(timeout):
                     res = AIGeneratedConsistencySkill(ctx).check_segment(segment_id)
@@ -1364,8 +1341,11 @@ def _ai_anchor_check_missing(ctx, product_id: str) -> Result:
         attempted += 1
         _guard_log("segment_step_start", product_id=product_id, step="ai_anchor_check", segment_id=segment_id, attempt=attempted, limit=limit)
         try:
-            with _guard_timeout(timeout):
-                res = AIAnchorCheckSkill(ctx).check_segment(segment_id)
+            if _guard_segment_subprocess_enabled():
+                res = _run_segment_guard_step("anchor_check", segment_id, timeout, product_id=product_id, ctx=ctx)
+            else:
+                with _guard_timeout(timeout):
+                    res = AIAnchorCheckSkill(ctx).check_segment(segment_id)
         except _GuardTimeout:
             _mark_segment_guard_failed(ctx, segment_id, "ai_stage_failed", f"ai anchor check timed out after {timeout}s")
             res = Result.ok({"status": "failed", "segment_id": segment_id, "error_code": "AI_ANCHOR_CHECK_TIMEOUT", "timeout_seconds": timeout})
@@ -1443,7 +1423,23 @@ def _guard_segment_subprocess_enabled() -> bool:
     return os.environ.get("AUTO_MIXCUT_GUARD_SEGMENT_SUBPROCESS", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
-def _run_segment_guard_step(step: str, segment_id: str, timeout_seconds: int, product_id: str = "", index: int = 0, force: bool = False) -> Result:
+def _run_segment_guard_step(
+    step: str,
+    segment_id: str,
+    timeout_seconds: int,
+    product_id: str = "",
+    index: int = 0,
+    force: bool = False,
+    ctx: Any | None = None,
+) -> Result:
+    step_run_id = _start_guard_step_run(
+        ctx,
+        product_id,
+        f"segment.{_ledger_step_name(step)}",
+        detail={"timeout_seconds": timeout_seconds, "index": index, "force": force},
+        entity_type="segment",
+        entity_id=segment_id,
+    )
     cmd = [
         sys.executable,
         str(ROOT / "scripts" / "run_segment_guard_step.py"),
@@ -1471,25 +1467,33 @@ def _run_segment_guard_step(step: str, segment_id: str, timeout_seconds: int, pr
         time.sleep(0.2)
     if proc.poll() is None:
         _kill_process_group(proc)
+        _fail_guard_step_run(ctx, step_run_id, f"{step.upper()}_TIMEOUT", f"{step} timed out after {timeout_seconds}s", {"segment_id": segment_id})
         raise _GuardTimeout(f"{step} timed out after {timeout_seconds}s")
     try:
         stdout, stderr = proc.communicate(timeout=2)
     except subprocess.TimeoutExpired:
         _kill_process_group(proc)
+        _fail_guard_step_run(ctx, step_run_id, f"{step.upper()}_OUTPUT_TIMEOUT", f"{step} output collection timed out after subprocess exit", {"segment_id": segment_id})
         raise _GuardTimeout(f"{step} output collection timed out after subprocess exit")
 
     payload = _parse_result_json(stdout)
     if not payload:
         message = (stderr or stdout or f"{step} subprocess returned {proc.returncode}").strip()
-        return Result.fail(f"{step.upper()}_SUBPROCESS_FAILED", message[:1000], {"segment_id": segment_id, "returncode": proc.returncode})
+        res = Result.fail(f"{step.upper()}_SUBPROCESS_FAILED", message[:1000], {"segment_id": segment_id, "returncode": proc.returncode})
+        _finish_guard_step_run(ctx, step_run_id, res, detail={"segment_id": segment_id, "returncode": proc.returncode, "stderr": (stderr or "")[-1000:]})
+        return res
     if payload.get("success"):
-        return Result.ok(payload.get("data") or {})
+        res = Result.ok(payload.get("data") or {})
+        _finish_guard_step_run(ctx, step_run_id, res, detail={"segment_id": segment_id, "returncode": proc.returncode, "data": res.data})
+        return res
     error = payload.get("error") or {}
-    return Result.fail(
+    res = Result.fail(
         str(error.get("code") or f"{step.upper()}_FAILED"),
         str(error.get("message") or f"{step} failed"),
         {"segment_id": segment_id, "subprocess": payload},
     )
+    _finish_guard_step_run(ctx, step_run_id, res, detail={"segment_id": segment_id, "returncode": proc.returncode, "subprocess": payload})
+    return res
 
 
 def _kill_process_group(proc: subprocess.Popen) -> None:
@@ -1526,6 +1530,82 @@ def _parse_result_json(stdout: str) -> dict[str, Any]:
         if isinstance(data, dict):
             return data
     return {}
+
+
+def _start_guard_step_run(
+    ctx: Any | None,
+    product_id: str,
+    step_name: str,
+    detail: dict[str, Any] | None = None,
+    entity_type: str = "",
+    entity_id: str = "",
+) -> str:
+    if ctx is None or not product_id:
+        return ""
+    try:
+        return PipelineRunSkill(ctx).start_step(
+            product_id,
+            step_name,
+            detail=detail or {},
+            entity_type=entity_type,
+            entity_id=entity_id,
+        )
+    except Exception:
+        return ""
+
+
+def _finish_guard_step_run(ctx: Any | None, step_run_id: str, result: Result, detail: dict[str, Any] | None = None) -> None:
+    if ctx is None or not step_run_id:
+        return
+    try:
+        PipelineRunSkill(ctx).finish_step(step_run_id, result, detail=detail)
+    except Exception:
+        return
+
+
+def _fail_guard_step_run(ctx: Any | None, step_run_id: str, code: str, message: str, detail: dict[str, Any] | None = None) -> None:
+    if ctx is None or not step_run_id:
+        return
+    try:
+        PipelineRunSkill(ctx).fail_step(step_run_id, code, message, detail=detail)
+    except Exception:
+        return
+
+
+def _ledger_step_name(step: str) -> str:
+    if step == "anchor_check":
+        return "ai_anchor_check"
+    return step
+
+
+def _compact_step_run_detail(step_name: str, result: Result) -> dict[str, Any]:
+    payload = result.to_dict()
+    data = payload.get("data") if isinstance(payload, dict) else {}
+    error = payload.get("error") if isinstance(payload, dict) else {}
+    detail: dict[str, Any] = {"step": step_name, "success": bool(result.success)}
+    if isinstance(data, dict):
+        for key in (
+            "count",
+            "attempted_count",
+            "warning_count",
+            "completed_segments",
+            "skipped_segments",
+            "failed_segments",
+            "checked",
+            "passed",
+            "failed",
+            "source_types",
+            "skipped",
+            "reason",
+        ):
+            if key in data:
+                detail[key] = data[key]
+        if "results" in data and isinstance(data["results"], list):
+            detail["result_count"] = len(data["results"])
+    if isinstance(error, dict):
+        detail["error_code"] = error.get("code")
+        detail["error_message"] = error.get("message")
+    return detail
 
 
 def _guard_log(event: str, **payload: Any) -> None:
@@ -1627,7 +1707,10 @@ def _safe_guard_update(ctx, product_id: str, status: str, next_action: str, last
 def _fulfilled_ai_supplement_values(ctx, product_id: str, detail: dict[str, Any]) -> dict[str, Any]:
     if int((detail or {}).get("remaining_count") or 0) > 0:
         return {}
-    packages = ctx.repo.list_where("segment_prompt_packages", "product_id=?", (product_id,))
+    try:
+        packages = ctx.repo.list_where("segment_prompt_packages", "product_id=?", (product_id,))
+    except Exception:
+        packages = []
     if not packages:
         return {}
     generated = [

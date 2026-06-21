@@ -14,9 +14,22 @@ class PipelineRunSkill:
         self.ctx = ctx
         self._ensured = False
 
-    def start_step(self, product_id: str, step_name: str, batch_id: str = "", detail: dict[str, Any] | None = None) -> str:
+    def start_step(
+        self,
+        product_id: str,
+        step_name: str,
+        batch_id: str = "",
+        detail: dict[str, Any] | None = None,
+        entity_type: str = "",
+        entity_id: str = "",
+    ) -> str:
         self._ensure_table()
         step_run_id = new_id("PIPESTEP")
+        step_detail = dict(detail or {})
+        if entity_type:
+            step_detail.setdefault("entity_type", entity_type)
+        if entity_id:
+            step_detail.setdefault("entity_id", entity_id)
         self.ctx.repo.upsert(
             "pipeline_step_runs",
             "step_run_id",
@@ -27,17 +40,18 @@ class PipelineRunSkill:
                 "step_name": step_name,
                 "status": "running",
                 "started_at": _now(),
-                "detail_json": detail or {},
+                "detail_json": step_detail,
             },
         )
         return step_run_id
 
     def finish_step(self, step_run_id: str, result: Result, detail: dict[str, Any] | None = None) -> None:
         self._ensure_table()
+        detail_payload = detail if detail is not None else (result.data if result.success else (result.error.detail if result.error else {}))
         payload: dict[str, Any] = {
             "status": "success" if result.success else "failed",
             "finished_at": _now(),
-            "detail_json": detail if detail is not None else (result.data if result.success else (result.error.detail if result.error else {})),
+            "detail_json": self._merged_detail(step_run_id, detail_payload),
         }
         if result.error:
             payload.update({"error_code": result.error.code, "error_message": result.error.message})
@@ -54,9 +68,17 @@ class PipelineRunSkill:
                 "finished_at": _now(),
                 "error_code": code,
                 "error_message": message,
-                "detail_json": detail or {},
+                "detail_json": self._merged_detail(step_run_id, detail or {}),
             },
         )
+
+    def _merged_detail(self, step_run_id: str, detail: dict[str, Any] | None) -> dict[str, Any]:
+        existing = self.ctx.repo.get("pipeline_step_runs", "step_run_id", step_run_id) or {}
+        current = existing.get("detail_json")
+        if not isinstance(current, dict):
+            current = {}
+        incoming = detail if isinstance(detail, dict) else {}
+        return {**current, **incoming}
 
     def _ensure_table(self) -> None:
         if self._ensured:
