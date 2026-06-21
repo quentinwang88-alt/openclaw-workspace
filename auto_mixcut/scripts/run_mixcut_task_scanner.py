@@ -141,6 +141,16 @@ def run_candidate(item: dict[str, Any], args: argparse.Namespace) -> dict[str, A
     RDSRepositorySkill(ctx).init_db()
     product_id = str(item.get("product_id") or "")
     shop_id = str(item.get("shop_id") or "")
+    task = _latest_task(ctx, product_id)
+    if _task_done(task):
+        finished_at = datetime.utcnow()
+        _update_feishu_record(item.get("record_id"), _feishu_status_fields(task, finished_at))
+        return {
+            "success": True,
+            "product_id": product_id,
+            "status": "skipped",
+            "reason": "already_done",
+        }
     field_issue = _candidate_field_issue(item)
     if field_issue:
         finished_at = datetime.utcnow()
@@ -416,6 +426,12 @@ def _update_feishu_record(record_id: Any, fields: dict[str, Any]) -> None:
 def _latest_task(ctx: Any, product_id: str) -> dict[str, Any] | None:
     rows = ctx.repo.list_where("content_tasks", "product_id=? ORDER BY id DESC LIMIT 1", (product_id,))
     return rows[0] if rows else None
+
+
+def _task_done(task: dict[str, Any] | None) -> bool:
+    if not task:
+        return False
+    return str(task.get("pipeline_status") or "") == "DONE" or str(task.get("task_status") or "") == "DONE"
 
 
 def _rds_needs_scanner(task: dict[str, Any] | None) -> bool:
