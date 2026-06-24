@@ -172,7 +172,7 @@ async function main() {
   // Build product lock card
   const hardConstraints = extractHardConstraints(context.prompt);
   let lock = buildProductLockCard(context.prompt, imagePaths, null);
-  const category = detectCategory(context.prompt, lock);
+  const category = detectCategory(context.prompt, lock, context?.category);
   console.log(`商品类目: ${category.category || '未识别'}`);
 
   if (!lock.productType && imagePaths.length > 0 && !skipLLM) {

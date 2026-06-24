@@ -33,11 +33,12 @@ def decide_mixcut_state(task: dict[str, Any] | None, feishu_state: str = "") -> 
     task_status = str(task.get("task_status") or "")
     is_done = pipeline_status in DONE_STATUSES or task_status in DONE_STATUSES
     is_blocked = pipeline_status == BLOCKED_STATUS
-    is_waiting_ai_return = (
+    waiting_ai_signal = (
         feishu_state == "等待AI回流"
         or pipeline_status == WAITING_AI_RETURN_STATUS
         or next_action in WAIT_AI_RETURN_ACTIONS
     )
+    is_waiting_ai_return = waiting_ai_signal and not _has_material_capacity_to_continue(task)
     should_scan = (
         pipeline_status in RUNNABLE_PIPELINE_STATUSES
         or pipeline_status == WAITING_AI_RETURN_STATUS
@@ -83,3 +84,12 @@ def _display_state(pipeline_status: str, next_action: str, task_status: str) -> 
     if pipeline_status in RUNNABLE_PIPELINE_STATUSES or next_action in RUNNABLE_ACTIONS:
         return "运行中"
     return ""
+
+
+def _has_material_capacity_to_continue(task: dict[str, Any]) -> bool:
+    try:
+        remaining = int(task.get("target_remaining_variant_count") or task.get("remaining_count") or 0)
+        extra_capacity = int(task.get("material_pool_extra_capacity") or 0)
+    except (TypeError, ValueError):
+        return False
+    return remaining > 0 and extra_capacity >= remaining

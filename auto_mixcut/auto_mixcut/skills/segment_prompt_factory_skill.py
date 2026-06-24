@@ -24,15 +24,16 @@ PROMPT_BANK_SEGMENT_ALIASES = {
     "detail_atmosphere": "product_display",
     "tryon_result": "before_go_out",
 }
-PROMPT_BANK_REQUIRED_CATEGORIES = {"hair_accessories", "scarves_hats", "earrings", "bracelets", "womens_outerwear"}
+PROMPT_BANK_REQUIRED_CATEGORIES = {"hair_accessories", "scarves_hats", "earrings", "bracelets", "necklaces", "womens_outerwear", "generic_fashion"}
 PROMPT_BANK_REQUIRED_SEGMENTS = {"product_display", "mirror_routine", "home_lifestyle", "before_go_out", "seasonal_scene"}
 PRODUCT_ONLY_SEGMENT_TYPES = {"product_still", "unboxing", "flatlay"}
 GRADE_VARIANTS = {"A": 4, "B": 2, "C": 2}
 PERTURBATION_DIMS = ["camera_motion", "time_light", "composition", "color_tone", "props_env", "micro_arc"]
 MAX_PROMPT_CHARS = 1600
-RICH_PERTURBATION_CATEGORIES = {"womens_outerwear", "earrings", "bracelets"}
+RICH_PERTURBATION_CATEGORIES = {"womens_outerwear", "earrings", "bracelets", "necklaces"}
 ORIGINAL_SCRIPT_DB_ENV = "ORIGINAL_SCRIPT_GENERATOR_DB_PATH"
 DEFAULT_ORIGINAL_SCRIPT_DB = Path.home() / ".openclaw" / "shared" / "data" / "original_script_generator.sqlite3"
+_HOOK_CFG_CACHE: dict[str, dict[str, Any]] = {}
 
 
 class SegmentPromptFactorySkill:
@@ -51,7 +52,12 @@ class SegmentPromptFactorySkill:
         normalized_brief = {**brief, "category": category}
         segment_type = str(template_slot.get("segment_type") or "home_lifestyle").strip()
         grade = _grade(template_slot)
-        person_framing = _person_framing(template_slot, grade)
+        is_hook = _is_hook_slot(template_slot)
+        hook_cfg = _load_hook_config(self.ctx) if is_hook else {}
+        hook_intent = _resolve_hook_intent(template_slot, hook_cfg) if is_hook else str(template_slot.get("hook_intent") or _default_hook_intent(template_slot))
+        hook_face_cfg = (hook_cfg.get("category_hook_face") or {}) if is_hook else {}
+        hook_face_guard_negative = _list((hook_cfg.get("face_guard_negative") or {}).get(category)) if is_hook else []
+        person_framing = _person_framing(template_slot, grade, is_hook, hook_face_cfg, category)
         contract_validation = _validate_segment_type_contract(self.ctx, category, segment_type)
         if not contract_validation.success:
             return contract_validation
@@ -61,12 +67,12 @@ class SegmentPromptFactorySkill:
         pool_validation = _validate_perturbation_pool(category, pools, dedup_config, person_framing=person_framing, factory_config=_load_factory_config(self.ctx))
         if not pool_validation.success:
             return pool_validation
-        perturbation_slot = {**template_slot, "person_framing": person_framing, "segment_type": segment_type}
-        perturbation = _choose_perturbation(normalized_brief, perturbation_slot, pools, batch_seen if batch_seen is not None else set(), _load_factory_config(self.ctx))
+        perturbation_slot = {**template_slot, "person_framing": person_framing, "segment_type": segment_type, "is_hook": is_hook}
+        perturbation = _choose_perturbation(normalized_brief, perturbation_slot, pools, batch_seen if batch_seen is not None else set(), _load_factory_config(self.ctx), is_hook, hook_cfg)
         hard_anchors = _list(normalized_brief.get("hard_anchors"))
         forbidden_actions = _list(normalized_brief.get("forbidden_actions")) or _list(normalized_brief.get("must_not_show"))
         key_constraints = _list(normalized_brief.get("key_visual_constraints")) or _list(normalized_brief.get("must_show"))
-        prompt_result = _build_prompt_from_bank(self.ctx, category, segment_type, grade, normalized_brief, local_human, person_framing, perturbation)
+        prompt_result = _build_prompt_from_bank(self.ctx, category, segment_type, grade, normalized_brief, local_human, person_framing, perturbation, is_hook=is_hook, hook_cfg=hook_cfg, hook_intent=hook_intent)
         if not prompt_result.success:
             return prompt_result
         prompt_payload = prompt_result.data
@@ -87,7 +93,8 @@ class SegmentPromptFactorySkill:
             "template_id": template_slot.get("template_id"),
             "slot_index": int(template_slot.get("slot_index") or 0),
             "slot_role": str(template_slot.get("slot_role") or template_slot.get("role") or "scene"),
-            "hook_intent": str(template_slot.get("hook_intent") or _default_hook_intent(template_slot)),
+            "hook_intent": hook_intent,
+            "is_hook": is_hook,
             "prompt_grade": grade,
             "ai_gen_grade": grade,
             "material_qc_grade": None,
@@ -106,6 +113,9 @@ class SegmentPromptFactorySkill:
                 "hard_anchors": hard_anchors,
                 "forbidden_actions": forbidden_actions,
                 "key_visual_constraints": key_constraints,
+            },
+            "hook_policy": {
+                "face_guard_negative": hook_face_guard_negative,
             },
             "created_at": datetime.utcnow().isoformat(timespec="seconds"),
         }
@@ -363,6 +373,8 @@ def _infer_category_from_text(brief: dict[str, Any]) -> str:
     for key in ("hard_anchors", "display_anchors", "key_visual_constraints", "must_show"):
         parts.extend(str(item) for item in _list(brief.get(key)))
     text = " ".join(parts).lower()
+    if any(token in text for token in ("สร้อยคอ", "项链", "吊坠项链", "颈链", "necklace", "necklaces", "pendant", "kalung")):
+        return "necklaces"
     if any(token in text for token in ("สร้อยข้อมือ", "กำไล", "手链", "手镯", "手串", "腕饰", "bracelet", "bangle")):
         return "bracelets"
     return ""
@@ -380,6 +392,20 @@ def _load_factory_config(ctx: SkillContext) -> dict[str, Any]:
             return yaml.safe_load(fh) or {}
     except FileNotFoundError:
         return {}
+
+
+def _load_hook_config(ctx: SkillContext) -> dict[str, Any]:
+    cache_key = str(ctx.settings.root_dir)
+    if cache_key in _HOOK_CFG_CACHE:
+        return _HOOK_CFG_CACHE[cache_key]
+    path = ctx.settings.root_dir / "config" / "hook_prompt.yaml"
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh) or {}
+    except FileNotFoundError:
+        raise FileNotFoundError(f"hook_prompt.yaml not found at {path}; required for hook slots")
+    _HOOK_CFG_CACHE[cache_key] = cfg
+    return cfg
 
 
 def _post_validation_config(ctx: SkillContext) -> dict[str, Any]:
@@ -404,12 +430,15 @@ def _build_prompt_from_bank(
     local_human: dict[str, Any],
     person_framing: str,
     perturbation: dict[str, str],
+    is_hook: bool = False,
+    hook_cfg: dict[str, Any] | None = None,
+    hook_intent: str = "",
 ) -> Result:
     bank = _load_prompt_bank(ctx)
     bank_validation = _validate_prompt_bank(bank)
     if not bank_validation.success:
         return bank_validation
-    category_bank = ((bank.get("prompt_bank") or {}).get(category) or (bank.get("prompt_bank") or {}).get("womens_outerwear") or {})
+    category_bank = ((bank.get("prompt_bank") or {}).get(category) or (bank.get("prompt_bank") or {}).get("generic_fashion") or (bank.get("prompt_bank") or {}).get("womens_outerwear") or {})
     segments = category_bank.get("segments") or {}
     segment_key = segment_type if segment_type in segments else _bank_segment_key(segment_type)
     row = segments.get(segment_key)
@@ -439,16 +468,23 @@ def _build_prompt_from_bank(
         ]
         motion_arc = _product_only_motion(ctx, category, segment_type, brief, perturbation)
     else:
+        person_layer = _person_layer(ctx, category, segment_type, local_human, persona_context)
+        if is_hook:
+            person_layer = _join_prompt([person_layer, _hook_gaze_layer(hook_cfg or {}, category)])
         positive_parts = [
-            str((bank.get("base") or {}).get("positive_prefix") or DEFAULT_BASE_POSITIVE),
+            _hook_base(hook_cfg or {}) if is_hook else str((bank.get("base") or {}).get("positive_prefix") or DEFAULT_BASE_POSITIVE),
             positive_core,
             _grade_positive_suffix(grade),
-            _person_layer(ctx, category, segment_type, local_human, persona_context),
+            person_layer,
             _perturbation_layer(perturbation),
             selling_layer,
         ]
-        motion_arc = _cn_arrow(_motion_from_bank(row, grade) or str(perturbation.get("micro_arc") or "开始静止 -> 轻微变化 -> 清楚停留"))
+        if is_hook:
+            positive_parts.insert(0, _hook_layer(hook_cfg or {}, hook_intent))
+        motion_arc = _cn_arrow(str(perturbation.get("micro_arc") or "开始静止 -> 轻微变化 -> 清楚停留") if is_hook else _motion_from_bank(row, grade) or str(perturbation.get("micro_arc") or "开始静止 -> 轻微变化 -> 清楚停留"))
     negative_l1, negative_l2 = _negative_layers(ctx, bank, category_bank, category, brief, local_human, persona_context, person_framing, segment_type)
+    if is_hook:
+        negative_l1 = _dedupe([*negative_l1, *_list(((hook_cfg or {}).get("face_guard_negative") or {}).get(category))])
     prompt = _assemble_prompt(positive_parts, negative_l1, negative_l2, motion_arc)
     prompt_validation = _validate_prompt_text(prompt, category, segment_type, segment_key, grade, selected_anchors, negative_l1)
     if not prompt_validation.success:
@@ -559,6 +595,13 @@ def _sanitize_product_only_anchor(text: Any) -> str:
         "耳垂",
         "耳侧近景",
         "侧脸裁切",
+        "颈部锁骨附近",
+        "颈部佩戴",
+        "颈部",
+        "锁骨附近",
+        "锁骨",
+        "肩颈局部",
+        "肩颈",
         "随转头",
         "转头",
         "跟拍",
@@ -716,6 +759,13 @@ def _validate_package(package: dict[str, Any]) -> Result:
         return Result.fail("SEGMENT_SCRIPT_ID_REQUIRED", "segment_script_id is required")
     if not package["anchor_ref"]["hard_anchors"]:
         return Result.fail("HARD_ANCHORS_REQUIRED", "anchor_ref.hard_anchors is required")
+    is_hook = bool(package.get("is_hook"))
+    if package["category"] == "womens_outerwear" and package["person_framing"] == "ai_full_face" and is_hook:
+        negative = package["prompt"]["negative"]
+        required_guard = _list((package.get("hook_policy") or {}).get("face_guard_negative"))
+        missing = [item for item in required_guard if item not in negative]
+        if not required_guard or missing:
+            return Result.fail("FACE_GUARD_MISSING", "outerwear hook with full_face must keep configured silhouette guard negative", {"missing": missing})
     if package["duration_sec"] != 4:
         return Result.fail("DURATION_INVALID", "AI segment prompts must be 4 seconds")
     negative = package["prompt"]["negative"]
@@ -759,7 +809,15 @@ def _validate_segment_type_contract(ctx: SkillContext, category: str, segment_ty
     return Result.ok()
 
 
-def _choose_perturbation(brief: dict[str, Any], slot: dict[str, Any], pools: dict[str, Any], seen: set[str], validation_config: dict[str, Any] | None = None) -> dict[str, str]:
+def _choose_perturbation(
+    brief: dict[str, Any],
+    slot: dict[str, Any],
+    pools: dict[str, Any],
+    seen: set[str],
+    validation_config: dict[str, Any] | None = None,
+    is_hook: bool = False,
+    hook_cfg: dict[str, Any] | None = None,
+) -> dict[str, str]:
     category = _category_alias(str(brief.get("category") or "generic_fashion"))
     validation_config = validation_config or {}
     person_framing = str(slot.get("person_framing") or "")
@@ -767,14 +825,22 @@ def _choose_perturbation(brief: dict[str, Any], slot: dict[str, Any], pools: dic
     pool = pools.get(pool_key)
     if pool is None:
         raise ValueError(f"missing perturbation pool for category={category}, pool_key={pool_key}")
+    hook_arc = []
+    if is_hook:
+        hook_arc = _list(((hook_cfg or {}).get("category_hook_arc") or {}).get(category))
+        if not hook_arc:
+            raise KeyError(f"category '{category}' missing in hook_prompt.yaml:category_hook_arc")
     salt_base = json.dumps({"product_id": brief.get("product_id"), "segment_type": slot.get("segment_type"), "slot_index": slot.get("slot_index")}, sort_keys=True, ensure_ascii=False)
     target_space = _sampling_target_space(str(slot.get("segment_type") or ""), salt_base, validation_config)
     for attempt in range(200):
         seed = f"{salt_base}:{attempt}"
         values = {}
         for dim in PERTURBATION_DIMS:
-            options = _list(pool.get(dim)) or [dim.replace("_", " ")]
-            options = _filter_sampling_options(options, dim, target_space, validation_config)
+            if dim == "micro_arc" and hook_arc:
+                options = hook_arc
+            else:
+                options = _list(pool.get(dim)) or [dim.replace("_", " ")]
+                options = _filter_sampling_options(options, dim, target_space, validation_config)
             values[dim] = options[_stable_index(seed, dim, len(options))]
         key = json.dumps(values, sort_keys=True, ensure_ascii=False)
         if key not in seen:
@@ -872,6 +938,9 @@ def _category_alias(category: str) -> str:
         "bangle": "bracelets",
         "wrist_accessory": "bracelets",
         "jewelry_bracelet": "bracelets",
+        "necklace": "necklaces",
+        "pendant": "necklaces",
+        "jewelry_necklace": "necklaces",
         "general": "generic_fashion",
         "小饰品": "generic_fashion",
         "通用服饰": "generic_fashion",
@@ -879,8 +948,13 @@ def _category_alias(category: str) -> str:
         "手镯": "bracelets",
         "手串": "bracelets",
         "腕饰": "bracelets",
+        "项链": "necklaces",
+        "吊坠项链": "necklaces",
+        "颈链": "necklaces",
+        "kalung": "necklaces",
         "สร้อยข้อมือ": "bracelets",
         "กำไล": "bracelets",
+        "สร้อยคอ": "necklaces",
     }.get(category, category)
 
 
@@ -892,7 +966,45 @@ def _grade(slot: dict[str, Any]) -> str:
     return "A" if role in {"hero", "result"} and int(slot.get("slot_index") or 0) == 0 else "B" if role == "detail" else "C"
 
 
-def _person_framing(slot: dict[str, Any], grade: str) -> str:
+def _is_hook_slot(slot: dict[str, Any]) -> bool:
+    return bool(slot.get("is_hook"))
+
+
+def _resolve_hook_intent(slot: dict[str, Any], hook_cfg: dict[str, Any]) -> str:
+    hook_intent = str(slot.get("hook_intent") or "").strip()
+    if not hook_intent:
+        raise KeyError("hook_intent missing for hook slot")
+    _hook_layer(hook_cfg, hook_intent)
+    return hook_intent
+
+
+def _hook_base(hook_cfg: dict[str, Any]) -> str:
+    hook_base = str(hook_cfg.get("hook_base") or "").strip()
+    if not hook_base:
+        raise KeyError("hook_base missing in hook_prompt.yaml")
+    return hook_base
+
+
+def _hook_layer(hook_cfg: dict[str, Any], hook_intent: str) -> str:
+    intents = hook_cfg.get("hook_intents") or {}
+    entry = intents.get(hook_intent)
+    if not entry or not entry.get("positive"):
+        raise KeyError(f"hook_intent '{hook_intent}' missing in hook_prompt.yaml:hook_intents")
+    return str(entry["positive"])
+
+
+def _hook_gaze_layer(hook_cfg: dict[str, Any], category: str) -> str:
+    gaze = str(((hook_cfg.get("category_hook_face") or {}).get(category) or {}).get("prefer_gaze") or "").strip()
+    return f"钩子镜人物视线：{gaze}" if gaze else ""
+
+
+def _person_framing(slot: dict[str, Any], grade: str, is_hook: bool = False, hook_face_cfg: dict[str, Any] | None = None, category: str | None = None) -> str:
+    if is_hook:
+        face = (hook_face_cfg or {}).get(category)
+        if not face:
+            raise KeyError(f"category '{category}' missing in hook_prompt.yaml:category_hook_face")
+        if face.get("allow_full_face"):
+            return "ai_full_face"
     value = str(slot.get("person_framing") or "").strip()
     if value == "product_only":
         return "product_only"
@@ -1119,6 +1231,8 @@ def _load_original_persona_asset(product_id: str, category: str) -> dict[str, An
 def _original_category_keys(category: str) -> list[str]:
     return {
         "earrings": ["耳环", "耳线", "ear_accessory"],
+        "necklaces": ["项链", "吊坠项链", "颈链", "necklace", "jewelry_necklace"],
+        "bracelets": ["手链", "手镯", "手串", "腕饰", "bracelet", "jewelry_bracelet"],
         "hair_accessories": ["发饰", "hair_accessory"],
         "womens_outerwear": ["外套", "上装", "女装", "apparel", "clothing"],
         "scarves_hats": ["围巾", "头巾", "帽子", "apparel_accessory"],
@@ -1361,10 +1475,11 @@ def _post_assembly_validate(ctx: SkillContext, package: dict[str, Any]) -> Resul
         return enum_result
     prompt = enum_result.data
 
-    motion_result = _validate_motion_arc(prompt, str(package.get("segment_type") or ""), config, warnings)
-    if not motion_result.success:
-        return motion_result
-    prompt = motion_result.data
+    if not bool(package.get("is_hook")):
+        motion_result = _validate_motion_arc(prompt, str(package.get("segment_type") or ""), config, warnings)
+        if not motion_result.success:
+            return motion_result
+        prompt = motion_result.data
 
     l1_result = _validate_l1_negative(ctx, prompt, package, config, warnings)
     if not l1_result.success:
@@ -1440,9 +1555,13 @@ def _validate_category_contract_prompt(ctx: SkillContext, prompt: dict[str, str]
         person_framing = str(package.get("person_framing") or "")
         pool_key = _perturbation_pool_key(category, person_framing, _load_factory_config(ctx))
         pool = pools.get(pool_key) or {}
+        is_hook = bool(package.get("is_hook"))
+        hook_arc = _list((_load_hook_config(ctx).get("category_hook_arc") or {}).get(category)) if is_hook else []
         invalid = []
         for dim in PERTURBATION_DIMS:
             value = str(perturbation.get(dim) or "").strip()
+            if is_hook and dim == "micro_arc" and value in hook_arc:
+                continue
             if value and value not in _list(pool.get(dim)):
                 invalid.append({"dim": dim, "value": value, "pool_key": pool_key})
         if invalid:
@@ -1504,7 +1623,8 @@ def _required_l1_negative(ctx: SkillContext, package: dict[str, Any], config: di
     category_l1_config = _list((config.get("category_l1_negative_fixed_ordered") or {}).get(category))
     category_l1 = category_l1_config or _list(category_bank.get("negative_l1_zh"))
     forbidden_l1, _ = _classify_negative_items(_list((package.get("anchor_ref") or {}).get("forbidden_actions")), category)
-    return _dedupe([*base_l1, *category_l1, *forbidden_l1])
+    hook_guard_l1 = _list((package.get("hook_policy") or {}).get("face_guard_negative")) if bool(package.get("is_hook")) else []
+    return _dedupe([*base_l1, *category_l1, *forbidden_l1, *hook_guard_l1])
 
 
 def _dedup_positive_anchors(prompt: dict[str, str], package: dict[str, Any], warnings: list[dict[str, Any]]) -> Result:

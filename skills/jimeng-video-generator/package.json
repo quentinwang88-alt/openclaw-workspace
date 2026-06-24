@@ -17,7 +17,7 @@
     "daily-report": "node send-jimeng-daily-report.js --config ./feishu-direct.json"
   },
   "dependencies": {
-    "puppeteer": "^22.0.0",
+    "puppeteer": "^22.15.0",
     "puppeteer-core": "^24.39.1"
   },
   "author": "",

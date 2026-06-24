@@ -1,0 +1,77 @@
+# Hook-only prompt config for segment_prompt_factory.
+# Activated only when template_slot.is_hook is true.
+
+hook_base: >-
+  停滑开场钩子，首帧强反差，前0.5秒抓眼，动态入画，真实TikTok生活化风格，
+  单镜头一镜到底，自然手持感，真实光线，4秒。
+
+hook_intents:
+  contrast_reveal:
+    positive: "同一镜头内形成强前后反差，平平无奇到明显变好，出现清楚的变化瞬间"
+    intent_cn: "前后反差"
+  sudden_reveal:
+    positive: "商品突然入画，快速揭示，动作干脆，有意外感和停留冲击"
+    intent_cn: "突然揭示"
+  effect_burst:
+    positive: "商品效果在瞬间爆发，闪光、摆动或光线打到商品形成高光时刻"
+    intent_cn: "效果爆发"
+  face_hook:
+    positive: "人物直视镜头，自信有表情，有亲近感，像在第一秒直接叫住观众"
+    intent_cn: "看镜头情绪钩子"
+  product_clarity:
+    positive: "商品是画面主角，主体清楚，对焦稳定"
+    intent_cn: "商品清晰"
+  material_closeup:
+    positive: "材质和纹理极近景清楚，细节有高级感"
+    intent_cn: "材质特写"
+  tryon_result:
+    positive: "佩戴或上身后的效果清楚可见"
+    intent_cn: "试戴/上身结果"
+  atmosphere:
+    positive: "自然生活氛围柔和，商品自然出现"
+    intent_cn: "生活氛围"
+
+category_hook_arc:
+  earrings:
+    - "素耳入画 -> 手快速戴上耳饰 -> 转头瞬间闪光定住"
+    - "侧脸突然转向镜头 -> 耳饰闪动摇摆 -> 光点停留"
+    - "普通侧脸 -> 耳饰吃到光 -> 高光瞬间停住"
+  hair_accessories:
+    - "凌乱散发 -> 快速一夹 -> 造型反差揭示"
+    - "普通发型 -> 发饰啪地夹上 -> 自信转头看镜头"
+    - "手快速入画 -> 发饰固定 -> 头发弹起成型"
+  scarves_hats:
+    - "空脖颈或空头部 -> 快速围上或戴上 -> 对镜头完成造型揭示"
+    - "普通造型 -> 围巾旋入画面 -> 自信转身"
+    - "帽子落下 -> 调整帽檐 -> 直视镜头"
+  bracelets:
+    - "空手腕入画 -> 手链快速扣上 -> 手腕转动闪光"
+    - "普通手腕 -> 手链突然滑入镜头 -> 近景高光停住"
+    - "手指快速调整手链 -> 金属或珠光闪动 -> 看镜头确认"
+  womens_outerwear:
+    - "普通内搭 -> 外套甩上身 -> 完整短款版型和垂坠揭示"
+    - "人物走入画面 -> 外套摆动打开 -> 完整廓形稳定下来"
+    - "背面入画 -> 戏剧性转身 -> 正面版型和翻领揭示"
+
+category_hook_face:
+  earrings: { allow_full_face: true, prefer_gaze: "直视镜头" }
+  hair_accessories: { allow_full_face: true, prefer_gaze: "直视镜头" }
+  scarves_hats: { allow_full_face: true, prefer_gaze: "直视镜头" }
+  bracelets: { allow_full_face: true, prefer_gaze: "直视镜头" }
+  womens_outerwear: { allow_full_face: true, prefer_gaze: "直视镜头" }
+
+face_guard_negative:
+  womens_outerwear:
+    - "不要让脸压过服装主体"
+    - "不要扭曲服装廓形"
+    - "不要错误衣长"
+    - "不要把衣服裁出画面"
+
+selling_hook_phrases:
+  earrings: ["转头瞬间有闪光感", "修饰脸型"]
+  hair_accessories: ["三秒整理凌乱头发", "一夹就有造型感"]
+  scarves_hats: ["一戴立刻有氛围", "修饰脸型"]
+  bracelets: ["抬手瞬间有精致感", "手腕显细"]
+  womens_outerwear: ["显瘦不臃肿", "一秒出门有氛围"]
+
+on_missing_hook_intent: raise

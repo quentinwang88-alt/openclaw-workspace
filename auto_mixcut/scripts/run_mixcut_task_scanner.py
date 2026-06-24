@@ -42,6 +42,8 @@ def main() -> int:
     parser.add_argument("--max-products", type=int, default=_env_int("AUTO_MIXCUT_SCANNER_MAX_PRODUCTS", 2))
     parser.add_argument("--max-workers", type=int, default=_env_int("AUTO_MIXCUT_SCANNER_MAX_WORKERS", 2))
     parser.add_argument("--guard-timeout", type=int, default=_env_int("AUTO_MIXCUT_SCANNER_GUARD_TIMEOUT", 1800))
+    parser.add_argument("--patrol-timeout", type=int, default=_env_int("AUTO_MIXCUT_SCANNER_PATROL_TIMEOUT", 600))
+    parser.add_argument("--skip-patrol", action="store_true", help="Skip unattended preflight patrol before guard/AI heartbeat.")
     parser.add_argument("--lock-ttl-minutes", type=int, default=_env_int("AUTO_MIXCUT_LOCK_TTL_MINUTES", 60))
     parser.add_argument("--retry-backoff-minutes", type=int, default=_env_int("AUTO_MIXCUT_RETRY_BACKOFF_MINUTES", 30))
     parser.add_argument("--loop", action="store_true", help="Keep scanning forever.")
@@ -185,7 +187,46 @@ def run_candidate(item: dict[str, Any], args: argparse.Namespace) -> dict[str, A
                 "混剪阻断原因": "",
             },
         )
-        _mark_task_started(ctx, product_id, owner, started_at)
+        patrol = {"status": "skipped", "reason": "skip_patrol"}
+        if not args.skip_patrol:
+            patrol = _run(_patrol_command(product_id), timeout=int(args.patrol_timeout or 600))
+            if patrol.get("status") != "ok":
+                finished_at = datetime.utcnow()
+                _update_feishu_record(
+                    item.get("record_id"),
+                    {
+                        "混剪任务状态": "阻断需人工处理",
+                        "混剪最后运行时间": datetime_cell(finished_at),
+                        "混剪阻断原因": f"patrol_{patrol.get('status')}",
+                    },
+                )
+                return {
+                    "success": False,
+                    "product_id": product_id,
+                    "mode": "patrol",
+                    "command": " ".join(_patrol_command(product_id)),
+                    "process": patrol,
+                }
+
+        ctx = build_context()
+        task_after_patrol = _latest_task(ctx, product_id)
+        if _task_done(task_after_patrol):
+            finished_at = datetime.utcnow()
+            _update_feishu_record(item.get("record_id"), _feishu_status_fields(task_after_patrol, finished_at))
+            return {
+                "success": True,
+                "product_id": product_id,
+                "mode": "patrol",
+                "status": "skipped",
+                "reason": "done_after_patrol",
+                "patrol": patrol,
+            }
+        if task_after_patrol:
+            item = {
+                **item,
+                "pipeline_status": str(task_after_patrol.get("pipeline_status") or ""),
+                "next_action": str(task_after_patrol.get("next_action") or ""),
+            }
         if _should_run_ai_return_heartbeat(ctx, item):
             command = _ai_return_command(product_id)
             mode = "ai_return_heartbeat"
@@ -193,6 +234,7 @@ def run_candidate(item: dict[str, Any], args: argparse.Namespace) -> dict[str, A
             command = _guard_command(item)
             mode = "guard"
 
+        _mark_task_started(ctx, product_id, owner, started_at)
         proc = _run(command, timeout=int(args.guard_timeout or 1800))
         finished_at = datetime.utcnow()
         ctx = build_context()
@@ -205,6 +247,7 @@ def run_candidate(item: dict[str, Any], args: argparse.Namespace) -> dict[str, A
             "product_id": product_id,
             "mode": mode,
             "command": " ".join(command),
+            "patrol": patrol,
             "process": proc,
             "sync": sync,
         }
@@ -305,6 +348,16 @@ def _ai_return_command(product_id: str) -> list[str]:
         product_id,
         "--max-nightly-passes",
         "1",
+    ]
+
+
+def _patrol_command(product_id: str) -> list[str]:
+    return [
+        sys.executable,
+        str(ROOT / "scripts" / "run_mixcut_unattended_patrol.py"),
+        "--product-id",
+        product_id,
+        "--skip-feishu-task-sync",
     ]
 
 

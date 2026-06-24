@@ -76,6 +76,8 @@ def main() -> int:
                 continue
             status = importer.text(fields.get(importer.FIELD_STATUS))
             result_sync = importer.text(fields.get(importer.FIELD_RESULT_SYNC))
+            if importer.is_rejected_return_status(status, result_sync):
+                continue
             if status not in importer.IMPORTED_STATUSES and result_sync not in importer.RESULT_SYNC_READY:
                 continue
 

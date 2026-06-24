@@ -119,10 +119,20 @@ def _ensure_runtime_compatibility_columns(ctx: SkillContext) -> Result:
             "slot_role": "TEXT",
             "ai_gen_grade": "TEXT",
             "hook_intent": "TEXT",
+            "product_mismatch_suspect": "INTEGER DEFAULT 0",
+            "product_mismatch_reason": "TEXT",
+            "product_mismatch_output_id": "TEXT",
+            "product_mismatch_marked_at": "TEXT",
         },
         "segment_tags": {"text_overlay_risk": "TEXT", "text_language": "TEXT", "text_overlay_reason": "TEXT", "hook_visual_type": "TEXT"},
         "render_plans": {
             "output_id": "TEXT",
+        },
+        "mixcut_batches": {
+            "final_qc_async_status": "TEXT",
+            "final_qc_async_error": "TEXT",
+            "final_qc_async_log_path": "TEXT",
+            "final_qc_async_updated_at": "TEXT",
         },
         "outputs": {
             "bgm_output_oss_object_id": "TEXT",
@@ -134,6 +144,8 @@ def _ensure_runtime_compatibility_columns(ctx: SkillContext) -> Result:
             "published_at": "TEXT",
         },
         "bgm_tracks": {
+            "status": "TEXT DEFAULT 'active'",
+            "license_status": "TEXT",
             "audio_analysis_json": "TEXT",
             "audio_analyzed_at": "TEXT",
             "audio_tag_source": "TEXT",
@@ -189,6 +201,27 @@ def _ensure_runtime_compatibility_columns(ctx: SkillContext) -> Result:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS bgm_usage_events (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  event_id TEXT NOT NULL UNIQUE,
+                  bgm_id TEXT NOT NULL,
+                  output_id TEXT,
+                  batch_id TEXT,
+                  product_id TEXT,
+                  template_id TEXT,
+                  usage_status TEXT,
+                  quality_status TEXT,
+                  reason TEXT,
+                  created_at TEXT,
+                  updated_at TEXT
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_bgm_usage_bgm ON bgm_usage_events(bgm_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_bgm_usage_output ON bgm_usage_events(output_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_bgm_usage_product ON bgm_usage_events(product_id)")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS pipeline_step_runs (
@@ -382,6 +415,10 @@ def _ensure_mysql_core_tables(ctx: SkillContext) -> Result:
           slot_role VARCHAR(64),
           ai_gen_grade VARCHAR(32),
           hook_intent VARCHAR(128),
+          product_mismatch_suspect TINYINT DEFAULT 0,
+          product_mismatch_reason TEXT,
+          product_mismatch_output_id VARCHAR(128),
+          product_mismatch_marked_at DATETIME,
           created_at DATETIME,
           updated_at DATETIME,
           KEY idx_segments_product (product_id),
@@ -470,6 +507,10 @@ def _ensure_mysql_core_tables(ctx: SkillContext) -> Result:
           material_tier VARCHAR(64),
           template_pool_json JSON,
           experiment_batch VARCHAR(256),
+          final_qc_async_status VARCHAR(64),
+          final_qc_async_error TEXT,
+          final_qc_async_log_path TEXT,
+          final_qc_async_updated_at DATETIME,
           created_at DATETIME,
           updated_at DATETIME
         )
@@ -656,10 +697,20 @@ def _ensure_mysql_runtime_compatibility_columns(ctx: SkillContext) -> Result:
             "slot_role": "VARCHAR(64)",
             "ai_gen_grade": "VARCHAR(32)",
             "hook_intent": "VARCHAR(128)",
+            "product_mismatch_suspect": "TINYINT DEFAULT 0",
+            "product_mismatch_reason": "TEXT",
+            "product_mismatch_output_id": "VARCHAR(128)",
+            "product_mismatch_marked_at": "DATETIME",
         },
         "segment_tags": {"text_overlay_risk": "VARCHAR(64)", "text_language": "VARCHAR(64)", "text_overlay_reason": "TEXT"},
         "render_plans": {
             "output_id": "VARCHAR(128)",
+        },
+        "mixcut_batches": {
+            "final_qc_async_status": "VARCHAR(64)",
+            "final_qc_async_error": "TEXT",
+            "final_qc_async_log_path": "TEXT",
+            "final_qc_async_updated_at": "DATETIME",
         },
         "outputs": {
             "bgm_output_oss_object_id": "VARCHAR(128)",
@@ -673,6 +724,8 @@ def _ensure_mysql_runtime_compatibility_columns(ctx: SkillContext) -> Result:
             "publish_result": "TEXT",
         },
         "bgm_tracks": {
+            "status": "VARCHAR(64) DEFAULT 'active'",
+            "license_status": "VARCHAR(64)",
             "audio_analysis_json": "JSON",
             "audio_analyzed_at": "DATETIME",
             "audio_tag_source": "VARCHAR(64)",
@@ -693,6 +746,8 @@ def _ensure_mysql_runtime_compatibility_columns(ctx: SkillContext) -> Result:
                       track_name VARCHAR(512),
                       artist_name VARCHAR(256),
                       source_platform VARCHAR(128),
+                      status VARCHAR(64) DEFAULT 'active',
+                      license_status VARCHAR(64),
                       source_url TEXT,
                       file_name VARCHAR(512),
                       download_version VARCHAR(64),

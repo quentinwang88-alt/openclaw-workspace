@@ -17,6 +17,7 @@ const DEFAULT_CONFIG = {
 // 模型选项映射
 const MODEL_MAP = {
   'Seedance 2.0': 'Seedance 2.0',
+  'Seedance 2.0 Mini': 'Seedance 2.0 Mini',
   'Seedance 2.0 Fast': 'Seedance 2.0 Fast',
   '视频 3.5 Pro': '视频 3.5 Pro',
   '视频 3.0 Pro': '视频 3.0 Pro',

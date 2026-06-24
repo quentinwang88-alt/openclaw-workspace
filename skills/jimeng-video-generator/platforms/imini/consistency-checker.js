@@ -19,10 +19,11 @@ async function checkFirstFrameConsistency(originalImagePath, firstFrameImagePath
   }
 
   const input = [];
+  const originalImagePaths = Array.isArray(originalImagePath) ? originalImagePath.filter(Boolean).slice(0, 3) : [originalImagePath].filter(Boolean);
 
   input.push({
     type: 'input_text',
-    text: `你是一个商品一致性检查专家。请对比参考图和首帧图，检查商品外观是否一致。
+    text: `你是一个商品一致性检查专家。请对比参考图和首帧图，检查商品外观是否一致。参考图可能有多张，需综合判断同一商品的主颜色、结构、关键细节和佩戴/陈列方式。
 
 ${productLock ? formatProductLockCard(productLock) : ''}
 
@@ -58,11 +59,11 @@ score 规则：
 - <0.5：严重不一致`
   });
 
-  if (originalImagePath) {
+  for (let i = 0; i < originalImagePaths.length; i++) {
     try {
-      input.push(imagePathToInputItem(originalImagePath));
+      input.push(imagePathToInputItem(originalImagePaths[i]));
     } catch (error) {
-      console.log(`  ⚠️ 原始参考图读取失败: ${error.message}`);
+      console.log(`  ⚠️ 原始参考图 ${i + 1} 读取失败: ${error.message}`);
     }
   }
 

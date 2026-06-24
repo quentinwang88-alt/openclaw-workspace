@@ -164,15 +164,48 @@ def submit_product(ctx: Any, product_id: str, dry_run: bool = False) -> dict[str
     else:
         budget = AISupplementGatewaySkill(ctx).submit_budget(product_id, remaining_count=1, configured_limit=1)
     if int(budget.get("submit_limit") or 0) <= 0:
-        return {
+        result = {
             "success": True,
             "status": "skipped",
             "reason": "ai_submit_inflight_capacity_filled",
             "product_id": product_id,
             **budget,
         }
+        if not dry_run:
+            result["status_sync_after_submit"] = import_product_returns(product_id, dry_run=False)
+            _mark_waiting_return_after_submit(ctx, product_id, result)
+        return result
     cmd = _submit_command(product_id, budget)
-    return _run(cmd, cwd=WORKSPACE / "skills" / "jimeng-video-generator", dry_run=dry_run, timeout=_timeout("AUTO_MIXCUT_AI_HEARTBEAT_SUBMIT_TIMEOUT", 900), env_extra={"IMINI_ALLOW_REAL_SUBMIT": "1"})
+    result = _run(cmd, cwd=WORKSPACE / "skills" / "jimeng-video-generator", dry_run=dry_run, timeout=_timeout("AUTO_MIXCUT_AI_HEARTBEAT_SUBMIT_TIMEOUT", 900), env_extra={"IMINI_ALLOW_REAL_SUBMIT": "1"})
+    if not dry_run:
+        result["status_sync_after_submit"] = import_product_returns(product_id, dry_run=False)
+        _mark_waiting_return_after_submit(ctx, product_id, result)
+    return result
+
+
+def _mark_waiting_return_after_submit(ctx: Any, product_id: str, submit_result: dict[str, Any]) -> None:
+    state = AISupplementGatewaySkill(ctx).package_state(product_id)
+    if int(state.get("inflight_count") or 0) <= 0:
+        return
+    if int(state.get("ready_to_submit_count") or 0) > 0:
+        return
+    rows = ctx.repo.list_where("content_tasks", "product_id=? ORDER BY id DESC", (product_id,))
+    task = rows[0] if rows else None
+    if not task:
+        return
+    ctx.repo.update(
+        "content_tasks",
+        "task_id",
+        task["task_id"],
+        {
+            "task_status": "AI_SUPPLEMENT_CREATED",
+            "pipeline_status": "WAITING_AI_RETURN",
+            "next_action": "WAIT_AI_SEGMENT_RETURN",
+            "last_error": "",
+            "ai_supplement_status": "submitted",
+            "ai_supplement_package_count": int(state.get("inflight_count") or task.get("ai_supplement_package_count") or 0),
+        },
+    )
 
 
 def recover_product_results(ctx: Any, product_id: str, dry_run: bool = False) -> dict[str, Any]:
@@ -239,6 +272,8 @@ def _task_state(ctx: Any, product_id: str) -> dict[str, Any]:
         "next_action": task.get("next_action"),
         "last_error": task.get("last_error"),
         "ai_supplement_status": task.get("ai_supplement_status"),
+        "material_pool_extra_capacity": task.get("material_pool_extra_capacity"),
+        "first_slot_remaining_capacity": task.get("first_slot_remaining_capacity"),
         "ready_to_submit_count": package_state.get("ready_to_submit_count", 0),
         "inflight_count": package_state.get("inflight_count", 0),
         "imported_package_count": package_state.get("imported_package_count", 0),
@@ -254,11 +289,14 @@ def _should_continue_nightly(ctx: Any, product_id: str, state: dict[str, Any], p
     pipeline_status = str(state.get("pipeline_status") or "")
     ready = int(state.get("ready_to_submit_count") or 0)
     inflight = int(state.get("inflight_count") or 0)
+    material_capacity = int(state.get("material_pool_extra_capacity") or 0)
     if next_action in {"RUN_GUARD_AGAIN", "RUN_AI_SEGMENT_WORKER", "WAIT_AI_SUPPLEMENT_APPROVAL"}:
         return True
     if pipeline_status == "READY_TO_CONTINUE":
         return True
     if pipeline_status == "WAITING_AI_RETURN":
+        if material_capacity >= int(state.get("remaining_count") or 0):
+            return True
         return ready > 0 and inflight <= 0
     imported = _imported_count(pass_result.get("import") or {})
     if imported > 0:
@@ -274,6 +312,11 @@ def _stable_reason(ctx: Any, product_id: str, state: dict[str, Any]) -> str:
     if pipeline_status == "BLOCKED":
         return "blocked"
     if pipeline_status == "WAITING_AI_RETURN":
+        try:
+            if int(state.get("remaining_count") or 0) > 0 and int(state.get("material_pool_extra_capacity") or 0) >= int(state.get("remaining_count") or 0):
+                return "ready_to_continue_with_existing_material"
+        except (TypeError, ValueError):
+            pass
         if int(state.get("inflight_count") or 0) > 0:
             return "waiting_ai_return"
         if next_action == "WAIT_AI_SUPPLEMENT_APPROVAL":

@@ -143,6 +143,7 @@ def run_guard_loop(
         effective_timeout = max(30, _dynamic_round_timeout(product_id, round_timeout))
         child_env = os.environ.copy()
         child_env.setdefault("AUTO_MIXCUT_SKIP_FINAL_VIDEO_QC", "1")
+        child_env.setdefault("AUTO_MIXCUT_ASYNC_FINAL_VIDEO_QC", "1")
         child_env.setdefault("AUTO_MIXCUT_TOP_UP_MAX_PER_ROUND", "5")
         child_env.setdefault("AUTO_MIXCUT_WATERMARK_CHECK_LIMIT", "8")
         child_env.setdefault("AUTO_MIXCUT_SEGMENT_ASSET_LIMIT", "8")

@@ -4,7 +4,7 @@ Usage: python3 scripts/sync_and_tag_bgm.py
 """
 from __future__ import annotations
 
-import json, os, sys, hashlib
+import json, os, sys, hashlib, mimetypes
 from pathlib import Path
 
 WORKSPACE = Path("/Users/likeu3/.openclaw/workspace")
@@ -45,23 +45,54 @@ def main():
         if not bgm_id:
             bgm_id = _make_bgm_id(fields)
 
-        row = {
-            "bgm_id": bgm_id,
-            "bgm_tag_status": "untagged",
-            "tag_review_required": 0,
-        }
+        existing = ctx.repo.get("bgm_tracks", "bgm_id", bgm_id) or {}
+        row = {"bgm_id": bgm_id}
         row["track_name"] = _cell_text(fields.get("BGM名称")) or "Unknown"
-        row["artist_name"] = _cell_text(fields.get("Artist/来源")) or ""
+        row["artist_name"] = _cell_text(fields.get("Artist/来源")) or _cell_text(fields.get("Artist")) or _cell_text(fields.get("艺术家")) or ""
         row["source_platform"] = "feishu"
-        row["source_url"] = _cell_text(fields.get("来源链接")) or ""
+        row["source_url"] = _cell_text(fields.get("Artlist链接")) or _cell_text(fields.get("来源链接")) or ""
         row["official_tags_json"] = "[]"
-        row["license_note"] = _cell_text(fields.get("授权信息")) or ""
+        row["license_note"] = _cell_text(fields.get("授权信息")) or _attachment_summary(fields.get("授权凭证文件")) or ""
+        row["status"] = _normalize_track_status(fields.get("状态"))
+        row["license_status"] = _normalize_license_status(fields, row["status"])
         row["default_volume"] = 0.2
         row["fade_in_ms"] = 500
         row["fade_out_ms"] = 800
         row["suitable_for_intro"] = 1
         row["loop_friendly"] = 0
         row["voiceover_friendly"] = 1
+        if existing:
+            row["bgm_tag_status"] = existing.get("bgm_tag_status") or "untagged"
+            row["tag_review_required"] = int(existing.get("tag_review_required") or 0)
+            for key in [
+                "mood_tags_json",
+                "energy_level",
+                "vocal_type",
+                "category_tags_json",
+                "template_tags_json",
+                "ai_suggested_tags_json",
+                "tag_diff_json",
+                "tag_confidence",
+                "bgm_tagged_at",
+                "bgm_tag_prompt_version",
+                "bgm_tag_reason",
+                "audio_analysis_json",
+                "audio_analyzed_at",
+                "audio_tag_source",
+                "audio_tag_confidence",
+                "recommended_start_sec",
+                "default_volume",
+                "fade_in_ms",
+                "fade_out_ms",
+                "suitable_for_intro",
+                "loop_friendly",
+                "voiceover_friendly",
+            ]:
+                if existing.get(key) not in (None, "", []):
+                    row[key] = existing[key]
+        else:
+            row["bgm_tag_status"] = "untagged"
+            row["tag_review_required"] = 0
 
         duration = fields.get("时长(ms)")
         if duration is not None:
@@ -82,7 +113,8 @@ def main():
             print(f"  WARN upsert failed for {bgm_id}: {result.error.message if result.error else '?'}")
             skipped += 1
 
-    print(f"Synced: {synced}  Skipped: {skipped}")
+    backfilled = _backfill_operational_defaults(ctx)
+    print(f"Synced: {synced}  Skipped: {skipped}  Backfilled defaults: {backfilled}")
 
     all_tracks = ctx.repo.list_where("bgm_tracks", "1=1")
     print(f"Total bgm_tracks in DB: {len(all_tracks)}")
@@ -162,6 +194,8 @@ def _download_audio(client, rec, ctx, bgm_id: str) -> dict | None:
             object_key = f"auto_mixcut/bgm_library/raw/{bgm_id}.{suffix}"
             upload = ctx.oss.upload(local_path, object_key)
             oss_id = upload.data.get("object_id", "") if upload.success else ""
+            if upload.success:
+                _save_oss_object(ctx, upload.data, "bgm_library", local_path)
 
             return {"oss_object_id": oss_id, "local_path": str(local_path)}
     return None
@@ -170,6 +204,70 @@ def _download_audio(client, rec, ctx, bgm_id: str) -> dict | None:
 def _make_bgm_id(fields: dict) -> str:
     name = _cell_text(fields.get("BGM名称")) or "UNKNOWN"
     return "BGM_" + hashlib.sha256(name.encode()).hexdigest()[:12].upper()
+
+
+def _attachment_summary(value) -> str:
+    if isinstance(value, list):
+        return ", ".join(item for item in (_attachment_summary(v) for v in value) if item)
+    if isinstance(value, dict):
+        return str(value.get("name") or value.get("file_name") or value.get("file_token") or "").strip()
+    return ""
+
+
+def _backfill_operational_defaults(ctx) -> int:
+    updated = 0
+    for track in ctx.repo.list_where("bgm_tracks", "1=1"):
+        values = {}
+        if not str(track.get("status") or "").strip():
+            values["status"] = "active"
+        if not str(track.get("license_status") or "").strip():
+            values["license_status"] = "pending"
+        if values:
+            result = ctx.repo.update("bgm_tracks", "bgm_id", track["bgm_id"], values)
+            if result.success:
+                updated += 1
+    return updated
+
+
+def _save_oss_object(ctx, upload_data: dict, object_type: str, path: Path) -> None:
+    if not upload_data.get("object_id"):
+        return
+    row = dict(upload_data)
+    row.setdefault("object_type", object_type)
+    row.setdefault("mime_type", mimetypes.guess_type(path.name)[0] or "audio/mpeg")
+    try:
+        ctx.repo.upsert("oss_objects", "object_id", row)
+    except Exception:
+        pass
+
+
+def _normalize_track_status(value) -> str:
+    text = _cell_text(value)
+    if text in {"生效中", "已批准", "可用", "active", "approved"}:
+        return "active"
+    if text in {"暂停", "paused"}:
+        return "paused"
+    if text in {"已拒绝", "拒绝", "不可用", "rejected"}:
+        return "rejected"
+    if text in {"已过期", "expired"}:
+        return "expired"
+    if text in {"待授权确认", "候选", "待处理", "pending", "candidate"}:
+        return "pending"
+    return "active" if not text else text
+
+
+def _normalize_license_status(fields: dict, track_status: str) -> str:
+    raw = _cell_text(fields.get("授权状态")) or _cell_text(fields.get("版权状态"))
+    if raw in {"可用", "已确认", "已验证", "verified", "available"}:
+        return "verified"
+    if raw in {"不可用", "已拒绝", "限制", "rejected", "unavailable", "restricted"}:
+        return "unavailable"
+    if raw in {"已过期", "expired"}:
+        return "expired"
+    if track_status in {"rejected", "expired", "paused"}:
+        return track_status
+    has_license_evidence = bool(_cell_text(fields.get("授权信息")) or _attachment_summary(fields.get("授权凭证文件")))
+    return "verified" if has_license_evidence else "pending"
 
 
 def _cell_text(value) -> str:

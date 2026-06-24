@@ -73,6 +73,7 @@ function parseArgs(argv) {
     limit: 1,
     recordId: '',
     productId: '',
+    channel: '',
     ensureSchema: true
   };
   for (const arg of argv) {
@@ -89,6 +90,7 @@ function parseArgs(argv) {
       args._expectConfig = false;
     } else if (arg.startsWith('--record-id=')) args.recordId = arg.slice('--record-id='.length);
     else if (arg.startsWith('--product-id=')) args.productId = arg.slice('--product-id='.length);
+    else if (arg.startsWith('--channel=')) args.channel = arg.slice('--channel='.length);
     else if (arg.startsWith('--limit=')) args.limit = Math.max(1, Number(arg.slice('--limit='.length)) || 1);
   }
   return args;
@@ -292,6 +294,7 @@ function shouldSubmitRecord(record, config, args) {
   }
   const context = buildSegmentContext(record, config);
   if (args.productId && context.productId !== args.productId) return false;
+  if (args.channel && normalizeChannelName(context.channel) !== normalizeChannelName(args.channel)) return false;
   if (!context.prompt || !context.productId) return false;
   if (!context.canSubmit && !args.recordId) return false;
   if (!args.recordId && !config.pendingStatuses.includes(context.currentStatus)) return false;
@@ -299,6 +302,34 @@ function shouldSubmitRecord(record, config, args) {
   if (context.executionOwnerMachineId && context.executionOwnerMachineId !== config.machineId) return false;
   if (!args.recordId && referenceReadinessIssue(context)) return false;
   return true;
+}
+
+function normalizeChannelName(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (raw === 'imini' || raw === 'i-mini' || raw === 'i_mini') return 'imini';
+  if (raw === 'jimeng' || raw === '即梦' || raw === 'default' || raw === 'jianying') return 'jimeng';
+  return raw || 'jimeng';
+}
+
+function normalizeModelConcurrencyKey(value) {
+  const lower = String(value || '').trim().toLowerCase();
+  if (!lower) return '';
+  if (lower.includes('seedance 2.0 mini')) return 'Seedance 2.0 mini';
+  if (lower.includes('seedance 2.0 fast')) return 'Seedance 2.0 Fast';
+  if (lower.includes('seedance 2.0')) return 'Seedance 2.0';
+  return String(value || '').trim();
+}
+
+function getMaxConcurrentForContext(config, context) {
+  const byModel = config.maxConcurrentByModel || {};
+  const modelKey = normalizeModelConcurrencyKey(context?.model || config.defaultModel);
+  const configured =
+    byModel[modelKey] ??
+    byModel[String(context?.model || '').trim()] ??
+    byModel[String(config.defaultModel || '').trim()];
+  const fallback = Number(config.maxConcurrent || config.maxInflightSubmissions || 1);
+  const value = Number(configured || fallback || 1);
+  return Math.max(1, Math.floor(value));
 }
 
 function referenceReadinessIssue(context) {
@@ -446,10 +477,88 @@ async function connectBrowser(config) {
     protocolTimeout: Number(config.protocolTimeoutMs || 300000)
   });
   const pages = await browser.pages();
-  const page = pages.find(item => item.url().includes('jimeng.jianying.com')) || pages[0] || await browser.newPage();
+  const page = await selectJimengPage(pages) || pages[0] || await browser.newPage();
   await page.bringToFront().catch(() => {});
   await page.setViewport({ width: 1600, height: 1000 }).catch(() => {});
   return { browser, page };
+}
+
+async function scoreJimengPage(page) {
+  const url = page.url();
+  if (!url.includes('jimeng.jianying.com')) {
+    return { page, score: Number.NEGATIVE_INFINITY, url, reason: 'not_jimeng' };
+  }
+
+  let detail = {
+    text: '',
+    hasLoginBlocker: false,
+    hasDefaultCreation: false,
+    hasVideoToolbar: false,
+    hasQueueText: false,
+    hasLoggedInMarker: false
+  };
+  try {
+    detail = await page.evaluate(() => {
+      const text = String(document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+      return {
+        text: text.slice(0, 3000),
+        hasLoginBlocker:
+          text.includes('同意协议后前往登录') ||
+          text.includes('扫码登录') ||
+          text.includes('手机号登录') ||
+          text.includes('验证码登录'),
+        hasDefaultCreation: text.includes('默认创作'),
+        hasVideoToolbar:
+          text.includes('Seedance') ||
+          text.includes('全能参考') ||
+          text.includes('视频生成') ||
+          /\d+:\d+/.test(text),
+        hasQueueText: text.includes('排队') || text.includes('取消生成') || /生成\s*\d+/.test(text),
+        hasLoggedInMarker:
+          text.includes('Octo Beta') ||
+          text.includes('会员') ||
+          text.includes('开启创作')
+      };
+    });
+  } catch (error) {
+    // Detached or cross-origin pages simply lose the DOM part of the score.
+  }
+
+  let score = 0;
+  if (url.includes('/ai-tool/generate')) score += 1000;
+  if (url.includes('workspace=0')) score += 100;
+  if (url.includes('type=video')) score += 100;
+  if (url.includes('/ai-tool/home')) score -= 250;
+  if (detail.hasDefaultCreation) score += 300;
+  if (detail.hasVideoToolbar) score += 160;
+  if (detail.hasLoggedInMarker) score += 120;
+  if (detail.hasQueueText) score += 40;
+  if (detail.hasLoginBlocker) score -= 1400;
+
+  return {
+    page,
+    score,
+    url,
+    reason: [
+      url.includes('/ai-tool/generate') ? 'generate' : '',
+      detail.hasDefaultCreation ? 'default_creation' : '',
+      detail.hasVideoToolbar ? 'video_toolbar' : '',
+      detail.hasLoggedInMarker ? 'logged_marker' : '',
+      detail.hasLoginBlocker ? 'login_blocker' : ''
+    ].filter(Boolean).join(',')
+  };
+}
+
+async function selectJimengPage(pages) {
+  const scored = await Promise.all((pages || []).map(scoreJimengPage));
+  const candidates = scored
+    .filter(item => Number.isFinite(item.score) && item.score > Number.NEGATIVE_INFINITY)
+    .sort((a, b) => b.score - a.score);
+  const best = candidates[0] || null;
+  if (best) {
+    console.log(`  🧭 选中即梦页面: score=${best.score} ${best.reason || '-'} ${best.url}`);
+  }
+  return best?.page || null;
 }
 
 async function getIminiPage(browser, config) {
@@ -565,14 +674,17 @@ async function submitContext({ config, token, browser, page, context, dryRun }) 
 
     const newSubmittedCount = context.submittedCount + 1;
     const done = newSubmittedCount >= context.repeatTarget;
+    const now = formatBeijingTimestamp();
     const updated = updateSubmissionRecord(config, traceId, {
       status: platform === 'jimeng' ? 'rendering' : 'submitted',
       submit_confirmed_by: result.code || result.confirmedBy || `${platform}_submit_success`,
       submit_confirmation_note: platform === 'jimeng'
         ? '页面检测到排队信号，等待资产页抓取回传'
         : 'imini 页面提交成功，等待资产页抓取回传',
+      queue_observed: platform === 'jimeng' ? true : undefined,
+      queue_observed_at: platform === 'jimeng' ? now : undefined,
       platform_task_id: result.taskId || traceId,
-      state_updated_at: formatBeijingTimestamp()
+      state_updated_at: now
     });
     await updateRecord(config, token, context.recordId, {
       [config.statusField]: done ? (config.submittedStatus || '已提单') : (config.processingStatus || '生成中'),
@@ -663,9 +775,29 @@ async function main() {
   }
 
   const { browser, page } = await connectBrowser(config);
+  let failedCount = 0;
+  let jimengGeneratingCount = null;
   try {
     for (const record of candidates) {
       const context = buildSegmentContext(record, config);
+      const channelDecision = resolveChannel(context, config);
+      if (channelDecision.channel !== 'imini') {
+        if (jimengGeneratingCount == null) {
+          try {
+            const status = await checkGeneratingStatus(page);
+            jimengGeneratingCount = Number(status?.generating || 0);
+            console.log(`  当前即梦生成中: ${jimengGeneratingCount}`);
+          } catch (error) {
+            jimengGeneratingCount = 0;
+            console.log(`  ⚠️ 读取即梦生成中数量失败，按 0 继续: ${error.message}`);
+          }
+        }
+        const maxConcurrent = getMaxConcurrentForContext(config, context);
+        if (jimengGeneratingCount >= maxConcurrent) {
+          console.log(`  ⏳ 已达到 ${context.model || config.defaultModel} 并发上限 (${jimengGeneratingCount}/${maxConcurrent})，停止继续提单`);
+          break;
+        }
+      }
       const claim = await claimRecord(config, token, context);
       if (!claim.ok) {
         console.log(`⏭️ ${context.taskName}: ${claim.reason}`);
@@ -676,8 +808,14 @@ async function main() {
       try {
         const result = await submitContext({ config, token, browser, page, context: latestContext, dryRun: false });
         console.log(result.success ? `✅ 已提单: ${result.traceId}` : `❌ 提单失败: ${result.traceId}`);
+        if (result.success && channelDecision.channel !== 'imini') {
+          jimengGeneratingCount = (jimengGeneratingCount || 0) + 1;
+          console.log(`  即梦本地并发计数更新: ${jimengGeneratingCount}/${getMaxConcurrentForContext(config, latestContext)}`);
+        }
+        if (!result.success) failedCount += 1;
       } catch (error) {
         console.log(`❌ ${latestContext.taskName}: ${error.message}`);
+        failedCount += 1;
         await updateRecord(config, token, latestContext.recordId, {
           [config.statusField]: config.failedStatus || '失败',
           [config.fields.resultSyncStatus]: 'failed',
@@ -690,6 +828,9 @@ async function main() {
     }
   } finally {
     await browser.disconnect();
+  }
+  if (failedCount > 0) {
+    process.exitCode = 1;
   }
 }
 

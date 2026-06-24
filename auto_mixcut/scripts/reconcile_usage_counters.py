@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from auto_mixcut.core.bootstrap import build_context
 from auto_mixcut.core.ids import new_id
+from auto_mixcut.skills.rds_repository_skill import RDSRepositorySkill
 from auto_mixcut.skills.usage_counter_skill import is_good_rendered_output, is_rejected_rendered_output, reconcile_product_segment_usage
 
 
@@ -24,6 +25,10 @@ def main() -> int:
     args = parser.parse_args()
 
     ctx = build_context()
+    init = RDSRepositorySkill(ctx).init_db()
+    if not init.success:
+        print(init.to_dict())
+        return 1
     where = "product_id=?" if args.product_id else "1=1"
     params = (args.product_id,) if args.product_id else ()
     outputs = ctx.repo.list_where("outputs", where, params)
@@ -44,6 +49,7 @@ def main() -> int:
         rejected_segment_counts.update(str(row.get("segment_id") or "") for row in rows if row.get("segment_id"))
 
     bgm_counts: Counter[str] = Counter()
+    rejected_bgm_counts: Counter[str] = Counter()
     bgm_events = []
     rendered_outputs_for_bgm = []
     rejected_outputs_for_bgm = []
@@ -74,6 +80,7 @@ def main() -> int:
             bgm_id = str(((output.get("bgm_plan_json") or {}).get("bgm_id")) or "")
             if not bgm_id:
                 continue
+            rejected_bgm_counts[bgm_id] += 1
             bgm_events.append(
                 {
                     "event_id": new_id("BGMUSE"),
@@ -83,7 +90,7 @@ def main() -> int:
                     "product_id": output.get("product_id"),
                     "template_id": output.get("template_id"),
                     "usage_status": "rejected",
-                    "quality_status": output.get("machine_quality_status"),
+                    "quality_status": "rejected",
                     "reason": "reconciled_from_outputs",
                     "created_at": datetime.utcnow().isoformat(timespec="seconds"),
                 }
@@ -110,9 +117,22 @@ def main() -> int:
             for event in bgm_events:
                 ctx.repo.insert("bgm_usage_events", event)
             for track in ctx.repo.list_where("bgm_tracks", "1=1"):
-                ctx.repo.update("bgm_tracks", "bgm_id", track["bgm_id"], {"usage_count": int(bgm_counts.get(track["bgm_id"], 0))})
+                ctx.repo.update(
+                    "bgm_tracks",
+                    "bgm_id",
+                    track["bgm_id"],
+                    {
+                        "usage_count": int(bgm_counts.get(track["bgm_id"], 0)),
+                        "rejected_usage_count": int(rejected_bgm_counts.get(track["bgm_id"], 0)),
+                    },
+                )
             for bgm_id, count in bgm_counts.items():
-                ctx.repo.update("bgm_tracks", "bgm_id", bgm_id, {"usage_count": int(count)})
+                ctx.repo.update(
+                    "bgm_tracks",
+                    "bgm_id",
+                    bgm_id,
+                    {"usage_count": int(count), "rejected_usage_count": int(rejected_bgm_counts.get(bgm_id, 0))},
+                )
     else:
         all_segments = ctx.repo.list_where("segments", where, params)
         touched_segments = len(all_segments)

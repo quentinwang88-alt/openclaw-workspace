@@ -24,6 +24,7 @@ from auto_mixcut.skills.render_plan_skill import (
     _build_template_constraints,
     _hook_score_weights,
     _segment_score,
+    _select_segments,
 )
 
 
@@ -163,6 +164,55 @@ class HookScoringTest(unittest.TestCase):
         ad_c = _build_template_constraints(ad)
         self.assertEqual(ad_c.get("hook_weight_scale"), 2.0)
         self.assertTrue(ad_c.get("require_hook_visual_first_slot"))
+
+    def test_ad_template_constraints_include_unique_source_floor(self):
+        ad = TemplateSpec(
+            template_id="AD_FAST_HOOK_8S", duration_ms=8000, slots=[], default_moods=[],
+            suitable_categories=[], template_objective="ad_fast_hook", pacing="fast",
+            required_roles=["hero"], risk_policy={}, source_policy={}, bgm_profile={},
+            selection_policy={"hook_weight_scale": 2.0, "require_hook_visual_first_slot": True, "min_unique_source_assets": 3},
+        )
+        ad_c = _build_template_constraints(ad)
+        self.assertEqual(ad_c.get("min_unique_source_assets"), 3)
+
+    def test_ad_selection_forces_unique_source_assets(self):
+        slots = [
+            {"role": "hero", "duration_ms": 3000},
+            {"role": "result", "duration_ms": 3000},
+            {"role": "detail", "duration_ms": 2000},
+        ]
+        segments = [
+            _make_segment("SEG_HOOK", hook_strength="strong", source_trust_level="medium", asset_id="ASSET_A")
+            | {"source_type": "ai_generated", "product_match_status": "anchor_pending", "hook_visual_type": "product_reveal", "product_visibility": "high", "effective_roles_json": ["hero", "detail"]},
+            _make_segment("SEG_RESULT_B", hook_strength="strong", source_trust_level="low", asset_id="ASSET_B")
+            | {"source_type": "douyin_repost", "product_match_status": "uncertain", "hook_visual_type": "before_after", "product_visibility": "high", "effective_roles_json": ["result", "detail"]},
+            _make_segment("SEG_DETAIL_B", hook_strength="medium", source_trust_level="low", asset_id="ASSET_B")
+            | {"source_type": "douyin_repost", "product_match_status": "uncertain", "hook_visual_type": "product_reveal", "product_visibility": "high", "effective_roles_json": ["detail"]},
+            _make_segment("SEG_DETAIL_C", hook_strength="medium", source_trust_level="low", asset_id="ASSET_C")
+            | {"source_type": "douyin_repost", "product_match_status": "uncertain", "hook_visual_type": "product_reveal", "product_visibility": "high", "effective_roles_json": ["detail", "hero"]},
+        ]
+        state = {
+            "segments": set(),
+            "segment_counts": {},
+            "core_segment_counts": {},
+            "assets": {},
+            "first_assets": set(),
+            "first_asset_counts": {},
+            "first_segment_counts": {},
+            "_selection_segments": segments,
+        }
+        res = _select_segments(
+            self.ctx,
+            "PROD_AD_UNIQUE",
+            slots,
+            batch_state=state,
+            variant_no=1,
+            constraints={"require_hook_visual_first_slot": True, "min_unique_source_assets": 3},
+        )
+        self.assertTrue(res.success, res.to_dict())
+        asset_ids = [item["asset_id"] for item in res.data]
+        self.assertEqual(len(set(asset_ids)), 3)
+        self.assertEqual(asset_ids, ["ASSET_A", "ASSET_B", "ASSET_C"])
 
     # config 实际加载验证（确保 render_scoring.yaml 被读到）
     def test_hook_score_weights_loaded_from_config(self):

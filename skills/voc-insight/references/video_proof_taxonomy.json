@@ -1,0 +1,66 @@
+{
+  "version": "v1",
+  "signal_map": {
+    "appearance_cute_color": {
+      "voc_signal": "appearance",
+      "proof_archetype": "appearance_transform",
+      "usage_lane": "video_hook",
+      "video_fit_score": 85,
+      "required_beats": ["before_state", "use_or_wear", "reveal_after"],
+      "visual_goal_zh": "使用或佩戴前后更好看，颜色/款式效果可见",
+      "forbidden_claims": ["不要承诺不疼、不伤发、全天不掉"]
+    },
+    "hold_quality": {
+      "voc_signal": "stability",
+      "proof_archetype": "state_stability_proof",
+      "usage_lane": "video_hook",
+      "video_fit_score": 80,
+      "required_beats": ["before_state", "use_action", "movement_check", "after_state"],
+      "visual_goal_zh": "使用后状态更稳定、更利落或更不散乱",
+      "forbidden_claims": ["不要写防滑、全天稳固", "不要写不疼、不伤发"]
+    },
+    "value_quantity": {
+      "voc_signal": "price_value",
+      "proof_archetype": "copy_only",
+      "usage_lane": "copy_only",
+      "video_fit_score": 30,
+      "required_beats": [],
+      "visual_goal_zh": "价格/数量适合文案或商品卡，不作为视频主钩子",
+      "copy_lane_reason": "offer/value is not a visual proof"
+    },
+    "fast_shipping": {
+      "voc_signal": "fulfillment",
+      "proof_archetype": "copy_only",
+      "usage_lane": "copy_only",
+      "video_fit_score": 20,
+      "required_beats": [],
+      "visual_goal_zh": "履约信任点适合文案，不作为视频主钩子",
+      "copy_lane_reason": "fulfillment speed cannot be proven by product footage"
+    },
+    "slow_shipping": {
+      "voc_signal": "risk_pain",
+      "proof_archetype": "reject",
+      "usage_lane": "reject",
+      "video_fit_score": 0,
+      "required_beats": [],
+      "visual_goal_zh": "风险提示，不可包装成卖点"
+    },
+    "fulfillment_missing": {
+      "voc_signal": "risk_pain",
+      "proof_archetype": "reject",
+      "usage_lane": "reject",
+      "video_fit_score": 0,
+      "required_beats": [],
+      "visual_goal_zh": "履约风险，不可包装成卖点"
+    }
+  },
+  "default_positive": {
+    "voc_signal": "general_positive",
+    "proof_archetype": "scenario_use_proof",
+    "usage_lane": "video_support",
+    "video_fit_score": 55,
+    "required_beats": ["real_scene", "use_action", "result_state"],
+    "visual_goal_zh": "在真实场景中展示商品有用或好看",
+    "forbidden_claims": ["不要使用没有证据的功能承诺"]
+  }
+}

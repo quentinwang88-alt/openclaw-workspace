@@ -75,7 +75,7 @@ class FeishuReviewSkill:
             "确认人": product.get("anchor_confirmed_by"),
             "确认时间": datetime_cell(product.get("anchor_confirmed_at")),
         }
-        return self._sync("product_anchor", product_id, "商品锚点卡确认队列", days=14, fields=fields)
+        return self._sync_anchor_queue_record(product_id, fields)
 
     def pull_anchor_confirmations(self, product_id: str | None = None) -> Result:
         if not self.ctx.settings.feishu_enabled:
@@ -302,6 +302,64 @@ class FeishuReviewSkill:
         )
         return res if not res.success else Result.ok({"sync_id": sync_id, "feishu_record_id": feishu_record_id, "expire_at": expire_at})
 
+    def _sync_anchor_queue_record(self, product_id: str, fields: dict) -> Result:
+        table = "商品锚点卡确认队列"
+        object_type = "product_anchor"
+        sync_id = new_id("FS")
+        expire_at = (datetime.utcnow() + timedelta(days=14)).isoformat(timespec="seconds")
+        feishu_record_id = new_id("FSREC")
+        merged_images = False
+        archived_duplicates: list[str] = []
+        if self.ctx.settings.feishu_enabled:
+            try:
+                existing_sync = self.ctx.repo.list_where(
+                    "feishu_sync_records",
+                    "object_type=? AND object_id=? AND feishu_table=? ORDER BY id DESC",
+                    (object_type, product_id, table),
+                )
+                client = AutoMixcutFeishuClient(table)
+                records = _anchor_records_for_product(client, product_id)
+                canonical = _select_anchor_canonical_record(records, existing_sync)
+                if canonical:
+                    feishu_record_id = canonical.record_id
+                    sync_id = existing_sync[0]["sync_id"] if existing_sync else sync_id
+                    if not _attachments(fields.get("商品主图")):
+                        image_source = _first_anchor_record_with_images(records)
+                        if image_source:
+                            fields = {**fields, "商品主图": _attachments((image_source.fields or {}).get("商品主图"))}
+                            merged_images = True
+                    _safe_update_record(client, feishu_record_id, fields)
+                    archived_duplicates = _archive_duplicate_anchor_records(client, records, feishu_record_id)
+                else:
+                    feishu_record_id = _safe_create_record(client, fields or {})
+            except Exception as exc:
+                return Result.fail("FEISHU_SYNC_FAILED", str(exc), {"object_type": object_type, "object_id": product_id, "table": table})
+        res = self.ctx.repo.upsert(
+            "feishu_sync_records",
+            "sync_id",
+            {
+                "sync_id": sync_id,
+                "object_type": object_type,
+                "object_id": product_id,
+                "feishu_table": table,
+                "feishu_record_id": feishu_record_id,
+                "sync_status": "synced",
+                "expire_at": expire_at,
+                "cleanup_status": "pending",
+            },
+        )
+        if not res.success:
+            return res
+        return Result.ok(
+            {
+                "sync_id": sync_id,
+                "feishu_record_id": feishu_record_id,
+                "expire_at": expire_at,
+                "merged_images": merged_images,
+                "archived_duplicates": archived_duplicates,
+            }
+        )
+
 
 def sync_product_task_best_effort(ctx: SkillContext, product_id: str) -> dict:
     product_id = str(product_id or "").strip()
@@ -334,6 +392,74 @@ def _safe_create_record(client: AutoMixcutFeishuClient, fields: dict) -> str:
         if not _is_missing_field_error(exc):
             raise
         return client.create_record(_filter_existing_fields(client, fields))
+
+
+def _anchor_records_for_product(client: AutoMixcutFeishuClient, product_id: str) -> list:
+    records = []
+    for record in client.list_records(limit=500):
+        fields = record.fields or {}
+        if _cell_text(fields.get("商品ID")) == str(product_id):
+            records.append(record)
+    return records
+
+
+def _select_anchor_canonical_record(records: list, existing_sync: list[dict] | None = None):
+    existing_ids = {str(row.get("feishu_record_id") or "") for row in (existing_sync or []) if str(row.get("feishu_record_id") or "").startswith("rec")}
+    if existing_ids:
+        for record in records:
+            if record.record_id in existing_ids:
+                return record
+    if not records:
+        return None
+    ranked = sorted(enumerate(records), key=lambda item: _anchor_record_score(item[1], item[0]), reverse=True)
+    return ranked[0][1]
+
+
+def _anchor_record_score(record, index: int) -> tuple[int, int]:
+    fields = record.fields or {}
+    status = _cell_text(fields.get("人工确认状态"))
+    has_anchor = bool(_cell_text(fields.get("AI生成锚点卡")))
+    has_images = bool(_attachments(fields.get("商品主图")))
+    score = 0
+    if status in {"已确认", "confirmed"}:
+        score += 100
+    elif status == "待确认":
+        score += 20
+    elif status in {"驳回"}:
+        score -= 100
+    if has_anchor:
+        score += 50
+    if has_images:
+        score += 30
+    return score, index
+
+
+def _first_anchor_record_with_images(records: list):
+    for record in reversed(records):
+        if _attachments((record.fields or {}).get("商品主图")):
+            return record
+    return None
+
+
+def _archive_duplicate_anchor_records(client: AutoMixcutFeishuClient, records: list, canonical_record_id: str) -> list[str]:
+    archived = []
+    for record in records:
+        if record.record_id == canonical_record_id:
+            continue
+        fields = record.fields or {}
+        note = _append_note(_cell_text(fields.get("备注")), f"重复锚点卡记录，已合并到 {canonical_record_id}")
+        try:
+            _safe_update_record(client, record.record_id, {"人工确认状态": "驳回", "备注": note})
+            archived.append(record.record_id)
+        except Exception:
+            continue
+    return archived
+
+
+def _append_note(existing: str, note: str) -> str:
+    if note in existing:
+        return existing
+    return (existing + "\n" + note).strip() if existing else note
 
 
 def _filter_existing_fields(client: AutoMixcutFeishuClient, fields: dict) -> dict:

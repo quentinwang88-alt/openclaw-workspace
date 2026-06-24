@@ -12,7 +12,7 @@ from auto_mixcut.core.result import Result
 from auto_mixcut.skills.media_probe_skill import MediaProbeSkill
 from auto_mixcut.skills.quality_gate_skill import QualityGateSkill
 from auto_mixcut.skills.rds_repository_skill import RDSRepositorySkill
-from scripts.sync_prompt_package_workbench_from_tasks import _gap_slots
+from scripts.sync_prompt_package_workbench_from_tasks import _category_key, _gap_slots, _prompt_record_blocks_new_package
 from auto_mixcut.skills.readiness_check_skill import ReadinessCheckSkill, _calibrate_render_plan_capacity
 from auto_mixcut.skills.render_plan_skill import RenderPlanSkill, _choose_template, _load_templates, _passes_first_slot_floor, _segment_score, _select_segments
 from auto_mixcut.skills.render_skill import _actual_generated_count, _bgm_audio_filter, _default_bgm_plan, _drawtext_filter, _subtitle_plan
@@ -27,9 +27,10 @@ from auto_mixcut.skills.final_video_qc_skill import _normalize_final_qc_response
 from auto_mixcut.skills.pipeline_run_skill import PipelineRunSkill
 from auto_mixcut.skills.ai_supplement_workbench_skill import _infer_capacity_gap_text, _supplement_state_summary
 from auto_mixcut.skills.ai_tagging_skill import AITaggingSkill
+from auto_mixcut.skills.segment_prompt_factory_skill import SegmentPromptFactorySkill, _ensure_prompt_package_table
 from scripts.run_mixcut_guard import _compute_missing_effective_roles, _ensure_anchor_confirmed, _stale_repair_source_types, _stale_segment_summary, run_guard_pass
 from scripts.run_mixcut_guard_loop import _dynamic_round_timeout, _parse_guard_stdout, _status_action_from_result
-from auto_mixcut.cli import _cap_round_count, _create_render_plans_with_timeout, _skip_final_video_qc, _top_up_snapshot
+from auto_mixcut.cli import _async_final_video_qc_enabled, _cap_round_count, _create_render_plans_with_timeout, _skip_final_video_qc, _top_up_snapshot
 
 
 def _restore_env(key: str, value: str | None) -> None:
@@ -73,6 +74,142 @@ class AIFactoryStrategyTest(unittest.TestCase):
 
         self.assertIsNone(choice["template"])
         self.assertEqual(choice["debug"]["skip_reason"], "no_category_matching_template")
+
+    def test_core_ai_selection_requires_imported_prompt_package_id(self):
+        product_id = "PROD_AI_CORE_PROMPT_FILTER"
+        RDSRepositorySkill(self.ctx).create_product_task(product_id, "Earring", "MY", "earrings", 1)
+        self.assertTrue(_ensure_prompt_package_table(self.ctx).success)
+        self.ctx.repo.upsert(
+            "segment_prompt_packages",
+            "segment_prompt_id",
+            {
+                "segment_prompt_id": "SP_VALID_CORE",
+                "product_id": product_id,
+                "package_status": "imported",
+                "generated_segment_id": "SEG_VALID_CORE",
+            },
+        )
+        for asset_id, segment_id, prompt_id in [
+            ("ASSET_LEGACY_AI", "SEG_LEGACY_AI", ""),
+            ("ASSET_VALID_CORE", "SEG_VALID_CORE", "SP_VALID_CORE"),
+        ]:
+            self.ctx.repo.upsert(
+                "assets",
+                "asset_id",
+                {
+                    "asset_id": asset_id,
+                    "product_id": product_id,
+                    "source_type": "ai_generated",
+                    "source_trust_level": "high",
+                    "prompt_package_id": prompt_id,
+                },
+            )
+            self.ctx.repo.upsert(
+                "segments",
+                "segment_id",
+                {
+                    "segment_id": segment_id,
+                    "asset_id": asset_id,
+                    "product_id": product_id,
+                    "source_type": "ai_generated",
+                    "source_trust_level": "high",
+                    "duration_ms": 4000,
+                    "effective_roles_json": ["hero"],
+                    "prompt_package_id": prompt_id,
+                },
+            )
+
+        selected = _select_segments(
+            self.ctx,
+            product_id,
+            [{"role": "hero", "duration_ms": 3000}],
+            {"segments": set(), "assets": {}, "first_assets": set()},
+        )
+
+        self.assertTrue(selected.success, selected.to_dict())
+        self.assertEqual(selected.data[0]["segment_id"], "SEG_VALID_CORE")
+        self.assertEqual(selected.data[0]["prompt_package_id"], "SP_VALID_CORE")
+
+    def test_generic_necklace_brief_uses_necklace_prompt_bank(self):
+        res = SegmentPromptFactorySkill(self.ctx).build_package(
+            {
+                "product_id": "PROD_NECKLACE_PROMPT",
+                "category": "generic_fashion",
+                "product_subtype": "necklace",
+                "display_family": "项链",
+                "hard_anchors": ["银色圆形项链", "金属链条和吊坠"],
+                "must_show": ["项链在锁骨附近清楚可见"],
+            },
+            {
+                "template_id": "TEST_NECKLACE_TEMPLATE",
+                "slot_index": 0,
+                "slot_role": "hero",
+                "segment_type": "product_display",
+                "ai_gen_grade": "A",
+                "person_framing": "ai_local",
+            },
+            persist=False,
+        )
+
+        self.assertTrue(res.success, res.to_dict())
+        package = res.data
+        prompt_text = "；".join(str(value) for value in package["prompt"].values())
+        self.assertEqual(package["category"], "necklaces")
+        self.assertIn("项链", prompt_text)
+        self.assertNotRegex(prompt_text, r"女装外套|衣摆|袖口|面料垂感|完整上身结果镜")
+
+    def test_prompt_workbench_sync_infers_necklace_from_generic_category_hint(self):
+        self.assertEqual(
+            _category_key("generic_fashion", "Kalung wanita necklace silver pendant 项链"),
+            "necklaces",
+        )
+
+    def test_necklace_product_only_prompt_removes_wearing_body_terms(self):
+        res = SegmentPromptFactorySkill(self.ctx).build_package(
+            {
+                "product_id": "PROD_NECKLACE_STILL",
+                "category": "necklaces",
+                "display_family": "项链",
+                "hard_anchors": ["项链必须作为颈部佩戴的首饰呈现", "金色细链和多条水滴流苏"],
+                "must_show": ["颈部锁骨附近佩戴结果"],
+            },
+            {
+                "template_id": "TEST_NECKLACE_STILL",
+                "slot_index": 1,
+                "slot_role": "detail",
+                "segment_type": "product_still",
+                "ai_gen_grade": "B",
+                "person_framing": "product_only",
+            },
+            persist=False,
+        )
+
+        self.assertTrue(res.success, res.to_dict())
+        positive = res.data["prompt"]["positive"]
+        self.assertNotRegex(positive, r"颈部|锁骨|佩戴效果|佩戴")
+        self.assertIn("首饰展示架", positive)
+
+    def test_necklace_detail_atmosphere_is_allowed_as_detail_prompt(self):
+        res = SegmentPromptFactorySkill(self.ctx).build_package(
+            {
+                "product_id": "PROD_NECKLACE_DETAIL",
+                "category": "necklaces",
+                "display_family": "项链",
+                "hard_anchors": ["金色细链", "多条水滴流苏"],
+            },
+            {
+                "template_id": "TEST_NECKLACE_DETAIL",
+                "slot_index": 2,
+                "slot_role": "detail",
+                "segment_type": "detail_atmosphere",
+                "ai_gen_grade": "B",
+                "person_framing": "ai_local",
+            },
+            persist=False,
+        )
+
+        self.assertTrue(res.success, res.to_dict())
+        self.assertEqual(res.data["category"], "necklaces")
 
     def test_readiness_skips_heavy_render_plan_estimate_for_large_pool(self):
         product_id = "VN_LARGE_POOL_ESTIMATE"
@@ -436,6 +573,16 @@ class AIFactoryStrategyTest(unittest.TestCase):
         finally:
             _restore_env("AUTO_MIXCUT_SKIP_FINAL_VIDEO_QC", old_value)
 
+    def test_async_final_video_qc_is_enabled_by_default(self):
+        old_value = os.environ.get("AUTO_MIXCUT_ASYNC_FINAL_VIDEO_QC")
+        try:
+            os.environ.pop("AUTO_MIXCUT_ASYNC_FINAL_VIDEO_QC", None)
+            self.assertTrue(_async_final_video_qc_enabled())
+            os.environ["AUTO_MIXCUT_ASYNC_FINAL_VIDEO_QC"] = "0"
+            self.assertFalse(_async_final_video_qc_enabled())
+        finally:
+            _restore_env("AUTO_MIXCUT_ASYNC_FINAL_VIDEO_QC", old_value)
+
     def test_ai_supplement_infers_gap_from_capacity_shortfall(self):
         gap_text = _infer_capacity_gap_text(
             self.ctx,
@@ -723,6 +870,69 @@ class AIFactoryStrategyTest(unittest.TestCase):
         self.assertEqual(len(slots), 2)
         self.assertEqual({slot["slot_role"] for slot in slots}, {"hero"})
         self.assertNotIn("tryon_result", {slot["segment_type"] for slot in slots})
+
+    def test_guard_recomputes_empty_ai_roles_when_tag_is_usable(self):
+        product_id = "PROD_AI_EMPTY_ROLE_REPAIR"
+        segment_id = "SEG_AI_EMPTY_ROLE_REPAIR"
+        RDSRepositorySkill(self.ctx).create_product_task(product_id, "Hair bow", "VN", "hair_accessories", 1)
+        self.ctx.repo.upsert(
+            "assets",
+            "asset_id",
+            {
+                "asset_id": "ASSET_AI_EMPTY_ROLE_REPAIR",
+                "product_id": product_id,
+                "source_type": "ai_generated",
+                "source_trust_level": "medium",
+                "slot_role": "hero",
+            },
+        )
+        self.ctx.repo.upsert(
+            "segments",
+            "segment_id",
+            {
+                "segment_id": segment_id,
+                "asset_id": "ASSET_AI_EMPTY_ROLE_REPAIR",
+                "product_id": product_id,
+                "source_type": "ai_generated",
+                "source_trust_level": "medium",
+                "segment_type": "product_display",
+                "slot_role": "hero",
+                "segment_status": "qc_passed",
+                "anchor_match_level": "strict_pass",
+                "frame_consistency_status": "pass",
+                "effective_roles_json": [],
+                "effective_roles_updated_at": "2026-06-23T00:00:00",
+            },
+        )
+        self.ctx.repo.insert(
+            "segment_tags",
+            {
+                "segment_id": segment_id,
+                "primary_shot_role": "result",
+                "secondary_roles_json": ["hero", "detail"],
+                "product_visibility": "high",
+                "mixcut_usability": "yes",
+                "risk_level": "low",
+                "confidence": "high",
+            },
+        )
+
+        res = _compute_missing_effective_roles(self.ctx, product_id, source_types=["ai_generated"])
+
+        self.assertTrue(res.success, res.to_dict())
+        self.assertEqual(res.data["attempted_count"], 1)
+        segment = self.ctx.repo.get("segments", "segment_id", segment_id)
+        self.assertIn("hero", segment["effective_roles_json"])
+        self.assertIn("detail", segment["effective_roles_json"])
+
+    def test_prompt_workbench_dedupe_only_blocks_open_packages(self):
+        self.assertTrue(_prompt_record_blocks_new_package("待提单"))
+        self.assertTrue(_prompt_record_blocks_new_package("生成中"))
+        self.assertTrue(_prompt_record_blocks_new_package("参考图异常"))
+        self.assertFalse(_prompt_record_blocks_new_package("已回流"))
+        self.assertFalse(_prompt_record_blocks_new_package("质检通过"))
+        self.assertFalse(_prompt_record_blocks_new_package("已消费"))
+        self.assertFalse(_prompt_record_blocks_new_package("失败"))
 
     def test_readiness_caps_outputs_by_unique_first_slot_and_requests_missing_heroes(self):
         product_id = "VN_ONE_HERO_CAP"
@@ -1366,6 +1576,28 @@ class AIFactoryStrategyTest(unittest.TestCase):
         self.assertIn("volume=1.000", audio_filter)
         self.assertIn("atrim=0:15.000", audio_filter)
         self.assertNotIn("apad", audio_filter)
+
+    def test_bgm_filter_can_use_background_bed_volume_mode(self):
+        old_mode = os.environ.get("AUTO_MIXCUT_BGM_VOLUME_MODE")
+        old_min = os.environ.get("AUTO_MIXCUT_BGM_MIN_VOLUME")
+        try:
+            os.environ["AUTO_MIXCUT_BGM_VOLUME_MODE"] = "bed"
+            os.environ.pop("AUTO_MIXCUT_BGM_MIN_VOLUME", None)
+            bgm_plan = {"default_volume": 0.2, "fade_in_ms": 500, "fade_out_ms": 800}
+
+            audio_filter = _bgm_audio_filter(bgm_plan, 15000)
+
+            self.assertIn("volume=0.200", audio_filter)
+            self.assertIn("afade=t=out", audio_filter)
+        finally:
+            if old_mode is None:
+                os.environ.pop("AUTO_MIXCUT_BGM_VOLUME_MODE", None)
+            else:
+                os.environ["AUTO_MIXCUT_BGM_VOLUME_MODE"] = old_mode
+            if old_min is None:
+                os.environ.pop("AUTO_MIXCUT_BGM_MIN_VOLUME", None)
+            else:
+                os.environ["AUTO_MIXCUT_BGM_MIN_VOLUME"] = old_min
 
     def test_segment_scoring_prefers_real_output_usage_over_planning_noise(self):
         slot = {"role": "hero", "duration_ms": 3000}

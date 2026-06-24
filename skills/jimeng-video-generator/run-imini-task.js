@@ -105,7 +105,7 @@ async function main() {
   console.log(`\n🔍 生成商品一致性锁定卡...`);
   const hardConstraints = extractHardConstraints(context.prompt);
   const lock = buildProductLockCard(context.prompt, imagePaths, null);
-  const category = detectCategory(context.prompt, lock);
+  const category = detectCategory(context.prompt, lock, context?.category);
   console.log(`   商品类目: ${category.category || '未识别'}`);
   console.log(`   锁定卡:\n${formatProductLockCard(lock)}`);
 

@@ -578,14 +578,22 @@ def _select_segments(ctx: SkillContext, product_id: str, slots, batch_state: dic
         state["_selection_segments"] = segments
     for slot in slots:
         role = slot["role"]
+        slot_index = len(selected) + 1
         pool = [s for s in segments if role in (s.get("effective_roles_json") or [])]
         if not pool and role == "hero":
             pool = _hero_fallback_pool(segments)
-        pool = _filter_constraints(ctx, pool, constraints, slot_index=len(selected) + 1)
+        pool = _filter_product_mismatch_suspects(pool)
+        pool = _filter_ai_core_prompt_packages(ctx, product_id, pool, state, role, slot_index)
+        pool = _filter_constraints(ctx, pool, constraints, slot_index=slot_index)
         filtered = _filter_slot_pool(pool, slot)
         if filtered:
             pool = filtered
-        slot_index = len(selected) + 1
+        if not pool:
+            return Result.fail(
+                "RENDER_PLAN_FAILED",
+                f"no segment available for role {role}",
+                {"role": role, "reason": "candidate_pool_empty_after_safety_filters"},
+            )
         clean_or_repairable_pool = [s for s in pool if not _has_unusable_subtitle_risk(s)]
         if not clean_or_repairable_pool:
             return Result.fail("RENDER_PLAN_FAILED", f"no clean segment available for role {role}", {"role": role, "reason": "hard subtitle unusable"})
@@ -633,9 +641,13 @@ def _select_segments(ctx: SkillContext, product_id: str, slots, batch_state: dic
             unused_first_asset_pool = [s for s in pool if s.get("asset_id") not in state.get("first_assets", set())]
             if unused_first_asset_pool:
                 pool = unused_first_asset_pool
+        unique_source_locked = False
+        unique_source_pool, unique_source_locked = _filter_min_unique_source_assets(pool, selected, slots, slot_index, constraints)
+        if unique_source_pool:
+            pool = unique_source_pool
         if slot_index > 1 and role in {"detail", "result"}:
             non_hero_core_pool = [s for s in pool if "hero" not in (s.get("effective_roles_json") or [])]
-            if non_hero_core_pool:
+            if non_hero_core_pool and not unique_source_locked:
                 pool = non_hero_core_pool
         unused_asset_pool = _filter_unused_asset(pool, selected)
         if unused_asset_pool:
@@ -669,7 +681,7 @@ def _select_segments(ctx: SkillContext, product_id: str, slots, batch_state: dic
             "source_type": choice.get("source_type"),
             "source_trust_level": choice.get("source_trust_level"),
             "source_identity": choice.get("source_identity"),
-            "prompt_package_id": choice.get("prompt_package_id") or choice.get("source_identity"),
+            "prompt_package_id": _ai_prompt_package_id(choice),
             "asset_scene_tag": choice.get("scene_tag"),
             "asset_slot_role": choice.get("slot_role"),
             "asset_ai_gen_grade": choice.get("ai_gen_grade"),
@@ -687,7 +699,50 @@ def _select_segments(ctx: SkillContext, product_id: str, slots, batch_state: dic
             "selected segment durations are below minimum render duration",
             {"status": "skipped_low_quality", "planned_duration_ms": planned_duration, "min_duration_ms": min_duration},
         )
+    unique_target = _min_unique_source_asset_target(constraints, slots)
+    if unique_target:
+        unique_assets = {str(item.get("asset_id") or "") for item in selected if item.get("asset_id")}
+        if len(unique_assets) < unique_target:
+            return Result.fail(
+                "SKIPPED_LOW_QUALITY",
+                "selected source asset diversity is below template minimum",
+                {
+                    "status": "skipped_low_quality",
+                    "unique_source_assets": len(unique_assets),
+                    "min_unique_source_assets": unique_target,
+                },
+            )
     return Result.ok(selected)
+
+
+def _filter_min_unique_source_assets(
+    pool: list[dict],
+    selected: list[dict],
+    slots: list[dict],
+    slot_index: int,
+    constraints: dict,
+) -> tuple[list[dict], bool]:
+    """Prefer a new asset while a template-level unique-source floor is still reachable."""
+    unique_target = _min_unique_source_asset_target(constraints, slots)
+    if unique_target <= 0:
+        return pool, False
+    selected_assets = {str(item.get("asset_id") or "") for item in selected if item.get("asset_id")}
+    if len(selected_assets) >= unique_target:
+        return pool, False
+    remaining_after_current = max(0, len(slots) - slot_index)
+    # If we can still hit the target, force this slot to contribute a fresh asset.
+    if len(selected_assets) + 1 + remaining_after_current < unique_target:
+        return pool, False
+    fresh_pool = [s for s in pool if str(s.get("asset_id") or "") not in selected_assets]
+    return (fresh_pool, True) if fresh_pool else (pool, False)
+
+
+def _min_unique_source_asset_target(constraints: dict, slots: list[dict]) -> int:
+    try:
+        target = int((constraints or {}).get("min_unique_source_assets") or 0)
+    except (TypeError, ValueError):
+        target = 0
+    return min(max(target, 0), len(slots))
 
 
 def _hero_fallback_pool(segments: list[dict]) -> list[dict]:
@@ -696,6 +751,69 @@ def _hero_fallback_pool(segments: list[dict]) -> list[dict]:
         for s in segments
         if {"result", "detail"}.intersection(s.get("effective_roles_json") or [])
     ]
+
+
+def _filter_product_mismatch_suspects(pool: list[dict]) -> list[dict]:
+    return [s for s in pool if not _is_product_mismatch_suspect(s)]
+
+
+def _is_product_mismatch_suspect(segment: dict) -> bool:
+    value = segment.get("product_mismatch_suspect")
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "是"}
+
+
+def _filter_ai_core_prompt_packages(
+    ctx: SkillContext,
+    product_id: str,
+    pool: list[dict],
+    state: dict,
+    role: str,
+    slot_index: int,
+) -> list[dict]:
+    if role not in CORE_ROLES and slot_index != 1:
+        return pool
+    valid_ids = _valid_prompt_package_ids_for_selection(ctx, product_id, state)
+    filtered = []
+    for segment in pool:
+        if str(segment.get("source_type") or "") != "ai_generated":
+            filtered.append(segment)
+            continue
+        prompt_id = _ai_prompt_package_id(segment)
+        if prompt_id and prompt_id in valid_ids:
+            filtered.append(segment)
+    return filtered
+
+
+def _valid_prompt_package_ids_for_selection(ctx: SkillContext, product_id: str, state: dict) -> set[str]:
+    cache_key = f"_valid_prompt_package_ids:{product_id}"
+    if cache_key in state:
+        return set(state.get(cache_key) or set())
+    valid_statuses = {"imported", "consumed", "downloaded", "uploaded", "已回流", "质检通过", "已消费"}
+    invalid_statuses = {"created", "submitted", "generating", "failed", "待提单", "已提单", "生成中", "失败"}
+    valid: set[str] = set()
+    try:
+        rows = ctx.repo.list_where("segment_prompt_packages", "product_id=?", (product_id,))
+    except Exception:
+        rows = []
+    for row in rows:
+        prompt_id = str(row.get("segment_prompt_id") or "").strip()
+        if not prompt_id:
+            continue
+        status = str(row.get("package_status") or row.get("result_sync_status") or "").strip()
+        if status in invalid_statuses and not (row.get("generated_asset_id") or row.get("generated_segment_id")):
+            continue
+        if status in valid_statuses or row.get("generated_asset_id") or row.get("generated_segment_id"):
+            valid.add(prompt_id)
+    state[cache_key] = valid
+    return valid
+
+
+def _ai_prompt_package_id(segment: dict) -> str:
+    if str(segment.get("source_type") or "") != "ai_generated":
+        return ""
+    return str(segment.get("prompt_package_id") or "").strip()
 
 
 def _slot_duration_ms(slot: dict, segment: dict) -> int:
@@ -766,7 +884,7 @@ def _segment_score(ctx: SkillContext, segment: dict, selected: list[dict], batch
     segment_type = str(segment.get("segment_type") or segment.get("scene_tag") or "").strip()
     if slot_segment_type and segment_type == slot_segment_type:
         score += 18
-    is_prompt_package_ai = source_type == "ai_generated" and bool(segment.get("source_identity") or segment.get("scene_tag"))
+    is_prompt_package_ai = source_type == "ai_generated" and bool(_ai_prompt_package_id(segment))
     if is_prompt_package_ai:
         score += 16
         if batch_state.get("reuse_mode") in {"fill_target", "final_fill"}:
@@ -847,7 +965,7 @@ def _segment_score(ctx: SkillContext, segment: dict, selected: list[dict], batch
 def _selection_reason(ctx: SkillContext, segment: dict, batch_state: dict, slot: dict, slot_index: int, score: float) -> dict[str, Any]:
     segment_id = str(segment.get("segment_id") or "")
     asset_id = str(segment.get("asset_id") or "")
-    prompt_package_id = str(segment.get("prompt_package_id") or segment.get("source_identity") or "")
+    prompt_package_id = _ai_prompt_package_id(segment)
     slot_segment_type = str(slot.get("segment_type") or "")
     segment_type = str(segment.get("segment_type") or segment.get("scene_tag") or "")
     overlay = classify_text_overlay(_overlay_tag(segment))
@@ -1373,6 +1491,8 @@ def _build_template_constraints(template: TemplateSpec) -> dict[str, Any]:
         constraints["hook_weight_scale"] = sp["hook_weight_scale"]
     if sp.get("require_hook_visual_first_slot"):
         constraints["require_hook_visual_first_slot"] = True
+    if sp.get("min_unique_source_assets") is not None:
+        constraints["min_unique_source_assets"] = sp["min_unique_source_assets"]
     return constraints
 
 

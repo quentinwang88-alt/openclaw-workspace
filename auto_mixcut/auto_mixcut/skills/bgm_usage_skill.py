@@ -41,9 +41,20 @@ def refresh_bgm_track_usage(ctx: SkillContext, bgm_id: str, last_feedback_status
     bgm_id = str(bgm_id or "").strip()
     if not bgm_id:
         return {"bgm_id": bgm_id, "rendered_usage_count": 0, "rejected_usage_count": 0}
-    events = ctx.repo.list_where("bgm_usage_events", "bgm_id=? AND usage_status='rendered'", (bgm_id,))
-    rendered = len(events)
-    rejected = sum(1 for event in events if str(event.get("quality_status") or "") in REJECTED_BGM_FEEDBACK)
+    events = ctx.repo.list_where("bgm_usage_events", "bgm_id=?", (bgm_id,))
+    rendered_output_ids = {
+        str(event.get("output_id") or event.get("event_id") or "")
+        for event in events
+        if str(event.get("usage_status") or "") == "rendered"
+    }
+    rejected_output_ids = {
+        str(event.get("output_id") or event.get("event_id") or "")
+        for event in events
+        if str(event.get("usage_status") or "") == "rejected"
+        or str(event.get("quality_status") or "") in REJECTED_BGM_FEEDBACK
+    }
+    rendered = len(rendered_output_ids)
+    rejected = len(rejected_output_ids)
     values = {"usage_count": rendered, "rejected_usage_count": rejected}
     if last_feedback_status:
         values["last_feedback_status"] = last_feedback_status

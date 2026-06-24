@@ -492,7 +492,7 @@ async function inspectVideoGenerationPage(page) {
       );
     };
 
-    const visibleComboboxes = Array.from(document.querySelectorAll('div[role="combobox"]'))
+    const visibleComboboxes = Array.from(document.querySelectorAll('div[role="combobox"], [role="combobox"]'))
       .filter(isVisible)
       .map(el => (el.textContent || '').replace(/\s+/g, ' ').trim())
       .filter(Boolean);
@@ -500,13 +500,28 @@ async function inspectVideoGenerationPage(page) {
       .filter(isVisible)
       .map(el => (el.textContent || '').replace(/\s+/g, ' ').trim())
       .filter(Boolean);
-    const hasRatioButton = visibleButtons.some(text => /^\d+:\d+$/.test(text));
+    const visibleControlTexts = Array.from(document.querySelectorAll('button, [role="button"], [role="combobox"], div, span'))
+      .filter(isVisible)
+      .map(el => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim())
+      .filter(Boolean);
+    const hasRatioButton = visibleControlTexts.some(text => /(^|\D)(\d+:\d+)(\D|$)/.test(text));
 
     const bodyText = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
     const normalizedBody = bodyText.toLowerCase();
+    const loginAgreementDetected =
+      bodyText.includes('同意协议后前往登录') ||
+      (bodyText.includes('已阅读并同意') && bodyText.includes('用户服务协议'));
+    const loginDialogDetected =
+      /扫码登录|验证码登录|手机号登录|密码登录|登录即可|登录后/.test(bodyText);
+    const homeHubDetected =
+      location.href.includes('/ai-tool/home') &&
+      bodyText.includes('即刻造梦') &&
+      (bodyText.includes('视频生成') || bodyText.includes('视频创作') || bodyText.includes('Seedance'));
+    const loginButtonDetected = visibleControlTexts.some(text => text === '登录');
     const loginDetected =
-      /登录|手机号|验证码|继续登录|注册|登录即可/.test(bodyText) &&
-      !visibleComboboxes.some(text => text.includes('视频生成'));
+      loginAgreementDetected ||
+      loginDialogDetected ||
+      (loginButtonDetected && homeHubDetected);
     const brokenPageDetected =
       normalizedBody.includes('404 not found') ||
       normalizedBody.includes('guru meditation') ||
@@ -557,12 +572,14 @@ async function inspectVideoGenerationPage(page) {
       visibleComboboxes,
       visibleButtons,
       hasVideoToolbar: visibleComboboxes.some(text => text.includes('视频生成')),
+      homeHubDetected,
       creationHubDetected,
       defaultCreationInputReady,
-      toolbarReady: !creationHubDetected && (defaultCreationInputReady || (visibleComboboxes.length >= 4 && hasRatioButton)),
+      toolbarReady: !creationHubDetected && !homeHubDetected && (defaultCreationInputReady || (visibleComboboxes.length >= 4 && hasRatioButton)),
       composerReferenceImageCount,
       composerHasUserContent,
       loginDetected,
+      loginAgreementDetected,
       brokenPageDetected,
       bodyPreview: bodyText.slice(0, 200)
     };
@@ -576,7 +593,7 @@ async function waitForVideoGenerationPageReady(page, timeout = 45000) {
   while (Date.now() - startedAt < timeout) {
     lastState = await inspectVideoGenerationPage(page).catch(() => null);
     if (lastState?.loginDetected) {
-      throw new Error('即梦登录态可能已失效');
+      throw new Error('即梦登录态不可用：请在调试 Chrome 中登录即梦后重试');
     }
     if (lastState?.brokenPageDetected) {
       const suffix = lastState?.bodyPreview ? `：${lastState.bodyPreview}` : '';
@@ -740,18 +757,31 @@ async function openVideoCreationEntry(page) {
         const rect = el.getBoundingClientRect();
         return { el, text, rect };
       })
-      .filter(item =>
-        item.text.includes('视频生成') &&
-        /Seedance|2\.0/.test(item.text) &&
-        item.rect.top > 250 &&
-        item.rect.left > 250 &&
-        item.rect.width >= 120 &&
-        item.rect.height >= 50
-      )
+      .filter(item => {
+        const seedanceVideoEntry =
+          /Seedance|S2\.0|2\.0/.test(item.text) &&
+          /视频创作|全能视频创作|视频生成/.test(item.text);
+        const directVideoEntry =
+          item.text === '视频生成' ||
+          item.text === 'S2.0视频创作' ||
+          item.text === '全能视频创作';
+        return (
+          (seedanceVideoEntry || directVideoEntry) &&
+          item.rect.top > 120 &&
+          item.rect.left > 200 &&
+          item.rect.width >= 80 &&
+          item.rect.height >= 20
+        );
+      })
       .sort((a, b) => {
-        const aScore = Math.abs(a.rect.top - 390) + Math.abs(a.rect.left - 1220);
-        const bScore = Math.abs(b.rect.top - 390) + Math.abs(b.rect.left - 1220);
-        return aScore - bScore;
+        const score = item => {
+          let value = Math.abs(item.rect.top - 430) + Math.abs(item.rect.left - 470);
+          if (item.text.includes('Seedance') && item.text.includes('全能视频创作')) value -= 200;
+          if (item.text.includes('S2.0视频创作')) value -= 120;
+          if (item.el.tagName === 'BUTTON') value -= 80;
+          return value;
+        };
+        return score(a) - score(b) || (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height);
       });
 
     const target = candidates[0]?.el || null;
@@ -1329,6 +1359,33 @@ async function resetVideoGenerationPage(page, baseUrl = DEFAULT_CONFIG.baseUrl) 
   let lastError = null;
   const reusableCreationUrl = getReusableCreationUrl(baseUrl);
 
+  const openVideoEntryIfNeeded = async (stage, knownState = null) => {
+    const state = knownState || await inspectVideoGenerationPage(page).catch(() => null);
+    if (!state?.homeHubDetected && !state?.creationHubDetected) {
+      return false;
+    }
+    if (state?.loginDetected) {
+      throw new Error('即梦登录态不可用：请在调试 Chrome 中登录即梦后重试');
+    }
+
+    const entryResult = await openVideoCreationEntry(page);
+    if (!entryResult.clicked) {
+      console.log(`  ⚠️ 未能从即梦首页打开视频创作入口 (${stage}): ${entryResult.reason || 'unknown'}`);
+      return false;
+    }
+    console.log(`  🧭 已从即梦首页打开视频创作入口 (${stage}): ${entryResult.text || 'video-entry'}`);
+    await sleep(2500);
+
+    const afterEntryState = await inspectVideoGenerationPage(page).catch(() => null);
+    if (afterEntryState?.loginDetected) {
+      throw new Error('即梦登录态不可用：请在调试 Chrome 中登录即梦后重试');
+    }
+    await ensureReusableCreationVideoMode(page).catch(error => {
+      console.log(`  ⚠️ 首页入口后切换视频模式失败: ${error.message}`);
+    });
+    return true;
+  };
+
   const forceOpenReusableCreationUrl = async (stage, options = {}) => {
     const blankFirst = options.blankFirst !== false;
     if (blankFirst) {
@@ -1343,6 +1400,8 @@ async function resetVideoGenerationPage(page, baseUrl = DEFAULT_CONFIG.baseUrl) 
       await sleep(800);
     }
     await gotoWithTolerance(page, reusableCreationUrl, { label: `默认创作工作区${stage ? `-${stage}` : ''}` });
+    const routedState = await inspectVideoGenerationPage(page).catch(() => null);
+    await openVideoEntryIfNeeded(`force-${stage || 'goto'}`, routedState);
     await ensureReusableCreationVideoMode(page).catch(error => {
       console.log(`  ⚠️ 默认创作直达后切换视频模式失败: ${error.message}`);
     });
@@ -1417,6 +1476,11 @@ async function resetVideoGenerationPage(page, baseUrl = DEFAULT_CONFIG.baseUrl) 
       }
       await gotoWithTolerance(page, reusableCreationUrl, { label: '默认创作工作区' });
       const afterGotoState = await inspectVideoGenerationPage(page).catch(() => null);
+      const openedFromHome = await openVideoEntryIfNeeded('goto', afterGotoState);
+      if (openedFromHome) {
+        await ensureCleanReusableCreation('home-entry');
+        return;
+      }
       const afterGotoReusable =
         afterGotoState?.url?.includes('/ai-tool/generate') &&
         afterGotoState?.url?.includes('workspace=0');
@@ -1521,7 +1585,9 @@ async function getActiveFileInputs(page) {
 async function getVisibleToolbarState(page) {
   const comboboxes = await getVisibleElementHandles(page, 'div[role="combobox"]', 1200);
   const buttons = await getVisibleElementHandles(page, 'button', 1200);
-  const ratioButton = buttons.find(btn => /^\d+:\d+$/.test(btn.text));
+  const ratioPattern = /(^|\D)(\d+:\d+)(\D|$)/;
+  const extractRatio = text => String(text || '').match(ratioPattern)?.[2] || '';
+  const ratioButton = buttons.find(btn => ratioPattern.test(btn.text));
   const generationButton = buttons.find(btn => btn.text.includes('视频生成'));
   const modelButton = buttons.find(btn => /Seedance|视频\s*3/.test(btn.text));
   const modeButton = buttons.find(btn => /参考|首尾帧|全能|智能|主体/.test(btn.text));
@@ -1554,7 +1620,7 @@ async function getVisibleToolbarState(page) {
         };
       })
       .filter(item => item.text && item.text.length <= 80)
-      .filter(item => /视频生成|Seedance|参考|首尾帧|全能|智能|主体|^\d+:\d+$|^\d+s$/.test(item.text))
+      .filter(item => /视频生成|Seedance|参考|首尾帧|全能|智能|主体|\d+:\d+|^\d+s$/.test(item.text))
       .sort((a, b) => a.area - b.area || a.left - b.left || a.top - b.top);
   }).catch(() => []);
   const fallbackControls = await safePageEvaluate(page, '读取新版创作控件', () => {
@@ -1585,7 +1651,7 @@ async function getVisibleToolbarState(page) {
         };
       })
       .filter(item => item.text && item.text.length <= 40)
-      .filter(item => /视频生成|Seedance|参考|首尾帧|全能|智能|主体|^\d+:\d+$|^\d+s$/.test(item.text))
+      .filter(item => /视频生成|Seedance|参考|首尾帧|全能|智能|主体|\d+:\d+|^\d+s$/.test(item.text))
       .sort((a, b) => a.area - b.area || a.top - b.top || a.left - b.left);
   }).catch(() => []);
   const findFallback = predicate => fallbackControls.find(item => predicate(item.text))?.text || '';
@@ -1597,7 +1663,7 @@ async function getVisibleToolbarState(page) {
     model: findToolbar(text => /Seedance|视频\s*3/.test(text)) || findFallback(text => /Seedance|视频\s*3/.test(text)) || findCombobox(text => /Seedance|视频\s*3/.test(text)) || modelButton?.text || '',
     mode: findToolbar(text => /参考|首尾帧|全能|智能|主体/.test(text)) || findFallback(text => /参考|首尾帧|全能|智能|主体/.test(text)) || findCombobox(text => /参考|首尾帧|全能|智能|主体/.test(text)) || modeButton?.text || '',
     duration: findToolbar(text => /^\d+s$/.test(text)) || findCombobox(text => /^\d+s$/.test(text)) || durationButton?.text || findFallback(text => /^\d+s$/.test(text)) || '',
-    ratio: findToolbar(text => /^\d+:\d+$/.test(text)) || ratioButton?.text || findFallback(text => /^\d+:\d+$/.test(text))
+    ratio: extractRatio(findToolbar(text => ratioPattern.test(text)) || ratioButton?.text || findFallback(text => ratioPattern.test(text)) || findCombobox(text => ratioPattern.test(text)))
   };
 }
 
@@ -1662,6 +1728,9 @@ function normalizeModelVariantName(value) {
   if (lower.includes('seedance 2.0 fast')) {
     return 'Seedance 2.0 Fast';
   }
+  if (lower.includes('seedance 2.0 mini')) {
+    return 'Seedance 2.0 Mini';
+  }
   if (lower.includes('seedance 2.0')) {
     return 'Seedance 2.0';
   }
@@ -1708,7 +1777,8 @@ function isDurationMatch(actual, expected) {
 }
 
 function isRatioMatch(actual, expected) {
-  return actual === expected;
+  const match = String(actual || '').match(/(^|\D)(\d+:\d+)(\D|$)/);
+  return (match?.[2] || '') === String(expected || '');
 }
 
 async function getUploadAreaPreviewState(inputHandle) {
@@ -2556,7 +2626,7 @@ async function selectRatio(page, ratio) {
         if (!isVisible(el)) return false;
         const rect = el.getBoundingClientRect();
         const text = String(el.textContent || '').replace(/\s+/g, ' ').trim();
-        return rect.y >= 250 && rect.y < window.innerHeight - 8 && text.match(/^\d+:\d+$/);
+        return rect.y >= 250 && rect.y < window.innerHeight - 8 && text.match(/(^|\D)(\d+:\d+)(\D|$)/);
       })
       .sort((a, b) => {
         const ar = a.getBoundingClientRect();
@@ -2572,7 +2642,8 @@ async function selectRatio(page, ratio) {
       return { success: false, error: '未找到比例按钮' };
     }
     
-    const currentRatio = String(ratioButton.textContent || '').replace(/\s+/g, ' ').trim();
+    const currentText = String(ratioButton.textContent || '').replace(/\s+/g, ' ').trim();
+    const currentRatio = currentText.match(/(^|\D)(\d+:\d+)(\D|$)/)?.[2] || currentText;
     console.log('当前比例:', currentRatio);
     
     // 如果已经是目标比例，直接返回
@@ -2708,12 +2779,12 @@ async function selectRatio(page, ratio) {
   for (let index = 0; index < 6; index++) {
     await sleep(500);
     verifyResult = (await getVisibleToolbarState(page)).ratio;
-    if (verifyResult === ratio) {
+    if (isRatioMatch(verifyResult, ratio)) {
       break;
     }
   }
   
-  if (verifyResult === ratio) {
+  if (isRatioMatch(verifyResult, ratio)) {
     console.log(`  ✅ 已选择比例: ${ratio}`);
     return true;
   } else {
@@ -2737,44 +2808,87 @@ async function selectDuration(page, duration) {
   
   const comboboxes = await getVisibleElementHandles(page, 'div[role="combobox"]', 1200);
   let durationCombobox = null;
+
+  const durationComboboxes = comboboxes
+    .filter(box => /^\d+s$/.test(box.text))
+    .sort((a, b) => {
+      const targetY = 930;
+      const aScore = Math.abs((a.y || 0) - targetY) + Math.abs((a.x || 0) - 1160);
+      const bScore = Math.abs((b.y || 0) - targetY) + Math.abs((b.x || 0) - 1160);
+      return aScore - bScore;
+    });
+  durationCombobox = durationComboboxes[0]?.handle || null;
   
-  for (const box of comboboxes) {
-    const text = box.text;
-    // 时长下拉框包含秒数，如 "4s", "10s", "15s"
-    if (text.match(/^\d+s$/)) {
-      durationCombobox = box.handle;
-      break;
-    }
-  }
-  
-  if (!durationCombobox) {
-    const clicked = await safePageEvaluate(page, '点击新版时长按钮', () => {
+  const clickBottomDurationDropdown = async () => {
+    const clicked = await safePageEvaluate(page, '点击底部时长下拉', () => {
       const isVisible = el => {
         if (!el) return false;
         const style = getComputedStyle(el);
         const rect = el.getBoundingClientRect();
         return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && rect.width > 0 && rect.height > 0;
       };
-      const buttons = Array.from(document.querySelectorAll('button, [role="button"], [role="combobox"], div, span'))
+      const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
+      const buttons = Array.from(document.querySelectorAll('[role="combobox"], button, [role="button"], div, span'))
         .filter(isVisible)
-        .map(el => ({ el, text: (el.textContent || '').replace(/\s+/g, ' ').trim(), rect: el.getBoundingClientRect() }))
-        .filter(item => /^\d+s$/.test(item.text) && item.rect.top < 700)
-        .sort((a, b) => (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height) || a.rect.top - b.rect.top || a.rect.left - b.rect.left);
-      if (!buttons.length) return false;
-      const target = buttons[0].el.closest('button,[role="button"],[role="combobox"]') || buttons[0].el;
-      target.click();
-      return true;
-    }).catch(() => false);
-
-    if (!clicked) {
-      console.log('  ⚠️ 未找到时长下拉框');
-      return false;
+        .map(el => {
+          const rect = el.getBoundingClientRect();
+          const clickTarget = el.closest('[role="combobox"], button, [role="button"]') || el;
+          const clickRect = clickTarget.getBoundingClientRect();
+          return {
+            el,
+            clickTarget,
+            text: normalize(el.innerText || el.textContent),
+            rect,
+            clickRect,
+            role: el.getAttribute('role') || ''
+          };
+        })
+        .filter(item =>
+          /^\d+s$/.test(item.text) &&
+          item.clickRect.top >= window.innerHeight * 0.55 &&
+          item.clickRect.top < window.innerHeight - 8
+        )
+        .sort((a, b) => {
+          const targetY = window.innerHeight - 72;
+          const aScore = Math.abs(a.clickRect.top - targetY) + Math.abs(a.clickRect.left - 1160);
+          const bScore = Math.abs(b.clickRect.top - targetY) + Math.abs(b.clickRect.left - 1160);
+          return aScore - bScore || (a.clickRect.width * a.clickRect.height) - (b.clickRect.width * b.clickRect.height);
+        });
+      const target = buttons[0];
+      if (!target) {
+        return { clicked: false, reason: 'duration_control_not_found' };
+      }
+      target.clickTarget.click();
+      return {
+        clicked: true,
+        text: target.text,
+        top: Math.round(target.clickRect.top),
+        left: Math.round(target.clickRect.left),
+        role: target.role
+      };
+    }).catch(error => ({ clicked: false, reason: error.message }));
+    if (clicked.clicked) {
+      console.log(`  已打开时长下拉: ${clicked.text} @(${clicked.left},${clicked.top})`);
     }
-    await sleep(1000);
-  } else {
-    await durationCombobox.click();
-    await sleep(1000);
+    return clicked.clicked;
+  };
+
+  let openedDurationDropdown = await clickBottomDurationDropdown();
+  if (!openedDurationDropdown && durationCombobox) {
+    const box = await durationCombobox.boundingBox().catch(() => null);
+    if (box && box.width > 0 && box.height > 0) {
+      await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { delay: 80 });
+    } else {
+      await durationCombobox.click();
+    }
+    openedDurationDropdown = true;
   }
+
+  if (!openedDurationDropdown) {
+    console.log('  ⚠️ 未找到时长下拉框');
+    return false;
+  }
+  await sleep(1000);
   
   const listbox = await page.waitForSelector('div[role="listbox"]', { timeout: 5000 }).catch(() => null);
   const targetText = `${duration}s`;

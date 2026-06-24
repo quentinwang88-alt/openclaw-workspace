@@ -21,6 +21,7 @@ from auto_mixcut.skills.cleanup_skill import CleanupSkill
 from auto_mixcut.skills.effective_role_skill import EffectiveRoleSkill
 from auto_mixcut.skills.feishu_review_skill import FeishuReviewSkill
 from auto_mixcut.skills.final_video_qc_skill import FinalVideoQCSkill
+from auto_mixcut.skills.final_video_qc_async_skill import FinalVideoQCAsyncSkill
 from auto_mixcut.skills.frame_sample_skill import FrameSampleSkill
 from auto_mixcut.skills.golden_benchmark_skill import GoldenBenchmarkSkill
 from auto_mixcut.skills.media_probe_skill import MediaProbeSkill
@@ -291,6 +292,51 @@ def _top_up(ctx, product_id, count, max_rounds=2):
             return _top_up_fail("render_plan", planned, product_id, rounds, before)
         batch_id = (planned.data or {}).get("batch_id") or ""
         plan_ids = (planned.data or {}).get("render_plan_ids") or []
+        resume_reason = (planned.data or {}).get("reason")
+        resume_batch_id = (planned.data or {}).get("active_batch_id") or batch_id
+        if resume_reason in {"active_planning_batch_exists", "pending_output_qc_exists"} and resume_batch_id:
+            rendered = RenderSkill(ctx).render_batch(resume_batch_id)
+            if not rendered.success:
+                return _top_up_fail("render", rendered, product_id, rounds, before, resume_batch_id)
+
+            quality = QualityGateSkill(ctx).check_batch(resume_batch_id)
+            if not quality.success:
+                return _top_up_fail("quality", quality, product_id, rounds, before, resume_batch_id)
+
+            synced = FeishuReviewSkill(ctx).sync_output_qc(resume_batch_id)
+            if not synced.success:
+                return _top_up_fail("sync_feishu", synced, product_id, rounds, before, resume_batch_id)
+
+            async_final_qc = None
+            if _async_final_video_qc_enabled():
+                async_final_qc = FinalVideoQCAsyncSkill(ctx).dispatch_batch(resume_batch_id)
+
+            after = _top_up_snapshot(ctx, product_id, count)
+            rounds.append(
+                _top_up_round_summary(
+                    ctx,
+                    round_no,
+                    resume_batch_id,
+                    before,
+                    readiness,
+                    planned,
+                    rendered,
+                    quality,
+                    None,
+                    synced,
+                    after,
+                    supplement,
+                    async_final_qc,
+                )
+            )
+            batch_ids.append(resume_batch_id)
+            if after["target_remaining_variant_count"] <= 0:
+                stop_reason = "target_filled"
+                break
+            if after["material_pool_extra_capacity"] <= 0:
+                stop_reason = "no_material_pool_capacity_after_round"
+                break
+            continue
         if not batch_id or not plan_ids:
             stop_reason = "render_plan_empty"
             if not supplement and deferred_ai_supplement_gaps:
@@ -319,8 +365,12 @@ def _top_up(ctx, product_id, count, max_rounds=2):
         if not synced.success:
             return _top_up_fail("sync_feishu", synced, product_id, rounds, before, batch_id)
 
+        async_final_qc = None
+        if final_qc is None and _async_final_video_qc_enabled():
+            async_final_qc = FinalVideoQCAsyncSkill(ctx).dispatch_batch(batch_id)
+
         after = _top_up_snapshot(ctx, product_id, count)
-        rounds.append(_top_up_round_summary(ctx, round_no, batch_id, before, readiness, planned, rendered, quality, final_qc, synced, after, supplement))
+        rounds.append(_top_up_round_summary(ctx, round_no, batch_id, before, readiness, planned, rendered, quality, final_qc, synced, after, supplement, async_final_qc))
         batch_ids.append(batch_id)
         if after["target_remaining_variant_count"] <= 0:
             stop_reason = "target_filled"
@@ -449,7 +499,7 @@ def _write_task_timeout(ctx, product_id: str, message: str, aborted: dict) -> No
     )
 
 
-def _top_up_round_summary(ctx, round_no, batch_id, before, readiness, planned, rendered=None, quality=None, final_qc=None, synced=None, after=None, supplement=None):
+def _top_up_round_summary(ctx, round_no, batch_id, before, readiness, planned, rendered=None, quality=None, final_qc=None, synced=None, after=None, supplement=None, async_final_qc=None):
     plan_data = planned.data or {}
     outputs = ctx.repo.list_where("outputs", "batch_id=? ORDER BY id ASC", (batch_id,)) if batch_id else []
     output_items = [
@@ -485,6 +535,7 @@ def _top_up_round_summary(ctx, round_no, batch_id, before, readiness, planned, r
             "render": rendered.to_dict() if rendered else None,
             "quality": quality.to_dict() if quality else None,
             "final_video_qc": final_qc.to_dict() if final_qc else None,
+            "final_video_qc_async": async_final_qc.to_dict() if async_final_qc else None,
             "sync_feishu": synced.to_dict() if synced else None,
         },
     }
@@ -607,6 +658,11 @@ def _chunked(items: list[str], size: int):
 
 def _skip_final_video_qc() -> bool:
     value = str(os.environ.get("AUTO_MIXCUT_SKIP_FINAL_VIDEO_QC", "1")).strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _async_final_video_qc_enabled() -> bool:
+    value = str(os.environ.get("AUTO_MIXCUT_ASYNC_FINAL_VIDEO_QC", "1")).strip().lower()
     return value not in {"0", "false", "no", "off"}
 
 

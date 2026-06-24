@@ -1,5 +1,6 @@
 const IMINI_MODEL_MAP = {
   'seedance 2.0': 'Seedance 2.0',
+  'seedance 2.0 mini': 'Seedance 2.0 Mini',
   'seedance 2.0 fast': 'Seedance 2.0 Fast',
   'seedance 2.0 fast vip': 'Seedance 2.0 Fast VIP',
   'seedance 2.0 vip': 'Seedance 2.0 VIP'

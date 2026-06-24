@@ -1,0 +1,113 @@
+{
+  "version": "v1",
+  "adapters": [
+    {
+      "adapter_id": "hair_accessories.appearance_transform.default",
+      "category": "hair_accessories",
+      "product_form": "*",
+      "proof_archetype": "appearance_transform",
+      "priority": 100,
+      "allowed_segment_types": ["tryon_result", "mirror_routine", "product_display", "detail_atmosphere"],
+      "required_action_zh": "先展示普通发型或手持发饰，再佩戴到头发上，镜前轻转头展示颜色和造型变化",
+      "shot_plan": ["普通发型或手持商品入画", "佩戴到头发上", "镜前转头展示搭配效果"],
+      "safe_micro_actions": ["佩戴后转头展示", "镜前整理头发", "近景展示发饰在头发上的效果"],
+      "negative_constraints": ["不要只做静物展示", "不要变成耳环/项链/发箍"]
+    },
+    {
+      "adapter_id": "hair_accessories.state_stability.side_hair_fix",
+      "category": "hair_accessories",
+      "product_form": "*",
+      "proof_archetype": "state_stability_proof",
+      "priority": 100,
+      "allowed_segment_types": ["tryon_result", "mirror_routine"],
+      "required_action_zh": "先展示局部头发较松散，再用发夹夹住，手离开后轻微转头展示整理后的状态",
+      "shot_plan": ["头发或碎发松散", "发夹夹住头发", "手离开后轻转头展示更利落"],
+      "safe_micro_actions": ["夹住侧边头发", "手离开发夹", "轻微转头展示结果"],
+      "negative_constraints": ["不要只拿在手里展示", "不要只展示装饰图案"]
+    },
+    {
+      "adapter_id": "earrings.appearance_transform.turn_head",
+      "category": "earrings",
+      "product_form": "*",
+      "proof_archetype": "appearance_transform",
+      "priority": 90,
+      "allowed_segment_types": ["tryon_result", "mirror_routine", "product_display"],
+      "required_action_zh": "先展示未佩戴或手持耳饰，再戴到耳朵上，轻转头展示脸侧效果",
+      "shot_plan": ["手持耳饰近景", "戴到耳朵上", "转头展示脸侧搭配效果"],
+      "safe_micro_actions": ["靠近耳侧佩戴", "轻转头", "镜前看整体效果"],
+      "negative_constraints": ["不要变成项链/发夹", "不要遮住耳饰"]
+    },
+    {
+      "adapter_id": "bracelets.state_stability.wrist_motion",
+      "category": "bracelets",
+      "product_form": "*",
+      "proof_archetype": "state_stability_proof",
+      "priority": 90,
+      "allowed_segment_types": ["tryon_result", "product_display"],
+      "required_action_zh": "戴上手链后抬手、转腕，展示佩戴位置自然且商品清楚可见",
+      "shot_plan": ["手链戴到手腕", "抬手转腕", "停留展示佩戴效果"],
+      "safe_micro_actions": ["扣上手链", "转腕", "手腕靠近镜头"],
+      "negative_constraints": ["不要变成戒指", "不要遮挡主体"]
+    },
+    {
+      "adapter_id": "bags.capacity.daily_items_fill",
+      "category": "bags",
+      "product_form": "*",
+      "proof_archetype": "capacity_fill_proof",
+      "priority": 90,
+      "allowed_segment_types": ["product_display", "home_lifestyle"],
+      "required_action_zh": "先展示空包，再放入手机、钥匙或口红，最后拎起展示包型和容量",
+      "shot_plan": ["空包打开", "日常小物放入", "合上或拎起展示"],
+      "safe_micro_actions": ["放入小物", "拉上拉链或合扣", "拎起走一步"],
+      "negative_constraints": ["不要塞入夸张大件", "不要只做静物摆拍"]
+    },
+    {
+      "adapter_id": "generic.appearance_transform.default",
+      "category": "*",
+      "product_form": "*",
+      "proof_archetype": "appearance_transform",
+      "priority": 1,
+      "allowed_segment_types": ["product_display", "tryon_result", "mirror_routine", "detail_atmosphere"],
+      "required_action_zh": "先展示商品本体，再展示商品进入使用状态，最后停留展示外观变化或搭配结果",
+      "shot_plan": ["商品本体近景", "进入使用或佩戴状态", "展示外观变化或搭配结果"],
+      "safe_micro_actions": ["手持展示", "进入使用状态", "结果状态停留"],
+      "negative_constraints": ["不要只做无动作静物展示", "不要把商品变成其他类目"]
+    },
+    {
+      "adapter_id": "generic.state_stability.default",
+      "category": "*",
+      "product_form": "*",
+      "proof_archetype": "state_stability_proof",
+      "priority": 1,
+      "allowed_segment_types": ["product_display", "tryon_result", "home_lifestyle"],
+      "required_action_zh": "先展示使用前状态，再使用商品固定或承托，最后用轻微动作展示结果保持稳定",
+      "shot_plan": ["使用前状态入画", "使用商品完成固定或承托", "轻微动作后结果状态保持"],
+      "safe_micro_actions": ["手部操作", "轻微晃动或移动", "结果近景停留"],
+      "negative_constraints": ["不要夸张测试强度", "不要生成无法证明的功能承诺"]
+    },
+    {
+      "adapter_id": "generic.capacity.default",
+      "category": "*",
+      "product_form": "*",
+      "proof_archetype": "capacity_fill_proof",
+      "priority": 1,
+      "allowed_segment_types": ["product_display", "home_lifestyle"],
+      "required_action_zh": "先展示商品内部或承载空间，再放入合理尺寸的日常物品，最后展示收纳后的状态",
+      "shot_plan": ["空间或结构近景", "放入合理尺寸物品", "收纳后状态停留"],
+      "safe_micro_actions": ["打开空间", "放入小物", "合上或移开手展示结果"],
+      "negative_constraints": ["不要塞入明显不合尺寸的大件", "不要夸大容量"]
+    },
+    {
+      "adapter_id": "generic.scenario_use.default",
+      "category": "*",
+      "product_form": "*",
+      "proof_archetype": "scenario_use_proof",
+      "priority": 1,
+      "allowed_segment_types": ["product_display", "home_lifestyle", "mirror_routine"],
+      "required_action_zh": "在真实生活场景中展示商品被使用，并保留结果状态",
+      "shot_plan": ["真实场景入画", "使用商品", "结果状态停留"],
+      "safe_micro_actions": ["手持展示", "使用动作", "结果近景"],
+      "negative_constraints": ["不要只做无动作静物展示"]
+    }
+  ]
+}

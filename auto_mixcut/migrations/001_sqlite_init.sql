@@ -136,6 +136,10 @@ CREATE TABLE IF NOT EXISTS segments (
   usage_count INTEGER DEFAULT 0,
   used_in_outputs_count INTEGER DEFAULT 0,
   used_in_rejected_outputs_count INTEGER DEFAULT 0,
+  product_mismatch_suspect INTEGER DEFAULT 0,
+  product_mismatch_reason TEXT,
+  product_mismatch_output_id TEXT,
+  product_mismatch_marked_at TEXT,
   avg_first_3s_retention REAL,
   avg_completion_rate REAL,
   performance_score REAL,
@@ -309,6 +313,10 @@ CREATE TABLE IF NOT EXISTS mixcut_batches (
   material_tier TEXT,
   template_pool_json TEXT,
   experiment_batch TEXT,
+  final_qc_async_status TEXT,
+  final_qc_async_error TEXT,
+  final_qc_async_log_path TEXT,
+  final_qc_async_updated_at TEXT,
   created_at TEXT,
   updated_at TEXT
 );

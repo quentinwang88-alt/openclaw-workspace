@@ -9,12 +9,21 @@ category_normalization:
     bangle: bracelets
     wrist_accessory: bracelets
     jewelry_bracelet: bracelets
+    necklaces: necklaces
+    necklace: necklaces
+    pendant: necklaces
+    jewelry_necklace: necklaces
     手链: bracelets
     手镯: bracelets
     手串: bracelets
     腕饰: bracelets
+    项链: necklaces
+    吊坠项链: necklaces
+    颈链: necklaces
+    kalung: necklaces
     สร้อยข้อมือ: bracelets
     กำไล: bracelets
+    สร้อยคอ: necklaces
     scarves_hats: scarves_hats
     scarf_hat: scarves_hats
     scarves: scarves_hats
@@ -42,6 +51,10 @@ prompt_rules:
       A: "手链特征清楚，手腕佩戴结果或托盘展示清晰，链型、吊坠和光泽可见"
       B: "链节、吊坠、扣头、延长链、金属或珐琅细节可识别"
       C: "日常佩戴氛围自然，手链可以不是主体但不能消失或变形"
+    necklaces:
+      A: "项链特征清楚，颈部锁骨附近佩戴结果或托盘展示清晰，链型、吊坠、流苏和金属光泽可见"
+      B: "链节、吊坠、扣头、延长链、坠饰层次和金属细节可识别"
+      C: "日常佩戴氛围自然，项链可以不是主体但不能消失、变形或跑到错误部位"
     scarves_hats:
       A: "围巾或帽子形状清楚，佩戴瞬间可见，面料或帽檐结构可读"
       B: "纹理、边缘、结扣、帽檐或编织细节可识别"
@@ -51,6 +64,7 @@ prompt_rules:
     hair_accessories: ["发饰品类错误", "发饰消失在头发里", "佩戴位置错误"]
     earrings: ["首饰品类错误", "耳饰没有出现在耳侧", "耳饰结构变形"]
     bracelets: ["首饰品类错误", "手链没有出现在手腕或托盘中", "手链结构变形", "手链被误生成为项链/耳饰/戒指"]
+    necklaces: ["首饰品类错误", "项链没有出现在颈部锁骨附近或托盘中", "项链结构变形", "项链被误生成为耳饰/手链/戒指"]
     scarves_hats: ["配饰品类错误", "围巾或帽子变形", "季节感错位"]
 
 category_execution_contract:
@@ -70,6 +84,14 @@ category_execution_contract:
     forbidden_cross_category_words: [衣摆, 衣形, 领口, 袖, 耳垂, 耳侧, 侧脸裁切, 头发, 发饰, collar, sleeve, coat edge]
     product_only_wear_effect_tokens: [佩戴, 佩戴效果, 手腕, 手背, 手部近景, 跟拍]
     product_only_scene_tokens: [镜前, 手腕近景, 手背侧面, 肩部以上]
+  necklaces:
+    forbidden_actions: [复杂扣戴过程, 大幅甩头, 项链剧烈摆动, 多只手遮挡商品, 拍成手链或耳饰]
+    allowed_segment_types: [product_display, product_still, flatlay, mirror_routine, before_go_out, tryon_result, detail_atmosphere, home_lifestyle, unboxing]
+    forbidden_segment_types: []
+    variable_pool_key: necklaces
+    forbidden_cross_category_words: [衣摆, 衣形, 领口, 袖, 耳垂, 耳侧, 手腕, 手背, 发饰, collar, sleeve, coat edge]
+    product_only_wear_effect_tokens: [佩戴, 佩戴效果, 颈部, 锁骨, 颈部近景, 锁骨近景, 跟拍]
+    product_only_scene_tokens: [镜前, 颈部近景, 锁骨近景, 肩颈局部]
   womens_outerwear:
     allowed_segment_types: [product_display, product_still, flatlay, mirror_routine, before_go_out, tryon_result, detail_atmosphere, home_lifestyle, seasonal_scene, unboxing]
     forbidden_segment_types: []
@@ -181,6 +203,7 @@ product_still_lexicon:
       hair_accessories: "发饰平铺或立式陈列,齿距/材质/光泽清晰,微距质感,无人无手"
       earrings: "耳饰悬挂或托盘陈列,金属光泽/流苏细节微距,无人无手"
       bracelets: "手链托盘陈列或环形摆放,链节/吊坠/扣头/金属光泽清晰,微距质感,无人无手"
+      necklaces: "项链托盘陈列或首饰展示架陈列,链节/吊坠/流苏/扣头/金属光泽清晰,微距质感,无人无手"
       scarves_hats: "围巾垂坠展示或帽子立体陈列,面料纹理/编织细节,无人无手"
       womens_outerwear: "外套挂拍展示完整廓形,衣长/领口/面料垂感清晰,衣架或立体挂展,无人"
       generic_fashion: "商品立体陈列,材质纹理和关键结构清晰,无人无手"
@@ -190,6 +213,7 @@ product_still_lexicon:
       hair_accessories: "拆开小包装取出发饰,指尖展示,无面部"
       earrings: "打开耳饰盒,取出展示光泽,只出手部,无面部"
       bracelets: "打开首饰盒或小包装取出手链,指尖托起链节和吊坠,只出手部,无面部"
+      necklaces: "打开首饰盒或小包装取出项链,指尖托起链条和吊坠,只出手部,无面部"
       scarves_hats: "拆快递取出围巾/帽子,展开瞬间,只出手部"
       womens_outerwear: "拆包装取出外套,抖开展示廓形,只出手部,无面部全身"
       generic_fashion: "拆开包装取出商品,只出手部,无面部"
@@ -199,6 +223,7 @@ product_still_lexicon:
       hair_accessories: "多款发饰平铺成组,色系排布,俯拍"
       earrings: "耳饰成对平铺,配卡片或干花点缀,俯拍"
       bracelets: "手链环形平铺或成组摆放,配卡片/托盘/小花点缀,俯拍"
+      necklaces: "项链自然垂坠平铺或环形摆放,吊坠居中,配卡片/托盘/小花点缀,俯拍"
       scarves_hats: "围巾折叠平铺配帽子,季节感小物,俯拍"
       womens_outerwear: "外套平铺配内搭或配饰,展示搭配方案,俯拍"
       generic_fashion: "商品平铺俯拍,搭配小物克制,关键结构清晰"
@@ -221,6 +246,7 @@ persona_pool:
       hair_accessories: 女
       earrings: 女
       bracelets: 女
+      necklaces: 女
       scarves_hats: [女, 中性]
       womens_outerwear: 女
       generic_fashion: 女
@@ -267,6 +293,9 @@ ai_shot_risk:
     bracelets:
       forbidden: [复杂扣戴过程, 大幅甩手, 手链剧烈摆动, 拍成项链或耳饰, 多只手遮挡商品]
       high_risk: [只拍近景细节不拍佩戴结果, 关键吊坠被遮挡, 手腕动作压过商品]
+    necklaces:
+      forbidden: [复杂扣戴过程, 大幅甩头, 项链剧烈摆动, 拍成手链或耳饰, 多只手遮挡商品]
+      high_risk: [只拍近景细节不拍佩戴结果, 关键吊坠或流苏被遮挡, 头发或衣领压过商品]
     hair_accessories:
       forbidden: [手头发发饰长时间纠缠同框, 复杂盘发过程, 大幅甩头, 反复调整发饰位置]
       high_risk: [发饰被头发遮住, 只拍发型不拍发饰结果, 人物动作压过商品]

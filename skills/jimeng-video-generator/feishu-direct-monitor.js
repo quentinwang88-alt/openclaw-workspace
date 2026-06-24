@@ -179,6 +179,7 @@ const MODEL_ALIASES = {
   'seedance 2.0 fast vip': 'Seedance 2.0 Fast VIP',
   'seedance 2.0 vip': 'Seedance 2.0 VIP',
   'seedance 2.0 fast': 'Seedance 2.0 Fast',
+  'seedance 2.0 mini': 'Seedance 2.0 Mini',
   'seedance 2.0': 'Seedance 2.0'
 };
 
@@ -761,6 +762,9 @@ function normalizeModelName(value, fallback) {
   }
   if (lower.includes('seedance 2.0 fast')) {
     return 'Seedance 2.0 Fast';
+  }
+  if (lower.includes('seedance 2.0 mini')) {
+    return 'Seedance 2.0 Mini';
   }
   if (lower.includes('seedance 2.0')) {
     return 'Seedance 2.0';

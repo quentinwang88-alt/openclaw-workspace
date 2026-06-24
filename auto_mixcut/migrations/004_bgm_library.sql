@@ -5,6 +5,8 @@ CREATE TABLE IF NOT EXISTS bgm_tracks (
   track_name TEXT,
   artist_name TEXT,
   source_platform TEXT,
+  status TEXT DEFAULT 'active',
+  license_status TEXT,
   source_url TEXT,
   file_name TEXT,
   download_version TEXT,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from auto_mixcut.core.storage_paths import require_oss_object_path
@@ -76,8 +77,9 @@ class FinalVideoQCSkill:
         elif status == "pass":
             updates["machine_quality_status"] = "publish_ready"
         self.ctx.repo.update("outputs", "output_id", output_id, updates)
+        segment_feedback = _mark_product_mismatch_segments(self.ctx, output_id, qc) if status == "fail" else {"updated_count": 0}
         BgmUsageSkill(self.ctx).record_output_feedback(output_id, _bgm_feedback_status(status), "final_video_qc")
-        return Result.ok({"output_id": output_id, "final_qc_status": status, "final_qc": qc})
+        return Result.ok({"output_id": output_id, "final_qc_status": status, "final_qc": qc, "segment_feedback": segment_feedback})
 
     def _output_path(self, output: dict) -> Path | None:
         object_id = output.get("bgm_output_oss_object_id") or output.get("output_oss_object_id")
@@ -197,6 +199,79 @@ def _bgm_feedback_status(final_qc_status: str) -> str:
     if final_qc_status == "fail":
         return "final_qc_fail"
     return "final_qc_needs_review"
+
+
+def _mark_product_mismatch_segments(ctx: SkillContext, output_id: str, qc: dict) -> dict:
+    if not _has_product_match_failure(qc):
+        return {"updated_count": 0, "reason": "no_product_match_failure"}
+    slots = ctx.repo.list_where("output_segments", "output_id=? ORDER BY slot_index", (output_id,))
+    if not slots:
+        return {"updated_count": 0, "reason": "no_output_segments"}
+    reason = _final_qc_reason_text(qc)
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    updated = []
+    for slot in slots:
+        segment_id = str(slot.get("segment_id") or "")
+        segment = ctx.repo.get("segments", "segment_id", segment_id) if segment_id else None
+        if not segment or not _should_mark_product_mismatch_segment(ctx, segment):
+            continue
+        ctx.repo.update(
+            "segments",
+            "segment_id",
+            segment_id,
+            {
+                "product_mismatch_suspect": 1,
+                "product_mismatch_reason": reason[:1000],
+                "product_mismatch_output_id": output_id,
+                "product_mismatch_marked_at": now,
+                "effective_roles_json": [],
+                "effective_roles_updated_at": now,
+                "effective_roles_reason": f"final_video_qc_product_mismatch: {reason}"[:500],
+            },
+        )
+        updated.append(segment_id)
+    return {"updated_count": len(updated), "segment_ids": updated, "reason": reason[:300]}
+
+
+def _has_product_match_failure(qc: dict) -> bool:
+    if _as_bool(qc.get("product_match_issue")):
+        return True
+    text = _final_qc_reason_text(qc).lower()
+    tokens = [
+        "商品不一致",
+        "展示不一致",
+        "款式不一致",
+        "多款",
+        "不同款",
+        "错品",
+        "错款",
+        "目标商品",
+        "product mismatch",
+        "wrong product",
+    ]
+    return any(token in text for token in tokens)
+
+
+def _final_qc_reason_text(qc: dict) -> str:
+    parts = []
+    for key in ("fail_reasons", "review_reasons", "raw_text"):
+        value = qc.get(key)
+        if isinstance(value, list):
+            parts.extend(str(item) for item in value if item)
+        elif value:
+            parts.append(str(value))
+    return "; ".join(parts).strip() or "final video QC product mismatch"
+
+
+def _should_mark_product_mismatch_segment(ctx: SkillContext, segment: dict) -> bool:
+    asset = ctx.repo.get("assets", "asset_id", segment.get("asset_id")) if segment.get("asset_id") else {}
+    source_type = str(segment.get("source_type") or (asset or {}).get("source_type") or "")
+    source_trust = str(segment.get("source_trust_level") or (asset or {}).get("source_trust_level") or "")
+    if source_type == "ai_generated":
+        return True
+    if source_type in {"competitor", "douyin_repost", "other"}:
+        return True
+    return source_trust == "low"
 
 
 def _refresh_task_actual_count(ctx: SkillContext, batch_id: str) -> dict:

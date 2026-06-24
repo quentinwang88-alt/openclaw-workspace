@@ -42,8 +42,10 @@ FIELD_RESULT = "提单结果"
 FIELD_LATEST_TRACE_ID = "最新追踪ID"
 FIELD_PLATFORM_TASK_ID = "平台任务ID"
 
-IMPORTED_STATUSES = {"已回流", "已导入", "质检中", "质检通过", "质检废弃"}
+IMPORTED_STATUSES = {"已回流", "已导入", "质检中", "质检通过"}
 RESULT_SYNC_READY = {"uploaded", "downloaded", "已回流", "已上传"}
+REJECTED_STATUSES = {"失败", "质检废弃", "暂停"}
+REJECTED_RESULT_SYNC = {"failed", "blocked", "review_failed", "review_failed_or_missing_asset", "claim_failed", "timed_out"}
 
 
 def main() -> int:
@@ -77,6 +79,8 @@ def main() -> int:
 
         status = text(fields.get(FIELD_STATUS))
         result_sync = text(fields.get(FIELD_RESULT_SYNC))
+        if is_rejected_return_status(status, result_sync):
+            continue
         files = attachments(fields.get(FIELD_ATTACHMENT))
         if not files:
             continue
@@ -109,6 +113,8 @@ def sync_submission_status(ctx: Any, record_id: str, fields: Dict[str, Any]) -> 
         return {"updated": False, "reason": "prompt_package_missing", "segment_prompt_id": prompt_id}
 
     current_status = str(package.get("package_status") or "")
+    if current_status in {"failed", "质检废弃"}:
+        return {"updated": False, "reason": "prompt_package_rejected", "segment_prompt_id": prompt_id}
     if current_status in {"imported", "consumed", "fulfilled", "质检中", "质检通过", "质检参考", "质检废弃"} and (
         package.get("generated_asset_id") or package.get("generated_segment_id")
     ):
@@ -140,6 +146,8 @@ def sync_submission_status(ctx: Any, record_id: str, fields: Dict[str, Any]) -> 
 def _rds_package_status(feishu_status: str, result_sync: str) -> str:
     status = str(feishu_status or "").strip()
     sync = str(result_sync or "").strip().lower()
+    if status in REJECTED_STATUSES or sync in REJECTED_RESULT_SYNC:
+        return "failed"
     if status in {"质检中", "已导入"} or sync in {"uploaded", "downloaded", "已回流", "已上传"}:
         return "imported"
     if status in {"已回流", "已生成"}:
@@ -148,11 +156,15 @@ def _rds_package_status(feishu_status: str, result_sync: str) -> str:
         return "submitted"
     if status in {"生成中"} or sync in {"rendering", "observing"}:
         return "generating"
-    if status in {"失败"} or sync in {"failed", "blocked", "review_failed", "review_failed_or_missing_asset", "claim_failed", "timed_out"}:
-        return "failed"
     if status in {"待提单", "已创建"}:
         return "created"
     return ""
+
+
+def is_rejected_return_status(feishu_status: str, result_sync: str) -> bool:
+    status = str(feishu_status or "").strip()
+    sync = str(result_sync or "").strip().lower()
+    return status in REJECTED_STATUSES or sync in REJECTED_RESULT_SYNC
 
 
 def _provider_from_job_id(external_job_id: str) -> str:
@@ -176,6 +188,8 @@ def import_record(
     package = ctx.repo.get("segment_prompt_packages", "segment_prompt_id", prompt_id)
     if not package:
         return {"record_id": record_id, "segment_prompt_id": prompt_id, "status": "failed", "reason": "prompt_package_missing"}
+    if not force and str(package.get("package_status") or "") in {"failed", "质检废弃"}:
+        return {"record_id": record_id, "segment_prompt_id": prompt_id, "status": "skipped", "reason": "prompt_package_rejected"}
     if package.get("generated_asset_id") and package.get("generated_segment_id") and not force:
         maybe_backfill_feishu(ctx, client, record_id, package)
         return {

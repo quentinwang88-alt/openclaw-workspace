@@ -481,6 +481,7 @@ templates:
     selection_policy:
       hook_weight_scale: 2.0
       require_hook_visual_first_slot: true
+      min_unique_source_assets: 3
     bgm_profile:
       moods: [premium_clean, daily_clean]
       energy: high

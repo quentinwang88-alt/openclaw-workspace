@@ -84,8 +84,15 @@ class SQLiteRepository:
 
     def migrate(self, sql_path: Path) -> Result:
         try:
+            sql = sql_path.read_text(encoding="utf-8")
             with self.connect() as conn:
-                conn.executescript(sql_path.read_text(encoding="utf-8"))
+                for statement in _sql_statements(sql):
+                    try:
+                        conn.execute(statement)
+                    except sqlite3.OperationalError as exc:
+                        if "duplicate column name" in str(exc).lower():
+                            continue
+                        raise
             return Result.ok({"db_path": str(self.db_path)})
         except Exception as exc:
             return Result.fail("MIGRATION_FAILED", str(exc), {"db_path": str(self.db_path)})
@@ -460,11 +467,15 @@ class MySQLRepository:
 
 
 def _mysql_statements(sql: str) -> List[str]:
+    return _sql_statements(sql, skip_source=True)
+
+
+def _sql_statements(sql: str, skip_source: bool = False) -> List[str]:
     statements: List[str] = []
     current: List[str] = []
     for line in sql.splitlines():
         stripped = line.strip()
-        if not stripped or stripped.startswith("--") or stripped.upper().startswith("SOURCE "):
+        if not stripped or stripped.startswith("--") or (skip_source and stripped.upper().startswith("SOURCE ")):
             continue
         current.append(line)
         if stripped.endswith(";"):
