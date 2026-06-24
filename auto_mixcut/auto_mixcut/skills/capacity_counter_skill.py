@@ -4,7 +4,7 @@ from auto_mixcut.core.result import Result
 
 from .context import SkillContext
 from .render_plan_skill import estimate_render_plan_capacity
-from .usage_counter_skill import is_good_rendered_output
+from .usage_counter_skill import ads_fast_strict_outputs_enabled, count_good_rendered_outputs
 
 
 DEFAULT_EXTRA_CAPACITY_PROBE = 10
@@ -56,8 +56,7 @@ class CapacityCounterSkill:
 
 
 def _actual_good_outputs(ctx: SkillContext, product_id: str) -> int:
-    outputs = ctx.repo.list_where("outputs", "product_id=?", (product_id,))
-    return sum(1 for output in outputs if is_good_rendered_output(output))
+    return count_good_rendered_outputs(ctx, product_id, strict_segments=ads_fast_strict_outputs_enabled())
 
 
 def _lightweight_capacity_estimate(segments: list[dict], probe_count: int) -> dict:

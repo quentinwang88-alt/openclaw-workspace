@@ -17,6 +17,7 @@ from auto_mixcut.skills.mixcut_state_machine_skill import decide_mixcut_state, g
 from auto_mixcut.skills.pipeline_run_skill import PipelineRunSkill
 from auto_mixcut.skills.rds_repository_skill import RDSRepositorySkill
 from auto_mixcut.skills.segment_prompt_factory_skill import _ensure_prompt_package_table
+from auto_mixcut.skills.usage_counter_skill import count_good_rendered_outputs
 
 
 class MixcutStabilityTest(unittest.TestCase):
@@ -182,6 +183,45 @@ class MixcutStabilityTest(unittest.TestCase):
         self.assertEqual(state["consumed_package_count"], 1)
         self.assertEqual(state["active_package_count"], 0)
         self.assertEqual(budget["submit_limit"], 5)
+
+    def test_strict_good_output_excludes_failed_segments(self):
+        product_id = "PROD_STRICT_OUTPUT"
+        self.ctx.repo.upsert(
+            "segments",
+            "segment_id",
+            {
+                "segment_id": "SEG_FAILED_STRICT",
+                "asset_id": "ASSET_FAILED_STRICT",
+                "product_id": product_id,
+                "segment_status": "ai_stage_failed",
+            },
+        )
+        self.ctx.repo.upsert(
+            "outputs",
+            "output_id",
+            {
+                "output_id": "OUT_WITH_FAILED_SEG",
+                "batch_id": "BATCH_STRICT",
+                "product_id": product_id,
+                "variant_no": 1,
+                "template_id": "TEMPLATE_TEST",
+                "render_status": "rendered",
+                "machine_quality_status": "publish_ready",
+            },
+        )
+        self.ctx.repo.insert(
+            "output_segments",
+            {
+                "output_id": "OUT_WITH_FAILED_SEG",
+                "segment_id": "SEG_FAILED_STRICT",
+                "asset_id": "ASSET_FAILED_STRICT",
+                "slot_index": 1,
+                "role_used": "hero",
+            },
+        )
+
+        self.assertEqual(count_good_rendered_outputs(self.ctx, product_id, strict_segments=False), 1)
+        self.assertEqual(count_good_rendered_outputs(self.ctx, product_id, strict_segments=True), 0)
 
     def test_ai_supplement_gateway_treats_stale_generating_as_recoverable(self):
         product_id = "PROD_AI_STALE_GATEWAY"

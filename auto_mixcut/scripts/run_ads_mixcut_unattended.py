@@ -309,32 +309,82 @@ def load_segment_summary(conn, product_id: str) -> Dict[str, Any]:
 
 def load_output_summary(conn, product_id: str) -> Dict[str, Any]:
     cur = conn.cursor()
-    good_statuses = ",".join(["%s"] * len(GOOD_MACHINE_OUTPUT_STATUSES))
-    rejected_statuses = ",".join(["%s"] * len(REJECTED_HUMAN_OUTPUT_STATUSES))
+    good_statuses = sorted(GOOD_MACHINE_OUTPUT_STATUSES)
+    rejected_statuses = sorted(REJECTED_HUMAN_OUTPUT_STATUSES)
+    failed_statuses = sorted(FAILED_SEGMENT_STATUSES)
+    failed_placeholders = ",".join(["%s"] * len(failed_statuses))
     cur.execute(
-        "SELECT COUNT(*) total, "
-        f"SUM(CASE WHEN render_status='rendered' AND machine_quality_status IN ({good_statuses}) "
-        f"AND COALESCE(human_quality_status, '') NOT IN ({rejected_statuses}) THEN 1 ELSE 0 END) good, "
-        "SUM(CASE WHEN render_status='rendered' THEN 1 ELSE 0 END) rendered "
-        "FROM outputs WHERE product_id=%s",
-        (*sorted(GOOD_MACHINE_OUTPUT_STATUSES), *sorted(REJECTED_HUMAN_OUTPUT_STATUSES), product_id),
+        "SELECT o.output_id, o.render_status, o.machine_quality_status, o.human_quality_status, o.duration_ms, "
+        f"SUM(CASE WHEN s.segment_status IN ({failed_placeholders}) THEN 1 ELSE 0 END) failed_segment_count, "
+        "SUM(CASE WHEN s.segment_id IS NULL AND os.segment_id IS NOT NULL THEN 1 ELSE 0 END) missing_segment_count, "
+        "SUM(CASE WHEN p.template_id='VOC_ADS_HOOK_PACKAGE' THEN 1 ELSE 0 END) voc_segment_count "
+        "FROM outputs o "
+        "LEFT JOIN output_segments os ON os.output_id=o.output_id "
+        "LEFT JOIN segments s ON s.segment_id=os.segment_id "
+        "LEFT JOIN segment_prompt_packages p ON p.segment_prompt_id=s.prompt_package_id "
+        "WHERE o.product_id=%s "
+        "GROUP BY o.output_id, o.render_status, o.machine_quality_status, o.human_quality_status, o.duration_ms",
+        (*failed_statuses, product_id),
     )
-    row = cur.fetchone()
-    cur.execute(
-        "SELECT AVG(duration_ms) avg_ms, MIN(duration_ms) min_ms, MAX(duration_ms) max_ms "
-        f"FROM outputs WHERE product_id=%s AND render_status='rendered' "
-        f"AND machine_quality_status IN ({good_statuses}) "
-        f"AND COALESCE(human_quality_status, '') NOT IN ({rejected_statuses})",
-        (product_id, *sorted(GOOD_MACHINE_OUTPUT_STATUSES), *sorted(REJECTED_HUMAN_OUTPUT_STATUSES)),
-    )
-    dur = cur.fetchone()
+    rows = cur.fetchall()
+    good_set = set(good_statuses)
+    rejected_set = set(rejected_statuses)
+    total = len(rows)
+    rendered = 0
+    base_good = 0
+    strict_good = 0
+    outputs_with_failed_segments = 0
+    outputs_missing_segments = 0
+    good_excluded_by_failed_segments = 0
+    outputs_with_voc_segments = 0
+    base_good_outputs_with_voc_segments = 0
+    strict_good_outputs_with_voc_segments = 0
+    strict_durations: List[int] = []
+    for row in rows:
+        is_rendered = row.get("render_status") == "rendered"
+        if is_rendered:
+            rendered += 1
+        is_base_good = (
+            is_rendered
+            and row.get("machine_quality_status") in good_set
+            and str(row.get("human_quality_status") or "") not in rejected_set
+        )
+        failed_count = int(row.get("failed_segment_count") or 0)
+        missing_count = int(row.get("missing_segment_count") or 0)
+        voc_count = int(row.get("voc_segment_count") or 0)
+        has_segment_issue = failed_count > 0 or missing_count > 0
+        if failed_count > 0:
+            outputs_with_failed_segments += 1
+        if missing_count > 0:
+            outputs_missing_segments += 1
+        if voc_count > 0:
+            outputs_with_voc_segments += 1
+        if is_base_good:
+            base_good += 1
+            if voc_count > 0:
+                base_good_outputs_with_voc_segments += 1
+            if has_segment_issue:
+                good_excluded_by_failed_segments += 1
+            else:
+                strict_good += 1
+                if voc_count > 0:
+                    strict_good_outputs_with_voc_segments += 1
+                strict_durations.append(int(row.get("duration_ms") or 0))
     return {
-        "total_outputs": int(row["total"] or 0),
-        "good_outputs": int(row["good"] or 0),
-        "rendered_outputs": int(row["rendered"] or 0),
-        "avg_duration_ms": int(dur["avg_ms"] or 0),
-        "min_duration_ms": int(dur["min_ms"] or 0),
-        "max_duration_ms": int(dur["max_ms"] or 0),
+        "total_outputs": total,
+        "good_outputs": strict_good,
+        "base_good_outputs": base_good,
+        "rendered_outputs": rendered,
+        "good_outputs_excluded_by_failed_segments": good_excluded_by_failed_segments,
+        "outputs_with_failed_segments": outputs_with_failed_segments,
+        "outputs_missing_segments": outputs_missing_segments,
+        "outputs_with_voc_segments": outputs_with_voc_segments,
+        "good_outputs_with_voc_segments": strict_good_outputs_with_voc_segments,
+        "base_good_outputs_with_voc_segments": base_good_outputs_with_voc_segments,
+        "strict_good_outputs_with_voc_segments": strict_good_outputs_with_voc_segments,
+        "avg_duration_ms": int(sum(strict_durations) / len(strict_durations)) if strict_durations else 0,
+        "min_duration_ms": min(strict_durations) if strict_durations else 0,
+        "max_duration_ms": max(strict_durations) if strict_durations else 0,
     }
 
 
@@ -616,8 +666,15 @@ def plan_ads_mixcut(
         },
         "flow_summary": {
             "strict_good_outputs": existing_good,
+            "base_good_outputs": out.get("base_good_outputs", existing_good),
+            "good_outputs_excluded_by_failed_segments": out.get("good_outputs_excluded_by_failed_segments", 0),
             "target_met": remaining <= 0,
             "voc_participation": voc_participation_summary(use_voc_hooks, voc, voc_gap),
+            "voc_output_usage": {
+                "outputs_with_voc_segments": out.get("outputs_with_voc_segments", 0),
+                "base_good_outputs_with_voc_segments": out.get("base_good_outputs_with_voc_segments", 0),
+                "strict_good_outputs_with_voc_segments": out.get("strict_good_outputs_with_voc_segments", 0),
+            },
             "bottleneck": bottleneck_summary(task, seg, remaining),
         },
         "voc_hook_package": {

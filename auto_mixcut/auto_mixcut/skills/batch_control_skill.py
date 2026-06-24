@@ -7,7 +7,7 @@ from auto_mixcut.core.result import Result
 from .context import SkillContext
 from .bgm_usage_skill import BgmUsageSkill
 from .feishu_review_skill import sync_product_task_best_effort
-from .usage_counter_skill import is_good_rendered_output, reconcile_product_segment_usage
+from .usage_counter_skill import ads_fast_strict_outputs_enabled, count_good_rendered_outputs, reconcile_product_segment_usage
 
 
 class BatchControlSkill:
@@ -74,6 +74,4 @@ class BatchControlSkill:
 
 
 def _actual_good_outputs(ctx: SkillContext, product_id: str) -> int:
-    if not product_id:
-        return 0
-    return sum(1 for output in ctx.repo.list_where("outputs", "product_id=?", (product_id,)) if is_good_rendered_output(output))
+    return count_good_rendered_outputs(ctx, product_id, strict_segments=ads_fast_strict_outputs_enabled())

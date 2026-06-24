@@ -1,12 +1,27 @@
 from __future__ import annotations
 
 from collections import Counter
+import os
 
 from .context import SkillContext
 
 
 GOOD_MACHINE_OUTPUT_STATUSES = {"passed", "passed_with_warning", "needs_review", "publish_ready"}
 REJECTED_HUMAN_OUTPUT_STATUSES = {"rejected", "discard", "不可发布", "废弃", "不要", "不使用"}
+FAILED_OUTPUT_SEGMENT_STATUSES = {
+    "qc_failed",
+    "frame_sample_failed",
+    "frame_sample_timeout",
+    "fingerprint_failed",
+    "tag_failed",
+    "effective_role_failed",
+    "ai_stage_failed",
+    "unusable",
+}
+
+
+def ads_fast_strict_outputs_enabled() -> bool:
+    return os.environ.get("AUTO_MIXCUT_ADS_FAST_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def is_human_rejected_output(output: dict) -> bool:
@@ -18,6 +33,55 @@ def is_good_rendered_output(output: dict) -> bool:
         output.get("render_status") == "rendered"
         and output.get("machine_quality_status") in GOOD_MACHINE_OUTPUT_STATUSES
         and not is_human_rejected_output(output)
+    )
+
+
+def output_segment_issue_summary(ctx: SkillContext, output_id: str) -> dict:
+    failed_segments = []
+    missing_segments = []
+    if not output_id:
+        return {"failed_segment_count": 0, "missing_segment_count": 0, "failed_segments": [], "missing_segments": []}
+    for row in ctx.repo.list_where("output_segments", "output_id=?", (output_id,)):
+        segment_id = str(row.get("segment_id") or "")
+        if not segment_id:
+            continue
+        segment = ctx.repo.get("segments", "segment_id", segment_id) or {}
+        if not segment:
+            missing_segments.append(segment_id)
+            continue
+        status = str(segment.get("segment_status") or "")
+        if status in FAILED_OUTPUT_SEGMENT_STATUSES:
+            failed_segments.append({"segment_id": segment_id, "segment_status": status})
+    return {
+        "failed_segment_count": len(failed_segments),
+        "missing_segment_count": len(missing_segments),
+        "failed_segments": failed_segments,
+        "missing_segments": missing_segments,
+    }
+
+
+def output_has_failed_segments(ctx: SkillContext, output_id: str, *, include_missing: bool = True) -> bool:
+    summary = output_segment_issue_summary(ctx, output_id)
+    if int(summary.get("failed_segment_count") or 0) > 0:
+        return True
+    return include_missing and int(summary.get("missing_segment_count") or 0) > 0
+
+
+def is_good_rendered_output_strict(ctx: SkillContext, output: dict, *, strict_segments: bool = False) -> bool:
+    if not is_good_rendered_output(output):
+        return False
+    if strict_segments and output_has_failed_segments(ctx, str(output.get("output_id") or "")):
+        return False
+    return True
+
+
+def count_good_rendered_outputs(ctx: SkillContext, product_id: str, *, strict_segments: bool = False) -> int:
+    if not product_id:
+        return 0
+    return sum(
+        1
+        for output in ctx.repo.list_where("outputs", "product_id=?", (product_id,))
+        if is_good_rendered_output_strict(ctx, output, strict_segments=strict_segments)
     )
 
 

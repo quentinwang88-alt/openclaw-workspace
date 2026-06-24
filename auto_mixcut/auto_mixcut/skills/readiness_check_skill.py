@@ -218,9 +218,9 @@ def _calibrate_render_plan_capacity(ctx: SkillContext, product_id: str, segments
 
 
 def _actual_good_outputs(ctx: SkillContext, product_id: str) -> int:
-    from .usage_counter_skill import is_good_rendered_output
+    from .usage_counter_skill import ads_fast_strict_outputs_enabled, count_good_rendered_outputs
 
-    return sum(1 for output in ctx.repo.list_where("outputs", "product_id=?", (product_id,)) if is_good_rendered_output(output))
+    return count_good_rendered_outputs(ctx, product_id, strict_segments=ads_fast_strict_outputs_enabled())
 
 
 def _current_bottleneck(diversity: dict, gaps: list[str]) -> str:

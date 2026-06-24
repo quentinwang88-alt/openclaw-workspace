@@ -40,7 +40,7 @@ from auto_mixcut.skills.product_anchor_skill import ProductAnchorSkill  # noqa: 
 from auto_mixcut.skills.rds_repository_skill import RDSRepositorySkill  # noqa: E402
 from auto_mixcut.skills.segment_fingerprint_skill import SegmentFingerprintSkill  # noqa: E402
 from auto_mixcut.skills.segment_skill import SegmentSkill  # noqa: E402
-from auto_mixcut.skills.usage_counter_skill import is_good_rendered_output  # noqa: E402
+from auto_mixcut.skills.usage_counter_skill import count_good_rendered_outputs  # noqa: E402
 from auto_mixcut.skills.watermark_detect_skill import WatermarkDetectSkill  # noqa: E402
 from auto_mixcut.skills.watermark_process_skill import WatermarkProcessSkill  # noqa: E402
 
@@ -1741,14 +1741,13 @@ def _guard_timeout(seconds: int):
 
 
 def _status_detail(ctx, product_id: str, target: int | None) -> dict[str, Any]:
-    outputs = ctx.repo.list_where("outputs", "product_id=?", (product_id,))
     task = _latest_task(ctx, product_id) or {}
     capacity = CapacityCounterSkill(ctx).refresh_product(product_id) if task else Result.ok({})
     cap = capacity.data if capacity.success else {}
     segments = ctx.repo.list_where("segments", "product_id=?", (product_id,))
     stale = _stale_segment_summary(ctx, segments, _build_stale_index(ctx, segments))
     first_candidates = sum(1 for seg in segments if "hero" in (seg.get("effective_roles_json") or []))
-    effective = sum(1 for output in outputs if is_good_rendered_output(output))
+    effective = count_good_rendered_outputs(ctx, product_id, strict_segments=_is_ads_fast_mode())
     target_value = int(target or task.get("requested_variant_count") or task.get("allowed_variant_count") or 0)
     return {
         "target_count": target_value,
