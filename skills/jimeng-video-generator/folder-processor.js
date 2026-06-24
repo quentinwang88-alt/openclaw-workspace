@@ -3208,11 +3208,63 @@ async function inputPrompt(page, prompt) {
     return false;
   }
   
-  await inputBox.click();
-  await page.keyboard.down('Meta');
-  await page.keyboard.press('A');
-  await page.keyboard.up('Meta');
-  await page.keyboard.press('Backspace');
+  const readInputContent = async label => {
+    const value = await safeHandleEvaluate(inputBox, label, el =>
+      ('value' in el ? el.value : el.innerText || el.textContent) || ''
+    );
+    return String(value || '');
+  };
+
+  const clearInput = async () => {
+    await inputBox.click();
+    await page.keyboard.down('Meta');
+    await page.keyboard.press('A');
+    await page.keyboard.up('Meta');
+    await page.keyboard.press('Backspace');
+  };
+
+  const setPromptViaDom = async () => {
+    return await safeHandleEvaluate(inputBox, 'DOM写入提示词', (el, value) => {
+      const notify = () => {
+        el.dispatchEvent(new InputEvent('input', {
+          bubbles: true,
+          cancelable: true,
+          inputType: 'insertText',
+          data: value
+        }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
+        el.dispatchEvent(new Event('focus', { bubbles: true }));
+      };
+
+      el.focus();
+      if ('value' in el) {
+        const proto = el.tagName === 'TEXTAREA'
+          ? window.HTMLTextAreaElement.prototype
+          : window.HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+        if (setter) {
+          setter.call(el, value);
+        } else {
+          el.value = value;
+        }
+        notify();
+        return el.value || '';
+      }
+
+      el.textContent = value;
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      notify();
+      return el.innerText || el.textContent || '';
+    }, prompt);
+  };
+
+  await clearInput();
 
   // Let the editor process smaller native input batches. Dispatching one large
   // synthetic input event can block JiMeng's page runtime and time out CDP.
@@ -3228,9 +3280,7 @@ async function inputPrompt(page, prompt) {
 
   await sleep(800);
 
-  const actualContent = await safeHandleEvaluate(inputBox, '校验提示词内容', el =>
-    ('value' in el ? el.value : el.textContent) || ''
-  );
+  const actualContent = await readInputContent('校验提示词内容');
 
   if (actualContent.length >= prompt.length * 0.9) {
     console.log(`  ✅ 已输入提示词 (${actualContent.length} 字符)`);
@@ -3238,11 +3288,7 @@ async function inputPrompt(page, prompt) {
   }
 
   console.log('  ⚠️ 原生分段输入不完整，清空后用更小分段重试...');
-  await inputBox.click();
-  await page.keyboard.down('Meta');
-  await page.keyboard.press('A');
-  await page.keyboard.up('Meta');
-  await page.keyboard.press('Backspace');
+  await clearInput();
   const retryChunkSize = 60;
   for (let offset = 0; offset < promptChars.length; offset += retryChunkSize) {
     await page.keyboard.sendCharacter(promptChars.slice(offset, offset + retryChunkSize).join(''));
@@ -3252,9 +3298,19 @@ async function inputPrompt(page, prompt) {
   }
   await sleep(800);
 
-  const finalContent = await safeHandleEvaluate(inputBox, '校验最终提示词内容', el =>
-    ('value' in el ? el.value : el.textContent) || ''
-  );
+  const retryContent = await readInputContent('校验重试提示词内容');
+  if (retryContent.length >= prompt.length * 0.9) {
+    console.log(`  ✅ 已输入提示词 (${retryContent.length} 字符)`);
+    return true;
+  }
+
+  console.log(`  ⚠️ 小分段输入仍不完整 (${retryContent.length}/${prompt.length})，切换 DOM 写入兜底...`);
+  await clearInput();
+  const domContent = String(await setPromptViaDom() || '');
+  await sleep(800);
+  const finalContent = domContent.length >= prompt.length * 0.9
+    ? domContent
+    : await readInputContent('校验DOM提示词内容');
   console.log(`  最终输入: ${finalContent.length} 字符`);
   return finalContent.length >= prompt.length * 0.9;
 }

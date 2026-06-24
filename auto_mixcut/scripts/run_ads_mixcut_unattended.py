@@ -95,6 +95,17 @@ STAGE_KEYS = [
 PROMPT_PENDING_STATUSES = {"submitted", "generating", "已提单", "生成中"}
 PROMPT_IMPORTED_STATUSES = {"imported", "consumed", "fulfilled", "质检中", "质检通过", "returned", "已回流", "已生成"}
 PROMPT_FAILED_STATUSES = {"failed", "质检废弃", "失败"}
+RECOVERABLE_PROMPT_FAILURE_TOKENS = [
+    "高峰期",
+    "暂时无法提交更多任务",
+    "无法提交更多任务",
+    "请等待其他任务完成",
+    "platform_limited",
+    "retry_pending",
+    "队列已满",
+    "提示词输入失败",
+    "prompt_input_failed",
+]
 
 
 def connect_db(url: Optional[str] = None):
@@ -353,6 +364,43 @@ def load_voc_hook_package(conn, product_id: str) -> Optional[Dict[str, Any]]:
     }
 
 
+def diagnose_voc_gap(conn, product_id: str) -> Dict[str, Any]:
+    cur = conn.cursor()
+    result: Dict[str, Any] = {"product_id": product_id}
+    checks = [
+        ("raw_voc_count", "SELECT COUNT(*) c FROM fastmoss_voc_raw WHERE fastmoss_product_id=%s"),
+        ("enriched_voc_count", "SELECT COUNT(*) c FROM fastmoss_voc_enriched WHERE fastmoss_product_id=%s"),
+        ("snapshot_count", "SELECT COUNT(*) c FROM fastmoss_voc_product_snapshot WHERE fastmoss_product_id=%s"),
+        ("recommendation_count", "SELECT COUNT(*) c FROM fastmoss_voc_product_recommendation WHERE product_id=%s"),
+        ("ads_hook_package_count", "SELECT COUNT(*) c FROM voc_ads_hook_package WHERE product_id=%s AND usecase='ads_mixcut'"),
+    ]
+    for key, sql in checks:
+        try:
+            cur.execute(sql, (product_id,))
+            row = cur.fetchone() or {}
+            result[key] = int(row.get("c") or 0)
+        except Exception as exc:
+            result[key] = None
+            result.setdefault("diagnostic_errors", []).append({"check": key, "error": str(exc)})
+
+    evidence_count = int(result.get("raw_voc_count") or 0) + int(result.get("enriched_voc_count") or 0) + int(result.get("snapshot_count") or 0)
+    reco_count = int(result.get("recommendation_count") or 0)
+    package_count = int(result.get("ads_hook_package_count") or 0)
+    if evidence_count <= 0 and reco_count <= 0:
+        result["missing_reason"] = "product_not_in_voc_capture_pool"
+        result["next_action"] = "run FastMoss VOC capture for this product, or build a manually confirmed category-transfer VOC hook package"
+    elif reco_count <= 0:
+        result["missing_reason"] = "product_voc_recommendation_missing"
+        result["next_action"] = "run voc-insight product scope for this product, then build ADS hook package"
+    elif package_count <= 0:
+        result["missing_reason"] = "ads_hook_package_missing"
+        result["next_action"] = "run build_ads_hook_package.py and confirm one or more VOC selling points"
+    else:
+        result["missing_reason"] = "ads_hook_package_not_ready_or_unconfirmed"
+        result["next_action"] = "check voc_ads_hook_package readiness_status/manual_confirmation_status"
+    return result
+
+
 def load_prompt_package_summary(conn, product_id: str, prompt_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     cur = conn.cursor()
     if prompt_ids:
@@ -372,16 +420,20 @@ def load_prompt_package_summary(conn, product_id: str, prompt_ids: Optional[List
         )
     rows = cur.fetchall()
     by_status: Dict[str, int] = Counter()
-    pending = imported = failed = submitted = generated = consumed = 0
+    pending = imported = failed = recoverable_failed = submitted = generated = consumed = 0
     for row in rows:
         status = str(row.get("package_status") or "").strip()
+        failure_reason = str(row.get("failure_reason") or "").strip()
         by_status[status or "unknown"] += 1
         if status in PROMPT_PENDING_STATUSES:
             pending += 1
         if status == "submitted":
             submitted += 1
         if status in PROMPT_FAILED_STATUSES:
-            failed += 1
+            if _recoverable_prompt_failure(failure_reason):
+                recoverable_failed += 1
+            else:
+                failed += 1
         if status in PROMPT_IMPORTED_STATUSES:
             imported += 1
         if status == "consumed":
@@ -396,8 +448,14 @@ def load_prompt_package_summary(conn, product_id: str, prompt_ids: Optional[List
         "generated": generated,
         "consumed": consumed,
         "failed": failed,
+        "recoverable_failed": recoverable_failed,
         "by_status": dict(by_status),
     }
+
+
+def _recoverable_prompt_failure(text: str) -> bool:
+    lower = str(text or "").lower()
+    return any(str(token).lower() in lower for token in RECOVERABLE_PROMPT_FAILURE_TOKENS)
 
 
 # ── Step 2: plan ──
@@ -408,6 +466,7 @@ def plan_ads_mixcut(
     seg: Dict[str, Any],
     out: Dict[str, Any],
     voc: Optional[Dict[str, Any]],
+    voc_gap: Optional[Dict[str, Any]],
     target: int,
     use_voc_hooks: bool,
     max_hook: int,
@@ -493,6 +552,7 @@ def plan_ads_mixcut(
             "readiness": voc["readiness_status"] if voc else None,
             "confirmed": voc_confirmed,
             "candidate_count": voc_candidates,
+            "missing_diagnosis": voc_gap if voc is None else None,
         } if use_voc_hooks else None,
         "gap": {
             "new_hook_segments_planned": hook_gap,
@@ -513,7 +573,10 @@ def plan_ads_mixcut(
     if remaining <= 0:
         plan["note"] = "target already met, no work needed"
     if use_voc_hooks and voc is None:
-        warnings.append("no VOC hook package found; run build_ads_hook_package.py first")
+        if voc_gap and voc_gap.get("missing_reason"):
+            warnings.append(f"no VOC hook package found: {voc_gap.get('missing_reason')}; {voc_gap.get('next_action')}")
+        else:
+            warnings.append("no VOC hook package found; run build_ads_hook_package.py first")
     elif use_voc_hooks and voc and not voc_confirmed:
         warnings.append("VOC hook package exists but is NOT confirmed; dry-run-only until manual confirmation")
     if warnings:
@@ -844,10 +907,12 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         seg = load_segment_summary(conn, args.product_id)
         out = load_output_summary(conn, args.product_id)
         voc = load_voc_hook_package(conn, args.product_id) if args.use_voc_hooks else None
+        voc_gap = diagnose_voc_gap(conn, args.product_id) if args.use_voc_hooks and voc is None else {}
 
         # step 2: plan
         plan = plan_ads_mixcut(
             args.product_id, task, seg, out, voc,
+            voc_gap,
             args.target_count, args.use_voc_hooks,
             args.max_new_hook_segments, args.max_new_support_segments,
         )
@@ -865,6 +930,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                 "segment_summary": {k: v for k, v in seg.items() if k != "segments"},
                 "output_summary": out,
                 "voc_hook_package_found": voc is not None,
+                "voc_hook_package_gap": voc_gap or None,
             },
             "plan": plan,
         }

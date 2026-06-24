@@ -152,7 +152,23 @@ def submit_budget_from_state(remaining_count: int, state: dict[str, Any], config
 
 def is_recoverable_submit_failure(text: str) -> bool:
     lower = str(text or "").lower()
-    return any(token in lower for token in ["imini_allow_real_submit", "real_submit_disabled", "真实提交默认关闭"])
+    return any(
+        token in lower
+        for token in [
+            "imini_allow_real_submit",
+            "real_submit_disabled",
+            "真实提交默认关闭",
+            "高峰期",
+            "暂时无法提交更多任务",
+            "无法提交更多任务",
+            "请等待其他任务完成",
+            "platform_limited",
+            "retry_pending",
+            "队列已满",
+            "提示词输入失败",
+            "prompt_input_failed",
+        ]
+    )
 
 
 def is_stale_inflight_package(row: dict[str, Any]) -> bool:

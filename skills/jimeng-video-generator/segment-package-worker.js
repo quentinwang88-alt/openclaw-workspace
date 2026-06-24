@@ -663,8 +663,11 @@ async function submitContext({ config, token, browser, page, context, dryRun }) 
         submit_confirmation_note: result.error || '提交失败',
         state_updated_at: formatBeijingTimestamp()
       });
+      const retryStatus = Array.isArray(config.pendingStatuses) && config.pendingStatuses[0]
+        ? config.pendingStatuses[0]
+        : '待提单';
       await updateRecord(config, token, context.recordId, {
-        [config.statusField]: config.failedStatus || '失败',
+        [config.statusField]: result.retryable ? retryStatus : (config.failedStatus || '失败'),
         [config.fields.resultSyncStatus]: updated.status,
         [config.fields.result]: result.error || '提交失败',
         [config.fields.errorMessage]: result.error || '提交失败'
