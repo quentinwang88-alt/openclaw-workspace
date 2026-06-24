@@ -36,7 +36,7 @@ class AISupplementGatewaySkill:
     def __init__(self, ctx: SkillContext):
         self.ctx = ctx
 
-    def package_state(self, product_id: str) -> dict[str, int]:
+    def package_state(self, product_id: str) -> dict[str, Any]:
         rows = _list_packages(self.ctx, product_id)
         used_prompt_package_ids = _used_prompt_package_ids(self.ctx, product_id, rows)
         state = {
@@ -49,45 +49,65 @@ class AISupplementGatewaySkill:
             "consumed_package_count": 0,
             "failed_package_count": 0,
             "stale_inflight_count": 0,
+            "role_counts": {},
         }
         for row in rows:
             prompt_id = str(row.get("segment_prompt_id") or "").strip()
+            role = _package_role(row)
             normalized = normalize_package(row)
             if prompt_id in used_prompt_package_ids and normalized == "imported":
                 normalized = "consumed"
             if normalized == "ready_to_submit":
                 state["ready_to_submit_count"] += 1
+                _inc_role(state, role, "ready_to_submit_count")
             elif normalized == "needs_feishu_sync":
                 state["needs_feishu_sync_count"] += 1
+                _inc_role(state, role, "needs_feishu_sync_count")
             elif normalized == "recoverable_failed":
                 state["recoverable_failed_count"] += 1
+                _inc_role(state, role, "recoverable_failed_count")
                 if is_stale_inflight_package(row):
                     state["stale_inflight_count"] += 1
+                    _inc_role(state, role, "stale_inflight_count")
             elif normalized == "inflight":
                 state["inflight_count"] += 1
+                _inc_role(state, role, "inflight_count")
             elif normalized == "imported":
                 state["imported_package_count"] += 1
+                _inc_role(state, role, "imported_package_count")
             elif normalized == "consumed":
                 state["consumed_package_count"] += 1
+                _inc_role(state, role, "consumed_package_count")
             elif normalized == "failed":
                 state["failed_package_count"] += 1
+                _inc_role(state, role, "failed_package_count")
         state["active_package_count"] = (
             state["ready_to_submit_count"]
             + state["inflight_count"]
         )
         state["future_package_count"] = state["active_package_count"] + state["recoverable_failed_count"]
+        for role_state in state["role_counts"].values():
+            role_state["active_package_count"] = int(role_state.get("ready_to_submit_count") or 0) + int(role_state.get("inflight_count") or 0)
+            role_state["future_package_count"] = role_state["active_package_count"] + int(role_state.get("recoverable_failed_count") or 0)
         return state
 
-    def submit_budget(self, product_id: str, remaining_count: int | None = None, configured_limit: int | None = None) -> dict[str, int]:
-        remaining = int(remaining_count if remaining_count is not None else self._remaining_count(product_id))
+    def submit_budget(self, product_id: str, remaining_count: int | None = None, configured_limit: int | None = None) -> dict[str, Any]:
+        task = self._latest_task(product_id) or {}
+        remaining = int(remaining_count if remaining_count is not None else self._remaining_count_from_task(task))
         remaining = max(0, remaining)
         limit = int(configured_limit if configured_limit is not None else _configured_submit_limit())
         state = self.package_state(product_id)
-        return submit_budget_from_state(remaining, state, configured_limit=limit)
+        priority_role = priority_role_from_task(task, remaining)
+        return submit_budget_from_state(remaining, state, configured_limit=limit, priority_role=priority_role)
 
     def _remaining_count(self, product_id: str) -> int:
+        return self._remaining_count_from_task(self._latest_task(product_id) or {})
+
+    def _latest_task(self, product_id: str) -> dict[str, Any] | None:
         rows = self.ctx.repo.list_where("content_tasks", "product_id=? ORDER BY id DESC", (product_id,))
-        task = rows[0] if rows else {}
+        return rows[0] if rows else None
+
+    def _remaining_count_from_task(self, task: dict[str, Any]) -> int:
         target = int(task.get("requested_variant_count") or task.get("allowed_variant_count") or 0)
         actual = int(task.get("actual_variant_count") or 0)
         return int(task.get("target_remaining_variant_count") or max(0, target - actual))
@@ -119,9 +139,15 @@ def normalize_package(row: dict[str, Any]) -> str:
     return "unknown"
 
 
-def submit_budget_from_state(remaining_count: int, state: dict[str, Any], configured_limit: int | None = None) -> dict[str, int]:
+def submit_budget_from_state(
+    remaining_count: int,
+    state: dict[str, Any],
+    configured_limit: int | None = None,
+    priority_role: str | None = None,
+) -> dict[str, Any]:
     remaining = max(0, int(remaining_count or 0))
     limit = int(configured_limit if configured_limit is not None else _configured_submit_limit())
+    priority_role = _normalize_role(priority_role or state.get("priority_role") or "")
     active = int(state.get("active_package_count") or 0)
     ready = int(state.get("ready_to_submit_count") or 0)
     retry = int(state.get("recoverable_failed_count") or 0)
@@ -134,7 +160,8 @@ def submit_budget_from_state(remaining_count: int, state: dict[str, Any], config
     submit_limit = min(limit, needed_after_active)
     if ready_or_retry > 0:
         submit_limit = min(limit, ready_or_retry, needed_after_inflight)
-    return {
+
+    budget: dict[str, Any] = {
         "target_remaining": remaining,
         "remaining_count": remaining,
         "ai_submit_active_count": active,
@@ -148,6 +175,91 @@ def submit_budget_from_state(remaining_count: int, state: dict[str, Any], config
         "needed_after_inflight": needed_after_inflight,
         "submit_limit": max(0, submit_limit),
     }
+    if priority_role:
+        role_state = (state.get("role_counts") or {}).get(priority_role) or {}
+        role_ready = int(role_state.get("ready_to_submit_count") or 0)
+        role_retry = int(role_state.get("recoverable_failed_count") or 0)
+        role_inflight = int(role_state.get("inflight_count") or 0)
+        role_ready_or_retry = role_ready + role_retry
+        role_needed_after_inflight = max(0, remaining - role_inflight)
+        role_submit_limit = min(limit, role_ready_or_retry, role_needed_after_inflight)
+        budget.update(
+            {
+                "priority_role": priority_role,
+                "budget_mode": "priority_role",
+                "role_ready_to_submit_count": role_ready,
+                "role_recoverable_failed_count": role_retry,
+                "role_inflight_count": role_inflight,
+                "role_imported_package_count": int(role_state.get("imported_package_count") or 0),
+                "role_consumed_package_count": int(role_state.get("consumed_package_count") or 0),
+                "role_needed_after_inflight": role_needed_after_inflight,
+                "submit_limit": max(0, role_submit_limit),
+            }
+        )
+    return budget
+
+
+def _inc_role(state: dict[str, Any], role: str, key: str) -> None:
+    role = _normalize_role(role)
+    if not role:
+        return
+    role_counts = state.setdefault("role_counts", {})
+    role_state = role_counts.setdefault(
+        role,
+        {
+            "ready_to_submit_count": 0,
+            "needs_feishu_sync_count": 0,
+            "recoverable_failed_count": 0,
+            "inflight_count": 0,
+            "imported_package_count": 0,
+            "consumed_package_count": 0,
+            "failed_package_count": 0,
+            "stale_inflight_count": 0,
+        },
+    )
+    role_state[key] = int(role_state.get(key) or 0) + 1
+
+
+def _package_role(row: dict[str, Any]) -> str:
+    role = str(row.get("slot_role") or row.get("素材角色") or "").strip()
+    if role:
+        return _normalize_role(role)
+    return ""
+
+
+def _normalize_role(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+    if raw == "hero" or "首镜" in raw or "开头" in raw:
+        return "hero"
+    if raw == "result" or "结果" in raw or "成品" in raw or "上身" in raw:
+        return "result"
+    if raw == "detail" or "细节" in raw:
+        return "detail"
+    if raw == "scene" or "场景" in raw:
+        return "scene"
+    if raw == "ending" or "结尾" in raw:
+        return "ending"
+    return raw
+
+
+def priority_role_from_task(task: dict[str, Any], remaining: int) -> str:
+    if remaining <= 0:
+        return ""
+    bottleneck = str(task.get("current_bottleneck") or task.get("capacity_note") or task.get("blocked_reason") or "")
+    try:
+        first_slot_remaining = int(task.get("first_slot_remaining_capacity") or 0)
+    except (TypeError, ValueError):
+        first_slot_remaining = 0
+    if first_slot_remaining <= 0 and (
+        "首镜" in bottleneck
+        or "first_slot" in bottleneck
+        or "复用模式" in bottleneck
+        or "first slot" in bottleneck.lower()
+    ):
+        return "hero"
+    return ""
 
 
 def is_recoverable_submit_failure(text: str) -> bool:

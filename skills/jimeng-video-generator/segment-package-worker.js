@@ -73,6 +73,7 @@ function parseArgs(argv) {
     limit: 1,
     recordId: '',
     productId: '',
+    slotRole: '',
     channel: '',
     ensureSchema: true
   };
@@ -90,6 +91,7 @@ function parseArgs(argv) {
       args._expectConfig = false;
     } else if (arg.startsWith('--record-id=')) args.recordId = arg.slice('--record-id='.length);
     else if (arg.startsWith('--product-id=')) args.productId = arg.slice('--product-id='.length);
+    else if (arg.startsWith('--slot-role=')) args.slotRole = arg.slice('--slot-role='.length);
     else if (arg.startsWith('--channel=')) args.channel = arg.slice('--channel='.length);
     else if (arg.startsWith('--limit=')) args.limit = Math.max(1, Number(arg.slice('--limit='.length)) || 1);
   }
@@ -171,6 +173,7 @@ async function ensureSegmentSchema(config, token) {
     { field_name: config.fields.model, type: FIELD_TYPE.TEXT },
     { field_name: config.fields.ratio, type: FIELD_TYPE.TEXT },
     { field_name: config.fields.duration, type: FIELD_TYPE.NUMBER, property: { formatter: '0' } },
+    { field_name: config.fields.slotRole, type: FIELD_TYPE.TEXT },
     { field_name: config.fields.repeatCount, type: FIELD_TYPE.NUMBER, property: { formatter: '0' } },
     { field_name: config.fields.submittedCount, type: FIELD_TYPE.NUMBER, property: { formatter: '0' } },
     { field_name: config.fields.executionOwner, type: FIELD_TYPE.TEXT },
@@ -252,6 +255,7 @@ function buildSegmentContext(record, config) {
     market,
     category: text(fields[config.fields.category]),
     segmentType: text(fields[config.fields.segmentType]),
+    slotRole: text(fields[config.fields.slotRole]),
     grade: text(fields[config.fields.grade]),
     prompt,
     rawPrompt,
@@ -294,6 +298,7 @@ function shouldSubmitRecord(record, config, args) {
   }
   const context = buildSegmentContext(record, config);
   if (args.productId && context.productId !== args.productId) return false;
+  if (args.slotRole && normalizeSlotRole(context.slotRole) !== normalizeSlotRole(args.slotRole)) return false;
   if (args.channel && normalizeChannelName(context.channel) !== normalizeChannelName(args.channel)) return false;
   if (!context.prompt || !context.productId) return false;
   if (!context.canSubmit && !args.recordId) return false;
@@ -302,6 +307,16 @@ function shouldSubmitRecord(record, config, args) {
   if (context.executionOwnerMachineId && context.executionOwnerMachineId !== config.machineId) return false;
   if (!args.recordId && referenceReadinessIssue(context)) return false;
   return true;
+}
+
+function normalizeSlotRole(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return '';
+  if (raw.includes('首镜') || raw.includes('开头') || raw === 'hero') return 'hero';
+  if (raw.includes('结果') || raw.includes('成品') || raw === 'result') return 'result';
+  if (raw.includes('细节') || raw === 'detail') return 'detail';
+  if (raw.includes('场景') || raw === 'scene') return 'scene';
+  return raw;
 }
 
 function normalizeChannelName(value) {
@@ -788,6 +803,10 @@ async function main() {
         if (jimengGeneratingCount == null) {
           try {
             const status = await checkGeneratingStatus(page);
+            if (status?.limited) {
+              console.log(`  ⏳ 平台限流中，停止本轮提单: ${status.limitedText || '高峰期，暂时无法提交更多任务'}`);
+              break;
+            }
             jimengGeneratingCount = Number(status?.generating || 0);
             console.log(`  当前即梦生成中: ${jimengGeneratingCount}`);
           } catch (error) {

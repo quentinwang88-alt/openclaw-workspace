@@ -358,7 +358,7 @@ def _json_from_stdout(text: str) -> Any:
 def _submit_command(product_id: str, budget: dict[str, Any]) -> list[str]:
     limit = max(1, int(budget.get("submit_limit") or budget.get("ready_to_submit_count") or budget.get("remaining_count") or 1))
     needed = max(1, int(budget.get("target_remaining") or budget.get("remaining_count") or limit))
-    return [
+    command = [
         "node",
         str(WORKSPACE / "skills" / "jimeng-video-generator" / "segment-package-worker.js"),
         "--submit-only",
@@ -366,11 +366,14 @@ def _submit_command(product_id: str, budget: dict[str, Any]) -> list[str]:
         f"--limit={limit}",
         f"--max-submit-needed={needed}",
     ]
+    if str(budget.get("priority_role") or "").strip():
+        command.append(f"--slot-role={str(budget.get('priority_role')).strip()}")
+    return command
 
 
-def _budget_from_pending(item: dict[str, Any]) -> dict[str, int]:
+def _budget_from_pending(item: dict[str, Any]) -> dict[str, Any]:
     remaining = max(1, int(item.get("remaining_count") or 1))
-    return submit_budget_from_state(remaining, item)
+    return submit_budget_from_state(remaining, item, priority_role=str(item.get("priority_role") or ""))
 
 
 def _run(cmd: list[str], cwd: Path, dry_run: bool, timeout: int, env_extra: dict[str, str] | None = None) -> dict[str, Any]:

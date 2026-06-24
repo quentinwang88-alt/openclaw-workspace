@@ -12,7 +12,7 @@ import requests
 
 from auto_mixcut.core.result import Result
 
-from .ai_supplement_gateway_skill import AISupplementGatewaySkill, submit_budget_from_state
+from .ai_supplement_gateway_skill import AISupplementGatewaySkill, priority_role_from_task, submit_budget_from_state
 from .context import SkillContext
 
 
@@ -252,6 +252,7 @@ def pending_ai_supplement_products(ctx: SkillContext, include_waiting_return: bo
                 "pipeline_status": pipeline_status,
                 "next_action": next_action,
                 "ai_supplement_status": ai_status,
+                "priority_role": priority_role_from_task(task, remaining),
                 **package_state,
             }
         )
@@ -392,7 +393,7 @@ def _approval_all_command() -> str:
 def _submit_command(product_id: str, budget: dict[str, Any]) -> list[str]:
     limit = max(1, int(budget.get("submit_limit") or budget.get("ready_to_submit_count") or budget.get("remaining_count") or 1))
     needed = max(1, int(budget.get("target_remaining") or budget.get("remaining_count") or limit))
-    return [
+    command = [
         "node",
         "/Users/likeu3/.openclaw/workspace/skills/jimeng-video-generator/segment-package-worker.js",
         "--submit-only",
@@ -401,11 +402,14 @@ def _submit_command(product_id: str, budget: dict[str, Any]) -> list[str]:
         f"--limit={limit}",
         f"--max-submit-needed={needed}",
     ]
+    if str(budget.get("priority_role") or "").strip():
+        command.append(f"--slot-role={str(budget.get('priority_role')).strip()}")
+    return command
 
 
-def _budget_from_item(item: dict[str, Any]) -> dict[str, int]:
+def _budget_from_item(item: dict[str, Any]) -> dict[str, Any]:
     remaining = max(1, int(item.get("remaining_count") or 1))
-    return submit_budget_from_state(remaining, item)
+    return submit_budget_from_state(remaining, item, priority_role=str(item.get("priority_role") or ""))
 
 
 def _approval_slot() -> str:

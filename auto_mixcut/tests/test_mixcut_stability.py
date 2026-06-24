@@ -83,13 +83,13 @@ class MixcutStabilityTest(unittest.TestCase):
         self.ctx.repo.update("content_tasks", "task_id", task["task_id"], {"target_remaining_variant_count": 5})
         self.assertTrue(_ensure_prompt_package_table(self.ctx).success)
         rows = [
-            ("SP_READY", "created", "", ""),
-            ("SP_RETRY", "failed", "", "real_submit_disabled"),
-            ("SP_SUBMITTED", "submitted", "", ""),
-            ("SP_IMPORTED", "imported", "ASSET_AI", ""),
-            ("SP_CONSUMED", "consumed", "", ""),
+            ("SP_READY", "created", "", "", "rec_ready"),
+            ("SP_RETRY", "failed", "", "real_submit_disabled", ""),
+            ("SP_SUBMITTED", "submitted", "", "", ""),
+            ("SP_IMPORTED", "imported", "ASSET_AI", "", ""),
+            ("SP_CONSUMED", "consumed", "", "", ""),
         ]
-        for prompt_id, status, asset_id, failure in rows:
+        for prompt_id, status, asset_id, failure, feishu_record_id in rows:
             self.ctx.repo.upsert(
                 "segment_prompt_packages",
                 "segment_prompt_id",
@@ -99,6 +99,7 @@ class MixcutStabilityTest(unittest.TestCase):
                     "package_status": status,
                     "generated_asset_id": asset_id,
                     "failure_reason": failure,
+                    "feishu_record_id": feishu_record_id,
                 },
             )
 
@@ -206,6 +207,45 @@ class MixcutStabilityTest(unittest.TestCase):
         self.assertEqual(state["recoverable_failed_count"], 1)
         self.assertEqual(state["stale_inflight_count"], 1)
         self.assertEqual(state["active_package_count"], 0)
+        self.assertEqual(budget["submit_limit"], 1)
+
+    def test_ai_supplement_gateway_prioritizes_hero_for_first_slot_bottleneck(self):
+        product_id = "PROD_AI_HERO_BUDGET"
+        RDSRepositorySkill(self.ctx).create_product_task(product_id, "Hair Clip", "TH", "hair_accessories", 2)
+        task = self.ctx.repo.list_where("content_tasks", "product_id=?", (product_id,))[0]
+        self.ctx.repo.update(
+            "content_tasks",
+            "task_id",
+            task["task_id"],
+            {
+                "target_remaining_variant_count": 2,
+                "first_slot_remaining_capacity": 0,
+                "current_bottleneck": "已进入复用模式",
+            },
+        )
+        self.assertTrue(_ensure_prompt_package_table(self.ctx).success)
+        for prompt_id, role in [("SP_HERO_READY", "hero"), ("SP_DETAIL_READY", "detail")]:
+            self.ctx.repo.upsert(
+                "segment_prompt_packages",
+                "segment_prompt_id",
+                {
+                    "segment_prompt_id": prompt_id,
+                    "product_id": product_id,
+                    "package_status": "created",
+                    "feishu_record_id": f"rec_{prompt_id}",
+                    "slot_role": role,
+                },
+            )
+
+        gateway = AISupplementGatewaySkill(self.ctx)
+        state = gateway.package_state(product_id)
+        budget = gateway.submit_budget(product_id, remaining_count=2, configured_limit=5)
+
+        self.assertEqual(state["ready_to_submit_count"], 2)
+        self.assertEqual(state["role_counts"]["hero"]["ready_to_submit_count"], 1)
+        self.assertEqual(state["role_counts"]["detail"]["ready_to_submit_count"], 1)
+        self.assertEqual(budget["priority_role"], "hero")
+        self.assertEqual(budget["role_ready_to_submit_count"], 1)
         self.assertEqual(budget["submit_limit"], 1)
 
     def test_final_qc_product_mismatch_marks_ai_segments_suspect(self):

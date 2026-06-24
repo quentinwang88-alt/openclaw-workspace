@@ -458,6 +458,74 @@ def _recoverable_prompt_failure(text: str) -> bool:
     return any(str(token).lower() in lower for token in RECOVERABLE_PROMPT_FAILURE_TOKENS)
 
 
+def voc_participation_summary(use_voc_hooks: bool, voc: Optional[Dict[str, Any]], voc_gap: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not use_voc_hooks:
+        return {"mode": "voc_disabled", "participates": False, "reason": "voc_hooks_disabled"}
+    if voc and voc.get("confirmed"):
+        return {
+            "mode": "product_voc",
+            "participates": True,
+            "package_id": voc.get("package_id"),
+            "candidate_count": int(voc.get("hook_candidate_count") or len(voc.get("candidates") or [])),
+        }
+    if voc:
+        return {
+            "mode": "voc_blocked",
+            "participates": False,
+            "package_id": voc.get("package_id"),
+            "readiness": voc.get("readiness_status"),
+            "manual_confirmation_status": voc.get("manual_confirmation_status"),
+            "reason": "voc_package_not_confirmed",
+            "next_action": "confirm one or more VOC selling points before ADS hook package consumption",
+        }
+    reason = (voc_gap or {}).get("missing_reason") or "voc_package_missing"
+    mode = "category_voc_transfer_needed" if reason == "product_not_in_voc_capture_pool" else "voc_missing"
+    return {
+        "mode": mode,
+        "participates": False,
+        "reason": reason,
+        "next_action": (voc_gap or {}).get("next_action") or "build and confirm ADS VOC hook package",
+    }
+
+
+def bottleneck_summary(task: Optional[Dict[str, Any]], seg: Dict[str, Any], remaining: int) -> Dict[str, Any]:
+    task = task or {}
+    current = str(task.get("current_bottleneck") or "")
+    note = str(task.get("capacity_note") or task.get("blocked_reason") or "")
+    first_slot_capacity = _to_int(task.get("first_slot_remaining_capacity"), 0)
+    material_extra = _to_int(task.get("material_pool_extra_capacity"), 0)
+    role = ""
+    action = "none"
+    if remaining <= 0:
+        role = ""
+        action = "target_met"
+    elif first_slot_capacity <= 0 and ("首镜" in note or "first_slot" in note or "复用模式" in current or "first slot" in note.lower()):
+        role = "hero"
+        action = "submit_or_generate_hero_first_slot"
+    elif material_extra <= 0:
+        role = "mixed_support"
+        action = "generate_support_segments"
+    else:
+        role = "render_capacity"
+        action = "render_guard"
+    return {
+        "role": role,
+        "action": action,
+        "current_bottleneck": current,
+        "capacity_note": note,
+        "first_slot_remaining_capacity": first_slot_capacity,
+        "material_pool_extra_capacity": material_extra,
+        "hero_segments": int((seg.get("by_core_role") or {}).get("hero") or 0),
+    }
+
+
+def _to_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value if value is not None else default)
+    except (TypeError, ValueError):
+        return default
+
+
 # ── Step 2: plan ──
 
 def plan_ads_mixcut(
@@ -545,6 +613,12 @@ def plan_ads_mixcut(
             "scene": scene_count,
             "ending": ending_count,
             "hook_segments": seg["hook_segments"],
+        },
+        "flow_summary": {
+            "strict_good_outputs": existing_good,
+            "target_met": remaining <= 0,
+            "voc_participation": voc_participation_summary(use_voc_hooks, voc, voc_gap),
+            "bottleneck": bottleneck_summary(task, seg, remaining),
         },
         "voc_hook_package": {
             "found": voc is not None,

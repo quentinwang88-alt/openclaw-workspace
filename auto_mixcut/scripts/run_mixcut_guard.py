@@ -498,7 +498,7 @@ def _maybe_prepare_ai_submit(ctx, product_id: str, top_up_data: dict[str, Any]) 
             "product_id": product_id,
             **budget,
         }
-    command = _ai_segment_worker_command(product_id, budget["submit_limit"], budget["target_remaining"])
+    command = _ai_segment_worker_command(product_id, budget["submit_limit"], budget["target_remaining"], str(budget.get("priority_role") or ""))
     if daytime_approval_required(ctx, product_id):
         approval = queue_daytime_approval(ctx, product_id, budget, command)
         return {
@@ -581,8 +581,8 @@ def _maybe_prepare_ai_submit(ctx, product_id: str, top_up_data: dict[str, Any]) 
     }
 
 
-def _ai_segment_worker_command(product_id: str, limit: int, max_submit_needed: int) -> list[str]:
-    return [
+def _ai_segment_worker_command(product_id: str, limit: int, max_submit_needed: int, priority_role: str = "") -> list[str]:
+    command = [
         "node",
         str(ROOT.parent / "skills" / "jimeng-video-generator" / "segment-package-worker.js"),
         "--submit-only",
@@ -590,6 +590,9 @@ def _ai_segment_worker_command(product_id: str, limit: int, max_submit_needed: i
         f"--limit={max(1, int(limit or 1))}",
         f"--max-submit-needed={max(1, int(max_submit_needed or limit or 1))}",
     ]
+    if priority_role:
+        command.append(f"--slot-role={priority_role}")
+    return command
 
 
 def _ai_submit_budget(ctx, product_id: str) -> dict[str, int]:
