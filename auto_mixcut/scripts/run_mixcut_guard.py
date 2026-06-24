@@ -1461,10 +1461,11 @@ def _guard_effective_role_limit() -> int:
 
 
 def _guard_effective_role_timeout() -> int:
+    default = 60 if _is_ads_fast_mode() else 20
     try:
-        return max(5, int(os.environ.get("AUTO_MIXCUT_GUARD_EFFECTIVE_ROLE_TIMEOUT", "20") or "20"))
+        return max(5, int(os.environ.get("AUTO_MIXCUT_GUARD_EFFECTIVE_ROLE_TIMEOUT", str(default)) or str(default)))
     except ValueError:
-        return 20
+        return default
 
 
 def _guard_tag_total_timeout() -> int:

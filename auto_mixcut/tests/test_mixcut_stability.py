@@ -18,6 +18,7 @@ from auto_mixcut.skills.pipeline_run_skill import PipelineRunSkill
 from auto_mixcut.skills.rds_repository_skill import RDSRepositorySkill
 from auto_mixcut.skills.segment_prompt_factory_skill import _ensure_prompt_package_table
 from auto_mixcut.skills.usage_counter_skill import count_good_rendered_outputs
+from scripts.sync_prompt_package_workbench_from_tasks import _voc_slot_plans
 
 
 class MixcutStabilityTest(unittest.TestCase):
@@ -222,6 +223,36 @@ class MixcutStabilityTest(unittest.TestCase):
 
         self.assertEqual(count_good_rendered_outputs(self.ctx, product_id, strict_segments=False), 1)
         self.assertEqual(count_good_rendered_outputs(self.ctx, product_id, strict_segments=True), 0)
+
+    def test_voc_action_proof_slot_plans_avoid_static_display(self):
+        plans = _voc_slot_plans(
+            {
+                "insight_id": "selling_hold_quality",
+                "hook_intent": "contrast_reveal",
+                "required_action_zh": "夹住侧边碎发后轻转头展示更利落",
+            },
+            "hair_accessories",
+        )
+
+        self.assertEqual(plans[0], ("tryon_result", "A", "hero"))
+        segment_types = [segment_type for segment_type, _grade, _role in plans]
+        self.assertNotIn("product_display", segment_types)
+        self.assertNotIn("before_go_out", segment_types)
+
+    def test_voc_action_proof_slot_plans_respect_category_contract(self):
+        plans = _voc_slot_plans(
+            {
+                "insight_id": "selling_appearance_cute_color",
+                "hook_intent": "tryon_result",
+                "required_action_zh": "手拿耳饰靠近耳侧后轻转头展示效果",
+            },
+            "earrings",
+        )
+
+        segment_types = [segment_type for segment_type, _grade, _role in plans]
+        self.assertEqual(segment_types, ["mirror_routine"])
+        self.assertNotIn("tryon_result", segment_types)
+        self.assertNotIn("before_go_out", segment_types)
 
     def test_ai_supplement_gateway_treats_stale_generating_as_recoverable(self):
         product_id = "PROD_AI_STALE_GATEWAY"

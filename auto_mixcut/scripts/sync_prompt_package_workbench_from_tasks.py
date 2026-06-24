@@ -10,6 +10,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
+import yaml
+
 
 WORKSPACE = Path("/Users/likeu3/.openclaw/workspace")
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -92,6 +94,8 @@ SEGMENT_CN = {
     "flatlay": "平铺摆拍",
 }
 GRADE_CN = {"A": "A-核心位", "B": "B-支撑位", "C": "C-氛围位"}
+STATIC_VOC_PROOF_SEGMENT_TYPES = {"product_display", "handheld_product", "product_still", "flatlay"}
+_CATEGORY_CONTRACT_CACHE: Dict[str, Any] | None = None
 PROMPT_RECORD_BLOCKING_STATUSES = {
     "",
     "待提单",
@@ -615,26 +619,78 @@ def _voc_ads_hook_slots(voc_package: Dict[str, Any], category: str, max_packages
 def _voc_slot_plans(candidate: Dict[str, Any], category: str) -> List[tuple[str, str, str]]:
     allowed = _listish(candidate.get("allowed_segment_types"))
     if allowed:
+        if _voc_candidate_needs_action_proof(candidate):
+            allowed = [seg for seg in allowed if seg not in STATIC_VOC_PROOF_SEGMENT_TYPES]
+        if not allowed:
+            return _voc_action_proof_slot_plans(candidate, category)
         roles = ["hero", "result", "detail", "hero"]
         plans = [(seg, "A" if i < 2 else "B", roles[i]) for i, seg in enumerate(allowed[:4])]
         if plans:
-            return plans
+            filtered = _filter_voc_plans_for_category(plans, category)
+            if filtered:
+                return filtered
+    action_plans = _voc_action_proof_slot_plans(candidate, category)
+    if action_plans:
+        filtered = _filter_voc_plans_for_category(action_plans, category)
+        if filtered:
+            return filtered
+    fallback = [(segment, grade, role) for segment, grade, role, _intent in _slot_plans_for_role("hero", category)]
+    return _filter_voc_plans_for_category(fallback, category) or fallback
+
+
+def _voc_candidate_needs_action_proof(candidate: Dict[str, Any]) -> bool:
+    insight_id = _text(candidate.get("insight_id"))
+    hook_intent = _text(candidate.get("hook_intent"))
+    required_action = _text(candidate.get("required_action_zh"))
+    return bool(required_action) or insight_id in {"selling_appearance_cute_color", "selling_hold_quality"} or hook_intent in {"tryon_result", "contrast_reveal"}
+
+
+def _voc_action_proof_slot_plans(candidate: Dict[str, Any], category: str) -> List[tuple[str, str, str]]:
     insight_id = _text(candidate.get("insight_id"))
     hook_intent = _text(candidate.get("hook_intent"))
     if insight_id == "selling_appearance_cute_color" or hook_intent == "tryon_result":
         return [
             ("tryon_result", "A", "hero"),
-            ("mirror_routine", "A", "result"),
-            ("product_display", "A", "hero"),
+            ("mirror_routine", "A", "hero"),
+            ("before_go_out", "A", "result"),
             ("detail_atmosphere", "B", "detail"),
         ]
     if insight_id == "selling_hold_quality" or hook_intent == "contrast_reveal":
         return [
             ("tryon_result", "A", "hero"),
-            ("product_display", "A", "hero"),
-            ("mirror_routine", "A", "result"),
+            ("mirror_routine", "A", "hero"),
+            ("before_go_out", "A", "result"),
+            ("detail_atmosphere", "B", "detail"),
         ]
-    return [(segment, grade, role) for segment, grade, role, _intent in _slot_plans_for_role("hero", category)]
+    return []
+
+
+def _filter_voc_plans_for_category(plans: List[tuple[str, str, str]], category: str) -> List[tuple[str, str, str]]:
+    contract = _category_execution_contract(category)
+    allowed = set(_listish(contract.get("allowed_segment_types")))
+    forbidden = set(_listish(contract.get("forbidden_segment_types")))
+    filtered = []
+    for segment_type, grade, role in plans:
+        if segment_type in forbidden:
+            continue
+        if allowed and segment_type not in allowed:
+            continue
+        filtered.append((segment_type, grade, role))
+    return filtered
+
+
+def _category_execution_contract(category: str) -> Dict[str, Any]:
+    global _CATEGORY_CONTRACT_CACHE
+    if _CATEGORY_CONTRACT_CACHE is None:
+        path = REPO_ROOT / "config" / "ai_segment_factory.yaml"
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                config = yaml.safe_load(fh) or {}
+        except Exception:
+            config = {}
+        _CATEGORY_CONTRACT_CACHE = config.get("category_execution_contract") or {}
+    category_key = _category_key(category, "")
+    return dict((_CATEGORY_CONTRACT_CACHE or {}).get(category_key) or (_CATEGORY_CONTRACT_CACHE or {}).get(category) or {})
 
 
 def _brief_with_voc_candidate(brief: Dict[str, Any], slot: Dict[str, Any]) -> Dict[str, Any]:
