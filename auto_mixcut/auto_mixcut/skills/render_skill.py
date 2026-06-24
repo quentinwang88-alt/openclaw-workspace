@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 from pathlib import Path
 
 from auto_mixcut.core.ids import new_id
 from auto_mixcut.core.result import Result
-from auto_mixcut.core.storage_paths import require_oss_object_path
+from auto_mixcut.core.storage_paths import require_oss_object_path, resolve_oss_object_path
 
 from .context import SkillContext
 from .bgm_usage_skill import refresh_bgm_track_usage
 from .feishu_review_skill import sync_product_task_best_effort
 from .hard_subtitle_policy import is_repairable_bottom_caption
+from .rds_repository_skill import RDSRepositorySkill
 from .usage_counter_skill import is_good_rendered_output, refresh_segment_usage
 
 MIN_BGM_VOLUME = 1.0
@@ -26,8 +28,12 @@ BGM_BATCH_TRACK_NAME_CAP = 1
 class RenderSkill:
     def __init__(self, ctx: SkillContext):
         self.ctx = ctx
+        self._runtime_schema_checked = False
 
     def render_batch(self, batch_id: str) -> Result:
+        schema = self._ensure_runtime_schema()
+        if not schema.success:
+            return schema
         plans = self.ctx.repo.list_where("render_plans", "batch_id=? AND render_status='planned'", (batch_id,))
         outputs = []
         failures = []
@@ -65,6 +71,9 @@ class RenderSkill:
         return Result.ok({"batch_id": batch_id, "output_ids": outputs, "task_sync": task_sync})
 
     def render_plan(self, render_plan_id: str) -> Result:
+        schema = self._ensure_runtime_schema()
+        if not schema.success:
+            return schema
         plan = self.ctx.repo.get("render_plans", "render_plan_id", render_plan_id)
         if not plan:
             return Result.fail("RENDER_PLAN_NOT_FOUND", "render plan not found", {"render_plan_id": render_plan_id})
@@ -109,8 +118,9 @@ class RenderSkill:
         for slot in segments:
             self.ctx.repo.insert("output_segments", {"output_id": output_id, "segment_id": slot["segment_id"], "asset_id": slot["asset_id"], "slot_index": slot["slot"], "role_used": slot["role"], "start_ms_in_output": slot["start_ms_in_output"], "end_ms_in_output": slot["end_ms_in_output"]})
             refresh_segment_usage(self.ctx, slot["segment_id"])
+        consumed_prompt_packages = _mark_prompt_packages_consumed_for_output(self.ctx, segments)
         _record_bgm_usage(self.ctx, output_row, bgm_plan)
-        manifest_data = {"output_id": output_id, "batch_id": plan["batch_id"], "product_id": plan["product_id"], "template_id": plan["template_id"], "duration_ms": duration_ms, "output_oss_object_id": out_obj["object_id"], "cover_oss_object_id": cover_obj["object_id"], "segments": segments, "subtitles": subtitles, "bgm": {**bgm_plan, "oss_object_id": bgm_object, "loudness_normalized": True}, "machine_quality_status": "pending", "experiment_group": plan["template_id"], "experiment_batch": plan["batch_id"]}
+        manifest_data = {"output_id": output_id, "batch_id": plan["batch_id"], "product_id": plan["product_id"], "template_id": plan["template_id"], "duration_ms": duration_ms, "output_oss_object_id": out_obj["object_id"], "cover_oss_object_id": cover_obj["object_id"], "segments": segments, "subtitles": subtitles, "bgm": {**bgm_plan, "oss_object_id": bgm_object, "loudness_normalized": True}, "machine_quality_status": "pending", "experiment_group": plan["template_id"], "experiment_batch": plan["batch_id"], "consumed_prompt_package_ids": consumed_prompt_packages}
         manifest.write_text(json.dumps(manifest_data, ensure_ascii=False, indent=2), encoding="utf-8")
         man_key = f"auto_mixcut/manifests/{product.get('market','NA')}/{product.get('category','uncategorized')}/{plan['product_id']}/{plan['batch_id']}/variant_{plan['variant_no']:03d}.json"
         man_upload = self.ctx.oss.upload(manifest, man_key)
@@ -118,6 +128,14 @@ class RenderSkill:
             self.ctx.repo.upsert("oss_objects", "object_id", dict(man_upload.data, object_type="manifest", mime_type="application/json"))
         self.ctx.repo.update("render_plans", "render_plan_id", render_plan_id, {"render_status": "rendered", "output_id": output_id})
         return Result.ok({"output_id": output_id, "manifest": manifest_data})
+
+    def _ensure_runtime_schema(self) -> Result:
+        if self._runtime_schema_checked:
+            return Result.ok({"skipped": True})
+        result = RDSRepositorySkill(self.ctx).init_db()
+        if result.success:
+            self._runtime_schema_checked = True
+        return result
 
     def _render_real(self, plan: dict, slots: list[dict], output_path: Path, cover_path: Path, subtitles: list[dict]) -> Result:
         tool_check = self.ctx.ffmpeg.require_tools()
@@ -243,6 +261,32 @@ def _actual_generated_count(ctx: SkillContext, product_id: str | None) -> int:
     return sum(1 for output in outputs if is_good_rendered_output(output))
 
 
+def _mark_prompt_packages_consumed_for_output(ctx: SkillContext, slots: list[dict]) -> list[str]:
+    consumed: list[str] = []
+    seen: set[str] = set()
+    for slot in slots:
+        segment_id = str(slot.get("segment_id") or "").strip()
+        if not segment_id:
+            continue
+        segment = ctx.repo.get("segments", "segment_id", segment_id) or {}
+        if str(segment.get("source_type") or "") != "ai_generated":
+            continue
+        asset = ctx.repo.get("assets", "asset_id", segment.get("asset_id") or slot.get("asset_id")) or {}
+        prompt_id = str(segment.get("prompt_package_id") or asset.get("prompt_package_id") or asset.get("source_identity") or "").strip()
+        if not prompt_id or prompt_id in seen:
+            continue
+        seen.add(prompt_id)
+        patch = {
+            "package_status": "consumed",
+            "generated_asset_id": str(segment.get("asset_id") or slot.get("asset_id") or asset.get("asset_id") or ""),
+            "generated_segment_id": segment_id,
+        }
+        result = ctx.repo.update("segment_prompt_packages", "segment_prompt_id", prompt_id, patch)
+        if result.success:
+            consumed.append(prompt_id)
+    return consumed
+
+
 def _duration_arg(duration_ms: int) -> str:
     return f"{max(duration_ms, 500) / 1000:.3f}"
 
@@ -312,11 +356,22 @@ def _ensure_bgm(ctx: SkillContext, plan: dict | None = None) -> Result:
         bgm_profile = plan_template.get("bgm_profile") or {}
         moods = bgm_profile.get("moods") or plan_template.get("default_moods") or []
         mood = str(moods[0]) if moods else ""
+        energy = str(bgm_profile.get("energy") or "")
+        preferred_vocal_types = bgm_profile.get("preferred_vocal_types") or bgm_profile.get("vocal_types") or []
+        if isinstance(preferred_vocal_types, str):
+            preferred_vocal_types = [preferred_vocal_types]
         category = ""
         if product_id:
             product = ctx.repo.get("products", "product_id", product_id) or {}
             category = product.get("category", "")
-        rec = BgmLibrarySkill(ctx).get_recommendation(product_id=product_id, category=category, mood=mood, template_id=template_id)
+        rec = BgmLibrarySkill(ctx).get_recommendation(
+            product_id=product_id,
+            category=category,
+            mood=mood,
+            template_id=template_id,
+            energy=energy,
+            preferred_vocal_types=list(preferred_vocal_types or []),
+        )
         recs = rec.data.get("recommendations", []) if rec.success else []
         if recs:
             best = _choose_bgm_candidate_for_batch(ctx, recs, plan or {})
@@ -360,6 +415,12 @@ def _ensure_bgm(ctx: SkillContext, plan: dict | None = None) -> Result:
     if paths:
         seed = int((plan or {}).get("variant_no") or 1) - 1
         return _register_bgm(ctx, paths[seed % len(paths)])
+    if not (ctx.ffmpeg.mock or _env_truthy("AUTO_MIXCUT_ALLOW_TEST_BGM_FALLBACK")):
+        return Result.fail(
+            "BGM_NOT_AVAILABLE",
+            "No approved BGM track or local non-test BGM file is available",
+            {"allow_test_fallback_env": "AUTO_MIXCUT_ALLOW_TEST_BGM_FALLBACK"},
+        )
     generated = bgm_dir / "test_soft_bgm_15s.m4a"
     if not generated.exists():
         res = ctx.ffmpeg.run(
@@ -386,18 +447,52 @@ def _choose_bgm_candidate_for_batch(ctx: SkillContext, recs: list[dict], plan: d
     if not recs:
         return {}
     id_counts, name_counts = _batch_bgm_usage(ctx, str(plan.get("batch_id") or ""))
+    plan_template = ((plan or {}).get("plan_json") or {}).get("template") or {}
+    template_id = str(plan_template.get("template_id") or "")
     variant_no = max(1, int(plan.get("variant_no") or 1))
+    is_ads = template_id and _is_ads_template(template_id)
+    id_cap = _bgm_cap_for_template(template_id, is_ads)
+    name_cap = id_cap
+
+    def _over_cap(bgm_id, track_name_key):
+        return (int(id_counts.get(bgm_id, 0)) if bgm_id else 0) >= id_cap or (
+            int(name_counts.get(track_name_key, 0)) if track_name_key else 0) >= name_cap
+
     annotated = []
     for index, rec in enumerate(recs):
         bgm_id = str(rec.get("bgm_id") or "")
         track_name_key = _bgm_track_name_key(rec)
         id_count = int(id_counts.get(bgm_id, 0)) if bgm_id else 0
         name_count = int(name_counts.get(track_name_key, 0)) if track_name_key else 0
-        over_cap = id_count >= BGM_BATCH_ID_CAP or name_count >= BGM_BATCH_TRACK_NAME_CAP
+        over_cap = _over_cap(bgm_id, track_name_key)
         score = _safe_float(rec.get("score"), 0)
-        annotated.append((over_cap, name_count, id_count, -score, (index + variant_no - 1) % max(len(recs), 1), rec))
+        usage = int(rec.get("usage_count") or 0)
+        # diversity key: when all tracks are over cap, prefer least-recently-used
+        annotated.append((
+            over_cap,
+            0 if is_ads and not over_cap else (id_count + name_count),
+            -score,
+            usage,
+            (index + variant_no - 1) % max(len(recs), 1),
+            rec,
+        ))
     annotated.sort(key=lambda item: item[:5])
+    # when all candidates are over cap, add fair round-robin among remaining
+    all_over = all(a[0] for a in annotated)
+    if all_over and len(annotated) > 1:
+        # rotate by batch position to cycle through available tracks
+        annotated.sort(key=lambda item: (item[3], item[4], -item[2]))
     return annotated[0][5]
+
+
+def _is_ads_template(template_id: str) -> bool:
+    """Check if a template is an AD fast template needing higher BGM diversity."""
+    return bool(template_id) and template_id.upper().startswith("AD_FAST")
+
+
+def _bgm_cap_for_template(template_id: str, is_ads: bool) -> int:
+    """Return per-batch bgm reuse cap."""
+    return 2 if is_ads else BGM_BATCH_ID_CAP
 
 
 def _batch_bgm_usage(ctx: SkillContext, batch_id: str) -> tuple[dict[str, int], dict[str, int]]:
@@ -445,7 +540,7 @@ def _default_bgm_plan() -> dict:
         "bgm_id": "",
         "track_name": "",
         "recommended_start_sec": 0,
-        "default_volume": MIN_BGM_VOLUME,
+        "default_volume": _bgm_min_volume(),
         "fade_in_ms": 60,
         "fade_out_ms": 0,
         "matched_template_id": "",
@@ -464,7 +559,8 @@ def _normalize_bgm_mix(ctx: SkillContext, track: dict, path: Path, planned_durat
     elif duration_sec and start_sec >= max(duration_sec - 1.0, 0):
         start_sec = 0.0
     updated["recommended_start_sec"] = round(start_sec, 3)
-    updated["default_volume"] = max(_safe_float(updated.get("default_volume"), MIN_BGM_VOLUME), MIN_BGM_VOLUME)
+    min_volume = _bgm_min_volume()
+    updated["default_volume"] = max(_safe_float(updated.get("default_volume"), min_volume), min_volume)
     updated["fade_in_ms"] = min(int(_safe_float(updated.get("fade_in_ms"), 60)), 80)
     updated["fade_out_ms"] = 0
     if duration_sec:
@@ -498,7 +594,17 @@ def _bgm_track_path(ctx: SkillContext, track: dict) -> Path | None:
     # 用信号超时保护 exists()：外接存储/NFS 掉线时 stat() 会无限挂起
     if local and _path_exists_safe(local) and local.is_file():
         return local
-    return require_oss_object_path(ctx, track.get("oss_object_id", ""), "render_bgm")
+    resolved = resolve_oss_object_path(ctx, track.get("oss_object_id", ""), "render_bgm")
+    if not resolved.success:
+        return None
+    path = Path(resolved.data["path"])
+    bgm_id = str(track.get("bgm_id") or "")
+    if bgm_id:
+        try:
+            ctx.repo.update("bgm_tracks", "bgm_id", bgm_id, {"local_file_path": str(path)})
+        except Exception:
+            pass
+    return path
 
 
 def _path_exists_safe(path: Path, timeout_sec: float = 5.0) -> bool:
@@ -529,7 +635,7 @@ def _apply_audio_mix_suggestions(track: dict) -> dict:
 
 
 def _bgm_manifest(data: dict) -> dict:
-    volume = _safe_float(data.get("default_volume"), MIN_BGM_VOLUME)
+    volume = _safe_float(data.get("default_volume"), _bgm_min_volume())
     return {
         "bgm_id": data.get("bgm_id") or "",
         "track_name": data.get("track_name") or "",
@@ -538,7 +644,7 @@ def _bgm_manifest(data: dict) -> dict:
         "recommended_start_sec": _safe_float(data.get("recommended_start_sec"), 0),
         "fade_in_ms": _safe_int(data.get("fade_in_ms"), 500),
         "fade_out_ms": _safe_int(data.get("fade_out_ms"), 0),
-        "loudnorm_target_i": BGM_LOUDNORM_TARGET_I,
+        "loudnorm_target_i": _bgm_loudnorm_target_i(),
         "matched_template_id": data.get("matched_template_id") or "",
         "matched_mood": data.get("matched_mood") or "",
         "fallback_source": data.get("fallback_source") or "",
@@ -547,11 +653,12 @@ def _bgm_manifest(data: dict) -> dict:
 
 def _bgm_audio_filter(data: dict, duration_ms: int) -> str:
     duration_sec = max(duration_ms, 500) / 1000
-    volume = min(max(_safe_float(data.get("default_volume"), MIN_BGM_VOLUME), MIN_BGM_VOLUME), 1.0)
+    min_volume = _bgm_min_volume()
+    volume = min(max(_safe_float(data.get("default_volume"), min_volume), min_volume), 1.0)
     fade_in = max(_safe_int(data.get("fade_in_ms"), 500), 0) / 1000
     fade_out = max(_safe_int(data.get("fade_out_ms"), 0), 0) / 1000
     parts = [
-        f"loudnorm=I={BGM_LOUDNORM_TARGET_I}:TP={BGM_LOUDNORM_TRUE_PEAK}:LRA={BGM_LOUDNORM_LRA}",
+        f"loudnorm=I={_bgm_loudnorm_target_i():g}:TP={BGM_LOUDNORM_TRUE_PEAK:g}:LRA={BGM_LOUDNORM_LRA:g}",
         f"volume={volume:.3f}",
         f"atrim=0:{duration_sec:.3f}",
     ]
@@ -614,6 +721,22 @@ def _safe_int(value, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _bgm_min_volume() -> float:
+    explicit = os.environ.get("AUTO_MIXCUT_BGM_MIN_VOLUME")
+    if explicit not in (None, ""):
+        return max(0.0, min(_safe_float(explicit, MIN_BGM_VOLUME), 1.0))
+    mode = str(os.environ.get("AUTO_MIXCUT_BGM_VOLUME_MODE") or "audible").strip().lower()
+    return 0.2 if mode in {"bed", "background", "soft"} else MIN_BGM_VOLUME
+
+
+def _bgm_loudnorm_target_i() -> float:
+    return _safe_float(os.environ.get("AUTO_MIXCUT_BGM_LOUDNORM_I"), BGM_LOUDNORM_TARGET_I)
+
+
+def _env_truthy(name: str) -> bool:
+    return str(os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _subtitle_plan(ctx: SkillContext, plan: dict) -> list[dict]:

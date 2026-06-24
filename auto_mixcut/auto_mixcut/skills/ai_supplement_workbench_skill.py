@@ -36,12 +36,12 @@ class AISupplementWorkbenchSkill:
 
         existing_state = _existing_prompt_package_state(self.ctx, product_id)
         requested_total = _requested_package_count(gap_text, max_packages)
-        available_existing = existing_state["active_package_count"]
+        available_existing = existing_state["future_package_count"]
         if existing_state["active_package_count"] >= requested_total:
             data = {
                 "product_id": product_id,
                 "skipped": True,
-                "reason": "ai_package_inflight_sufficient",
+                "reason": "ai_package_future_inventory_sufficient",
                 "requested_total": requested_total,
                 "existing_state": existing_state,
             }
@@ -129,7 +129,7 @@ def _update_task_ai_supplement(ctx: SkillContext, task: dict, status: str, packa
     if status == "created":
         patch["task_status"] = "AI_SUPPLEMENT_CREATED"
         patch["pipeline_status"] = "WAITING_AI_RETURN"
-        patch["next_action"] = "WAIT_AI_SEGMENT_RETURN"
+        patch["next_action"] = "RUN_AI_SEGMENT_WORKER"
         patch["last_error"] = ""
     elif status == "needs_submit_retry":
         patch["task_status"] = "AI_SUPPLEMENT_CREATED"
@@ -214,9 +214,11 @@ def _existing_prompt_package_state(ctx: SkillContext, product_id: str) -> dict[s
         "inflight_count": state["inflight_count"],
         "ready_to_submit_count": state["ready_to_submit_count"],
         "recoverable_failed_count": state["recoverable_failed_count"],
+        "stale_inflight_count": state.get("stale_inflight_count", 0),
         "imported_package_count": state["imported_package_count"],
         "consumed_package_count": state["consumed_package_count"],
         "active_package_count": state["active_package_count"],
+        "future_package_count": state.get("future_package_count", state["active_package_count"] + state["recoverable_failed_count"]),
     }
 
 

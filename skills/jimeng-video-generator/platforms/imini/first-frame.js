@@ -122,6 +122,160 @@ function shouldUsePhoneCoveredFaceFrame(context, productLock, category) {
   return true;
 }
 
+function extractMotionArc(prompt) {
+  const text = String(prompt || '');
+  const match = text.match(/运镜\/动作弧线[：:]\s*([^\n]+)/);
+  return match ? match[1].replace(/\s+/g, ' ').trim() : '';
+}
+
+
+const START_STATE_KEYWORDS = ['拿起', '取出', '靠近', '准备', '刚要', '手持', '放到', '靠到', '披上前', '夹上前', '戴上前', '扣上前', '整理前', '拿出', '抬起', '伸向', '朝'];
+const PROCESS_KEYWORDS = ['戴上', '夹上', '穿上', '披上', '扣上', '整理', '拉近', '侧转', '转身', '抖开', '挂上', '系上', '别上', '套上'];
+const RESULT_KEYWORDS = ['已戴好', '已穿好', '造型完成', '成型', '结果展示', '上身效果', '佩戴效果', '完成后', '稳定停留', '效果停留', '廓形成型', '展示上身', '已经', '整体展示', '最终'];
+const START_MOTION_COMBOS = [
+  ['拿起', '穿上'], ['手持', '穿上'], ['取出', '穿上'], ['拿起', '戴上'],
+  ['拿起', '夹上'], ['靠近', '夹上'], ['准备', '穿上'], ['刚要', '披上'],
+  ['拿出', '别上'], ['拿起', '系上'], ['拿起', '扣上'], ['拿起', '套上'],
+];
+
+function _splitMotionNodes(motionArc) {
+  if (!motionArc) return [];
+  return motionArc.split(/->|→|然后|，|；/).map(s => s.trim()).filter(Boolean);
+}
+
+function isResultOnlyMotion(motionArc, prompt) {
+  if (!motionArc) return false;
+  const nodes = _splitMotionNodes(motionArc);
+  if (nodes.length === 0) return false;
+  const firstNode = nodes[0];
+  // if first node is clearly a RESULT state (已穿好/已戴好/展示效果), it's result-only
+  if (RESULT_KEYWORDS.some(k => firstNode.includes(k))) {
+    return true;
+  }
+  // if first node has process keywords but no start keywords, check if whole arc is result display
+  const hasProcess = PROCESS_KEYWORDS.some(k => motionArc.includes(k));
+  const hasStart = START_STATE_KEYWORDS.some(k => motionArc.includes(k));
+  if (!hasStart && !hasProcess) {
+    const text = motionArc;
+    if (RESULT_KEYWORDS.some(k => text.includes(k))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function deriveFirstFrameStartState(prompt, category) {
+  const motionArc = extractMotionArc(prompt);
+  const cat = category || '';
+  const nodes = _splitMotionNodes(motionArc);
+
+  // result-only motion overrides category template — allow result state
+  if (motionArc && isResultOnlyMotion(motionArc, prompt)) {
+    return { isStartState: false, category: cat, hint: '动作弧线为结果展示型，首帧可为已穿戴/已整理完成状态', matched: 'result_only_motion' };
+  }
+
+  // check category templates first
+  for (const [catKey, rule] of Object.entries(CATEGORY_START_STATE_RULES)) {
+    if (cat.includes(catKey) || catKey === cat) {
+      return { isStartState: true, category: catKey, hint: rule.default, matched: 'category_rule' };
+    }
+  }
+  // default
+  if (CATEGORY_START_STATE_RULES['default']) {
+    return { isStartState: true, category: 'default', hint: CATEGORY_START_STATE_RULES['default'].default, matched: 'default_rule' };
+  }
+
+  if (!motionArc) {
+    return { isStartState: false, category: cat, hint: '', matched: 'no_motion_arc' };
+  }
+
+  // has process keywords: must generate BEFORE state
+  const hasProcess = PROCESS_KEYWORDS.some(k => nodes.some(n => n.includes(k)));
+  const hasStart = START_STATE_KEYWORDS.some(k => nodes.some(n => n.includes(k)));
+  if (hasProcess && !hasStart) {
+    // find what the first process action is
+    const firstProcess = PROCESS_KEYWORDS.find(k => nodes.some(n => n.includes(k)));
+    const startHint = firstProcess ? `首帧应表现${firstProcess}动作开始前或刚开始的瞬间` : '首帧应表现动作开始前状态';
+    return { isStartState: true, category: cat, hint: startHint, matched: 'process_without_start' };
+  }
+
+  if (nodes.length > 0) {
+    const firstNode = nodes[0].toLowerCase();
+    const isStartNode = START_STATE_KEYWORDS.some(k => firstNode.includes(k));
+    if (isStartNode) {
+      return { isStartState: true, category: cat, hint: `首帧应为：${nodes[0]}`, matched: 'first_node_is_start' };
+    }
+    const isResultNode = RESULT_KEYWORDS.some(k => firstNode.includes(k));
+    if (isResultNode) {
+      return { isStartState: false, category: cat, hint: '首帧可为结果展示状态', matched: 'first_node_is_result' };
+    }
+  }
+
+  // conservative default: if any process keyword exists, force start state
+  for (const [start, end] of START_MOTION_COMBOS) {
+    if (nodes.some(n => n.includes(start)) || motionArc.includes(start)) {
+      if (nodes.some(n => n.includes(end)) || motionArc.includes(end)) {
+        return { isStartState: true, category: cat, hint: `首帧应表现${start}的瞬间，${end}尚未完成`, matched: 'combo_match' };
+      }
+    }
+  }
+
+  if (hasProcess) {
+    return { isStartState: true, category: cat, hint: '首帧应表现动作开始前一瞬间', matched: 'conservative_default' };
+  }
+
+  // result-only: allow
+  return { isStartState: false, category: cat, hint: '', matched: 'unknown_motion' };
+}
+
+
+const CATEGORY_START_STATE_RULES = {
+  '女装外套': {
+    default: '首帧优先是外套拿在手上、刚披到肩前、手扶衣领准备穿、外套尚未完整穿好。如果使用镜前自拍遮脸，手机可以遮住脸，但不能遮住外套关键版型。不要直接生成已经穿好并整理完成的成片效果。',
+  },
+  '发饰': {
+    default: '首帧优先是手拿发饰靠近头发、头发尚未固定、夹子尚未夹上。不要直接生成发型已经完成、发饰已经戴好后的结果图。',
+  },
+  '耳环': {
+    default: '首帧优先是手拿耳饰靠近耳侧、尚未完全戴好。不要直接生成耳饰已经佩戴完成并转头展示的结果图。',
+  },
+  '手链': {
+    default: '首帧优先是手链靠近手腕、尚未扣好，或手刚拿起手链。不要直接生成已经扣好后的静态展示。',
+  },
+  '项链': {
+    default: '首帧优先是项链在手中、靠近颈部、尚未完全扣好。不要直接生成已经佩戴完成的静态展示。',
+  },
+  '包': {
+    default: '首帧优先是包在手边、刚拿起、包带尚未完全背上。不要直接生成已经背好的静态展示。',
+  },
+  'default': {
+    default: '首帧表现动作开始前一瞬间：商品在手边或刚进入画面，动作尚未完成。不要直接生成穿戴完成、使用结束的结果态。',
+  },
+};
+
+function buildFirstFrameStartStateBlock(prompt, category) {
+  const startState = deriveFirstFrameStartState(prompt, category);
+  const lines = [];
+  lines.push('');
+  lines.push('首帧动作状态硬规则：');
+  lines.push('这张图是图片转视频的第 0 秒起点，不是最终结果图。');
+  lines.push('必须表现动作开始前或动作刚开始的状态，让后续视频仍有动作空间。');
+  lines.push('不要直接生成动作完成后的结果态。');
+  lines.push('不要生成已经佩戴完成、已经穿好、已经整理完成、造型已经成型的画面，除非动作弧线明确就是从结果展示开始。');
+
+  if (startState.hint) {
+    lines.push('');
+    if (startState.matched === 'result_only_motion') {
+      lines.push(`本条动作弧线为结果展示型：${startState.hint}`);
+    } else {
+      lines.push(`本条动作弧线的首帧应为：${startState.hint}`);
+    }
+  }
+
+  return { lines, startState };
+}
+
+
 function buildFirstFramePrompt(context, productLock, category, options = {}) {
   const ratio = context.ratio || '9:16';
   const categoryRule = getCompositionRule(category);
@@ -159,6 +313,11 @@ function buildFirstFramePrompt(context, productLock, category, options = {}) {
     lines.push('生成动作开始前的自然静止瞬间，优先让场景、人物状态和穿搭有差异。');
   } else {
     lines.push('根据短视频片段提示词，生成动作开始前的自然静止画面；重点不是商品近景，而是有内容的生活场景。');
+  }
+
+  const startStateBlock = buildFirstFrameStartStateBlock(context.prompt, category);
+  for (const line of startStateBlock.lines) {
+    lines.push(line);
   }
 
   if (productLockText.length > 0) {
@@ -702,7 +861,8 @@ function buildOpenClawChildEnv(options = {}) {
 }
 
 function buildOpenClawImageArgs({ firstFramePrompt, referenceImagePaths, outputPath, ratio, options = {} }) {
-  const hasReference = Array.isArray(referenceImagePaths) && referenceImagePaths.length > 0;
+  const selectedReferences = selectReferenceImagePaths(referenceImagePaths, options);
+  const hasReference = selectedReferences.length > 0;
   const command = hasReference ? 'edit' : 'generate';
   const model = normalizeOpenClawImageModel(options.openclawModel ||
     options.imageModel ||
@@ -725,8 +885,10 @@ function buildOpenClawImageArgs({ firstFramePrompt, referenceImagePaths, outputP
     '--json'
   ];
 
-  if (hasReference) {
-    args.push('--file', referenceImagePaths[0]);
+  if (selectedReferences.length > 0) {
+    for (const imagePath of selectedReferences) {
+      args.push('--file', imagePath);
+    }
   }
 
   return { args, command, model, size, aspectRatio };
@@ -809,7 +971,8 @@ async function callOpenAIImageSkillGeneration({ firstFramePrompt, referenceImage
   const tempDir = fs.mkdtempSync(path.join('/private/tmp', 'imini-first-frame-'));
   const inputPath = path.join(tempDir, 'input.json');
   const outputDir = path.join(tempDir, 'outputs');
-  const hasReference = Array.isArray(referenceImagePaths) && referenceImagePaths.length > 0;
+  const selectedReferences = selectReferenceImagePaths(referenceImagePaths, options);
+  const hasReference = selectedReferences.length > 0;
   const taskId = `imini_first_frame_${Date.now()}`;
   const payload = {
     task_id: taskId,
@@ -817,8 +980,8 @@ async function callOpenAIImageSkillGeneration({ firstFramePrompt, referenceImage
     target_field: 'first_frame',
     mode: hasReference ? 'edit' : 'generate',
     prompt: firstFramePrompt,
-    input_image_path: hasReference ? referenceImagePaths[0] : '',
-    input_image_paths: hasReference ? referenceImagePaths.slice(0, 5) : [],
+    input_image_path: hasReference ? selectedReferences[0] : '',
+    input_image_paths: selectedReferences,
     size,
     quality: options.quality || 'medium',
     output_format: options.outputFormat || 'png',
@@ -961,10 +1124,11 @@ async function callResponsesImageGeneration({ firstFramePrompt, referenceImagePa
 
   const content = [{ type: 'input_text', text: firstFramePrompt }];
 
-  if (referenceImagePaths && referenceImagePaths.length > 0) {
-    for (let i = 0; i < Math.min(referenceImagePaths.length, 1); i++) {
+  const selectedReferences = selectReferenceImagePaths(referenceImagePaths, options);
+  if (selectedReferences.length > 0) {
+    for (let i = 0; i < selectedReferences.length; i++) {
       try {
-        content.push(imagePathToInputItem(referenceImagePaths[i]));
+        content.push(imagePathToInputItem(selectedReferences[i]));
       } catch (error) {
         console.log(`  ⚠️ 首帧参考图 ${i + 1} 读取失败: ${error.message}`);
       }
@@ -1131,6 +1295,13 @@ async function generateFirstFrameImageWithLLM(firstFramePrompt, referenceImagePa
   }
 }
 
+function selectReferenceImagePaths(referenceImagePaths, options = {}) {
+  if (!Array.isArray(referenceImagePaths) || referenceImagePaths.length === 0) return [];
+  const configured = Number(options.referenceImageLimit || process.env.IMINI_FIRST_FRAME_REFERENCE_LIMIT || 3);
+  const limit = Math.max(1, Math.min(referenceImagePaths.length, Number.isFinite(configured) && configured > 0 ? configured : 3));
+  return referenceImagePaths.slice(0, limit).filter(Boolean);
+}
+
 module.exports = {
   buildFirstFramePrompt,
   generateFirstFrameImageWithLLM,
@@ -1143,6 +1314,12 @@ module.exports = {
   normalizeOpenClawImageModel,
   buildOpenClawChildEnv,
   loadOpenClawServiceProxyEnv,
+  selectReferenceImagePaths,
   extractImageResult,
-  isNonRetryableImageError
+  isNonRetryableImageError,
+  extractMotionArc,
+  deriveFirstFrameStartState,
+  isResultOnlyMotion,
+  CATEGORY_START_STATE_RULES,
+  buildFirstFrameStartStateBlock,
 };

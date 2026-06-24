@@ -214,15 +214,28 @@ def run_guard_pass(ctx, product_id: str, target: int | None = None, name: str = 
                     material_pool_extra_capacity=ready_detail.get("material_pool_extra_capacity"),
                     remaining_count=ready_detail.get("remaining_count"),
                 )
-                supplement_gate = _maybe_create_ai_supplement_for_capacity_gap(ctx, product_id, ready_detail)
-                if supplement_gate.get("status") != "skipped":
-                    detail["ai_supplement_gate"] = supplement_gate
-                    next_action = "RUN_AI_SEGMENT_WORKER" if supplement_gate.get("ai_submit", {}).get("status") in {"manual_required", "failed", "timeout"} else "WAIT_AI_SEGMENT_RETURN"
-                    last_error = supplement_gate.get("ai_submit", {}).get("error") or supplement_gate.get("ai_submit", {}).get("reason") or ""
-                    _safe_guard_update(ctx, product_id, "WAITING_AI_RETURN", next_action, last_error, detail)
-                    return Result.ok({"product_id": product_id, "pipeline_status": "WAITING_AI_RETURN", "next_action": next_action, "detail": detail})
-                _safe_guard_update(ctx, product_id, "READY_TO_CONTINUE", "RUN_GUARD_AGAIN", "", detail)
-                return Result.ok({"product_id": product_id, "pipeline_status": "READY_TO_CONTINUE", "next_action": "RUN_GUARD_AGAIN", "detail": detail})
+                if (
+                    _guard_allows_top_up_with_stale()
+                    and int(ready_detail.get("material_pool_extra_capacity") or 0) > 0
+                    and int(ready_detail.get("remaining_count") or 0) > 0
+                ):
+                    _guard_log(
+                        "stale_ai_deferred_top_up_allowed",
+                        product_id=product_id,
+                        stale_ai_count=refreshed_stale_ai["stale_count"],
+                        material_pool_extra_capacity=ready_detail.get("material_pool_extra_capacity"),
+                        remaining_count=ready_detail.get("remaining_count"),
+                    )
+                else:
+                    supplement_gate = _maybe_create_ai_supplement_for_capacity_gap(ctx, product_id, ready_detail)
+                    if supplement_gate.get("status") != "skipped":
+                        detail["ai_supplement_gate"] = supplement_gate
+                        next_action = "RUN_AI_SEGMENT_WORKER" if supplement_gate.get("ai_submit", {}).get("status") in {"manual_required", "failed", "timeout"} else "WAIT_AI_SEGMENT_RETURN"
+                        last_error = supplement_gate.get("ai_submit", {}).get("error") or supplement_gate.get("ai_submit", {}).get("reason") or ""
+                        _safe_guard_update(ctx, product_id, "WAITING_AI_RETURN", next_action, last_error, detail)
+                        return Result.ok({"product_id": product_id, "pipeline_status": "WAITING_AI_RETURN", "next_action": next_action, "detail": detail})
+                    _safe_guard_update(ctx, product_id, "READY_TO_CONTINUE", "RUN_GUARD_AGAIN", "", detail)
+                    return Result.ok({"product_id": product_id, "pipeline_status": "READY_TO_CONTINUE", "next_action": "RUN_GUARD_AGAIN", "detail": detail})
             if not _guard_allows_top_up_with_stale() or int(ready_detail.get("material_pool_extra_capacity") or 0) <= 0 or int(ready_detail.get("remaining_count") or 0) <= 0:
                 supplement_gate = _maybe_create_ai_supplement_for_capacity_gap(ctx, product_id, ready_detail)
                 if supplement_gate.get("status") != "skipped":
@@ -662,9 +675,11 @@ def _stale_retag_segment_ids(ctx, product_id: str, source_types: list[str]) -> l
 
 def _guard_retag_limit() -> int:
     try:
-        return max(0, int(os.environ.get("AUTO_MIXCUT_GUARD_RETAG_LIMIT", "40") or "40"))
+        default = int(os.environ.get("AUTO_MIXCUT_GUARD_RETAG_LIMIT", "40") or "40")
+        limit = max(0, default)
     except ValueError:
-        return 40
+        limit = 40
+    return limit * 2 if _is_ads_fast_mode() else limit
 
 
 def _retag_segment_priority(segment: dict[str, Any]) -> tuple[int, int, str]:
@@ -706,6 +721,10 @@ def _guard_allows_top_up_with_stale() -> bool:
     return os.environ.get("AUTO_MIXCUT_GUARD_TOP_UP_WITH_STALE", "1").strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _is_ads_fast_mode() -> bool:
+    return os.environ.get("AUTO_MIXCUT_ADS_FAST_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _guard_tag_timeout() -> int:
     try:
         return max(30, int(os.environ.get("AUTO_MIXCUT_GUARD_TAG_TIMEOUT", "180") or "180"))
@@ -718,6 +737,8 @@ def _stale_segment_reasons(ctx, segment: dict[str, Any], stale_index: dict[str, 
     segment_id = str(segment.get("segment_id") or "")
     if not segment_id:
         return ["missing_segment_id"]
+    if _is_product_mismatch_suspect(segment):
+        return []
     if _is_guard_failed_segment(segment):
         return []
     if not _has_frames(ctx, segment_id, stale_index):
@@ -729,13 +750,27 @@ def _stale_segment_reasons(ctx, segment: dict[str, Any], stale_index: dict[str, 
     if segment.get("source_type") == "ai_generated":
         if str(segment.get("segment_status") or "") in {"", "created"}:
             reasons.append("ai_qc_missing")
+        if _is_retryable_ai_failure(segment):
+            status = str(segment.get("segment_status") or "")
+            failure_reason = str(segment.get("effective_roles_reason") or "").lower()
+            if status == "ai_stage_failed":
+                if "consistency" in failure_reason and not segment.get("frame_consistency_status"):
+                    reasons.append("ai_consistency_missing")
+                if ("anchor" in failure_reason or "锚点" in failure_reason) and not segment.get("anchor_match_level"):
+                    reasons.append("ai_anchor_check_missing")
+                if not segment.get("frame_consistency_status") and not segment.get("anchor_match_level"):
+                    reasons.append("ai_consistency_missing")
+            elif status == "effective_role_failed":
+                reasons.append("effective_roles_missing")
         if _guard_runs_consistency() and not segment.get("frame_consistency_status"):
             reasons.append("ai_consistency_missing")
         if str(segment.get("segment_status") or "") == "qc_passed" and not segment.get("anchor_match_level"):
             reasons.append("ai_anchor_check_missing")
+        if _ai_effective_roles_need_recompute(ctx, segment, stale_index):
+            reasons.append("effective_roles_missing")
     if not segment.get("effective_roles_updated_at"):
         reasons.append("effective_roles_missing")
-    return reasons
+    return list(dict.fromkeys(reasons))
 
 
 def _build_stale_index(ctx, segments: list[dict[str, Any]]) -> dict[str, Any]:
@@ -777,6 +812,36 @@ def _has_tag(ctx, segment_id: str, stale_index: dict[str, Any] | None = None) ->
         return segment_id in stale_index.get("tag_ids", set())
     rows = ctx.repo.list_where("segment_tags", "segment_id=? LIMIT 1", (segment_id,))
     return bool(rows)
+
+
+def _latest_tag_for_guard(ctx, segment_id: str) -> dict[str, Any]:
+    rows = ctx.repo.list_where("segment_tags", "segment_id=? ORDER BY id DESC LIMIT 1", (segment_id,))
+    return rows[0] if rows else {}
+
+
+def _ai_effective_roles_need_recompute(ctx, segment: dict[str, Any], stale_index: dict[str, Any] | None = None) -> bool:
+    if str(segment.get("source_type") or "") != "ai_generated":
+        return False
+    if _is_product_mismatch_suspect(segment):
+        return False
+    if str(segment.get("segment_status") or "") != "qc_passed":
+        return False
+    if str(segment.get("anchor_match_level") or "") != "strict_pass":
+        return False
+    if str(segment.get("frame_consistency_status") or "") not in {"", "pass"}:
+        return False
+    if segment.get("effective_roles_json"):
+        return False
+    segment_id = str(segment.get("segment_id") or "")
+    if not segment_id or not _has_tag(ctx, segment_id, stale_index):
+        return False
+    tag = _latest_tag_for_guard(ctx, segment_id)
+    return (
+        str(tag.get("mixcut_usability") or "") == "yes"
+        and str(tag.get("risk_level") or "") in {"low", "medium"}
+        and str(tag.get("product_visibility") or "") in {"high", "medium"}
+        and str(tag.get("confidence") or "") in {"high", "medium"}
+    )
 
 
 def _status_after_top_up(ctx, product_id: str, target: int, top_up: Result) -> dict[str, Any]:
@@ -1214,12 +1279,24 @@ def _compute_missing_effective_roles(ctx, product_id: str, source_types: list[st
     attempted = 0
     limit = _guard_effective_role_limit()
     force_set = set(force_segment_ids or [])
+    segments = sorted(
+        segments,
+        key=lambda segment: (
+            0 if str(segment.get("segment_id") or "") in force_set else 1,
+            _retag_segment_priority(segment),
+        ),
+    )
     for segment in segments:
         segment_id = str(segment.get("segment_id") or "")
         if _is_guard_failed_segment(segment):
             results.append({"segment_id": segment_id, "skipped": True, "reason": str(segment.get("segment_status") or "guard_failed")})
             continue
-        if segment.get("effective_roles_updated_at") and segment_id not in force_set:
+        if (
+            segment.get("effective_roles_updated_at")
+            and segment_id not in force_set
+            and not _is_retryable_ai_failure(segment)
+            and not _ai_effective_roles_need_recompute(ctx, segment, stale_index)
+        ):
             results.append({"segment_id": segment_id, "skipped": True, "reason": "effective_roles_exist"})
             continue
         if not _has_tag(ctx, segment_id, stale_index):
@@ -1395,6 +1472,10 @@ def _guard_tag_total_timeout() -> int:
 
 
 def _is_guard_failed_segment(segment: dict[str, Any]) -> bool:
+    if _is_product_mismatch_suspect(segment):
+        return True
+    if _is_retryable_ai_failure(segment):
+        return False
     return str(segment.get("segment_status") or "") in {
         "frame_sample_failed",
         "frame_sample_timeout",
@@ -1403,6 +1484,25 @@ def _is_guard_failed_segment(segment: dict[str, Any]) -> bool:
         "ai_stage_failed",
         "effective_role_failed",
     }
+
+
+def _is_retryable_ai_failure(segment: dict[str, Any]) -> bool:
+    """Allow transient AI postprocess timeouts to be retried by later guard passes."""
+    if _is_product_mismatch_suspect(segment):
+        return False
+    if str(segment.get("source_type") or "") != "ai_generated":
+        return False
+    if str(segment.get("segment_status") or "") not in {"ai_stage_failed", "effective_role_failed"}:
+        return False
+    if not str(segment.get("prompt_package_id") or "").strip():
+        return False
+    reason = str(segment.get("effective_roles_reason") or "").lower()
+    return "timed out" in reason or "timeout" in reason
+
+
+def _is_product_mismatch_suspect(segment: dict[str, Any]) -> bool:
+    value = segment.get("product_mismatch_suspect")
+    return value in {1, True, "1", "true", "True"}
 
 
 def _mark_segment_guard_failed(ctx, segment_id: str, status: str, reason: str) -> None:

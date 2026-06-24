@@ -21,6 +21,9 @@ const {
   updateSubmissionRecord
 } = require('./trace-state');
 const { claimIminiAsset } = require('./platforms/imini/asset-claimer');
+
+ensureLocalhostBypassesProxy();
+
 let syncJimengTaskState = null;
 try {
   ({ syncJimengTaskState } = require('../short-video-automation-mvp/services/nodes/sync-jimeng-task-state'));
@@ -39,7 +42,7 @@ const DEFAULT_CONFIG = {
   baseUrl: 'https://jimeng.jianying.com/ai-tool/home?workspace=0&type=video',
   assetUrl: 'https://jimeng.jianying.com/ai-tool/asset?workspace=0',
   runtimeRoot: '~/Desktop/temp/jimeng-feishu-runtime',
-  maxAssetCandidates: 10,
+  maxAssetCandidates: 20,
   assetScanBatches: 5,
   assetScrollStepPx: 1200,
   concurrentClaimBatchLimit: 5,
@@ -79,6 +82,26 @@ const DOWNLOAD_TAB_ROLE = 'openclaw-jimeng-download';
 
 let cachedAccessToken = null;
 let tokenExpireTime = 0;
+
+function ensureLocalhostBypassesProxy() {
+  const required = ['127.0.0.1', 'localhost'];
+  for (const key of ['NO_PROXY', 'no_proxy']) {
+    const existing = String(process.env[key] || '').trim();
+    const parts = existing
+      ? existing.split(',').map(item => item.trim()).filter(Boolean)
+      : [];
+    let changed = false;
+    for (const value of required) {
+      if (!parts.includes(value)) {
+        parts.push(value);
+        changed = true;
+      }
+    }
+    if (changed || !existing) {
+      process.env[key] = parts.join(',');
+    }
+  }
+}
 
 function syncAutomationTaskFromJimeng(submission, notes = '') {
   if (!syncJimengTaskState) {
@@ -1546,7 +1569,9 @@ async function ensureVideoAssetTab(page) {
         console.log('✅ 已进入资产页视频列表');
         return;
       }
-      lastError = '资产页已进入视频区域，但未找到“所有视频”页签';
+      await sleep(800);
+      console.log('✅ 已进入资产页视频区域（未检测到二级页签，按新版资产页继续扫描）');
+      return;
     } else {
       lastError = '资产页未找到“视频”页签';
     }
@@ -1746,8 +1771,17 @@ async function listVideoCardTargets(page) {
         if (tag === 'ASIDE' || tag === 'NAV' || tag === 'HEADER' || role === 'navigation') {
           return false;
         }
-        if (/(side|sidebar|nav|menu|header)/i.test(className)) {
+        // context-menu-trigger is an asset card action handle, NOT navigation
+        const isContextMenuTrigger = /context-menu/i.test(className);
+        const isNavigationLikeClass =
+          /(side|sidebar|nav|header)/i.test(className) ||
+          (/(^|[-_\s])menu($|[-_\s])/i.test(className) && !isContextMenuTrigger);
+        if (isNavigationLikeClass) {
           return false;
+        }
+        // asset-video-card / videoCard are asset card wrappers — definitely inside content
+        if (/(asset[-_]video[-_]card|videoCard)/i.test(className)) {
+          return true;
         }
         if (/灵感 生成 资产 图片 视频 无限画布|批量操作 同步到剪映/.test(text) && text.length < 120) {
           return false;
@@ -1769,9 +1803,18 @@ async function listVideoCardTargets(page) {
 
       let current = clickable || media;
       let combinedText = '';
+      let hasNewCardClass = false;
       for (let depth = 0; current && current !== document.body && depth < 7; depth += 1) {
+        const cls = String(current.className || '');
         combinedText += ` ${(current.textContent || '').replace(/\s+/g, ' ').trim()}`;
+        // new asset page card selectors
+        if (/(asset[-_]video[-_]card|videoCard|context-menu-trigger)/i.test(cls)) {
+          hasNewCardClass = true;
+        }
         current = current.parentElement;
+      }
+      if (hasNewCardClass) {
+        return true;
       }
       if (/所有视频 我的收藏|批量操作|同步到剪映/.test(combinedText) && combinedText.length < 160) {
         return false;
@@ -2167,8 +2210,16 @@ async function openMatchingVideoDetail(page, config, token, submission, claimPoo
         if (bufferedCandidates.length === 0) {
           if (batchIndex === 0 && openedCount === 0) {
             emptyInitialCandidateReads += 1;
+            // diagnostic: count raw media elements on page before giving up
+            const rawDiagnostic = await page.evaluate(() => {
+              const allVideos = document.querySelectorAll('video').length;
+              const allImages = document.querySelectorAll('img').length;
+              const allCanvases = document.querySelectorAll('canvas').length;
+              const cardClasses = document.querySelectorAll('[class*="asset-"],[class*="videoCard"],[class*="context-menu"]').length;
+              return { allVideos, allImages, allCanvases, cardClasses };
+            }).catch(() => ({ error: 'diagnostic_failed' }));
+            console.log(`⚠️  资产视频首屏为空，第 ${emptyInitialCandidateReads}/2 次重新进入资产列表后重试... (raw: v=${rawDiagnostic.allVideos} i=${rawDiagnostic.allImages} c=${rawDiagnostic.allCanvases} cls=${rawDiagnostic.cardClasses})`);
             if (emptyInitialCandidateReads <= 2) {
-              console.log(`⚠️  资产视频首屏为空，第 ${emptyInitialCandidateReads}/2 次重新进入资产列表后重试...`);
               await ensureHealthyAssetPage(page, config, 2);
               await ensureVideoAssetTab(page);
               await sleep(1500);
@@ -2392,11 +2443,18 @@ function pickUploadableSubmissions(records, traceId, limit, recordId = null, tas
     item.trace_id &&
     (!traceId || item.trace_id === traceId) &&
     (!recordId || item.record_id === recordId) &&
-    (!taskNames || taskNames.includes(item.task_name))
+      (!taskNames || taskNames.includes(item.task_name))
   );
 
   if (limit) {
-    items = items.slice(0, limit);
+    items = items
+      .slice()
+      .sort((a, b) => {
+        const aTime = parseTimestampMs(a.state_updated_at || a.submit_time || a.queue_observed_at || a.first_zero_queue_at) || 0;
+        const bTime = parseTimestampMs(b.state_updated_at || b.submit_time || b.queue_observed_at || b.first_zero_queue_at) || 0;
+        return bTime - aTime;
+      })
+      .slice(0, limit);
   }
 
   return items;

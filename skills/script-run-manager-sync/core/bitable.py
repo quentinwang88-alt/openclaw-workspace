@@ -189,9 +189,9 @@ class FeishuBitableClient:
 
         return records
 
-    def batch_create_records(self, records: List[Dict[str, Any]]) -> None:
+    def batch_create_records(self, records: List[Dict[str, Any]]) -> List[str]:
         if not records:
-            return
+            return []
         url = (
             f"https://open.feishu.cn/open-apis/bitable/v1/apps/"
             f"{self.app_token}/tables/{self.table_id}/records/batch_create"
@@ -200,6 +200,8 @@ class FeishuBitableClient:
         result = response.json()
         if result.get("code") != 0:
             raise FeishuAPIError(f"批量创建记录失败: {result.get('msg')}")
+        created = result.get("data", {}).get("records", []) or result.get("data", {}).get("items", [])
+        return [item.get("record_id") for item in created if item.get("record_id")]
 
     def batch_update_records(self, records: List[Dict[str, Any]]) -> None:
         if not records:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -99,12 +100,16 @@ class BgmLibrarySkill:
 
         oss_res = self.ctx.oss.upload(path, f"auto_mixcut/bgm_library/{path.relative_to(bgm_dir).as_posix()}")
         oss_object_id = oss_res.data.get("object_id", "") if oss_res.success else ""
+        if oss_res.success:
+            _save_uploaded_bgm_object(self.ctx, oss_res.data, "bgm_library", path)
 
         row = {
             "bgm_id": bgm_id,
             "track_name": metadata.get("track_name", file_name.rsplit(".", 1)[0]),
             "artist_name": metadata.get("artist_name", ""),
             "source_platform": metadata.get("source_platform", "local"),
+            "status": "active",
+            "license_status": "verified" if metadata.get("license_note") else "pending",
             "file_name": file_name,
             "download_version": "Full Mix",
             "duration_ms": self._probe_duration(path),
@@ -164,30 +169,48 @@ class BgmLibrarySkill:
             },
         )
 
-    def get_recommendation(self, product_id: str = "", category: str = "", mood: str = "", template_id: str = "") -> Result:
+    def get_recommendation(
+        self,
+        product_id: str = "",
+        category: str = "",
+        mood: str = "",
+        template_id: str = "",
+        energy: str = "",
+        preferred_vocal_types: list[str] | None = None,
+    ) -> Result:
         tracks = self.ctx.repo.list_where("bgm_tracks", "1=1")
-        usable = [t for t in tracks if t.get("bgm_tag_status") in {"tagged", "fallback"}]
+        usable = [t for t in tracks if _is_track_enabled(t)]
         if not usable:
-            usable = tracks
+            usable = [t for t in tracks if _is_license_not_blocked(t)]
 
         scored = []
         for track in usable:
-            score = self._score_track(track, category, mood, template_id)
+            score = self._score_track(track, category, mood, template_id, energy, preferred_vocal_types or [])
+            score -= self._recent_usage_penalty(track, product_id=product_id, template_id=template_id)
             scored.append((score, track))
 
         scored.sort(key=lambda x: x[0], reverse=True)
 
         top = []
-        for score, track in scored[:12]:
+        seen_identities = set()
+        for score, track in scored:
+            identity = _track_identity(track)
+            if identity and identity in seen_identities:
+                continue
+            if identity:
+                seen_identities.add(identity)
             mix_suggestions = _audio_mix_suggestions(track)
             top.append({
                 "bgm_id": track.get("bgm_id"),
                 "track_name": track.get("track_name"),
                 "mood_tags": _parse_json_safe(track.get("mood_tags_json"), []),
                 "energy_level": track.get("energy_level", "medium"),
+                "vocal_type": track.get("vocal_type", "unknown"),
+                "status": track.get("status") or "active",
+                "license_status": track.get("license_status") or "pending",
                 "score": score,
                 "usage_count": int(track.get("usage_count") or 0),
-                "degrade_mode": "observe",
+                "degrade_mode": _degrade_mode(track),
                 "recommended_start_sec": mix_suggestions.get("recommended_start_sec", track.get("recommended_start_sec", 0)),
                 "default_volume": mix_suggestions.get("default_volume", track.get("default_volume", 0.2)),
                 "fade_in_ms": mix_suggestions.get("fade_in_ms", track.get("fade_in_ms", 500)),
@@ -195,6 +218,8 @@ class BgmLibrarySkill:
                 "oss_object_id": track.get("oss_object_id"),
                 "local_file_path": track.get("local_file_path"),
             })
+            if len(top) >= 12:
+                break
 
         return Result.ok({"recommendations": top})
 
@@ -239,8 +264,9 @@ class BgmLibrarySkill:
             "voiceover_friendly": True,
         }
 
-    def _score_track(self, track: dict, category: str, mood: str, template_id: str) -> float:
+    def _score_track(self, track: dict, category: str, mood: str, template_id: str, energy: str = "", preferred_vocal_types: list[str] | None = None) -> float:
         score = 1.0
+        preferred_vocal_types = preferred_vocal_types or []
         cat_tags = _parse_json_safe(track.get("category_tags_json"), [])
         if category and isinstance(cat_tags, list):
             if category in cat_tags:
@@ -266,13 +292,44 @@ class BgmLibrarySkill:
         if confidence == "low":
             score *= 0.5
 
+        tag_status = str(track.get("bgm_tag_status") or "").strip().lower()
+        if tag_status == "tagged":
+            score += 0.25
+        elif tag_status == "fallback":
+            score += 0.05
+        elif tag_status in {"untagged", ""}:
+            score -= 0.35
+        else:
+            score -= 0.15
+
         energy_level = str(track.get("energy_level") or "")
+        if energy:
+            score += _energy_match_score(energy_level, energy)
         if energy_level == "high":
             score += 0.25
         elif energy_level == "medium":
             score += 0.1
         elif energy_level == "low":
             score -= 0.15
+
+        vocal_type = str(track.get("vocal_type") or "unknown")
+        if preferred_vocal_types:
+            if vocal_type in preferred_vocal_types:
+                score += 0.35
+            elif vocal_type == "unknown":
+                score -= 0.05
+            else:
+                score -= 0.25
+
+        license_status = str(track.get("license_status") or "").strip().lower()
+        if license_status == "verified":
+            score += 0.16
+        elif license_status == "pending":
+            score += 0.04
+        elif not license_status:
+            score -= 0.06
+        if track.get("oss_object_id"):
+            score += 0.08
 
         analysis = _parse_json_safe(track.get("audio_analysis_json"), {})
         features = analysis.get("features") if isinstance(analysis, dict) else {}
@@ -307,6 +364,38 @@ class BgmLibrarySkill:
             score -= min(0.45, 0.12 + rejection_ratio * 0.35)
 
         return score
+
+    def _recent_usage_penalty(self, track: dict, product_id: str = "", template_id: str = "") -> float:
+        usage = max(int(track.get("usage_count") or 0), int(track.get("rejected_usage_count") or 0))
+        penalty = min(0.8, usage * 0.06)
+        is_ads = bool(template_id) and template_id.upper().startswith("AD_FAST")
+        if is_ads:
+            penalty += min(0.7, usage * 0.08)
+        if not product_id:
+            return penalty
+
+        bgm_id = str(track.get("bgm_id") or "")
+        identity = _track_identity(track)
+        limit = 30 if is_ads else 12
+        try:
+            recent_outputs = self.ctx.repo.list_where(
+                "outputs",
+                "product_id=? AND render_status='rendered' ORDER BY id DESC LIMIT {}".format(limit),
+                (product_id,),
+            )
+        except Exception:
+            return penalty
+        for output in recent_outputs:
+            plan = _parse_json_safe(output.get("bgm_plan_json"), {})
+            if not isinstance(plan, dict):
+                continue
+            same_id = bool(bgm_id and str(plan.get("bgm_id") or "") == bgm_id)
+            same_identity = bool(identity and _track_identity(plan) == identity)
+            if same_id or same_identity:
+                penalty += 2.0 if is_ads else 1.2
+                if template_id and str(output.get("template_id") or "") == template_id:
+                    penalty += 0.5
+        return penalty
 
     def _file_to_bgm_id(self, file_name: str, path: Path) -> str:
         import hashlib
@@ -350,12 +439,66 @@ def _parse_json_safe(value, default=None):
     return default
 
 
+def _save_uploaded_bgm_object(ctx: SkillContext, upload_data: dict, object_type: str, path: Path) -> None:
+    if not upload_data.get("object_id"):
+        return
+    row = dict(upload_data)
+    row.setdefault("object_type", object_type)
+    row.setdefault("mime_type", mimetypes.guess_type(path.name)[0] or "audio/mpeg")
+    try:
+        ctx.repo.upsert("oss_objects", "object_id", row)
+    except Exception:
+        pass
+
+
 def _audio_mix_suggestions(track: dict) -> dict:
     analysis = _parse_json_safe(track.get("audio_analysis_json"), {})
     if not isinstance(analysis, dict):
         return {}
     suggestions = analysis.get("mix_suggestions") or {}
     return suggestions if isinstance(suggestions, dict) else {}
+
+
+def _is_track_enabled(track: dict) -> bool:
+    status = str(track.get("status") or "active").strip().lower()
+    if status in {"paused", "rejected", "expired", "inactive", "disabled", "暂停", "已拒绝", "已过期", "不可用"}:
+        return False
+    return _is_license_not_blocked(track)
+
+
+def _is_license_not_blocked(track: dict) -> bool:
+    license_status = str(track.get("license_status") or "").strip().lower()
+    if license_status in {"unavailable", "restricted", "rejected", "expired", "不可用", "限制", "已拒绝", "已过期"}:
+        return False
+    return True
+
+
+def _degrade_mode(track: dict) -> str:
+    status = str(track.get("bgm_tag_status") or "").strip().lower()
+    if status in {"tagged", "fallback"}:
+        return "observe"
+    return "untagged_penalty"
+
+
+def _track_identity(track: dict) -> str:
+    name = str(track.get("track_name") or "").strip().lower()
+    if not name:
+        return ""
+    artist = str(track.get("artist_name") or "").strip().lower()
+    return f"{name}|{artist}"
+
+
+def _energy_match_score(actual: str, wanted: str) -> float:
+    actual = str(actual or "").strip().lower()
+    wanted = str(wanted or "").strip().lower()
+    if not wanted or not actual:
+        return 0.0
+    if actual == wanted:
+        return 0.35
+    adjacent = {("high", "medium"), ("medium", "high"), ("medium", "low"), ("low", "medium")}
+    if (actual, wanted) in adjacent:
+        return 0.08
+    return -0.28
 
 
 def _safe_float(value, default=0.0) -> float:

@@ -1298,7 +1298,7 @@ async function runFirstFramePipeline(context, config, originalImagePaths) {
     buildProductLockCard(context.prompt, originalImagePaths, productAnchor),
     productAnchor
   );
-  const category = detectCategory(context.prompt, lock);
+  const category = detectCategory(context.prompt, lock, context?.category);
 
   if (!lock.productType) {
     if (firstFrameConfig.enabled !== false && originalImagePaths && originalImagePaths.length > 0) {
@@ -1357,13 +1357,23 @@ async function runFirstFramePipeline(context, config, originalImagePaths) {
   for (let attempt = 0; !firstFrameImagePath && attempt <= maxFirstFrameRetries; attempt++) {
     console.log(`  🎨 生成首帧图 (尝试 ${attempt + 1}/${maxFirstFrameRetries + 1})...`);
 
-    const imageResult = await generateFirstFrameImageWithLLM(firstFramePrompt, originalImagePaths, {
+    // rebuild prompt on retry to include failure hint
+    let framePrompt = firstFramePrompt;
+    if (attempt > 0 && lastConsistencyResult && lastConsistencyResult.retryHint) {
+      console.log(`  🔄 重试首帧，上一版问题: ${lastConsistencyResult.reason || ''}`);
+      framePrompt = `${firstFramePrompt}\n\n首帧修正提示：\n上一版失败原因：${lastConsistencyResult.reason || '未知'}\n本次必须修正：${lastConsistencyResult.retryHint}`;
+    }
+
+    const imageResult = await generateFirstFrameImageWithLLM(framePrompt, originalImagePaths, {
       ...firstFrameConfig,
       outputPath: firstFrameOutputPath,
       ratio: context.ratio
     });
     if (!imageResult.success) {
       console.log(`  ❌ 首帧图生成失败: ${imageResult.error}`);
+      // clear stale image on failure
+      firstFrameImagePath = null;
+      try { fs.unlinkSync(firstFrameOutputPath); } catch (_) {}
       if (attempt < maxFirstFrameRetries) {
         await sleep(2000);
         continue;
@@ -1402,7 +1412,7 @@ async function runFirstFramePipeline(context, config, originalImagePaths) {
     if (originalImagePaths && originalImagePaths.length > 0 && firstFrameConfig.consistencyMode === 'strict') {
       console.log('  🔍 执行首帧一致性自检...');
       lastConsistencyResult = await checkFirstFrameConsistency(
-        originalImagePaths[0],
+        originalImagePaths,
         imageResult.imagePath,
         lock,
         hardConstraints
