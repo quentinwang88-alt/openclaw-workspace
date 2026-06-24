@@ -35,6 +35,8 @@ JIMENG_SKILL_ROOT = os.path.join(_WORKSPACE_ROOT, "skills", "jimeng-video-genera
 SEGMENT_PACKAGE_CONFIG = "segment-package.json"
 if SKILL_ROOT not in sys.path:
     sys.path.insert(0, SKILL_ROOT)
+
+from auto_mixcut.skills.ai_supplement_gateway_skill import is_stale_inflight_package, normalize_package  # noqa: E402
 if os.path.exists(_ENV_PATH):
     for _line in open(_ENV_PATH, encoding="utf-8"):
         _line = _line.strip()
@@ -92,7 +94,6 @@ STAGE_KEYS = [
     "render",
     "final_qc",
 ]
-PROMPT_PENDING_STATUSES = {"submitted", "generating", "已提单", "生成中"}
 PROMPT_IMPORTED_STATUSES = {"imported", "consumed", "fulfilled", "质检中", "质检通过", "returned", "已回流", "已生成"}
 PROMPT_FAILED_STATUSES = {"failed", "质检废弃", "失败"}
 RECOVERABLE_PROMPT_FAILURE_TOKENS = [
@@ -457,36 +458,42 @@ def load_prompt_package_summary(conn, product_id: str, prompt_ids: Optional[List
         placeholders = ",".join(["%s"] * len(prompt_ids))
         cur.execute(
             "SELECT segment_prompt_id, package_status, external_provider, external_job_id, "
-            "generated_asset_id, generated_segment_id, failure_reason "
+            "generated_asset_id, generated_segment_id, failure_reason, created_at, updated_at "
             f"FROM segment_prompt_packages WHERE product_id=%s AND segment_prompt_id IN ({placeholders})",
             (product_id, *prompt_ids),
         )
     else:
         cur.execute(
             "SELECT segment_prompt_id, package_status, external_provider, external_job_id, "
-            "generated_asset_id, generated_segment_id, failure_reason "
+            "generated_asset_id, generated_segment_id, failure_reason, created_at, updated_at "
             "FROM segment_prompt_packages WHERE product_id=%s",
             (product_id,),
         )
     rows = cur.fetchall()
     by_status: Dict[str, int] = Counter()
-    pending = imported = failed = recoverable_failed = submitted = generated = consumed = 0
+    by_normalized: Dict[str, int] = Counter()
+    pending = imported = failed = recoverable_failed = submitted = generated = consumed = stale_inflight = 0
     for row in rows:
         status = str(row.get("package_status") or "").strip()
         failure_reason = str(row.get("failure_reason") or "").strip()
+        normalized = normalize_package(row)
         by_status[status or "unknown"] += 1
-        if status in PROMPT_PENDING_STATUSES:
+        by_normalized[normalized or "unknown"] += 1
+        if normalized in {"ready_to_submit", "inflight"}:
             pending += 1
-        if status == "submitted":
+        if normalized == "inflight" and status == "submitted":
             submitted += 1
-        if status in PROMPT_FAILED_STATUSES:
-            if _recoverable_prompt_failure(failure_reason):
-                recoverable_failed += 1
-            else:
-                failed += 1
-        if status in PROMPT_IMPORTED_STATUSES:
+        if normalized == "recoverable_failed":
+            recoverable_failed += 1
+            if is_stale_inflight_package(row):
+                stale_inflight += 1
+        elif status in PROMPT_FAILED_STATUSES and _recoverable_prompt_failure(failure_reason):
+            recoverable_failed += 1
+        elif normalized == "failed" or status in PROMPT_FAILED_STATUSES:
+            failed += 1
+        if normalized == "imported" or status in PROMPT_IMPORTED_STATUSES:
             imported += 1
-        if status == "consumed":
+        if normalized == "consumed" or status == "consumed":
             consumed += 1
         if row.get("generated_asset_id") or row.get("generated_segment_id"):
             generated += 1
@@ -499,7 +506,9 @@ def load_prompt_package_summary(conn, product_id: str, prompt_ids: Optional[List
         "consumed": consumed,
         "failed": failed,
         "recoverable_failed": recoverable_failed,
+        "stale_inflight": stale_inflight,
         "by_status": dict(by_status),
+        "by_normalized": dict(by_normalized),
     }
 
 
