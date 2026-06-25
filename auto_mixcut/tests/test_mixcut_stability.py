@@ -18,7 +18,7 @@ from auto_mixcut.skills.mixcut_state_machine_skill import decide_mixcut_state, g
 from auto_mixcut.skills.pipeline_run_skill import PipelineRunSkill
 from auto_mixcut.skills.rds_repository_skill import RDSRepositorySkill
 from auto_mixcut.skills.render_plan_skill import _ads_voc_quota_state, _select_segments, _usable_existing_outputs
-from scripts.run_ads_mixcut_unattended import plan_ads_mixcut
+from scripts.run_ads_mixcut_unattended import is_truthy_flag, plan_ads_mixcut
 from auto_mixcut.skills.segment_prompt_factory_skill import _ensure_prompt_package_table
 from auto_mixcut.skills.usage_counter_skill import count_good_rendered_outputs
 from scripts.run_mixcut_guard import _compute_missing_effective_roles, _status_after_top_up
@@ -790,6 +790,47 @@ class MixcutStabilityTest(unittest.TestCase):
         self.assertEqual(result["updated_count"], 1)
         self.assertEqual(row["product_mismatch_suspect"], 1)
         self.assertEqual(row["effective_roles_json"], [])
+
+    def test_ads_plan_reports_voc_mismatch_suspects_as_unusable(self):
+        plan = plan_ads_mixcut(
+            product_id="PROD_VOC_MISMATCH",
+            task={"product_id": "PROD_VOC_MISMATCH", "task_type": "ADS_FAST", "task_status": "running"},
+            seg={
+                "raw_total": 5,
+                "total": 4,
+                "by_core_role": {"hero": 3, "result": 3, "detail": 2, "scene": 1},
+                "hook_segments": 3,
+                "voc_segments": {"total": 4, "usable": 0, "unusable": 4, "mismatch_suspect": 4},
+            },
+            out={
+                "good_outputs": 10,
+                "total_outputs": 10,
+                "strict_good_outputs_with_voc_segments": 0,
+            },
+            voc={
+                "package_id": "VOC_PACK",
+                "readiness_status": "confirmed",
+                "confirmed": True,
+                "candidates": [{"hook": "A"}],
+            },
+            voc_gap=None,
+            target=12,
+            use_voc_hooks=True,
+            max_hook=6,
+            max_support=12,
+        )
+
+        usage = plan["flow_summary"]["voc_output_usage"]
+        self.assertEqual(usage["voc_usable_segment_count"], 0)
+        self.assertEqual(usage["voc_unusable_segment_count"], 4)
+        self.assertEqual(usage["voc_mismatch_suspect_segment_count"], 4)
+        self.assertEqual(usage["voc_quota_status"], "needs_voc_segment_generation")
+
+    def test_truthy_flag_accepts_mysql_and_text_values(self):
+        self.assertTrue(is_truthy_flag(1))
+        self.assertTrue(is_truthy_flag("是"))
+        self.assertFalse(is_truthy_flag(0))
+        self.assertFalse(is_truthy_flag(None))
 
     def test_anchor_sync_prefers_confirmed_anchor_record_over_image_only_row(self):
         image_only = SimpleNamespace(

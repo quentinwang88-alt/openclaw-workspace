@@ -113,6 +113,12 @@ RECOVERABLE_PROMPT_FAILURE_TOKENS = [
 ]
 
 
+def is_truthy_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "是"}
+
+
 def connect_db(url: Optional[str] = None):
     if pymysql is None:
         raise RuntimeError("pymysql not installed")
@@ -247,7 +253,8 @@ def load_segment_summary(conn, product_id: str) -> Dict[str, Any]:
     cur = conn.cursor()
     cur.execute(
         "SELECT s.segment_id, s.effective_roles_json, s.slot_role, s.is_image_generated, s.prompt_package_id, "
-        "s.segment_type, s.segment_status, s.source_type, p.template_id AS prompt_template_id, "
+        "s.segment_type, s.segment_status, s.source_type, s.product_mismatch_suspect, s.product_mismatch_reason, "
+        "p.template_id AS prompt_template_id, "
         "t.primary_shot_role, t.hook_visual_type, t.hook_strength "
         "FROM segments s "
         "LEFT JOIN segment_prompt_packages p ON p.segment_prompt_id=s.prompt_package_id "
@@ -265,6 +272,8 @@ def load_segment_summary(conn, product_id: str) -> Dict[str, Any]:
     voc_total = 0
     voc_usable = 0
     voc_unusable = 0
+    voc_mismatch_suspect = 0
+    mismatch_suspect = 0
     segments: List[Dict] = []
     for r in rows:
         status = str(r.get("segment_status") or "").strip()
@@ -280,6 +289,12 @@ def load_segment_summary(conn, product_id: str) -> Dict[str, Any]:
         if source_type == "ai_generated" and status != "qc_passed":
             if is_voc_segment:
                 voc_unusable += 1
+            continue
+        if is_truthy_flag(r.get("product_mismatch_suspect")):
+            mismatch_suspect += 1
+            if is_voc_segment:
+                voc_unusable += 1
+                voc_mismatch_suspect += 1
             continue
         roles = jload(r.get("effective_roles_json")) or []
         if not isinstance(roles, list):
@@ -329,7 +344,9 @@ def load_segment_summary(conn, product_id: str) -> Dict[str, Any]:
             "total": voc_total,
             "usable": voc_usable,
             "unusable": voc_unusable,
+            "mismatch_suspect": voc_mismatch_suspect,
         },
+        "product_mismatch_suspect_segments": mismatch_suspect,
         "segments": segments,
     }
 
@@ -496,14 +513,14 @@ def load_prompt_package_summary(conn, product_id: str, prompt_ids: Optional[List
     if prompt_ids:
         placeholders = ",".join(["%s"] * len(prompt_ids))
         cur.execute(
-            "SELECT segment_prompt_id, package_status, external_provider, external_job_id, "
+            "SELECT segment_prompt_id, package_status, feishu_record_id, external_provider, external_job_id, "
             "generated_asset_id, generated_segment_id, failure_reason, created_at, updated_at "
             f"FROM segment_prompt_packages WHERE product_id=%s AND segment_prompt_id IN ({placeholders})",
             (product_id, *prompt_ids),
         )
     else:
         cur.execute(
-            "SELECT segment_prompt_id, package_status, external_provider, external_job_id, "
+            "SELECT segment_prompt_id, package_status, feishu_record_id, external_provider, external_job_id, "
             "generated_asset_id, generated_segment_id, failure_reason, created_at, updated_at "
             "FROM segment_prompt_packages WHERE product_id=%s",
             (product_id,),
@@ -802,6 +819,7 @@ def plan_ads_mixcut(
                 "voc_total_segment_count": int(voc_segment_counts.get("total") or 0),
                 "voc_usable_segment_count": voc_usable_segments,
                 "voc_unusable_segment_count": int(voc_segment_counts.get("unusable") or 0),
+                "voc_mismatch_suspect_segment_count": int(voc_segment_counts.get("mismatch_suspect") or 0),
                 "outputs_with_voc_segments": out.get("outputs_with_voc_segments", 0),
                 "voc_rendered_output_count": out.get("voc_rendered_output_count", 0),
                 "voc_draft_only_output_count": out.get("voc_draft_only_output_count", 0),
