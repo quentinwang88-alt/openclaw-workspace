@@ -352,10 +352,27 @@ class MixcutStabilityTest(unittest.TestCase):
                     "product_binding_type": "exact_sku",
                     "segment_status": "qc_passed",
                     "duration_ms": 4000,
-                    "effective_roles_json": ["hero"],
+                    "effective_roles_json": [] if segment_id == "SEG_VOC_FORCE" else ["hero"],
                     "prompt_package_id": prompt_id,
                 },
             )
+        self.ctx.repo.insert(
+            "segment_tags",
+            {
+                "segment_id": "SEG_VOC_FORCE",
+                "tag_source": "test",
+                "primary_shot_role": "hero",
+                "secondary_roles_json": ["detail", "result"],
+                "product_visibility": "high",
+                "hook_strength": "medium",
+                "hook_visual_type": "action",
+                "mixcut_usability": "yes",
+                "risk_level": "low",
+                "confidence": "high",
+                "needs_human_review": 0,
+                "text_overlay_risk": "none",
+            },
+        )
 
         state = {"segments": set(), "segment_counts": {}, "core_segment_counts": {}, "assets": {}, "first_assets": set(), "first_asset_counts": {}, "first_segment_counts": {}, "template_counts": {}}
         result = _select_segments(

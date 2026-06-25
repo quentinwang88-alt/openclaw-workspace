@@ -1370,8 +1370,40 @@ def _enrich_segments_for_selection(ctx: SkillContext, segments: list[dict]) -> l
                 item["has_watermark"] = asset.get("has_watermark")
             if asset.get("watermark_reason"):
                 item["watermark_reason"] = asset.get("watermark_reason")
+        item["effective_roles_json"] = _effective_roles_for_selection(item)
         enriched.append(item)
     return enriched
+
+
+def _effective_roles_for_selection(segment: dict) -> list[str]:
+    roles = _normalize_role_list(segment.get("effective_roles_json"))
+    if roles:
+        return roles
+    derived: list[str] = []
+    primary = str(segment.get("primary_shot_role") or segment.get("slot_role") or "").strip()
+    if primary:
+        derived.append(primary)
+    derived.extend(_normalize_role_list(segment.get("secondary_roles_json")))
+    slot_role = str(segment.get("slot_role") or "").strip()
+    if slot_role:
+        derived.append(slot_role)
+    return sorted({role for role in derived if role})
+
+
+def _normalize_role_list(value: Any) -> list[str]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        try:
+            loaded = json.loads(value)
+        except Exception:
+            loaded = [value]
+        value = loaded
+    if isinstance(value, (tuple, set)):
+        value = list(value)
+    if not isinstance(value, list):
+        return []
+    return [str(role).strip() for role in value if str(role or "").strip()]
 
 
 def _latest_tags_for_segments(ctx: SkillContext, segment_ids: list[str]) -> dict[str, dict]:
