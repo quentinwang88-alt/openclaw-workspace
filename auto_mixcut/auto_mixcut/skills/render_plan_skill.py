@@ -19,7 +19,11 @@ from .hard_subtitle_policy import (
     is_repairable_bottom_caption,
     is_unusable_hard_subtitle,
 )
-from .usage_counter_skill import is_good_rendered_output
+from .usage_counter_skill import (
+    FAILED_OUTPUT_SEGMENT_STATUSES,
+    ads_fast_strict_outputs_enabled,
+    is_good_rendered_output_strict,
+)
 
 
 DEFAULT_TEMPLATE_SPECS = [
@@ -404,8 +408,10 @@ def estimate_render_plan_capacity(ctx: SkillContext, product_id: str, count: int
     templates = _load_templates(ctx)
     product = ctx.repo.get("products", "product_id", product_id) or {}
     segments = ctx.repo.list_where("segments", "product_id=?", (product_id,))
+    segments = _render_eligible_segments(_enrich_segments_for_selection(ctx, segments))
     first_slot_candidates = sum(1 for segment in segments if "hero" in (segment.get("effective_roles_json") or []))
     batch_state = {"segments": set(), "segment_counts": {}, "core_segment_counts": {}, "assets": {}, "first_assets": set(), "first_asset_counts": {}, "first_segment_counts": {}, "template_counts": {}}
+    batch_state["_selection_segments"] = segments
     planned = 0
     skipped = 0
     for variant in range(1, count + 1):
@@ -453,7 +459,11 @@ def estimate_render_plan_capacity(ctx: SkillContext, product_id: str, count: int
 
 def _usable_existing_outputs(ctx: SkillContext, product_id: str) -> list[dict[str, Any]]:
     outputs = ctx.repo.list_where("outputs", "product_id=? ORDER BY created_at, id", (product_id,))
-    return [output for output in outputs if is_good_rendered_output(output)]
+    return [
+        output
+        for output in outputs
+        if is_good_rendered_output_strict(ctx, output, strict_segments=ads_fast_strict_outputs_enabled())
+    ]
 
 
 def _active_planning_batch(ctx: SkillContext, product_id: str) -> dict[str, Any] | None:
@@ -575,6 +585,7 @@ def _select_segments(ctx: SkillContext, product_id: str, slots, batch_state: dic
     if segments is None:
         segments = ctx.repo.list_where("segments", "product_id=?", (product_id,))
         segments = _enrich_segments_for_selection(ctx, segments)
+        segments = _render_eligible_segments(segments)
         state["_selection_segments"] = segments
     for slot in slots:
         role = slot["role"]
@@ -755,6 +766,15 @@ def _hero_fallback_pool(segments: list[dict]) -> list[dict]:
 
 def _filter_product_mismatch_suspects(pool: list[dict]) -> list[dict]:
     return [s for s in pool if not _is_product_mismatch_suspect(s)]
+
+
+def _render_eligible_segments(segments: list[dict]) -> list[dict]:
+    return [segment for segment in segments if _is_render_eligible_segment(segment)]
+
+
+def _is_render_eligible_segment(segment: dict) -> bool:
+    status = str(segment.get("segment_status") or "").strip()
+    return status not in FAILED_OUTPUT_SEGMENT_STATUSES
 
 
 def _is_product_mismatch_suspect(segment: dict) -> bool:
@@ -1427,7 +1447,7 @@ def precheck_hook_coverage(ctx: SkillContext, product_id: str, required_count: i
     segments = ctx.repo.list_where("segments", "product_id=?", (product_id,))
     if not segments:
         return {"ok": False, "gap": {"product_id": product_id, "missing_role": "hero", "expected_hook_visual_type": "any", "expected_segment_type": "home_lifestyle", "shortfall": required_count}}
-    enriched = _enrich_segments_for_selection(ctx, segments)
+    enriched = _render_eligible_segments(_enrich_segments_for_selection(ctx, segments))
     candidates = []
     for seg in enriched:
         roles = seg.get("effective_roles_json") or []

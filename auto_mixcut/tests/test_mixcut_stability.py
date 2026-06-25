@@ -9,6 +9,7 @@ import unittest
 
 from auto_mixcut.core.bootstrap import build_context
 from auto_mixcut.core.result import Result
+from auto_mixcut.cli import _top_up_snapshot
 from auto_mixcut.skills.ai_supplement_gateway_skill import AISupplementGatewaySkill
 from auto_mixcut.skills.final_video_qc_async_skill import FinalVideoQCAsyncSkill
 from auto_mixcut.skills.final_video_qc_skill import _mark_product_mismatch_segments
@@ -16,8 +17,10 @@ from auto_mixcut.skills.feishu_review_skill import _select_anchor_canonical_reco
 from auto_mixcut.skills.mixcut_state_machine_skill import decide_mixcut_state, guard_start_status
 from auto_mixcut.skills.pipeline_run_skill import PipelineRunSkill
 from auto_mixcut.skills.rds_repository_skill import RDSRepositorySkill
+from auto_mixcut.skills.render_plan_skill import _select_segments, _usable_existing_outputs
 from auto_mixcut.skills.segment_prompt_factory_skill import _ensure_prompt_package_table
 from auto_mixcut.skills.usage_counter_skill import count_good_rendered_outputs
+from scripts.run_mixcut_guard import _compute_missing_effective_roles, _status_after_top_up
 from scripts.sync_prompt_package_workbench_from_tasks import _voc_slot_plans
 
 
@@ -223,6 +226,231 @@ class MixcutStabilityTest(unittest.TestCase):
 
         self.assertEqual(count_good_rendered_outputs(self.ctx, product_id, strict_segments=False), 1)
         self.assertEqual(count_good_rendered_outputs(self.ctx, product_id, strict_segments=True), 0)
+
+    def test_render_plan_selection_excludes_failed_segments(self):
+        product_id = "PROD_RENDER_ELIGIBLE"
+        for segment_id, status in [
+            ("SEG_FAILED_RENDER_POOL", "ai_stage_failed"),
+            ("SEG_GOOD_RENDER_POOL", "qc_passed"),
+        ]:
+            self.ctx.repo.upsert(
+                "segments",
+                "segment_id",
+                {
+                    "segment_id": segment_id,
+                    "asset_id": f"ASSET_{segment_id}",
+                    "product_id": product_id,
+                    "source_type": "self_shot",
+                    "source_trust_level": "high",
+                    "product_match_status": "trusted_by_source",
+                    "product_binding_type": "exact_sku",
+                    "segment_status": status,
+                    "effective_roles_json": ["hero"],
+                    "duration_ms": 3000,
+                },
+            )
+
+        result = _select_segments(
+            self.ctx,
+            product_id,
+            [{"role": "hero", "duration_ms": 3000}],
+            batch_state={"segments": set(), "segment_counts": {}, "core_segment_counts": {}, "assets": {}, "first_assets": set(), "first_asset_counts": {}, "first_segment_counts": {}, "template_counts": {}},
+        )
+
+        self.assertTrue(result.success, result.to_dict())
+        self.assertEqual(result.data[0]["segment_id"], "SEG_GOOD_RENDER_POOL")
+
+    def test_ads_fast_existing_outputs_use_strict_segment_status(self):
+        product_id = "PROD_STRICT_EXISTING"
+        previous = os.environ.get("AUTO_MIXCUT_ADS_FAST_MODE")
+        os.environ["AUTO_MIXCUT_ADS_FAST_MODE"] = "1"
+        try:
+            for segment_id, status in [
+                ("SEG_CLEAN_EXISTING", "qc_passed"),
+                ("SEG_FAILED_EXISTING", "ai_stage_failed"),
+            ]:
+                self.ctx.repo.upsert(
+                    "segments",
+                    "segment_id",
+                    {
+                        "segment_id": segment_id,
+                        "asset_id": f"ASSET_{segment_id}",
+                        "product_id": product_id,
+                        "segment_status": status,
+                    },
+                )
+            for output_id, segment_id in [
+                ("OUT_CLEAN_EXISTING", "SEG_CLEAN_EXISTING"),
+                ("OUT_FAILED_EXISTING", "SEG_FAILED_EXISTING"),
+            ]:
+                self.ctx.repo.upsert(
+                    "outputs",
+                    "output_id",
+                    {
+                        "output_id": output_id,
+                        "batch_id": "BATCH_STRICT_EXISTING",
+                        "product_id": product_id,
+                        "variant_no": 1,
+                        "template_id": "TEMPLATE_TEST",
+                        "render_status": "rendered",
+                        "machine_quality_status": "publish_ready",
+                    },
+                )
+                self.ctx.repo.insert(
+                    "output_segments",
+                    {
+                        "output_id": output_id,
+                        "segment_id": segment_id,
+                        "asset_id": f"ASSET_{segment_id}",
+                        "slot_index": 1,
+                        "role_used": "hero",
+                    },
+                )
+
+            output_ids = [output["output_id"] for output in _usable_existing_outputs(self.ctx, product_id)]
+
+            self.assertEqual(output_ids, ["OUT_CLEAN_EXISTING"])
+        finally:
+            if previous is None:
+                os.environ.pop("AUTO_MIXCUT_ADS_FAST_MODE", None)
+            else:
+                os.environ["AUTO_MIXCUT_ADS_FAST_MODE"] = previous
+
+    def test_ads_fast_top_up_snapshot_uses_strict_segment_status(self):
+        product_id = "PROD_STRICT_TOP_UP"
+        previous = os.environ.get("AUTO_MIXCUT_ADS_FAST_MODE")
+        os.environ["AUTO_MIXCUT_ADS_FAST_MODE"] = "1"
+        try:
+            RDSRepositorySkill(self.ctx).create_product_task(product_id, "Hair Clip", "TH", "hair_accessories", 2)
+            for segment_id, status in [
+                ("SEG_CLEAN_TOP_UP", "qc_passed"),
+                ("SEG_FAILED_TOP_UP", "ai_stage_failed"),
+            ]:
+                self.ctx.repo.upsert(
+                    "segments",
+                    "segment_id",
+                    {
+                        "segment_id": segment_id,
+                        "asset_id": f"ASSET_{segment_id}",
+                        "product_id": product_id,
+                        "segment_status": status,
+                    },
+                )
+            for output_id, segment_id in [
+                ("OUT_CLEAN_TOP_UP", "SEG_CLEAN_TOP_UP"),
+                ("OUT_FAILED_TOP_UP", "SEG_FAILED_TOP_UP"),
+            ]:
+                self.ctx.repo.upsert(
+                    "outputs",
+                    "output_id",
+                    {
+                        "output_id": output_id,
+                        "batch_id": "BATCH_STRICT_TOP_UP",
+                        "product_id": product_id,
+                        "variant_no": 1,
+                        "template_id": "TEMPLATE_TEST",
+                        "render_status": "rendered",
+                        "machine_quality_status": "publish_ready",
+                    },
+                )
+                self.ctx.repo.insert(
+                    "output_segments",
+                    {
+                        "output_id": output_id,
+                        "segment_id": segment_id,
+                        "asset_id": f"ASSET_{segment_id}",
+                        "slot_index": 1,
+                        "role_used": "hero",
+                    },
+                )
+
+            snapshot = _top_up_snapshot(self.ctx, product_id, count=2, refresh_capacity=False)
+
+            self.assertEqual(snapshot["effective_outputs"], 1)
+            self.assertEqual(snapshot["target_remaining_variant_count"], 1)
+        finally:
+            if previous is None:
+                os.environ.pop("AUTO_MIXCUT_ADS_FAST_MODE", None)
+            else:
+                os.environ["AUTO_MIXCUT_ADS_FAST_MODE"] = previous
+
+    def test_guard_effective_role_limit_zero_skips_batch(self):
+        product_id = "PROD_ROLE_LIMIT_ZERO"
+        previous = os.environ.get("AUTO_MIXCUT_GUARD_EFFECTIVE_ROLE_LIMIT")
+        os.environ["AUTO_MIXCUT_GUARD_EFFECTIVE_ROLE_LIMIT"] = "0"
+        try:
+            self.ctx.repo.upsert(
+                "segments",
+                "segment_id",
+                {
+                    "segment_id": "SEG_ROLE_LIMIT_ZERO",
+                    "asset_id": "ASSET_ROLE_LIMIT_ZERO",
+                    "product_id": product_id,
+                    "source_type": "competitor",
+                    "segment_status": "created",
+                },
+            )
+            self.ctx.repo.insert(
+                "segment_tags",
+                {
+                    "segment_id": "SEG_ROLE_LIMIT_ZERO",
+                    "tag_source": "test",
+                    "primary_shot_role": "hero",
+                    "product_visibility": "high",
+                    "hook_strength": "strong",
+                    "risk_level": "low",
+                },
+            )
+
+            res = _compute_missing_effective_roles(self.ctx, product_id, ["competitor"])
+
+            self.assertTrue(res.success, res.to_dict())
+            self.assertEqual(res.data["attempted_count"], 0)
+            self.assertEqual(res.data["results"][0]["reason"], "outside_effective_role_batch")
+            segment = self.ctx.repo.get("segments", "segment_id", "SEG_ROLE_LIMIT_ZERO")
+            self.assertFalse(segment.get("effective_roles_updated_at"))
+        finally:
+            if previous is None:
+                os.environ.pop("AUTO_MIXCUT_GUARD_EFFECTIVE_ROLE_LIMIT", None)
+            else:
+                os.environ["AUTO_MIXCUT_GUARD_EFFECTIVE_ROLE_LIMIT"] = previous
+
+    def test_guard_status_uses_final_remaining_over_stop_reason(self):
+        product_id = "PROD_STOP_REASON_STRICT"
+        previous = os.environ.get("AUTO_MIXCUT_ADS_FAST_MODE")
+        os.environ["AUTO_MIXCUT_ADS_FAST_MODE"] = "1"
+        try:
+            RDSRepositorySkill(self.ctx).create_product_task(product_id, "Hair Clip", "TH", "hair_accessories", 2)
+            self.ctx.repo.upsert(
+                "outputs",
+                "output_id",
+                {
+                    "output_id": "OUT_STOP_REASON_ONE",
+                    "batch_id": "BATCH_STOP_REASON",
+                    "product_id": product_id,
+                    "variant_no": 1,
+                    "template_id": "TEMPLATE_TEST",
+                    "render_status": "rendered",
+                    "machine_quality_status": "publish_ready",
+                },
+            )
+            top_up = Result.ok(
+                {
+                    "stop_reason": "target_filled",
+                    "batch_ids": ["BATCH_STOP_REASON"],
+                    "final": {"target_remaining_variant_count": 1},
+                }
+            )
+
+            status = _status_after_top_up(self.ctx, product_id, 2, top_up)
+
+            self.assertEqual(status["pipeline_status"], "READY_TO_CONTINUE")
+            self.assertEqual(status["next_action"], "RUN_GUARD_AGAIN")
+        finally:
+            if previous is None:
+                os.environ.pop("AUTO_MIXCUT_ADS_FAST_MODE", None)
+            else:
+                os.environ["AUTO_MIXCUT_ADS_FAST_MODE"] = previous
 
     def test_voc_action_proof_slot_plans_avoid_static_display(self):
         plans = _voc_slot_plans(

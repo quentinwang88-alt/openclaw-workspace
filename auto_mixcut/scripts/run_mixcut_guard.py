@@ -856,7 +856,7 @@ def _status_after_top_up(ctx, product_id: str, target: int, top_up: Result) -> d
     stop = str(data.get("stop_reason") or "")
     target_remaining = int((data.get("final") or {}).get("target_remaining_variant_count") or detail.get("target_remaining_variant_count") or 0)
     batch_ids = data.get("batch_ids") or []
-    if target_remaining <= 0 or stop in {"target_already_filled", "target_filled"}:
+    if target_remaining <= 0:
         return {**detail, "pipeline_status": "DONE", "next_action": "NONE", "last_error": "", "last_batch_id": batch_ids[-1] if batch_ids else ""}
     if batch_ids:
         return {**detail, "pipeline_status": "READY_TO_CONTINUE", "next_action": "RUN_GUARD_AGAIN", "last_error": "", "last_batch_id": batch_ids[-1]}
@@ -1305,7 +1305,7 @@ def _compute_missing_effective_roles(ctx, product_id: str, source_types: list[st
         if not _has_tag(ctx, segment_id, stale_index):
             results.append({"segment_id": segment_id, "skipped": True, "reason": "tag_missing"})
             continue
-        if limit > 0 and attempted >= limit:
+        if attempted >= limit:
             results.append({"segment_id": segment_id, "skipped": True, "reason": "outside_effective_role_batch"})
             continue
         attempted += 1

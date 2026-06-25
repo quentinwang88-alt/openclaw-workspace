@@ -35,7 +35,7 @@ from auto_mixcut.skills.render_plan_skill import RenderPlanSkill
 from auto_mixcut.skills.render_skill import RenderSkill
 from auto_mixcut.skills.segment_fingerprint_skill import SegmentFingerprintSkill
 from auto_mixcut.skills.segment_skill import SegmentSkill
-from auto_mixcut.skills.usage_counter_skill import is_good_rendered_output
+from auto_mixcut.skills.usage_counter_skill import ads_fast_strict_outputs_enabled, is_good_rendered_output_strict
 from auto_mixcut.skills.watermark_detect_skill import WatermarkDetectSkill
 from auto_mixcut.skills.watermark_process_skill import WatermarkProcessSkill
 from auto_mixcut.skills.bgm_audio_analysis_skill import BgmAudioAnalysisSkill
@@ -390,6 +390,8 @@ def _top_up(ctx, product_id, count, max_rounds=2):
     final = _top_up_snapshot(ctx, product_id, count, refresh_capacity=False)
     if final.get("error"):
         return Result.fail("TOP_UP_SNAPSHOT_FAILED", "failed to read final top-up snapshot", {"product_id": product_id, "snapshot": final, "rounds": rounds})
+    if int(final.get("target_remaining_variant_count") or 0) > 0 and stop_reason in {"target_already_filled", "target_filled"}:
+        stop_reason = "target_not_filled_after_qc"
     return Result.ok({
         "product_id": product_id,
         "batch_id": batch_ids[-1] if batch_ids else "",
@@ -507,7 +509,7 @@ def _top_up_round_summary(ctx, round_no, batch_id, before, readiness, planned, r
             "output_id": row.get("output_id"),
             "machine_quality_status": row.get("machine_quality_status"),
             "human_quality_status": row.get("human_quality_status"),
-            "is_effective": is_good_rendered_output(row),
+            "is_effective": _top_up_output_is_effective(ctx, row),
         }
         for row in outputs
     ]
@@ -521,7 +523,7 @@ def _top_up_round_summary(ctx, round_no, batch_id, before, readiness, planned, r
         "planned_count": len(plan_data.get("render_plan_ids") or []),
         "skipped_plan_count": len(plan_data.get("skipped_render_plan_ids") or []),
         "rendered_count": len(outputs),
-        "effective_count": sum(1 for row in outputs if is_good_rendered_output(row)),
+        "effective_count": sum(1 for row in outputs if _top_up_output_is_effective(ctx, row)),
         "publish_ready_count": sum(1 for row in outputs if row.get("machine_quality_status") == "publish_ready"),
         "needs_review_count": sum(1 for row in outputs if row.get("machine_quality_status") == "needs_review"),
         "draft_only_count": sum(1 for row in outputs if row.get("machine_quality_status") == "draft_only"),
@@ -561,7 +563,7 @@ def _top_up_snapshot(ctx, product_id, count=None, refresh_capacity=True):
     requested = int((task or {}).get("requested_variant_count") or allowed or 0)
     target = int(count or requested or allowed or 0)
     outputs = ctx.repo.list_where("outputs", "product_id=?", (product_id,))
-    effective = sum(1 for row in outputs if is_good_rendered_output(row))
+    effective = sum(1 for row in outputs if _top_up_output_is_effective(ctx, row))
     target_remaining = max(0, target - effective)
     if refresh_capacity:
         capacity = CapacityCounterSkill(ctx).refresh_product(product_id)
@@ -595,6 +597,14 @@ def _top_up_snapshot(ctx, product_id, count=None, refresh_capacity=True):
         "current_bottleneck": cap_data.get("current_bottleneck") or "",
         "capacity_note": cap_data.get("capacity_note") or "",
     }
+
+
+def _top_up_output_is_effective(ctx, output: dict) -> bool:
+    return is_good_rendered_output_strict(
+        ctx,
+        output,
+        strict_segments=ads_fast_strict_outputs_enabled(),
+    )
 
 
 def _latest_product_task(ctx, product_id):
