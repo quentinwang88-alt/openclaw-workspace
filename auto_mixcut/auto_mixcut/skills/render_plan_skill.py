@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import json
+import math
 import os
 from typing import Any
 
@@ -50,6 +51,9 @@ FILL_MODE_TEMPLATE_REUSE_PER_BATCH = 3
 FINAL_FILL_FIRST_SEGMENT_REUSE_PER_BATCH = 3
 FINAL_FILL_FIRST_ASSET_REUSE_PER_BATCH = 5
 FINAL_FILL_TEMPLATE_REUSE_PER_BATCH = 4
+VOC_ADS_HOOK_PACKAGE_TEMPLATE_ID = "VOC_ADS_HOOK_PACKAGE"
+DEFAULT_ADS_VOC_QUOTA_RATIO = 0.2
+DEFAULT_ADS_VOC_SEGMENT_OUTPUT_CAP = 2
 
 
 @dataclass(frozen=True)
@@ -203,6 +207,7 @@ class RenderPlanSkill:
         plans = []
         skipped = []
         batch_state = {"segments": set(), "segment_counts": {}, "core_segment_counts": {}, "assets": {}, "first_assets": set(), "first_asset_counts": {}, "first_segment_counts": {}, "template_counts": {}}
+        batch_state["_voc_quota"] = _ads_voc_quota_state(self.ctx, product_id, target_total, existing_outputs, batch_state)
         variant_start = existing_count + 1 if fill_gap_only else 1
         for offset in range(total):
             variant = variant_start + offset
@@ -211,6 +216,8 @@ class RenderPlanSkill:
             template: TemplateSpec | None = None
             selected: Result | None = None
             last_skip: dict[str, Any] = {}
+            voc_required_for_plan = False
+            voc_fallback_used = False
             while True:
                 choice = _choose_template(self.ctx, product, templates, batch_state, variant, excluded_templates)
                 if not choice.get("template"):
@@ -223,8 +230,23 @@ class RenderPlanSkill:
                 # 改动3：从模板 selection_policy 组装 constraints（种草模板返回空 dict，零侵入）。
                 # 改动1：投流模板的 hook_weight_scale 经此注入 _segment_score。
                 template_constraints = _build_template_constraints(template)
+                force_voc = _should_force_voc_proof(batch_state)
+                if force_voc:
+                    template_constraints = {**template_constraints, "require_voc_prompt_package": True}
                 selected = _select_segments(self.ctx, product_id, template.slots, batch_state=batch_state, variant_no=variant, template=template, constraints=template_constraints)
+                if force_voc and not selected.success:
+                    _record_voc_quota_fallback(batch_state, template.template_id, selected.error.detail if selected.error else {})
+                    fallback_constraints = _build_template_constraints(template)
+                    fallback_selected = _select_segments(self.ctx, product_id, template.slots, batch_state=batch_state, variant_no=variant, template=template, constraints=fallback_constraints)
+                    if fallback_selected.success:
+                        selected = fallback_selected
+                        voc_required_for_plan = True
+                        voc_fallback_used = True
+                        choice.setdefault("debug", {})["voc_quota_fallback_used"] = True
+                        break
+                    selected = fallback_selected
                 if selected.success:
+                    voc_required_for_plan = force_voc
                     break
                 if selected.error and selected.error.code == "SKIPPED_LOW_QUALITY":
                     last_skip = {"template": template, "choice": choice, "detail": selected.error.detail}
@@ -273,6 +295,7 @@ class RenderPlanSkill:
                     "source_type": item.get("source_type"),
                     "source_identity": item.get("source_identity"),
                     "prompt_package_id": item.get("prompt_package_id"),
+                    "is_voc_ads_hook_package": bool(item.get("is_voc_ads_hook_package")),
                     "asset_scene_tag": item.get("asset_scene_tag"),
                     "asset_slot_role": item.get("asset_slot_role"),
                     "asset_ai_gen_grade": item.get("asset_ai_gen_grade"),
@@ -296,12 +319,20 @@ class RenderPlanSkill:
                     "template": _template_plan_json(template),
                     "template_selection": choice["debug"],
                     "reuse_mode": batch_state.get("reuse_mode", "strict"),
+                    "voc_proof": {
+                        "quota_required_for_this_plan": bool(voc_required_for_plan),
+                        "quota_fallback_used": bool(voc_fallback_used),
+                        "filled_by_this_plan": _selected_contains_voc_ads_hook(selected.data),
+                        "quota_state_before_record": _public_voc_quota_state(batch_state),
+                    },
                 },
                 "quality_gate_status": "pending",
                 "render_status": "planned",
             }
             self.ctx.repo.upsert("render_plans", "render_plan_id", row)
             _record_selection(self.ctx, selected.data, batch_state)
+            if _selected_contains_voc_ads_hook(selected.data):
+                _record_voc_quota_fill(batch_state)
             plans.append(plan_id)
         # render_plans 全部创建完后，把 batch 状态从 planning 推进到 planned，
         # 否则 render_batch / _top_up 会认为批次还在 planning 而跳过渲染。
@@ -336,6 +367,7 @@ class RenderPlanSkill:
             "target_variant_count": target_total,
             "existing_usable_outputs": existing_count,
             "fill_gap_count": total,
+            "voc_quota": _public_voc_quota_state(batch_state),
             "task_sync": task_sync,
         })
 
@@ -577,6 +609,102 @@ def _top_up_summary(target_total: int, existing_count: int, planned_count: int, 
     return summary
 
 
+def _ads_voc_quota_state(
+    ctx: SkillContext,
+    product_id: str,
+    target_total: int,
+    existing_outputs: list[dict[str, Any]],
+    state: dict,
+) -> dict[str, Any]:
+    enabled = ads_fast_strict_outputs_enabled() and _env_flag("AUTO_MIXCUT_ADS_VOC_PROOF_QUOTA_ENABLED", True)
+    usable_segment_count = len(_usable_voc_ads_hook_segments(ctx, product_id, state)) if enabled else 0
+    desired = _ads_voc_output_quota(target_total) if enabled and usable_segment_count > 0 else 0
+    segment_cap = _ads_voc_segment_output_cap()
+    required = min(desired, usable_segment_count * segment_cap) if desired > 0 else 0
+    existing_filled = _count_existing_outputs_with_voc_ads_hook(ctx, product_id, existing_outputs, state) if required > 0 else 0
+    return {
+        "enabled": bool(enabled),
+        "required": int(required),
+        "existing_filled": int(existing_filled),
+        "planned_filled": 0,
+        "usable_segment_count": int(usable_segment_count),
+        "segment_output_cap": int(segment_cap),
+        "fallback_count": 0,
+        "fallbacks": [],
+    }
+
+
+def _should_force_voc_proof(batch_state: dict) -> bool:
+    quota = batch_state.get("_voc_quota") or {}
+    if not quota.get("enabled"):
+        return False
+    required = int(quota.get("required") or 0)
+    filled = int(quota.get("existing_filled") or 0) + int(quota.get("planned_filled") or 0)
+    return required > 0 and filled < required
+
+
+def _record_voc_quota_fill(batch_state: dict) -> None:
+    quota = batch_state.get("_voc_quota") or {}
+    quota["planned_filled"] = int(quota.get("planned_filled") or 0) + 1
+
+
+def _record_voc_quota_fallback(batch_state: dict, template_id: str, detail: dict[str, Any] | None = None) -> None:
+    quota = batch_state.get("_voc_quota") or {}
+    quota["fallback_count"] = int(quota.get("fallback_count") or 0) + 1
+    fallbacks = quota.setdefault("fallbacks", [])
+    if len(fallbacks) < 20:
+        fallbacks.append({"template_id": template_id, "detail": detail or {}})
+
+
+def _public_voc_quota_state(batch_state: dict) -> dict[str, Any]:
+    quota = batch_state.get("_voc_quota") or {}
+    if not quota:
+        return {"enabled": False}
+    required = int(quota.get("required") or 0)
+    existing_filled = int(quota.get("existing_filled") or 0)
+    planned_filled = int(quota.get("planned_filled") or 0)
+    return {
+        "enabled": bool(quota.get("enabled")),
+        "required": required,
+        "existing_filled": existing_filled,
+        "planned_filled": planned_filled,
+        "remaining_after_plans": max(0, required - existing_filled - planned_filled),
+        "usable_segment_count": int(quota.get("usable_segment_count") or 0),
+        "segment_output_cap": int(quota.get("segment_output_cap") or 0),
+        "fallback_count": int(quota.get("fallback_count") or 0),
+    }
+
+
+def _ads_voc_output_quota(target_total: int) -> int:
+    target = max(0, int(target_total or 0))
+    if target <= 0:
+        return 0
+    return min(target, max(1, math.ceil(target * _ads_voc_quota_ratio())))
+
+
+def _ads_voc_quota_ratio() -> float:
+    try:
+        value = float(os.environ.get("AUTO_MIXCUT_ADS_VOC_PROOF_QUOTA_RATIO", DEFAULT_ADS_VOC_QUOTA_RATIO))
+    except (TypeError, ValueError):
+        value = DEFAULT_ADS_VOC_QUOTA_RATIO
+    return min(1.0, max(0.0, value))
+
+
+def _ads_voc_segment_output_cap() -> int:
+    try:
+        value = int(os.environ.get("AUTO_MIXCUT_ADS_VOC_SEGMENT_OUTPUT_CAP", DEFAULT_ADS_VOC_SEGMENT_OUTPUT_CAP))
+    except (TypeError, ValueError):
+        value = DEFAULT_ADS_VOC_SEGMENT_OUTPUT_CAP
+    return max(1, value)
+
+
+def _env_flag(key: str, default: bool) -> bool:
+    value = os.environ.get(key)
+    if value is None:
+        return default
+    return str(value).strip().lower() not in {"0", "false", "no", "off"}
+
+
 def _select_segments(ctx: SkillContext, product_id: str, slots, batch_state: dict | None = None, variant_no: int = 1, constraints: dict | None = None, template: TemplateSpec | None = None) -> Result:
     constraints = constraints or {}
     selected = []
@@ -587,6 +715,19 @@ def _select_segments(ctx: SkillContext, product_id: str, slots, batch_state: dic
         segments = _enrich_segments_for_selection(ctx, segments)
         segments = _render_eligible_segments(segments)
         state["_selection_segments"] = segments
+    voc_required_slot_index = 0
+    if constraints.get("require_voc_prompt_package"):
+        voc_required_slot_index = _voc_required_slot_index(ctx, product_id, segments, slots, state)
+        if voc_required_slot_index <= 0:
+            return Result.fail(
+                "SKIPPED_LOW_QUALITY",
+                "no VOC ADS hook package segment available",
+                {
+                    "status": "skipped_low_quality",
+                    "reason": "voc_ads_hook_package_unavailable",
+                    "usable_voc_segment_count": len(_usable_voc_ads_hook_segments(ctx, product_id, state)),
+                },
+            )
     for slot in slots:
         role = slot["role"]
         slot_index = len(selected) + 1
@@ -595,6 +736,14 @@ def _select_segments(ctx: SkillContext, product_id: str, slots, batch_state: dic
             pool = _hero_fallback_pool(segments)
         pool = _filter_product_mismatch_suspects(pool)
         pool = _filter_ai_core_prompt_packages(ctx, product_id, pool, state, role, slot_index)
+        if slot_index == voc_required_slot_index:
+            pool = [s for s in pool if _is_voc_ads_hook_segment(ctx, product_id, state, s)]
+            if not pool:
+                return Result.fail(
+                    "SKIPPED_LOW_QUALITY",
+                    "no VOC ADS hook package segment available for slot",
+                    {"status": "skipped_low_quality", "role": role, "slot_index": slot_index, "reason": "voc_slot_pool_empty"},
+                )
         pool = _filter_constraints(ctx, pool, constraints, slot_index=slot_index)
         filtered = _filter_slot_pool(pool, slot)
         if filtered:
@@ -680,6 +829,11 @@ def _select_segments(ctx: SkillContext, product_id: str, slots, batch_state: dic
             reverse=True,
         )
         best_score, choice = scored[0]
+        is_voc_ads_hook = _is_voc_ads_hook_segment(ctx, product_id, state, choice)
+        selection_reason = _selection_reason(ctx, choice, state, slot, slot_index, best_score)
+        if is_voc_ads_hook:
+            selection_reason["is_voc_ads_hook_package"] = True
+            selection_reason.setdefault("why", []).append("voc_ads_hook_package")
         selected.append({
             "role": role,
             "duration_ms": _slot_duration_ms(slot, choice),
@@ -693,12 +847,13 @@ def _select_segments(ctx: SkillContext, product_id: str, slots, batch_state: dic
             "source_trust_level": choice.get("source_trust_level"),
             "source_identity": choice.get("source_identity"),
             "prompt_package_id": _ai_prompt_package_id(choice),
+            "is_voc_ads_hook_package": bool(is_voc_ads_hook),
             "asset_scene_tag": choice.get("scene_tag"),
             "asset_slot_role": choice.get("slot_role"),
             "asset_ai_gen_grade": choice.get("ai_gen_grade"),
             "asset_hook_intent": choice.get("hook_intent"),
             "selection_score": round(float(best_score), 3),
-            "selection_reason": _selection_reason(ctx, choice, state, slot, slot_index, best_score),
+            "selection_reason": selection_reason,
             "subtitle_cleanup": _subtitle_cleanup_plan(choice),
         })
     _rebalance_selected_durations(selected, _min_plan_duration_ms(template, slots))
@@ -804,6 +959,105 @@ def _filter_ai_core_prompt_packages(
         if prompt_id and prompt_id in valid_ids:
             filtered.append(segment)
     return filtered
+
+
+def _voc_required_slot_index(
+    ctx: SkillContext,
+    product_id: str,
+    segments: list[dict],
+    slots: list[dict],
+    state: dict,
+) -> int:
+    for slot_index, slot in enumerate(slots, start=1):
+        role = slot["role"]
+        pool = [s for s in segments if role in (s.get("effective_roles_json") or [])]
+        if not pool and role == "hero":
+            pool = _hero_fallback_pool(segments)
+        pool = _filter_product_mismatch_suspects(pool)
+        pool = _filter_ai_core_prompt_packages(ctx, product_id, pool, state, role, slot_index)
+        pool = _filter_slot_pool(pool, slot)
+        if any(_is_voc_ads_hook_segment(ctx, product_id, state, segment) for segment in pool):
+            return slot_index
+    return 0
+
+
+def _usable_voc_ads_hook_segments(ctx: SkillContext, product_id: str, state: dict) -> list[dict]:
+    segments = state.get("_selection_segments")
+    if segments is None:
+        try:
+            segments = ctx.repo.list_where("segments", "product_id=?", (product_id,))
+        except Exception:
+            segments = []
+        segments = _enrich_segments_for_selection(ctx, segments)
+        segments = _render_eligible_segments(segments)
+        state["_selection_segments"] = segments
+    return [
+        segment
+        for segment in segments
+        if _is_voc_ads_hook_segment(ctx, product_id, state, segment)
+        and not _is_product_mismatch_suspect(segment)
+    ]
+
+
+def _is_voc_ads_hook_segment(ctx: SkillContext, product_id: str, state: dict, segment: dict) -> bool:
+    prompt_id = _ai_prompt_package_id(segment)
+    if not prompt_id:
+        return False
+    return prompt_id in _voc_prompt_package_ids_for_selection(ctx, product_id, state)
+
+
+def _selected_contains_voc_ads_hook(selected: list[dict]) -> bool:
+    return any(bool(item.get("is_voc_ads_hook_package")) for item in selected or [])
+
+
+def _count_existing_outputs_with_voc_ads_hook(
+    ctx: SkillContext,
+    product_id: str,
+    outputs: list[dict[str, Any]],
+    state: dict,
+) -> int:
+    count = 0
+    for output in outputs or []:
+        output_id = str(output.get("output_id") or "").strip()
+        if not output_id:
+            continue
+        try:
+            rows = ctx.repo.list_where("output_segments", "output_id=?", (output_id,))
+        except Exception:
+            rows = []
+        for row in rows:
+            segment_id = str(row.get("segment_id") or "").strip()
+            if not segment_id:
+                continue
+            segment = ctx.repo.get("segments", "segment_id", segment_id) or {}
+            if str(segment.get("product_id") or "") != product_id:
+                continue
+            if _is_voc_ads_hook_segment(ctx, product_id, state, segment):
+                count += 1
+                break
+    return count
+
+
+def _voc_prompt_package_ids_for_selection(ctx: SkillContext, product_id: str, state: dict) -> set[str]:
+    cache_key = f"_voc_prompt_package_ids:{product_id}"
+    if cache_key in state:
+        return set(state.get(cache_key) or set())
+    valid_ids = _valid_prompt_package_ids_for_selection(ctx, product_id, state)
+    voc_ids: set[str] = set()
+    try:
+        rows = ctx.repo.list_where(
+            "segment_prompt_packages",
+            "product_id=? AND template_id=?",
+            (product_id, VOC_ADS_HOOK_PACKAGE_TEMPLATE_ID),
+        )
+    except Exception:
+        rows = []
+    for row in rows:
+        prompt_id = str(row.get("segment_prompt_id") or "").strip()
+        if prompt_id and prompt_id in valid_ids:
+            voc_ids.add(prompt_id)
+    state[cache_key] = voc_ids
+    return voc_ids
 
 
 def _valid_prompt_package_ids_for_selection(ctx: SkillContext, product_id: str, state: dict) -> set[str]:

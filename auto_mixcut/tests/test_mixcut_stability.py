@@ -17,7 +17,8 @@ from auto_mixcut.skills.feishu_review_skill import _select_anchor_canonical_reco
 from auto_mixcut.skills.mixcut_state_machine_skill import decide_mixcut_state, guard_start_status
 from auto_mixcut.skills.pipeline_run_skill import PipelineRunSkill
 from auto_mixcut.skills.rds_repository_skill import RDSRepositorySkill
-from auto_mixcut.skills.render_plan_skill import _select_segments, _usable_existing_outputs
+from auto_mixcut.skills.render_plan_skill import _ads_voc_quota_state, _select_segments, _usable_existing_outputs
+from scripts.run_ads_mixcut_unattended import plan_ads_mixcut
 from auto_mixcut.skills.segment_prompt_factory_skill import _ensure_prompt_package_table
 from auto_mixcut.skills.usage_counter_skill import count_good_rendered_outputs
 from scripts.run_mixcut_guard import _compute_missing_effective_roles, _status_after_top_up
@@ -259,6 +260,200 @@ class MixcutStabilityTest(unittest.TestCase):
 
         self.assertTrue(result.success, result.to_dict())
         self.assertEqual(result.data[0]["segment_id"], "SEG_GOOD_RENDER_POOL")
+
+    def test_ads_plan_creates_voc_gap_even_when_generic_hooks_exist(self):
+        previous_ratio = os.environ.get("AUTO_MIXCUT_ADS_VOC_PROOF_QUOTA_RATIO")
+        previous_cap = os.environ.get("AUTO_MIXCUT_ADS_VOC_SEGMENT_OUTPUT_CAP")
+        os.environ["AUTO_MIXCUT_ADS_VOC_PROOF_QUOTA_RATIO"] = "0.2"
+        os.environ["AUTO_MIXCUT_ADS_VOC_SEGMENT_OUTPUT_CAP"] = "2"
+        try:
+            plan = plan_ads_mixcut(
+                "PROD_VOC_GAP",
+                {"product_id": "PROD_VOC_GAP", "task_status": "READY"},
+                {
+                    "total": 20,
+                    "raw_total": 20,
+                    "by_core_role": {"hero": 6, "result": 4, "detail": 4, "scene": 2, "ending": 1},
+                    "hook_segments": 6,
+                    "voc_segments": {"total": 0, "usable": 0, "unusable": 0},
+                },
+                {
+                    "good_outputs": 0,
+                    "total_outputs": 0,
+                    "strict_good_outputs_with_voc_segments": 0,
+                },
+                {
+                    "confirmed": True,
+                    "package_id": "VOC_PACKAGE",
+                    "readiness_status": "ready_for_hook_package",
+                    "candidates": [{"insight_id": "A"}, {"insight_id": "B"}],
+                },
+                {},
+                target=10,
+                use_voc_hooks=True,
+                max_hook=6,
+                max_support=12,
+            )
+
+            self.assertGreaterEqual(plan["gap"]["new_hook_segments_planned"], 1)
+            usage = plan["flow_summary"]["voc_output_usage"]
+            self.assertEqual(usage["voc_desired_output_quota"], 2)
+            self.assertEqual(usage["voc_segment_gap"], 1)
+            self.assertEqual(usage["voc_quota_status"], "needs_voc_segment_generation")
+        finally:
+            if previous_ratio is None:
+                os.environ.pop("AUTO_MIXCUT_ADS_VOC_PROOF_QUOTA_RATIO", None)
+            else:
+                os.environ["AUTO_MIXCUT_ADS_VOC_PROOF_QUOTA_RATIO"] = previous_ratio
+            if previous_cap is None:
+                os.environ.pop("AUTO_MIXCUT_ADS_VOC_SEGMENT_OUTPUT_CAP", None)
+            else:
+                os.environ["AUTO_MIXCUT_ADS_VOC_SEGMENT_OUTPUT_CAP"] = previous_cap
+
+    def test_render_plan_can_force_voc_ads_hook_segment(self):
+        product_id = "PROD_FORCE_VOC_SEGMENT"
+        self.assertTrue(_ensure_prompt_package_table(self.ctx).success)
+        self.ctx.repo.upsert(
+            "segment_prompt_packages",
+            "segment_prompt_id",
+            {
+                "segment_prompt_id": "SP_VOC_FORCE",
+                "product_id": product_id,
+                "template_id": "VOC_ADS_HOOK_PACKAGE",
+                "package_status": "imported",
+                "generated_segment_id": "SEG_VOC_FORCE",
+            },
+        )
+        for asset_id, segment_id, source_type, prompt_id in [
+            ("ASSET_NONVOC_FORCE", "SEG_NONVOC_FORCE", "self_shot", ""),
+            ("ASSET_VOC_FORCE", "SEG_VOC_FORCE", "ai_generated", "SP_VOC_FORCE"),
+        ]:
+            self.ctx.repo.upsert(
+                "assets",
+                "asset_id",
+                {
+                    "asset_id": asset_id,
+                    "product_id": product_id,
+                    "source_type": source_type,
+                    "source_trust_level": "high",
+                    "prompt_package_id": prompt_id,
+                },
+            )
+            self.ctx.repo.upsert(
+                "segments",
+                "segment_id",
+                {
+                    "segment_id": segment_id,
+                    "asset_id": asset_id,
+                    "product_id": product_id,
+                    "source_type": source_type,
+                    "source_trust_level": "high",
+                    "product_match_status": "trusted_by_source",
+                    "product_binding_type": "exact_sku",
+                    "segment_status": "qc_passed",
+                    "duration_ms": 4000,
+                    "effective_roles_json": ["hero"],
+                    "prompt_package_id": prompt_id,
+                },
+            )
+
+        state = {"segments": set(), "segment_counts": {}, "core_segment_counts": {}, "assets": {}, "first_assets": set(), "first_asset_counts": {}, "first_segment_counts": {}, "template_counts": {}}
+        result = _select_segments(
+            self.ctx,
+            product_id,
+            [{"role": "hero", "duration_ms": 3000}],
+            batch_state=state,
+            constraints={"require_voc_prompt_package": True},
+        )
+
+        self.assertTrue(result.success, result.to_dict())
+        self.assertEqual(result.data[0]["segment_id"], "SEG_VOC_FORCE")
+        self.assertTrue(result.data[0]["is_voc_ads_hook_package"])
+        self.assertIn("voc_ads_hook_package", result.data[0]["selection_reason"]["why"])
+
+    def test_ads_voc_quota_counts_existing_strict_voc_outputs(self):
+        product_id = "PROD_VOC_QUOTA_EXISTING"
+        previous_mode = os.environ.get("AUTO_MIXCUT_ADS_FAST_MODE")
+        previous_ratio = os.environ.get("AUTO_MIXCUT_ADS_VOC_PROOF_QUOTA_RATIO")
+        previous_cap = os.environ.get("AUTO_MIXCUT_ADS_VOC_SEGMENT_OUTPUT_CAP")
+        os.environ["AUTO_MIXCUT_ADS_FAST_MODE"] = "1"
+        os.environ["AUTO_MIXCUT_ADS_VOC_PROOF_QUOTA_RATIO"] = "0.2"
+        os.environ["AUTO_MIXCUT_ADS_VOC_SEGMENT_OUTPUT_CAP"] = "2"
+        try:
+            self.assertTrue(_ensure_prompt_package_table(self.ctx).success)
+            self.ctx.repo.upsert(
+                "segment_prompt_packages",
+                "segment_prompt_id",
+                {
+                    "segment_prompt_id": "SP_VOC_QUOTA",
+                    "product_id": product_id,
+                    "template_id": "VOC_ADS_HOOK_PACKAGE",
+                    "package_status": "imported",
+                    "generated_segment_id": "SEG_VOC_QUOTA",
+                },
+            )
+            self.ctx.repo.upsert(
+                "segments",
+                "segment_id",
+                {
+                    "segment_id": "SEG_VOC_QUOTA",
+                    "asset_id": "ASSET_VOC_QUOTA",
+                    "product_id": product_id,
+                    "source_type": "ai_generated",
+                    "segment_status": "qc_passed",
+                    "effective_roles_json": ["hero"],
+                    "prompt_package_id": "SP_VOC_QUOTA",
+                },
+            )
+            self.ctx.repo.upsert(
+                "outputs",
+                "output_id",
+                {
+                    "output_id": "OUT_VOC_QUOTA",
+                    "batch_id": "BATCH_VOC_QUOTA",
+                    "product_id": product_id,
+                    "variant_no": 1,
+                    "template_id": "TEMPLATE_TEST",
+                    "render_status": "rendered",
+                    "machine_quality_status": "publish_ready",
+                },
+            )
+            self.ctx.repo.insert(
+                "output_segments",
+                {
+                    "output_id": "OUT_VOC_QUOTA",
+                    "segment_id": "SEG_VOC_QUOTA",
+                    "asset_id": "ASSET_VOC_QUOTA",
+                    "slot_index": 1,
+                    "role_used": "hero",
+                },
+            )
+
+            quota = _ads_voc_quota_state(
+                self.ctx,
+                product_id,
+                10,
+                [{"output_id": "OUT_VOC_QUOTA"}],
+                {},
+            )
+
+            self.assertTrue(quota["enabled"])
+            self.assertEqual(quota["usable_segment_count"], 1)
+            self.assertEqual(quota["required"], 2)
+            self.assertEqual(quota["existing_filled"], 1)
+        finally:
+            if previous_mode is None:
+                os.environ.pop("AUTO_MIXCUT_ADS_FAST_MODE", None)
+            else:
+                os.environ["AUTO_MIXCUT_ADS_FAST_MODE"] = previous_mode
+            if previous_ratio is None:
+                os.environ.pop("AUTO_MIXCUT_ADS_VOC_PROOF_QUOTA_RATIO", None)
+            else:
+                os.environ["AUTO_MIXCUT_ADS_VOC_PROOF_QUOTA_RATIO"] = previous_ratio
+            if previous_cap is None:
+                os.environ.pop("AUTO_MIXCUT_ADS_VOC_SEGMENT_OUTPUT_CAP", None)
+            else:
+                os.environ["AUTO_MIXCUT_ADS_VOC_SEGMENT_OUTPUT_CAP"] = previous_cap
 
     def test_ads_fast_existing_outputs_use_strict_segment_status(self):
         product_id = "PROD_STRICT_EXISTING"

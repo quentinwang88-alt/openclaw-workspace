@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -73,6 +74,9 @@ RUN_TABLE_DDL = """CREATE TABLE IF NOT EXISTS ads_mixcut_unattended_run (
 
 CORE_ROLES = {"hero", "result", "detail", "scene", "ending"}
 HOOK_ROLES = {"hero"}
+VOC_ADS_HOOK_PACKAGE_TEMPLATE_ID = "VOC_ADS_HOOK_PACKAGE"
+DEFAULT_ADS_VOC_QUOTA_RATIO = 0.2
+DEFAULT_ADS_VOC_SEGMENT_OUTPUT_CAP = 2
 GOOD_MACHINE_OUTPUT_STATUSES = {"passed", "passed_with_warning", "needs_review", "publish_ready"}
 REJECTED_HUMAN_OUTPUT_STATUSES = {"rejected", "discard", "不可发布", "废弃", "不要", "不使用"}
 FAILED_SEGMENT_STATUSES = {
@@ -243,8 +247,10 @@ def load_segment_summary(conn, product_id: str) -> Dict[str, Any]:
     cur = conn.cursor()
     cur.execute(
         "SELECT s.segment_id, s.effective_roles_json, s.slot_role, s.is_image_generated, s.prompt_package_id, "
-        "s.segment_type, s.segment_status, s.source_type, t.primary_shot_role, t.hook_visual_type, t.hook_strength "
+        "s.segment_type, s.segment_status, s.source_type, p.template_id AS prompt_template_id, "
+        "t.primary_shot_role, t.hook_visual_type, t.hook_strength "
         "FROM segments s "
+        "LEFT JOIN segment_prompt_packages p ON p.segment_prompt_id=s.prompt_package_id "
         "LEFT JOIN segment_tags t ON t.id = ("
         "  SELECT MAX(t2.id) FROM segment_tags t2 WHERE t2.segment_id=s.segment_id"
         ") "
@@ -256,14 +262,24 @@ def load_segment_summary(conn, product_id: str) -> Dict[str, Any]:
     by_core_role: Dict[str, int] = Counter()
     by_status: Dict[str, int] = Counter()
     hook_count = 0
+    voc_total = 0
+    voc_usable = 0
+    voc_unusable = 0
     segments: List[Dict] = []
     for r in rows:
         status = str(r.get("segment_status") or "").strip()
         source_type = str(r.get("source_type") or "").strip()
+        is_voc_segment = str(r.get("prompt_template_id") or "") == VOC_ADS_HOOK_PACKAGE_TEMPLATE_ID
+        if is_voc_segment:
+            voc_total += 1
         by_status[status or "unknown"] += 1
         if status in FAILED_SEGMENT_STATUSES:
+            if is_voc_segment:
+                voc_unusable += 1
             continue
         if source_type == "ai_generated" and status != "qc_passed":
+            if is_voc_segment:
+                voc_unusable += 1
             continue
         roles = jload(r.get("effective_roles_json")) or []
         if not isinstance(roles, list):
@@ -286,12 +302,17 @@ def load_segment_summary(conn, product_id: str) -> Dict[str, Any]:
                 by_core_role[role] += 1
         if is_hook:
             hook_count += 1
+        if is_voc_segment:
+            voc_usable += 1
         segments.append({
             "segment_id": r.get("segment_id"),
             "effective_roles": sorted(role_set),
             "primary_shot_role": primary,
             "segment_status": status,
             "source_type": source_type,
+            "prompt_package_id": r.get("prompt_package_id"),
+            "prompt_template_id": r.get("prompt_template_id"),
+            "is_voc_ads_hook_package": is_voc_segment,
             "is_hook": is_hook,
             "hook_visual_type": hook_type,
             "hook_strength": r.get("hook_strength"),
@@ -304,6 +325,11 @@ def load_segment_summary(conn, product_id: str) -> Dict[str, Any]:
         "by_role": dict(by_role),
         "by_core_role": dict(by_core_role),
         "hook_segments": hook_count,
+        "voc_segments": {
+            "total": voc_total,
+            "usable": voc_usable,
+            "unusable": voc_unusable,
+        },
         "segments": segments,
     }
 
@@ -340,6 +366,9 @@ def load_output_summary(conn, product_id: str) -> Dict[str, Any]:
     outputs_with_voc_segments = 0
     base_good_outputs_with_voc_segments = 0
     strict_good_outputs_with_voc_segments = 0
+    voc_rendered_output_count = 0
+    voc_draft_only_output_count = 0
+    voc_failed_segment_output_count = 0
     strict_durations: List[int] = []
     for row in rows:
         is_rendered = row.get("render_status") == "rendered"
@@ -360,6 +389,12 @@ def load_output_summary(conn, product_id: str) -> Dict[str, Any]:
             outputs_missing_segments += 1
         if voc_count > 0:
             outputs_with_voc_segments += 1
+            if is_rendered:
+                voc_rendered_output_count += 1
+            if str(row.get("machine_quality_status") or "") == "draft_only":
+                voc_draft_only_output_count += 1
+            if has_segment_issue:
+                voc_failed_segment_output_count += 1
         if is_base_good:
             base_good += 1
             if voc_count > 0:
@@ -383,6 +418,10 @@ def load_output_summary(conn, product_id: str) -> Dict[str, Any]:
         "good_outputs_with_voc_segments": strict_good_outputs_with_voc_segments,
         "base_good_outputs_with_voc_segments": base_good_outputs_with_voc_segments,
         "strict_good_outputs_with_voc_segments": strict_good_outputs_with_voc_segments,
+        "voc_strict_good_output_count": strict_good_outputs_with_voc_segments,
+        "voc_rendered_output_count": voc_rendered_output_count,
+        "voc_draft_only_output_count": voc_draft_only_output_count,
+        "voc_failed_segment_output_count": voc_failed_segment_output_count,
         "avg_duration_ms": int(sum(strict_durations) / len(strict_durations)) if strict_durations else 0,
         "min_duration_ms": min(strict_durations) if strict_durations else 0,
         "max_duration_ms": max(strict_durations) if strict_durations else 0,
@@ -585,6 +624,69 @@ def _to_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _ads_voc_output_quota(target: int, use_voc_hooks: bool, voc_confirmed: bool, voc_candidates: int) -> int:
+    if not use_voc_hooks or not voc_confirmed or voc_candidates <= 0:
+        return 0
+    target_count = max(0, int(target or 0))
+    if target_count <= 0:
+        return 0
+    return min(target_count, max(1, math.ceil(target_count * _ads_voc_quota_ratio())))
+
+
+def _ads_voc_renderable_quota(target: int, use_voc_hooks: bool, voc_confirmed: bool, voc_candidates: int, voc_usable_segments: int) -> int:
+    desired = _ads_voc_output_quota(target, use_voc_hooks, voc_confirmed, voc_candidates)
+    if desired <= 0 or voc_usable_segments <= 0:
+        return 0
+    return min(desired, voc_usable_segments * _ads_voc_segment_output_cap())
+
+
+def _ads_voc_segment_gap(desired_output_quota: int, filled_outputs: int, usable_segments: int) -> int:
+    output_gap = max(0, int(desired_output_quota or 0) - int(filled_outputs or 0))
+    if output_gap <= 0:
+        return 0
+    needed_segments = math.ceil(output_gap / _ads_voc_segment_output_cap())
+    return max(0, needed_segments - max(0, int(usable_segments or 0)))
+
+
+def _ads_voc_quota_ratio() -> float:
+    try:
+        value = float(os.environ.get("AUTO_MIXCUT_ADS_VOC_PROOF_QUOTA_RATIO", DEFAULT_ADS_VOC_QUOTA_RATIO))
+    except (TypeError, ValueError):
+        value = DEFAULT_ADS_VOC_QUOTA_RATIO
+    return min(1.0, max(0.0, value))
+
+
+def _ads_voc_segment_output_cap() -> int:
+    try:
+        value = int(os.environ.get("AUTO_MIXCUT_ADS_VOC_SEGMENT_OUTPUT_CAP", DEFAULT_ADS_VOC_SEGMENT_OUTPUT_CAP))
+    except (TypeError, ValueError):
+        value = DEFAULT_ADS_VOC_SEGMENT_OUTPUT_CAP
+    return max(1, value)
+
+
+def _voc_quota_status(
+    use_voc_hooks: bool,
+    voc_confirmed: bool,
+    desired_quota: int,
+    renderable_quota: int,
+    filled_outputs: int,
+    usable_segments: int,
+) -> str:
+    if not use_voc_hooks:
+        return "disabled"
+    if not voc_confirmed:
+        return "package_missing_or_unconfirmed"
+    if desired_quota <= 0:
+        return "not_applicable"
+    if filled_outputs >= desired_quota:
+        return "filled"
+    if usable_segments <= 0:
+        return "needs_voc_segment_generation"
+    if renderable_quota <= filled_outputs:
+        return "needs_more_voc_segments"
+    return "needs_voc_proof_render"
+
+
 # ── Step 2: plan ──
 
 def plan_ads_mixcut(
@@ -616,6 +718,9 @@ def plan_ads_mixcut(
     blocked_hook_gap = 0
     voc_candidates = 0
     voc_confirmed = False
+    voc_segment_counts = seg.get("voc_segments") or {}
+    voc_usable_segments = int(voc_segment_counts.get("usable") or 0)
+    voc_filled_outputs = int(out.get("strict_good_outputs_with_voc_segments") or 0)
     if use_voc_hooks and voc and voc.get("candidates"):
         voc_candidates = len(voc["candidates"])
         voc_confirmed = voc.get("confirmed", False)
@@ -626,6 +731,19 @@ def plan_ads_mixcut(
             blocked_hook_gap = desired_hook_gap
     else:
         hook_gap = max(0, 3 - hero_count)
+
+    voc_desired_output_quota = _ads_voc_output_quota(target, use_voc_hooks, voc_confirmed, voc_candidates)
+    voc_renderable_output_quota = _ads_voc_renderable_quota(
+        target,
+        use_voc_hooks,
+        voc_confirmed,
+        voc_candidates,
+        voc_usable_segments,
+    )
+    voc_quota_remaining = max(0, voc_desired_output_quota - voc_filled_outputs)
+    voc_segment_gap = _ads_voc_segment_gap(voc_desired_output_quota, voc_filled_outputs, voc_usable_segments)
+    if voc_confirmed and voc_segment_gap > 0:
+        hook_gap = max(hook_gap, min(max_hook, voc_segment_gap))
 
     # support gap: need at least 2 of {result, detail, scene} with some depth
     support_gap = 0
@@ -672,6 +790,7 @@ def plan_ads_mixcut(
             "scene": scene_count,
             "ending": ending_count,
             "hook_segments": seg["hook_segments"],
+            "voc_usable_segments": voc_usable_segments,
         },
         "flow_summary": {
             "strict_good_outputs": existing_good,
@@ -680,9 +799,28 @@ def plan_ads_mixcut(
             "target_met": remaining <= 0,
             "voc_participation": voc_participation_summary(use_voc_hooks, voc, voc_gap),
             "voc_output_usage": {
+                "voc_total_segment_count": int(voc_segment_counts.get("total") or 0),
+                "voc_usable_segment_count": voc_usable_segments,
+                "voc_unusable_segment_count": int(voc_segment_counts.get("unusable") or 0),
                 "outputs_with_voc_segments": out.get("outputs_with_voc_segments", 0),
+                "voc_rendered_output_count": out.get("voc_rendered_output_count", 0),
+                "voc_draft_only_output_count": out.get("voc_draft_only_output_count", 0),
+                "voc_failed_segment_output_count": out.get("voc_failed_segment_output_count", 0),
                 "base_good_outputs_with_voc_segments": out.get("base_good_outputs_with_voc_segments", 0),
                 "strict_good_outputs_with_voc_segments": out.get("strict_good_outputs_with_voc_segments", 0),
+                "voc_desired_output_quota": voc_desired_output_quota,
+                "voc_renderable_output_quota": voc_renderable_output_quota,
+                "voc_quota_filled": voc_filled_outputs,
+                "voc_quota_remaining": voc_quota_remaining,
+                "voc_segment_gap": voc_segment_gap,
+                "voc_quota_status": _voc_quota_status(
+                    use_voc_hooks,
+                    voc_confirmed,
+                    voc_desired_output_quota,
+                    voc_renderable_output_quota,
+                    voc_filled_outputs,
+                    voc_usable_segments,
+                ),
             },
             "bottleneck": bottleneck_summary(task, seg, remaining),
         },
@@ -719,6 +857,11 @@ def plan_ads_mixcut(
             warnings.append("no VOC hook package found; run build_ads_hook_package.py first")
     elif use_voc_hooks and voc and not voc_confirmed:
         warnings.append("VOC hook package exists but is NOT confirmed; dry-run-only until manual confirmation")
+    elif use_voc_hooks and voc_confirmed and voc_quota_remaining > 0:
+        if voc_usable_segments <= 0:
+            warnings.append("VOC hook package confirmed but no usable VOC segments have returned yet; prompt package generation is needed")
+        else:
+            warnings.append("VOC hook package confirmed but strict good outputs have not met VOC proof quota yet; render planning will prefer VOC proof segments")
     if warnings:
         plan["warnings"] = warnings
 
