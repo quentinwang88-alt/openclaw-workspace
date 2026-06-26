@@ -14,6 +14,7 @@ from scripts.run_ads_mixcut_unattended import (
     build_quantity_goal,
     normalize_goal_args,
     plan_ads_mixcut,
+    result_target_met,
 )
 from auto_mixcut.cli import _top_up_snapshot
 
@@ -99,6 +100,14 @@ class ADSQuantityGoalTest(unittest.TestCase):
         self.assertEqual(goal["factory_tier"], 40)
         self.assertEqual(goal["target_strict_good_count"], 40)
         self.assertEqual(goal["desired_new_good_count"], 28)
+
+    def test_final_target_met_overrides_optional_blocked_steps(self):
+        result = {
+            "prepare_voc_hooks": {"status": "blocked", "reason": "voc_hook_package_missing"},
+            "final_inspect": {"remaining_to_target": 0},
+        }
+
+        self.assertTrue(result_target_met(result))
 
     def test_ads_fast_strict_count_ignores_non_ads_outputs(self):
         product_id = "PROD_ADS_COUNT"

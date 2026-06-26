@@ -1444,6 +1444,14 @@ def result_has_failed_step(value: Any) -> bool:
     return False
 
 
+def result_target_met(result: Dict[str, Any]) -> bool:
+    final = result.get("final_inspect") or {}
+    if final:
+        return _to_int(final.get("remaining_to_target"), 1) <= 0
+    plan = result.get("plan") or {}
+    return _to_int(plan.get("remaining_to_target"), 1) <= 0
+
+
 def apply_full_run_defaults(args: argparse.Namespace) -> argparse.Namespace:
     if not args.full_run:
         return args
@@ -1485,7 +1493,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
     indent = 2 if args.pretty else None
     print(json.dumps(result, ensure_ascii=False, indent=indent, default=str))
-    return 1 if result_has_failed_step(result) else 0
+    return 0 if result_target_met(result) else 1 if result_has_failed_step(result) else 0
 
 
 if __name__ == "__main__":
