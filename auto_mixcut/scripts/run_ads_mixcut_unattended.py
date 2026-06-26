@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""ADS 无人值守混剪编排脚本 — V1 dry-run / plan only.
+"""ADS 无人值守混剪编排脚本.
 
-扫描产品当前素材池和成片，生成补充计划，不实际提交或渲染。
+扫描产品当前素材池和成片，生成补充计划、写 Prompt Package、回流检查并触发 guard 渲染。
+真实提单默认交给 run_ai_supplement_heartbeat.py / segment-package-worker 消费飞书表格。
 
 Usage:
   python3 scripts/run_ads_mixcut_unattended.py \\
     --product-id 1729659517276948599 --target-count 30 --use-voc-hooks --dry-run --json
 
-正式执行才允许 --write（V1 先不做，dry-run 只出 plan）。
+正式执行需要 --write；默认不会在本脚本里直接提交即梦/Imini。
 """
 from __future__ import annotations
 
@@ -37,7 +38,8 @@ SEGMENT_PACKAGE_CONFIG = "segment-package.json"
 if SKILL_ROOT not in sys.path:
     sys.path.insert(0, SKILL_ROOT)
 
-from auto_mixcut.skills.ai_supplement_gateway_skill import is_stale_inflight_package, normalize_package  # noqa: E402
+from auto_mixcut.config.factory_config import factory_config  # noqa: E402
+from auto_mixcut.skills.ai_supplement_gateway_skill import summarize_package_rows  # noqa: E402
 if os.path.exists(_ENV_PATH):
     for _line in open(_ENV_PATH, encoding="utf-8"):
         _line = _line.strip()
@@ -75,6 +77,7 @@ RUN_TABLE_DDL = """CREATE TABLE IF NOT EXISTS ads_mixcut_unattended_run (
 CORE_ROLES = {"hero", "result", "detail", "scene", "ending"}
 HOOK_ROLES = {"hero"}
 VOC_ADS_HOOK_PACKAGE_TEMPLATE_ID = "VOC_ADS_HOOK_PACKAGE"
+ADS_FAST_TEMPLATE_ID = "AD_FAST_HOOK_8S"
 DEFAULT_ADS_VOC_QUOTA_RATIO = 0.2
 DEFAULT_ADS_VOC_SEGMENT_OUTPUT_CAP = 2
 GOOD_MACHINE_OUTPUT_STATUSES = {"passed", "passed_with_warning", "needs_review", "publish_ready"}
@@ -98,21 +101,6 @@ STAGE_KEYS = [
     "render",
     "final_qc",
 ]
-PROMPT_IMPORTED_STATUSES = {"imported", "consumed", "fulfilled", "质检中", "质检通过", "returned", "已回流", "已生成"}
-PROMPT_FAILED_STATUSES = {"failed", "质检废弃", "失败"}
-RECOVERABLE_PROMPT_FAILURE_TOKENS = [
-    "高峰期",
-    "暂时无法提交更多任务",
-    "无法提交更多任务",
-    "请等待其他任务完成",
-    "platform_limited",
-    "retry_pending",
-    "队列已满",
-    "提示词输入失败",
-    "prompt_input_failed",
-]
-
-
 def is_truthy_flag(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -358,7 +346,7 @@ def load_output_summary(conn, product_id: str) -> Dict[str, Any]:
     failed_statuses = sorted(FAILED_SEGMENT_STATUSES)
     failed_placeholders = ",".join(["%s"] * len(failed_statuses))
     cur.execute(
-        "SELECT o.output_id, o.render_status, o.machine_quality_status, o.human_quality_status, o.duration_ms, "
+        "SELECT o.output_id, o.template_id, o.render_status, o.machine_quality_status, o.human_quality_status, o.duration_ms, "
         f"SUM(CASE WHEN s.segment_status IN ({failed_placeholders}) THEN 1 ELSE 0 END) failed_segment_count, "
         "SUM(CASE WHEN s.segment_id IS NULL AND os.segment_id IS NOT NULL THEN 1 ELSE 0 END) missing_segment_count, "
         "SUM(CASE WHEN p.template_id='VOC_ADS_HOOK_PACKAGE' THEN 1 ELSE 0 END) voc_segment_count "
@@ -367,7 +355,7 @@ def load_output_summary(conn, product_id: str) -> Dict[str, Any]:
         "LEFT JOIN segments s ON s.segment_id=os.segment_id "
         "LEFT JOIN segment_prompt_packages p ON p.segment_prompt_id=s.prompt_package_id "
         "WHERE o.product_id=%s "
-        "GROUP BY o.output_id, o.render_status, o.machine_quality_status, o.human_quality_status, o.duration_ms",
+        "GROUP BY o.output_id, o.template_id, o.render_status, o.machine_quality_status, o.human_quality_status, o.duration_ms",
         (*failed_statuses, product_id),
     )
     rows = cur.fetchall()
@@ -377,6 +365,10 @@ def load_output_summary(conn, product_id: str) -> Dict[str, Any]:
     rendered = 0
     base_good = 0
     strict_good = 0
+    ads_total = 0
+    ads_rendered = 0
+    ads_base_good = 0
+    ads_strict_good = 0
     outputs_with_failed_segments = 0
     outputs_missing_segments = 0
     good_excluded_by_failed_segments = 0
@@ -389,8 +381,13 @@ def load_output_summary(conn, product_id: str) -> Dict[str, Any]:
     strict_durations: List[int] = []
     for row in rows:
         is_rendered = row.get("render_status") == "rendered"
+        is_ads_output = str(row.get("template_id") or "").upper().startswith("AD_FAST")
+        if is_ads_output:
+            ads_total += 1
         if is_rendered:
             rendered += 1
+            if is_ads_output:
+                ads_rendered += 1
         is_base_good = (
             is_rendered
             and row.get("machine_quality_status") in good_set
@@ -414,20 +411,29 @@ def load_output_summary(conn, product_id: str) -> Dict[str, Any]:
                 voc_failed_segment_output_count += 1
         if is_base_good:
             base_good += 1
+            if is_ads_output:
+                ads_base_good += 1
             if voc_count > 0:
                 base_good_outputs_with_voc_segments += 1
             if has_segment_issue:
                 good_excluded_by_failed_segments += 1
             else:
                 strict_good += 1
+                if is_ads_output:
+                    ads_strict_good += 1
                 if voc_count > 0:
                     strict_good_outputs_with_voc_segments += 1
-                strict_durations.append(int(row.get("duration_ms") or 0))
+                if is_ads_output:
+                    strict_durations.append(int(row.get("duration_ms") or 0))
     return {
         "total_outputs": total,
-        "good_outputs": strict_good,
-        "base_good_outputs": base_good,
-        "rendered_outputs": rendered,
+        "good_outputs": ads_strict_good,
+        "base_good_outputs": ads_base_good,
+        "rendered_outputs": ads_rendered,
+        "all_good_outputs": strict_good,
+        "all_base_good_outputs": base_good,
+        "all_rendered_outputs": rendered,
+        "ads_total_outputs": ads_total,
         "good_outputs_excluded_by_failed_segments": good_excluded_by_failed_segments,
         "outputs_with_failed_segments": outputs_with_failed_segments,
         "outputs_missing_segments": outputs_missing_segments,
@@ -526,51 +532,7 @@ def load_prompt_package_summary(conn, product_id: str, prompt_ids: Optional[List
             (product_id,),
         )
     rows = cur.fetchall()
-    by_status: Dict[str, int] = Counter()
-    by_normalized: Dict[str, int] = Counter()
-    pending = imported = failed = recoverable_failed = submitted = generated = consumed = stale_inflight = 0
-    for row in rows:
-        status = str(row.get("package_status") or "").strip()
-        failure_reason = str(row.get("failure_reason") or "").strip()
-        normalized = normalize_package(row)
-        by_status[status or "unknown"] += 1
-        by_normalized[normalized or "unknown"] += 1
-        if normalized in {"ready_to_submit", "inflight"}:
-            pending += 1
-        if normalized == "inflight" and status == "submitted":
-            submitted += 1
-        if normalized == "recoverable_failed":
-            recoverable_failed += 1
-            if is_stale_inflight_package(row):
-                stale_inflight += 1
-        elif status in PROMPT_FAILED_STATUSES and _recoverable_prompt_failure(failure_reason):
-            recoverable_failed += 1
-        elif normalized == "failed" or status in PROMPT_FAILED_STATUSES:
-            failed += 1
-        if normalized == "imported" or status in PROMPT_IMPORTED_STATUSES:
-            imported += 1
-        if normalized == "consumed" or status == "consumed":
-            consumed += 1
-        if row.get("generated_asset_id") or row.get("generated_segment_id"):
-            generated += 1
-    return {
-        "total": len(rows),
-        "pending": pending,
-        "submitted": submitted,
-        "imported": imported,
-        "generated": generated,
-        "consumed": consumed,
-        "failed": failed,
-        "recoverable_failed": recoverable_failed,
-        "stale_inflight": stale_inflight,
-        "by_status": dict(by_status),
-        "by_normalized": dict(by_normalized),
-    }
-
-
-def _recoverable_prompt_failure(text: str) -> bool:
-    lower = str(text or "").lower()
-    return any(str(token).lower() in lower for token in RECOVERABLE_PROMPT_FAILURE_TOKENS)
+    return summarize_package_rows(rows)
 
 
 def voc_participation_summary(use_voc_hooks: bool, voc: Optional[Dict[str, Any]], voc_gap: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -977,6 +939,12 @@ def prepare_voc_hooks(plan: Dict[str, Any], args: argparse.Namespace) -> Dict[st
 def submit_hook_packages(plan: Dict[str, Any], args: argparse.Namespace, prompt_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     if not args.submit_hook_packages:
         return {"status": "not_requested"}
+    if not direct_submit_enabled(args):
+        return {
+            "status": "blocked",
+            "reason": "direct_submit_disabled",
+            "next_action": "submit prompt packages via run_ai_supplement_heartbeat.py / segment-package-worker from Feishu workbench",
+        }
     if not args.write:
         return {"status": "blocked", "reason": "submit_requires_write"}
     if args.submit_channel == "imini" and not args.allow_imini_real_submit:
@@ -1031,6 +999,10 @@ def submit_hook_packages(plan: Dict[str, Any], args: argparse.Namespace, prompt_
         "scope": "product",
         "planned_limit": max(1, limit),
     }
+
+
+def direct_submit_enabled(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "allow_direct_submit", False) or factory_config().allow_direct_submit)
 
 
 def import_returns(args: argparse.Namespace, dry_run: bool = False, force: bool = False) -> Dict[str, Any]:
@@ -1178,10 +1150,10 @@ def run_render_guard(args: argparse.Namespace) -> Dict[str, Any]:
         str(args.target_count),
         "--max-rounds",
         str(max(1, int(args.guard_max_rounds or 3))),
+        "--template-id",
+        ADS_FAST_TEMPLATE_ID,
     ]
-    env = {"AUTO_MIXCUT_DB_PROVIDER": "mysql", "AUTO_MIXCUT_OSS_PROVIDER": "aliyun"}
-    if os.environ.get("AUTO_MIXCUT_ADS_FAST_MODE", "").strip().lower() in {"1", "true", "yes", "on"}:
-        env["AUTO_MIXCUT_ADS_FAST_MODE"] = "1"
+    env = {"AUTO_MIXCUT_DB_PROVIDER": "mysql", "AUTO_MIXCUT_OSS_PROVIDER": "aliyun", "AUTO_MIXCUT_ADS_FAST_MODE": "1"}
     return command_result(
         cmd,
         SKILL_ROOT,
@@ -1250,6 +1222,13 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         scoped_prompt_ids = prepared_prompt_ids(result)
         if scoped_prompt_ids:
             result["scoped_prompt_ids"] = scoped_prompt_ids
+            if not args.submit_hook_packages:
+                result["prompt_package_submit_handoff"] = {
+                    "status": "deferred_to_worker",
+                    "reason": "direct_submit_disabled",
+                    "prompt_ids": scoped_prompt_ids,
+                    "next_action": "run_ai_supplement_heartbeat.py or the prompt-package worker will submit ready Feishu rows",
+                }
 
         if args.submit_hook_packages:
             hook_gap = (plan.get("gap") or {}).get("new_hook_segments_planned", 0)
@@ -1315,6 +1294,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--submit-limit", type=int, default=0)
     p.add_argument("--submit-timeout-minutes", type=int, default=90)
     p.add_argument("--allow-imini-real-submit", action="store_true")
+    p.add_argument("--allow-direct-submit", action="store_true", help="escape hatch: let this ADS script directly call segment-package-worker")
     p.add_argument("--import-returns", action="store_true", help="sync prompt package submission/return status from Feishu into RDS")
     p.add_argument("--import-timeout-minutes", type=int, default=20)
     p.add_argument("--wait-returns", action="store_true", help="poll generation result uploader and import returns until pending prompt packages clear or timeout")
@@ -1327,7 +1307,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--guard-max-rounds", type=int, default=2)
     p.add_argument("--render-timeout-minutes", type=int, default=120)
     p.add_argument("--run-final-qc", action="store_true")
-    p.add_argument("--full-run", action="store_true", help="prepare, submit, wait/import, QC, render, and final QC in one guarded run")
+    p.add_argument("--full-run", action="store_true", help="prepare prompt packages, import existing returns, QC, render, and final QC in one guarded run")
     p.add_argument("--product-task-url", default=None)
     p.add_argument("--anchor-queue-url", default=None)
     p.add_argument("--prompt-workbench-url", default=None)
@@ -1339,17 +1319,38 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def result_has_failed_step(value: Any) -> bool:
+    if isinstance(value, dict):
+        status = str(value.get("status") or "").strip().lower()
+        if status in {"failed", "blocked", "timeout"}:
+            return True
+        return any(result_has_failed_step(item) for item in value.values())
+    if isinstance(value, list):
+        return any(result_has_failed_step(item) for item in value)
+    return False
+
+
+def apply_full_run_defaults(args: argparse.Namespace) -> argparse.Namespace:
+    if not args.full_run:
+        return args
+    args.prepare_voc_hooks = True
+    args.write_prompt_workbench = True
+    args.import_returns = True
+    if direct_submit_enabled(args):
+        args.submit_hook_packages = True
+        args.wait_returns = True
+    else:
+        args.submit_hook_packages = False
+        args.wait_returns = False
+    args.run_segment_qc = True
+    args.render = True
+    args.run_final_qc = True
+    return args
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.full_run:
-        args.prepare_voc_hooks = True
-        args.write_prompt_workbench = True
-        args.submit_hook_packages = True
-        args.import_returns = True
-        args.wait_returns = True
-        args.run_segment_qc = True
-        args.render = True
-        args.run_final_qc = True
+    apply_full_run_defaults(args)
     if args.dry_run and args.write:
         print("ERROR: --dry-run and --write are mutually exclusive", file=sys.stderr)
         return 2
@@ -1369,7 +1370,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
     indent = 2 if args.pretty else None
     print(json.dumps(result, ensure_ascii=False, indent=indent, default=str))
-    return 0
+    return 1 if result_has_failed_step(result) else 0
 
 
 if __name__ == "__main__":

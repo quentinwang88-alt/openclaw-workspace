@@ -18,8 +18,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from auto_mixcut.config.factory_config import factory_config  # noqa: E402
 from auto_mixcut.agent.orchestrator import AutoMixcutOrchestratorAgent  # noqa: E402
-from auto_mixcut.cli import _top_up  # noqa: E402
+from auto_mixcut.cli import _abort_latest_planning_batch, _top_up  # noqa: E402
 from auto_mixcut.core.bootstrap import build_context  # noqa: E402
 from auto_mixcut.core.ids import new_id  # noqa: E402
 from auto_mixcut.core.result import Result  # noqa: E402
@@ -53,6 +54,7 @@ def main() -> int:
     parser.add_argument("--market", default="")
     parser.add_argument("--category", default="")
     parser.add_argument("--max-rounds", type=int, default=2)
+    parser.add_argument("--template-id", default="")
     parser.add_argument("--skip-upload-sync", action="store_true")
     args = parser.parse_args()
 
@@ -71,13 +73,14 @@ def main() -> int:
         market=args.market,
         category=args.category,
         max_rounds=args.max_rounds,
+        template_id=args.template_id,
         process_uploads=not args.skip_upload_sync,
     )
     print(json.dumps(res.to_dict(), ensure_ascii=False, indent=2, default=str))
     return 0 if res.success else 1
 
 
-def run_guard_pass(ctx, product_id: str, target: int | None = None, name: str = "", market: str = "", category: str = "", max_rounds: int = 2, process_uploads: bool = True) -> Result:
+def run_guard_pass(ctx, product_id: str, target: int | None = None, name: str = "", market: str = "", category: str = "", max_rounds: int = 2, template_id: str = "", process_uploads: bool = True) -> Result:
     product_id = str(product_id or "").strip()
     if not product_id:
         return Result.fail("PRODUCT_ID_REQUIRED", "product_id is required")
@@ -107,7 +110,15 @@ def run_guard_pass(ctx, product_id: str, target: int | None = None, name: str = 
         if payload.get("source_record_id"):
             task_rows = ctx.repo.list_where("content_tasks", "product_id=? ORDER BY id DESC", (product_id,))
             if task_rows:
-                ctx.repo.update("content_tasks", "task_id", task_rows[0]["task_id"], {"created_by": "feishu_product_task"})
+                task_patch = {"created_by": "feishu_product_task"}
+                if _repo_has_column(ctx, "content_tasks", "source_record_id"):
+                    task_patch["source_record_id"] = str(payload.get("source_record_id") or "")
+                ctx.repo.update(
+                    "content_tasks",
+                    "task_id",
+                    task_rows[0]["task_id"],
+                    task_patch,
+                )
         task = _latest_task(ctx, product_id)
         product = ctx.repo.get("products", "product_id", product_id)
 
@@ -138,12 +149,39 @@ def run_guard_pass(ctx, product_id: str, target: int | None = None, name: str = 
         _guard_log("process_uploads", product_id=product_id)
         upload_sync = _process_uploads(product_id)
     ai_return_sync = _process_prompt_package_returns(ctx, product_id, target) if process_uploads else {"status": "skipped", "reason": "upload_sync_disabled"}
+    ai_return_postprocess = None
+    if _should_postprocess_ai_returns(ctx, product_id, ai_return_sync):
+        _guard_log("ai_return_postprocess_start", product_id=product_id, ai_return_sync=ai_return_sync)
+        with _guard_ai_return_postprocess_limits():
+            ai_return_postprocess = _run_incremental_postprocess(ctx, product_id, source_types=["ai_generated"])
+        if not ai_return_postprocess.success:
+            detail = {
+                **_status_detail(ctx, product_id, target),
+                "upload_sync": upload_sync,
+                "ai_return_sync": ai_return_sync,
+                "ai_return_postprocess": ai_return_postprocess.to_dict(),
+            }
+            status, action = _classify_failure(ai_return_postprocess)
+            _safe_guard_update(ctx, product_id, status, action, ai_return_postprocess.error.message if ai_return_postprocess.error else "", detail)
+            return ai_return_postprocess
+        post_detail = _status_detail(ctx, product_id, target)
+        postprocess_work = _ai_generated_postprocess_work_summary(ctx, product_id)
+        if _should_defer_after_ai_return_postprocess(post_detail, postprocess_work):
+            detail = {
+                **post_detail,
+                "upload_sync": upload_sync,
+                "ai_return_sync": ai_return_sync,
+                "ai_return_postprocess": ai_return_postprocess.to_dict(),
+                "ai_generated_postprocess_work": postprocess_work,
+            }
+            _safe_guard_update(ctx, product_id, "READY_TO_CONTINUE", "RUN_GUARD_AGAIN", "", detail)
+            return Result.ok({"product_id": product_id, "pipeline_status": "READY_TO_CONTINUE", "next_action": "RUN_GUARD_AGAIN", "detail": detail})
 
     assets = ctx.repo.list_where("assets", "product_id=?", (product_id,))
     segments = ctx.repo.list_where("segments", "product_id=?", (product_id,))
     _guard_log("material_loaded", product_id=product_id, assets=len(assets), segments=len(segments))
     if not assets:
-        detail = {**_status_detail(ctx, product_id, target), "upload_sync": upload_sync, "ai_return_sync": ai_return_sync}
+        detail = {**_status_detail(ctx, product_id, target), "upload_sync": upload_sync, "ai_return_sync": ai_return_sync, "ai_return_postprocess": ai_return_postprocess.to_dict() if ai_return_postprocess else None}
         _safe_guard_update(ctx, product_id, "BLOCKED", "NEED_MATERIAL_UPLOAD", "没有可处理素材，请先上传素材或等待AI回流", detail)
         return Result.ok({"product_id": product_id, "pipeline_status": "BLOCKED", "next_action": "NEED_MATERIAL_UPLOAD", "detail": detail})
 
@@ -160,6 +198,7 @@ def run_guard_pass(ctx, product_id: str, target: int | None = None, name: str = 
             **_status_detail(ctx, product_id, target),
             "upload_sync": upload_sync,
             "ai_return_sync": ai_return_sync,
+            "ai_return_postprocess": ai_return_postprocess.to_dict() if ai_return_postprocess else None,
             "stale_segments": stale_segments,
             "stale_ai_segments": stale_ai_segments,
             "stale_repair_source_types": stale_repair_source_types,
@@ -200,6 +239,8 @@ def run_guard_pass(ctx, product_id: str, target: int | None = None, name: str = 
             detail = {
                 **ready_detail,
                 "upload_sync": upload_sync,
+                "ai_return_sync": ai_return_sync,
+                "ai_return_postprocess": ai_return_postprocess.to_dict() if ai_return_postprocess else None,
                 "stale_segments": refreshed_stale,
                 "stale_ai_segments": _stale_segment_summary(ctx, [s for s in refreshed_segments if s.get("source_type") == "ai_generated"], refreshed_index),
                 "stale_repair_source_types": _stale_repair_source_types(ctx, refreshed_segments, refreshed_index),
@@ -255,7 +296,8 @@ def run_guard_pass(ctx, product_id: str, target: int | None = None, name: str = 
             )
 
     _guard_log("top_up_start", product_id=product_id, target=target)
-    top_up = _top_up(ctx, product_id, target, max_rounds=max_rounds)
+    top_up_result = _top_up_with_ads_template_fallback(ctx, product_id, target, max_rounds=max_rounds, template_id=template_id or None)
+    top_up = top_up_result["top_up"]
     ai_submit = _maybe_prepare_ai_submit(ctx, product_id, top_up.data or {}) if top_up.success else {"status": "skipped", "reason": "top_up_failed"}
     final = _status_after_top_up(ctx, product_id, target, top_up)
     if ai_submit.get("status") in {"manual_required", "failed", "timeout"} and final.get("pipeline_status") == "WAITING_AI_RETURN":
@@ -270,10 +312,89 @@ def run_guard_pass(ctx, product_id: str, target: int | None = None, name: str = 
         "stale_ai_segments": stale_ai_segments,
         "stale_repair_source_types": stale_repair_source_types,
         "top_up": top_up.to_dict(),
+        "top_up_template_fallback": top_up_result.get("fallback"),
         "final": final,
     }
     _safe_guard_update(ctx, product_id, final["pipeline_status"], final["next_action"], final.get("last_error") or "", detail, final.get("last_batch_id") or "")
     return Result.ok({"product_id": product_id, **final, "detail": detail})
+
+
+def _top_up_with_ads_template_fallback(ctx, product_id: str, target: int, max_rounds: int, template_id: str | None = None) -> dict[str, Any]:
+    forced_template_id = str(template_id or "").strip()
+    first = _top_up(ctx, product_id, target, max_rounds=max_rounds, template_id=forced_template_id or None)
+    if not _should_fallback_for_forced_ads_template(forced_template_id, first):
+        return {"top_up": first, "fallback": None}
+
+    _guard_log("ads_template_fallback_start", product_id=product_id, template_id=forced_template_id)
+    aborted = _abort_latest_planning_batch(ctx, product_id, "ads_template_fallback")
+    fallback = _top_up(ctx, product_id, target, max_rounds=max_rounds, template_id=None)
+    _guard_log(
+        "ads_template_fallback_done",
+        product_id=product_id,
+        template_id=forced_template_id,
+        fallback_success=fallback.success,
+        abort_status=aborted.get("status"),
+    )
+    return {
+        "top_up": fallback,
+        "fallback": {
+            "status": "used",
+            "from_template_id": forced_template_id,
+            "reason": "forced_ads_template_hero_hook_pool_empty",
+            "abort_planning_batch": aborted,
+            "first_attempt": first.to_dict(),
+            "fallback_attempt": fallback.to_dict(),
+        },
+    }
+
+
+def _should_fallback_for_forced_ads_template(template_id: str | None, result: Result) -> bool:
+    if not _is_forced_ads_template_id(template_id):
+        return False
+    if result.success:
+        return _is_forced_ads_template_empty_plan(result)
+    return _contains_ads_hero_hook_gap(result.to_dict())
+
+
+def _is_forced_ads_template_id(template_id: str | None) -> bool:
+    value = str(template_id or "").strip().upper()
+    return value.startswith(("AD_", "ADS_", "ADFAST", "AD_FAST"))
+
+
+def _is_forced_ads_template_empty_plan(result: Result) -> bool:
+    data = result.data or {}
+    if str(data.get("stop_reason") or "") != "render_plan_empty":
+        return False
+    for item in data.get("rounds") or []:
+        if int(item.get("planned_count") or 0) > 0:
+            return False
+    return True
+
+
+def _contains_ads_hero_hook_gap(value: Any) -> bool:
+    if isinstance(value, dict):
+        role = str(value.get("role") or "").strip().lower()
+        reason = str(value.get("reason") or "").strip().lower()
+        text = " ".join(
+            str(value.get(key) or "")
+            for key in ("code", "message", "error", "reason", "role")
+        ).lower()
+        hero_gap = role == "hero" and (
+            "candidate_pool_empty_after_safety_filters" in reason
+            or "no segment available for role hero" in text
+            or "hook_visual" in text
+        )
+        if hero_gap:
+            return True
+        return any(_contains_ads_hero_hook_gap(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_ads_hero_hook_gap(item) for item in value)
+    if isinstance(value, str):
+        text = value.lower()
+        return "no segment available for role hero" in text and (
+            "candidate_pool_empty_after_safety_filters" in text or "hook_visual" in text
+        )
+    return False
 
 
 def _process_uploads(product_id: str) -> dict[str, Any]:
@@ -335,6 +456,16 @@ def _has_required_task_payload(payload: dict[str, Any]) -> bool:
     except (TypeError, ValueError):
         requested = 0
     return bool(payload.get("product_name") and payload.get("market") and payload.get("category") and requested > 0)
+
+
+def _repo_has_column(ctx, table: str, column: str) -> bool:
+    checker = getattr(ctx.repo, "_has_column", None)
+    if callable(checker):
+        try:
+            return bool(checker(table, column))
+        except Exception:
+            return False
+    return False
 
 
 def _fetch_product_task_from_feishu(product_id: str) -> Result:
@@ -429,6 +560,102 @@ def _process_prompt_package_returns(ctx, product_id: str, target: int | None) ->
     return {"status": "ok", "imported_count": imported, "import_limit": import_limit, "remaining_count": remaining, "result": payload}
 
 
+def _should_postprocess_ai_returns(ctx, product_id: str, ai_return_sync: dict[str, Any]) -> bool:
+    if os.environ.get("AUTO_MIXCUT_GUARD_AI_RETURN_POSTPROCESS", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    status = str((ai_return_sync or {}).get("status") or "")
+    if status not in {"ok", "skipped"}:
+        return False
+    if str((ai_return_sync or {}).get("reason") or "") in {"disabled", "upload_sync_disabled", "target_already_filled"}:
+        return False
+    try:
+        remaining_count = int((ai_return_sync or {}).get("remaining_count") or 0)
+    except (TypeError, ValueError):
+        remaining_count = 0
+    if "remaining_count" in (ai_return_sync or {}) and remaining_count <= 0:
+        return False
+    try:
+        imported_count = int((ai_return_sync or {}).get("imported_count") or 0)
+    except (TypeError, ValueError):
+        imported_count = 0
+    if imported_count > 0:
+        return True
+    work = _ai_generated_postprocess_work_summary(ctx, product_id)
+    return _has_ai_generated_postprocess_work(work)
+
+
+@contextmanager
+def _guard_ai_return_postprocess_limits():
+    defaults = {
+        "AUTO_MIXCUT_GUARD_PROBE_LIMIT": "6",
+        "AUTO_MIXCUT_SEGMENT_ASSET_LIMIT": "6",
+        "AUTO_MIXCUT_GUARD_FRAME_LIMIT": "6",
+        "AUTO_MIXCUT_GUARD_RETAG_LIMIT": "6",
+        "AUTO_MIXCUT_GUARD_AI_STAGE_LIMIT": "6",
+        "AUTO_MIXCUT_GUARD_EFFECTIVE_ROLE_LIMIT": "6",
+        "AUTO_MIXCUT_GUARD_FRAME_TIMEOUT": "45",
+        "AUTO_MIXCUT_GUARD_AI_STAGE_TIMEOUT": "35",
+    }
+    changed: dict[str, str | None] = {}
+    for key, value in defaults.items():
+        if not os.environ.get(key):
+            changed[key] = None
+            os.environ[key] = value
+    try:
+        yield
+    finally:
+        for key, old_value in changed.items():
+            if old_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old_value
+
+
+def _ai_generated_postprocess_work_summary(ctx, product_id: str) -> dict[str, Any]:
+    assets = ctx.repo.list_where("assets", "product_id=? AND source_type='ai_generated'", (product_id,))
+    segments = ctx.repo.list_where("segments", "product_id=? AND source_type='ai_generated'", (product_id,))
+    stale = _stale_segment_summary(ctx, segments, _build_stale_index(ctx, segments)) if segments else {"stale_count": 0, "sample": []}
+    probe_pending = sum(1 for asset in assets if str(asset.get("probe_status") or "pending") != "done")
+    watermark_pending = sum(
+        1
+        for asset in assets
+        if str(asset.get("probe_status") or "") == "done"
+        and str(asset.get("has_watermark") or "pending") in {"", "pending", "unknown"}
+    )
+    no_watermark_assets = [
+        asset
+        for asset in assets
+        if str(asset.get("probe_status") or "") == "done" and str(asset.get("has_watermark") or "") == "no"
+    ]
+    unsegmented_assets = sum(
+        1
+        for asset in no_watermark_assets
+        if not ctx.repo.list_where("segments", "asset_id=? LIMIT 1", (asset["asset_id"],))
+    )
+    return {
+        "ai_generated_asset_count": len(assets),
+        "ai_generated_segment_count": len(segments),
+        "probe_pending_count": probe_pending,
+        "watermark_pending_count": watermark_pending,
+        "unsegmented_asset_count": unsegmented_assets,
+        "stale_segment_count": stale["stale_count"],
+        "stale_sample": stale.get("sample") or [],
+    }
+
+
+def _has_ai_generated_postprocess_work(summary: dict[str, Any]) -> bool:
+    return any(
+        int(summary.get(key) or 0) > 0
+        for key in ("probe_pending_count", "watermark_pending_count", "unsegmented_asset_count", "stale_segment_count")
+    )
+
+
+def _should_defer_after_ai_return_postprocess(detail: dict[str, Any], work: dict[str, Any]) -> bool:
+    remaining = int((detail or {}).get("remaining_count") or 0)
+    capacity = int((detail or {}).get("material_pool_extra_capacity") or 0)
+    return remaining > 0 and capacity <= 0 and _has_ai_generated_postprocess_work(work)
+
+
 def _guard_ai_return_timeout() -> int:
     try:
         return max(30, int(os.environ.get("AUTO_MIXCUT_GUARD_AI_RETURN_TIMEOUT", "240") or "240"))
@@ -509,10 +736,10 @@ def _maybe_prepare_ai_submit(ctx, product_id: str, top_up_data: dict[str, Any]) 
             "product_id": product_id,
             **budget,
         }
-    if os.environ.get("AUTO_MIXCUT_GUARD_SUBMIT_AI_PACKAGES", "1").strip().lower() in {"0", "false", "no", "off"}:
+    if not _guard_direct_ai_submit_enabled():
         return {
-            "status": "manual_required",
-            "reason": "auto submit disabled",
+            "status": "deferred_to_worker",
+            "reason": "submit_delegated_to_ai_heartbeat",
             "command": " ".join(command),
             "product_id": product_id,
             **budget,
@@ -593,6 +820,10 @@ def _ai_segment_worker_command(product_id: str, limit: int, max_submit_needed: i
     if priority_role:
         command.append(f"--slot-role={priority_role}")
     return command
+
+
+def _guard_direct_ai_submit_enabled() -> bool:
+    return factory_config().guard_submit_ai_packages
 
 
 def _ai_submit_budget(ctx, product_id: str) -> dict[str, int]:
@@ -725,7 +956,7 @@ def _guard_allows_top_up_with_stale() -> bool:
 
 
 def _is_ads_fast_mode() -> bool:
-    return os.environ.get("AUTO_MIXCUT_ADS_FAST_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+    return factory_config().ads_fast_mode
 
 
 def _guard_tag_timeout() -> int:
@@ -979,11 +1210,11 @@ def _has_more_material_work(summary: dict[str, Any]) -> bool:
 
 def _segments_for_source_types(ctx, product_id: str, source_types: list[str]) -> list[dict[str, Any]]:
     if not source_types:
-        return ctx.repo.list_where("segments", "product_id=?", (product_id,))
+        return ctx.repo.list_where("segments", "product_id=? ORDER BY id DESC", (product_id,))
     placeholders = ",".join("?" for _ in source_types)
     return ctx.repo.list_where(
         "segments",
-        f"product_id=? AND source_type IN ({placeholders})",
+        f"product_id=? AND source_type IN ({placeholders}) ORDER BY id DESC",
         (product_id, *source_types),
     )
 

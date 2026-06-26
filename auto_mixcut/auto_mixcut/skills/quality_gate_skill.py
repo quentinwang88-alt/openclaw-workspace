@@ -3,10 +3,12 @@ from __future__ import annotations
 import re
 import subprocess
 
+from auto_mixcut.config.factory_config import factory_config
 from auto_mixcut.core.result import Result
 from auto_mixcut.core.storage_paths import require_oss_object_path
 
 from .context import SkillContext
+from .material_policy_skill import MaterialPolicySkill, evaluate_material_policy
 from .usage_counter_skill import refresh_output_segment_usage
 
 
@@ -50,10 +52,13 @@ class QualityGateSkill:
             tag = first["tag"]
             segment = first["segment"]
             roles = segment.get("effective_roles_json") or []
+            material_policy = MaterialPolicySkill(self.ctx).evaluate_segment(segment, asset=first.get("asset") or {}, tag=tag, usecase="ads_mixcut" if _is_ads_mode() else "mixcut", slot_index=1, role="hero")
+            if not material_policy.get("first_slot_allowed"):
+                reasons.append("first segment blocked by material policy: " + ",".join(material_policy.get("block_reasons") or ["material_policy_blocked"]))
             if tag.get("product_visibility") != "high":
                 reasons.append("first segment product visibility is not high")
             ai_anchor_trusted = segment.get("source_type") == "ai_generated" and segment.get("anchor_match_level") == "strict_pass"
-            trusted_real_first = _trusted_real_first_segment(first)
+            trusted_real_first = bool(material_policy.get("trusted_real_first"))
             if tag.get("risk_level") != "low" and not ai_anchor_trusted and not trusted_real_first:
                 reasons.append("first segment risk is not low")
             if tag.get("hook_strength") not in {"strong", "medium"}:
@@ -61,7 +66,7 @@ class QualityGateSkill:
             if (
                 segment.get("product_match_status") not in {"trusted_by_source", "anchor_pass"}
                 and not ai_anchor_trusted
-                and not _low_trust_first_slot_review_candidate(first)
+                and not material_policy.get("low_trust_first_slot_candidate")
             ):
                 reasons.append("first segment product match is not trusted")
             if not set(roles).intersection({"hero", "result", "detail"}):
@@ -106,51 +111,18 @@ def _trusted_real_first_segment(bundle: dict) -> bool:
     segment = bundle.get("segment") or {}
     asset = bundle.get("asset") or {}
     tag = bundle.get("tag") or {}
-    source_type = str(segment.get("source_type") or asset.get("source_type") or "")
-    trust = str(segment.get("source_trust_level") or asset.get("source_trust_level") or "")
-    binding = str(segment.get("product_binding_type") or asset.get("product_binding_type") or "")
-    match = str(segment.get("product_match_status") or "")
-    if source_type not in {"authorized_creator", "self_shot", "original_script", "creator_original"}:
-        return False
-    if trust not in {"high", "medium"} or binding != "exact_sku" or match not in {"trusted_by_source", "anchor_pass"}:
-        return False
-    if str(tag.get("product_visibility") or "") != "high":
-        return False
-    if str(tag.get("confidence") or "") not in {"high", "medium"}:
-        return False
-    if str(tag.get("risk_level") or "") != "medium":
-        return False
-    reason = str(tag.get("reason") or "")
-    soft_tokens = ["锚点未知", "锚点不确定", "锚点缺失", "商品锚点", "商品信息缺失", "需核对", "需复核", "需确认", "人工确认", "人工核实"]
-    hard_tokens = ["水印", "平台", "账号", "logo", "Logo", "错款", "错品类", "竞品", "SKU一致性", "漂移", "无关元素", "品牌包", "遮挡严重"]
-    return any(token in reason for token in soft_tokens) and not any(token in reason for token in hard_tokens)
+    return evaluate_material_policy(None, segment, asset=asset, tag=tag, usecase="ads_mixcut" if _is_ads_mode() else "mixcut", slot_index=1, role="hero").trusted_real_first
 
 
 def _low_trust_first_slot_review_candidate(bundle: dict) -> bool:
     segment = bundle.get("segment") or {}
     asset = bundle.get("asset") or {}
     tag = bundle.get("tag") or {}
-    source_type = str(segment.get("source_type") or asset.get("source_type") or "")
-    trust = str(segment.get("source_trust_level") or asset.get("source_trust_level") or "")
-    binding = str(segment.get("product_binding_type") or asset.get("product_binding_type") or "")
-    match = str(segment.get("product_match_status") or "")
-    if source_type not in {"douyin_repost", "competitor"}:
-        return False
-    if trust != "low" or binding not in {"exact_sku", "same_style"}:
-        return False
-    if match not in {"", "uncertain", "trusted_by_source", "anchor_pass"}:
-        return False
-    if "hero" not in (segment.get("effective_roles_json") or []):
-        return False
-    return (
-        str(tag.get("primary_shot_role") or "") == "hero"
-        and str(tag.get("product_visibility") or "") == "high"
-        and str(tag.get("confidence") or "") == "high"
-        and str(tag.get("risk_level") or "") == "low"
-        and str(tag.get("mixcut_usability") or "") == "yes"
-        and str(tag.get("text_overlay_risk") or "none") in {"", "none", "low", "minor"}
-        and str(asset.get("has_watermark") or segment.get("has_watermark") or "no") != "yes"
-    )
+    return evaluate_material_policy(None, segment, asset=asset, tag=tag, usecase="ads_mixcut" if _is_ads_mode() else "mixcut", slot_index=1, role="hero").low_trust_first_slot_candidate
+
+
+def _is_ads_mode() -> bool:
+    return factory_config().ads_fast_mode
 
 
 def _audio_volume(ctx: SkillContext, output: dict, start_sec: float | None = None, duration_sec: float | None = None) -> float | None:

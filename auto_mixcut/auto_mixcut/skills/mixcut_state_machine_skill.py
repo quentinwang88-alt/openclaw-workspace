@@ -3,14 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from auto_mixcut.domain.statuses import AI_WORKER_ACTIONS, RUNNABLE_PIPELINE_STATUSES, WAIT_AI_RETURN_ACTIONS, NextAction, PipelineStatus
 
-DONE_STATUSES = {"DONE"}
-WAIT_AI_RETURN_ACTIONS = {"WAIT_AI_SEGMENT_RETURN"}
-AI_WORKER_ACTIONS = {"RUN_AI_SEGMENT_WORKER"}
-RUNNABLE_ACTIONS = {"GUARD_PASS_STARTED", "RUN_GUARD_AGAIN", *AI_WORKER_ACTIONS}
-RUNNABLE_PIPELINE_STATUSES = {"RUNNING", "READY_TO_CONTINUE"}
-WAITING_AI_RETURN_STATUS = "WAITING_AI_RETURN"
-BLOCKED_STATUS = "BLOCKED"
+DONE_STATUSES = {PipelineStatus.DONE}
+RUNNABLE_ACTIONS = {NextAction.GUARD_PASS_STARTED, NextAction.RUN_GUARD_AGAIN, *AI_WORKER_ACTIONS}
+WAITING_AI_RETURN_STATUS = PipelineStatus.WAITING_AI_RETURN
+BLOCKED_STATUS = PipelineStatus.BLOCKED
 
 
 @dataclass(frozen=True)
@@ -68,8 +66,8 @@ def guard_start_status(detail: dict[str, Any]) -> tuple[str, str]:
         and int(detail.get("remaining_count") or 0) > 0
         and int(detail.get("first_slot_remaining_capacity") or 0) <= 0
     ):
-        return WAITING_AI_RETURN_STATUS, "CHECK_AI_RETURN_THEN_CONTINUE"
-    return "RUNNING", "GUARD_PASS_STARTED"
+        return WAITING_AI_RETURN_STATUS, NextAction.CHECK_AI_RETURN_THEN_CONTINUE
+    return PipelineStatus.RUNNING, NextAction.GUARD_PASS_STARTED
 
 
 def _display_state(pipeline_status: str, next_action: str, task_status: str) -> str:
@@ -79,7 +77,7 @@ def _display_state(pipeline_status: str, next_action: str, task_status: str) -> 
         return "阻断需人工处理"
     if pipeline_status == WAITING_AI_RETURN_STATUS or next_action in WAIT_AI_RETURN_ACTIONS:
         return "等待AI回流"
-    if next_action == "WAIT_AI_SUPPLEMENT_APPROVAL":
+    if next_action == NextAction.WAIT_AI_SUPPLEMENT_APPROVAL:
         return "等待AI补素材"
     if pipeline_status in RUNNABLE_PIPELINE_STATUSES or next_action in RUNNABLE_ACTIONS:
         return "运行中"

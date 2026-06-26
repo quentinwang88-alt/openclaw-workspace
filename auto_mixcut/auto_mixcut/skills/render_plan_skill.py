@@ -9,6 +9,7 @@ from typing import Any
 
 import yaml
 
+from auto_mixcut.config.factory_config import factory_config
 from auto_mixcut.core.ids import new_id
 from auto_mixcut.core.result import Result
 
@@ -20,6 +21,7 @@ from .hard_subtitle_policy import (
     is_repairable_bottom_caption,
     is_unusable_hard_subtitle,
 )
+from .material_policy_skill import MaterialPolicySkill, TRUSTED_REAL_SOURCE_TYPES
 from .usage_counter_skill import (
     FAILED_OUTPUT_SEGMENT_STATUSES,
     ads_fast_strict_outputs_enabled,
@@ -35,7 +37,7 @@ DEFAULT_TEMPLATE_SPECS = [
 ]
 TRUST_RANK = {"low": 1, "medium": 2, "high": 3}
 CORE_ROLES = {"hero", "detail", "result"}
-REAL_SOURCE_TYPES = {"authorized_creator", "self_shot", "original_script", "creator_original"}
+REAL_SOURCE_TYPES = TRUSTED_REAL_SOURCE_TYPES
 FALLBACK_TEMPLATE_ID = "GENERAL_BALANCED_15S"
 MIN_RENDER_PLAN_DURATION_MS = 12000
 MAX_SEGMENT_REUSE_PER_BATCH = 2
@@ -46,6 +48,7 @@ MAX_TEMPLATE_REUSE_PER_BATCH = 2
 FILL_MODE_SEGMENT_REUSE_PER_BATCH = 3
 FILL_MODE_SUPPORT_SEGMENT_REUSE_PER_BATCH = 3
 FILL_MODE_FIRST_SEGMENT_REUSE_PER_BATCH = 2
+FILL_MODE_FIRST_SEGMENT_REUSE_PER_BATCH_ADS = 5
 FILL_MODE_FIRST_ASSET_REUSE_PER_BATCH = 4
 FILL_MODE_TEMPLATE_REUSE_PER_BATCH = 3
 FINAL_FILL_FIRST_SEGMENT_REUSE_PER_BATCH = 3
@@ -485,7 +488,7 @@ def estimate_render_plan_capacity(ctx: SkillContext, product_id: str, count: int
         "fill_mode_activated_at_variant": batch_state.get("fill_mode_activated_at_variant"),
         "final_fill_mode_activated_at_variant": batch_state.get("final_fill_mode_activated_at_variant"),
         "first_slot_candidates": first_slot_candidates,
-        "first_slot_capacity": first_slot_candidates * FILL_MODE_FIRST_SEGMENT_REUSE_PER_BATCH,
+        "first_slot_capacity": first_slot_candidates * _first_slot_reuse_cap(),
     }
 
 
@@ -735,6 +738,14 @@ def _select_segments(ctx: SkillContext, product_id: str, slots, batch_state: dic
         if not pool and role == "hero":
             pool = _hero_fallback_pool(segments)
         pool = _filter_product_mismatch_suspects(pool)
+        policy_pool, policy_rejections = _filter_material_policy_pool(ctx, pool, role, slot_index)
+        if not policy_pool and policy_rejections:
+            return Result.fail(
+                "SKIPPED_LOW_QUALITY",
+                "no segment passes material policy",
+                {"status": "skipped_low_quality", "role": role, "slot_index": slot_index, "reason": "material_policy_blocked", "material_policy_rejections": policy_rejections[:8]},
+            )
+        pool = policy_pool
         pool = _filter_ai_core_prompt_packages(ctx, product_id, pool, state, role, slot_index)
         if slot_index == voc_required_slot_index:
             pool = [s for s in pool if _is_voc_ads_hook_segment(ctx, product_id, state, s)]
@@ -921,6 +932,12 @@ def _hero_fallback_pool(segments: list[dict]) -> list[dict]:
 
 def _filter_product_mismatch_suspects(pool: list[dict]) -> list[dict]:
     return [s for s in pool if not _is_product_mismatch_suspect(s)]
+
+
+def _filter_material_policy_pool(ctx: SkillContext, pool: list[dict], role: str, slot_index: int) -> tuple[list[dict], list[dict[str, Any]]]:
+    if not _is_ads_mode() or not pool:
+        return pool, []
+    return MaterialPolicySkill(ctx).filter_segments(pool, usecase="ads_mixcut", role=role, slot_index=slot_index)
 
 
 def _render_eligible_segments(segments: list[dict]) -> list[dict]:
@@ -1571,9 +1588,13 @@ def _passes_first_slot_floor(ctx: SkillContext, segment: dict, risk_policy: dict
         return False, "first slot asset has watermark"
     if risk_policy.get("avoid_subtitle_risk_in_first_slot") and _has_subtitle_risk(ctx, segment):
         return False, "first slot has subtitle risk"
+    material_policy = _first_slot_material_policy(ctx, segment)
+    if not material_policy.get("first_slot_allowed"):
+        reasons = ",".join(material_policy.get("block_reasons") or ["material_policy_blocked"])
+        return False, f"first slot blocked by material policy: {reasons}"
     risk = _latest_tag_value(ctx, segment, "risk_level") or segment.get("risk_level")
     ai_anchor_trusted = segment.get("source_type") == "ai_generated" and segment.get("anchor_match_level") == "strict_pass"
-    trusted_real_first = _trusted_real_first_segment(ctx, segment)
+    trusted_real_first = bool(material_policy.get("trusted_real_first"))
     if risk != "low" and not ai_anchor_trusted and not trusted_real_first:
         return False, "first slot risk is not low or trusted"
     visibility = _latest_tag_value(ctx, segment, "product_visibility")
@@ -1582,55 +1603,31 @@ def _passes_first_slot_floor(ctx: SkillContext, segment: dict, risk_policy: dict
     if (
         segment.get("product_match_status") not in {"trusted_by_source", "anchor_pass"}
         and not ai_anchor_trusted
-        and not _low_trust_first_slot_review_candidate(ctx, segment)
+        and not material_policy.get("low_trust_first_slot_candidate")
     ):
         return False, "first slot product match is not trusted"
     return True, ""
 
 
 def _trusted_real_first_segment(ctx: SkillContext, segment: dict) -> bool:
-    source_type = str(segment.get("source_type") or "")
-    trust = str(segment.get("source_trust_level") or "")
-    binding = str(segment.get("product_binding_type") or "")
-    match = str(segment.get("product_match_status") or "")
-    if source_type not in REAL_SOURCE_TYPES:
-        return False
-    if trust not in {"high", "medium"} or binding != "exact_sku" or match not in {"trusted_by_source", "anchor_pass"}:
-        return False
-    if str(_latest_tag_value(ctx, segment, "product_visibility") or "") != "high":
-        return False
-    if str(_latest_tag_value(ctx, segment, "confidence") or "") not in {"high", "medium"}:
-        return False
-    if str(_latest_tag_value(ctx, segment, "risk_level") or "") != "medium":
-        return False
-    reason = str(_latest_tag_value(ctx, segment, "reason") or "")
-    soft_tokens = ["锚点未知", "锚点不确定", "锚点缺失", "商品锚点", "商品信息缺失", "需核对", "需复核", "需确认", "人工确认", "人工核实"]
-    hard_tokens = ["水印", "平台", "账号", "logo", "Logo", "错款", "错品类", "竞品", "SKU一致性", "漂移", "无关元素", "品牌包", "遮挡严重"]
-    return any(token in reason for token in soft_tokens) and not any(token in reason for token in hard_tokens)
+    return bool(_first_slot_material_policy(ctx, segment).get("trusted_real_first"))
 
 
 def _low_trust_first_slot_review_candidate(ctx: SkillContext, segment: dict) -> bool:
-    source_type = str(segment.get("source_type") or "")
-    trust = str(segment.get("source_trust_level") or "")
-    binding = str(segment.get("product_binding_type") or "")
-    match = str(segment.get("product_match_status") or "")
-    if source_type not in {"douyin_repost", "competitor"}:
-        return False
-    if trust != "low" or binding not in {"exact_sku", "same_style"}:
-        return False
-    if match not in {"", "uncertain", "trusted_by_source", "anchor_pass"}:
-        return False
-    if "hero" not in (segment.get("effective_roles_json") or []):
-        return False
-    return (
-        str(_latest_tag_value(ctx, segment, "primary_shot_role") or "") == "hero"
-        and str(_latest_tag_value(ctx, segment, "product_visibility") or "") == "high"
-        and str(_latest_tag_value(ctx, segment, "confidence") or "") == "high"
-        and str(_latest_tag_value(ctx, segment, "risk_level") or "") == "low"
-        and str(_latest_tag_value(ctx, segment, "mixcut_usability") or "") == "yes"
-        and not _has_subtitle_risk(ctx, segment)
-        and not _asset_has_watermark(ctx, segment)
-    )
+    return bool(_first_slot_material_policy(ctx, segment).get("low_trust_first_slot_candidate"))
+
+
+def _first_slot_material_policy(ctx: SkillContext, segment: dict) -> dict[str, Any]:
+    tag = {
+        "primary_shot_role": _latest_tag_value(ctx, segment, "primary_shot_role"),
+        "product_visibility": _latest_tag_value(ctx, segment, "product_visibility"),
+        "confidence": _latest_tag_value(ctx, segment, "confidence"),
+        "risk_level": _latest_tag_value(ctx, segment, "risk_level"),
+        "mixcut_usability": _latest_tag_value(ctx, segment, "mixcut_usability"),
+        "text_overlay_risk": _latest_tag_value(ctx, segment, "text_overlay_risk"),
+        "reason": _latest_tag_value(ctx, segment, "reason"),
+    }
+    return MaterialPolicySkill(ctx).evaluate_segment(segment, tag=tag, usecase="ads_mixcut" if _is_ads_mode() else "mixcut", slot_index=1, role="hero")
 
 
 def _prefer_first_slot_pool(ctx: SkillContext, pool: list[dict]) -> list[dict]:
@@ -1921,11 +1918,24 @@ def _core_segment_reuse_cap(state: dict) -> int:
 
 
 def _first_segment_reuse_cap(state: dict) -> int:
+    base = MAX_FIRST_SEGMENT_REUSE_PER_BATCH
     if state.get("reuse_mode") == "final_fill":
-        return FINAL_FILL_FIRST_SEGMENT_REUSE_PER_BATCH
-    if state.get("reuse_mode") == "fill_target":
-        return FILL_MODE_FIRST_SEGMENT_REUSE_PER_BATCH
-    return MAX_FIRST_SEGMENT_REUSE_PER_BATCH
+        base = FINAL_FILL_FIRST_SEGMENT_REUSE_PER_BATCH
+    elif state.get("reuse_mode") == "fill_target":
+        base = FILL_MODE_FIRST_SEGMENT_REUSE_PER_BATCH
+    if _is_ads_mode():
+        return max(base, FILL_MODE_FIRST_SEGMENT_REUSE_PER_BATCH_ADS)
+    return base
+
+
+def _is_ads_mode() -> bool:
+    return factory_config().ads_fast_mode
+
+
+def _first_slot_reuse_cap() -> int:
+    if factory_config().ads_fast_mode:
+        return FILL_MODE_FIRST_SEGMENT_REUSE_PER_BATCH_ADS
+    return FILL_MODE_FIRST_SEGMENT_REUSE_PER_BATCH
 
 
 def _first_asset_reuse_cap(state: dict) -> int:

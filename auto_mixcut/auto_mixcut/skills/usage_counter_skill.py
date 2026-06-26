@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from collections import Counter
-import os
 
+from auto_mixcut.config.factory_config import factory_config
 from .context import SkillContext
 
 
@@ -21,7 +21,7 @@ FAILED_OUTPUT_SEGMENT_STATUSES = {
 
 
 def ads_fast_strict_outputs_enabled() -> bool:
-    return os.environ.get("AUTO_MIXCUT_ADS_FAST_MODE", "").strip().lower() in {"1", "true", "yes", "on"}
+    return factory_config().ads_fast_mode
 
 
 def is_human_rejected_output(output: dict) -> bool:

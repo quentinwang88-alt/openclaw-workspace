@@ -1,5 +1,4 @@
-from __future__ import annotations
-
+from auto_mixcut.config.factory_config import factory_config
 from auto_mixcut.core.result import Result
 
 from .context import SkillContext
@@ -12,6 +11,11 @@ MAX_HEAVY_RENDER_PLAN_ESTIMATE_SEGMENTS = 80
 AVG_SEGMENTS_PER_OUTPUT = 5
 SUPPORT_SEGMENT_REUSE_CAP = 3
 FIRST_SLOT_REUSE_CAP = 2
+FIRST_SLOT_REUSE_CAP_ADS = 5
+
+
+def _is_ads_fast() -> bool:
+    return factory_config().ads_fast_mode
 
 
 class CapacityCounterSkill:
@@ -63,7 +67,8 @@ def _lightweight_capacity_estimate(segments: list[dict], probe_count: int) -> di
     usable = [segment for segment in segments if segment.get("effective_roles_json")]
     first_slot = [segment for segment in usable if "hero" in (segment.get("effective_roles_json") or [])]
     segment_capacity = int(len(usable) * SUPPORT_SEGMENT_REUSE_CAP / AVG_SEGMENTS_PER_OUTPUT)
-    first_slot_capacity = len(first_slot) * FIRST_SLOT_REUSE_CAP
+    first_slot_cap = FIRST_SLOT_REUSE_CAP_ADS if _is_ads_fast() else FIRST_SLOT_REUSE_CAP
+    first_slot_capacity = len(first_slot) * first_slot_cap
     planned = max(0, min(int(probe_count or 0), segment_capacity, first_slot_capacity))
     bottlenecks = []
     if planned == segment_capacity:
