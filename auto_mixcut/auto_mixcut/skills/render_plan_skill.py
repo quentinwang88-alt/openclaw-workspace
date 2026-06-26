@@ -25,6 +25,7 @@ from .material_policy_skill import MaterialPolicySkill, TRUSTED_REAL_SOURCE_TYPE
 from .usage_counter_skill import (
     FAILED_OUTPUT_SEGMENT_STATUSES,
     ads_fast_strict_outputs_enabled,
+    is_ads_fast_output,
     is_good_rendered_output_strict,
 )
 
@@ -85,7 +86,7 @@ class RenderPlanSkill:
         task = _task(self.ctx, product_id)
         allowed = int((task or {}).get("allowed_variant_count") or 0)
         target_total = min(count or allowed, allowed)
-        existing_outputs = _usable_existing_outputs(self.ctx, product_id) if fill_gap_only else []
+        existing_outputs = _usable_existing_outputs(self.ctx, product_id, template_id=template_id) if fill_gap_only else []
         existing_count = len(existing_outputs)
         total = max(0, target_total - existing_count) if fill_gap_only else target_total
         if target_total <= 0:
@@ -492,11 +493,13 @@ def estimate_render_plan_capacity(ctx: SkillContext, product_id: str, count: int
     }
 
 
-def _usable_existing_outputs(ctx: SkillContext, product_id: str) -> list[dict[str, Any]]:
+def _usable_existing_outputs(ctx: SkillContext, product_id: str, template_id: str | None = None) -> list[dict[str, Any]]:
     outputs = ctx.repo.list_where("outputs", "product_id=? ORDER BY created_at, id", (product_id,))
+    forced_ads_template = str(template_id or "").strip().upper().startswith("AD_FAST")
     return [
         output
         for output in outputs
+        if not (forced_ads_template and ads_fast_strict_outputs_enabled()) or is_ads_fast_output(output)
         if is_good_rendered_output_strict(ctx, output, strict_segments=ads_fast_strict_outputs_enabled())
     ]
 

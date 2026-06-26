@@ -7,6 +7,7 @@ import unittest
 
 from auto_mixcut.core.bootstrap import build_context
 from auto_mixcut.skills.rds_repository_skill import RDSRepositorySkill
+from auto_mixcut.skills.render_plan_skill import _usable_existing_outputs
 from auto_mixcut.skills.usage_counter_skill import count_good_rendered_outputs
 from scripts.run_ads_mixcut_unattended import (
     build_parser,
@@ -166,6 +167,39 @@ class ADSQuantityGoalTest(unittest.TestCase):
             self.assertEqual(general_snapshot["effective_outputs"], 2)
             self.assertEqual(ads_snapshot["effective_outputs"], 1)
             self.assertEqual(ads_snapshot["target_remaining_variant_count"], 1)
+        finally:
+            if previous is None:
+                os.environ.pop("AUTO_MIXCUT_ADS_FAST_MODE", None)
+            else:
+                os.environ["AUTO_MIXCUT_ADS_FAST_MODE"] = previous
+
+    def test_forced_ads_render_plan_existing_outputs_ignore_non_ads_outputs(self):
+        product_id = "PROD_ADS_PLAN_COUNT"
+        for output_id, template_id in [
+            ("OUT_ADS", "AD_FAST_HOOK_8S"),
+            ("OUT_GENERAL", "GENERAL_BALANCED_15S"),
+        ]:
+            self.ctx.repo.upsert(
+                "outputs",
+                "output_id",
+                {
+                    "output_id": output_id,
+                    "product_id": product_id,
+                    "template_id": template_id,
+                    "render_status": "rendered",
+                    "machine_quality_status": "publish_ready",
+                },
+            )
+
+        previous = os.environ.get("AUTO_MIXCUT_ADS_FAST_MODE")
+        try:
+            os.environ["AUTO_MIXCUT_ADS_FAST_MODE"] = "1"
+
+            general_outputs = _usable_existing_outputs(self.ctx, product_id)
+            ads_outputs = _usable_existing_outputs(self.ctx, product_id, template_id="AD_FAST_HOOK_8S")
+
+            self.assertEqual([row["output_id"] for row in general_outputs], ["OUT_ADS", "OUT_GENERAL"])
+            self.assertEqual([row["output_id"] for row in ads_outputs], ["OUT_ADS"])
         finally:
             if previous is None:
                 os.environ.pop("AUTO_MIXCUT_ADS_FAST_MODE", None)
