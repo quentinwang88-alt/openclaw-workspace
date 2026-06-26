@@ -80,6 +80,12 @@ VOC_ADS_HOOK_PACKAGE_TEMPLATE_ID = "VOC_ADS_HOOK_PACKAGE"
 ADS_FAST_TEMPLATE_ID = "AD_FAST_HOOK_8S"
 DEFAULT_ADS_VOC_QUOTA_RATIO = 0.2
 DEFAULT_ADS_VOC_SEGMENT_OUTPUT_CAP = 2
+DEFAULT_MAX_RENDERS_PER_PASS = 4
+GOAL_MODE_ABSOLUTE_TARGET = "absolute_target"
+GOAL_MODE_INCREMENTAL_ADD = "incremental_add"
+GOAL_MODE_FACTORY_TIER = "factory_tier"
+GOAL_MODES = {GOAL_MODE_ABSOLUTE_TARGET, GOAL_MODE_INCREMENTAL_ADD, GOAL_MODE_FACTORY_TIER}
+FACTORY_TIERS = {20, 40, 60, 80}
 GOOD_MACHINE_OUTPUT_STATUSES = {"passed", "passed_with_warning", "needs_review", "publish_ready"}
 REJECTED_HUMAN_OUTPUT_STATUSES = {"rejected", "discard", "不可发布", "废弃", "不要", "不使用"}
 FAILED_SEGMENT_STATUSES = {
@@ -224,6 +230,77 @@ def prepared_prompt_ids(result: Dict[str, Any]) -> List[str]:
         if prompt_id:
             ids.append(prompt_id)
     return ids
+
+
+def normalize_goal_args(args: argparse.Namespace) -> argparse.Namespace:
+    add_count = _to_int(getattr(args, "add_count", 0), 0)
+    factory_tier = _to_int(getattr(args, "factory_tier", 0), 0)
+    if add_count > 0:
+        args.goal_mode = GOAL_MODE_INCREMENTAL_ADD
+        args.target_count = add_count
+    if factory_tier > 0:
+        args.goal_mode = GOAL_MODE_FACTORY_TIER
+        args.target_count = factory_tier
+    if getattr(args, "goal_mode", "") not in GOAL_MODES:
+        args.goal_mode = GOAL_MODE_ABSOLUTE_TARGET
+    args.target_count = max(0, _to_int(getattr(args, "target_count", 0), 0))
+    args.add_count = max(0, add_count)
+    if args.goal_mode == GOAL_MODE_FACTORY_TIER and factory_tier <= 0 and args.target_count in FACTORY_TIERS:
+        factory_tier = args.target_count
+    args.factory_tier = factory_tier if factory_tier in FACTORY_TIERS else 0
+    return args
+
+
+def build_quantity_goal(
+    out: Dict[str, Any],
+    target_count: int,
+    goal_mode: str = GOAL_MODE_ABSOLUTE_TARGET,
+    add_count: int = 0,
+    factory_tier: int = 0,
+) -> Dict[str, Any]:
+    start_good = max(0, _to_int(out.get("good_outputs"), 0))
+    requested = max(0, _to_int(target_count, 0))
+    mode = goal_mode if goal_mode in GOAL_MODES else GOAL_MODE_ABSOLUTE_TARGET
+
+    if mode == GOAL_MODE_INCREMENTAL_ADD:
+        desired_new = max(0, _to_int(add_count, 0) or requested)
+        target_good = start_good + desired_new
+    elif mode == GOAL_MODE_FACTORY_TIER:
+        tier = _to_int(factory_tier, 0) or requested
+        target_good = tier if tier in FACTORY_TIERS else requested
+        desired_new = max(0, target_good - start_good)
+    else:
+        target_good = requested
+        desired_new = max(0, target_good - start_good)
+
+    return update_quantity_goal_progress(
+        {
+            "goal_mode": mode,
+            "requested_target_count": requested,
+            "start_strict_good_count": start_good,
+            "target_strict_good_count": max(0, target_good),
+            "desired_new_good_count": desired_new,
+            "factory_tier": target_good if mode == GOAL_MODE_FACTORY_TIER else 0,
+        },
+        start_good,
+    )
+
+
+def update_quantity_goal_progress(goal: Dict[str, Any], current_good: int) -> Dict[str, Any]:
+    target_good = max(0, _to_int(goal.get("target_strict_good_count"), 0))
+    start_good = max(0, _to_int(goal.get("start_strict_good_count"), 0))
+    current_good = max(0, _to_int(current_good, 0))
+    return {
+        **goal,
+        "current_strict_good_count": current_good,
+        "new_good_outputs": max(0, current_good - start_good),
+        "remaining_to_target": max(0, target_good - current_good),
+    }
+
+
+def render_batch_limit(value: Any) -> int:
+    limit = _to_int(value, DEFAULT_MAX_RENDERS_PER_PASS)
+    return max(0, limit)
 
 
 # ── Step 1: inspect ──
@@ -679,9 +756,14 @@ def plan_ads_mixcut(
     use_voc_hooks: bool,
     max_hook: int,
     max_support: int,
+    quantity_goal: Optional[Dict[str, Any]] = None,
+    max_renders_per_pass: int = DEFAULT_MAX_RENDERS_PER_PASS,
 ) -> Dict[str, Any]:
-    existing_good = out["good_outputs"]
+    quantity_goal = quantity_goal or build_quantity_goal(out, target, GOAL_MODE_ABSOLUTE_TARGET)
+    existing_good = max(0, _to_int(out.get("good_outputs"), 0))
+    target = max(0, _to_int(quantity_goal.get("target_strict_good_count"), target))
     remaining = max(0, target - existing_good)
+    pass_limit = render_batch_limit(max_renders_per_pass)
     blockers: List[str] = []
     if task is None:
         blockers.append("content_task_missing")
@@ -736,9 +818,11 @@ def plan_ads_mixcut(
 
     # render plan
     planned_renders = 0
+    guard_target_count = existing_good
     min_assets = hero_count + result_count + detail_count
     if remaining > 0 and min_assets >= 3:
-        planned_renders = remaining
+        planned_renders = min(remaining, pass_limit) if pass_limit > 0 else remaining
+        guard_target_count = existing_good + planned_renders
 
     if remaining <= 0:
         status = "ready"
@@ -759,6 +843,7 @@ def plan_ads_mixcut(
         "existing_good_outputs": existing_good,
         "existing_total_outputs": out["total_outputs"],
         "target_count": target,
+        "quantity_goal": update_quantity_goal_progress(quantity_goal, existing_good),
         "remaining_to_target": remaining,
         "asset_pool": {
             "raw_total_segments": seg.get("raw_total", seg["total"]),
@@ -819,6 +904,9 @@ def plan_ads_mixcut(
         },
         "render": {
             "planned_renders": planned_renders,
+            "max_renders_per_pass": pass_limit,
+            "guard_target_count": guard_target_count,
+            "final_target_count": target,
             "available_templates": "AD_FAST_HOOK_8S, AD_FAST_HOOK_10S, AD_FAST_PROOF_12S",
         },
         "status": status,
@@ -866,7 +954,7 @@ def persist_run(conn, run_id: str, result: Dict[str, Any], args: argparse.Namesp
         "planned_new_hook_segments, planned_new_support_segments, "
         "rendered_output_count, payload_json, created_at, updated_at) "
         "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-        (run_id, args.product_id, args.target_count, 1 if args.use_voc_hooks else 0,
+        (run_id, args.product_id, _to_int(result.get("target_count"), args.target_count), 1 if args.use_voc_hooks else 0,
          1 if args.short_ads_mode else 0,
          args.max_new_hook_segments, args.max_new_support_segments,
          status, current_step,
@@ -1136,30 +1224,38 @@ def run_segment_qc(args: argparse.Namespace) -> Dict[str, Any]:
     }
 
 
-def run_render_guard(args: argparse.Namespace) -> Dict[str, Any]:
+def run_render_guard(args: argparse.Namespace, plan: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if not args.render:
         return {"status": "not_requested"}
     if not args.write:
         return {"status": "blocked", "reason": "render_requires_write"}
+    render_plan = (plan or {}).get("render") or {}
+    guard_target = _to_int(render_plan.get("guard_target_count"), _to_int(getattr(args, "target_count", 0), 0))
+    final_target = _to_int(render_plan.get("final_target_count"), _to_int(getattr(args, "target_count", 0), 0))
     cmd = [
         sys.executable,
         "scripts/run_mixcut_guard.py",
         "--product-id",
         args.product_id,
         "--target",
-        str(args.target_count),
+        str(guard_target),
         "--max-rounds",
         str(max(1, int(args.guard_max_rounds or 3))),
         "--template-id",
         ADS_FAST_TEMPLATE_ID,
     ]
     env = {"AUTO_MIXCUT_DB_PROVIDER": "mysql", "AUTO_MIXCUT_OSS_PROVIDER": "aliyun", "AUTO_MIXCUT_ADS_FAST_MODE": "1"}
-    return command_result(
+    result = command_result(
         cmd,
         SKILL_ROOT,
         env=env,
         timeout_minutes=args.render_timeout_minutes,
     )
+    result["guard_target_count"] = guard_target
+    result["final_target_count"] = final_target
+    result["planned_renders"] = _to_int(render_plan.get("planned_renders"), 0)
+    result["max_renders_per_pass"] = _to_int(render_plan.get("max_renders_per_pass"), 0)
+    return result
 
 
 def run_final_qc(args: argparse.Namespace, render_result: Dict[str, Any]) -> Dict[str, Any]:
@@ -1181,6 +1277,13 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         out = load_output_summary(conn, args.product_id)
         voc = load_voc_hook_package(conn, args.product_id) if args.use_voc_hooks else None
         voc_gap = diagnose_voc_gap(conn, args.product_id) if args.use_voc_hooks and voc is None else {}
+        quantity_goal = build_quantity_goal(
+            out,
+            args.target_count,
+            getattr(args, "goal_mode", GOAL_MODE_ABSOLUTE_TARGET),
+            getattr(args, "add_count", 0),
+            getattr(args, "factory_tier", 0),
+        )
 
         # step 2: plan
         plan = plan_ads_mixcut(
@@ -1188,6 +1291,8 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             voc_gap,
             args.target_count, args.use_voc_hooks,
             args.max_new_hook_segments, args.max_new_support_segments,
+            quantity_goal=quantity_goal,
+            max_renders_per_pass=args.max_renders_per_pass,
         )
 
         run_id = "ads_unattended__{}__{}".format(args.product_id, now_iso().replace(":", "").replace("-", ""))
@@ -1195,7 +1300,10 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             "run_id": run_id,
             "dry_run": not args.write,
             "product_id": args.product_id,
-            "target_count": args.target_count,
+            "goal_mode": quantity_goal["goal_mode"],
+            "requested_target_count": quantity_goal["requested_target_count"],
+            "target_count": quantity_goal["target_strict_good_count"],
+            "quantity_goal": quantity_goal,
             "use_voc_hooks": args.use_voc_hooks,
             "inspect": {
                 "task_exists": task is not None,
@@ -1248,7 +1356,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
 
         render_result: Dict[str, Any] = {}
         if args.render:
-            render_result = run_render_guard(args)
+            render_result = run_render_guard(args, plan)
             result["render"] = render_result
 
         if args.run_final_qc:
@@ -1257,10 +1365,12 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         final_out = load_output_summary(conn, args.product_id)
         final_seg = load_segment_summary(conn, args.product_id)
         final_packages = load_prompt_package_summary(conn, args.product_id)
+        final_quantity_goal = update_quantity_goal_progress(quantity_goal, final_out["good_outputs"])
         result["final_inspect"] = {
             "good_outputs": final_out["good_outputs"],
             "total_outputs": final_out["total_outputs"],
-            "remaining_to_target": max(0, args.target_count - final_out["good_outputs"]),
+            "remaining_to_target": final_quantity_goal["remaining_to_target"],
+            "quantity_goal": final_quantity_goal,
             "usable_segments": final_seg["total"],
             "prompt_packages": final_packages,
         }
@@ -1280,7 +1390,11 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="ADS 无人值守混剪编排")
     p.add_argument("--product-id", required=True)
-    p.add_argument("--target-count", type=int, default=30)
+    p.add_argument("--target-count", type=int, default=30, help="absolute target by default; with --goal-mode incremental_add it means new outputs to add")
+    p.add_argument("--goal-mode", choices=sorted(GOAL_MODES), default=GOAL_MODE_ABSOLUTE_TARGET)
+    p.add_argument("--add-count", type=int, default=0, help="shortcut for --goal-mode incremental_add --target-count N")
+    p.add_argument("--factory-tier", type=int, choices=sorted(FACTORY_TIERS), default=0, help="shortcut for --goal-mode factory_tier using 20/40/60/80")
+    p.add_argument("--max-renders-per-pass", type=int, default=DEFAULT_MAX_RENDERS_PER_PASS, help="cap one unattended render pass; 0 means no cap")
     p.add_argument("--use-voc-hooks", action="store_true", default=True)
     p.add_argument("--no-voc-hooks", dest="use_voc_hooks", action="store_false")
     p.add_argument("--max-new-hook-segments", type=int, default=6)
@@ -1350,6 +1464,7 @@ def apply_full_run_defaults(args: argparse.Namespace) -> argparse.Namespace:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    normalize_goal_args(args)
     apply_full_run_defaults(args)
     if args.dry_run and args.write:
         print("ERROR: --dry-run and --write are mutually exclusive", file=sys.stderr)
