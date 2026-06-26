@@ -36,6 +36,10 @@ def is_good_rendered_output(output: dict) -> bool:
     )
 
 
+def is_ads_fast_output(output: dict) -> bool:
+    return str(output.get("template_id") or "").strip().upper().startswith("AD_FAST")
+
+
 def output_segment_issue_summary(ctx: SkillContext, output_id: str) -> dict:
     failed_segments = []
     missing_segments = []
@@ -78,10 +82,12 @@ def is_good_rendered_output_strict(ctx: SkillContext, output: dict, *, strict_se
 def count_good_rendered_outputs(ctx: SkillContext, product_id: str, *, strict_segments: bool = False) -> int:
     if not product_id:
         return 0
+    ads_only = strict_segments and ads_fast_strict_outputs_enabled()
     return sum(
         1
         for output in ctx.repo.list_where("outputs", "product_id=?", (product_id,))
-        if is_good_rendered_output_strict(ctx, output, strict_segments=strict_segments)
+        if (not ads_only or is_ads_fast_output(output))
+        and is_good_rendered_output_strict(ctx, output, strict_segments=strict_segments)
     )
 
 

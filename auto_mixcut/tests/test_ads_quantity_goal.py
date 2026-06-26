@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+import tempfile
 import unittest
 
+from auto_mixcut.core.bootstrap import build_context
+from auto_mixcut.skills.rds_repository_skill import RDSRepositorySkill
+from auto_mixcut.skills.usage_counter_skill import count_good_rendered_outputs
 from scripts.run_ads_mixcut_unattended import (
     build_parser,
     build_quantity_goal,
@@ -11,6 +17,24 @@ from scripts.run_ads_mixcut_unattended import (
 
 
 class ADSQuantityGoalTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        os.environ["AUTO_MIXCUT_ROOT"] = str(Path(__file__).resolve().parents[1])
+        os.environ["AUTO_MIXCUT_DB"] = str(root / "db.sqlite")
+        os.environ["AUTO_MIXCUT_OSS_ROOT"] = str(root / "oss")
+        os.environ["AUTO_MIXCUT_OSS_PROVIDER"] = "local"
+        os.environ["AUTO_MIXCUT_TEMP_ROOT"] = str(root / "tmp")
+        os.environ["AUTO_MIXCUT_MOCK_FFMPEG"] = "1"
+        os.environ["AUTO_MIXCUT_MOCK_LLM"] = "1"
+        os.environ["AUTO_MIXCUT_FEISHU_ENABLED"] = "0"
+        self.ctx = build_context()
+        init = RDSRepositorySkill(self.ctx).init_db()
+        self.assertTrue(init.success, init.to_dict())
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
     def test_add_count_sets_incremental_goal(self):
         args = build_parser().parse_args(
             ["--product-id", "PROD_ADS_ADD", "--add-count", "10", "--full-run", "--write"]
@@ -73,6 +97,44 @@ class ADSQuantityGoalTest(unittest.TestCase):
         self.assertEqual(goal["factory_tier"], 40)
         self.assertEqual(goal["target_strict_good_count"], 40)
         self.assertEqual(goal["desired_new_good_count"], 28)
+
+    def test_ads_fast_strict_count_ignores_non_ads_outputs(self):
+        product_id = "PROD_ADS_COUNT"
+        self.ctx.repo.upsert(
+            "outputs",
+            "output_id",
+            {
+                "output_id": "OUT_ADS",
+                "product_id": product_id,
+                "template_id": "AD_FAST_HOOK_8S",
+                "render_status": "rendered",
+                "machine_quality_status": "publish_ready",
+            },
+        )
+        self.ctx.repo.upsert(
+            "outputs",
+            "output_id",
+            {
+                "output_id": "OUT_GENERAL",
+                "product_id": product_id,
+                "template_id": "GENERAL_BALANCED_15S",
+                "render_status": "rendered",
+                "machine_quality_status": "publish_ready",
+            },
+        )
+
+        previous = os.environ.get("AUTO_MIXCUT_ADS_FAST_MODE")
+        try:
+            os.environ.pop("AUTO_MIXCUT_ADS_FAST_MODE", None)
+            self.assertEqual(count_good_rendered_outputs(self.ctx, product_id, strict_segments=True), 2)
+
+            os.environ["AUTO_MIXCUT_ADS_FAST_MODE"] = "1"
+            self.assertEqual(count_good_rendered_outputs(self.ctx, product_id, strict_segments=True), 1)
+        finally:
+            if previous is None:
+                os.environ.pop("AUTO_MIXCUT_ADS_FAST_MODE", None)
+            else:
+                os.environ["AUTO_MIXCUT_ADS_FAST_MODE"] = previous
 
 
 if __name__ == "__main__":
