@@ -14,6 +14,7 @@ from scripts.run_ads_mixcut_unattended import (
     normalize_goal_args,
     plan_ads_mixcut,
 )
+from auto_mixcut.cli import _top_up_snapshot
 
 
 class ADSQuantityGoalTest(unittest.TestCase):
@@ -130,6 +131,41 @@ class ADSQuantityGoalTest(unittest.TestCase):
 
             os.environ["AUTO_MIXCUT_ADS_FAST_MODE"] = "1"
             self.assertEqual(count_good_rendered_outputs(self.ctx, product_id, strict_segments=True), 1)
+        finally:
+            if previous is None:
+                os.environ.pop("AUTO_MIXCUT_ADS_FAST_MODE", None)
+            else:
+                os.environ["AUTO_MIXCUT_ADS_FAST_MODE"] = previous
+
+    def test_forced_ads_top_up_snapshot_ignores_non_ads_outputs(self):
+        product_id = "PROD_ADS_TOP_UP_COUNT"
+        RDSRepositorySkill(self.ctx).create_product_task(product_id, "Hair Clip", "TH", "hair_accessories", 2)
+        for output_id, template_id in [
+            ("OUT_ADS", "AD_FAST_HOOK_8S"),
+            ("OUT_GENERAL", "GENERAL_BALANCED_15S"),
+        ]:
+            self.ctx.repo.upsert(
+                "outputs",
+                "output_id",
+                {
+                    "output_id": output_id,
+                    "product_id": product_id,
+                    "template_id": template_id,
+                    "render_status": "rendered",
+                    "machine_quality_status": "publish_ready",
+                },
+            )
+
+        previous = os.environ.get("AUTO_MIXCUT_ADS_FAST_MODE")
+        try:
+            os.environ["AUTO_MIXCUT_ADS_FAST_MODE"] = "1"
+
+            general_snapshot = _top_up_snapshot(self.ctx, product_id, count=2, refresh_capacity=False)
+            ads_snapshot = _top_up_snapshot(self.ctx, product_id, count=2, refresh_capacity=False, template_id="AD_FAST_HOOK_8S")
+
+            self.assertEqual(general_snapshot["effective_outputs"], 2)
+            self.assertEqual(ads_snapshot["effective_outputs"], 1)
+            self.assertEqual(ads_snapshot["target_remaining_variant_count"], 1)
         finally:
             if previous is None:
                 os.environ.pop("AUTO_MIXCUT_ADS_FAST_MODE", None)

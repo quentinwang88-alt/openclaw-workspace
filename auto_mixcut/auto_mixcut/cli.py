@@ -35,7 +35,7 @@ from auto_mixcut.skills.render_plan_skill import RenderPlanSkill
 from auto_mixcut.skills.render_skill import RenderSkill
 from auto_mixcut.skills.segment_fingerprint_skill import SegmentFingerprintSkill
 from auto_mixcut.skills.segment_skill import SegmentSkill
-from auto_mixcut.skills.usage_counter_skill import ads_fast_strict_outputs_enabled, is_good_rendered_output_strict
+from auto_mixcut.skills.usage_counter_skill import ads_fast_strict_outputs_enabled, is_ads_fast_output, is_good_rendered_output_strict
 from auto_mixcut.skills.watermark_detect_skill import WatermarkDetectSkill
 from auto_mixcut.skills.watermark_process_skill import WatermarkProcessSkill
 from auto_mixcut.skills.bgm_audio_analysis_skill import BgmAudioAnalysisSkill
@@ -64,11 +64,13 @@ def main(argv: list[str] | None = None) -> int:
     render_plan = sub.add_parser("render-plan")
     render_plan.add_argument("--product-id", required=True)
     render_plan.add_argument("--count", type=int)
+    render_plan.add_argument("--template-id", default="")
     render_plan.add_argument("--full-refresh", action="store_true", help="ignore existing usable outputs and regenerate a full batch")
     render_plan.add_argument("--confirm-full-refresh", action="store_true", help="required with --full-refresh to prevent accidental full-batch reruns")
     top_up = sub.add_parser("top-up")
     top_up.add_argument("--product-id", required=True)
     top_up.add_argument("--count", type=int)
+    top_up.add_argument("--template-id", default="")
     top_up.add_argument("--max-rounds", type=int, default=2, help="max small fill-gap rounds; prevents accidental full-batch reruns")
     fingerprint = sub.add_parser("fingerprint")
     fingerprint.add_argument("--product-id", required=True)
@@ -161,8 +163,8 @@ def main(argv: list[str] | None = None) -> int:
         "ai-diversity-budget": lambda: AIDiversityBudget(ctx).evaluate(args.product_id),
         "ai-supplement-workbench": lambda: AISupplementWorkbenchSkill(ctx).sync_for_product(args.product_id, max_packages=args.max_packages, gap_text=args.gap_text),
         "check": lambda: ReadinessCheckSkill(ctx).check_product(args.product_id),
-        "render-plan": lambda: _render_plan(ctx, args.product_id, args.count, args.full_refresh, args.confirm_full_refresh),
-        "top-up": lambda: _top_up(ctx, args.product_id, args.count, args.max_rounds),
+        "render-plan": lambda: _render_plan(ctx, args.product_id, args.count, args.full_refresh, args.confirm_full_refresh, args.template_id),
+        "top-up": lambda: _top_up(ctx, args.product_id, args.count, args.max_rounds, template_id=args.template_id),
         "render": lambda: RenderSkill(ctx).render_batch(args.batch_id),
         "abort-batch": lambda: BatchControlSkill(ctx).abort_batch(args.batch_id, reason=args.reason),
         "final-video-qc": lambda: FinalVideoQCSkill(ctx).check_batch(args.batch_id),
@@ -202,7 +204,7 @@ def _bgm_tag(ctx, bgm_id, force):
     return BgmTaggingSkill(ctx).calibrate_all(force=force)
 
 
-def _render_plan(ctx, product_id, count, full_refresh, confirm_full_refresh):
+def _render_plan(ctx, product_id, count, full_refresh, confirm_full_refresh, template_id=None):
     if full_refresh and not confirm_full_refresh:
         from auto_mixcut.core.result import Result
 
@@ -211,10 +213,10 @@ def _render_plan(ctx, product_id, count, full_refresh, confirm_full_refresh):
             "--full-refresh will ignore existing usable outputs; pass --confirm-full-refresh only when intentionally regenerating a full batch",
             {"product_id": product_id},
         )
-    return RenderPlanSkill(ctx).create_plans(product_id, count=count, fill_gap_only=not full_refresh)
+    return RenderPlanSkill(ctx).create_plans(product_id, count=count, fill_gap_only=not full_refresh, template_id=template_id)
 
 
-def _top_up(ctx, product_id, count, max_rounds=2):
+def _top_up(ctx, product_id, count, max_rounds=2, template_id=None):
     from auto_mixcut.core.result import Result
 
     max_rounds = max(1, int(max_rounds or 1))
@@ -223,13 +225,13 @@ def _top_up(ctx, product_id, count, max_rounds=2):
     stop_reason = ""
     deferred_ai_supplement_gaps = []
     for round_no in range(1, max_rounds + 1):
-        before = _top_up_snapshot(ctx, product_id, count, refresh_capacity=False)
+        before = _top_up_snapshot(ctx, product_id, count, refresh_capacity=False, template_id=template_id)
         if before.get("error"):
             return Result.fail("TOP_UP_SNAPSHOT_FAILED", "failed to read top-up snapshot", {"product_id": product_id, "snapshot": before, "rounds": rounds})
         if before["target_remaining_variant_count"] <= 0:
             stop_reason = "target_already_filled"
             break
-        before = _top_up_snapshot(ctx, product_id, count, refresh_capacity=True)
+        before = _top_up_snapshot(ctx, product_id, count, refresh_capacity=True, template_id=template_id)
         if before.get("error"):
             return Result.fail("TOP_UP_SNAPSHOT_FAILED", "failed to read top-up snapshot", {"product_id": product_id, "snapshot": before, "rounds": rounds})
         pending_ai = _pending_ai_postprocess_summary(ctx, product_id)
@@ -287,7 +289,7 @@ def _top_up(ctx, product_id, count, max_rounds=2):
             else:
                 deferred_ai_supplement_gaps.append(gap_text)
 
-        planned = _create_render_plans_with_timeout(ctx, product_id, count=_cap_round_count(before, count))
+        planned = _create_render_plans_with_timeout(ctx, product_id, count=_cap_round_count(before, count), template_id=template_id)
         if not planned.success:
             return _top_up_fail("render_plan", planned, product_id, rounds, before)
         batch_id = (planned.data or {}).get("batch_id") or ""
@@ -311,7 +313,7 @@ def _top_up(ctx, product_id, count, max_rounds=2):
             if _async_final_video_qc_enabled():
                 async_final_qc = FinalVideoQCAsyncSkill(ctx).dispatch_batch(resume_batch_id)
 
-            after = _top_up_snapshot(ctx, product_id, count)
+            after = _top_up_snapshot(ctx, product_id, count, template_id=template_id)
             rounds.append(
                 _top_up_round_summary(
                     ctx,
@@ -369,7 +371,7 @@ def _top_up(ctx, product_id, count, max_rounds=2):
         if final_qc is None and _async_final_video_qc_enabled():
             async_final_qc = FinalVideoQCAsyncSkill(ctx).dispatch_batch(batch_id)
 
-        after = _top_up_snapshot(ctx, product_id, count)
+        after = _top_up_snapshot(ctx, product_id, count, template_id=template_id)
         rounds.append(_top_up_round_summary(ctx, round_no, batch_id, before, readiness, planned, rendered, quality, final_qc, synced, after, supplement, async_final_qc))
         batch_ids.append(batch_id)
         if after["target_remaining_variant_count"] <= 0:
@@ -384,10 +386,10 @@ def _top_up(ctx, product_id, count, max_rounds=2):
     if batch_ids:
         task_sync = FeishuReviewSkill(ctx).sync_task(product_id)
         if not task_sync.success:
-            return _top_up_fail("sync_task", task_sync, product_id, rounds, _top_up_snapshot(ctx, product_id, count, refresh_capacity=False))
+            return _top_up_fail("sync_task", task_sync, product_id, rounds, _top_up_snapshot(ctx, product_id, count, refresh_capacity=False, template_id=template_id))
     else:
         task_sync = Result.ok({"status": "skipped", "reason": "no_new_batch"})
-    final = _top_up_snapshot(ctx, product_id, count, refresh_capacity=False)
+    final = _top_up_snapshot(ctx, product_id, count, refresh_capacity=False, template_id=template_id)
     if final.get("error"):
         return Result.fail("TOP_UP_SNAPSHOT_FAILED", "failed to read final top-up snapshot", {"product_id": product_id, "snapshot": final, "rounds": rounds})
     if int(final.get("target_remaining_variant_count") or 0) > 0 and stop_reason in {"target_already_filled", "target_filled"}:
@@ -421,13 +423,13 @@ def _top_up_fail(stage, result, product_id, rounds, snapshot, batch_id=""):
     )
 
 
-def _create_render_plans_with_timeout(ctx, product_id, count):
+def _create_render_plans_with_timeout(ctx, product_id, count, template_id=None):
     from auto_mixcut.core.result import Result
 
     timeout_seconds = max(1, int(os.environ.get("AUTO_MIXCUT_RENDER_PLAN_TIMEOUT", "180") or "180"))
     try:
         with _operation_timeout(timeout_seconds):
-            return RenderPlanSkill(ctx).create_plans(product_id, count=count, fill_gap_only=True)
+            return RenderPlanSkill(ctx).create_plans(product_id, count=count, fill_gap_only=True, template_id=template_id)
     except TimeoutError:
         aborted = _abort_latest_planning_batch(ctx, product_id, "planning_timeout")
         message = f"render planning timed out after {timeout_seconds}s"
@@ -543,7 +545,7 @@ def _top_up_round_summary(ctx, round_no, batch_id, before, readiness, planned, r
     }
 
 
-def _top_up_snapshot(ctx, product_id, count=None, refresh_capacity=True):
+def _top_up_snapshot(ctx, product_id, count=None, refresh_capacity=True, template_id=None):
     task = _latest_product_task(ctx, product_id)
     if not task:
         return {
@@ -563,7 +565,7 @@ def _top_up_snapshot(ctx, product_id, count=None, refresh_capacity=True):
     requested = int((task or {}).get("requested_variant_count") or allowed or 0)
     target = int(count or requested or allowed or 0)
     outputs = ctx.repo.list_where("outputs", "product_id=?", (product_id,))
-    effective = sum(1 for row in outputs if _top_up_output_is_effective(ctx, row))
+    effective = sum(1 for row in outputs if _top_up_output_is_effective(ctx, row, template_id=template_id))
     target_remaining = max(0, target - effective)
     if refresh_capacity:
         capacity = CapacityCounterSkill(ctx).refresh_product(product_id)
@@ -599,12 +601,18 @@ def _top_up_snapshot(ctx, product_id, count=None, refresh_capacity=True):
     }
 
 
-def _top_up_output_is_effective(ctx, output: dict) -> bool:
+def _top_up_output_is_effective(ctx, output: dict, template_id: str | None = None) -> bool:
+    if _is_forced_ads_template(template_id) and ads_fast_strict_outputs_enabled() and not is_ads_fast_output(output):
+        return False
     return is_good_rendered_output_strict(
         ctx,
         output,
         strict_segments=ads_fast_strict_outputs_enabled(),
     )
+
+
+def _is_forced_ads_template(template_id: str | None) -> bool:
+    return str(template_id or "").strip().upper().startswith("AD_FAST")
 
 
 def _latest_product_task(ctx, product_id):
