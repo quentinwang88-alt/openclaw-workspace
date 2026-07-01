@@ -57,6 +57,7 @@ def main() -> int:
     parser.add_argument("--max-rounds", type=int, default=2)
     parser.add_argument("--template-id", default="")
     parser.add_argument("--skip-upload-sync", action="store_true")
+    parser.add_argument("--full-output", action="store_true", help="print the full guard result instead of the compact CLI summary")
     args = parser.parse_args()
 
     _guard_log("guard_start", product_id=args.product_id, target=args.target)
@@ -102,8 +103,122 @@ def main() -> int:
     finally:
         if lock_data.get("release_on_exit"):
             ProductRunLockSkill(ctx).release(args.product_id, owner=lock_owner)
-    print(json.dumps(res.to_dict(), ensure_ascii=False, indent=2, default=str))
+    output = res.to_dict() if args.full_output else _compact_guard_cli_output(res)
+    print(json.dumps(output, ensure_ascii=False, indent=2, default=str))
     return 0 if res.success else 1
+
+
+def _compact_guard_cli_output(res: Result) -> dict[str, Any]:
+    payload = res.to_dict()
+    if not res.success:
+        return _compact_guard_error(payload)
+    data = payload.get("data") or {}
+    detail = data.get("detail") or {}
+    final = data.get("final") or {}
+    target_count = _first_non_empty(final.get("target_count"), data.get("target_count"))
+    remaining_count = _first_non_empty(
+        final.get("remaining_count"),
+        final.get("target_remaining_variant_count"),
+        data.get("remaining_count"),
+        data.get("target_remaining_variant_count"),
+    )
+    actual_count = _first_non_empty(final.get("actual_count"), data.get("actual_count"))
+    if actual_count in (None, "") and target_count not in (None, "") and remaining_count not in (None, ""):
+        try:
+            actual_count = max(0, int(target_count) - int(remaining_count))
+        except (TypeError, ValueError):
+            actual_count = None
+    top_up = detail.get("top_up") or {}
+    top_up_data = top_up.get("data") or {}
+    rounds = top_up_data.get("rounds") or []
+    ai_submit = detail.get("ai_submit") or {}
+    return {
+        "success": True,
+        "data": {
+            "product_id": data.get("product_id"),
+            "pipeline_status": data.get("pipeline_status"),
+            "next_action": data.get("next_action"),
+            "last_error": final.get("last_error") or data.get("last_error") or "",
+            "target_count": target_count,
+            "actual_count": actual_count,
+            "remaining_count": remaining_count,
+            "last_batch_id": final.get("last_batch_id") or data.get("last_batch_id") or "",
+            "upload_sync_status": (detail.get("upload_sync") or {}).get("status"),
+            "ai_submit": {
+                "status": ai_submit.get("status"),
+                "reason": ai_submit.get("reason") or ai_submit.get("error") or "",
+            },
+            "top_up": {
+                "success": top_up.get("success"),
+                "stop_reason": top_up_data.get("stop_reason") or "",
+                "round_count": len(rounds),
+                "rounds": [_compact_guard_round(item) for item in rounds[-3:]],
+                "template_fallback": _compact_guard_fallback(detail.get("top_up_template_fallback")),
+            },
+        },
+    }
+
+
+def _first_non_empty(*values: Any) -> Any:
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _compact_guard_error(payload: dict[str, Any]) -> dict[str, Any]:
+    error = payload.get("error") or {}
+    data = payload.get("data") or {}
+    return {
+        "success": False,
+        "error": {
+            "code": error.get("code") or payload.get("code") or "GUARD_FAILED",
+            "message": error.get("message") or payload.get("message") or "",
+            "detail": _compact_error_detail(error.get("detail") or data.get("detail") or {}),
+        },
+    }
+
+
+def _compact_error_detail(detail: Any) -> Any:
+    if not isinstance(detail, dict):
+        return detail
+    keys = (
+        "product_id",
+        "pipeline_status",
+        "next_action",
+        "reason",
+        "stop_reason",
+        "batch_id",
+        "last_batch_id",
+        "target_count",
+        "actual_count",
+        "remaining_count",
+    )
+    return {key: detail.get(key) for key in keys if key in detail}
+
+
+def _compact_guard_round(item: Any) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return {}
+    after = item.get("after") if isinstance(item.get("after"), dict) else {}
+    return {
+        "round_no": item.get("round_no") or item.get("round"),
+        "batch_id": item.get("batch_id") or "",
+        "planned_count": item.get("planned_count"),
+        "skipped_count": item.get("skipped_count"),
+        "rendered_count": item.get("rendered_count"),
+        "good_after": after.get("good_rendered_outputs") or after.get("effective_outputs"),
+    }
+
+
+def _compact_guard_fallback(fallback: Any) -> dict[str, Any] | None:
+    if not isinstance(fallback, dict):
+        return None
+    return {
+        "status": fallback.get("status"),
+        "from_template_id": fallback.get("from_template_id"),
+        "reason": fallback.get("reason"),
+    }
 
 
 def run_guard_pass(ctx, product_id: str, target: int | None = None, name: str = "", market: str = "", category: str = "", max_rounds: int = 2, template_id: str = "", process_uploads: bool = True) -> Result:

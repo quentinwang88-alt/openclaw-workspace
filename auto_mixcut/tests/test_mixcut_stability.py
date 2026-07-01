@@ -293,6 +293,172 @@ class MixcutStabilityTest(unittest.TestCase):
         self.assertEqual(result.data["cycle_status"], "submitted_waiting_return")
         self.assertEqual(result.data["next_action"], "WAIT_AI_SEGMENT_RETURN")
 
+    def test_ai_supplement_cycle_uses_imported_package_delta_when_stdout_truncated(self):
+        product_id = "PROD_AI_CYCLE_IMPORT_DELTA"
+        self._create_cycle_task(product_id, target=8, actual=3, remaining=5, material_capacity=0)
+        package_states = [
+            {
+                "ready_to_submit_count": 0,
+                "recoverable_failed_count": 0,
+                "inflight_count": 1,
+                "imported_package_count": 2,
+                "consumed_package_count": 0,
+            },
+            {
+                "ready_to_submit_count": 0,
+                "recoverable_failed_count": 0,
+                "inflight_count": 1,
+                "imported_package_count": 2,
+                "consumed_package_count": 0,
+            },
+            {
+                "ready_to_submit_count": 0,
+                "recoverable_failed_count": 0,
+                "inflight_count": 0,
+                "imported_package_count": 5,
+                "consumed_package_count": 0,
+            },
+            {
+                "ready_to_submit_count": 0,
+                "recoverable_failed_count": 0,
+                "inflight_count": 0,
+                "imported_package_count": 5,
+                "consumed_package_count": 0,
+            },
+        ]
+
+        def import_returns_fn(pid, dry_run):
+            return {"status": "ok", "stdout": "truncated tail without json"}
+
+        with patch(
+            "auto_mixcut.skills.ai_supplement_cycle_skill.AISupplementGatewaySkill.package_state",
+            side_effect=package_states,
+        ):
+            result = AISupplementCycleSkill(self.ctx).run_once(
+                product_id,
+                submit=False,
+                recover=False,
+                import_returns=True,
+                run_guard=False,
+                import_returns_fn=import_returns_fn,
+            )
+
+        self.assertTrue(result.success, result.to_dict())
+        self.assertEqual(result.data["imported_count"], 3)
+        self.assertEqual(result.data["cycle_status"], "imported_continue")
+        self.assertTrue(result.data["continue_recommended"])
+
+    def test_ai_supplement_cycle_prefers_import_delta_over_submit_timeout(self):
+        product_id = "PROD_AI_CYCLE_TIMEOUT_BUT_IMPORTED"
+        self._create_cycle_task(product_id, target=8, actual=3, remaining=5, material_capacity=0)
+        package_states = [
+            {
+                "ready_to_submit_count": 1,
+                "recoverable_failed_count": 0,
+                "inflight_count": 0,
+                "imported_package_count": 2,
+                "consumed_package_count": 0,
+            },
+            {
+                "ready_to_submit_count": 0,
+                "recoverable_failed_count": 0,
+                "inflight_count": 1,
+                "imported_package_count": 2,
+                "consumed_package_count": 0,
+            },
+            {
+                "ready_to_submit_count": 0,
+                "recoverable_failed_count": 0,
+                "inflight_count": 0,
+                "imported_package_count": 5,
+                "consumed_package_count": 0,
+            },
+            {
+                "ready_to_submit_count": 0,
+                "recoverable_failed_count": 0,
+                "inflight_count": 0,
+                "imported_package_count": 5,
+                "consumed_package_count": 0,
+            },
+        ]
+
+        def submit_fn(ctx, pid, dry_run):
+            return {"status": "timeout", "reason": "worker_timeout"}
+
+        def import_returns_fn(pid, dry_run):
+            return {"status": "ok", "stdout": "truncated tail without json"}
+
+        with patch(
+            "auto_mixcut.skills.ai_supplement_cycle_skill.AISupplementGatewaySkill.package_state",
+            side_effect=package_states,
+        ):
+            result = AISupplementCycleSkill(self.ctx).run_once(
+                product_id,
+                submit_fn=submit_fn,
+                recover=False,
+                import_returns=True,
+                run_guard=False,
+                import_returns_fn=import_returns_fn,
+            )
+
+        self.assertTrue(result.success, result.to_dict())
+        self.assertEqual(result.data["imported_count"], 3)
+        self.assertEqual(result.data["cycle_status"], "imported_continue")
+        self.assertEqual(result.data["next_action"], "RUN_GUARD_AGAIN")
+
+    def test_sync_quality_gate_defaults_to_bypass_pending_outputs(self):
+        previous = os.environ.pop("AUTO_MIXCUT_SYNC_QUALITY_GATE", None)
+        try:
+            product_id = "PROD_QUALITY_BYPASS"
+            batch_id = "BATCH_QUALITY_BYPASS"
+            output_id = "OUT_QUALITY_BYPASS"
+            plan_id = "PLAN_QUALITY_BYPASS"
+            self.ctx.repo.upsert(
+                "outputs",
+                "output_id",
+                {
+                    "output_id": output_id,
+                    "batch_id": batch_id,
+                    "product_id": product_id,
+                    "variant_no": 1,
+                    "template_id": "AI_LIFESTYLE_16S",
+                    "duration_ms": 16000,
+                    "width": 1080,
+                    "height": 1920,
+                    "render_status": "rendered",
+                    "machine_quality_status": "pending",
+                    "human_quality_status": "pending",
+                },
+            )
+            self.ctx.repo.upsert(
+                "render_plans",
+                "render_plan_id",
+                {
+                    "render_plan_id": plan_id,
+                    "batch_id": batch_id,
+                    "product_id": product_id,
+                    "variant_no": 1,
+                    "template_id": "AI_LIFESTYLE_16S",
+                    "planned_duration_ms": 16000,
+                    "plan_json": {},
+                    "render_status": "rendered",
+                    "quality_gate_status": "pending",
+                    "output_id": output_id,
+                },
+            )
+
+            result = mixcut_cli._quality_gate_with_timeout(self.ctx, batch_id)
+
+            self.assertTrue(result.success, result.to_dict())
+            self.assertEqual(result.data["status"], "skipped")
+            output = self.ctx.repo.get("outputs", "output_id", output_id)
+            plan = self.ctx.repo.get("render_plans", "render_plan_id", plan_id)
+            self.assertEqual(output["machine_quality_status"], "passed_with_warning")
+            self.assertEqual(plan["quality_gate_status"], "passed_with_warning")
+        finally:
+            if previous is not None:
+                os.environ["AUTO_MIXCUT_SYNC_QUALITY_GATE"] = previous
+
     def test_ads_full_run_delegates_submit_to_worker_by_default(self):
         previous = os.environ.get("AUTO_MIXCUT_ALLOW_DIRECT_SUBMIT")
         os.environ.pop("AUTO_MIXCUT_ALLOW_DIRECT_SUBMIT", None)

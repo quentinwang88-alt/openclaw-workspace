@@ -109,8 +109,9 @@ class AISupplementCycleSkill:
 
         if import_returns and import_returns_fn:
             steps["import_returns"] = import_returns_fn(product_id, False)
-            imported_count = _imported_count(steps["import_returns"])
+            parsed_imported_count = _imported_count(steps["import_returns"])
             current = self.inspect(product_id).data or current
+            imported_count = max(parsed_imported_count, _package_import_delta(before.data or {}, current))
         elif import_returns:
             steps["import_returns"] = {"status": "skipped", "reason": "import_returns_callback_missing"}
 
@@ -125,6 +126,7 @@ class AISupplementCycleSkill:
         if not final.success:
             return final
         data = final.data or {}
+        imported_count = max(imported_count, _package_import_delta(before.data or {}, data))
         cycle_status = _final_cycle_status(data, steps, imported_count=imported_count, submitted=submitted)
         next_action = _next_action_for_cycle(cycle_status, data)
         reason = _final_reason(cycle_status, data, steps)
@@ -167,8 +169,6 @@ def _inspect_cycle_status(task_state: dict[str, Any], package_state: dict[str, A
 
 
 def _final_cycle_status(data: dict[str, Any], steps: dict[str, Any], *, imported_count: int, submitted: bool) -> str:
-    if any(_step_failed(value) for value in steps.values()):
-        return "failed"
     package_state = data.get("package_state") or {}
     state = data.get("state_after") or {}
     remaining = _int(state.get("remaining_count"))
@@ -180,6 +180,8 @@ def _final_cycle_status(data: dict[str, Any], steps: dict[str, Any], *, imported
         return "fulfilled"
     if imported_count > 0:
         return "imported_continue"
+    if any(_step_failed(value) for value in steps.values()):
+        return "failed"
     if material_capacity >= remaining:
         return "fulfilled"
     if submitted and inflight > 0:
@@ -312,6 +314,12 @@ def _imported_count(result: dict[str, Any]) -> int:
         if isinstance(nested, dict):
             return _int(nested.get("count"), _int(nested.get("imported_count")))
     return _int(result.get("imported_count"), _int(result.get("count")))
+
+
+def _package_import_delta(before: dict[str, Any], after: dict[str, Any]) -> int:
+    before_state = before.get("package_state") or {}
+    after_state = after.get("package_state") or {}
+    return max(0, _int(after_state.get("imported_package_count")) - _int(before_state.get("imported_package_count")))
 
 
 def _json_from_stdout(text: str) -> Any:

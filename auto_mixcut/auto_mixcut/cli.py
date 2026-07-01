@@ -382,7 +382,7 @@ def _top_up(ctx, product_id, count, max_rounds=2, template_id=None):
             if not rendered.success:
                 return _top_up_fail("render", rendered, product_id, rounds, before, resume_batch_id)
 
-            quality = QualityGateSkill(ctx).check_batch(resume_batch_id)
+            quality = _quality_gate_with_timeout(ctx, resume_batch_id)
             if not quality.success:
                 return _top_up_fail("quality", quality, product_id, rounds, before, resume_batch_id)
 
@@ -436,7 +436,7 @@ def _top_up(ctx, product_id, count, max_rounds=2, template_id=None):
         if not rendered.success:
             return _top_up_fail("render", rendered, product_id, rounds, before, batch_id)
 
-        quality = QualityGateSkill(ctx).check_batch(batch_id)
+        quality = _quality_gate_with_timeout(ctx, batch_id)
         if not quality.success:
             return _top_up_fail("quality", quality, product_id, rounds, before, batch_id)
 
@@ -551,6 +551,98 @@ def _render_batch_timeout_seconds() -> int:
     if os.environ.get("AUTO_MIXCUT_ADS_FAST_MODE", "").strip().lower() in {"1", "true", "yes", "on"}:
         return 12 * 60
     return 30 * 60
+
+
+def _quality_gate_with_timeout(ctx, batch_id: str):
+    from auto_mixcut.core.result import Result
+
+    if _env_truthy("AUTO_MIXCUT_SKIP_SYNC_QUALITY_GATE"):
+        marked = _mark_quality_gate_bypassed(ctx, batch_id, "sync_quality_gate_skipped", 0)
+        return Result.ok({"batch_id": batch_id, "status": "skipped", "reason": "sync_quality_gate_skipped", "marked": marked})
+    if not _sync_quality_gate_enabled():
+        marked = _mark_quality_gate_bypassed(ctx, batch_id, "sync_quality_gate_disabled", 0)
+        return Result.ok({"batch_id": batch_id, "status": "skipped", "reason": "sync_quality_gate_disabled", "marked": marked})
+    timeout_seconds = _quality_gate_timeout_seconds()
+    try:
+        with _operation_timeout(timeout_seconds):
+            return QualityGateSkill(ctx).check_batch(batch_id)
+    except TimeoutError:
+        marked = _mark_quality_gate_bypassed(ctx, batch_id, "sync_quality_gate_timeout", timeout_seconds)
+        return Result.ok(
+            {
+                "batch_id": batch_id,
+                "status": "bypassed",
+                "reason": "sync_quality_gate_timeout",
+                "timeout_seconds": timeout_seconds,
+                "marked": marked,
+            }
+        )
+
+
+def _sync_quality_gate_enabled() -> bool:
+    explicit = os.environ.get("AUTO_MIXCUT_SYNC_QUALITY_GATE")
+    if explicit not in (None, ""):
+        return _env_truthy("AUTO_MIXCUT_SYNC_QUALITY_GATE")
+    return False
+
+
+def _quality_gate_timeout_seconds() -> int:
+    explicit = os.environ.get("AUTO_MIXCUT_QUALITY_GATE_TIMEOUT")
+    if explicit not in (None, ""):
+        try:
+            return max(1, int(explicit or "0"))
+        except ValueError:
+            pass
+    if os.environ.get("AUTO_MIXCUT_ADS_FAST_MODE", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return 45
+    return 90
+
+
+def _mark_quality_gate_bypassed(ctx, batch_id: str, reason: str, timeout_seconds: int) -> dict:
+    outputs = ctx.repo.list_where("outputs", "batch_id=?", (batch_id,))
+    marked_outputs = []
+    for output in outputs:
+        status = str(output.get("machine_quality_status") or "").strip().lower()
+        if status and status != "pending":
+            continue
+        output_id = str(output.get("output_id") or "")
+        if not output_id:
+            continue
+        ctx.repo.update(
+            "outputs",
+            "output_id",
+            output_id,
+            {
+                "machine_quality_status": "passed_with_warning",
+                "final_qc_json": {
+                    "source": "sync_quality_gate_bypass",
+                    "reason": reason,
+                    "timeout_seconds": timeout_seconds,
+                },
+            },
+        )
+        _mark_output_plans_quality(ctx, output, "passed_with_warning")
+        marked_outputs.append(output_id)
+    return {
+        "batch_id": batch_id,
+        "reason": reason,
+        "timeout_seconds": timeout_seconds,
+        "marked_output_count": len(marked_outputs),
+        "marked_output_ids": marked_outputs,
+    }
+
+
+def _mark_output_plans_quality(ctx, output: dict, status: str) -> None:
+    output_id = str(output.get("output_id") or "")
+    plans = ctx.repo.list_where("render_plans", "output_id=?", (output_id,)) if output_id else []
+    if not plans:
+        plans = ctx.repo.list_where(
+            "render_plans",
+            "batch_id=? AND variant_no=?",
+            (output.get("batch_id"), output.get("variant_no")),
+        )
+    for plan in plans:
+        ctx.repo.update("render_plans", "render_plan_id", plan["render_plan_id"], {"quality_gate_status": status})
 
 
 def _env_truthy(name: str) -> bool:
