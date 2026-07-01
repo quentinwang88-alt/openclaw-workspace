@@ -22,6 +22,7 @@ from core.bitable import FeishuBitableClient, resolve_wiki_bitable_app_token  # 
 from core.feishu_url_parser import parse_feishu_bitable_url  # type: ignore  # noqa: E402
 
 from auto_mixcut.core.bootstrap import build_context  # noqa: E402
+from auto_mixcut.skills.ai_supplement_gateway_skill import normalize_package  # noqa: E402
 from auto_mixcut.skills.product_reference_image_skill import ProductReferenceImageSkill  # noqa: E402
 from auto_mixcut.skills.rds_repository_skill import RDSRepositorySkill  # noqa: E402
 from auto_mixcut.skills.segment_prompt_factory_skill import SegmentPromptFactorySkill  # noqa: E402
@@ -109,7 +110,15 @@ PROMPT_RECORD_BLOCKING_STATUSES = {
     "returned",
     "参考图异常",
 }
-PROMPT_RECORD_REFRESHABLE_STATUSES = {"", "待提单", "参考图异常"}
+PROMPT_RECORD_REFRESHABLE_STATUSES = {"", "待提单", "参考图异常", "失败", "failed"}
+PROMPT_RECORD_REJECTED_RESULT_SYNC = {
+    "failed",
+    "blocked",
+    "review_failed",
+    "review_failed_or_missing_asset",
+    "claim_failed",
+    "timed_out",
+}
 
 
 def _submit_channel_label(value: str) -> str:
@@ -156,7 +165,7 @@ def sync_workbench(
 
     task_records = _latest_task_records(task_client.list_records(page_size=100))
     anchor_by_product = _index_latest_anchor(anchor_client.list_records(page_size=100))
-    existing_prompt_records = _existing_prompt_records(prompt_client.list_records(page_size=100))
+    existing_prompt_records = _existing_prompt_records(prompt_client.list_records(page_size=100), include_refreshable=refresh_existing_prompts, ctx=ctx)
     existing_keys = set(existing_prompt_records)
     reference_pack_cache: Dict[tuple[str, str, str], Dict[str, Any]] = {}
 
@@ -170,7 +179,7 @@ def sync_workbench(
         if not product_id or (product_id_filter and product_id != product_id_filter):
             continue
         voc_package = _load_ready_voc_ads_package(ctx, product_id) if use_voc_ads_package else {}
-        gap_count = _gap_count(fields)
+        gap_count = _gap_count(fields, ctx, product_id, max_packages_per_product)
         if voc_package:
             gap_count = int(voc_package.get("requested_hook_count") or gap_count or 0)
         if gap_count <= 0:
@@ -190,9 +199,10 @@ def sync_workbench(
         market = _text(fields.get("市场")) or _text(anchor_fields.get("市场")) or "VN"
         sku_id = _sku_id(fields, anchor_fields)
         sku_label = _sku_label(fields, anchor_fields)
-        category = _category_key(_text(fields.get("类目")) or _text(anchor_fields.get("类目")), product_name)
+        category = _category_key(_text(fields.get("归一类目")) or _text(fields.get("类目")) or _text(anchor_fields.get("类目")), product_name)
         category_cn = CATEGORY_KEY_TO_CN.get(category, "通用服饰")
         brief = _anchor_brief(product_id, product_name, category, anchor_fields)
+        brief = _brief_with_hook_direction_context(brief, fields, category)
         brief["material_anchor_brief"]["sku_id"] = sku_id
         if not brief["material_anchor_brief"]["hard_anchors"]:
             skipped.append({"product_id": product_id, "reason": "anchor_without_hard_anchors"})
@@ -229,7 +239,7 @@ def sync_workbench(
                 if refresh_existing_prompts:
                     existing_record = existing_prompt_records[existing_key]
                     existing_status = _text((existing_record.fields or {}).get("包状态"))
-                    if not _prompt_record_refreshable(existing_status):
+                    if not _prompt_record_refreshable(existing_status, existing_record.fields or {}, ctx):
                         skipped.append({
                             "product_id": product_id,
                             "reason": "existing_prompt_not_refreshable",
@@ -292,24 +302,20 @@ def sync_workbench(
             else:
                 try:
                     # Phase 1: save RDS with pending status
-                    saved = factory.save_package(package)
+                    package["submit_channel"] = submit_channel
+                    saved = factory.save_package(package, status="pending_feishu_sync")
                     if not saved.success:
                         existing_keys.discard(dedupe_key)
                         failed.append({"product_id": product_id, "segment_prompt_id": package["segment_prompt_id"], "reason": "prompt_package_rds_failed", "error": saved.to_dict()})
                         continue
-                    ctx.repo.update(
-                        "segment_prompt_packages", "segment_prompt_id",
-                        package["segment_prompt_id"],
-                        {"package_status": "pending_feishu_sync"},
-                    )
 
                     # Phase 2: create Feishu record
                     try:
                         prompt_field_names, feishu_record_id = _safe_batch_create_prompt(prompt_client, row_fields, prompt_field_names)
-                        ctx.repo.update(
-                            "segment_prompt_packages", "segment_prompt_id",
+                        _update_prompt_package_or_raise(
+                            ctx,
                             package["segment_prompt_id"],
-                            {"package_status": "created", "feishu_record_id": feishu_record_id, "failure_reason": ""},
+                            {"package_status": "created", "feishu_record_id": feishu_record_id, "failure_reason": "", "submit_channel": submit_channel},
                         )
                         created.append({
                             "product_id": product_id,
@@ -320,11 +326,14 @@ def sync_workbench(
                             "voc_hook": package.get("voc_hook") or {},
                         })
                     except Exception as exc:
-                        ctx.repo.update(
-                            "segment_prompt_packages", "segment_prompt_id",
-                            package["segment_prompt_id"],
-                            {"package_status": "feishu_sync_failed", "failure_reason": str(exc)},
-                        )
+                        try:
+                            _update_prompt_package_or_raise(
+                                ctx,
+                                package["segment_prompt_id"],
+                                {"package_status": "feishu_sync_failed", "failure_reason": str(exc)},
+                            )
+                        except Exception as update_exc:
+                            failed.append({"product_id": product_id, "segment_prompt_id": package["segment_prompt_id"], "reason": "rds_update_failed_after_feishu_create", "error": str(update_exc)})
                         existing_keys.discard(dedupe_key)
                         failed.append({"product_id": product_id, "segment_prompt_id": package["segment_prompt_id"], "reason": "feishu_create_failed", "error": str(exc)})
                 except Exception as exc:
@@ -351,6 +360,12 @@ def _safe_batch_create_prompt(client: FeishuBitableClient, row_fields: Dict[str,
         if ids:
             return latest, ids[0]
         raise RuntimeError("飞书创建成功但未返回 record_id")
+
+
+def _update_prompt_package_or_raise(ctx: Any, prompt_id: str, patch: Dict[str, Any]) -> None:
+    result = ctx.repo.update("segment_prompt_packages", "segment_prompt_id", prompt_id, patch)
+    if not result.success:
+        raise RuntimeError(json.dumps(result.to_dict(), ensure_ascii=False, default=str))
 
 
 def _filter_fields(row_fields: Dict[str, Any], field_names: set[str]) -> Dict[str, Any]:
@@ -415,7 +430,11 @@ def _task_sort_key(fields: Dict[str, Any]) -> tuple[int, str]:
     return (task_no, status)
 
 
-def _existing_prompt_records(records: Iterable[Any]) -> Dict[tuple[str, str, str, str, str, str], Any]:
+def _existing_prompt_records(
+    records: Iterable[Any],
+    include_refreshable: bool = False,
+    ctx: Any | None = None,
+) -> Dict[tuple[str, str, str, str, str, str], Any]:
     indexed: Dict[tuple[str, str, str, str, str, str], Any] = {}
     for record in records:
         fields = record.fields or {}
@@ -426,7 +445,8 @@ def _existing_prompt_records(records: Iterable[Any]) -> Dict[tuple[str, str, str
         grade = _text(fields.get("生成档位"))
         hook_intent = _text(fields.get("镜头意图")) or _text(fields.get("Hook意图"))
         status = _text(fields.get("包状态"))
-        if product_id and segment_type and grade and _prompt_record_blocks_new_package(status):
+        refreshable = include_refreshable and _prompt_record_refreshable(status, fields, ctx)
+        if product_id and segment_type and grade and (_prompt_record_blocks_new_package(status, fields) or refreshable):
             indexed[(product_id, sku_id, role, segment_type, grade, hook_intent)] = record
             if not role and not hook_intent:
                 indexed[(product_id, sku_id, "", segment_type, grade, "")] = record
@@ -435,12 +455,30 @@ def _existing_prompt_records(records: Iterable[Any]) -> Dict[tuple[str, str, str
     return indexed
 
 
-def _prompt_record_blocks_new_package(status: str) -> bool:
+def _prompt_record_blocks_new_package(status: str, fields: Dict[str, Any] | None = None) -> bool:
+    result_sync = _text((fields or {}).get("结果回传状态")).lower()
+    if result_sync in PROMPT_RECORD_REJECTED_RESULT_SYNC:
+        return False
     return _text(status) in PROMPT_RECORD_BLOCKING_STATUSES
 
 
-def _prompt_record_refreshable(status: str) -> bool:
-    return _text(status) in PROMPT_RECORD_REFRESHABLE_STATUSES
+def _prompt_record_refreshable(status: str, fields: Dict[str, Any] | None = None, ctx: Any | None = None) -> bool:
+    result_sync = _text((fields or {}).get("结果回传状态")).lower()
+    if result_sync in PROMPT_RECORD_REJECTED_RESULT_SYNC:
+        return True
+    normalized = _text(status)
+    if normalized in PROMPT_RECORD_REFRESHABLE_STATUSES:
+        return True
+    if normalized not in {"生成中", "generating", "已提单", "submitted"}:
+        return False
+    prompt_id = _text((fields or {}).get("提示词包ID"))
+    if not prompt_id or ctx is None:
+        return False
+    try:
+        row = ctx.repo.get("segment_prompt_packages", "segment_prompt_id", prompt_id) or {}
+    except Exception:
+        row = {}
+    return bool(row) and normalize_package(row) == "recoverable_failed"
 
 
 def _prompt_dedupe_key(product_id: str, sku_id: str, slot: Dict[str, Any]) -> tuple[str, str, str, str, str, str]:
@@ -510,10 +548,18 @@ def _refresh_existing_prompt(
         "渠道": _submit_channel_label(submit_channel),
         "短视频片段提示词": _format_prompt_package(package),
         "备注": _note(fields, 1, 1, slot.get("voc_hook_candidate")),
+        "人工审核结论": "待审核",
     }
-    if not _package_reference_ready(package):
+    reference_ready = _package_reference_ready(package)
+    if reference_ready:
+        update_fields["包状态"] = "待提单"
+        update_fields["是否可提单"] = True
+    else:
         update_fields["包状态"] = "参考图异常"
         update_fields["是否可提单"] = False
+    for optional_field in ("失败原因", "异常原因", "错误信息", "平台任务ID", "最新Trace ID"):
+        if optional_field in (fields or {}):
+            update_fields[optional_field] = ""
     if dry_run:
         return {
             "record_id": record.record_id,
@@ -521,25 +567,68 @@ def _refresh_existing_prompt(
             "action": "would_refresh",
             "fields": _without_large_prompt(update_fields),
         }
-    saved = factory.save_package(package)
+    package["submit_channel"] = submit_channel
+    saved = factory.save_package(package, status="pending_feishu_sync")
     if not saved.success:
         return {"failed": {"reason": "prompt_refresh_rds_failed", "error": saved.to_dict()}}
+    try:
+        _update_prompt_package_or_raise(
+            factory.ctx,
+            package["segment_prompt_id"],
+            {
+                "package_status": "created" if reference_ready else "pending_feishu_sync",
+                "external_provider": "",
+                "external_job_id": "",
+                "generated_asset_id": "",
+                "generated_segment_id": "",
+                "feishu_record_id": record.record_id,
+                "failure_reason": "",
+                "submit_channel": submit_channel,
+            },
+        )
+    except Exception as exc:
+        return {"failed": {"reason": "prompt_refresh_rds_update_failed", "error": str(exc)}}
     prompt_client.update_record_fields(record.record_id, update_fields)
     return {"record_id": record.record_id, "segment_prompt_id": package["segment_prompt_id"], "action": "refreshed"}
 
 
-def _gap_count(fields: Dict[str, Any]) -> int:
-    gap_text = _text(fields.get("素材缺口说明"))
+def _gap_count(fields: Dict[str, Any], ctx: Any | None = None, product_id: str = "", max_packages: int = 6) -> int:
+    task = _latest_content_task(ctx, product_id) if ctx and product_id else {}
+    gap_text = _text(fields.get("素材缺口说明")) or _text(task.get("blocked_reason"))
     explicit = _explicit_ai_supplement_count(gap_text)
     if explicit > 0:
-        return explicit
-    target = _int(fields.get("目标生成数量"))
-    actual = _int(fields.get("实际生成数量"))
-    material_status = _text(fields.get("素材状态"))
+        return min(explicit, max(1, int(max_packages or explicit)))
+    target = _int(fields.get("目标生成数量")) or _parse_factory_tier(fields.get("投流混剪档位")) or _int(task.get("requested_variant_count")) or _int(task.get("allowed_variant_count"))
+    actual = _int(fields.get("实际生成数量")) or _int(task.get("actual_variant_count"))
+    material_status = _text(fields.get("素材状态")) or _text(task.get("material_status"))
     if target > actual and material_status in {"not_ready", "blocked", "review_required"}:
-        return target - actual
+        return min(target - actual, max(1, int(max_packages or target - actual)))
     if gap_text or material_status in {"not_ready", "blocked", "review_required"}:
         return 1
+    return 0
+
+
+def _latest_content_task(ctx: Any | None, product_id: str) -> Dict[str, Any]:
+    if not ctx or not product_id:
+        return {}
+    try:
+        rows = ctx.repo.list_where("content_tasks", "product_id=? ORDER BY id DESC LIMIT 1", (product_id,))
+    except Exception:
+        return {}
+    return rows[0] if rows else {}
+
+
+def _parse_factory_tier(value: Any) -> int:
+    text = _text(value)
+    if not text:
+        return 0
+    direct = _int(text)
+    if direct in {20, 40, 60, 80}:
+        return direct
+    for item in "".join(ch if ch.isdigit() else " " for ch in text).split():
+        tier = _int(item)
+        if tier in {20, 40, 60, 80}:
+            return tier
     return 0
 
 
@@ -693,6 +782,100 @@ def _category_execution_contract(category: str) -> Dict[str, Any]:
     return dict((_CATEGORY_CONTRACT_CACHE or {}).get(category_key) or (_CATEGORY_CONTRACT_CACHE or {}).get(category) or {})
 
 
+def _brief_with_hook_direction_context(brief: Dict[str, Any], task_fields: Dict[str, Any], category: str) -> Dict[str, Any]:
+    context = _hook_direction_context(task_fields, category)
+    if not context.get("final_directions"):
+        return brief
+    cloned = json.loads(json.dumps(brief, ensure_ascii=False, default=str))
+    material = cloned.get("material_anchor_brief") or cloned
+    directions = _listish(context.get("final_directions"))[:4]
+    material["safe_micro_actions"] = _dedupe(directions + _listish(material.get("safe_micro_actions")))
+    material["hook_direction_context"] = context
+    if "material_anchor_brief" in cloned:
+        cloned["material_anchor_brief"] = material
+    return cloned
+
+
+def _hook_direction_context(task_fields: Dict[str, Any], category: str) -> Dict[str, Any]:
+    manual = _direction_lines(_text(task_fields.get("钩子方向备注")))
+    voc_enabled = _voc_reference_enabled(task_fields.get("是否启用VOC参考"))
+    voc = _direction_lines(_text(task_fields.get("VOC参考摘要"))) if voc_enabled else []
+    defaults = _category_default_hook_directions(category)
+    final = _dedupe(manual + voc + defaults)[:5]
+    if manual and voc:
+        source = "manual+voc"
+    elif manual:
+        source = "manual"
+    elif voc:
+        source = "voc"
+    else:
+        source = "category_default"
+    return {
+        "source": source,
+        "manual_note": "\n".join(manual),
+        "voc_reference": voc,
+        "category_default": defaults,
+        "final_directions": final,
+        "negative_constraints": [
+            "不要把钩子方向写成硬广字幕",
+            "不要口播宣称功效或用户一致好评",
+            "不要为了表达卖点改变商品外观或类目",
+        ],
+    }
+
+
+def _direction_lines(value: str) -> List[str]:
+    chunks: List[str] = []
+    for line in str(value or "").replace("；", "\n").replace(";", "\n").splitlines():
+        text = line.strip(" -•\t")
+        if text:
+            chunks.append(text)
+    return _dedupe(chunks)[:5]
+
+
+def _voc_reference_enabled(value: Any) -> bool:
+    text = _text(value).strip().lower()
+    if not text:
+        return True
+    return text not in {"关闭", "否", "不启用", "禁用", "false", "0", "no", "off"}
+
+
+def _category_default_hook_directions(category: str) -> List[str]:
+    key = _category_key(category, "")
+    defaults = {
+        "hair_accessories": [
+            "前1秒清楚展示佩戴或整理动作",
+            "用镜前整理、转头或侧边整理呈现造型变化",
+            "补充产品近景，颜色、形状和材质要清楚",
+        ],
+        "earrings": [
+            "前1秒清楚展示耳饰上耳效果或手持近景",
+            "用侧脸转头或整理头发露出耳饰",
+            "补充耳饰材质、光泽和大小比例近景",
+        ],
+        "necklaces": [
+            "前1秒清楚展示颈部佩戴效果或吊坠近景",
+            "用整理衣领、轻转身体呈现项链位置和垂坠感",
+            "补充吊坠、链条和光泽细节近景",
+        ],
+        "bracelets": [
+            "前1秒清楚展示腕部佩戴效果或手持近景",
+            "用抬手、整理袖口或转动手腕呈现存在感",
+            "补充材质、扣件和细节近景",
+        ],
+        "womens_tops": [
+            "前1秒展示上身轮廓或穿搭完成效果",
+            "用拉拉链、整理领口、转身呈现版型和外套层次",
+            "补充面料纹理、袖口、门襟或口袋细节",
+        ],
+    }
+    return defaults.get(key) or [
+        "前1秒让商品主体清楚出现",
+        "用真实生活化动作展示商品使用或佩戴场景",
+        "补充商品细节近景，避免只做静物摆拍",
+    ]
+
+
 def _brief_with_voc_candidate(brief: Dict[str, Any], slot: Dict[str, Any]) -> Dict[str, Any]:
     candidate = slot.get("voc_hook_candidate") if isinstance(slot.get("voc_hook_candidate"), dict) else {}
     if not candidate:
@@ -707,12 +890,12 @@ def _brief_with_voc_candidate(brief: Dict[str, Any], slot: Dict[str, Any]) -> Di
         material["primary_visual_result"] = visual_goal
         must_show = _listish(material.get("must_show"))
         proof_constraints = []
-        proof_constraints.append(f"VOC证明目标：{visual_goal}")
+        proof_constraints.append(f"VOC参考方向：{visual_goal}")
         if required_action:
-            proof_constraints.append(f"VOC证明动作：{required_action}")
-        proof_constraints.extend(f"VOC证明镜头：{shot}" for shot in proof_shots[:3])
+            proof_constraints.append(f"VOC参考动作：{required_action}")
+        proof_constraints.extend(f"VOC参考镜头：{shot}" for shot in proof_shots[:3])
         if selling_point:
-            proof_constraints.append(f"VOC来源卖点：{selling_point}")
+            proof_constraints.append(f"VOC来源方向：{selling_point}")
         material["must_show"] = _dedupe([*proof_constraints, *must_show])
     safe_micro = _listish(candidate.get("safe_micro_actions")) or _voc_safe_micro_actions(candidate)
     material["safe_micro_actions"] = _dedupe(safe_micro + _listish(material.get("safe_micro_actions")))
@@ -1192,11 +1375,11 @@ def _note(fields: Dict[str, Any], index: int, total: int, voc_candidate: Any = N
         insight_id = _text(voc_candidate.get("insight_id"))
         requested = _int(voc_candidate.get("requested_hook_count"))
         if visual_proof:
-            chunks.append(f"VOC证明点：{visual_proof}" + (f" x{requested}" if requested else ""))
+            chunks.append(f"VOC参考方向：{visual_proof}" + (f" x{requested}" if requested else ""))
         if required_action:
-            chunks.append(f"VOC证明动作：{required_action}")
+            chunks.append(f"VOC参考动作：{required_action}")
         if selling_point and selling_point != visual_proof:
-            chunks.append(f"VOC来源卖点：{selling_point}")
+            chunks.append(f"VOC来源方向：{selling_point}")
         if insight_id:
             chunks.append(f"VOC洞察：{insight_id}")
     gap_text = _text(fields.get("素材缺口说明"))
@@ -1381,10 +1564,13 @@ def _repair_rds_only_packages(args) -> Dict[str, Any]:
         # check if feishu already has this prompt_id
         if prompt_id in feishu_by_prompt_id:
             feishu_rid = feishu_by_prompt_id[prompt_id]
-            ctx.repo.update("segment_prompt_packages", "segment_prompt_id", prompt_id, {
-                "package_status": "created", "feishu_record_id": feishu_rid, "failure_reason": "",
-            })
-            repaired.append({"segment_prompt_id": prompt_id, "action": "feishu_found", "feishu_record_id": feishu_rid})
+            try:
+                _update_prompt_package_or_raise(ctx, prompt_id, {
+                    "package_status": "created", "feishu_record_id": feishu_rid, "failure_reason": "", "submit_channel": args.submit_channel,
+                })
+                repaired.append({"segment_prompt_id": prompt_id, "action": "feishu_found", "feishu_record_id": feishu_rid})
+            except Exception as exc:
+                failed.append({"segment_prompt_id": prompt_id, "error": str(exc)})
             continue
 
         # build feishu row from package data
@@ -1399,14 +1585,17 @@ def _repair_rds_only_packages(args) -> Dict[str, Any]:
                 "短视频片段提示词": _format_prompt_package(package),
             }
             prompt_field_names, feishu_record_id = _safe_batch_create_prompt(prompt_client, row_fields, prompt_field_names)
-            ctx.repo.update("segment_prompt_packages", "segment_prompt_id", prompt_id, {
-                "package_status": "created", "feishu_record_id": feishu_record_id, "failure_reason": "",
+            _update_prompt_package_or_raise(ctx, prompt_id, {
+                "package_status": "created", "feishu_record_id": feishu_record_id, "failure_reason": "", "submit_channel": args.submit_channel,
             })
             repaired.append({"segment_prompt_id": prompt_id, "action": "created", "feishu_record_id": feishu_record_id})
         except Exception as exc:
-            ctx.repo.update("segment_prompt_packages", "segment_prompt_id", prompt_id, {
-                "package_status": "feishu_sync_failed", "failure_reason": str(exc),
-            })
+            try:
+                _update_prompt_package_or_raise(ctx, prompt_id, {
+                    "package_status": "feishu_sync_failed", "failure_reason": str(exc),
+                })
+            except Exception:
+                pass
             failed.append({"segment_prompt_id": prompt_id, "error": str(exc)})
 
     return {"repaired": repaired, "skipped": skipped, "failed": failed}

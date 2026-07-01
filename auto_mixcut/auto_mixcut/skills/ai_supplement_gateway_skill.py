@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime, timedelta
 import os
 from typing import Any
@@ -28,6 +29,14 @@ IN_FLIGHT_PACKAGE_STATUSES = {
 }
 IMPORTED_PACKAGE_STATUSES = {"imported", "已回流", "质检通过", "downloaded", "uploaded"}
 CONSUMED_PACKAGE_STATUSES = {"consumed", "已消费"}
+REJECTED_RESULT_SYNC_STATUSES = {
+    "failed",
+    "blocked",
+    "review_failed",
+    "review_failed_or_missing_asset",
+    "claim_failed",
+    "timed_out",
+}
 
 
 class AISupplementGatewaySkill:
@@ -116,6 +125,7 @@ class AISupplementGatewaySkill:
 def normalize_package(row: dict[str, Any]) -> str:
     status = _status(row)
     result_sync = str(row.get("result_sync_status") or "").strip()
+    result_sync_key = result_sync.lower()
     failure = str(row.get("failure_reason") or "").strip()
     if status in CONSUMED_PACKAGE_STATUSES:
         return "consumed"
@@ -123,6 +133,8 @@ def normalize_package(row: dict[str, Any]) -> str:
         return "imported"
     if status in IMPORTED_PACKAGE_STATUSES or result_sync in IMPORTED_PACKAGE_STATUSES:
         return "imported"
+    if result_sync_key in REJECTED_RESULT_SYNC_STATUSES:
+        return "failed"
     if is_stale_inflight_package(row):
         return "recoverable_failed"
     if status in IN_FLIGHT_PACKAGE_STATUSES or result_sync in IN_FLIGHT_PACKAGE_STATUSES:
@@ -137,6 +149,58 @@ def normalize_package(row: dict[str, Any]) -> str:
     if status in RECOVERABLE_FAILED_PACKAGE_STATUSES:
         return "recoverable_failed" if is_recoverable_submit_failure(failure) else "failed"
     return "unknown"
+
+
+def summarize_package_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Canonical prompt-package summary for planner/orchestrator scripts."""
+    by_status: Counter[str] = Counter()
+    by_normalized: Counter[str] = Counter()
+    summary = {
+        "total": len(rows),
+        "pending": 0,
+        "ready_to_submit": 0,
+        "needs_feishu_sync": 0,
+        "submitted": 0,
+        "inflight": 0,
+        "imported": 0,
+        "generated": 0,
+        "consumed": 0,
+        "failed": 0,
+        "recoverable_failed": 0,
+        "stale_inflight": 0,
+    }
+    for row in rows:
+        status = _status(row)
+        normalized = normalize_package(row)
+        by_status[status or "unknown"] += 1
+        by_normalized[normalized or "unknown"] += 1
+        if normalized in {"ready_to_submit", "inflight"}:
+            summary["pending"] += 1
+        if normalized == "ready_to_submit":
+            summary["ready_to_submit"] += 1
+        elif normalized == "needs_feishu_sync":
+            summary["needs_feishu_sync"] += 1
+        elif normalized == "inflight":
+            summary["inflight"] += 1
+            if status == "submitted":
+                summary["submitted"] += 1
+        elif normalized == "recoverable_failed":
+            summary["recoverable_failed"] += 1
+            if is_stale_inflight_package(row):
+                summary["stale_inflight"] += 1
+        elif normalized == "failed":
+            summary["failed"] += 1
+        elif normalized == "imported":
+            summary["imported"] += 1
+        elif normalized == "consumed":
+            summary["consumed"] += 1
+        if row.get("generated_asset_id") or row.get("generated_segment_id"):
+            summary["generated"] += 1
+    summary["by_status"] = dict(by_status)
+    summary["by_normalized"] = dict(by_normalized)
+    summary["active_package_count"] = summary["ready_to_submit"] + summary["inflight"]
+    summary["future_package_count"] = summary["active_package_count"] + summary["recoverable_failed"]
+    return summary
 
 
 def submit_budget_from_state(
@@ -157,9 +221,16 @@ def submit_budget_from_state(
     ready_or_retry = ready + retry
     needed_after_active = max(0, remaining - active)
     needed_after_inflight = max(0, remaining - inflight)
-    submit_limit = min(limit, needed_after_active)
-    if ready_or_retry > 0:
-        submit_limit = min(limit, ready_or_retry, needed_after_inflight)
+    submit_limit = min(limit, ready_or_retry, needed_after_inflight) if ready_or_retry > 0 else 0
+    package_shortfall = max(0, needed_after_active - ready_or_retry)
+    submit_block_reason = ""
+    if submit_limit <= 0 and remaining > 0:
+        if inflight > 0:
+            submit_block_reason = "waiting_ai_return"
+        elif ready_or_retry <= 0:
+            submit_block_reason = "no_ready_or_recoverable_prompt_package"
+        else:
+            submit_block_reason = "inflight_capacity_filled"
 
     budget: dict[str, Any] = {
         "target_remaining": remaining,
@@ -173,7 +244,10 @@ def submit_budget_from_state(
         "future_package_count": active + retry,
         "needed_after_active": needed_after_active,
         "needed_after_inflight": needed_after_inflight,
+        "package_shortfall_count": package_shortfall,
+        "submit_block_reason": submit_block_reason,
         "submit_limit": max(0, submit_limit),
+        "submit_slot_role": "",
     }
     if priority_role:
         role_state = (state.get("role_counts") or {}).get(priority_role) or {}
@@ -182,18 +256,37 @@ def submit_budget_from_state(
         role_inflight = int(role_state.get("inflight_count") or 0)
         role_ready_or_retry = role_ready + role_retry
         role_needed_after_inflight = max(0, remaining - role_inflight)
-        role_submit_limit = min(limit, role_ready_or_retry, role_needed_after_inflight)
+        role_submit_limit = min(limit, role_ready_or_retry, role_needed_after_inflight) if role_ready_or_retry > 0 else 0
+        role_package_shortfall = max(0, role_needed_after_inflight - role_ready_or_retry)
+        role_block_reason = submit_block_reason
+        budget_mode = "priority_role"
+        effective_submit_limit = role_submit_limit
+        submit_slot_role = priority_role if role_submit_limit > 0 else ""
+        if role_submit_limit <= 0 and remaining > 0:
+            if role_inflight > 0:
+                role_block_reason = "waiting_priority_role_ai_return"
+                if submit_limit > 0:
+                    role_block_reason = ""
+                    budget_mode = "general_while_priority_role_inflight"
+                    effective_submit_limit = submit_limit
+            elif role_ready_or_retry <= 0:
+                role_block_reason = "no_priority_role_prompt_package"
+            else:
+                role_block_reason = "priority_role_inflight_capacity_filled"
         budget.update(
             {
                 "priority_role": priority_role,
-                "budget_mode": "priority_role",
+                "budget_mode": budget_mode,
                 "role_ready_to_submit_count": role_ready,
                 "role_recoverable_failed_count": role_retry,
                 "role_inflight_count": role_inflight,
                 "role_imported_package_count": int(role_state.get("imported_package_count") or 0),
                 "role_consumed_package_count": int(role_state.get("consumed_package_count") or 0),
                 "role_needed_after_inflight": role_needed_after_inflight,
-                "submit_limit": max(0, role_submit_limit),
+                "role_package_shortfall_count": role_package_shortfall,
+                "submit_block_reason": role_block_reason,
+                "submit_slot_role": submit_slot_role,
+                "submit_limit": max(0, effective_submit_limit),
             }
         )
     return budget
@@ -279,6 +372,10 @@ def is_recoverable_submit_failure(text: str) -> bool:
             "队列已满",
             "提示词输入失败",
             "prompt_input_failed",
+            "未检测到即梦视频生成页完整控件",
+            "generate_button_not_found",
+            "mode_switch_failed",
+            "submit_failed",
         ]
     )
 
@@ -291,9 +388,25 @@ def is_stale_inflight_package(row: dict[str, Any]) -> bool:
     if row.get("generated_asset_id") or row.get("generated_segment_id"):
         return False
     timestamp = _package_updated_at(row)
+    if not _has_external_submission_marker(row):
+        if timestamp is None:
+            return True
+        return datetime.utcnow() - timestamp > timedelta(minutes=_configured_unconfirmed_inflight_grace_minutes())
     if timestamp is None:
         return False
     return datetime.utcnow() - timestamp > timedelta(hours=_configured_inflight_stale_hours())
+
+
+def _has_external_submission_marker(row: dict[str, Any]) -> bool:
+    return any(
+        str(row.get(key) or "").strip()
+        for key in (
+            "external_job_id",
+            "platform_task_id",
+            "latest_trace_id",
+            "submission_trace_id",
+        )
+    )
 
 
 def _package_updated_at(row: dict[str, Any]) -> datetime | None:
@@ -395,3 +508,10 @@ def _configured_inflight_stale_hours() -> int:
         return max(1, int(os.environ.get("AUTO_MIXCUT_AI_PACKAGE_STALE_HOURS", "6") or "6"))
     except ValueError:
         return 6
+
+
+def _configured_unconfirmed_inflight_grace_minutes() -> int:
+    try:
+        return max(1, int(os.environ.get("AUTO_MIXCUT_AI_UNCONFIRMED_INFLIGHT_GRACE_MINUTES", "10") or "10"))
+    except ValueError:
+        return 10

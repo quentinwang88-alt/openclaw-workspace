@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 import re
@@ -18,6 +19,9 @@ from typing import Any, Dict, List, Set
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+os.environ.setdefault("AUTO_MIXCUT_TAG_TOTAL_TIMEOUT_SEC", "240")
+os.environ.setdefault("AUTO_MIXCUT_TAG_PROGRESS_EVERY", "1")
 
 from auto_mixcut.core.bootstrap import build_context  # noqa: E402
 from auto_mixcut.skills.ai_anchor_check_skill import AIAnchorCheckSkill  # noqa: E402

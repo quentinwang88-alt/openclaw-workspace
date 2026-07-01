@@ -95,12 +95,16 @@ class MaterialPolicySkill:
         return allowed, rejected
 
     def _asset_for_segment(self, segment: dict[str, Any]) -> dict[str, Any]:
+        if segment.get("_asset_loaded"):
+            return segment.get("_asset") or {}
         asset_id = str(segment.get("asset_id") or "")
         if not asset_id:
             return {}
         return self.ctx.repo.get("assets", "asset_id", asset_id) or {}
 
     def _latest_tag_for_segment(self, segment: dict[str, Any]) -> dict[str, Any]:
+        if segment.get("_latest_tag_loaded"):
+            return segment.get("_latest_tag") or {}
         segment_id = str(segment.get("segment_id") or "")
         if not segment_id:
             return {}
@@ -215,6 +219,8 @@ def _low_trust_first_slot_candidate(segment: dict[str, Any], asset: dict[str, An
 def _published_exposure_used(ctx: SkillContext | None, segment: dict[str, Any]) -> bool:
     if _truthy(segment.get("published_at")) or str(segment.get("publish_result") or "").strip().lower() in PUBLISHED_RESULT_VALUES:
         return True
+    if segment.get("_published_exposure_loaded"):
+        return bool(segment.get("_published_exposure_used"))
     if ctx is None:
         return False
     segment_id = str(segment.get("segment_id") or "")

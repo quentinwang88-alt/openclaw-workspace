@@ -67,7 +67,10 @@ class RenderSkill:
                     "failure_reason": "",
                 },
             )
-        task_sync = sync_product_task_best_effort(self.ctx, batch.get("product_id") if batch else "")
+        if _env_truthy("AUTO_MIXCUT_SKIP_INLINE_FEISHU_SYNC"):
+            task_sync = Result.ok({"status": "skipped", "reason": "inline_feishu_sync_disabled"})
+        else:
+            task_sync = sync_product_task_best_effort(self.ctx, batch.get("product_id") if batch else "")
         return Result.ok({"batch_id": batch_id, "output_ids": outputs, "task_sync": task_sync})
 
     def render_plan(self, render_plan_id: str) -> Result:
@@ -132,6 +135,9 @@ class RenderSkill:
     def _ensure_runtime_schema(self) -> Result:
         if self._runtime_schema_checked:
             return Result.ok({"skipped": True})
+        if _env_truthy("AUTO_MIXCUT_SKIP_RENDER_RUNTIME_SCHEMA"):
+            self._runtime_schema_checked = True
+            return Result.ok({"skipped": True, "reason": "render_runtime_schema_check_disabled"})
         result = RDSRepositorySkill(self.ctx).init_db()
         if result.success:
             self._runtime_schema_checked = True

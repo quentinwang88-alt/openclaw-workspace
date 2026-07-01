@@ -769,21 +769,21 @@ def build_prompt_smoke(factory: SegmentPromptFactorySkill, product: Dict[str, An
     proof_actions = []
     for item in candidates:
         if item.get("required_action_zh"):
-            proof_actions.append(f"VOC证明动作：{item.get('required_action_zh')}")
+            proof_actions.append(f"VOC参考动作：{item.get('required_action_zh')}")
         for shot in item.get("proof_shot_list") or []:
-            proof_actions.append(f"VOC证明镜头：{shot}")
+            proof_actions.append(f"VOC参考镜头：{shot}")
     brief = {
         "product_id": product.get("product_id"),
         "category": product.get("category"),
         "product_subtype": product.get("product_name"),
         "primary_visual_result": "；".join(p for p in proof_points[:2] if p),
-        "must_show": proof_actions[:6] + [f"VOC来源卖点：{item.get('selling_point')}" for item in candidates if item.get("selling_point")] + anchor_texts(anchor.get("display_anchors"), ("anchor", "constraint", "selling_point"))[:3],
+        "must_show": proof_actions[:6] + [f"VOC来源方向：{item.get('selling_point')}" for item in candidates if item.get("selling_point")] + anchor_texts(anchor.get("display_anchors"), ("anchor", "constraint", "selling_point"))[:3],
         "must_not_show": anchor_texts(anchor.get("distortion_alerts"), ("anchor", "constraint", "text"))[:5],
         "hard_anchors": anchor_texts(anchor.get("hard_anchors"), ("anchor", "constraint", "text"))[:6],
         "display_anchors": anchor_texts(anchor.get("display_anchors"), ("anchor", "constraint", "text"))[:4],
         "key_visual_constraints": anchor_texts(anchor.get("key_visual_constraints"), ("constraint", "anchor", "text"))[:5],
         "forbidden_actions": anchor_texts(anchor.get("distortion_alerts"), ("anchor", "constraint", "text"))[:5],
-        "safe_micro_actions": [a.replace("VOC证明动作：", "").replace("VOC证明镜头：", "") for a in proof_actions[:6]]
+        "safe_micro_actions": [a.replace("VOC参考动作：", "").replace("VOC参考镜头：", "") for a in proof_actions[:6]]
         or ["后脑佩戴结果近景", "手部轻夹入发髻区域", "同角度前后对比"],
     }
     results: List[Dict[str, Any]] = []
@@ -907,42 +907,49 @@ def latest_task_with_feishu_record(ctx: Any, product_id: str) -> Dict[str, Any] 
 
 def ensure_task_voc_fields(client: AutoMixcutFeishuClient) -> None:
     existing = {field.field_name for field in client.client.list_fields()}
-    for field_name in [
-        "AI推荐卖点",
-        "VOC来源批次",
-        "VOC质量状态",
-        "VOC推荐状态",
-        "VOC商品形态",
-        "VOC形态样本量",
-        "VOC形态置信度",
-        "VOC风险提示",
-        "VOC推荐更新时间",
-        "VOC人工确认状态",
-        "VOC人工确认卖点",
-        "VOC目标钩子数",
-        "VOC钩子包状态",
-        "VOC钩子包ID",
-        "VOC钩子候选数",
-        "VOC钩子包摘要",
-        "VOC钩子包更新时间",
-    ]:
+    field_specs = [
+        ("是否启用VOC参考", 3, "SingleSelect", {"options": [{"name": "启用"}, {"name": "关闭"}]}),
+        ("VOC参考摘要", 1, "Text", None),
+        ("钩子方向状态", 3, "SingleSelect", {"options": [{"name": "默认类目"}, {"name": "人工备注"}, {"name": "VOC参考"}, {"name": "人工+VOC"}, {"name": "跳过VOC"}]}),
+        ("VOC风险提示", 1, "Text", None),
+        ("最近更新时间", 5, "DateTime", None),
+    ]
+    for field_name, field_type, ui_type, field_property in field_specs:
         if field_name not in existing:
-            client.client.create_field(field_name, field_type=1, ui_type="Text")
+            client.client.create_field(field_name, field_type=field_type, ui_type=ui_type, property=field_property)
             existing.add(field_name)
 
 
 def feishu_task_fields(recommendation: Dict[str, Any]) -> Dict[str, Any]:
+    reference = format_voc_reference_summary(recommendation)
     return {
-        "AI推荐卖点": recommendation.get("recommendation_text") or "",
-        "VOC来源批次": str(recommendation.get("batch_id") or ""),
-        "VOC质量状态": str(recommendation.get("quality_status") or ""),
-        "VOC推荐状态": str(recommendation.get("recommendation_status") or ""),
-        "VOC商品形态": format_product_form(recommendation),
-        "VOC形态样本量": format_form_sample(recommendation),
-        "VOC形态置信度": str(recommendation.get("form_confidence") or ""),
+        "是否启用VOC参考": "启用",
+        "VOC参考摘要": reference,
+        "钩子方向状态": "VOC参考" if reference else "默认类目",
         "VOC风险提示": format_voc_risk_note(recommendation),
-        "VOC推荐更新时间": datetime.utcnow().isoformat(timespec="seconds"),
+        "最近更新时间": datetime_cell(datetime.utcnow()),
     }
+
+
+def format_voc_reference_summary(recommendation: Dict[str, Any]) -> str:
+    directions: List[str] = []
+    for item in recommendation.get("primary_selling_points") or []:
+        visual = str(item.get("visual_proof_zh") or item.get("visual_goal_zh") or item.get("selling_point") or "").strip()
+        action = str(item.get("required_action_zh") or "").strip()
+        shots = [str(shot).strip() for shot in (item.get("proof_shot_list") or []) if str(shot).strip()]
+        if action:
+            directions.append(action)
+        elif shots:
+            directions.append(shots[0])
+        elif visual:
+            directions.append(visual)
+    if not directions:
+        return ""
+    scoped = []
+    form = format_product_form(recommendation)
+    for item in directions[:3]:
+        scoped.append(f"{item}" + (f"（参考形态：{form}）" if form else ""))
+    return "\n".join(scoped)
 
 
 def format_voc_risk_note(recommendation: Dict[str, Any]) -> str:

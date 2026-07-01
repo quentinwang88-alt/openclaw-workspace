@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import os
 from typing import Any, Dict, List, Optional
 
 from auto_mixcut.core.result import Result
@@ -196,6 +197,9 @@ def _compute_roles(segment: Dict[str, Any], asset: Dict[str, Any], tag: Dict[str
 
 
 def _ai_roles(segment: Dict[str, Any], asset: Dict[str, Any], tag: Dict[str, Any], config: AISegmentFactoryConfig) -> tuple[List[str], str]:
+    if not _ai_semantic_qc_enabled():
+        return _ai_roles_without_semantic_qc(segment, asset, tag, config)
+
     segment_type = str(segment.get("segment_type") or "")
     anchor_level = str(segment.get("anchor_match_level") or "")
 
@@ -258,6 +262,35 @@ def _ai_roles(segment: Dict[str, Any], asset: Dict[str, Any], tag: Dict[str, Any
     return [r for r in rule.possible_roles if r in {"scene", "ending"}] or ["scene", "ending"], "ai default fallback"
 
 
+def _ai_roles_without_semantic_qc(segment: Dict[str, Any], asset: Dict[str, Any], tag: Dict[str, Any], config: AISegmentFactoryConfig) -> tuple[List[str], str]:
+    segment_type = str(segment.get("segment_type") or asset.get("scene_tag") or "")
+    rule = config.get_segment_type_rule(segment_type)
+    possible_roles = set(rule.possible_roles or ["scene", "ending"])
+    roles = {role for role in (rule.default_roles or []) if role in possible_roles}
+
+    slot_role = str(segment.get("slot_role") or asset.get("slot_role") or "")
+    allowed_core_roles = set(segment.get("allowed_core_roles_json") or asset.get("allowed_core_roles_json") or [])
+    if slot_role in {"hero", "detail", "result"} and slot_role in possible_roles:
+        if not allowed_core_roles or slot_role in allowed_core_roles:
+            roles.add(slot_role)
+
+    primary = tag.get("primary_shot_role")
+    secondary = tag.get("secondary_roles_json") or []
+    if isinstance(secondary, str):
+        secondary = [secondary]
+    for role in [primary, *secondary]:
+        if role in possible_roles:
+            roles.add(role)
+
+    if not roles:
+        roles = {role for role in possible_roles if role in {"scene", "ending"}}
+    if not roles and slot_role in {"hero", "detail", "result"}:
+        roles.add(slot_role)
+    if not roles:
+        roles = {"scene", "ending"}
+    return sorted(roles), "ai semantic qc disabled; roles inferred from prompt package and tag"
+
+
 def _ai_roles_for_missing_segment_type(segment: Dict[str, Any], tag: Dict[str, Any]) -> tuple[List[str], str]:
     consistency = str(segment.get("frame_consistency_status") or "")
     risk_level = str(tag.get("risk_level") or "medium")
@@ -279,6 +312,10 @@ def _ai_roles_for_missing_segment_type(segment: Dict[str, Any], tag: Dict[str, A
         if role in {"hero", "detail", "result", "scene", "ending"}:
             roles.add(role)
     return sorted(roles), "ai strict_pass missing segment_type; roles inferred from vision tag"
+
+
+def _ai_semantic_qc_enabled() -> bool:
+    return os.environ.get("AUTO_MIXCUT_AI_SEMANTIC_QC", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 

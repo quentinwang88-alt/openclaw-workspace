@@ -244,11 +244,13 @@ def _ensure_prompt_package_table(ctx: SkillContext) -> Result:
                           anchor_ref_json JSON,
                           perturbation_seed_json JSON,
                           package_status VARCHAR(64),
+                          result_sync_status VARCHAR(64),
                           external_provider VARCHAR(128),
                           external_job_id VARCHAR(256),
                           generated_asset_id VARCHAR(128),
                           generated_segment_id VARCHAR(128),
                           feishu_record_id VARCHAR(128),
+                          submit_channel VARCHAR(64),
                           failure_reason TEXT,
                           created_at DATETIME,
                           updated_at DATETIME
@@ -282,11 +284,13 @@ def _ensure_prompt_package_table(ctx: SkillContext) -> Result:
                       anchor_ref_json TEXT,
                       perturbation_seed_json TEXT,
                       package_status TEXT,
+                      result_sync_status TEXT,
                       external_provider TEXT,
                       external_job_id TEXT,
                       generated_asset_id TEXT,
                       generated_segment_id TEXT,
                       feishu_record_id TEXT,
+                      submit_channel TEXT,
                       failure_reason TEXT,
                       created_at TEXT,
                       updated_at TEXT
@@ -299,6 +303,8 @@ def _ensure_prompt_package_table(ctx: SkillContext) -> Result:
             _ensure_prompt_package_column(ctx, conn, "reference_image_version", "INT DEFAULT 0" if getattr(ctx.repo, "dialect", "sqlite") == "mysql" else "INTEGER DEFAULT 0")
             _ensure_prompt_package_column(ctx, conn, "reference_image_preview_url", "TEXT")
             _ensure_prompt_package_column(ctx, conn, "reference_image_status", "VARCHAR(64)" if getattr(ctx.repo, "dialect", "sqlite") == "mysql" else "TEXT")
+            _ensure_prompt_package_column(ctx, conn, "submit_channel", "VARCHAR(64)" if getattr(ctx.repo, "dialect", "sqlite") == "mysql" else "TEXT")
+            _ensure_prompt_package_column(ctx, conn, "result_sync_status", "VARCHAR(64)" if getattr(ctx.repo, "dialect", "sqlite") == "mysql" else "TEXT")
         return Result.ok()
     except Exception as exc:
         return Result.fail("PROMPT_PACKAGE_TABLE_FAILED", str(exc))
@@ -350,6 +356,8 @@ def _package_row(package: dict[str, Any], status: str) -> dict[str, Any]:
         "anchor_ref_json": package.get("anchor_ref"),
         "perturbation_seed_json": (package.get("gen_policy") or {}).get("perturbation_seed_group"),
         "package_status": status,
+        "result_sync_status": package.get("result_sync_status") or "",
+        "submit_channel": package.get("submit_channel") or "",
     }
 
 
@@ -1081,6 +1089,10 @@ def _selling_positive_layer(brief: dict[str, Any]) -> str:
     must_show = _list(brief.get("must_show"))
     if must_show:
         parts.append("必须出现：" + "、".join(must_show))
+    hook_context = brief.get("hook_direction_context") if isinstance(brief.get("hook_direction_context"), dict) else {}
+    hook_directions = _list(hook_context.get("final_directions"))[:3]
+    if hook_directions:
+        parts.append("镜头方向参考：" + "、".join(hook_directions))
     return "；".join(parts)
 
 

@@ -58,6 +58,13 @@ CATEGORIES = ["hair_accessories", "earrings", "womens_tops", "scarves", "hats", 
 UPLOAD_CATEGORIES = ["hair_accessories", "earrings", "womens_top", "scarf_hat", "other"]
 PRIORITIES = ["low", "normal", "high", "urgent"]
 TASK_TYPES = ["mixcut", "benchmark", "rerender"]
+MIXCUT_USE_CASES = ["投流混剪", "普通混剪"]
+MIXCUT_FACTORY_TIERS = ["20", "40", "60", "80"]
+PRODUCT_TASK_STATUSES = ["待开始", "生产中", "等待人工", "暂停", "完成", "异常"]
+VOC_REFERENCE_SWITCH = ["启用", "关闭"]
+HOOK_DIRECTION_STATUSES = ["默认类目", "人工备注", "VOC参考", "人工+VOC", "跳过VOC"]
+FACTORY_STATUSES = ["未启动", "生产中", "等待AI回流", "等待素材", "等待人工", "完成", "异常"]
+ISSUE_LEVELS = ["无", "提醒", "阻塞"]
 MATERIAL_TIERS = ["tier_0_not_ready", "tier_1_minimum", "tier_2_standard", "tier_3_full"]
 MATERIAL_STATUS = ["not_ready", "ready", "review_required", "blocked", "failed"]
 AI_SUPPLEMENT_STATUS = [
@@ -163,30 +170,22 @@ TABLE_FIELDS: Dict[str, List[Dict[str, Any]]] = {
         {"name": "商品ID", **TEXT},
         {"name": "商品名称", **TEXT},
         {"name": "市场", **single_select(MARKETS)},
-        {"name": "类目", **single_select(CATEGORIES)},
+        {"name": "归一类目", **single_select(CATEGORIES)},
         {"name": "店铺", **TEXT},
         {"name": "优先级", **single_select(PRIORITIES)},
-        {"name": "任务类型", **single_select(TASK_TYPES)},
-        {"name": "目标生成数量", **NUMBER},
-        {"name": "系统允许生成数量", **NUMBER},
-        {"name": "实际生成数量", **NUMBER},
-        {"name": "目标剩余可补成片数", **NUMBER},
-        {"name": "素材池剩余成片容量", **NUMBER},
-        {"name": "首镜剩余容量", **NUMBER},
-        {"name": "当前瓶颈", **TEXT},
-        {"name": "剩余容量说明", **TEXT},
-        {"name": "素材等级", **single_select(MATERIAL_TIERS)},
-        {"name": "素材状态", **single_select(MATERIAL_STATUS)},
-        {"name": "混剪状态", **single_select(TASK_STATUS)},
-        {"name": "守护状态", **single_select(GUARD_STATUS)},
-        {"name": "下一步动作", **single_select(GUARD_ACTIONS)},
-        {"name": "守护异常", **TEXT},
-        {"name": "最近批次ID", **TEXT},
-        {"name": "AI补素材状态", **single_select(AI_SUPPLEMENT_STATUS)},
-        {"name": "AI补素材包数量", **NUMBER},
-        {"name": "锚点状态", **single_select(ANCHOR_STATUS)},
-        {"name": "素材缺口说明", **TEXT},
-        {"name": "失败原因", **TEXT},
+        {"name": "混剪用途", **single_select(MIXCUT_USE_CASES)},
+        {"name": "投流混剪档位", **single_select(MIXCUT_FACTORY_TIERS)},
+        {"name": "任务状态", **single_select(PRODUCT_TASK_STATUSES)},
+        {"name": "钩子方向备注", **TEXT},
+        {"name": "是否启用VOC参考", **single_select(VOC_REFERENCE_SWITCH)},
+        {"name": "VOC参考摘要", **TEXT},
+        {"name": "钩子方向状态", **single_select(HOOK_DIRECTION_STATUSES)},
+        {"name": "工厂状态", **single_select(FACTORY_STATUSES)},
+        {"name": "成片进度", **TEXT},
+        {"name": "当前问题", **TEXT},
+        {"name": "处理建议", **TEXT},
+        {"name": "异常等级", **single_select(ISSUE_LEVELS)},
+        {"name": "最近更新时间", **DATETIME},
         {"name": "最近成片预览", **URL},
         {"name": "人工备注", **TEXT},
     ],
@@ -289,7 +288,13 @@ def resolve_client(feishu_url: str, table_name: str | None = None, direct: bool 
     return FeishuBitableClient(app_token=app_token, table_id=info.table_id)
 
 
-def ensure_table(table_name: str, feishu_url: str, dry_run: bool = False, direct: bool = False) -> Dict[str, Any]:
+def ensure_table(
+    table_name: str,
+    feishu_url: str,
+    dry_run: bool = False,
+    direct: bool = False,
+    update_select_options: bool = True,
+) -> Dict[str, Any]:
     client = resolve_client(feishu_url, table_name=table_name, direct=direct)
     existing = {field.field_name for field in client.list_fields()}
     existing_fields = {field.field_name: field for field in client.list_fields()}
@@ -300,7 +305,7 @@ def ensure_table(table_name: str, feishu_url: str, dry_run: bool = False, direct
     for spec in TABLE_FIELDS[table_name]:
         name = spec["name"]
         if name in existing:
-            if should_update_select_options(existing_fields[name], spec):
+            if update_select_options and should_update_select_options(existing_fields[name], spec):
                 if not dry_run:
                     update_field_property(client, existing_fields[name].field_id, spec)
                 updated.append(name)
@@ -368,9 +373,19 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--table", choices=sorted(DEFAULT_URLS), help="只检查/补齐指定表")
     parser.add_argument("--direct", action="store_true", help="使用生产代码里的固定 app_token/table_id，跳过 wiki 解析")
+    parser.add_argument("--skip-option-updates", action="store_true", help="只创建缺失字段，不更新已有单选/多选字段选项")
     args = parser.parse_args()
     table_urls = {args.table: DEFAULT_URLS[args.table]} if args.table else DEFAULT_URLS
-    results = [ensure_table(name, url, dry_run=args.dry_run, direct=args.direct) for name, url in table_urls.items()]
+    results = [
+        ensure_table(
+            name,
+            url,
+            dry_run=args.dry_run,
+            direct=args.direct,
+            update_select_options=not args.skip_option_updates,
+        )
+        for name, url in table_urls.items()
+    ]
     print(json.dumps(results, ensure_ascii=False, indent=2))
     return 1 if any(item["failed"] for item in results) else 0
 

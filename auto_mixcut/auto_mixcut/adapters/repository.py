@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -58,7 +59,9 @@ JSON_FIELDS = {
     "budget_json",
     "alert_json",
     "detail_json",
+    "reason_json",
     "ai_supplement_detail_json",
+    "guard_detail_json",
 }
 
 
@@ -77,10 +80,18 @@ class SQLiteRepository:
             yield conn
             conn.commit()
         except Exception:
-            conn.rollback()
+            try:
+                conn.rollback()
+            except Exception:
+                # The original DB error is more useful for retry/classification; a
+                # disconnected socket can also make rollback fail.
+                pass
             raise
         finally:
-            conn.close()
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def migrate(self, sql_path: Path) -> Result:
         try:
@@ -175,7 +186,7 @@ class SQLiteRepository:
 
     def _encode(self, key: str, value: Any) -> Any:
         if key in JSON_FIELDS and value is not None and not isinstance(value, str):
-            return json.dumps(value, ensure_ascii=False)
+            return json.dumps(value, ensure_ascii=False, default=str)
         return value
 
     def _has_column(self, table: str, column: str) -> bool:
@@ -233,9 +244,9 @@ class MySQLRepository:
             charset=self.charset,
             cursorclass=pymysql.cursors.DictCursor,
             autocommit=False,
-            connect_timeout=10,
-            read_timeout=45,
-            write_timeout=45,
+            connect_timeout=_env_int("AUTO_MIXCUT_DB_CONNECT_TIMEOUT", 10),
+            read_timeout=_env_int("AUTO_MIXCUT_DB_READ_TIMEOUT", 45),
+            write_timeout=_env_int("AUTO_MIXCUT_DB_WRITE_TIMEOUT", 45),
         )
         try:
             yield conn
@@ -433,7 +444,7 @@ class MySQLRepository:
 
     def _encode(self, key: str, value: Any) -> Any:
         if key in JSON_FIELDS and value is not None and not isinstance(value, str):
-            return json.dumps(value, ensure_ascii=False)
+            return json.dumps(value, ensure_ascii=False, default=str)
         return value
 
     def _has_column(self, table: str, column: str) -> bool:
@@ -464,6 +475,13 @@ class MySQLRepository:
                     raise
                 time.sleep(0.5 * (attempt + 1))
         raise last_exc or RuntimeError("mysql read failed")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)) or default)
+    except ValueError:
+        return default
 
 
 def _mysql_statements(sql: str) -> List[str]:

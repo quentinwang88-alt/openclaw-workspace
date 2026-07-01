@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+from datetime import datetime
 import json
 import os
 import signal
@@ -11,6 +12,7 @@ from pathlib import Path
 from auto_mixcut.agent.ai_diversity_budget import AIDiversityBudget
 from auto_mixcut.agent.orchestrator import AutoMixcutOrchestratorAgent
 from auto_mixcut.core.bootstrap import build_context
+from auto_mixcut.core.result import Result
 from auto_mixcut.skills.ai_segment_factory_skill import AISegmentFactorySkill
 from auto_mixcut.skills.ai_supplement_workbench_skill import AISupplementWorkbenchSkill
 from auto_mixcut.skills.batch_control_skill import BatchControlSkill
@@ -42,6 +44,24 @@ from auto_mixcut.skills.bgm_audio_analysis_skill import BgmAudioAnalysisSkill
 from auto_mixcut.skills.bgm_library_skill import BgmLibrarySkill
 from auto_mixcut.skills.bgm_tag_fusion_skill import BgmTagFusionSkill
 from auto_mixcut.skills.bgm_tagging_skill import BgmTaggingSkill
+
+
+def _ads_trace(event: str, **payload) -> None:
+    trace_file = os.environ.get("AUTO_MIXCUT_ADS_TRACE_FILE", "").strip()
+    if not trace_file:
+        return
+    try:
+        with open(trace_file, "a", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps(
+                    {"ts": datetime.utcnow().isoformat(timespec="seconds") + "Z", "scope": "cli", "event": event, **payload},
+                    ensure_ascii=False,
+                    default=str,
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -224,17 +244,48 @@ def _top_up(ctx, product_id, count, max_rounds=2, template_id=None):
     batch_ids = []
     stop_reason = ""
     deferred_ai_supplement_gaps = []
+    _ads_trace("top_up_begin", product_id=product_id, target=count, max_rounds=max_rounds)
     for round_no in range(1, max_rounds + 1):
+        _ads_trace("top_up_round_start", product_id=product_id, round_no=round_no)
+        _ads_trace("top_up_snapshot_start", product_id=product_id, round_no=round_no, refresh_capacity=False)
         before = _top_up_snapshot(ctx, product_id, count, refresh_capacity=False, template_id=template_id)
+        _ads_trace(
+            "top_up_snapshot_done",
+            product_id=product_id,
+            round_no=round_no,
+            refresh_capacity=False,
+            remaining=before.get("target_remaining_variant_count"),
+            material_pool_extra_capacity=before.get("material_pool_extra_capacity"),
+            error=before.get("error"),
+        )
         if before.get("error"):
             return Result.fail("TOP_UP_SNAPSHOT_FAILED", "failed to read top-up snapshot", {"product_id": product_id, "snapshot": before, "rounds": rounds})
         if before["target_remaining_variant_count"] <= 0:
             stop_reason = "target_already_filled"
             break
-        before = _top_up_snapshot(ctx, product_id, count, refresh_capacity=True, template_id=template_id)
+        refresh_capacity = not _env_truthy("AUTO_MIXCUT_TOP_UP_SKIP_CAPACITY_REFRESH")
+        _ads_trace("top_up_snapshot_start", product_id=product_id, round_no=round_no, refresh_capacity=refresh_capacity)
+        before = _top_up_snapshot(
+            ctx,
+            product_id,
+            count,
+            refresh_capacity=refresh_capacity,
+            template_id=template_id,
+        )
+        _ads_trace(
+            "top_up_snapshot_done",
+            product_id=product_id,
+            round_no=round_no,
+            refresh_capacity=refresh_capacity,
+            remaining=before.get("target_remaining_variant_count"),
+            material_pool_extra_capacity=before.get("material_pool_extra_capacity"),
+            error=before.get("error"),
+        )
         if before.get("error"):
             return Result.fail("TOP_UP_SNAPSHOT_FAILED", "failed to read top-up snapshot", {"product_id": product_id, "snapshot": before, "rounds": rounds})
+        _ads_trace("top_up_pending_ai_start", product_id=product_id, round_no=round_no)
         pending_ai = _pending_ai_postprocess_summary(ctx, product_id)
+        _ads_trace("top_up_pending_ai_done", product_id=product_id, round_no=round_no, pending_count=pending_ai.get("count"))
         if pending_ai["count"] > 0:
             stop_reason = "waiting_ai_postprocess"
             rounds.append(
@@ -253,6 +304,13 @@ def _top_up(ctx, product_id, count, max_rounds=2, template_id=None):
             break
         capacity_supplement = None
         capacity_gap_text = _capacity_ai_supplement_gap_text(before)
+        _ads_trace(
+            "top_up_capacity_gate",
+            product_id=product_id,
+            round_no=round_no,
+            has_gap=bool(capacity_gap_text),
+            material_pool_extra_capacity=before.get("material_pool_extra_capacity"),
+        )
         if capacity_gap_text and before["material_pool_extra_capacity"] <= 0:
             capacity_supplement = AISupplementWorkbenchSkill(ctx).sync_for_product(product_id, gap_text=capacity_gap_text)
             if not capacity_supplement.success:
@@ -272,10 +330,19 @@ def _top_up(ctx, product_id, count, max_rounds=2, template_id=None):
                         Result.ok({"render_plan_ids": [], "skipped": True, "reason": "waiting_ai_supplement"}),
                         supplement=capacity_supplement,
                     )
-                )
+            )
             break
 
+        _ads_trace("top_up_readiness_start", product_id=product_id, round_no=round_no)
         readiness = ReadinessCheckSkill(ctx).check_product(product_id, count)
+        _ads_trace(
+            "top_up_readiness_done",
+            product_id=product_id,
+            round_no=round_no,
+            success=readiness.success,
+            allowed=(readiness.data or {}).get("allowed_variant_count") if readiness.success else None,
+            error=readiness.to_dict() if not readiness.success else None,
+        )
         if not readiness.success:
             return _top_up_fail("check", readiness, product_id, rounds, before)
 
@@ -289,7 +356,19 @@ def _top_up(ctx, product_id, count, max_rounds=2, template_id=None):
             else:
                 deferred_ai_supplement_gaps.append(gap_text)
 
-        planned = _create_render_plans_with_timeout(ctx, product_id, count=_cap_round_count(before, count), template_id=template_id)
+        plan_count = _cap_round_count(before, count)
+        _ads_trace("top_up_plan_start", product_id=product_id, round_no=round_no, count=plan_count)
+        planned = _create_render_plans_with_timeout(ctx, product_id, count=plan_count, template_id=template_id)
+        _ads_trace(
+            "top_up_plan_done",
+            product_id=product_id,
+            round_no=round_no,
+            success=planned.success,
+            batch_id=(planned.data or {}).get("batch_id") if planned.success else "",
+            planned_count=len((planned.data or {}).get("render_plan_ids") or []) if planned.success else 0,
+            reason=(planned.data or {}).get("reason") if planned.success else None,
+            error=planned.to_dict() if not planned.success else None,
+        )
         if not planned.success:
             return _top_up_fail("render_plan", planned, product_id, rounds, before)
         batch_id = (planned.data or {}).get("batch_id") or ""
@@ -297,7 +376,9 @@ def _top_up(ctx, product_id, count, max_rounds=2, template_id=None):
         resume_reason = (planned.data or {}).get("reason")
         resume_batch_id = (planned.data or {}).get("active_batch_id") or batch_id
         if resume_reason in {"active_planning_batch_exists", "pending_output_qc_exists"} and resume_batch_id:
-            rendered = RenderSkill(ctx).render_batch(resume_batch_id)
+            _ads_trace("top_up_render_resume_start", product_id=product_id, round_no=round_no, batch_id=resume_batch_id, reason=resume_reason)
+            rendered = _render_batch_with_timeout(ctx, resume_batch_id, product_id)
+            _ads_trace("top_up_render_resume_done", product_id=product_id, round_no=round_no, batch_id=resume_batch_id, success=rendered.success, error=rendered.to_dict() if not rendered.success else None)
             if not rendered.success:
                 return _top_up_fail("render", rendered, product_id, rounds, before, resume_batch_id)
 
@@ -305,7 +386,7 @@ def _top_up(ctx, product_id, count, max_rounds=2, template_id=None):
             if not quality.success:
                 return _top_up_fail("quality", quality, product_id, rounds, before, resume_batch_id)
 
-            synced = FeishuReviewSkill(ctx).sync_output_qc(resume_batch_id)
+            synced = _sync_output_qc_best_effort(ctx, resume_batch_id)
             if not synced.success:
                 return _top_up_fail("sync_feishu", synced, product_id, rounds, before, resume_batch_id)
 
@@ -349,7 +430,9 @@ def _top_up(ctx, product_id, count, max_rounds=2, template_id=None):
             rounds.append(_top_up_round_summary(ctx, round_no, batch_id, before, readiness, planned, supplement=supplement))
             break
 
-        rendered = RenderSkill(ctx).render_batch(batch_id)
+        _ads_trace("top_up_render_start", product_id=product_id, round_no=round_no, batch_id=batch_id)
+        rendered = _render_batch_with_timeout(ctx, batch_id, product_id)
+        _ads_trace("top_up_render_done", product_id=product_id, round_no=round_no, batch_id=batch_id, success=rendered.success, error=rendered.to_dict() if not rendered.success else None)
         if not rendered.success:
             return _top_up_fail("render", rendered, product_id, rounds, before, batch_id)
 
@@ -363,7 +446,7 @@ def _top_up(ctx, product_id, count, max_rounds=2, template_id=None):
             if not final_qc.success:
                 return _top_up_fail("final_video_qc", final_qc, product_id, rounds, before, batch_id)
 
-        synced = FeishuReviewSkill(ctx).sync_output_qc(batch_id)
+        synced = _sync_output_qc_best_effort(ctx, batch_id)
         if not synced.success:
             return _top_up_fail("sync_feishu", synced, product_id, rounds, before, batch_id)
 
@@ -384,7 +467,7 @@ def _top_up(ctx, product_id, count, max_rounds=2, template_id=None):
         stop_reason = "max_rounds_reached"
 
     if batch_ids:
-        task_sync = FeishuReviewSkill(ctx).sync_task(product_id)
+        task_sync = _sync_task_best_effort(ctx, product_id)
         if not task_sync.success:
             return _top_up_fail("sync_task", task_sync, product_id, rounds, _top_up_snapshot(ctx, product_id, count, refresh_capacity=False, template_id=template_id))
     else:
@@ -439,6 +522,56 @@ def _create_render_plans_with_timeout(ctx, product_id, count, template_id=None):
             message,
             {"product_id": product_id, "timeout_seconds": timeout_seconds, "aborted": aborted},
         )
+
+
+def _render_batch_with_timeout(ctx, batch_id: str, product_id: str):
+    from auto_mixcut.core.result import Result
+
+    timeout_seconds = _render_batch_timeout_seconds()
+    try:
+        with _operation_timeout(timeout_seconds):
+            return RenderSkill(ctx).render_batch(batch_id)
+    except TimeoutError:
+        marked = _mark_render_batch_timeout(ctx, batch_id, product_id, timeout_seconds)
+        message = f"render batch timed out after {timeout_seconds}s"
+        return Result.fail(
+            "RENDER_BATCH_TIMEOUT",
+            message,
+            {"product_id": product_id, "batch_id": batch_id, "timeout_seconds": timeout_seconds, "marked": marked},
+        )
+
+
+def _render_batch_timeout_seconds() -> int:
+    explicit = os.environ.get("AUTO_MIXCUT_RENDER_BATCH_TIMEOUT")
+    if explicit not in (None, ""):
+        try:
+            return max(1, int(explicit or "0"))
+        except ValueError:
+            pass
+    if os.environ.get("AUTO_MIXCUT_ADS_FAST_MODE", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return 12 * 60
+    return 30 * 60
+
+
+def _env_truthy(name: str) -> bool:
+    return str(os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _mark_render_batch_timeout(ctx, batch_id: str, product_id: str, timeout_seconds: int) -> dict:
+    plans = ctx.repo.list_where("render_plans", "batch_id=?", (batch_id,))
+    outputs = ctx.repo.list_where("outputs", "batch_id=?", (batch_id,))
+    for plan in plans:
+        status = str(plan.get("render_status") or "").strip().lower()
+        if status not in {"rendered", "aborted", "failed", "skipped", "done"}:
+            ctx.repo.update(
+                "render_plans",
+                "render_plan_id",
+                plan["render_plan_id"],
+                {"render_status": "render_timeout", "quality_gate_status": "aborted"},
+            )
+    ctx.repo.update("mixcut_batches", "batch_id", batch_id, {"batch_status": "render_timeout", "rendered_count": len(outputs)})
+    _write_task_render_timeout(ctx, product_id, batch_id, timeout_seconds)
+    return {"plan_count": len(plans), "output_count": len(outputs), "batch_status": "render_timeout"}
 
 
 @contextmanager
@@ -503,6 +636,24 @@ def _write_task_timeout(ctx, product_id: str, message: str, aborted: dict) -> No
     )
 
 
+def _write_task_render_timeout(ctx, product_id: str, batch_id: str, timeout_seconds: int) -> None:
+    tasks = ctx.repo.list_where("content_tasks", "product_id=? ORDER BY id DESC LIMIT 1", (product_id,))
+    if not tasks:
+        return
+    ctx.repo.update(
+        "content_tasks",
+        "task_id",
+        tasks[0]["task_id"],
+        {
+            "task_status": "RENDER_TIMEOUT",
+            "pipeline_status": "BLOCKED",
+            "next_action": "CHECK_PIPELINE_LOG",
+            "last_error": f"render batch {batch_id} timed out after {timeout_seconds}s",
+            "last_batch_id": batch_id or tasks[0].get("last_batch_id"),
+        },
+    )
+
+
 def _top_up_round_summary(ctx, round_no, batch_id, before, readiness, planned, rendered=None, quality=None, final_qc=None, synced=None, after=None, supplement=None, async_final_qc=None):
     plan_data = planned.data or {}
     outputs = ctx.repo.list_where("outputs", "batch_id=? ORDER BY id ASC", (batch_id,)) if batch_id else []
@@ -543,6 +694,22 @@ def _top_up_round_summary(ctx, round_no, batch_id, before, readiness, planned, r
             "sync_feishu": synced.to_dict() if synced else None,
         },
     }
+
+
+def _skip_inline_feishu_sync() -> bool:
+    return str(os.environ.get("AUTO_MIXCUT_SKIP_INLINE_FEISHU_SYNC") or "").strip().lower() in {"1", "true", "yes"}
+
+
+def _sync_output_qc_best_effort(ctx, batch_id):
+    if _skip_inline_feishu_sync():
+        return Result.ok({"status": "skipped", "reason": "inline_feishu_sync_disabled", "batch_id": batch_id})
+    return FeishuReviewSkill(ctx).sync_output_qc(batch_id)
+
+
+def _sync_task_best_effort(ctx, product_id):
+    if _skip_inline_feishu_sync():
+        return Result.ok({"status": "skipped", "reason": "inline_feishu_sync_disabled", "product_id": product_id})
+    return FeishuReviewSkill(ctx).sync_task(product_id)
 
 
 def _top_up_snapshot(ctx, product_id, count=None, refresh_capacity=True, template_id=None):
@@ -616,7 +783,7 @@ def _is_forced_ads_template(template_id: str | None) -> bool:
 
 
 def _latest_product_task(ctx, product_id):
-    rows = ctx.repo.list_where("content_tasks", "product_id=? ORDER BY id DESC", (product_id,))
+    rows = ctx.repo.list_where("content_tasks", "product_id=? ORDER BY id DESC LIMIT 1", (product_id,))
     return rows[0] if rows else {}
 
 
@@ -640,23 +807,35 @@ def _pending_ai_postprocess_summary(ctx, product_id: str) -> dict:
     rows = ctx.repo.list_where("segments", "product_id=? AND source_type='ai_generated'", (product_id,))
     tag_ids = _tagged_segment_ids(ctx, [str(row.get("segment_id") or "") for row in rows])
     pending = []
+    require_ai_tagging = _env_truthy("AUTO_MIXCUT_GUARD_RUN_AI_TAGGING")
+    require_ai_anchor = _env_truthy("AUTO_MIXCUT_GUARD_RUN_AI_ANCHOR_CHECK")
     for segment in rows:
         segment_id = str(segment.get("segment_id") or "")
         status = str(segment.get("segment_status") or "")
-        if status in {"qc_failed", "frame_sample_failed", "frame_sample_timeout", "fingerprint_failed", "tag_failed", "effective_role_failed", "ai_stage_failed"}:
+        if status in {"qc_failed", "frame_sample_failed", "frame_sample_timeout", "fingerprint_failed"}:
+            continue
+        if status in {"tag_failed", "effective_role_failed", "ai_stage_failed"} and not _retryable_ai_postprocess_status(status):
             continue
         reasons = []
         if status in {"", "created"}:
             reasons.append("ai_qc_missing")
-        if segment_id not in tag_ids:
+        if require_ai_tagging and segment_id not in tag_ids:
             reasons.append("tag_missing")
-        if status == "qc_passed" and not segment.get("anchor_match_level"):
+        if require_ai_anchor and status == "qc_passed" and not segment.get("anchor_match_level"):
             reasons.append("ai_anchor_check_missing")
-        if not segment.get("effective_roles_updated_at"):
+        if not segment.get("effective_roles_updated_at") or not segment.get("effective_roles_json"):
             reasons.append("effective_roles_missing")
         if reasons:
             pending.append({"segment_id": segment_id, "status": status, "reasons": reasons})
     return {"count": len(pending), "sample": pending[:20]}
+
+
+def _retryable_ai_postprocess_status(status: str) -> bool:
+    if status == "tag_failed" and not _env_truthy("AUTO_MIXCUT_GUARD_RUN_AI_TAGGING"):
+        return True
+    if status in {"ai_stage_failed", "effective_role_failed"}:
+        return True
+    return False
 
 
 def _tagged_segment_ids(ctx, segment_ids: list[str]) -> set[str]:

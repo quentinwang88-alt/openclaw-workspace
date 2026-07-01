@@ -21,7 +21,8 @@ from .hard_subtitle_policy import (
     is_repairable_bottom_caption,
     is_unusable_hard_subtitle,
 )
-from .material_policy_skill import MaterialPolicySkill, TRUSTED_REAL_SOURCE_TYPES
+from .material_policy_skill import MaterialPolicySkill, PUBLISHED_RESULT_VALUES, TRUSTED_REAL_SOURCE_TYPES
+from .material_usage_ledger_skill import MaterialUsageLedgerSkill
 from .usage_counter_skill import (
     FAILED_OUTPUT_SEGMENT_STATUSES,
     ads_fast_strict_outputs_enabled,
@@ -84,8 +85,16 @@ class RenderPlanSkill:
 
     def create_plans(self, product_id: str, count: int | None = None, fill_gap_only: bool = True, template_id: str | None = None) -> Result:
         task = _task(self.ctx, product_id)
+        if _is_ads_mode():
+            usage = MaterialUsageLedgerSkill(self.ctx).refresh_product(product_id)
+            if not usage.success:
+                return usage
         allowed = int((task or {}).get("allowed_variant_count") or 0)
-        target_total = min(count or allowed, allowed)
+        requested_count = int(count or 0)
+        if requested_count > 0:
+            target_total = min(requested_count, allowed) if allowed > 0 else requested_count
+        else:
+            target_total = allowed
         existing_outputs = _usable_existing_outputs(self.ctx, product_id, template_id=template_id) if fill_gap_only else []
         existing_count = len(existing_outputs)
         total = max(0, target_total - existing_count) if fill_gap_only else target_total
@@ -512,21 +521,43 @@ def _active_planning_batch(ctx: SkillContext, product_id: str) -> dict[str, Any]
     )
     for batch in batches:
         batch_id = str(batch.get("batch_id") or "")
+        if _is_stale_batch(batch) and not _batch_has_outputs(ctx, batch_id):
+            _abort_stale_planning_batch(ctx, batch_id)
+            continue
         if _batch_has_active_work(ctx, batch_id):
             return batch
         if _is_stale_batch(batch):
-            ctx.repo.update(
-                "mixcut_batches",
-                "batch_id",
-                batch_id,
-                {
-                    "batch_status": "aborted_stale_planning",
-                    "updated_at": datetime.utcnow().isoformat(timespec="seconds"),
-                },
-            )
+            _abort_stale_planning_batch(ctx, batch_id)
             continue
         return batch
     return None
+
+
+def _batch_has_outputs(ctx: SkillContext, batch_id: str) -> bool:
+    if not batch_id:
+        return False
+    return bool(ctx.repo.list_where("outputs", "batch_id=? LIMIT 1", (batch_id,)))
+
+
+def _abort_stale_planning_batch(ctx: SkillContext, batch_id: str) -> None:
+    if not batch_id:
+        return
+    for plan in ctx.repo.list_where("render_plans", "batch_id=?", (batch_id,)):
+        ctx.repo.update(
+            "render_plans",
+            "render_plan_id",
+            plan["render_plan_id"],
+            {"render_status": "aborted_stale_planning", "quality_gate_status": "aborted"},
+        )
+    ctx.repo.update(
+        "mixcut_batches",
+        "batch_id",
+        batch_id,
+        {
+            "batch_status": "aborted_stale_planning",
+            "updated_at": datetime.utcnow().isoformat(timespec="seconds"),
+        },
+    )
 
 
 def _active_pending_output_batch(ctx: SkillContext, product_id: str) -> dict[str, Any] | None:
@@ -575,6 +606,14 @@ def _is_stale_batch(batch: dict[str, Any]) -> bool:
     created_at = _as_datetime(batch.get("created_at"))
     if not created_at:
         return False
+    stale_minutes = os.environ.get("AUTO_MIXCUT_STALE_PLANNING_BATCH_MINUTES")
+    if stale_minutes not in (None, ""):
+        try:
+            return datetime.utcnow() - created_at > timedelta(minutes=max(1, int(stale_minutes or "0")))
+        except ValueError:
+            pass
+    if str(os.environ.get("AUTO_MIXCUT_ADS_FAST_MODE") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        return datetime.utcnow() - created_at > timedelta(minutes=10)
     try:
         stale_hours = max(1, int(os.environ.get("AUTO_MIXCUT_STALE_PLANNING_BATCH_HOURS", "2") or "2"))
     except ValueError:
@@ -749,6 +788,14 @@ def _select_segments(ctx: SkillContext, product_id: str, slots, batch_state: dic
                 {"status": "skipped_low_quality", "role": role, "slot_index": slot_index, "reason": "material_policy_blocked", "material_policy_rejections": policy_rejections[:8]},
             )
         pool = policy_pool
+        usage_pool, usage_rejections = _filter_usage_ledger_pool(ctx, product_id, pool, state, role, slot_index)
+        if not usage_pool and usage_rejections:
+            return Result.fail(
+                "SKIPPED_LOW_QUALITY",
+                "no segment passes usage ledger policy",
+                {"status": "skipped_low_quality", "role": role, "slot_index": slot_index, "reason": "usage_ledger_blocked", "usage_ledger_rejections": usage_rejections[:8]},
+            )
+        pool = usage_pool
         pool = _filter_ai_core_prompt_packages(ctx, product_id, pool, state, role, slot_index)
         if slot_index == voc_required_slot_index:
             pool = [s for s in pool if _is_voc_ads_hook_segment(ctx, product_id, state, s)]
@@ -941,6 +988,60 @@ def _filter_material_policy_pool(ctx: SkillContext, pool: list[dict], role: str,
     if not _is_ads_mode() or not pool:
         return pool, []
     return MaterialPolicySkill(ctx).filter_segments(pool, usecase="ads_mixcut", role=role, slot_index=slot_index)
+
+
+def _filter_usage_ledger_pool(
+    ctx: SkillContext,
+    product_id: str,
+    pool: list[dict],
+    state: dict,
+    role: str,
+    slot_index: int,
+) -> tuple[list[dict], list[dict[str, Any]]]:
+    if not _is_ads_mode() or not pool:
+        return pool, []
+    snapshot = _usage_ledger_snapshot(ctx, product_id, state)
+    allowed: list[dict] = []
+    rejected: list[dict[str, Any]] = []
+    ledger = MaterialUsageLedgerSkill(ctx)
+    for segment in pool:
+        segment_id = str(segment.get("segment_id") or "")
+        asset_id = str(segment.get("asset_id") or "")
+        decision = ledger.evaluate_segment(
+            segment,
+            segment_usage=(snapshot.get("segments") or {}).get(segment_id, {}),
+            asset_usage=(snapshot.get("assets") or {}).get(asset_id, {}),
+            slot_index=slot_index,
+            role=role,
+        )
+        if decision.get("allowed"):
+            allowed.append(segment)
+        else:
+            rejected.append(
+                {
+                    "segment_id": segment_id,
+                    "asset_id": asset_id,
+                    "source_type": segment.get("source_type"),
+                    "block_reasons": decision.get("block_reasons") or [],
+                    "segment_usage": decision.get("segment_usage") or {},
+                    "asset_usage": decision.get("asset_usage") or {},
+                }
+            )
+    return allowed, rejected
+
+
+def _usage_ledger_snapshot(ctx: SkillContext, product_id: str, state: dict) -> dict[str, dict[str, Any]]:
+    cache_key = f"_usage_ledger_snapshot:{product_id}"
+    if cache_key in state:
+        return state.get(cache_key) or {"segments": {}, "assets": {}}
+    ledger = MaterialUsageLedgerSkill(ctx)
+    snapshot = ledger.product_snapshot(product_id, refresh=False)
+    if not snapshot.get("segments"):
+        refreshed = ledger.refresh_product(product_id)
+        if refreshed.success:
+            snapshot = ledger.product_snapshot(product_id, refresh=False)
+    state[cache_key] = snapshot
+    return snapshot
 
 
 def _render_eligible_segments(segments: list[dict]) -> list[dict]:
@@ -1369,18 +1470,25 @@ def _enrich_segments_for_selection(ctx: SkillContext, segments: list[dict]) -> l
     latest_tags = _latest_tags_for_segments(ctx, segment_ids)
     asset_ids = sorted({str(segment.get("asset_id") or "") for segment in segments if segment.get("asset_id")})
     assets = _assets_by_id(ctx, asset_ids)
+    published_exposure = _published_exposure_for_segments(ctx, segment_ids)
     for segment in segments:
         item = dict(segment)
-        tag = latest_tags.get(str(segment.get("segment_id") or "")) or {}
+        segment_id = str(segment.get("segment_id") or "")
+        tag = latest_tags.get(segment_id) or {}
         item["_latest_tag_loaded"] = True
+        item["_latest_tag"] = tag
+        item["_published_exposure_loaded"] = True
+        item["_published_exposure_used"] = bool(published_exposure.get(segment_id))
         for key in tag_keys:
             if key in tag:
                 item[key] = tag.get(key)
         if tag.get("reason"):
             item["tag_reason"] = tag.get("reason")
         asset_id = str(segment.get("asset_id") or "")
+        asset = assets.get(asset_id) or {}
+        item["_asset_loaded"] = True
+        item["_asset"] = asset
         if asset_id:
-            asset = assets.get(asset_id) or {}
             for key in ["source_identity", "scene_tag", "generation_type", "prompt_package_id", "slot_role", "ai_gen_grade", "hook_intent"]:
                 if asset.get(key) and not item.get(key):
                     item[key] = asset.get(key)
@@ -1449,6 +1557,42 @@ def _assets_by_id(ctx: SkillContext, asset_ids: list[str]) -> dict[str, dict]:
     placeholders = ",".join(["?"] * len(asset_ids))
     rows = ctx.repo.list_where("assets", f"asset_id IN ({placeholders})", tuple(asset_ids))
     return {str(row.get("asset_id") or ""): row for row in rows if row.get("asset_id")}
+
+
+def _published_exposure_for_segments(ctx: SkillContext, segment_ids: list[str]) -> dict[str, bool]:
+    if not segment_ids:
+        return {}
+    result = {segment_id: False for segment_id in segment_ids}
+    placeholders = ",".join(["?"] * len(segment_ids))
+    try:
+        rows = ctx.repo.list_where("output_segments", f"segment_id IN ({placeholders})", tuple(segment_ids))
+    except Exception:
+        return result
+    output_ids_by_segment: dict[str, set[str]] = {}
+    output_ids: set[str] = set()
+    for row in rows:
+        segment_id = str(row.get("segment_id") or "")
+        output_id = str(row.get("output_id") or "")
+        if not segment_id or not output_id:
+            continue
+        output_ids_by_segment.setdefault(segment_id, set()).add(output_id)
+        output_ids.add(output_id)
+    if not output_ids:
+        return result
+    output_placeholders = ",".join(["?"] * len(output_ids))
+    try:
+        output_rows = ctx.repo.list_where("outputs", f"output_id IN ({output_placeholders})", tuple(sorted(output_ids)))
+    except Exception:
+        return result
+    published_output_ids = {
+        str(row.get("output_id") or "")
+        for row in output_rows
+        if str(row.get("published_at") or "").strip()
+        or str(row.get("publish_result") or "").strip().lower() in PUBLISHED_RESULT_VALUES
+    }
+    for segment_id, linked_output_ids in output_ids_by_segment.items():
+        result[segment_id] = bool(linked_output_ids.intersection(published_output_ids))
+    return result
 
 
 def _choose_template(ctx: SkillContext, product: dict, templates: list[TemplateSpec], batch_state: dict, variant: int, excluded_templates: set[str] | None = None) -> dict[str, Any]:
@@ -1597,8 +1741,9 @@ def _passes_first_slot_floor(ctx: SkillContext, segment: dict, risk_policy: dict
         return False, f"first slot blocked by material policy: {reasons}"
     risk = _latest_tag_value(ctx, segment, "risk_level") or segment.get("risk_level")
     ai_anchor_trusted = segment.get("source_type") == "ai_generated" and segment.get("anchor_match_level") == "strict_pass"
+    ai_prompt_trusted = _ai_prompt_first_slot_trusted(segment)
     trusted_real_first = bool(material_policy.get("trusted_real_first"))
-    if risk != "low" and not ai_anchor_trusted and not trusted_real_first:
+    if risk not in {"low", None, ""} and not (ai_prompt_trusted and risk == "medium") and not ai_anchor_trusted and not trusted_real_first:
         return False, "first slot risk is not low or trusted"
     visibility = _latest_tag_value(ctx, segment, "product_visibility")
     if visibility == "low":
@@ -1606,6 +1751,7 @@ def _passes_first_slot_floor(ctx: SkillContext, segment: dict, risk_policy: dict
     if (
         segment.get("product_match_status") not in {"trusted_by_source", "anchor_pass"}
         and not ai_anchor_trusted
+        and not ai_prompt_trusted
         and not material_policy.get("low_trust_first_slot_candidate")
     ):
         return False, "first slot product match is not trusted"
@@ -1614,6 +1760,20 @@ def _passes_first_slot_floor(ctx: SkillContext, segment: dict, risk_policy: dict
 
 def _trusted_real_first_segment(ctx: SkillContext, segment: dict) -> bool:
     return bool(_first_slot_material_policy(ctx, segment).get("trusted_real_first"))
+
+
+def _ai_prompt_first_slot_trusted(segment: dict) -> bool:
+    if _ai_semantic_qc_enabled():
+        return False
+    if str(segment.get("source_type") or "") != "ai_generated":
+        return False
+    if "hero" not in (segment.get("effective_roles_json") or []):
+        return False
+    return bool(str(segment.get("prompt_package_id") or "").strip())
+
+
+def _ai_semantic_qc_enabled() -> bool:
+    return os.environ.get("AUTO_MIXCUT_AI_SEMANTIC_QC", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _low_trust_first_slot_review_candidate(ctx: SkillContext, segment: dict) -> bool:
@@ -1652,10 +1812,10 @@ def _first_slot_failure(ctx: SkillContext, segment: dict, risk_policy: dict[str,
 
 
 def _asset_has_watermark(ctx: SkillContext, segment: dict) -> bool:
-    asset = None
+    asset = segment.get("_asset") if segment.get("_asset_loaded") else None
     value = segment.get("has_watermark")
     if value is None and segment.get("asset_id"):
-        asset = ctx.repo.get("assets", "asset_id", segment.get("asset_id"))
+        asset = asset if asset is not None else ctx.repo.get("assets", "asset_id", segment.get("asset_id"))
         value = (asset or {}).get("has_watermark")
     normalized = str(value).strip().lower()
     if normalized in {"yes", "true", "1"}:
@@ -1749,7 +1909,8 @@ def precheck_hook_coverage(ctx: SkillContext, product_id: str, required_count: i
             continue
         risk = _latest_tag_value(ctx, seg, "risk_level") or seg.get("risk_level")
         ai_anchor_trusted = seg.get("source_type") == "ai_generated" and seg.get("anchor_match_level") == "strict_pass"
-        if risk not in {"low", None} and not ai_anchor_trusted and not _trusted_real_first_segment(ctx, seg):
+        ai_prompt_trusted = _ai_prompt_first_slot_trusted(seg)
+        if risk not in {"low", None} and not (ai_prompt_trusted and risk == "medium") and not ai_anchor_trusted and not _trusted_real_first_segment(ctx, seg):
             continue
         candidates.append(seg)
     shortfall = max(0, required_count - len(candidates))

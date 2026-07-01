@@ -37,6 +37,7 @@ from auto_mixcut.skills.frame_sample_skill import FrameSampleSkill  # noqa: E402
 from auto_mixcut.skills.media_probe_skill import MediaProbeSkill  # noqa: E402
 from auto_mixcut.skills.mixcut_state_machine_skill import guard_start_status as decide_guard_start_status  # noqa: E402
 from auto_mixcut.skills.pipeline_run_skill import PipelineRunSkill  # noqa: E402
+from auto_mixcut.skills.product_run_lock_skill import ProductRunLockSkill, default_product_run_owner  # noqa: E402
 from auto_mixcut.skills.product_anchor_skill import ProductAnchorSkill  # noqa: E402
 from auto_mixcut.skills.rds_repository_skill import RDSRepositorySkill  # noqa: E402
 from auto_mixcut.skills.segment_fingerprint_skill import SegmentFingerprintSkill  # noqa: E402
@@ -60,22 +61,47 @@ def main() -> int:
 
     _guard_log("guard_start", product_id=args.product_id, target=args.target)
     ctx = build_context()
-    init = RDSRepositorySkill(ctx).init_db()
-    if not init.success:
-        print(json.dumps(init.to_dict(), ensure_ascii=False, indent=2, default=str))
-        return 1
+    if not _skip_guard_init_db():
+        init = RDSRepositorySkill(ctx).init_db()
+        if not init.success:
+            print(json.dumps(init.to_dict(), ensure_ascii=False, indent=2, default=str))
+            return 1
 
-    res = run_guard_pass(
-        ctx,
-        product_id=args.product_id,
-        target=args.target,
-        name=args.name,
-        market=args.market,
-        category=args.category,
-        max_rounds=args.max_rounds,
-        template_id=args.template_id,
-        process_uploads=not args.skip_upload_sync,
-    )
+    lock_data = {"acquired": True, "release_on_exit": False, "disabled": True}
+    lock_owner = os.environ.get("AUTO_MIXCUT_RUN_LOCK_OWNER") or default_product_run_owner("guard")
+    if not _product_run_lock_disabled():
+        lock = ProductRunLockSkill(ctx).acquire(args.product_id, owner=lock_owner, ttl_minutes=_product_run_lock_ttl_minutes())
+        if not lock.success:
+            print(json.dumps(lock.to_dict(), ensure_ascii=False, indent=2, default=str))
+            return 1
+        lock_data = lock.data or {}
+        if not lock_data.get("acquired"):
+            skipped = Result.ok(
+                {
+                    "product_id": args.product_id,
+                    "pipeline_status": "SKIPPED",
+                    "next_action": "WAIT_PRODUCT_RUN_LOCK",
+                    "detail": {"reason": "product_locked", "lock": lock_data},
+                }
+            )
+            print(json.dumps(skipped.to_dict(), ensure_ascii=False, indent=2, default=str))
+            return 0
+
+    try:
+        res = run_guard_pass(
+            ctx,
+            product_id=args.product_id,
+            target=args.target,
+            name=args.name,
+            market=args.market,
+            category=args.category,
+            max_rounds=args.max_rounds,
+            template_id=args.template_id,
+            process_uploads=not args.skip_upload_sync,
+        )
+    finally:
+        if lock_data.get("release_on_exit"):
+            ProductRunLockSkill(ctx).release(args.product_id, owner=lock_owner)
     print(json.dumps(res.to_dict(), ensure_ascii=False, indent=2, default=str))
     return 0 if res.success else 1
 
@@ -87,7 +113,9 @@ def run_guard_pass(ctx, product_id: str, target: int | None = None, name: str = 
 
     _guard_log("load_task", product_id=product_id)
     task = _latest_task(ctx, product_id)
+    _guard_log("load_task_done", product_id=product_id, has_task=bool(task), task_id=(task or {}).get("task_id"))
     product = ctx.repo.get("products", "product_id", product_id)
+    _guard_log("load_product_done", product_id=product_id, has_product=bool(product))
     if not task:
         bootstrap = _task_bootstrap_payload(ctx, product_id, target=target, name=name, market=market, category=category)
         if not bootstrap.success:
@@ -123,7 +151,11 @@ def run_guard_pass(ctx, product_id: str, target: int | None = None, name: str = 
         product = ctx.repo.get("products", "product_id", product_id)
 
     if target:
-        ctx.repo.update("content_tasks", "task_id", task["task_id"], {"requested_variant_count": int(target)})
+        # ADS factory passes use a smaller per-pass guard target. Keep the
+        # product task's final tier target intact if a pass is interrupted.
+        current_target = int(task.get("requested_variant_count") or task.get("allowed_variant_count") or 0)
+        if int(target) > current_target:
+            ctx.repo.update("content_tasks", "task_id", task["task_id"], {"requested_variant_count": int(target)})
     else:
         target = int(task.get("requested_variant_count") or task.get("allowed_variant_count") or 0)
 
@@ -479,13 +511,17 @@ def _fetch_product_task_from_feishu(product_id: str) -> Result:
             fields = getattr(record, "fields", {}) or {}
             if _cell_text(fields.get("商品ID")) != product_id:
                 continue
-            target = _cell_number(fields.get("目标生成数量")) or _cell_number(fields.get("系统允许生成数量"))
+            target = (
+                _cell_number(fields.get("投流混剪档位"))
+                or _cell_number(fields.get("目标生成数量"))
+                or _cell_number(fields.get("系统允许生成数量"))
+            )
             return Result.ok({
                 "record_id": getattr(record, "record_id", ""),
                 "product_id": product_id,
                 "product_name": _cell_text(fields.get("商品名称")) or product_id,
                 "market": _cell_text(fields.get("市场")),
-                "category": _cell_text(fields.get("类目")) or _cell_text(fields.get("归一类目")),
+                "category": _cell_text(fields.get("归一类目")) or _cell_text(fields.get("类目")),
                 "shop_id": _cell_text(fields.get("店铺ID")) or _cell_text(fields.get("店铺")),
                 "priority": _cell_text(fields.get("优先级")) or "normal",
                 "requested_variant_count": int(target or 0),
@@ -725,7 +761,8 @@ def _maybe_prepare_ai_submit(ctx, product_id: str, top_up_data: dict[str, Any]) 
             "product_id": product_id,
             **budget,
         }
-    command = _ai_segment_worker_command(product_id, budget["submit_limit"], budget["target_remaining"], str(budget.get("priority_role") or ""))
+    submit_slot_role = str(budget.get("submit_slot_role") if "submit_slot_role" in budget else budget.get("priority_role") or "")
+    command = _ai_segment_worker_command(product_id, budget["submit_limit"], budget["target_remaining"], submit_slot_role)
     if daytime_approval_required(ctx, product_id):
         approval = queue_daytime_approval(ctx, product_id, budget, command)
         return {
@@ -819,6 +856,11 @@ def _ai_segment_worker_command(product_id: str, limit: int, max_submit_needed: i
     ]
     if priority_role:
         command.append(f"--slot-role={priority_role}")
+    channel = str(os.environ.get("AUTO_MIXCUT_AI_SUPPLEMENT_SUBMIT_CHANNEL") or "imini").strip().lower()
+    if channel in {"imini", "i-mini", "i_mini", "im", "i mini"}:
+        command.append("--channel=imini")
+    else:
+        command.append("--channel=jimeng")
     return command
 
 
@@ -944,15 +986,38 @@ def _guard_requires_phash() -> bool:
 
 
 def _guard_runs_consistency() -> bool:
-    return os.environ.get("AUTO_MIXCUT_GUARD_RUN_CONSISTENCY", "1").strip().lower() in {"1", "true", "yes", "on"}
+    return os.environ.get("AUTO_MIXCUT_GUARD_RUN_CONSISTENCY", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _guard_runs_ai_anchor_check() -> bool:
-    return os.environ.get("AUTO_MIXCUT_GUARD_RUN_AI_ANCHOR_CHECK", "1").strip().lower() in {"1", "true", "yes", "on"}
+    return os.environ.get("AUTO_MIXCUT_GUARD_RUN_AI_ANCHOR_CHECK", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _guard_runs_ai_tagging() -> bool:
+    return os.environ.get("AUTO_MIXCUT_GUARD_RUN_AI_TAGGING", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _guard_allows_top_up_with_stale() -> bool:
     return os.environ.get("AUTO_MIXCUT_GUARD_TOP_UP_WITH_STALE", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _skip_guard_init_db() -> bool:
+    return _env_truthy("AUTO_MIXCUT_SKIP_GUARD_INIT_DB")
+
+
+def _product_run_lock_disabled() -> bool:
+    return _env_truthy("AUTO_MIXCUT_DISABLE_PRODUCT_RUN_LOCK")
+
+
+def _product_run_lock_ttl_minutes() -> int:
+    try:
+        return max(5, int(os.environ.get("AUTO_MIXCUT_LOCK_TTL_MINUTES", "60") or "60"))
+    except ValueError:
+        return 60
+
+
+def _env_truthy(name: str, default: str = "0") -> bool:
+    return os.environ.get(name, default).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _is_ads_fast_mode() -> bool:
@@ -979,26 +1044,31 @@ def _stale_segment_reasons(ctx, segment: dict[str, Any], stale_index: dict[str, 
         reasons.append("frames_missing")
     if _guard_requires_phash() and not segment.get("visual_phash"):
         reasons.append("visual_phash_missing")
-    if not _has_tag(ctx, segment_id, stale_index):
+    source_type = str(segment.get("source_type") or "")
+    if not (source_type == "ai_generated" and not _guard_runs_ai_tagging()) and not _has_tag(ctx, segment_id, stale_index):
         reasons.append("tag_missing")
     if segment.get("source_type") == "ai_generated":
         if str(segment.get("segment_status") or "") in {"", "created"}:
             reasons.append("ai_qc_missing")
+        if str(segment.get("segment_status") or "") == "qc_passed" and not segment.get("effective_roles_json"):
+            reasons.append("effective_roles_missing")
         if _is_retryable_ai_failure(segment):
             status = str(segment.get("segment_status") or "")
             failure_reason = str(segment.get("effective_roles_reason") or "").lower()
+            if not segment.get("effective_roles_json"):
+                reasons.append("effective_roles_missing")
             if status == "ai_stage_failed":
-                if "consistency" in failure_reason and not segment.get("frame_consistency_status"):
+                if _guard_runs_consistency() and "consistency" in failure_reason and not segment.get("frame_consistency_status"):
                     reasons.append("ai_consistency_missing")
-                if ("anchor" in failure_reason or "锚点" in failure_reason) and not segment.get("anchor_match_level"):
+                if _guard_runs_ai_anchor_check() and ("anchor" in failure_reason or "锚点" in failure_reason) and not segment.get("anchor_match_level"):
                     reasons.append("ai_anchor_check_missing")
-                if not segment.get("frame_consistency_status") and not segment.get("anchor_match_level"):
+                if _guard_runs_consistency() and not segment.get("frame_consistency_status") and not segment.get("anchor_match_level"):
                     reasons.append("ai_consistency_missing")
             elif status == "effective_role_failed":
                 reasons.append("effective_roles_missing")
         if _guard_runs_consistency() and not segment.get("frame_consistency_status"):
             reasons.append("ai_consistency_missing")
-        if str(segment.get("segment_status") or "") == "qc_passed" and not segment.get("anchor_match_level"):
+        if _guard_runs_ai_anchor_check() and str(segment.get("segment_status") or "") == "qc_passed" and not segment.get("anchor_match_level"):
             reasons.append("ai_anchor_check_missing")
         if _ai_effective_roles_need_recompute(ctx, segment, stale_index):
             reasons.append("effective_roles_missing")
@@ -1096,8 +1166,44 @@ def _status_after_top_up(ctx, product_id: str, target: int, top_up: Result) -> d
     if stop == "waiting_ai_postprocess":
         return {**detail, "pipeline_status": "READY_TO_CONTINUE", "next_action": "RUN_GUARD_AGAIN", "last_error": "", "last_batch_id": batch_ids[-1] if batch_ids else ""}
     if stop in {"render_plan_empty", "no_material_pool_capacity", "no_material_pool_capacity_after_round"}:
-        return {**detail, "pipeline_status": "BLOCKED", "next_action": "NEED_MORE_MATERIAL_OR_AI_SUPPLEMENT", "last_error": stop, "last_batch_id": batch_ids[-1] if batch_ids else ""}
+        return {
+            **detail,
+            "pipeline_status": "BLOCKED",
+            "next_action": "NEED_MORE_MATERIAL_OR_AI_SUPPLEMENT",
+            "last_error": _compact_capacity_stop_error(stop, data, detail),
+            "last_batch_id": batch_ids[-1] if batch_ids else "",
+        }
     return {**detail, "pipeline_status": "BLOCKED", "next_action": "CHECK_PIPELINE_LOG", "last_error": stop or "unknown_stop", "last_batch_id": ""}
+
+
+def _compact_capacity_stop_error(stop: str, top_up_data: dict[str, Any], detail: dict[str, Any]) -> str:
+    remaining = int(detail.get("target_remaining_variant_count") or detail.get("remaining_count") or 0)
+    material_capacity = int(detail.get("material_pool_extra_capacity") or 0)
+    first_slot_capacity = int(detail.get("first_slot_remaining_capacity") or 0)
+    bottleneck = str(detail.get("current_bottleneck") or detail.get("capacity_note") or "").strip()
+    gaps = [str(item).strip() for item in top_up_data.get("deferred_ai_supplement_gaps") or [] if str(item or "").strip()]
+    if not gaps:
+        for round_item in reversed(top_up_data.get("rounds") or []):
+            readiness = (((round_item.get("steps") or {}).get("check") or {}).get("data") or {})
+            gaps = [str(item).strip() for item in readiness.get("gaps") or [] if str(item or "").strip()]
+            if gaps:
+                break
+    reason_map = {
+        "render_plan_empty": "渲染选片为空",
+        "no_material_pool_capacity": "素材池容量不足",
+        "no_material_pool_capacity_after_round": "本轮渲染后素材池容量不足",
+    }
+    parts = [
+        reason_map.get(stop, stop),
+        f"剩余={remaining}",
+        f"素材容量={material_capacity}",
+        f"首镜容量={first_slot_capacity}",
+    ]
+    if bottleneck:
+        parts.append(f"瓶颈={bottleneck}")
+    if gaps:
+        parts.append(f"建议={gaps[0]}")
+    return "；".join(parts)
 
 
 def _top_up_created_ai_supplement(data: dict[str, Any]) -> bool:
@@ -1437,6 +1543,7 @@ def _poll_missing_tags(ctx, product_id: str, source_types: list[str], force_segm
             skipped += 1
         else:
             failed += 1
+            _mark_ai_segment_guard_failed(ctx, segment_id, "tag_failed", _segment_failure_reason("tag poll failed", item))
             _guard_log("segment_step_failed", product_id=product_id, step="tag_poll", segment_id=segment_id, status=item.get("status"), error_code=item.get("error_code"))
     if runnable:
         parallel = _poll_tag_segments_parallel(ctx, product_id, runnable, max_workers=_guard_tag_concurrency())
@@ -1448,6 +1555,7 @@ def _poll_missing_tags(ctx, product_id: str, source_types: list[str], force_segm
                 skipped += 1
             else:
                 failed += 1
+                _mark_ai_segment_guard_failed(ctx, str(item.get("segment_id") or ""), "tag_failed", _segment_failure_reason("tag poll failed", item))
     _update_latest_task(ctx, product_id, {"task_status": "AI_TAGGED"})
     return Result.ok({
         "completed_segments": completed,
@@ -1488,6 +1596,7 @@ def _poll_tag_segments_parallel(ctx, product_id: str, runnable: list[tuple[int, 
             elif item.get("status") == "skipped":
                 _guard_log("segment_step_skipped", product_id=product_id, step="tag_poll", segment_id=segment_id, reason=item.get("reason"), parallel=True)
             else:
+                _mark_ai_segment_guard_failed(ctx, segment_id, "tag_failed", _segment_failure_reason("tag poll failed", item))
                 _guard_log("segment_step_failed", product_id=product_id, step="tag_poll", segment_id=segment_id, status=item.get("status"), error_code=item.get("error_code"), parallel=True)
     return [results_by_index[idx] for idx, _, _ in runnable if idx in results_by_index]
 
@@ -1529,11 +1638,16 @@ def _compute_missing_effective_roles(ctx, product_id: str, source_types: list[st
             segment.get("effective_roles_updated_at")
             and segment_id not in force_set
             and not _is_retryable_ai_failure(segment)
+            and not (
+                str(segment.get("source_type") or "") == "ai_generated"
+                and str(segment.get("segment_status") or "") == "qc_passed"
+                and not segment.get("effective_roles_json")
+            )
             and not _ai_effective_roles_need_recompute(ctx, segment, stale_index)
         ):
             results.append({"segment_id": segment_id, "skipped": True, "reason": "effective_roles_exist"})
             continue
-        if not _has_tag(ctx, segment_id, stale_index):
+        if not (str(segment.get("source_type") or "") == "ai_generated" and not _guard_runs_ai_tagging()) and not _has_tag(ctx, segment_id, stale_index):
             results.append({"segment_id": segment_id, "skipped": True, "reason": "tag_missing"})
             continue
         if attempted >= limit:
@@ -1542,7 +1656,7 @@ def _compute_missing_effective_roles(ctx, product_id: str, source_types: list[st
         attempted += 1
         _guard_log("segment_step_start", product_id=product_id, step="effective_roles", segment_id=segment_id, attempt=attempted, limit=limit)
         try:
-            if _guard_segment_subprocess_enabled():
+            if _guard_effective_role_subprocess_enabled():
                 res = _run_segment_guard_step("effective_roles", segment_id, _guard_effective_role_timeout(), product_id=product_id, ctx=ctx)
             else:
                 with _guard_timeout(_guard_effective_role_timeout()):
@@ -1561,6 +1675,8 @@ def _compute_missing_effective_roles(ctx, product_id: str, source_types: list[st
             results[-1]["status"] = "warning"
             _guard_log("segment_step_failed", product_id=product_id, step="effective_roles", segment_id=segment_id, error=(res.error.message if res.error else "")[:300])
             continue
+        if _is_retryable_ai_failure(segment):
+            ctx.repo.update("segments", "segment_id", segment_id, {"segment_status": "qc_passed"})
         _guard_log("segment_step_done", product_id=product_id, step="effective_roles", segment_id=segment_id)
     _update_latest_task(ctx, product_id, {"task_status": "EFFECTIVE_ROLES_COMPUTED"})
     warnings = [item for item in results if item.get("status") == "warning"]
@@ -1627,6 +1743,8 @@ def _ai_consistency_missing(ctx, product_id: str) -> Result:
             res = Result.ok({"status": "failed", "segment_id": segment_id, "error_code": "CONSISTENCY_TIMEOUT", "timeout_seconds": timeout})
             _guard_log("segment_step_timeout", product_id=product_id, step="consistency", segment_id=segment_id, timeout_seconds=timeout)
         results.append(res.to_dict())
+        if not res.success:
+            _mark_ai_segment_guard_failed(ctx, segment_id, "ai_stage_failed", _result_failure_reason("consistency failed", res))
     _update_latest_task(ctx, product_id, {"task_status": "CONSISTENCY_CHECKED"})
     return Result.ok({"checked_segments": attempted, "results": results})
 
@@ -1662,6 +1780,9 @@ def _ai_anchor_check_missing(ctx, product_id: str) -> Result:
             res = Result.ok({"status": "failed", "segment_id": segment_id, "error_code": "AI_ANCHOR_CHECK_TIMEOUT", "timeout_seconds": timeout})
             _guard_log("segment_step_timeout", product_id=product_id, step="ai_anchor_check", segment_id=segment_id, timeout_seconds=timeout)
         results.append(res.to_dict())
+        if not res.success:
+            _mark_ai_segment_guard_failed(ctx, segment_id, "ai_stage_failed", _result_failure_reason("ai anchor check failed", res))
+            continue
         if res.success and str(segment.get("segment_status") or "") == "ai_stage_failed":
             data = res.data or {}
             if str(data.get("anchor_match_level") or "") != "fail":
@@ -1699,6 +1820,10 @@ def _guard_effective_role_timeout() -> int:
         return default
 
 
+def _guard_effective_role_subprocess_enabled() -> bool:
+    return os.environ.get("AUTO_MIXCUT_GUARD_EFFECTIVE_ROLE_SUBPROCESS", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _guard_tag_total_timeout() -> int:
     try:
         return max(0, int(os.environ.get("AUTO_MIXCUT_TAG_TOTAL_TIMEOUT_SEC", "600") or "600"))
@@ -1727,12 +1852,23 @@ def _is_retryable_ai_failure(segment: dict[str, Any]) -> bool:
         return False
     if str(segment.get("source_type") or "") != "ai_generated":
         return False
-    if str(segment.get("segment_status") or "") not in {"ai_stage_failed", "effective_role_failed"}:
+    status = str(segment.get("segment_status") or "")
+    if status == "tag_failed":
+        return _guard_runs_ai_tagging()
+    if status not in {"ai_stage_failed", "effective_role_failed"}:
         return False
     if not str(segment.get("prompt_package_id") or "").strip():
         return False
     reason = str(segment.get("effective_roles_reason") or "").lower()
-    return "timed out" in reason or "timeout" in reason
+    retryable_tokens = (
+        "timed out",
+        "timeout",
+        "llm_call_exhausted",
+        "all retries",
+        "retries exhausted",
+        "escalations exhausted",
+    )
+    return any(token in reason for token in retryable_tokens)
 
 
 def _is_product_mismatch_suspect(segment: dict[str, Any]) -> bool:
@@ -1752,6 +1888,38 @@ def _mark_segment_guard_failed(ctx, segment_id: str, status: str, reason: str) -
             "effective_roles_reason": reason[:500],
         },
     )
+
+
+def _mark_ai_segment_guard_failed(ctx, segment_id: str, status: str, reason: str) -> None:
+    if not segment_id:
+        return
+    try:
+        segment = ctx.repo.get("segments", "segment_id", segment_id) or {}
+    except Exception:
+        segment = {}
+    if str(segment.get("source_type") or "") != "ai_generated":
+        return
+    _mark_segment_guard_failed(ctx, segment_id, status, reason)
+
+
+def _segment_failure_reason(prefix: str, item: dict[str, Any]) -> str:
+    error = item.get("error")
+    if isinstance(error, dict):
+        nested = error.get("error") or {}
+        code = nested.get("code") or error.get("code") or item.get("error_code") or ""
+        message = nested.get("message") or error.get("message") or ""
+    else:
+        code = item.get("error_code") or ""
+        message = str(error or item.get("reason") or "")
+    return f"{prefix}: {code} {message}".strip()[:500]
+
+
+def _result_failure_reason(prefix: str, result: Result) -> str:
+    if result.success:
+        return prefix
+    code = result.error.code if result.error else ""
+    message = result.error.message if result.error else ""
+    return f"{prefix}: {code} {message}".strip()[:500]
 
 
 def _guard_segment_subprocess_enabled() -> bool:
@@ -1946,6 +2114,13 @@ def _compact_step_run_detail(step_name: str, result: Result) -> dict[str, Any]:
 def _guard_log(event: str, **payload: Any) -> None:
     payload = {"event": event, **payload}
     print(json.dumps(payload, ensure_ascii=False, default=str), file=sys.stderr, flush=True)
+    trace_file = os.environ.get("AUTO_MIXCUT_ADS_TRACE_FILE", "").strip()
+    if trace_file:
+        try:
+            with open(trace_file, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps({"ts": datetime.utcnow().isoformat(timespec="seconds") + "Z", "scope": "guard", **payload}, ensure_ascii=False, default=str) + "\n")
+        except Exception:
+            pass
 
 
 class _GuardTimeout(Exception):
@@ -1974,7 +2149,13 @@ def _guard_timeout(seconds: int):
 
 def _status_detail(ctx, product_id: str, target: int | None) -> dict[str, Any]:
     task = _latest_task(ctx, product_id) or {}
-    capacity = CapacityCounterSkill(ctx).refresh_product(product_id) if task else Result.ok({})
+    use_capacity_snapshot = bool(task) and (
+        _is_ads_fast_mode() or _env_truthy("AUTO_MIXCUT_TOP_UP_SKIP_CAPACITY_REFRESH")
+    )
+    if use_capacity_snapshot:
+        capacity = Result.ok(task)
+    else:
+        capacity = CapacityCounterSkill(ctx).refresh_product(product_id) if task else Result.ok({})
     cap = capacity.data if capacity.success else {}
     segments = ctx.repo.list_where("segments", "product_id=?", (product_id,))
     stale = _stale_segment_summary(ctx, segments, _build_stale_index(ctx, segments))
@@ -2103,7 +2284,7 @@ def _compact_guard_detail(value: Any, depth: int = 0) -> Any:
 
 
 def _latest_task(ctx, product_id: str) -> dict | None:
-    rows = ctx.repo.list_where("content_tasks", "product_id=? ORDER BY id DESC", (product_id,))
+    rows = ctx.repo.list_where("content_tasks", "product_id=? ORDER BY id DESC LIMIT 1", (product_id,))
     return rows[0] if rows else None
 
 

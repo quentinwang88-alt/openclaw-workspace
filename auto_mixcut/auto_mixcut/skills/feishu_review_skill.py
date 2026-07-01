@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import os
 
 from auto_mixcut.adapters.feishu import AutoMixcutFeishuClient, datetime_cell, url_cell
 from auto_mixcut.core.ids import new_id
@@ -10,6 +11,7 @@ from auto_mixcut.core.storage_paths import require_oss_object_path
 from .context import SkillContext
 from .bgm_usage_skill import BgmUsageSkill
 from .capacity_counter_skill import CapacityCounterSkill
+from .mixcut_state_machine_skill import decide_mixcut_state
 from .usage_counter_skill import reconcile_product_segment_usage, refresh_output_segment_usage
 
 
@@ -24,37 +26,21 @@ class FeishuReviewSkill:
             return Result.fail("TASK_NOT_FOUND", "task not found", {"product_id": product_id})
         product = self.ctx.repo.get("products", "product_id", product_id) or {}
         latest_output = _latest_output(self.ctx, product_id)
+        task_row = task[0]
+        summary = _product_task_summary_fields(task_row)
         fields = {
             "商品ID": product_id,
             "商品名称": product.get("product_name"),
             "市场": product.get("market"),
-            "类目": product.get("category"),
+            "归一类目": product.get("category"),
             "店铺": product.get("shop_id"),
             "优先级": product.get("priority"),
-            "任务类型": task[0].get("task_type"),
-            "目标生成数量": task[0].get("requested_variant_count"),
-            "系统允许生成数量": task[0].get("allowed_variant_count"),
-            "实际生成数量": task[0].get("actual_variant_count"),
-            "目标剩余可补成片数": task[0].get("target_remaining_variant_count"),
-            "素材池剩余成片容量": task[0].get("material_pool_extra_capacity"),
-            "首镜剩余容量": task[0].get("first_slot_remaining_capacity"),
-            "当前瓶颈": task[0].get("current_bottleneck"),
-            "剩余容量说明": task[0].get("capacity_note"),
-            "素材等级": task[0].get("material_tier"),
-            "素材状态": task[0].get("material_status"),
-            "混剪状态": task[0].get("task_status"),
-            "守护状态": task[0].get("pipeline_status"),
-            "下一步动作": task[0].get("next_action"),
-            "守护异常": task[0].get("last_error"),
-            "最近批次ID": task[0].get("last_batch_id"),
-            "AI补素材状态": task[0].get("ai_supplement_status"),
-            "AI补素材包数量": task[0].get("ai_supplement_package_count"),
-            "锚点状态": product.get("anchor_status"),
-            "素材缺口说明": task[0].get("blocked_reason"),
-            "失败原因": task[0].get("failure_reason"),
+            "投流混剪档位": _factory_tier_value(task_row),
+            **summary,
             "最近成片预览": url_cell(_object_url(self.ctx, latest_output.get("output_oss_object_id") if latest_output else None), "最近成片预览"),
+            "最近更新时间": datetime_cell(datetime.utcnow()),
         }
-        return self._sync("product_task", task[0]["task_id"], "商品内容任务表", days=14, fields=fields)
+        return self._sync_product_task_record(product_id, task_row["task_id"], days=14, fields=fields)
 
     def sync_anchor_queue(self, product_id: str) -> Result:
         product = self.ctx.repo.get("products", "product_id", product_id)
@@ -302,6 +288,40 @@ class FeishuReviewSkill:
         )
         return res if not res.success else Result.ok({"sync_id": sync_id, "feishu_record_id": feishu_record_id, "expire_at": expire_at})
 
+    def _sync_product_task_record(self, product_id: str, object_id: str, days: int, fields: dict | None = None) -> Result:
+        sync_id = new_id("FS")
+        expire_at = (datetime.utcnow() + timedelta(days=days)).isoformat(timespec="seconds")
+        feishu_record_id = new_id("FSREC")
+        table = "商品内容任务表"
+        if self.ctx.settings.feishu_enabled:
+            try:
+                existing = self.ctx.repo.list_where(
+                    "feishu_sync_records",
+                    "object_type=? AND object_id=? AND feishu_table=? ORDER BY id DESC",
+                    ("product_task", object_id, table),
+                )
+                client = AutoMixcutFeishuClient(table)
+                records = _product_task_records_for_product(client, product_id)
+                canonical = _select_product_task_canonical_record(records, fields or {}, existing)
+                if canonical:
+                    feishu_record_id = canonical.record_id
+                    _safe_update_record(client, feishu_record_id, fields or {})
+                    sync_id = existing[0]["sync_id"] if existing else sync_id
+                elif existing and existing[0].get("feishu_record_id", "").startswith("rec"):
+                    feishu_record_id = existing[0]["feishu_record_id"]
+                    _safe_update_record(client, feishu_record_id, fields or {})
+                    sync_id = existing[0]["sync_id"]
+                else:
+                    feishu_record_id = _safe_create_record(client, fields or {})
+            except Exception as exc:
+                return Result.fail("FEISHU_SYNC_FAILED", str(exc), {"object_type": "product_task", "object_id": object_id, "table": table})
+        res = self.ctx.repo.upsert(
+            "feishu_sync_records",
+            "sync_id",
+            {"sync_id": sync_id, "object_type": "product_task", "object_id": object_id, "feishu_table": table, "feishu_record_id": feishu_record_id, "sync_status": "synced", "expire_at": expire_at, "cleanup_status": "pending"},
+        )
+        return res if not res.success else Result.ok({"sync_id": sync_id, "feishu_record_id": feishu_record_id, "expire_at": expire_at})
+
     def _sync_anchor_queue_record(self, product_id: str, fields: dict) -> Result:
         table = "商品锚点卡确认队列"
         object_type = "product_anchor"
@@ -361,10 +381,106 @@ class FeishuReviewSkill:
         )
 
 
+def _product_task_summary_fields(task: dict) -> dict:
+    decision = decide_mixcut_state(task)
+    problem = _current_problem(task, decision.display_state)
+    return {
+        "任务状态": _product_task_state(decision.display_state, task),
+        "工厂状态": _factory_state(decision.display_state, task),
+        "成片进度": _progress_text(task),
+        "当前问题": problem,
+        "处理建议": _action_advice(task, decision.display_state, problem),
+        "异常等级": _issue_level(task, decision.display_state, problem),
+    }
+
+
+def _factory_tier_value(task: dict) -> str:
+    target = _safe_int(task.get("requested_variant_count")) or _safe_int(task.get("allowed_variant_count"))
+    return str(target) if target in {20, 40, 60, 80} else ""
+
+
+def _progress_text(task: dict) -> str:
+    actual = _safe_int(task.get("actual_variant_count"))
+    target = _safe_int(task.get("requested_variant_count")) or _safe_int(task.get("allowed_variant_count"))
+    if target > 0:
+        return f"{actual}/{target}"
+    return str(actual) if actual > 0 else ""
+
+
+def _product_task_state(display_state: str, task: dict) -> str:
+    if display_state == "已完成":
+        return "完成"
+    if display_state == "阻断需人工处理" or str(task.get("pipeline_status") or "") == "ERROR":
+        return "异常"
+    if display_state in {"运行中", "等待AI补素材", "等待AI回流"}:
+        return "生产中"
+    return "待开始"
+
+
+def _factory_state(display_state: str, task: dict) -> str:
+    if display_state == "已完成":
+        return "完成"
+    if display_state == "阻断需人工处理" or str(task.get("pipeline_status") or "") == "ERROR":
+        return "异常"
+    if display_state == "等待AI回流":
+        return "等待AI回流"
+    if display_state == "等待AI补素材":
+        return "等待素材"
+    if display_state == "运行中":
+        return "生产中"
+    return "未启动"
+
+
+def _current_problem(task: dict, display_state: str) -> str:
+    if display_state == "阻断需人工处理" or str(task.get("pipeline_status") or "") == "ERROR":
+        return str(task.get("last_error") or task.get("blocked_reason") or task.get("failure_reason") or "流程阻断需人工处理")
+    if display_state == "等待AI回流":
+        return "等待AI片段生成回流"
+    if display_state == "等待AI补素材":
+        return "等待AI补素材任务处理"
+    if _safe_int(task.get("target_remaining_variant_count")) > 0 and _safe_int(task.get("material_pool_extra_capacity")) <= 0:
+        return "可用素材不足，等待补素材"
+    return ""
+
+
+def _action_advice(task: dict, display_state: str, problem: str) -> str:
+    next_action = str(task.get("next_action") or "")
+    if display_state == "已完成":
+        return ""
+    if display_state == "阻断需人工处理" or str(task.get("pipeline_status") or "") == "ERROR":
+        return "查看当前问题和RDS运行日志后重试"
+    if display_state == "等待AI回流":
+        return "等待worker回流或运行AI回流巡检"
+    if display_state == "等待AI补素材":
+        return "等待补素材worker处理"
+    if next_action == "RUN_GUARD_AGAIN":
+        return "继续运行无人值守混剪"
+    if problem:
+        return "等待系统自动处理或补充素材"
+    return ""
+
+
+def _issue_level(task: dict, display_state: str, problem: str) -> str:
+    if display_state == "阻断需人工处理" or str(task.get("pipeline_status") or "") == "ERROR":
+        return "阻塞"
+    if problem:
+        return "提醒"
+    return "无"
+
+
+def _safe_int(value: object) -> int:
+    try:
+        return int(float(value if value is not None else 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def sync_product_task_best_effort(ctx: SkillContext, product_id: str) -> dict:
     product_id = str(product_id or "").strip()
     if not product_id:
         return {"product_id": product_id, "status": "skipped", "reason": "product_id_missing"}
+    if os.environ.get("AUTO_MIXCUT_SKIP_INLINE_FEISHU_SYNC", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return {"product_id": product_id, "status": "skipped", "reason": "inline_feishu_sync_disabled"}
     if not ctx.settings.feishu_enabled:
         return {"product_id": product_id, "status": "skipped", "reason": "feishu_disabled"}
     try:
@@ -401,6 +517,54 @@ def _anchor_records_for_product(client: AutoMixcutFeishuClient, product_id: str)
         if _cell_text(fields.get("商品ID")) == str(product_id):
             records.append(record)
     return records
+
+
+def _product_task_records_for_product(client: AutoMixcutFeishuClient, product_id: str) -> list:
+    records = []
+    for record in client.list_records(limit=500):
+        fields = record.fields or {}
+        if _cell_text(fields.get("商品ID")) == str(product_id):
+            records.append(record)
+    return records
+
+
+def _select_product_task_canonical_record(records: list, fields: dict, existing_sync: list[dict] | None = None):
+    if not records:
+        return None
+    existing_ids = {str(row.get("feishu_record_id") or "") for row in (existing_sync or []) if str(row.get("feishu_record_id") or "").startswith("rec")}
+    target = _cell_int(fields.get("投流混剪档位")) or _cell_int(fields.get("目标生成数量")) or _cell_int(fields.get("目标混剪数量"))
+    ranked = sorted(
+        enumerate(records),
+        key=lambda item: _product_task_record_score(item[1], item[0], target, existing_ids),
+        reverse=True,
+    )
+    return ranked[0][1]
+
+
+def _product_task_record_score(record, index: int, target: int, existing_ids: set[str]) -> tuple[int, int]:
+    fields = record.fields or {}
+    state = _cell_text(fields.get("任务状态")) or _cell_text(fields.get("混剪任务状态")) or _cell_text(fields.get("混剪状态"))
+    row_target = _cell_int(fields.get("投流混剪档位")) or _cell_int(fields.get("目标混剪数量")) or _cell_int(fields.get("目标生成数量"))
+    score = 0
+    if state in {"待开始", "可混剪"}:
+        score += 120
+    elif state in {"生产中", "运行中", "等待AI补素材", "等待AI回流"}:
+        score += 100
+    elif not state:
+        score += 30
+    elif state in {"已完成", "完成"}:
+        score -= 20
+    else:
+        score += 10
+    if target and row_target == target:
+        score += 80
+    elif target and row_target > target:
+        score += 40
+    elif row_target:
+        score += min(row_target, 20)
+    if record.record_id in existing_ids:
+        score += 10
+    return score, index
 
 
 def _select_anchor_canonical_record(records: list, existing_sync: list[dict] | None = None):
@@ -496,6 +660,16 @@ def _cell_text(value: object) -> str:
     if isinstance(value, list):
         return " / ".join(item for item in (_cell_text(v) for v in value) if item)
     return str(value).strip()
+
+
+def _cell_int(value: object) -> int:
+    text = _cell_text(value)
+    if not text:
+        return 0
+    try:
+        return int(float(text))
+    except ValueError:
+        return 0
 
 
 def _bool_cell(value: object) -> bool:

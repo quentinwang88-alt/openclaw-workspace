@@ -19,11 +19,11 @@ class MediaProbeSkill:
             placeholders = ",".join("?" for _ in source_types)
             assets = self.ctx.repo.list_where(
                 "assets",
-                f"product_id=? AND probe_status!='done' AND source_type IN ({placeholders})",
+                f"product_id=? AND probe_status!='done' AND source_type IN ({placeholders}) ORDER BY id DESC",
                 (product_id, *source_types),
             )
         else:
-            assets = self.ctx.repo.list_where("assets", "product_id=? AND probe_status!='done'", (product_id,))
+            assets = self.ctx.repo.list_where("assets", "product_id=? AND probe_status!='done' ORDER BY id DESC", (product_id,))
         limit = _probe_asset_limit()
         selected = assets[:limit] if limit > 0 else assets
         results = []

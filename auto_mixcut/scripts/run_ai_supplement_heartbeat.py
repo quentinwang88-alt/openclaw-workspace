@@ -22,7 +22,9 @@ from auto_mixcut.skills.ai_supplement_scheduler_skill import (  # noqa: E402
     request_daytime_batch_approval,
     should_submit_now,
 )
-from auto_mixcut.skills.ai_supplement_gateway_skill import AISupplementGatewaySkill, submit_budget_from_state  # noqa: E402
+from auto_mixcut.skills.ai_supplement_cycle_skill import AISupplementCycleSkill  # noqa: E402
+from auto_mixcut.skills.ai_supplement_gateway_skill import AISupplementGatewaySkill, normalize_package, submit_budget_from_state  # noqa: E402
+from auto_mixcut.skills.product_run_lock_skill import ProductRunLockSkill, default_product_run_owner  # noqa: E402
 from auto_mixcut.skills.rds_repository_skill import RDSRepositorySkill  # noqa: E402
 
 
@@ -118,43 +120,74 @@ def main() -> int:
 
 def process_nightly_product(ctx: Any, product_id: str, args: argparse.Namespace) -> dict[str, Any]:
     if args.dry_run:
+        cycle = AISupplementCycleSkill(ctx).run_once(
+            product_id,
+            submit=True,
+            recover=not args.skip_result_uploader,
+            import_returns=True,
+            run_guard=not args.skip_guard,
+            dry_run=True,
+        )
         return {
             "product_id": product_id,
             "status": "nightly_planned",
             "max_passes": max(1, int(args.max_nightly_passes or 1)),
-            "submit": submit_product(ctx, product_id, dry_run=True),
-            "recover": {"dry_run": bool(not args.skip_result_uploader)},
-            "import": import_product_returns(product_id, dry_run=True),
-            "guard": run_guard_once(product_id, dry_run=True) if not args.skip_guard else {"status": "skipped", "reason": "skip_guard"},
+            "cycle": cycle.to_dict(),
         }
+
+    lock_owner = os.environ.get("AUTO_MIXCUT_RUN_LOCK_OWNER") or default_product_run_owner("ai_heartbeat")
+    lock_data = {"acquired": True, "release_on_exit": False}
+    if not _product_run_lock_disabled():
+        lock = ProductRunLockSkill(ctx).acquire(product_id, owner=lock_owner, ttl_minutes=_timeout("AUTO_MIXCUT_LOCK_TTL_MINUTES", 60))
+        if not lock.success:
+            return {"product_id": product_id, "status": "failed", "reason": "lock_failed", "lock": lock.to_dict()}
+        lock_data = lock.data or {}
+        if not lock_data.get("acquired"):
+            return {"product_id": product_id, "status": "skipped", "reason": "locked", "lock": lock_data}
 
     passes: list[dict[str, Any]] = []
     max_passes = max(1, int(args.max_nightly_passes or 1))
     final_state: dict[str, Any] = {}
     stop_reason = "max_passes_reached"
-    for pass_index in range(1, max_passes + 1):
-        pass_result: dict[str, Any] = {"pass": pass_index}
-        if should_submit_now(ctx, product_id, "nightly"):
-            pass_result["submit"] = submit_product(ctx, product_id, dry_run=False)
-        if not args.skip_result_uploader:
-            pass_result["recover"] = recover_product_results(ctx, product_id, dry_run=False)
-        pass_result["import"] = import_product_returns(product_id, dry_run=False)
-        if not args.skip_guard:
-            pass_result["guard"] = run_guard_once(product_id, dry_run=False)
-        final_state = _task_state(ctx, product_id)
-        pass_result["state_after"] = final_state
-        passes.append(pass_result)
-        if not _should_continue_nightly(ctx, product_id, final_state, pass_result):
-            stop_reason = _stable_reason(ctx, product_id, final_state)
-            break
-    return {
-        "product_id": product_id,
-        "status": "nightly_completed" if stop_reason != "max_passes_reached" else "nightly_max_passes_reached",
-        "stop_reason": stop_reason,
-        "pass_count": len(passes),
-        "final_state": final_state,
-        "passes": passes,
-    }
+    try:
+        cycle_skill = AISupplementCycleSkill(ctx)
+        for pass_index in range(1, max_passes + 1):
+            cycle = cycle_skill.run_once(
+                product_id,
+                submit=should_submit_now(ctx, product_id, "nightly"),
+                recover=not args.skip_result_uploader,
+                import_returns=True,
+                run_guard=not args.skip_guard,
+                dry_run=False,
+                lock_owner=lock_owner,
+                submit_fn=submit_product,
+                recover_fn=recover_product_results,
+                import_returns_fn=import_product_returns,
+                guard_fn=run_guard_once,
+            )
+            cycle_data = cycle.data or {}
+            pass_result: dict[str, Any] = {"pass": pass_index, "cycle": cycle.to_dict()}
+            pass_result.update(cycle_data.get("steps") or {})
+            final_state = cycle_data.get("state_after") or _task_state(ctx, product_id)
+            pass_result["state_after"] = final_state
+            passes.append(pass_result)
+            if not cycle.success:
+                stop_reason = "cycle_failed"
+                break
+            if not cycle_data.get("continue_recommended"):
+                stop_reason = str(cycle_data.get("reason") or cycle_data.get("cycle_status") or "stable_no_more_immediate_work")
+                break
+        return {
+            "product_id": product_id,
+            "status": "nightly_completed" if stop_reason != "max_passes_reached" else "nightly_max_passes_reached",
+            "stop_reason": stop_reason,
+            "pass_count": len(passes),
+            "final_state": final_state,
+            "passes": passes,
+        }
+    finally:
+        if lock_data.get("release_on_exit"):
+            ProductRunLockSkill(ctx).release(product_id, owner=lock_owner)
 
 
 def submit_product(ctx: Any, product_id: str, dry_run: bool = False) -> dict[str, Any]:
@@ -167,7 +200,7 @@ def submit_product(ctx: Any, product_id: str, dry_run: bool = False) -> dict[str
         result = {
             "success": True,
             "status": "skipped",
-            "reason": "ai_submit_inflight_capacity_filled",
+            "reason": budget.get("submit_block_reason") or "ai_submit_no_ready_prompt_package",
             "product_id": product_id,
             **budget,
         }
@@ -210,9 +243,13 @@ def _mark_waiting_return_after_submit(ctx: Any, product_id: str, submit_result: 
 
 def recover_product_results(ctx: Any, product_id: str, dry_run: bool = False) -> dict[str, Any]:
     packages = ctx.repo.list_where("segment_prompt_packages", "product_id=?", (product_id,))
-    task_names = [str(row.get("segment_prompt_id") or "") for row in packages if row.get("segment_prompt_id")]
+    actionable = [
+        row for row in packages
+        if normalize_package(row) in {"inflight", "recoverable_failed"}
+    ]
+    task_names = [str(row.get("segment_prompt_id") or "") for row in _sort_recoverable_packages(actionable) if row.get("segment_prompt_id")]
     if not task_names:
-        return {"status": "skipped", "reason": "no_prompt_packages"}
+        return {"status": "skipped", "reason": "no_inflight_or_recoverable_prompt_packages", "package_count": len(packages)}
     cmd = [
         "node",
         str(WORKSPACE / "skills" / "jimeng-video-generator" / "result-uploader.js"),
@@ -231,6 +268,16 @@ def recover_product_results(ctx: Any, product_id: str, dry_run: bool = False) ->
     return _run(cmd, cwd=WORKSPACE / "skills" / "jimeng-video-generator", dry_run=dry_run, timeout=_timeout("AUTO_MIXCUT_AI_HEARTBEAT_RECOVER_TIMEOUT", 900))
 
 
+def _sort_recoverable_packages(packages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def key(row: dict[str, Any]) -> tuple[int, str]:
+        normalized = normalize_package(row)
+        priority = 0 if normalized == "inflight" else 1
+        timestamp = str(row.get("updated_at") or row.get("created_at") or "")
+        return (priority, timestamp)
+
+    return sorted(packages, key=key)
+
+
 def import_product_returns(product_id: str, dry_run: bool = False) -> dict[str, Any]:
     cmd = [
         sys.executable,
@@ -244,7 +291,7 @@ def import_product_returns(product_id: str, dry_run: bool = False) -> dict[str, 
     return _run(cmd, cwd=ROOT, dry_run=False, timeout=_timeout("AUTO_MIXCUT_AI_HEARTBEAT_IMPORT_TIMEOUT", 300))
 
 
-def run_guard_once(product_id: str, dry_run: bool = False) -> dict[str, Any]:
+def run_guard_once(product_id: str, dry_run: bool = False, lock_owner: str = "") -> dict[str, Any]:
     cmd = [
         sys.executable,
         str(ROOT / "scripts" / "run_mixcut_guard.py"),
@@ -254,7 +301,8 @@ def run_guard_once(product_id: str, dry_run: bool = False) -> dict[str, Any]:
         "1",
         "--skip-upload-sync",
     ]
-    return _run(cmd, cwd=ROOT, dry_run=dry_run, timeout=_timeout("AUTO_MIXCUT_AI_HEARTBEAT_GUARD_TIMEOUT", 1200))
+    env_extra = {"AUTO_MIXCUT_RUN_LOCK_OWNER": lock_owner} if lock_owner else None
+    return _run(cmd, cwd=ROOT, dry_run=dry_run, timeout=_timeout("AUTO_MIXCUT_AI_HEARTBEAT_GUARD_TIMEOUT", 1200), env_extra=env_extra)
 
 
 def _task_state(ctx: Any, product_id: str) -> dict[str, Any]:
@@ -280,84 +328,10 @@ def _task_state(ctx: Any, product_id: str) -> dict[str, Any]:
     }
 
 
-def _should_continue_nightly(ctx: Any, product_id: str, state: dict[str, Any], pass_result: dict[str, Any]) -> bool:
-    if str(state.get("pipeline_status") or "") in {"DONE", "BLOCKED"}:
-        return False
-    if int(state.get("remaining_count") or 0) <= 0:
-        return False
-    next_action = str(state.get("next_action") or "")
-    pipeline_status = str(state.get("pipeline_status") or "")
-    ready = int(state.get("ready_to_submit_count") or 0)
-    inflight = int(state.get("inflight_count") or 0)
-    material_capacity = int(state.get("material_pool_extra_capacity") or 0)
-    if next_action in {"RUN_GUARD_AGAIN", "RUN_AI_SEGMENT_WORKER", "WAIT_AI_SUPPLEMENT_APPROVAL"}:
-        return True
-    if pipeline_status == "READY_TO_CONTINUE":
-        return True
-    if pipeline_status == "WAITING_AI_RETURN":
-        if material_capacity >= int(state.get("remaining_count") or 0):
-            return True
-        return ready > 0 and inflight <= 0
-    imported = _imported_count(pass_result.get("import") or {})
-    if imported > 0:
-        return True
-    return False
-
-
-def _stable_reason(ctx: Any, product_id: str, state: dict[str, Any]) -> str:
-    pipeline_status = str(state.get("pipeline_status") or "")
-    next_action = str(state.get("next_action") or "")
-    if pipeline_status == "DONE" or int(state.get("remaining_count") or 0) <= 0:
-        return "done"
-    if pipeline_status == "BLOCKED":
-        return "blocked"
-    if pipeline_status == "WAITING_AI_RETURN":
-        try:
-            if int(state.get("remaining_count") or 0) > 0 and int(state.get("material_pool_extra_capacity") or 0) >= int(state.get("remaining_count") or 0):
-                return "ready_to_continue_with_existing_material"
-        except (TypeError, ValueError):
-            pass
-        if int(state.get("inflight_count") or 0) > 0:
-            return "waiting_ai_return"
-        if next_action == "WAIT_AI_SUPPLEMENT_APPROVAL":
-            return "waiting_ai_supplement_approval"
-    return "stable_no_more_immediate_work"
-
-
-def _imported_count(result: dict[str, Any]) -> int:
-    payload = _json_from_stdout(str(result.get("stdout") or ""))
-    if not isinstance(payload, dict):
-        return 0
-    direct = payload.get("imported_count")
-    if direct is not None:
-        try:
-            return int(direct or 0)
-        except (TypeError, ValueError):
-            return 0
-    nested = payload.get("import") or {}
-    try:
-        return int(nested.get("count") or nested.get("imported_count") or 0)
-    except (TypeError, ValueError, AttributeError):
-        return 0
-
-
-def _json_from_stdout(text: str) -> Any:
-    stripped = text.strip()
-    if not stripped:
-        return None
-    for index, char in enumerate(stripped):
-        if char not in "[{":
-            continue
-        try:
-            return json.loads(stripped[index:])
-        except json.JSONDecodeError:
-            continue
-    return None
-
-
 def _submit_command(product_id: str, budget: dict[str, Any]) -> list[str]:
     limit = max(1, int(budget.get("submit_limit") or budget.get("ready_to_submit_count") or budget.get("remaining_count") or 1))
     needed = max(1, int(budget.get("target_remaining") or budget.get("remaining_count") or limit))
+    channel = str(os.environ.get("AUTO_MIXCUT_AI_SUPPLEMENT_SUBMIT_CHANNEL") or "Imini").strip()
     command = [
         "node",
         str(WORKSPACE / "skills" / "jimeng-video-generator" / "segment-package-worker.js"),
@@ -366,8 +340,11 @@ def _submit_command(product_id: str, budget: dict[str, Any]) -> list[str]:
         f"--limit={limit}",
         f"--max-submit-needed={needed}",
     ]
-    if str(budget.get("priority_role") or "").strip():
-        command.append(f"--slot-role={str(budget.get('priority_role')).strip()}")
+    if channel:
+        command.append(f"--channel={channel}")
+    submit_slot_role = str(budget.get("submit_slot_role") if "submit_slot_role" in budget else budget.get("priority_role") or "").strip()
+    if submit_slot_role:
+        command.append(f"--slot-role={submit_slot_role}")
     return command
 
 
@@ -405,6 +382,10 @@ def _timeout(name: str, default: int) -> int:
         return max(30, int(os.environ.get(name, str(default)) or default))
     except ValueError:
         return default
+
+
+def _product_run_lock_disabled() -> bool:
+    return str(os.environ.get("AUTO_MIXCUT_DISABLE_PRODUCT_RUN_LOCK") or "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _ensure_tool_path(env: dict[str, str]) -> None:

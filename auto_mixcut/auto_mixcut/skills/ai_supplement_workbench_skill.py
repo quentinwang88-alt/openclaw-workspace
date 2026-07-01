@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
 from pathlib import Path
 import re
 from typing import Any
@@ -17,7 +19,7 @@ class AISupplementWorkbenchSkill:
     def __init__(self, ctx: SkillContext):
         self.ctx = ctx
 
-    def sync_for_product(self, product_id: str, max_packages: int = 6, gap_text: str = "") -> Result:
+    def sync_for_product(self, product_id: str, max_packages: int = 6, gap_text: str = "", submit_channel: str = "") -> Result:
         task = _latest_task(self.ctx, product_id)
         if not task:
             return Result.fail("TASK_NOT_FOUND", "task not found", {"product_id": product_id})
@@ -35,29 +37,57 @@ class AISupplementWorkbenchSkill:
             return Result.ok(data)
 
         existing_state = _existing_prompt_package_state(self.ctx, product_id)
-        requested_total = _requested_package_count(gap_text, max_packages)
-        available_existing = existing_state["future_package_count"]
-        if existing_state["active_package_count"] >= requested_total:
-            data = {
-                "product_id": product_id,
-                "skipped": True,
-                "reason": "ai_package_future_inventory_sufficient",
-                "requested_total": requested_total,
-                "existing_state": existing_state,
-            }
-            _update_task_ai_supplement(self.ctx, task, "created", existing_state["active_package_count"], data)
-            return Result.ok(data)
-        if available_existing >= requested_total and (existing_state["ready_to_submit_count"] or existing_state["recoverable_failed_count"]):
-            data = {
-                "product_id": product_id,
-                "skipped": True,
-                "reason": "created_or_recoverable_packages_need_submit",
-                "requested_total": requested_total,
-                "existing_state": existing_state,
-            }
-            _update_task_ai_supplement(self.ctx, task, "needs_submit_retry", available_existing, data)
-            return Result.ok(data)
-        max_packages = max(1, min(max_packages, max(0, requested_total - available_existing) or max_packages))
+        requested_roles = _parse_requested_slots(gap_text)
+        role_shortfall = _role_package_shortfall(requested_roles, existing_state.get("role_counts") or {}) if requested_roles else {}
+        if requested_roles:
+            requested_total = sum(requested_roles.values())
+            if not role_shortfall:
+                data = {
+                    "product_id": product_id,
+                    "skipped": True,
+                    "reason": "ai_package_role_inventory_sufficient",
+                    "requested_total": requested_total,
+                    "requested_roles": requested_roles,
+                    "existing_state": existing_state,
+                }
+                _update_task_ai_supplement(self.ctx, task, "created", existing_state["active_package_count"], data)
+                return Result.ok(data)
+            gap_text = _gap_text_for_role_shortfall(role_shortfall)
+            self.ctx.repo.update("content_tasks", "task_id", task["task_id"], {"blocked_reason": gap_text})
+            task = _latest_task(self.ctx, product_id) or task
+            max_packages = max(1, min(max_packages, sum(role_shortfall.values())))
+            needs_recoverable_refresh = False
+        else:
+            requested_total = _requested_package_count(gap_text, max_packages)
+            available_existing = existing_state["future_package_count"]
+            needs_recoverable_refresh = (
+                int(existing_state.get("active_package_count") or 0) < requested_total
+                and int(existing_state.get("recoverable_failed_count") or 0) > 0
+            )
+            if existing_state["active_package_count"] >= requested_total:
+                data = {
+                    "product_id": product_id,
+                    "skipped": True,
+                    "reason": "ai_package_future_inventory_sufficient",
+                    "requested_total": requested_total,
+                    "existing_state": existing_state,
+                }
+                _update_task_ai_supplement(self.ctx, task, "created", existing_state["active_package_count"], data)
+                return Result.ok(data)
+            if available_existing >= requested_total and (existing_state["ready_to_submit_count"] or existing_state["recoverable_failed_count"]) and not needs_recoverable_refresh:
+                data = {
+                    "product_id": product_id,
+                    "skipped": True,
+                    "reason": "created_or_recoverable_packages_need_submit",
+                    "requested_total": requested_total,
+                    "existing_state": existing_state,
+                }
+                _update_task_ai_supplement(self.ctx, task, "needs_submit_retry", available_existing, data)
+                return Result.ok(data)
+            if needs_recoverable_refresh:
+                max_packages = max(1, min(max_packages, requested_total))
+            else:
+                max_packages = max(1, min(max_packages, max(0, requested_total - available_existing) or max_packages))
 
         feishu = FeishuReviewSkill(self.ctx)
         anchor_sync = feishu.sync_anchor_queue(product_id)
@@ -76,7 +106,8 @@ class AISupplementWorkbenchSkill:
                 dry_run=False,
                 product_id_filter=product_id,
                 max_packages_per_product=max(1, max_packages),
-                refresh_existing_prompts=False,
+                refresh_existing_prompts=needs_recoverable_refresh,
+                submit_channel=_resolve_submit_channel(submit_channel),
             )
         except Exception as exc:
             detail = {"product_id": product_id, "error": str(exc)}
@@ -86,7 +117,11 @@ class AISupplementWorkbenchSkill:
         created = result.get("created") or []
         skipped = result.get("skipped") or []
         failed = result.get("failed") or []
-        existing_count = sum(1 for item in skipped if isinstance(item, dict) and item.get("reason") == "already_exists")
+        existing_count = sum(
+            1
+            for item in skipped
+            if isinstance(item, dict) and item.get("reason") in {"already_exists", "refreshed_existing_prompt"}
+        )
         if failed:
             status = "failed" if not created and not existing_count else "created"
         elif created or existing_count:
@@ -117,10 +152,16 @@ def _latest_task(ctx: SkillContext, product_id: str) -> dict | None:
     return rows[0] if rows else None
 
 
+def _resolve_submit_channel(value: str = "") -> str:
+    raw = str(value or os.environ.get("AUTO_MIXCUT_AI_SUPPLEMENT_SUBMIT_CHANNEL") or "imini").strip().lower()
+    return "imini" if raw in {"imini", "i-mini", "i_mini", "im", "i mini"} else "jimeng"
+
+
 def _update_task_ai_supplement(ctx: SkillContext, task: dict, status: str, package_count: int, detail: dict) -> None:
     task_id = task.get("task_id")
     if not task_id:
         return
+    detail = _merge_task_ai_supplement_detail(task, detail or {})
     patch = {
         "ai_supplement_status": status,
         "ai_supplement_package_count": package_count,
@@ -142,6 +183,36 @@ def _update_task_ai_supplement(ctx: SkillContext, task: dict, status: str, packa
         patch["next_action"] = "NEED_MORE_MATERIAL_OR_AI_SUPPLEMENT" if status == "blocked" else "CHECK_ERROR"
         patch["last_error"] = (detail or {}).get("error") or status
     ctx.repo.update("content_tasks", "task_id", task_id, patch)
+
+
+def _merge_task_ai_supplement_detail(task: dict, detail: dict[str, Any]) -> dict[str, Any]:
+    previous = _task_ai_supplement_detail(task)
+    carry_keys = {
+        "approval_requested_at",
+        "approval_requested_date",
+        "approval_requested_slot",
+        "approval_command",
+        "approved_at",
+        "daytime_approval_valid_date",
+    }
+    merged = dict(detail or {})
+    for key in carry_keys:
+        if key not in merged and previous.get(key):
+            merged[key] = previous[key]
+    return merged
+
+
+def _task_ai_supplement_detail(task: dict) -> dict[str, Any]:
+    value = task.get("ai_supplement_detail_json") or {}
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except ValueError:
+            return {}
+    return {}
 
 
 def _resolve_gap_text(ctx: SkillContext, task: dict, explicit_gap_text: str = "") -> str:
@@ -189,8 +260,9 @@ def _infer_capacity_gap_text(ctx: SkillContext, task: dict) -> str:
 
 def _supplement_state_summary(gap_text: str, created: list, skipped: list, failed: list) -> dict[str, Any]:
     requested = _parse_requested_slots(gap_text)
-    existing = [item for item in skipped if isinstance(item, dict) and item.get("reason") == "already_exists"]
-    other_skipped = [item for item in skipped if not (isinstance(item, dict) and item.get("reason") == "already_exists")]
+    available_reasons = {"already_exists", "refreshed_existing_prompt"}
+    existing = [item for item in skipped if isinstance(item, dict) and item.get("reason") in available_reasons]
+    other_skipped = [item for item in skipped if not (isinstance(item, dict) and item.get("reason") in available_reasons)]
     created_count = len(created)
     existing_count = len(existing)
     failed_count = len(failed)
@@ -219,6 +291,7 @@ def _existing_prompt_package_state(ctx: SkillContext, product_id: str) -> dict[s
         "consumed_package_count": state["consumed_package_count"],
         "active_package_count": state["active_package_count"],
         "future_package_count": state.get("future_package_count", state["active_package_count"] + state["recoverable_failed_count"]),
+        "role_counts": state.get("role_counts") or {},
     }
 
 
@@ -248,6 +321,29 @@ def _parse_requested_slots(text: str) -> dict[str, int]:
             if match:
                 result[role] = max(result.get(role, 0), int(match.group(1)))
     return result
+
+
+def _role_package_shortfall(requested_roles: dict[str, int], role_counts: dict[str, Any]) -> dict[str, int]:
+    shortfall: dict[str, int] = {}
+    for role, requested in requested_roles.items():
+        state = role_counts.get(role) or {}
+        future = int(state.get("future_package_count") or 0)
+        missing = max(0, int(requested or 0) - future)
+        if missing > 0:
+            shortfall[role] = missing
+    return shortfall
+
+
+def _gap_text_for_role_shortfall(shortfall: dict[str, int]) -> str:
+    labels = {
+        "hero": "hero首镜",
+        "detail": "detail细节",
+        "result": "result上身",
+        "scene": "scene场景",
+        "ending": "ending结尾",
+    }
+    parts = [f"{labels.get(role, role)}{amount}" for role, amount in shortfall.items() if amount > 0]
+    return "AI补素材: " + "; ".join(parts)
 
 
 def _load_workbench_module() -> Any:

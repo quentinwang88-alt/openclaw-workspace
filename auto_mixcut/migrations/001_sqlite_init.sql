@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS content_tasks (
   blocked_reason TEXT,
   failure_reason TEXT,
   created_by TEXT,
+  source_record_id TEXT,
   created_at TEXT,
   updated_at TEXT
 );
@@ -404,6 +405,79 @@ CREATE TABLE IF NOT EXISTS output_segments (
   end_ms_in_output INTEGER,
   created_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS mixcut_segment_usage_snapshot (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  segment_id TEXT NOT NULL UNIQUE,
+  product_id TEXT NOT NULL,
+  asset_id TEXT,
+  source_type TEXT,
+  source_trust_level TEXT,
+  planned_count INTEGER DEFAULT 0,
+  rendered_count INTEGER DEFAULT 0,
+  good_output_count INTEGER DEFAULT 0,
+  draft_output_count INTEGER DEFAULT 0,
+  rejected_output_count INTEGER DEFAULT 0,
+  first_slot_planned_count INTEGER DEFAULT 0,
+  first_slot_good_count INTEGER DEFAULT 0,
+  first_slot_published_count INTEGER DEFAULT 0,
+  published_output_count INTEGER DEFAULT 0,
+  ads_eligible INTEGER DEFAULT 1,
+  ads_block_reason TEXT,
+  usage_risk_level TEXT,
+  created_at TEXT,
+  updated_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_mixcut_segment_usage_product ON mixcut_segment_usage_snapshot(product_id);
+CREATE INDEX IF NOT EXISTS idx_mixcut_segment_usage_asset ON mixcut_segment_usage_snapshot(asset_id);
+
+CREATE TABLE IF NOT EXISTS mixcut_asset_usage_snapshot (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  asset_id TEXT NOT NULL UNIQUE,
+  product_id TEXT NOT NULL,
+  source_type TEXT,
+  source_trust_level TEXT,
+  segment_count INTEGER DEFAULT 0,
+  planned_count INTEGER DEFAULT 0,
+  rendered_count INTEGER DEFAULT 0,
+  good_output_count INTEGER DEFAULT 0,
+  draft_output_count INTEGER DEFAULT 0,
+  rejected_output_count INTEGER DEFAULT 0,
+  first_slot_planned_count INTEGER DEFAULT 0,
+  first_slot_good_count INTEGER DEFAULT 0,
+  first_slot_published_count INTEGER DEFAULT 0,
+  published_output_count INTEGER DEFAULT 0,
+  ads_eligible INTEGER DEFAULT 1,
+  ads_block_reason TEXT,
+  usage_risk_level TEXT,
+  created_at TEXT,
+  updated_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_mixcut_asset_usage_product ON mixcut_asset_usage_snapshot(product_id);
+
+CREATE TABLE IF NOT EXISTS mixcut_output_similarity (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  comparison_id TEXT NOT NULL UNIQUE,
+  output_id TEXT NOT NULL,
+  compared_output_id TEXT NOT NULL,
+  product_id TEXT NOT NULL,
+  same_first_segment INTEGER DEFAULT 0,
+  same_first_asset INTEGER DEFAULT 0,
+  same_template INTEGER DEFAULT 0,
+  segment_overlap_ratio REAL DEFAULT 0,
+  core_segment_overlap_ratio REAL DEFAULT 0,
+  asset_overlap_ratio REAL DEFAULT 0,
+  similarity_level TEXT,
+  decision TEXT,
+  reason_json TEXT,
+  created_at TEXT,
+  updated_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_mixcut_similarity_output ON mixcut_output_similarity(output_id);
+CREATE INDEX IF NOT EXISTS idx_mixcut_similarity_product ON mixcut_output_similarity(product_id);
 
 CREATE TABLE IF NOT EXISTS feishu_sync_records (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

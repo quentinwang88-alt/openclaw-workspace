@@ -10,6 +10,7 @@ from .context import SkillContext
 from .bgm_usage_skill import BgmUsageSkill
 from .feishu_review_skill import sync_product_task_best_effort
 from .llm_router_skill import LLMRouterSkill
+from .material_usage_ledger_skill import MaterialUsageLedgerSkill
 from .usage_counter_skill import is_good_rendered_output
 
 
@@ -79,6 +80,9 @@ class FinalVideoQCSkill:
         self.ctx.repo.update("outputs", "output_id", output_id, updates)
         segment_feedback = _mark_product_mismatch_segments(self.ctx, output_id, qc) if status == "fail" else {"updated_count": 0}
         BgmUsageSkill(self.ctx).record_output_feedback(output_id, _bgm_feedback_status(status), "final_video_qc")
+        product_id = str(output.get("product_id") or "")
+        if product_id:
+            MaterialUsageLedgerSkill(self.ctx).refresh_product(product_id)
         return Result.ok({"output_id": output_id, "final_qc_status": status, "final_qc": qc, "segment_feedback": segment_feedback})
 
     def _output_path(self, output: dict) -> Path | None:

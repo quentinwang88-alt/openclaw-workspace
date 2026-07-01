@@ -45,11 +45,13 @@ def output_segment_issue_summary(ctx: SkillContext, output_id: str) -> dict:
     missing_segments = []
     if not output_id:
         return {"failed_segment_count": 0, "missing_segment_count": 0, "failed_segments": [], "missing_segments": []}
-    for row in ctx.repo.list_where("output_segments", "output_id=?", (output_id,)):
+    rows = ctx.repo.list_where("output_segments", "output_id=?", (output_id,))
+    segments_by_id = _segments_by_id(ctx, {str(row.get("segment_id") or "") for row in rows})
+    for row in rows:
         segment_id = str(row.get("segment_id") or "")
         if not segment_id:
             continue
-        segment = ctx.repo.get("segments", "segment_id", segment_id) or {}
+        segment = segments_by_id.get(segment_id) or {}
         if not segment:
             missing_segments.append(segment_id)
             continue
@@ -83,12 +85,53 @@ def count_good_rendered_outputs(ctx: SkillContext, product_id: str, *, strict_se
     if not product_id:
         return 0
     ads_only = strict_segments and ads_fast_strict_outputs_enabled()
-    return sum(
-        1
+    outputs = [
+        output
         for output in ctx.repo.list_where("outputs", "product_id=?", (product_id,))
-        if (not ads_only or is_ads_fast_output(output))
-        and is_good_rendered_output_strict(ctx, output, strict_segments=strict_segments)
-    )
+        if (not ads_only or is_ads_fast_output(output)) and is_good_rendered_output(output)
+    ]
+    if not strict_segments:
+        return len(outputs)
+    output_ids = [str(output.get("output_id") or "") for output in outputs if output.get("output_id")]
+    bad_output_ids = _outputs_with_bad_segments(ctx, output_ids)
+    return sum(1 for output in outputs if str(output.get("output_id") or "") not in bad_output_ids)
+
+
+def _outputs_with_bad_segments(ctx: SkillContext, output_ids: list[str]) -> set[str]:
+    if not output_ids:
+        return set()
+    output_segment_rows: list[dict] = []
+    for chunk in _chunks(output_ids, 200):
+        placeholders = ",".join("?" for _ in chunk)
+        output_segment_rows.extend(ctx.repo.list_where("output_segments", f"output_id IN ({placeholders})", tuple(chunk)))
+    segment_ids = {str(row.get("segment_id") or "") for row in output_segment_rows if row.get("segment_id")}
+    segments_by_id = _segments_by_id(ctx, segment_ids)
+    bad_output_ids: set[str] = set()
+    for row in output_segment_rows:
+        output_id = str(row.get("output_id") or "")
+        segment_id = str(row.get("segment_id") or "")
+        if not output_id or not segment_id:
+            continue
+        segment = segments_by_id.get(segment_id)
+        if not segment or str(segment.get("segment_status") or "") in FAILED_OUTPUT_SEGMENT_STATUSES:
+            bad_output_ids.add(output_id)
+    return bad_output_ids
+
+
+def _segments_by_id(ctx: SkillContext, segment_ids: set[str]) -> dict[str, dict]:
+    segment_ids.discard("")
+    if not segment_ids:
+        return {}
+    rows: list[dict] = []
+    for chunk in _chunks(sorted(segment_ids), 200):
+        placeholders = ",".join("?" for _ in chunk)
+        rows.extend(ctx.repo.list_where("segments", f"segment_id IN ({placeholders})", tuple(chunk)))
+    return {str(row.get("segment_id") or ""): row for row in rows if row.get("segment_id")}
+
+
+def _chunks(items: list[str], size: int):
+    for idx in range(0, len(items), max(1, size)):
+        yield items[idx : idx + size]
 
 
 def is_rejected_rendered_output(output: dict) -> bool:

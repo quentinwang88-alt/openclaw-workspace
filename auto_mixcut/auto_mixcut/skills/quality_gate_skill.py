@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import re
 import subprocess
+from pathlib import Path
 
+from auto_mixcut.adapters.oss import file_sha256
 from auto_mixcut.config.factory_config import factory_config
 from auto_mixcut.core.result import Result
 from auto_mixcut.core.storage_paths import require_oss_object_path
 
 from .context import SkillContext
 from .material_policy_skill import MaterialPolicySkill, evaluate_material_policy
+from .material_usage_ledger_skill import MaterialUsageLedgerSkill
+from .output_similarity_skill import OutputSimilaritySkill
 from .usage_counter_skill import refresh_output_segment_usage
 
 
@@ -80,11 +84,25 @@ class QualityGateSkill:
         assets = {s["asset_id"] for s in slots if s.get("asset_id")}
         if len(assets) < 3:
             reasons.append("unique_source_assets < 3")
+        similarity = None
         status = "passed" if not reasons else "failed"
+        if status == "passed" and _is_ads_mode():
+            similarity_result = OutputSimilaritySkill(self.ctx).check_output(output_id)
+            if similarity_result.success:
+                similarity = similarity_result.data or {}
+                decision = str(similarity.get("decision") or "pass")
+                if decision in {"duplicate_blocked", "similarity_review"}:
+                    status = decision
+                    reasons.append(f"output similarity gate: {decision}")
+            else:
+                similarity = similarity_result.to_dict()
         self.ctx.repo.update("outputs", "output_id", output_id, {"machine_quality_status": status})
         _sync_render_plan_quality_status(self.ctx, output, status)
         refresh_output_segment_usage(self.ctx, output_id)
-        return Result.ok({"output_id": output_id, "machine_quality_status": status, "score": 100 if status == "passed" else 60, "reasons": reasons})
+        product_id = str(output.get("product_id") or "")
+        if product_id:
+            MaterialUsageLedgerSkill(self.ctx).refresh_product(product_id)
+        return Result.ok({"output_id": output_id, "machine_quality_status": status, "score": 100 if status == "passed" else 60, "reasons": reasons, "similarity": similarity})
 
 
 def _segment_bundle(ctx: SkillContext, segment_id: str):
@@ -126,7 +144,7 @@ def _is_ads_mode() -> bool:
 
 
 def _audio_volume(ctx: SkillContext, output: dict, start_sec: float | None = None, duration_sec: float | None = None) -> float | None:
-    path = require_oss_object_path(ctx, output.get("output_oss_object_id"), "quality_outputs")
+    path = _quality_media_path(ctx, output)
     if not path or not path.exists():
         return None
     window_args = []
@@ -141,6 +159,38 @@ def _audio_volume(ctx: SkillContext, output: dict, start_sec: float | None = Non
     )
     match = re.search(r"mean_volume:\s*(-?\d+(?:\.\d+)?) dB", proc.stderr)
     return float(match.group(1)) if match else None
+
+
+def _quality_media_path(ctx: SkillContext, output: dict) -> Path | None:
+    cached = output.get("_quality_media_path")
+    if cached:
+        path = Path(cached)
+        if path.exists():
+            return path
+    local = ctx.settings.temp_root / "render" / str(output.get("product_id") or "") / f"{output.get('output_id')}.mp4"
+    if _local_render_matches_oss_object(ctx, local, output.get("output_oss_object_id")):
+        output["_quality_media_path"] = str(local)
+        return local
+    path = require_oss_object_path(ctx, output.get("output_oss_object_id"), "quality_outputs")
+    if path:
+        output["_quality_media_path"] = str(path)
+    return path
+
+
+def _local_render_matches_oss_object(ctx: SkillContext, path: Path, object_id: str | None) -> bool:
+    if not path.exists() or not object_id:
+        return False
+    obj = ctx.repo.get("oss_objects", "object_id", object_id) or {}
+    try:
+        expected_size = int(obj.get("file_size") or 0)
+    except (TypeError, ValueError):
+        expected_size = 0
+    if expected_size and path.stat().st_size != expected_size:
+        return False
+    expected_hash = str(obj.get("file_hash") or "")
+    if expected_hash and file_sha256(path) != expected_hash:
+        return False
+    return True
 
 
 def _audio_tail_window_reasons(ctx: SkillContext, output: dict, actual_duration_ms: int) -> list[str]:

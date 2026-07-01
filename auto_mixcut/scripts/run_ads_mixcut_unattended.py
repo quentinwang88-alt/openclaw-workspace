@@ -13,9 +13,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import math
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -39,7 +41,12 @@ if SKILL_ROOT not in sys.path:
     sys.path.insert(0, SKILL_ROOT)
 
 from auto_mixcut.config.factory_config import factory_config  # noqa: E402
+from auto_mixcut.core.bootstrap import build_context  # noqa: E402
 from auto_mixcut.skills.ai_supplement_gateway_skill import summarize_package_rows  # noqa: E402
+from auto_mixcut.skills.ai_supplement_workbench_skill import AISupplementWorkbenchSkill  # noqa: E402
+from auto_mixcut.skills.capacity_counter_skill import CapacityCounterSkill  # noqa: E402
+from auto_mixcut.skills.feishu_review_skill import sync_product_task_best_effort  # noqa: E402
+from auto_mixcut.skills.mixcut_state_machine_skill import decide_factory_state  # noqa: E402
 if os.path.exists(_ENV_PATH):
     for _line in open(_ENV_PATH, encoding="utf-8"):
         _line = _line.strip()
@@ -81,6 +88,8 @@ ADS_FAST_TEMPLATE_ID = "AD_FAST_HOOK_8S"
 DEFAULT_ADS_VOC_QUOTA_RATIO = 0.2
 DEFAULT_ADS_VOC_SEGMENT_OUTPUT_CAP = 2
 DEFAULT_MAX_RENDERS_PER_PASS = 4
+DEFAULT_AI_PACKAGE_STOCK_RATIO = 0.5
+DEFAULT_AI_PACKAGE_STOCK_MIN = 6
 GOAL_MODE_ABSOLUTE_TARGET = "absolute_target"
 GOAL_MODE_INCREMENTAL_ADD = "incremental_add"
 GOAL_MODE_FACTORY_TIER = "factory_tier"
@@ -100,6 +109,7 @@ FAILED_SEGMENT_STATUSES = {
 }
 STAGE_KEYS = [
     "prepare_voc_hooks",
+    "ai_supplement",
     "submit_hook_packages",
     "import_returns",
     "wait_returns",
@@ -111,6 +121,13 @@ def is_truthy_flag(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"1", "true", "yes", "是"}
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)) or default)
+    except ValueError:
+        return default
 
 
 def connect_db(url: Optional[str] = None):
@@ -126,13 +143,27 @@ def connect_db(url: Optional[str] = None):
         user=unquote(parsed.username or ""), password=unquote(parsed.password or ""),
         database=parsed.path.lstrip("/"),
         charset=query.get("charset", ["utf8mb4"])[0],
-        connect_timeout=20, read_timeout=60, write_timeout=60, autocommit=False,
+        connect_timeout=_env_int("AUTO_MIXCUT_ADS_DB_CONNECT_TIMEOUT", 10),
+        read_timeout=_env_int("AUTO_MIXCUT_ADS_DB_READ_TIMEOUT", 20),
+        write_timeout=_env_int("AUTO_MIXCUT_ADS_DB_WRITE_TIMEOUT", 20),
+        autocommit=False,
         cursorclass=pymysql.cursors.DictCursor,
     )
 
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def trace_step(event: str, **payload: Any) -> None:
+    path = os.environ.get("AUTO_MIXCUT_ADS_TRACE_FILE", "").strip()
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"ts": now_iso(), "event": event, **payload}, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        return
 
 
 def jload(v: Any) -> Any:
@@ -190,6 +221,10 @@ def command_result(
         }
 
 
+def _env_truthy(name: str) -> bool:
+    return str(os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def submit_channel_label(channel: str) -> str:
     return "Imini" if str(channel or "").strip().lower() == "imini" else "即梦"
 
@@ -217,7 +252,9 @@ def stage_status(result: Dict[str, Any]) -> tuple[str, str]:
             status = "prompt_package_failed"
             current_step = "wait_returns"
         elif current_step in {"render", "final_qc"}:
-            status = "incomplete"
+            quantity_goal = final.get("quantity_goal") or {}
+            new_good_outputs = _to_int(quantity_goal.get("new_good_outputs"), 0)
+            status = "in_progress" if new_good_outputs > 0 else "incomplete"
     return status, current_step
 
 
@@ -316,20 +353,18 @@ def load_task(conn, product_id: str) -> Optional[Dict[str, Any]]:
 
 def load_segment_summary(conn, product_id: str) -> Dict[str, Any]:
     cur = conn.cursor()
+    ph = _sql_placeholder(conn)
     cur.execute(
         "SELECT s.segment_id, s.effective_roles_json, s.slot_role, s.is_image_generated, s.prompt_package_id, "
         "s.segment_type, s.segment_status, s.source_type, s.product_mismatch_suspect, s.product_mismatch_reason, "
-        "p.template_id AS prompt_template_id, "
-        "t.primary_shot_role, t.hook_visual_type, t.hook_strength "
+        "p.template_id AS prompt_template_id "
         "FROM segments s "
         "LEFT JOIN segment_prompt_packages p ON p.segment_prompt_id=s.prompt_package_id "
-        "LEFT JOIN segment_tags t ON t.id = ("
-        "  SELECT MAX(t2.id) FROM segment_tags t2 WHERE t2.segment_id=s.segment_id"
-        ") "
-        "WHERE s.product_id=%s",
+        f"WHERE s.product_id={ph}",
         (product_id,),
     )
-    rows = cur.fetchall()
+    rows = [_row_dict(row) for row in cur.fetchall()]
+    latest_tags = load_latest_segment_tags(conn, [str(r.get("segment_id") or "") for r in rows])
     by_role: Dict[str, int] = Counter()
     by_core_role: Dict[str, int] = Counter()
     by_status: Dict[str, int] = Counter()
@@ -341,6 +376,7 @@ def load_segment_summary(conn, product_id: str) -> Dict[str, Any]:
     mismatch_suspect = 0
     segments: List[Dict] = []
     for r in rows:
+        tag = latest_tags.get(str(r.get("segment_id") or ""), {})
         status = str(r.get("segment_status") or "").strip()
         source_type = str(r.get("source_type") or "").strip()
         is_voc_segment = str(r.get("prompt_template_id") or "") == VOC_ADS_HOOK_PACKAGE_TEMPLATE_ID
@@ -366,15 +402,15 @@ def load_segment_summary(conn, product_id: str) -> Dict[str, Any]:
             roles = []
         role_set = {str(role) for role in roles if str(role or "").strip()}
         slot = r.get("slot_role") or ""
-        hook_type = r.get("hook_visual_type") or "none"
-        primary = r.get("primary_shot_role") or slot
+        hook_type = tag.get("hook_visual_type") or "none"
+        primary = tag.get("primary_shot_role") or slot
         if primary:
             role_set.add(str(primary))
         is_hook = (
             "hero" in role_set
             and hook_type
             and hook_type not in ("none", "")
-            and (r.get("hook_strength") or "") in {"strong", "medium"}
+            and (tag.get("hook_strength") or "") in {"strong", "medium"}
         )
         for role in role_set:
             by_role[role] += 1
@@ -395,7 +431,7 @@ def load_segment_summary(conn, product_id: str) -> Dict[str, Any]:
             "is_voc_ads_hook_package": is_voc_segment,
             "is_hook": is_hook,
             "hook_visual_type": hook_type,
-            "hook_strength": r.get("hook_strength"),
+            "hook_strength": tag.get("hook_strength"),
             "is_image_generated": bool(r.get("is_image_generated")),
         })
     return {
@@ -414,6 +450,47 @@ def load_segment_summary(conn, product_id: str) -> Dict[str, Any]:
         "product_mismatch_suspect_segments": mismatch_suspect,
         "segments": segments,
     }
+
+
+def load_latest_segment_tags(conn, segment_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    ids = [str(segment_id or "").strip() for segment_id in segment_ids if str(segment_id or "").strip()]
+    if not ids:
+        return {}
+    result: Dict[str, Dict[str, Any]] = {}
+    cur = conn.cursor()
+    ph = _sql_placeholder(conn)
+    for chunk in _chunks(ids, 500):
+        placeholders = ",".join([ph] * len(chunk))
+        cur.execute(
+            "SELECT t.segment_id, t.primary_shot_role, t.hook_visual_type, t.hook_strength "
+            "FROM segment_tags t "
+            "JOIN ("
+            "  SELECT segment_id, MAX(id) AS id FROM segment_tags "
+            f"  WHERE segment_id IN ({placeholders}) GROUP BY segment_id"
+            ") latest ON latest.id=t.id",
+            tuple(chunk),
+        )
+        for row in (_row_dict(item) for item in cur.fetchall()):
+            result[str(row.get("segment_id") or "")] = row
+    return result
+
+
+def _row_dict(row: Any) -> Dict[str, Any]:
+    if isinstance(row, dict):
+        return row
+    try:
+        return dict(row)
+    except Exception:
+        return {}
+
+
+def _sql_placeholder(conn) -> str:
+    return "?" if conn.__class__.__module__.startswith("sqlite3") else "%s"
+
+
+def _chunks(items: List[str], size: int):
+    for idx in range(0, len(items), max(1, size)):
+        yield items[idx : idx + size]
 
 
 def load_output_summary(conn, product_id: str) -> Dict[str, Any]:
@@ -597,14 +674,14 @@ def load_prompt_package_summary(conn, product_id: str, prompt_ids: Optional[List
         placeholders = ",".join(["%s"] * len(prompt_ids))
         cur.execute(
             "SELECT segment_prompt_id, package_status, feishu_record_id, external_provider, external_job_id, "
-            "generated_asset_id, generated_segment_id, failure_reason, created_at, updated_at "
+            "generated_asset_id, generated_segment_id, failure_reason, result_sync_status, submit_channel, created_at, updated_at "
             f"FROM segment_prompt_packages WHERE product_id=%s AND segment_prompt_id IN ({placeholders})",
             (product_id, *prompt_ids),
         )
     else:
         cur.execute(
             "SELECT segment_prompt_id, package_status, feishu_record_id, external_provider, external_job_id, "
-            "generated_asset_id, generated_segment_id, failure_reason, created_at, updated_at "
+            "generated_asset_id, generated_segment_id, failure_reason, result_sync_status, submit_channel, created_at, updated_at "
             "FROM segment_prompt_packages WHERE product_id=%s",
             (product_id,),
         )
@@ -624,13 +701,13 @@ def voc_participation_summary(use_voc_hooks: bool, voc: Optional[Dict[str, Any]]
         }
     if voc:
         return {
-            "mode": "voc_blocked",
+            "mode": "voc_unconfirmed_ignored",
             "participates": False,
             "package_id": voc.get("package_id"),
             "readiness": voc.get("readiness_status"),
             "manual_confirmation_status": voc.get("manual_confirmation_status"),
-            "reason": "voc_package_not_confirmed",
-            "next_action": "confirm one or more VOC selling points before ADS hook package consumption",
+            "reason": "voc_package_not_confirmed_ignored",
+            "next_action": "regular ADS_FAST continues; confirm VOC only for experimental dedicated hook packages",
         }
     reason = (voc_gap or {}).get("missing_reason") or "voc_package_missing"
     mode = "category_voc_transfer_needed" if reason == "product_not_in_voc_capture_pool" else "voc_missing"
@@ -782,14 +859,11 @@ def plan_ads_mixcut(
     voc_segment_counts = seg.get("voc_segments") or {}
     voc_usable_segments = int(voc_segment_counts.get("usable") or 0)
     voc_filled_outputs = int(out.get("strict_good_outputs_with_voc_segments") or 0)
-    if use_voc_hooks and voc and voc.get("candidates"):
+    if use_voc_hooks and voc and voc.get("candidates") and voc.get("confirmed", False):
         voc_candidates = len(voc["candidates"])
-        voc_confirmed = voc.get("confirmed", False)
+        voc_confirmed = True
         desired_hook_gap = max(0, min(max_hook, 6) - seg["hook_segments"])
-        if voc_confirmed:
-            hook_gap = desired_hook_gap
-        else:
-            blocked_hook_gap = desired_hook_gap
+        hook_gap = desired_hook_gap
     else:
         hook_gap = max(0, 3 - hero_count)
 
@@ -815,12 +889,15 @@ def plan_ads_mixcut(
     if scene_count < 1:
         support_gap += 1 - scene_count
     support_gap = min(support_gap, max_support)
+    bottleneck = bottleneck_summary(task, seg, remaining)
+    material_extra_capacity = _to_int(bottleneck.get("material_pool_extra_capacity"), 0)
+    capacity_exhausted = remaining > 0 and material_extra_capacity <= 0
 
     # render plan
     planned_renders = 0
     guard_target_count = existing_good
     min_assets = hero_count + result_count + detail_count
-    if remaining > 0 and min_assets >= 3:
+    if remaining > 0 and min_assets >= 3 and not capacity_exhausted:
         planned_renders = min(remaining, pass_limit) if pass_limit > 0 else remaining
         guard_target_count = existing_good + planned_renders
 
@@ -828,9 +905,8 @@ def plan_ads_mixcut(
         status = "ready"
     elif task is None:
         status = "missing_task"
-    elif use_voc_hooks and voc and voc.get("candidates") and not voc_confirmed and blocked_hook_gap > 0:
-        status = "needs_manual_confirmation"
-        blockers.append("voc_manual_confirmation_required")
+    elif capacity_exhausted:
+        status = "needs_prep"
     elif hook_gap > 0 or support_gap > 0:
         status = "needs_prep"
     else:
@@ -843,8 +919,11 @@ def plan_ads_mixcut(
         "existing_good_outputs": existing_good,
         "existing_total_outputs": out["total_outputs"],
         "target_count": target,
+        "factory_target_count": target,
+        "current_effective_count": existing_good,
         "quantity_goal": update_quantity_goal_progress(quantity_goal, existing_good),
         "remaining_to_target": remaining,
+        "remaining_to_factory_target": remaining,
         "asset_pool": {
             "raw_total_segments": seg.get("raw_total", seg["total"]),
             "total_usable_segments": seg["total"],
@@ -887,7 +966,7 @@ def plan_ads_mixcut(
                     voc_usable_segments,
                 ),
             },
-            "bottleneck": bottleneck_summary(task, seg, remaining),
+            "bottleneck": bottleneck,
         },
         "voc_hook_package": {
             "found": voc is not None,
@@ -906,7 +985,10 @@ def plan_ads_mixcut(
             "planned_renders": planned_renders,
             "max_renders_per_pass": pass_limit,
             "guard_target_count": guard_target_count,
+            "pass_target_count": guard_target_count,
             "final_target_count": target,
+            "factory_target_count": target,
+            "remaining_to_factory_target": remaining,
             "available_templates": "AD_FAST_HOOK_8S, AD_FAST_HOOK_10S, AD_FAST_PROOF_12S",
         },
         "status": status,
@@ -924,7 +1006,7 @@ def plan_ads_mixcut(
         else:
             warnings.append("no VOC hook package found; run build_ads_hook_package.py first")
     elif use_voc_hooks and voc and not voc_confirmed:
-        warnings.append("VOC hook package exists but is NOT confirmed; dry-run-only until manual confirmation")
+        warnings.append("VOC hook package exists but is not confirmed; ignoring it and continuing regular ADS_FAST")
     elif use_voc_hooks and voc_confirmed and voc_quota_remaining > 0:
         if voc_usable_segments <= 0:
             warnings.append("VOC hook package confirmed but no usable VOC segments have returned yet; prompt package generation is needed")
@@ -967,6 +1049,80 @@ def persist_run(conn, run_id: str, result: Dict[str, Any], args: argparse.Namesp
     conn.commit()
 
 
+def sync_content_task_goal(result: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
+    target = _to_int(result.get("target_count"), _to_int(getattr(args, "target_count", 0), 0))
+    product_id = str(getattr(args, "product_id", "") or "").strip()
+    if not product_id or target <= 0:
+        return {"status": "skipped", "reason": "missing_product_or_target"}
+    ctx = build_context()
+    rows = ctx.repo.list_where("content_tasks", "product_id=? ORDER BY id DESC LIMIT 1", (product_id,))
+    if not rows:
+        return {"status": "skipped", "reason": "content_task_missing"}
+    task = rows[0]
+    final = result.get("final_inspect") or {}
+    quantity_goal = final.get("quantity_goal") or result.get("quantity_goal") or {}
+    good_outputs = _to_int(final.get("good_outputs"), 0)
+    remaining = _to_int(quantity_goal.get("remaining_to_target"), max(0, target - good_outputs))
+    render = result.get("render") or {}
+    render_status = str(render.get("status") or "")
+    render_error = str(render.get("error") or "")
+    ai_supplement = result.get("ai_supplement") or {}
+    ai_status = str(ai_supplement.get("status") or "").strip().lower()
+    latest_rows = ctx.repo.list_where("content_tasks", "product_id=? ORDER BY id DESC LIMIT 1", (product_id,))
+    latest_task = latest_rows[0] if latest_rows else task
+    bottleneck = (((result.get("plan") or {}).get("flow_summary") or {}).get("bottleneck") or {})
+    decision = decide_factory_state(
+        latest_task,
+        facts={
+            "target_count": target,
+            "actual_count": good_outputs,
+            "remaining_count": remaining,
+            "render_status": render_status,
+            "ai_status": ai_status,
+            "material_pool_extra_capacity": bottleneck.get("material_pool_extra_capacity"),
+            "first_slot_remaining_capacity": bottleneck.get("first_slot_remaining_capacity"),
+        },
+    )
+    pipeline_status = decision.pipeline_status
+    next_action = decision.next_action
+    task_status = decision.task_status
+    if decision.is_done:
+        last_error = ""
+    elif render_status == "failed":
+        last_error = render_error or "render_failed"
+    elif ai_status in {"blocked", "failed"}:
+        last_error = str(latest_task.get("last_error") or ai_supplement.get("reason") or decision.stable_reason)
+    else:
+        last_error = str(latest_task.get("last_error") or "") if decision.is_blocked or decision.is_error else ""
+    patch = {
+        "requested_variant_count": target,
+        "task_status": task_status,
+        "pipeline_status": pipeline_status,
+        "next_action": next_action,
+        "last_error": last_error,
+    }
+    write = ctx.repo.update("content_tasks", "task_id", task["task_id"], patch)
+    if not write.success:
+        return {"status": "failed", "reason": "content_task_update_failed", "error": write.to_dict()}
+    capacity = CapacityCounterSkill(ctx).refresh_product(product_id)
+    if str(os.environ.get("AUTO_MIXCUT_SKIP_INLINE_FEISHU_SYNC") or "").strip().lower() in {"1", "true", "yes"}:
+        sync = {"status": "skipped", "reason": "inline_feishu_sync_disabled"}
+    else:
+        sync = sync_product_task_best_effort(ctx, product_id)
+    return {
+        "status": "synced",
+        "target_count": target,
+        "factory_target_count": target,
+        "good_outputs": good_outputs,
+        "remaining_to_target": remaining,
+        "remaining_to_factory_target": remaining,
+        "pipeline_status": pipeline_status,
+        "next_action": next_action,
+        "capacity": capacity.to_dict(),
+        "feishu_sync": sync,
+    }
+
+
 # ── Step 3: prepare VOC hook prompt packages ──
 
 def prepare_voc_hooks(plan: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
@@ -979,9 +1135,9 @@ def prepare_voc_hooks(plan: Dict[str, Any], args: argparse.Namespace) -> Dict[st
         return {"status": "blocked", "reason": "content_task_missing"}
     voc_info = plan.get("voc_hook_package") or {}
     if not voc_info.get("found"):
-        return {"status": "blocked", "reason": "voc_hook_package_missing"}
+        return {"status": "skipped", "reason": "voc_hook_package_missing_optional"}
     if not voc_info.get("confirmed"):
-        return {"status": "blocked", "reason": "voc_hook_package_not_confirmed"}
+        return {"status": "skipped", "reason": "voc_hook_package_not_confirmed_ignored"}
     planned_hooks = int((plan.get("gap") or {}).get("new_hook_segments_planned") or 0)
     if planned_hooks <= 0:
         return {"status": "skipped", "reason": "no_hook_gap"}
@@ -1022,6 +1178,112 @@ def prepare_voc_hooks(plan: Dict[str, Any], args: argparse.Namespace) -> Dict[st
         "failed_count": len(result.get("failed") or []),
         "result": result,
     }
+
+
+def prepare_ai_supplement(plan: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
+    remaining = _to_int(plan.get("remaining_to_target"), 0)
+    render_plan = plan.get("render") or {}
+    planned_renders = _to_int(render_plan.get("planned_renders"), 0)
+    if remaining <= 0:
+        return {"status": "skipped", "reason": "target_already_met"}
+    if planned_renders > 0:
+        return {"status": "skipped", "reason": "render_capacity_available", "planned_renders": planned_renders}
+    bottleneck = ((plan.get("flow_summary") or {}).get("bottleneck") or {})
+    if _to_int(bottleneck.get("material_pool_extra_capacity"), 0) > 0:
+        return {"status": "skipped", "reason": "material_capacity_available"}
+    gap_text = _ads_ai_supplement_gap_text(plan)
+    if not gap_text:
+        return {"status": "skipped", "reason": "no_ai_supplement_gap"}
+    package_stock_target = _ads_ai_supplement_package_stock_target(plan)
+    if not args.write:
+        return {"status": "dry_run", "gap_text": gap_text, "package_stock_target": package_stock_target}
+    ctx = build_context()
+    result = AISupplementWorkbenchSkill(ctx).sync_for_product(
+        args.product_id,
+        max_packages=package_stock_target or DEFAULT_AI_PACKAGE_STOCK_MIN,
+        gap_text=gap_text,
+    )
+    if not result.success:
+        return {"status": "failed", "gap_text": gap_text, "result": result.to_dict()}
+    payload = result.data or {}
+    status = "created"
+    if payload.get("skipped"):
+        reason = str(payload.get("reason") or "")
+        status = "needs_submit_retry" if reason in {"created_or_recoverable_packages_need_submit", "recoverable_failed_packages_need_retry"} else "blocked"
+    return {"status": status, "gap_text": gap_text, "package_stock_target": package_stock_target, "result": result.to_dict()}
+
+
+def _ads_ai_supplement_gap_text(plan: Dict[str, Any]) -> str:
+    remaining = _to_int(plan.get("remaining_to_target"), 0)
+    bottleneck = ((plan.get("flow_summary") or {}).get("bottleneck") or {})
+    material_extra = _to_int(bottleneck.get("material_pool_extra_capacity"), 0)
+    shortfall = max(0, remaining - material_extra)
+    if shortfall <= 0:
+        return ""
+    need = _ads_ai_supplement_package_stock_target(plan)
+    text = str(bottleneck.get("current_bottleneck") or bottleneck.get("capacity_note") or "")
+    first_slot_capacity = _to_int(bottleneck.get("first_slot_remaining_capacity"), 0)
+    hero_priority = "首镜" in text or "first_slot" in text or first_slot_capacity <= 0
+    counts = _ads_ai_supplement_role_counts(need, hero_priority=hero_priority)
+    labels = {
+        "hero": "hero首镜",
+        "detail": "detail细节",
+        "result": "result上身",
+        "scene": "scene场景",
+    }
+    parts = [f"{labels[role]}{amount}" for role, amount in counts.items() if amount > 0]
+    return "AI补素材: " + "; ".join(parts)
+
+
+def _ads_ai_supplement_package_stock_target(plan: Dict[str, Any]) -> int:
+    remaining = _to_int(plan.get("remaining_to_target"), 0)
+    bottleneck = ((plan.get("flow_summary") or {}).get("bottleneck") or {})
+    material_extra = _to_int(bottleneck.get("material_pool_extra_capacity"), 0)
+    shortfall = max(0, remaining - material_extra)
+    if shortfall <= 0:
+        return 0
+    ratio = _float_env("AUTO_MIXCUT_AI_PACKAGE_STOCK_RATIO", DEFAULT_AI_PACKAGE_STOCK_RATIO)
+    min_stock = max(1, _to_int(os.environ.get("AUTO_MIXCUT_AI_PACKAGE_STOCK_MIN"), DEFAULT_AI_PACKAGE_STOCK_MIN))
+    target = _to_int(plan.get("factory_target_count") or plan.get("target_count"), 0)
+    cap = _ads_ai_supplement_package_stock_cap(target)
+    return max(1, min(shortfall, cap, max(min_stock, math.ceil(shortfall * ratio))))
+
+
+def _ads_ai_supplement_package_stock_cap(target_count: int) -> int:
+    env_cap = _to_int(os.environ.get("AUTO_MIXCUT_AI_PACKAGE_STOCK_CAP"), 0)
+    if env_cap > 0:
+        return env_cap
+    target_count = _to_int(target_count, 0)
+    if target_count <= 20:
+        return 8
+    if target_count <= 40:
+        return 12
+    return 16
+
+
+def _ads_ai_supplement_role_counts(total: int, hero_priority: bool = False) -> Dict[str, int]:
+    total = max(1, _to_int(total, 1))
+    weights = {"hero": 0.55, "detail": 0.25, "result": 0.15, "scene": 0.05} if hero_priority else {"hero": 0.4, "detail": 0.3, "result": 0.2, "scene": 0.1}
+    counts = {"hero": 1, "detail": 0, "result": 0, "scene": 0}
+    if total >= 2:
+        counts["detail"] = 1
+    if total >= 3:
+        counts["result"] = 1
+    if total >= 6:
+        counts["scene"] = 1
+    remaining = total - sum(counts.values())
+    while remaining > 0:
+        role = max(weights, key=lambda item: (weights[item] * total - counts[item], weights[item]))
+        counts[role] += 1
+        remaining -= 1
+    return counts
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return max(0.1, float(os.environ.get(name, str(default)) or default))
+    except ValueError:
+        return default
 
 
 def submit_hook_packages(plan: Dict[str, Any], args: argparse.Namespace, prompt_ids: Optional[List[str]] = None) -> Dict[str, Any]:
@@ -1192,11 +1454,21 @@ def run_segment_qc(args: argparse.Namespace) -> Dict[str, Any]:
     from auto_mixcut.skills.ai_generation_qc_skill import _basic_qc  # noqa: WPS433
     from auto_mixcut.skills.rds_repository_skill import RDSRepositorySkill  # noqa: WPS433
 
+    trace_step("segment_qc_context_start", product_id=args.product_id)
     ctx = build_context()
-    init = RDSRepositorySkill(ctx).init_db()
-    if not init.success:
-        return {"status": "failed", "reason": "rds_init_failed", "result": init.to_dict()}
+    trace_step("segment_qc_context_done", product_id=args.product_id)
+    if not _env_truthy("AUTO_MIXCUT_ADS_FAST_MODE") and not _env_truthy("AUTO_MIXCUT_SKIP_ADS_SEGMENT_QC_INIT_DB"):
+        trace_step("segment_qc_init_db_start", product_id=args.product_id)
+        with _operation_timeout(_ads_inspect_timeout_seconds()):
+            init = RDSRepositorySkill(ctx).init_db()
+        trace_step("segment_qc_init_db_done", product_id=args.product_id, success=init.success)
+        if not init.success:
+            return {"status": "failed", "reason": "rds_init_failed", "result": init.to_dict()}
+    else:
+        trace_step("segment_qc_init_db_skipped", product_id=args.product_id)
+    trace_step("segment_qc_list_start", product_id=args.product_id)
     segments = ctx.repo.list_where("segments", "product_id=? AND source_type='ai_generated'", (args.product_id,))
+    trace_step("segment_qc_list_done", product_id=args.product_id, segments=len(segments))
     checked = passed = failed = skipped = 0
     results = []
     skip_statuses = {"qc_passed", "qc_failed", "frame_sample_failed", "frame_sample_timeout", "fingerprint_failed", "tag_failed"}
@@ -1230,6 +1502,8 @@ def run_render_guard(args: argparse.Namespace, plan: Optional[Dict[str, Any]] = 
     if not args.write:
         return {"status": "blocked", "reason": "render_requires_write"}
     render_plan = (plan or {}).get("render") or {}
+    if _to_int(render_plan.get("planned_renders"), 0) <= 0:
+        return {"status": "skipped", "reason": "no_planned_renders", "plan_status": (plan or {}).get("status")}
     guard_target = _to_int(render_plan.get("guard_target_count"), _to_int(getattr(args, "target_count", 0), 0))
     final_target = _to_int(render_plan.get("final_target_count"), _to_int(getattr(args, "target_count", 0), 0))
     cmd = [
@@ -1243,19 +1517,130 @@ def run_render_guard(args: argparse.Namespace, plan: Optional[Dict[str, Any]] = 
         str(max(1, int(args.guard_max_rounds or 3))),
         "--template-id",
         ADS_FAST_TEMPLATE_ID,
+        "--skip-upload-sync",
     ]
-    env = {"AUTO_MIXCUT_DB_PROVIDER": "mysql", "AUTO_MIXCUT_OSS_PROVIDER": "aliyun", "AUTO_MIXCUT_ADS_FAST_MODE": "1"}
-    result = command_result(
-        cmd,
-        SKILL_ROOT,
-        env=env,
-        timeout_minutes=args.render_timeout_minutes,
-    )
+    env = {
+        "AUTO_MIXCUT_DB_PROVIDER": "mysql",
+        "AUTO_MIXCUT_OSS_PROVIDER": "aliyun",
+        "AUTO_MIXCUT_ADS_FAST_MODE": "1",
+        "AUTO_MIXCUT_SKIP_INLINE_FEISHU_SYNC": "1",
+        "AUTO_MIXCUT_SKIP_GUARD_INIT_DB": "1",
+        "AUTO_MIXCUT_SKIP_RENDER_RUNTIME_SCHEMA": "1",
+        "AUTO_MIXCUT_STALE_PLANNING_BATCH_MINUTES": "10",
+        "AUTO_MIXCUT_RENDER_BATCH_TIMEOUT": "720",
+        "AUTO_MIXCUT_FFMPEG_TIMEOUT_SEC": "240",
+        "AUTO_MIXCUT_DB_READ_TIMEOUT": "15",
+        "AUTO_MIXCUT_DB_WRITE_TIMEOUT": "15",
+        "AUTO_MIXCUT_TOP_UP_SKIP_CAPACITY_REFRESH": "1",
+    }
+    if _env_truthy("AUTO_MIXCUT_RENDER_GUARD_SUBPROCESS"):
+        result = command_result(
+            cmd,
+            SKILL_ROOT,
+            env=env,
+            timeout_minutes=args.render_timeout_minutes,
+        )
+    else:
+        result = run_render_guard_inline(
+            args,
+            guard_target=guard_target,
+            env=env,
+            started_at=now_iso(),
+        )
     result["guard_target_count"] = guard_target
+    result["pass_target_count"] = guard_target
     result["final_target_count"] = final_target
+    result["factory_target_count"] = final_target
     result["planned_renders"] = _to_int(render_plan.get("planned_renders"), 0)
     result["max_renders_per_pass"] = _to_int(render_plan.get("max_renders_per_pass"), 0)
     return result
+
+
+def run_render_guard_inline(
+    args: argparse.Namespace,
+    guard_target: int,
+    env: Dict[str, str],
+    started_at: str,
+) -> Dict[str, Any]:
+    old_env = {key: os.environ.get(key) for key in env}
+    os.environ.update(env)
+    try:
+        from scripts.run_mixcut_guard import run_guard_pass  # noqa: WPS433
+
+        trace_step("inline_guard_build_context_start", product_id=args.product_id, guard_target=guard_target)
+        ctx = build_context()
+        trace_step("inline_guard_build_context_done", product_id=args.product_id, guard_target=guard_target)
+        with _operation_timeout(max(1, int(getattr(args, "render_timeout_minutes", 1) or 1)) * 60):
+            trace_step("inline_guard_run_start", product_id=args.product_id, guard_target=guard_target)
+            res = run_guard_pass(
+                ctx,
+                product_id=args.product_id,
+                target=guard_target,
+                max_rounds=max(1, int(args.guard_max_rounds or 3)),
+                template_id=ADS_FAST_TEMPLATE_ID,
+                process_uploads=False,
+            )
+            trace_step("inline_guard_run_done", product_id=args.product_id, guard_target=guard_target, success=res.success)
+        payload = res.to_dict()
+        return {
+            "status": "completed" if res.success else "failed",
+            "returncode": 0 if res.success else 1,
+            "cmd": ["inline", "run_guard_pass"],
+            "cwd": SKILL_ROOT,
+            "started_at": started_at,
+            "finished_at": now_iso(),
+            "stdout_tail": json.dumps(payload, ensure_ascii=False, default=str)[-4000:],
+            "stderr_tail": "",
+        }
+    except TimeoutError as exc:
+        return {
+            "status": "failed",
+            "returncode": None,
+            "cmd": ["inline", "run_guard_pass"],
+            "cwd": SKILL_ROOT,
+            "started_at": started_at,
+            "finished_at": now_iso(),
+            "error": str(exc),
+            "stdout_tail": "",
+            "stderr_tail": "",
+        }
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "returncode": None,
+            "cmd": ["inline", "run_guard_pass"],
+            "cwd": SKILL_ROOT,
+            "started_at": started_at,
+            "finished_at": now_iso(),
+            "error": str(exc),
+            "stdout_tail": "",
+            "stderr_tail": "",
+        }
+    finally:
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+@contextmanager
+def _operation_timeout(seconds: int):
+    if not hasattr(signal, "SIGALRM"):
+        yield
+        return
+    previous_handler = signal.getsignal(signal.SIGALRM)
+
+    def _raise_timeout(signum, frame):
+        raise TimeoutError(f"operation timed out after {seconds}s")
+
+    signal.signal(signal.SIGALRM, _raise_timeout)
+    signal.alarm(max(1, int(seconds)))
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous_handler)
 
 
 def run_final_qc(args: argparse.Namespace, render_result: Dict[str, Any]) -> Dict[str, Any]:
@@ -1269,14 +1654,20 @@ def run_final_qc(args: argparse.Namespace, render_result: Dict[str, Any]) -> Dic
 # ── main ──
 
 def run(args: argparse.Namespace) -> Dict[str, Any]:
+    trace_step("run_start", product_id=args.product_id, target_count=args.target_count, full_run=bool(getattr(args, "full_run", False)))
+    trace_step("connect_db_start", product_id=args.product_id)
     conn = connect_db(args.database_url)
+    trace_step("connect_db_done", product_id=args.product_id)
     try:
         # step 1: inspect
-        task = load_task(conn, args.product_id)
-        seg = load_segment_summary(conn, args.product_id)
-        out = load_output_summary(conn, args.product_id)
-        voc = load_voc_hook_package(conn, args.product_id) if args.use_voc_hooks else None
-        voc_gap = diagnose_voc_gap(conn, args.product_id) if args.use_voc_hooks and voc is None else {}
+        trace_step("inspect_start", product_id=args.product_id)
+        with _operation_timeout(_ads_inspect_timeout_seconds()):
+            task = load_task(conn, args.product_id)
+            seg = load_segment_summary(conn, args.product_id)
+            out = load_output_summary(conn, args.product_id)
+            voc = load_voc_hook_package(conn, args.product_id) if args.use_voc_hooks else None
+            voc_gap = diagnose_voc_gap(conn, args.product_id) if args.use_voc_hooks and voc is None else {}
+        trace_step("inspect_done", product_id=args.product_id, segments=seg.get("total"), good_outputs=out.get("good_outputs"), voc=bool(voc))
         quantity_goal = build_quantity_goal(
             out,
             args.target_count,
@@ -1286,6 +1677,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         )
 
         # step 2: plan
+        trace_step("plan_start", product_id=args.product_id)
         plan = plan_ads_mixcut(
             args.product_id, task, seg, out, voc,
             voc_gap,
@@ -1294,6 +1686,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             quantity_goal=quantity_goal,
             max_renders_per_pass=args.max_renders_per_pass,
         )
+        trace_step("plan_done", product_id=args.product_id, status=plan.get("status"), remaining=plan.get("remaining_to_target"), planned_renders=(plan.get("render") or {}).get("planned_renders"))
 
         run_id = "ads_unattended__{}__{}".format(args.product_id, now_iso().replace(":", "").replace("-", ""))
         result = {
@@ -1303,6 +1696,7 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             "goal_mode": quantity_goal["goal_mode"],
             "requested_target_count": quantity_goal["requested_target_count"],
             "target_count": quantity_goal["target_strict_good_count"],
+            "factory_target_count": quantity_goal["target_strict_good_count"],
             "quantity_goal": quantity_goal,
             "use_voc_hooks": args.use_voc_hooks,
             "inspect": {
@@ -1325,9 +1719,22 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
             return result
 
         if args.prepare_voc_hooks:
+            trace_step("prepare_voc_hooks_start", product_id=args.product_id)
             result["prepare_voc_hooks"] = prepare_voc_hooks(plan, args)
+            trace_step("prepare_voc_hooks_done", product_id=args.product_id, status=(result["prepare_voc_hooks"] or {}).get("status"))
 
         scoped_prompt_ids = prepared_prompt_ids(result)
+        ai_supplement_needed = (
+            _to_int(plan.get("remaining_to_target"), 0) > 0
+            and _to_int((plan.get("render") or {}).get("planned_renders"), 0) <= 0
+            and str(plan.get("status") or "") == "needs_prep"
+            and not scoped_prompt_ids
+        )
+        if ai_supplement_needed:
+            trace_step("ai_supplement_start", product_id=args.product_id)
+            result["ai_supplement"] = prepare_ai_supplement(plan, args)
+            trace_step("ai_supplement_done", product_id=args.product_id, status=(result["ai_supplement"] or {}).get("status"))
+
         if scoped_prompt_ids:
             result["scoped_prompt_ids"] = scoped_prompt_ids
             if not args.submit_hook_packages:
@@ -1346,25 +1753,36 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
                 result["submit_hook_packages"] = submit_hook_packages(plan, args, scoped_prompt_ids)
 
         if args.import_returns:
+            trace_step("import_returns_start", product_id=args.product_id)
             result["import_returns"] = import_returns(args)
+            trace_step("import_returns_done", product_id=args.product_id, status=(result["import_returns"] or {}).get("status"))
 
         if args.wait_returns:
             result["wait_returns"] = wait_for_returns(conn, args, scoped_prompt_ids)
 
         if args.run_segment_qc:
+            trace_step("segment_qc_start", product_id=args.product_id)
             result["segment_qc"] = run_segment_qc(args)
+            trace_step("segment_qc_done", product_id=args.product_id, status=(result["segment_qc"] or {}).get("status"))
 
         render_result: Dict[str, Any] = {}
         if args.render:
+            trace_step("render_guard_start", product_id=args.product_id)
             render_result = run_render_guard(args, plan)
             result["render"] = render_result
+            trace_step("render_guard_done", product_id=args.product_id, status=render_result.get("status"), error=render_result.get("error"))
 
         if args.run_final_qc:
+            trace_step("final_qc_start", product_id=args.product_id)
             result["final_qc"] = run_final_qc(args, render_result)
+            trace_step("final_qc_done", product_id=args.product_id, status=(result["final_qc"] or {}).get("status"))
 
-        final_out = load_output_summary(conn, args.product_id)
-        final_seg = load_segment_summary(conn, args.product_id)
-        final_packages = load_prompt_package_summary(conn, args.product_id)
+        trace_step("final_inspect_start", product_id=args.product_id)
+        with _operation_timeout(_ads_inspect_timeout_seconds()):
+            final_out = load_output_summary(conn, args.product_id)
+            final_seg = load_segment_summary(conn, args.product_id)
+            final_packages = load_prompt_package_summary(conn, args.product_id)
+        trace_step("final_inspect_done", product_id=args.product_id, good_outputs=final_out.get("good_outputs"), segments=final_seg.get("total"))
         final_quantity_goal = update_quantity_goal_progress(quantity_goal, final_out["good_outputs"])
         result["final_inspect"] = {
             "good_outputs": final_out["good_outputs"],
@@ -1376,15 +1794,26 @@ def run(args: argparse.Namespace) -> Dict[str, Any]:
         }
 
         if args.write:
+            trace_step("task_goal_sync_start", product_id=args.product_id)
+            result["task_goal_sync"] = sync_content_task_goal(result, args)
+            trace_step("task_goal_sync_done", product_id=args.product_id, status=(result["task_goal_sync"] or {}).get("status"))
             persist_run(conn, run_id, result, args)
             result["written"] = True
 
+        trace_step("run_done", product_id=args.product_id, status=stage_status(result)[0])
         return result
     finally:
         try:
             conn.close()
         except Exception:
             pass
+
+
+def _ads_inspect_timeout_seconds() -> int:
+    try:
+        return max(10, int(os.environ.get("AUTO_MIXCUT_ADS_INSPECT_TIMEOUT", "120") or "120"))
+    except ValueError:
+        return 120
 
 
 def build_parser() -> argparse.ArgumentParser:

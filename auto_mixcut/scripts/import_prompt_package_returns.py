@@ -24,7 +24,7 @@ sys.path.insert(0, str(WORKSPACE / "skills" / "script-run-manager-sync"))
 from auto_mixcut.core.bootstrap import build_context  # noqa: E402
 from auto_mixcut.core.ids import new_id  # noqa: E402
 from auto_mixcut.adapters.oss import AliyunOSS  # noqa: E402
-from auto_mixcut.skills.segment_prompt_factory_skill import SegmentPromptFactorySkill  # noqa: E402
+from auto_mixcut.skills.segment_prompt_factory_skill import SegmentPromptFactorySkill, _ensure_prompt_package_table  # noqa: E402
 from core.bitable import FeishuBitableClient, resolve_wiki_bitable_app_token  # type: ignore  # noqa: E402
 from core.feishu_url_parser import parse_feishu_bitable_url  # type: ignore  # noqa: E402
 
@@ -59,6 +59,9 @@ def main() -> int:
     args = parser.parse_args()
 
     ctx = build_context()
+    schema = _ensure_prompt_package_table(ctx)
+    if not schema.success:
+        raise RuntimeError(json.dumps(schema.to_dict(), ensure_ascii=False, default=str))
     client = resolve_client(args.url)
     records = client.list_records(page_size=500)
     results: List[Dict[str, Any]] = []
@@ -112,34 +115,44 @@ def sync_submission_status(ctx: Any, record_id: str, fields: Dict[str, Any]) -> 
     if not package:
         return {"updated": False, "reason": "prompt_package_missing", "segment_prompt_id": prompt_id}
 
+    feishu_status = text(fields.get(FIELD_STATUS))
+    result_sync = text(fields.get(FIELD_RESULT_SYNC))
+    next_status = _rds_package_status(feishu_status, result_sync)
     current_status = str(package.get("package_status") or "")
-    if current_status in {"failed", "质检废弃"}:
+    if current_status in {"failed", "质检废弃"} and next_status not in {"created", "submitted", "generating", "returned", "imported"}:
         return {"updated": False, "reason": "prompt_package_rejected", "segment_prompt_id": prompt_id}
     if current_status in {"imported", "consumed", "fulfilled", "质检中", "质检通过", "质检参考", "质检废弃"} and (
         package.get("generated_asset_id") or package.get("generated_segment_id")
     ):
         return {"updated": False, "reason": "already_imported", "segment_prompt_id": prompt_id}
 
-    feishu_status = text(fields.get(FIELD_STATUS))
-    result_sync = text(fields.get(FIELD_RESULT_SYNC))
-    next_status = _rds_package_status(feishu_status, result_sync)
     external_job_id = text(fields.get(FIELD_PLATFORM_TASK_ID)) or text(fields.get(FIELD_LATEST_TRACE_ID))
     patch: Dict[str, Any] = {"feishu_record_id": record_id}
+    if result_sync:
+        patch["result_sync_status"] = result_sync
     if next_status:
         patch["package_status"] = next_status
     if external_job_id:
         patch["external_job_id"] = external_job_id
-        if not package.get("external_provider"):
-            patch["external_provider"] = _provider_from_job_id(external_job_id)
+        patch["external_provider"] = _provider_from_job_id(external_job_id)
     if next_status == "failed":
         failure = text(fields.get(FIELD_RESULT)) or result_sync or feishu_status
         if failure:
             patch["failure_reason"] = failure
+    elif next_status and package.get("failure_reason"):
+        patch["failure_reason"] = ""
 
     patch = {key: value for key, value in patch.items() if value is not None and str(value) != str(package.get(key) or "")}
     if not patch:
         return {"updated": False, "reason": "no_change", "segment_prompt_id": prompt_id}
-    ctx.repo.update("segment_prompt_packages", "segment_prompt_id", prompt_id, patch)
+    update_res = ctx.repo.update("segment_prompt_packages", "segment_prompt_id", prompt_id, patch)
+    if not update_res.success:
+        return {
+            "updated": False,
+            "reason": "rds_update_failed",
+            "segment_prompt_id": prompt_id,
+            "error": None if update_res.error is None else update_res.error.to_dict(),
+        }
     return {"updated": True, "segment_prompt_id": prompt_id, "patch": patch}
 
 

@@ -6,6 +6,7 @@ from auto_mixcut.core.ids import new_id
 from auto_mixcut.core.result import Result
 
 from .context import SkillContext
+from .product_run_lock_skill import ensure_product_run_lock_table
 from .product_reference_image_skill import ensure_reference_image_tables
 
 
@@ -27,7 +28,15 @@ class RDSRepositorySkill:
                 reference_images = ensure_reference_image_tables(self.ctx)
                 if not reference_images.success:
                     return reference_images
-                return Result.ok({"migrations": ["ensure_mysql_core_tables", "ensure_llm_router_tables", "ensure_runtime_compatibility_columns", "ensure_reference_image_tables"], "db_provider": "mysql"})
+                from .material_usage_ledger_skill import ensure_material_usage_tables
+
+                usage_tables = ensure_material_usage_tables(self.ctx)
+                if not usage_tables.success:
+                    return usage_tables
+                product_run_locks = ensure_product_run_lock_table(self.ctx)
+                if not product_run_locks.success:
+                    return product_run_locks
+                return Result.ok({"migrations": ["ensure_mysql_core_tables", "ensure_llm_router_tables", "ensure_runtime_compatibility_columns", "ensure_reference_image_tables", "ensure_material_usage_tables", "ensure_product_run_lock_table"], "db_provider": "mysql"})
             return Result.fail("MYSQL_MIGRATION_UNAVAILABLE", "mysql repository cannot initialize tables")
         migrations_dir = self.ctx.settings.root_dir / "migrations"
         sql_files = sorted(m for m in migrations_dir.glob("*.sql") if not m.name.endswith("_mysql_init.sql"))
@@ -41,7 +50,15 @@ class RDSRepositorySkill:
         reference_images = ensure_reference_image_tables(self.ctx)
         if not reference_images.success:
             return reference_images
-        return Result.ok({"migrations": [m.name for m in sql_files] + ["ensure_reference_image_tables"]})
+        from .material_usage_ledger_skill import ensure_material_usage_tables
+
+        usage_tables = ensure_material_usage_tables(self.ctx)
+        if not usage_tables.success:
+            return usage_tables
+        product_run_locks = ensure_product_run_lock_table(self.ctx)
+        if not product_run_locks.success:
+            return product_run_locks
+        return Result.ok({"migrations": [m.name for m in sql_files] + ["ensure_reference_image_tables", "ensure_material_usage_tables", "ensure_product_run_lock_table"]})
 
     def create_product_task(
         self,
@@ -298,9 +315,11 @@ def _ensure_mysql_core_tables(ctx: SkillContext) -> Result:
           blocked_reason TEXT,
           failure_reason TEXT,
           created_by VARCHAR(128),
+          source_record_id VARCHAR(128),
           created_at DATETIME,
           updated_at DATETIME,
-          KEY idx_content_tasks_product (product_id)
+          KEY idx_content_tasks_product (product_id),
+          KEY idx_content_tasks_source_record (source_record_id)
         )
         """,
         """

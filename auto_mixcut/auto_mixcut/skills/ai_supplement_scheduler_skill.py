@@ -25,6 +25,9 @@ def daytime_approval_required(ctx: SkillContext, product_id: str) -> bool:
     if not _truthy(os.environ.get("AUTO_MIXCUT_AI_SUPPLEMENT_DAY_APPROVAL", "1")):
         return False
     task = _latest_task(ctx, product_id) or {}
+    detail = _detail(task)
+    if _approval_valid_today(detail):
+        return False
     if str(task.get("ai_supplement_status") or "") == "approved":
         return False
     return _is_daytime()
@@ -182,7 +185,12 @@ def approve_product(ctx: SkillContext, product_id: str) -> Result:
     if not task:
         return Result.fail("TASK_NOT_FOUND", "task not found", {"product_id": product_id})
     detail = _detail(task)
-    detail.update({"state": "approved", "approved_at": _now().isoformat(timespec="seconds")})
+    now = _now()
+    detail.update({
+        "state": "approved",
+        "approved_at": now.isoformat(timespec="seconds"),
+        "daytime_approval_valid_date": now.date().isoformat(),
+    })
     res = ctx.repo.update(
         "content_tasks",
         "task_id",
@@ -195,7 +203,7 @@ def approve_product(ctx: SkillContext, product_id: str) -> Result:
             "last_error": "",
         },
     )
-    return res if not res.success else Result.ok({"product_id": product_id, "ai_supplement_status": "approved"})
+    return res if not res.success else Result.ok({"product_id": product_id, "ai_supplement_status": "approved", "daytime_approval_valid_date": now.date().isoformat()})
 
 
 def approve_pending_products(ctx: SkillContext) -> Result:
@@ -278,7 +286,8 @@ def _approval_message(product: dict[str, Any], task: dict[str, Any], budget: dic
     target = int(task.get("requested_variant_count") or 0)
     actual = int(task.get("actual_variant_count") or 0)
     remaining = int(task.get("target_remaining_variant_count") or max(0, target - actual))
-    submit_limit = int(budget.get("submit_limit") or budget.get("needed_after_inflight") or 0)
+    submit_limit = int(budget.get("submit_limit") or 0)
+    package_shortfall = int(budget.get("package_shortfall_count") or 0)
     inflight = int(budget.get("ai_submit_inflight_count") or 0)
     return "\n".join(
         [
@@ -287,7 +296,7 @@ def _approval_message(product: dict[str, Any], task: dict[str, Any], budget: dic
             f"名称：{product_name[:80]}",
             f"市场/类目：{market} / {category}",
             f"目标/已有效/缺口：{target} / {actual} / {remaining}",
-            f"建议本轮补素材：{submit_limit} 个（已在途/已导入包：{inflight}）",
+            f"建议本轮提单：{submit_limit} 个（已在途：{inflight}；仍缺Prompt Package：{package_shortfall}）",
             "",
             "同意后让 OpenClaw 执行：",
             approval_command,
@@ -313,7 +322,7 @@ def _batch_approval_message(items: list[dict[str, Any]]) -> str:
                 f"{index}. {item.get('product_id')}",
                 f"   {str(product_name)[:70]}",
                 f"   市场/类目：{item.get('market') or '-'} / {item.get('category') or '-'}",
-                f"   目标缺口：{item.get('remaining_count')}；本轮建议补：{budget.get('submit_limit')}；待提单包：{item.get('ready_to_submit_count')}；在途：{item.get('inflight_count')}",
+                f"   目标缺口：{item.get('remaining_count')}；本轮建议提单：{budget.get('submit_limit')}；待提单包：{item.get('ready_to_submit_count')}；在途：{item.get('inflight_count')}；仍缺Prompt Package：{budget.get('package_shortfall_count')}",
             ]
         )
     lines.extend(
@@ -402,8 +411,9 @@ def _submit_command(product_id: str, budget: dict[str, Any]) -> list[str]:
         f"--limit={limit}",
         f"--max-submit-needed={needed}",
     ]
-    if str(budget.get("priority_role") or "").strip():
-        command.append(f"--slot-role={str(budget.get('priority_role')).strip()}")
+    submit_slot_role = str(budget.get("submit_slot_role") if "submit_slot_role" in budget else budget.get("priority_role") or "").strip()
+    if submit_slot_role:
+        command.append(f"--slot-role={submit_slot_role}")
     return command
 
 
@@ -434,6 +444,14 @@ def _detail(task: dict[str, Any]) -> dict[str, Any]:
         except ValueError:
             return {"raw": value[:1000]}
     return {}
+
+
+def _approval_valid_today(detail: dict[str, Any]) -> bool:
+    today = _now().date().isoformat()
+    if str(detail.get("daytime_approval_valid_date") or "") == today:
+        return True
+    approved_at = str(detail.get("approved_at") or "")
+    return bool(approved_at.startswith(today))
 
 
 def _now() -> datetime:
