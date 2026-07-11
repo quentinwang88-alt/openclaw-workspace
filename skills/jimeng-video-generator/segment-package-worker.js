@@ -580,11 +580,18 @@ async function getIminiPage(browser, config) {
   const pages = await browser.pages();
   let page = pages.find(item => item.url().includes('imini.com'));
   if (!page) {
+    const target = browser.targets()
+      .find(item => item.type() === 'page' && item.url().includes('imini.com'));
+    if (target) {
+      page = await target.page().catch(() => null);
+    }
+  }
+  if (!page) {
     page = await browser.newPage();
   }
   await page.bringToFront().catch(() => {});
   await page.setViewport({ width: 1600, height: 1000 }).catch(() => {});
-  if (config.channels?.imini?.baseUrl) {
+  if (config.channels?.imini?.baseUrl && !String(page.url() || '').includes('imini.com/zh/video')) {
     await page.goto(config.channels.imini.baseUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
   }
   return page;

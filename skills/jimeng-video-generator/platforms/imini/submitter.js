@@ -15,6 +15,11 @@ function sleep(ms) {
 
 let _createButtonAlreadyClicked = false;
 
+function isIminiVideoPage(url) {
+  const text = String(url || '');
+  return text.includes('imini.com/zh/video') || text.includes('imini.com/zh/tools/ai-video');
+}
+
 async function submitToImini(page, context, productLock, firstFrameImagePath, config) {
   // No retry: once we click 创建, a submission may have gone through.
   // Retrying would create duplicate tasks and waste credits.
@@ -46,12 +51,18 @@ async function attemptSubmit(page, context, productLock, firstFrameImagePath, co
   }
 
   const assetUrl = iminiConfig.assetUrl || 'https://imini.com/zh/assets';
-  const baseUrl = iminiConfig.baseUrl || 'https://imini.com/zh/tools/ai-video';
+  const baseUrl = iminiConfig.baseUrl || 'https://imini.com/zh/video';
 
-  await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(error => {
-    const msg = String(error?.message || error || '');
-    if (!msg.includes('Navigation timeout')) throw error;
-  });
+  if (!isIminiVideoPage(page.url())) {
+    await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(error => {
+      const msg = String(error?.message || error || '');
+      if (!msg.includes('Navigation timeout') && !msg.includes('ERR_CONNECTION_TIMED_OUT')) throw error;
+      if (!isIminiVideoPage(page.url())) throw error;
+      console.log(`  ⚠️ imini 页面跳转超时，但当前已在视频页，继续复用: ${page.url()}`);
+    });
+  } else {
+    console.log(`  imini 复用已打开视频页: ${page.url()}`);
+  }
   await sleep(3000);
 
   const modeSwitched = await switchToVideoCreation(page);
@@ -239,17 +250,21 @@ async function attemptSubmit(page, context, productLock, firstFrameImagePath, co
 
 function extractScriptId(context) {
   const candidates = [
-    context?.taskName,
-    context?.promptPackageId,
-    context?.contentId,
+    context?.prompt,
     context?.scriptId,
-    context?.prompt
+    context?.contentId,
+    context?.taskName,
+    context?.promptPackageId
   ];
   for (const value of candidates) {
     const text = String(value || '');
+    const match = text.match(/\bSPK-[A-Z0-9-]{6,64}\b/i);
+    if (match) return match[0];
+  }
+  for (const value of candidates) {
+    const text = String(value || '');
     const match = text.match(/\b\d{2,5}_M\d+_[A-Z0-9]+(?:_V\d+)?\b/i) ||
-      text.match(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i) ||
-      text.match(/\bSPK-[A-Z0-9-]{6,64}\b/i);
+      text.match(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i);
     if (match) return match[0];
   }
   return '';
@@ -292,6 +307,14 @@ async function readSubmitSignals(page, context) {
         };
       })
       .filter(item => item.text && item.width > 0 && item.height > 0);
+
+    if (id && bodyText.includes(id) && /Image To Video|Seedance|生成中|排队中|任务添加成功|480P|已提交/i.test(bodyText)) {
+      return {
+        success: true,
+        code: 'submitted_body_card',
+        detail: bodyText.slice(Math.max(0, bodyText.indexOf(id) - 80), bodyText.indexOf(id) + 120)
+      };
+    }
 
     const failurePatterns = [
       /积分不足/i, /余额不足/i, /credits? not enough/i,
