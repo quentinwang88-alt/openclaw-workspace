@@ -143,6 +143,7 @@ class TokenReceiverHandler(BaseHTTPRequestHandler):
                 'error': '无效的 JSON 数据'
             })
         except ValueError as e:
+            logger.warning("⚠️ 拒绝同步认证 Cookie: %s", e)
             self.send_json_response(409, {
                 'success': False,
                 'error': str(e)
@@ -180,6 +181,16 @@ class TokenReceiverHandler(BaseHTTPRequestHandler):
         active_identity = manager.get_profile_identity(active_profile)
 
         if manager.identities_differ(active_identity, incoming_identity):
+            logger.warning(
+                "⚠️ BigSeller profile 身份不匹配: active_profile=%s "
+                "active_uid=%s active_puid=%s incoming_uid=%s incoming_puid=%s incoming_request_id=%s",
+                active_profile,
+                active_identity.get("account_uid"),
+                active_identity.get("account_puid"),
+                incoming_identity.get("account_uid"),
+                incoming_identity.get("account_puid"),
+                incoming_identity.get("request_id"),
+            )
             raise ValueError(
                 "检测到你切到了一个未登记的新 BigSeller 账号。"
                 "为避免覆盖当前店铺配置，请先运行 "
