@@ -20,12 +20,162 @@ from ..config import PROMPT_VERSION, LLM_MODEL, LOG_DB_PATH
 from .llm_client import get_llm_client
 from .validator import check_message_risk, calculate_message_quality, calculate_sample_nurture_quality, get_max_rewrite_count
 from .content_opportunity_generator import generate_content_opportunity
+from .message_tone_guard import apply_tone_guard
 from ..prompts.message_generation import MSG_SYSTEM_PROMPT, MSG_USER_PROMPT_TEMPLATE
 from ..prompts.relationship_maintenance import MAINTENANCE_SYSTEM_PROMPT, MAINTENANCE_USER_PROMPT_TEMPLATE
 from ..prompts.follow_up_message import FOLLOWUP_SYSTEM_PROMPT, FOLLOWUP_USER_PROMPT_TEMPLATE
 from ..prompts.sample_pre_approval import SAMPLE_NURTURE_SYSTEM_PROMPT, SAMPLE_NURTURE_USER_PROMPT_TEMPLATE
 
 logger = logging.getLogger(__name__)
+
+
+def _contains_thai(text: str) -> bool:
+    return any("\u0e00" <= char <= "\u0e7f" for char in text or "")
+
+
+def _contains_cjk(text: str) -> bool:
+    return any("\u4e00" <= char <= "\u9fff" for char in text or "")
+
+
+def _clean_batch_text(text: str, fallback: str = "") -> str:
+    cleaned = str(text or "").strip()
+    return cleaned or fallback
+
+
+def _repair_local_message_language(
+    message_cn: str,
+    message_local: str,
+    target_language: str,
+) -> str:
+    if target_language not in ("泰语", "越南语") or not _contains_cjk(message_local):
+        return message_local
+    try:
+        repaired = get_llm_client().call_json(
+            prompt=(
+                f"请把下面达人私信完整改写成自然{target_language}。\n"
+                "要求：只输出目标语言，不要混入中文；保留达人账号、语气和低压CTA；不要新增承诺。\n"
+                f"中文运营版：{message_cn}\n"
+                f"当前本地版：{message_local}\n"
+                '输出JSON：{"message_local": ""}'
+            ),
+            system_prompt="你是跨境达人私信本地化助手，只输出合法JSON。",
+            max_tokens=500,
+        )
+        fixed = str(repaired.get("message_local", "") or "").strip()
+        if fixed and not _contains_cjk(fixed):
+            return fixed
+    except Exception:
+        pass
+    return message_local
+
+
+def _render_batch_cn_message(product_category: str, selling_points: str) -> str:
+    category = _clean_batch_text(product_category, "轻量内容方向")
+    if selling_points and not _contains_thai(selling_points):
+        display_effect = selling_points[:36]
+    else:
+        display_effect = "上身和搭配效果"
+    return (
+        f"这批是{category}，比较适合做不用复杂布景的轻量内容。"
+        f"日常出门前搭一套、镜前拍几秒，就能把{display_effect}自然呈现出来。"
+        "如果近期想补这类内容，可以先看看；觉得方向合适再回我，我发具体信息。"
+    )
+
+
+def _render_batch_local_message(target_language: str, product_category: str, selling_points: str) -> str:
+    if target_language == "泰语":
+        category = "เสื้อผ้า/ไลฟ์สไตล์" if _contains_cjk(product_category) else _clean_batch_text(product_category, "สินค้าแนวไลฟ์สไตล์")
+        selling = "ถ่ายง่าย ใช้ฉากประจำวันได้" if _contains_cjk(selling_points) else _clean_batch_text(selling_points, "ถ่ายง่าย ใช้ฉากประจำวันได้")
+        return (
+            f"รอบนี้เป็นสินค้าแนว{category} จุดเด่นคือ{selling} "
+            "ไม่ต้องจัดฉากซับซ้อน แค่ถ่ายลุคประจำวันหรือช่วงเตรียมตัวออกไปข้างนอกก็พอเห็นภาพค่ะ "
+            "ถ้าคิดว่าแนวนี้โอเค ค่อยทักกลับมาได้ เดี๋ยวส่งรายละเอียดเพิ่มเติมให้ค่ะ"
+        )
+    if target_language == "越南语":
+        category = "thời trang/lifestyle" if _contains_cjk(product_category) else _clean_batch_text(product_category, "sản phẩm lifestyle")
+        selling = "dễ quay trong bối cảnh hằng ngày" if _contains_cjk(selling_points) else _clean_batch_text(selling_points, "dễ quay trong bối cảnh hằng ngày")
+        return (
+            f"Đợt này là nhóm sản phẩm {category}, điểm chính là {selling}. "
+            "Không cần set bối cảnh cầu kỳ, chỉ cần quay một cảnh mặc thử hằng ngày hoặc trước khi ra ngoài là đủ tự nhiên. "
+            "Nếu thấy hướng này phù hợp, bạn nhắn lại rồi mình gửi thêm thông tin nhé."
+        )
+    category = "fashion/lifestyle items" if _contains_cjk(product_category) else _clean_batch_text(product_category, "lifestyle items")
+    selling = "easy to film in everyday scenes" if _contains_cjk(selling_points) else _clean_batch_text(selling_points, "easy to film in everyday scenes")
+    return (
+        f"This batch is around {category}, with a simple angle: {selling}. "
+        "It can be filmed in an everyday getting-ready or mirror-shot scene without a complicated setup. "
+        "If this direction feels okay, just reply and I’ll send the details."
+    )
+
+
+def generate_batch_content_opportunity(
+    product_context: Optional[Dict[str, Any]] = None,
+    market: str = "TH",
+    target_language: str = "泰语",
+    product_name: str = "",
+    product_category: str = "",
+    selling_points: str = "",
+    relationship_stage: str = "冷",
+) -> Dict[str, Any]:
+    """Generate lightweight batch outreach copy for product cards.
+
+    This is intentionally semi-templated: batch outreach should avoid fake
+    personalization and use local-language copy as the sendable message.
+    """
+    _init_log_db()
+    product_context = product_context or {}
+    category = _clean_batch_text(
+        product_category or product_context.get("product_category") or product_context.get("title"),
+        "轻量内容方向",
+    )
+    selling = _clean_batch_text(
+        selling_points or product_context.get("selling_points"),
+        "日常好搭、适合低成本短视频展示",
+    )
+    product = _clean_batch_text(product_name or product_context.get("product_name"), category)
+
+    raw_output = {
+        "message_purpose": "batch_content_opportunity",
+        "message_cn_for_operator": _render_batch_cn_message(category, selling),
+        "message_local": _render_batch_local_message(target_language, category, selling),
+        "why_this_message": "批量场景采用内容机会钩子、低成本拍摄场景、产品方向和轻 CTA，不假装看过达人视频。",
+        "quality_score": 8,
+    }
+    result = apply_tone_guard("batch_content_opportunity", raw_output, relationship_stage=relationship_stage)
+
+    conn = sqlite3.connect(LOG_DB_PATH)
+    conn.execute(
+        """INSERT INTO creator_message_logs (
+            creator_url, market, target_language, history_relation,
+            product_name, product_category, selling_points_json,
+            profile_card_json, content_opportunity_json,
+            message_cn_for_operator, message_local, why_this_message,
+            quality_score, risk_check_json, raw_output_json, created_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            "batch_content_opportunity",
+            market,
+            target_language,
+            relationship_stage,
+            product,
+            category,
+            json.dumps([selling], ensure_ascii=False),
+            json.dumps({}, ensure_ascii=False),
+            json.dumps(product_context, ensure_ascii=False),
+            result.get("message_cn_for_operator", ""),
+            result.get("message_local", ""),
+            result.get("why_this_message", ""),
+            result.get("quality_score", 8),
+            json.dumps(result.get("risk_check", {}), ensure_ascii=False),
+            json.dumps(result, ensure_ascii=False),
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    log_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.commit()
+    conn.close()
+    result["log_id"] = log_id
+    return result
 
 
 def _init_log_db() -> None:
@@ -418,6 +568,7 @@ def _generate_sample_nurture_message(
     creator_name = creator_url.split("@")[1].split("?")[0].split("/")[0] if "@" in creator_url else ""
 
     user_prompt = SAMPLE_NURTURE_USER_PROMPT_TEMPLATE.format(
+        target_language=target_language,
         creator_url=creator_url,
         creator_name=creator_name,
         history_relation=history_relation,
@@ -457,6 +608,11 @@ def _generate_sample_nurture_message(
 
     msg_cn = raw.get("message_cn_for_operator", "")
     msg_local = raw.get("message_local", "")
+    fixed_local = _repair_local_message_language(msg_cn, msg_local, target_language)
+    if fixed_local != msg_local:
+        raw["message_local_before_language_fix"] = msg_local
+        raw["message_local"] = fixed_local
+        msg_local = fixed_local
     need_detail = raw.get("need_product_detail", False)
 
     if need_detail or (not msg_cn and not msg_local):

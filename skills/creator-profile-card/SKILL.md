@@ -155,7 +155,19 @@ python3 skills/creator-profile-card/scripts/weekly_scan.py
 
 # 执行并生成话术草稿
 python3 skills/creator-profile-card/scripts/weekly_scan.py --generate-messages
+
+# 只刷新新增/待刷新记录（推荐给日常增量导入）
+python3 skills/creator-profile-card/scripts/weekly_scan.py --generate-messages --only-new
+
+# 预览新增/待刷新记录，不回写
+python3 skills/creator-profile-card/scripts/weekly_scan.py --dry-run --only-new
 ```
+
+`--only-new` 只处理：
+- `本周建议动作` 为空的新增记录
+- 或 `处理状态` 为 `新增 / 待刷新 / 待生成` 的记录
+
+这样新增达人可以增量刷新，不会重刷全表已有达人。
 
 ## 配置
 
@@ -213,6 +225,7 @@ skills/creator-profile-card/
 - 商品邀约 <8 分重写，最多 2 次
 - 关系维护 <8 分重写，最多 2 次
 - 轻跟进通过风险检查（无施压、无催促、无追加利益、无监控感）
+- 样品批前沟通必须生成中文运营版 + 当地语言版；当地语言版不得用英语兜底或混入中文
 
 ### 风险检测（全类型）
 - 监控感：我翻了你很多视频、我一直关注你
@@ -225,6 +238,11 @@ skills/creator-profile-card/
 - 商品邀约后：A/B 类 7 天 / C 类 30 天
 - 轻跟进后：A 类 30 天，B/C 类不跟进
 - 发送后自动回写：上次联系时间、上次联系类型、下次可联系时间、关系阶段=冷却
+
+### 样品申请优先规则
+- 如果 `样品申请状态` 为 `待审核 / 拟通过`，且 `申请样品商品` 有附件或内容，本周动作优先判为 `样品批前沟通`
+- 样品批前沟通优先读取 `申请样品商品` 图片做商品分析，其次才读取 `计划带货商品`
+- 样品批前沟通会回写 `本次话术草稿` 和 `当地语言版本`
 
 ### 排除规则（不进入本周触达池）
 - 关系阶段 = 合作中/放弃

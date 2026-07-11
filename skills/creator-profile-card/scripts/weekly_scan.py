@@ -25,6 +25,10 @@ except ImportError:
 
 from app.services.weekly_decision import decide_weekly_action, days_since
 
+ACTIONABLE_ACTIONS = ("商品邀约", "关系维护", "轻跟进", "样品批前沟通")
+SAMPLE_PRE_APPROVAL_STATUSES = ("待审核", "拟通过")
+ONLY_NEW_PROCESS_STATUSES = ("", "新增", "待刷新", "待生成")
+
 
 # ── 飞书凭证 ──
 cfg = json.loads((Path.home() / ".openclaw" / "openclaw.json").read_text())
@@ -65,11 +69,50 @@ def get_field(fields: dict, key: str, default=None):
     return v
 
 
-def generate_draft_for_record(record: dict, decision: dict) -> str:
+def has_attachment_or_text(fields: dict, key: str) -> bool:
+    value = fields.get(key)
+    if not value:
+        return False
+    if isinstance(value, list):
+        return any(bool(item) for item in value)
+    return bool(value)
+
+
+def as_list(value):
+    if not value:
+        return []
+    return value if isinstance(value, list) else [value]
+
+
+def decide_sample_related_action(fields: dict) -> dict:
+    sample_status = get_field(fields, "样品申请状态", "")
+    has_sample_product = has_attachment_or_text(fields, "申请样品商品")
+    if sample_status in SAMPLE_PRE_APPROVAL_STATUSES and has_sample_product:
+        return {
+            "action": "样品批前沟通",
+            "reason": "达人已申请样品，建议批前确认拍摄/直播意愿",
+            "message_purpose": "sample_pre_approval_nurture",
+        }
+    return {}
+
+
+def should_process_as_new_record(fields: dict) -> bool:
+    """判断记录是否属于本次新增/待刷新范围。
+
+    默认新增识别：本周建议动作为空。
+    手动重刷入口：运营把处理状态改成「新增 / 待刷新 / 待生成」。
+    已经进入「待处理 / 已发送 / 已回复 / 已暂缓」等状态的记录不会被 --only-new 重刷。
+    """
+    weekly_action = str(get_field(fields, "本周建议动作", "") or "").strip()
+    process_status = str(get_field(fields, "处理状态", "") or "").strip()
+    return (not weekly_action) or process_status in ONLY_NEW_PROCESS_STATUSES
+
+
+def generate_draft_for_record(record: dict, decision: dict) -> tuple:
     """为单条记录生成话术草稿。
 
     Returns:
-        话术文本，失败则返回空字符串。
+        (中文运营版, 当地语言版)，失败则返回空字符串。
     """
     try:
         from app.services.message_generator import generate_message
@@ -83,10 +126,12 @@ def generate_draft_for_record(record: dict, decision: dict) -> str:
             "画面风格": get_field(flds, "画面风格", ""),
             "适配类目": get_field(flds, "适配类目", []),
             "推荐商品/品类": get_field(flds, "推荐商品/品类", ""),
+            "达人擅长内容形式": get_field(flds, "达人擅长内容形式", "") or get_field(flds, "达人擅长内容方式", ""),
             "活跃度": get_field(flds, "活跃度", ""),
         }}
 
         history_relation = get_field(flds, "历史关系", "陌生")
+        action = decision.get("action", "")
         message_purpose = decision.get("message_purpose", "product_invitation")
         product_name = get_field(flds, "推荐商品/品类", get_field(flds, "选定商品", ""))
         product_category = "轻上装"  # 默认，实际应读商品表
@@ -117,11 +162,14 @@ def generate_draft_for_record(record: dict, decision: dict) -> str:
 
         # 下载商品图
         product_imgs = []
-        product_field = flds.get("计划带货商品", [])
+        if action == "样品批前沟通":
+            product_field = flds.get("申请样品商品", []) or flds.get("计划带货商品", [])
+        else:
+            product_field = flds.get("计划带货商品", []) or flds.get("申请样品商品", [])
         if product_field:
             import tempfile
             tmp_dir = Path(tempfile.mkdtemp(prefix="feishu_product_"))
-            for pv in (product_field if isinstance(product_field, list) else [product_field]):
+            for pv in as_list(product_field):
                 try:
                     file_token = pv.get("file_token", "")
                     dl_resp = requests.get(
@@ -146,7 +194,7 @@ def generate_draft_for_record(record: dict, decision: dict) -> str:
                 from app.services.llm_client import get_llm_client
                 llm = get_llm_client()
                 product_info = llm.call_json(
-                    prompt="分析这张商品图片，输出JSON：product_name, product_category, specific_product_type, target_scene, creator_shooting_scene, main_content_hook, fit_body_or_style, selling_points, avoid_claims",
+                    prompt="分析这张商品图片，输出JSON：product_name, product_category, specific_product_type, core_selling_points(数组,最多2个), short_video_scenes(数组,最多2个), live_talking_points(数组,最多2个), avoid_claims(数组)",
                     image_paths=product_imgs[:1],
                     system_prompt="你是电商商品分析助手。只基于图片内容分析，不编造信息。",
                 )
@@ -154,6 +202,17 @@ def generate_draft_for_record(record: dict, decision: dict) -> str:
                 product_info["commission_info"] = "佣金 15%"
             except Exception:
                 pass
+        if "core_selling_points" not in product_info:
+            selling_points = product_info.get("selling_points") or product_info.get("main_content_hook") or ""
+            product_info["core_selling_points"] = as_list(selling_points)[:2]
+        if action == "样品批前沟通":
+            product_info["applied_sample_product"] = product_info.get("product_name") or product_name or "申请样品"
+            product_info["sample_application_status"] = get_field(flds, "样品申请状态", "")
+            product_info["creator_content_mode"] = (
+                get_field(flds, "达人擅长内容形式", "")
+                or get_field(flds, "达人擅长内容方式", "")
+                or "短视频"
+            )
 
         result = generate_message(
             creator_url=creator_url,
@@ -176,21 +235,34 @@ def generate_draft_for_record(record: dict, decision: dict) -> str:
                 "last_message_summary": get_field(flds, "本次话术草稿", "")[:100],
             },
         )
-        return result.get("message_cn_for_operator", "")
+        return result.get("message_cn_for_operator", ""), result.get("message_local", "")
 
     except Exception as e:
         print(f"      ⚠️ 话术生成失败: {e}")
-        return ""
+        return "", ""
 
 
-def scan_and_update(generate_messages: bool = False, dry_run: bool = False, limit: int = 0, offset: int = 0):
+def scan_and_update(
+    generate_messages: bool = False,
+    dry_run: bool = False,
+    limit: int = 0,
+    offset: int = 0,
+    only_new: bool = False,
+):
     items = fetch_all_records()
     total = len(items)
+    new_total = None
+    if only_new:
+        items = [item for item in items if should_process_as_new_record(item.get("fields", {}))]
+        new_total = len(items)
     if offset > 0:
         items = items[offset:]
     if limit > 0:
         items = items[:limit]
-    print(f"📊 全表 {total} 条记录，本次处理 {len(items)} 条 (offset={offset})\n")
+    if only_new:
+        print(f"📊 全表 {total} 条记录，新增/待刷新 {new_total} 条，本次处理 {len(items)} 条 (offset={offset})\n")
+    else:
+        print(f"📊 全表 {total} 条记录，本次处理 {len(items)} 条 (offset={offset})\n")
 
     actions_count = {}
     total_updated = 0
@@ -235,16 +307,19 @@ def scan_and_update(generate_messages: bool = False, dry_run: bool = False, limi
             no_reply_count=no_reply_count, next_contact_after=next_contact_after,
             fit_categories=fit_categories,
         )
+        sample_decision = decide_sample_related_action(flds)
+        if sample_decision and relationship_stage not in ("放弃", "冷却", "合作中"):
+            decision = sample_decision
 
         action = decision["action"]
         reason = decision["reason"]
         actions_count[action] = actions_count.get(action, 0) + 1
 
-        status_icon = {"商品邀约": "🎯", "关系维护": "💬", "轻跟进": "👋", "暂缓": "⏸️", "放弃": "❌", "人工查看": "👁️"}.get(action, "")
+        status_icon = {"商品邀约": "🎯", "关系维护": "💬", "轻跟进": "👋", "样品批前沟通": "📦", "暂缓": "⏸️", "放弃": "❌", "人工查看": "👁️"}.get(action, "")
         print(f"  {status_icon} #{num} [{creator_tier}] {action} — {reason}")
 
         if dry_run:
-            needs_action = action in ("商品邀约", "关系维护", "轻跟进")
+            needs_action = action in ACTIONABLE_ACTIONS
             if needs_action:
                 needs_action_records.append((item, decision))
             continue
@@ -264,7 +339,7 @@ def scan_and_update(generate_messages: bool = False, dry_run: bool = False, limi
             )
             if resp.json().get("code") == 0:
                 total_updated += 1
-            needs_action = action in ("商品邀约", "关系维护", "轻跟进")
+            needs_action = action in ACTIONABLE_ACTIONS
             if needs_action:
                 needs_action_records.append((item, decision))
         except Exception as e:
@@ -279,7 +354,7 @@ def scan_and_update(generate_messages: bool = False, dry_run: bool = False, limi
 
     # 第二轮：生成本周话术草稿
     if generate_messages and needs_action_records:
-        action_records = [r for r, d in needs_action_records if d["action"] in ("商品邀约", "关系维护", "轻跟进")]
+        action_records = [r for r, d in needs_action_records if d["action"] in ACTIONABLE_ACTIONS]
         print(f"\n✍️ 正在为 {len(action_records)} 条待触达达人生成话术草稿...\n")
 
         for item, decision in needs_action_records:
@@ -289,14 +364,21 @@ def scan_and_update(generate_messages: bool = False, dry_run: bool = False, limi
             action = decision["action"]
 
             print(f"  生成 #{num} [{action}] ... ", end="", flush=True)
-            draft = generate_draft_for_record(item, decision)
+            draft, draft_local = generate_draft_for_record(item, decision)
             if draft:
+                write_fields = {"本次话术草稿": draft, "处理状态": "待处理"}
+                if draft_local:
+                    write_fields["当地语言版本"] = draft_local
+                if dry_run:
+                    total_messages += 1
+                    print(f"✅ dry-run ({len(draft)} 字)")
+                    continue
                 # 回写话术草稿到飞书
                 try:
                     resp = requests.put(
                         f"https://open.feishu.cn/open-apis/bitable/v1/apps/{APP_TOKEN}/tables/{TABLE_ID}/records/{rid}",
                         headers=H,
-                        json={"fields": {"本次话术草稿": draft, "处理状态": "待处理"}},
+                        json={"fields": write_fields},
                         timeout=15,
                     )
                     if resp.json().get("code") == 0:
@@ -319,12 +401,19 @@ def main():
     parser = argparse.ArgumentParser(description="周度达人池巡检")
     parser.add_argument("--dry-run", action="store_true", help="仅输出，不回写")
     parser.add_argument("--generate-messages", action="store_true", help="为本周建议触达的达人生成话术草稿并回写飞书")
+    parser.add_argument("--only-new", action="store_true", help="只处理新增/待刷新记录：本周建议动作为空，或处理状态=新增/待刷新/待生成")
     parser.add_argument("--limit", type=int, default=0, help="限制处理条数（0=全部）")
     parser.add_argument("--offset", type=int, default=0, help="跳过前 N 条")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
-    scan_and_update(generate_messages=args.generate_messages, dry_run=args.dry_run, limit=args.limit, offset=args.offset)
+    scan_and_update(
+        generate_messages=args.generate_messages,
+        dry_run=args.dry_run,
+        limit=args.limit,
+        offset=args.offset,
+        only_new=args.only_new,
+    )
 
 
 if __name__ == "__main__":

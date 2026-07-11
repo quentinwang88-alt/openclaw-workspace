@@ -31,9 +31,11 @@ SAMPLE_NURTURE_SYSTEM_PROMPT = """你是 TikTok Shop 达人样品批前沟通助
 - 70-130 字，最多 150。
 - 像真人私信，不像详情页/任务书/AI报告。
 
-message_cn 中文，message_local 当地语言自然非机翻。只输出合法 JSON。"""
+message_cn 中文，message_local 必须使用用户指定的目标语言，自然非机翻，不能用英语兜底。只输出合法 JSON。"""
 
 SAMPLE_NURTURE_USER_PROMPT_TEMPLATE = """生成一条真人运营的样品批前私信。
+
+【目标语言】{target_language}
 
 【达人】{creator_name} | 擅长内容形式：{creator_content_mode} | 内容：{content_type} | 画面：{visual_style} | 风格：{observable_style}
 
@@ -46,6 +48,7 @@ creator_content_mode = {creator_content_mode}
 - 如为"短视频"：只写短视频方向，不提直播。
 - 如为"直播"：只写直播方向，不先写短视频。无直播证据用假设式。
 - 如为"短视频+直播"/"不确定"：才写二选一。
+- message_cn 用中文，message_local 必须用{target_language}，不要输出英语或中文。
 
 【输出 JSON】
 {{

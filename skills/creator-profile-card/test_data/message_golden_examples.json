@@ -1,0 +1,92 @@
+{
+  "scoring_dimensions": ["attention", "reply_motivation", "naturalness", "risk", "stage_fit"],
+  "examples": [
+    {
+      "name": "batch_light_top_standard",
+      "purpose": "batch_content_opportunity",
+      "outreach_scene": "batch",
+      "relationship_stage": "冷",
+      "product_category": "轻上装",
+      "target_language": "泰语",
+      "expected_traits": [
+        "以内容机会开头",
+        "不出现达人名",
+        "不说适合你账号",
+        "CTA 为觉得方向合适再回"
+      ]
+    },
+    {
+      "name": "batch_light_top_minimal_two_sentence",
+      "purpose": "batch_content_opportunity",
+      "outreach_scene": "batch",
+      "relationship_stage": "冷",
+      "product_category": "轻上装",
+      "target_language": "泰语",
+      "expected_traits": [
+        "两句内完成",
+        "机会钩子和轻 CTA 都存在",
+        "不写成四段作文"
+      ]
+    },
+    {
+      "name": "batch_hair_accessory",
+      "purpose": "batch_content_opportunity",
+      "outreach_scene": "batch",
+      "relationship_stage": "陌生",
+      "product_category": "发饰",
+      "target_language": "泰语",
+      "expected_traits": [
+        "强调近景/出门前发型整理",
+        "不用复杂布景",
+        "不承诺销量"
+      ]
+    },
+    {
+      "name": "single_cold_apparel_creator",
+      "purpose": "single_product_invitation",
+      "outreach_scene": "single",
+      "relationship_stage": "冷",
+      "product_category": "轻上装",
+      "expected_traits": [
+        "使用画像字段做真实观察",
+        "冷关系 CTA 不说安排寄样",
+        "给具体低成本拍法"
+      ]
+    },
+    {
+      "name": "single_warm_sample_context",
+      "purpose": "single_product_invitation",
+      "outreach_scene": "single",
+      "relationship_stage": "温",
+      "product_category": "女装",
+      "expected_traits": [
+        "可推进样品/合作信息",
+        "仍保持低压",
+        "不编造历史"
+      ]
+    },
+    {
+      "name": "maintenance_previous_order",
+      "purpose": "relationship_maintenance",
+      "outreach_scene": "maintenance",
+      "relationship_stage": "温",
+      "history_relation": "出过单",
+      "expected_traits": [
+        "承接之前合作",
+        "不提商品/佣金/寄样",
+        "不索取回复"
+      ]
+    },
+    {
+      "name": "follow_up_no_reply",
+      "purpose": "follow_up",
+      "outreach_scene": "maintenance",
+      "relationship_stage": "冷",
+      "expected_traits": [
+        "承接上次方向",
+        "不催促",
+        "明确给拒绝空间"
+      ]
+    }
+  ]
+}
