@@ -11,10 +11,53 @@ SKILL_DIR = TESTS_DIR.parent
 if str(SKILL_DIR) not in sys.path:
     sys.path.insert(0, str(SKILL_DIR))
 
-from core.llm_client import VideoRemakeLLMClient  # noqa: E402
+from core.llm_client import VideoRemakeLLMClient, decide_video_duration  # noqa: E402
 
 
 class FourFieldPromptContractTest(unittest.TestCase):
+    def test_duration_decision_uses_downstream_supported_presets(self) -> None:
+        self.assertEqual(decide_video_duration(7.1).target_duration, 8)
+        self.assertEqual(decide_video_duration(12.0).target_duration, 10)
+        self.assertEqual(decide_video_duration(14.9).target_duration, 15)
+        self.assertEqual(decide_video_duration(18.0).strategy, "选段压缩复刻")
+        short = decide_video_duration(5.9)
+        self.assertTrue(short.is_suitable)
+        self.assertEqual(short.strategy, "短片延展复刻")
+        self.assertEqual(short.target_duration, 6)
+        self.assertFalse(decide_video_duration(25.1).is_suitable)
+
+    def test_adaptive_indexes_keep_timeline_anchors_and_motion_peaks(self) -> None:
+        indexes = VideoRemakeLLMClient._select_adaptive_indexes(
+            frame_count=300,
+            sample_count=12,
+            motion_scores=[(150, 99.0), (220, 80.0), (40, 70.0)],
+        )
+
+        self.assertEqual(len(indexes), 12)
+        self.assertEqual(indexes[0], 0)
+        self.assertEqual(indexes[-1], 299)
+        self.assertIn(150, indexes)
+        self.assertIn(220, indexes)
+
+    def test_staged_prompts_require_temporal_performance_contract(self) -> None:
+        decision = decide_video_duration(12.0)
+        analysis_prompt = VideoRemakeLLMClient._build_temporal_analysis_prompt(
+            context={"content_branch_label": "非商品展示型", "target_language": "Spanish"},
+            task_label="300",
+            decision=decision,
+            frames=[(Path("frame_1.jpg"), 0.0), (Path("frame_2.jpg"), 5.0)],
+        )
+        execution_prompt = VideoRemakeLLMClient._build_execution_prompt(
+            context={"content_branch_label": "非商品展示型", "target_language": "Spanish"},
+            decision=decision,
+            remake_card="card",
+        )
+
+        self.assertIn("起始姿态、触发、动作峰值、结束/回收姿态", analysis_prompt)
+        self.assertIn("每镜头只执行一个主动作", execution_prompt)
+        self.assertIn("固定笑脸", execution_prompt)
+        self.assertIn("总时长必须精确写成 10 秒", execution_prompt)
+
     def test_prompt_allows_chinese_instructions_but_not_spoken_text(self) -> None:
         prompt = VideoRemakeLLMClient._build_four_field_prompt(
             {
@@ -171,6 +214,17 @@ class FourFieldPromptContractTest(unittest.TestCase):
 
         self.assertIn("VNPS01", output)
 
+    def test_spoken_text_validator_allows_quoted_display_text_with_scene_tail(self) -> None:
+        client = object.__new__(VideoRemakeLLMClient)
+        client._responses_text = lambda *, prompt, frames: self.fail("repair should not run")
+
+        output = client._ensure_spoken_text_no_chinese(
+            '1）0.0-7.5秒，中近景，女性站在浴室镜前。开头可出现一个白色评论气泡，显示文字："Me obsesiona cómo se ve tu cabello. Tengo que probar algo así." 评论气泡停留约5秒后消失。情绪自然、俏皮。',
+            {"target_language": "Mexican Spanish"},
+        )
+
+        self.assertIn("Me obsesiona", output)
+
     def test_spoken_text_validator_repairs_quoted_chinese_visible_text(self) -> None:
         client = object.__new__(VideoRemakeLLMClient)
         calls = []
@@ -305,6 +359,17 @@ class FourFieldPromptContractTest(unittest.TestCase):
 
         self.assertIn("ลองแต่งหน้า", output)
         self.assertEqual(len(calls), 1)
+
+    def test_spoken_text_validator_allows_thai_subtitle_before_chinese_execution_tail(self) -> None:
+        client = object.__new__(VideoRemakeLLMClient)
+        client._responses_text = lambda *, prompt, frames: self.fail("repair should not run")
+
+        output = client._ensure_spoken_text_no_chinese(
+            "总设置：8秒，1个连续镜头，无口播；底部小字号泰语字幕：เผลอยิ้มตามเลย；音频待后期匹配。镜头1 0.0s-8.0s：自然观赛笑容。负面限制：不看镜头，不口播，不固定笑脸。",
+            {"target_language": "泰语"},
+        )
+
+        self.assertIn("เผลอยิ้มตามเลย", output)
 
 
 if __name__ == "__main__":

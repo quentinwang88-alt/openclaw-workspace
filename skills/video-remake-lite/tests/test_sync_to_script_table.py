@@ -43,6 +43,8 @@ class VideoRemakeScriptTableSyncTest(unittest.TestCase):
                 "店铺ID",
                 "产品ID",
                 "产品图片",
+                "AI视频参考图",
+                "参考图状态",
                 "目标国家",
                 "目标语言",
                 "商品类型",
@@ -135,6 +137,67 @@ class VideoRemakeScriptTableSyncTest(unittest.TestCase):
         self.assertEqual(fields["是否可同步"], True)
         self.assertEqual(fields["脚本方向一"], "nurture final prompt")
         self.assertEqual(fields["视频时长"], 15)
+
+    def test_remake_reference_images_take_priority_over_product_images(self) -> None:
+        source_mapping = resolve_field_mapping(
+            ["状态", "复刻参考图", "产品图片", "最终视频提示词", "视频时长"],
+            SOURCE_FIELD_ALIASES,
+        )
+        record = FakeRecord(
+            "rec_ref",
+            {
+                "状态": STATUS_DONE,
+                "复刻参考图": [{"file_token": "reference_1"}],
+                "产品图片": [{"file_token": "product_1"}],
+                "最终视频提示词": "body",
+                "视频时长": 8,
+            },
+        )
+
+        _script_id, fields = build_target_fields(
+            record,
+            source_mapping,
+            self.target_mapping,
+            profile="nurture",
+        )
+
+        self.assertEqual(source_mapping["product_images"], "复刻参考图")
+        self.assertEqual(fields["产品图片"], [{"file_token": "reference_1"}])
+
+    def test_confirmed_ai_reference_image_replaces_source_frames(self) -> None:
+        record = FakeRecord(
+            "rec_ai_ref",
+            {
+                "状态": STATUS_DONE,
+                "产品图片": [{"file_token": "source_1"}],
+                "AI视频参考图": [{"file_token": "ai_1"}],
+                "参考图状态": "已确认",
+                "最终视频提示词": "body",
+            },
+        )
+
+        _script_id, fields = build_target_fields(
+            record,
+            self.source_mapping,
+            self.target_mapping,
+            profile="nurture",
+        )
+
+        self.assertEqual(fields["产品图片"], [{"file_token": "ai_1"}])
+
+    def test_reference_image_must_be_confirmed_before_sync(self) -> None:
+        fields = {
+            "状态": STATUS_DONE,
+            "同步状态": "等待参考图确认",
+            "AI视频参考图": [{"file_token": "ai_1"}],
+            "参考图状态": "待确认",
+            "最终视频提示词": "body",
+        }
+        self.assertFalse(should_process_source_record(fields, self.source_mapping))
+
+        fields["参考图状态"] = "已确认"
+        fields["同步状态"] = "待同步"
+        self.assertTrue(should_process_source_record(fields, self.source_mapping))
 
     def test_should_process_new_completed_record_even_when_source_has_script_id(self) -> None:
         fields = {

@@ -69,7 +69,9 @@ SOURCE_FIELD_ALIASES: Dict[str, List[str]] = {
     "task_no": ["任务编号", "产品ID", "产品编码", "task_id", "编号"],
     "store_id": ["店铺ID", "店铺", "店铺编号", "store_id"],
     "product_id": ["产品ID", "产品编码", "商品编码", "SKU", "Product Code", "product_id"],
-    "product_images": ["产品图片", "商品图片", "图片", "参考图"],
+    "product_images": ["复刻参考图", "产品图片", "商品图片", "图片", "参考图"],
+    "ai_reference_images": ["AI视频参考图"],
+    "reference_status": ["参考图状态"],
     "content_branch": ["内容分支"],
     "target_country": ["目标国家", "国家"],
     "target_language": ["目标语言", "语言"],
@@ -298,11 +300,20 @@ def build_target_fields(
     sync_enabled = profile == PROFILE_NURTURE
 
     target_fields: Dict[str, Any] = {}
+    reference_status = normalize_text(fields.get(source_mapping.get("reference_status")))
+    confirmed_ai_images = (
+        extract_attachments(fields.get(source_mapping.get("ai_reference_images")))
+        if reference_status == "已确认"
+        else []
+    )
+    selected_images = confirmed_ai_images or extract_attachments(
+        fields.get(source_mapping.get("product_images"))
+    )
     values = {
         "task_no": task_no,
         "product_code": task_no,
         "product_id": product_id or task_no,
-        "product_images": extract_attachments(fields.get(source_mapping.get("product_images"))),
+        "product_images": selected_images,
         "store_id": normalize_text(fields.get(source_mapping.get("store_id"))),
         "script_s1": final_prompt_with_script_id,
         "parent_slot_1": parent_slot,
@@ -357,9 +368,15 @@ def should_process_source_record(
     retryable_failure = sync_status.startswith("同步失败") and any(
         pattern in sync_status for pattern in TRANSIENT_SYNC_ERROR_PATTERNS
     )
+    reference_status_field = source_mapping.get("reference_status")
+    ai_reference_field = source_mapping.get("ai_reference_images")
+    reference_status = normalize_text(fields.get(reference_status_field)) if reference_status_field else ""
+    ai_reference_images = extract_attachments(fields.get(ai_reference_field)) if ai_reference_field else []
+    uses_reference_approval = bool(reference_status or ai_reference_images)
     return (
         (not status_field or status == STATUS_DONE)
         and bool(final_storyboard)
+        and (not uses_reference_approval or reference_status == "已确认")
         and sync_status != SYNC_DONE
         and (not sync_status.startswith("同步失败") or retryable_failure)
     )

@@ -37,6 +37,28 @@ from core.bitable import (  # noqa: E402
 )
 from core.feishu_url_parser import parse_feishu_bitable_url  # noqa: E402
 from core.llm_client import VideoRemakeLLMClient  # noqa: E402
+from core.reference_image import (  # noqa: E402
+    ACTION_CONFIRM,
+    ACTION_REGENERATE,
+    APPROVAL_AUTO,
+    APPROVAL_MANUAL,
+    APPROVAL_STRICT,
+    INPUT_MODE_COMPREHENSIVE,
+    INPUT_MODE_SCRIPT_CLOTHING,
+    INPUT_MODE_SCRIPT_ONLY,
+    ReferenceImageResult,
+    ReferenceImageWorkflow,
+    STATUS_CONFIRMED as REFERENCE_STATUS_CONFIRMED,
+    STATUS_CONFLICT as REFERENCE_STATUS_CONFLICT,
+    STATUS_FAILED as REFERENCE_STATUS_FAILED,
+    STATUS_GENERATING as REFERENCE_STATUS_GENERATING,
+    STATUS_PENDING_APPROVAL as REFERENCE_STATUS_PENDING_APPROVAL,
+    STATUS_QA as REFERENCE_STATUS_QA,
+    STATUS_REWORK as REFERENCE_STATUS_REWORK,
+    apply_visual_lock_to_video_prompt,
+    build_reference_input_fingerprint,
+    extract_attachments,
+)
 from core.prompts import (  # noqa: E402
     CONTENT_BRANCH_NON_PRODUCT,
     CONTENT_BRANCH_PRODUCT,
@@ -54,6 +76,77 @@ STATUS_PROCESSING = "处理中"
 STATUS_DONE = "已完成"
 STATUS_FAILED = "失败"
 STATUS_NOT_SUITABLE = "不适合复刻"
+REFERENCE_FIELD_NAME = "复刻参考图"
+VIDEO_DURATION_FIELD_NAME = "视频时长"
+AI_REFERENCE_FIELD_NAME = "AI视频参考图"
+REFERENCE_FRAMES_ENABLED = os.environ.get("VIDEO_REMAKE_REFERENCE_FRAMES", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+REFERENCE_IMAGE_ENABLED = os.environ.get("VIDEO_REMAKE_AI_REFERENCE_IMAGE", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
+
+REFERENCE_FIELD_SPECS = [
+    ("人物参考图", 17, "Attachment", None),
+    ("服装参考图", 17, "Attachment", None),
+    ("场景参考图", 17, "Attachment", None),
+    ("参考要求", 1, "Text", None),
+    (
+        "AI参考图素材模式",
+        3,
+        "SingleSelect",
+        {
+            "options": [
+                {"name": INPUT_MODE_COMPREHENSIVE},
+                {"name": INPUT_MODE_SCRIPT_CLOTHING},
+                {"name": INPUT_MODE_SCRIPT_ONLY},
+            ]
+        },
+    ),
+    (
+        "参考图审批模式",
+        3,
+        "SingleSelect",
+        {"options": [{"name": APPROVAL_AUTO}, {"name": APPROVAL_MANUAL}, {"name": APPROVAL_STRICT}]},
+    ),
+    (
+        "参考图操作",
+        3,
+        "SingleSelect",
+        {"options": [{"name": ACTION_CONFIRM}, {"name": ACTION_REGENERATE}]},
+    ),
+    ("参考图修改意见", 1, "Text", None),
+    ("人物形象锚定", 1, "Text", None),
+    ("人物族群与地域设定", 1, "Text", None),
+    ("视觉锁定卡", 1, "Text", None),
+    ("AI参考图提示词", 1, "Text", None),
+    (AI_REFERENCE_FIELD_NAME, 17, "Attachment", None),
+    (
+        "参考图状态",
+        3,
+        "SingleSelect",
+        {
+            "options": [
+                {"name": REFERENCE_STATUS_GENERATING},
+                {"name": REFERENCE_STATUS_QA},
+                {"name": REFERENCE_STATUS_PENDING_APPROVAL},
+                {"name": REFERENCE_STATUS_CONFIRMED},
+                {"name": REFERENCE_STATUS_REWORK},
+                {"name": REFERENCE_STATUS_FAILED},
+                {"name": REFERENCE_STATUS_CONFLICT},
+            ]
+        },
+    ),
+    ("参考图版本", 2, "Number", None),
+    ("参考图质检结果", 1, "Text", None),
+    ("参考输入指纹", 1, "Text", None),
+]
 
 
 def resolve_feishu_config(feishu_url: Optional[str]) -> (str, str):
@@ -150,9 +243,10 @@ def load_pending_records(
     client: FeishuBitableClient,
     mapping: Dict[str, Optional[str]],
     limit: Optional[int] = None,
+    records: Optional[List[RemakeRecord]] = None,
 ) -> List[RemakeRecord]:
     """读取待开始任务。"""
-    records = client.list_records(page_size=100)
+    records = records if records is not None else client.list_records(page_size=100)
     status_field = mapping["status"]
     pending = [
         record for record in records
@@ -161,6 +255,37 @@ def load_pending_records(
     if limit:
         pending = pending[:limit]
     return pending
+
+
+def load_reference_action_records(
+    records: List[RemakeRecord],
+    mapping: Dict[str, Optional[str]],
+    limit: Optional[int] = None,
+) -> List[RemakeRecord]:
+    """Pick completed records that require confirm/regenerate or changed inputs."""
+    if not REFERENCE_IMAGE_ENABLED or not mapping.get("reference_status"):
+        return []
+    selected: List[RemakeRecord] = []
+    for record in records:
+        fields = record.fields
+        if normalize_cell_value(fields.get(mapping.get("status"))) != STATUS_DONE:
+            continue
+        action = normalize_cell_value(fields.get(mapping.get("reference_action")))
+        if action in {ACTION_CONFIRM, ACTION_REGENERATE}:
+            selected.append(record)
+        elif mapping.get("reference_input_fingerprint") and mapping.get("ai_reference_image"):
+            stored = normalize_cell_value(fields.get(mapping["reference_input_fingerprint"]))
+            if stored and extract_attachments(fields.get(mapping["ai_reference_image"])):
+                outputs = {
+                    "复刻卡": normalize_cell_value(fields.get(mapping.get("remake_card"))),
+                    "最终复刻视频提示词": normalize_cell_value(fields.get(mapping.get("final_prompt"))),
+                }
+                current = build_reference_input_fingerprint(fields, mapping, outputs)
+                if current != stored:
+                    selected.append(record)
+        if limit and len(selected) >= limit:
+            break
+    return selected
 
 
 def has_text_value(value: object) -> bool:
@@ -190,6 +315,7 @@ def extract_negative_words(final_storyboard: str) -> str:
 _STRATEGY_NOT_SUITABLE = "不建议复刻"
 _STRATEGY_KEEP_LENGTH = "原长复刻"
 _STRATEGY_COMPRESS = "选段压缩复刻"
+_STRATEGY_SHORT_EXTEND = "短片延展复刻"
 
 
 def extract_duration_decision(highlight_dna: str) -> Dict[str, str]:
@@ -197,7 +323,7 @@ def extract_duration_decision(highlight_dna: str) -> Dict[str, str]:
 
     返回字典：
       - original_duration: 原视频实际秒数（字符串，可能为空）
-      - strategy: 原长复刻 / 选段压缩复刻 / 不建议复刻 / 空字符串
+      - strategy: 短片延展复刻 / 原长复刻 / 选段压缩复刻 / 不建议复刻 / 空字符串
       - target_duration: 复刻目标时长秒数（字符串，可能为空；不建议复刻时为 0）
       - not_suitable_reason: 仅在不建议复刻时给出原因摘要（截断 500 字符）
     """
@@ -220,7 +346,12 @@ def extract_duration_decision(highlight_dna: str) -> Dict[str, str]:
     m = re.search(r"复刻策略\s*[:：]\s*([^\n]+)", flat)
     if m:
         raw = m.group(1).strip()
-        for keyword in (_STRATEGY_NOT_SUITABLE, _STRATEGY_COMPRESS, _STRATEGY_KEEP_LENGTH):
+        for keyword in (
+            _STRATEGY_NOT_SUITABLE,
+            _STRATEGY_COMPRESS,
+            _STRATEGY_SHORT_EXTEND,
+            _STRATEGY_KEEP_LENGTH,
+        ):
             if keyword in raw:
                 result["strategy"] = keyword
                 break
@@ -258,6 +389,11 @@ class VideoRemakePipeline:
         self.client = client
         self.mapping = mapping
         self.llm_client = VideoRemakeLLMClient()
+        self.reference_workflow = (
+            ReferenceImageWorkflow(client=client, llm_client=self.llm_client, mapping=mapping)
+            if REFERENCE_IMAGE_ENABLED and mapping.get("ai_reference_image")
+            else None
+        )
         self.stats = {
             "total": 0,
             "success": 0,
@@ -300,6 +436,62 @@ class VideoRemakePipeline:
 
         return self.stats
 
+    def process_reference_actions(
+        self,
+        records: List[RemakeRecord],
+        dry_run: bool = False,
+    ) -> Dict[str, int]:
+        stats = {"total": len(records), "confirmed": 0, "regenerated": 0, "failed": 0}
+        for record in records:
+            fields = record.fields
+            action = normalize_cell_value(fields.get(self.mapping.get("reference_action")))
+            if dry_run:
+                print(f"  参考图操作: record_id={record.record_id} action={action or '输入已变化'}")
+                continue
+            try:
+                if action == ACTION_CONFIRM:
+                    if not extract_attachments(fields.get(self.mapping.get("ai_reference_image"))):
+                        raise RuntimeError("没有可确认的AI视频参考图")
+                    update_fields: Dict[str, object] = {
+                        self.mapping["reference_status"]: REFERENCE_STATUS_CONFIRMED,
+                        self.mapping["reference_action"]: None,
+                    }
+                    if self.mapping.get("sync_status"):
+                        update_fields[self.mapping["sync_status"]] = "待同步"
+                    self.client.update_record_fields(record.record_id, update_fields)
+                    stats["confirmed"] += 1
+                    print(f"  ✅ 参考图已确认: record_id={record.record_id}")
+                    continue
+
+                outputs = {
+                    "复刻卡": normalize_cell_value(fields.get(self.mapping.get("remake_card"))),
+                    "最终复刻视频提示词": normalize_cell_value(fields.get(self.mapping.get("final_prompt"))),
+                }
+                if not outputs["复刻卡"] or not outputs["最终复刻视频提示词"]:
+                    raise RuntimeError("缺少复刻卡或最终复刻视频提示词，无法重新生成参考图")
+                task_label = normalize_cell_value(fields.get("任务编号")) or record.record_id
+                current_version = normalize_cell_value(fields.get(self.mapping.get("reference_version")))
+                try:
+                    version = int(float(current_version or 0)) + 1
+                except Exception:
+                    version = 1
+                result = self._run_reference_workflow(
+                    record=record,
+                    outputs=outputs,
+                    context=build_context(record, self.mapping),
+                    source_frame_paths=[],
+                    task_label=task_label,
+                    version=version,
+                    force_manual=False,
+                )
+                if result is None:
+                    raise RuntimeError("参考图重新生成失败")
+                stats["regenerated"] += 1
+            except Exception as exc:
+                stats["failed"] += 1
+                print(f"  ❌ 参考图操作失败: record_id={record.record_id} error={exc}")
+        return stats
+
     def _process_single_record(self, record: RemakeRecord) -> None:
         fields = record.fields
         context = build_context(record, self.mapping)
@@ -325,31 +517,66 @@ class VideoRemakePipeline:
 
         if has_four_step_fields(self.mapping):
             task_label = normalize_cell_value(fields.get("任务编号")) or record.record_id
-            print("  🤖 使用 Codex/OpenAI gpt-5.5 四字段路径...")
-            outputs = self.llm_client.generate_four_fields(
+            print("  🤖 使用 Codex/OpenAI gpt-5.5 自适应时序三阶段路径...")
+            generation = self.llm_client.generate_four_fields(
                 video_url=video_url,
                 context=context,
                 task_label=task_label,
             )
+            decision = generation.duration_decision
+            print(
+                f"  📏 程序时长决策：原视频={decision.original_duration:.1f}s"
+                f" | 策略={decision.strategy} | 目标={decision.target_duration}s"
+            )
+            if not decision.is_suitable:
+                not_suitable_fields = {
+                    self.mapping["script_breakdown"]: generation.outputs["脚本拆解"],
+                }
+                if self.mapping.get("video_duration"):
+                    not_suitable_fields[self.mapping["video_duration"]] = 0
+                self.client.update_record_fields(record.record_id, not_suitable_fields)
+                raise NotSuitableForRemake(decision.reason)
+
+            outputs = generation.outputs
             update_fields = {
                 self.mapping["script_breakdown"]: outputs["脚本拆解"],
                 self.mapping["remake_card"]: outputs["复刻卡"],
                 self.mapping["remade_script"]: outputs["复刻后的脚本"],
                 self.mapping["final_prompt"]: outputs["最终复刻视频提示词"],
             }
-
-            decision = extract_duration_decision(outputs["脚本拆解"])
-            if decision["target_duration"] and self.mapping.get("video_duration"):
-                try:
-                    update_fields[self.mapping["video_duration"]] = int(float(decision["target_duration"]))
-                except Exception:
-                    pass
+            if self.mapping.get("video_duration"):
+                update_fields[self.mapping["video_duration"]] = decision.target_duration
+            reference_attachments = self._upload_reference_frames(
+                generation.reference_frames,
+                task_label=task_label,
+            )
+            if reference_attachments and self.mapping.get("reference_images"):
+                update_fields[self.mapping["reference_images"]] = reference_attachments
             self.client.update_record_fields(record.record_id, update_fields)
             print(
                 "  ✅ 已写入四字段: "
                 + ", ".join(f"{key}={len(value)}字" for key, value in outputs.items())
             )
-            self._mark_done(record, fields)
+            workflow_fields = dict(fields)
+            workflow_fields.update(update_fields)
+            workflow_record = RemakeRecord(record_id=record.record_id, fields=workflow_fields)
+            reference_result = self._run_reference_workflow(
+                record=workflow_record,
+                outputs=outputs,
+                context=context,
+                source_frame_paths=generation.reference_frames,
+                task_label=task_label,
+                version=1,
+            )
+            sync_status = None
+            if getattr(self, "reference_workflow", None):
+                if reference_result and reference_result.sync_ready:
+                    sync_status = "待同步"
+                elif reference_result and reference_result.status == REFERENCE_STATUS_PENDING_APPROVAL:
+                    sync_status = "等待参考图确认"
+                else:
+                    sync_status = "等待参考图处理"
+            self._mark_done(record, fields, sync_status_override=sync_status)
             return
 
         highlight_dna = fields.get(self.mapping["highlight_dna"])
@@ -439,7 +666,132 @@ class VideoRemakePipeline:
 
         self._mark_done(record, fields)
 
-    def _mark_done(self, record: RemakeRecord, fields: Dict[str, object]) -> None:
+    def _upload_reference_frames(self, frame_paths: List[Path], *, task_label: str) -> List[Dict[str, object]]:
+        if not REFERENCE_FRAMES_ENABLED or not self.mapping.get("reference_images"):
+            return []
+        uploaded: List[Dict[str, object]] = []
+        for index, frame_path in enumerate(frame_paths[:3], 1):
+            try:
+                content = frame_path.read_bytes()
+                uploaded.append(
+                    self.client.upload_attachment(
+                        content=content,
+                        file_name=f"{task_label}_remake_reference_{index:02d}.jpg",
+                        content_type="image/jpeg",
+                        size=len(content),
+                    )
+                )
+            except Exception as exc:
+                print(f"    ⚠️ 上传复刻参考帧失败，继续保留文本生成结果: {exc}")
+        if uploaded:
+            print(f"  🖼️ 已生成并上传复刻参考帧 {len(uploaded)} 张")
+        return uploaded
+
+    def _run_reference_workflow(
+        self,
+        *,
+        record: RemakeRecord,
+        outputs: Dict[str, str],
+        context: Dict[str, str],
+        source_frame_paths: List[Path],
+        task_label: str,
+        version: int,
+        force_manual: bool = False,
+    ) -> Optional[ReferenceImageResult]:
+        if not getattr(self, "reference_workflow", None):
+            return None
+        start_fields: Dict[str, object] = {}
+        if self.mapping.get("reference_status"):
+            start_fields[self.mapping["reference_status"]] = REFERENCE_STATUS_GENERATING
+        if self.mapping.get("sync_status"):
+            start_fields[self.mapping["sync_status"]] = "等待参考图生成"
+        if start_fields:
+            self.client.update_record_fields(record.record_id, start_fields)
+        fingerprint = build_reference_input_fingerprint(record.fields, self.mapping, outputs)
+        try:
+            print(f"  🎨 使用 Image 2 生成视频首镜参考图 v{version}...")
+            result = self.reference_workflow.generate(
+                fields=record.fields,
+                outputs=outputs,
+                context=context,
+                source_frame_paths=source_frame_paths,
+                task_label=task_label,
+                version=version,
+                force_manual=force_manual,
+            )
+            update_fields: Dict[str, object] = {}
+            locked_final_prompt = apply_visual_lock_to_video_prompt(
+                outputs.get("最终复刻视频提示词", ""),
+                result.visual_lock_card,
+            )
+            fingerprint_outputs = dict(outputs)
+            fingerprint_outputs["最终复刻视频提示词"] = locked_final_prompt
+            value_map = {
+                "visual_lock_card": result.visual_lock_card,
+                "ai_reference_prompt": result.image_prompt,
+                "reference_status": result.status,
+                "reference_approval_mode": result.approval_mode,
+                "reference_version": result.version,
+                "reference_qa_result": result.qa_result,
+                "reference_input_fingerprint": result.input_fingerprint,
+                "character_appearance_anchor": result.character_appearance_anchor,
+            }
+            for logical_name, value in value_map.items():
+                field_name = self.mapping.get(logical_name)
+                if field_name:
+                    update_fields[field_name] = value
+            if locked_final_prompt and self.mapping.get("final_prompt"):
+                update_fields[self.mapping["final_prompt"]] = locked_final_prompt
+            if self.mapping.get("reference_input_fingerprint"):
+                fingerprint_fields = dict(record.fields)
+                if self.mapping.get("character_appearance_anchor"):
+                    fingerprint_fields[self.mapping["character_appearance_anchor"]] = (
+                        result.character_appearance_anchor
+                    )
+                update_fields[self.mapping["reference_input_fingerprint"]] = build_reference_input_fingerprint(
+                    fingerprint_fields,
+                    self.mapping,
+                    fingerprint_outputs,
+                )
+            if result.attachment and self.mapping.get("ai_reference_image"):
+                update_fields[self.mapping["ai_reference_image"]] = [result.attachment]
+            if self.mapping.get("reference_action"):
+                update_fields[self.mapping["reference_action"]] = None
+            if self.mapping.get("sync_status"):
+                update_fields[self.mapping["sync_status"]] = (
+                    "待同步" if result.sync_ready else
+                    "等待参考图确认" if result.status == REFERENCE_STATUS_PENDING_APPROVAL else
+                    "等待参考图处理"
+                )
+            if self.mapping.get("error_message"):
+                update_fields[self.mapping["error_message"]] = result.error_message[:1000]
+            self.client.update_record_fields(record.record_id, update_fields)
+            print(f"  ✅ AI参考图完成: status={result.status} version={result.version}")
+            return result
+        except Exception as exc:
+            failure_fields: Dict[str, object] = {}
+            if self.mapping.get("reference_status"):
+                failure_fields[self.mapping["reference_status"]] = REFERENCE_STATUS_FAILED
+            if self.mapping.get("reference_qa_result"):
+                failure_fields[self.mapping["reference_qa_result"]] = str(exc)[:5000]
+            if self.mapping.get("reference_input_fingerprint"):
+                failure_fields[self.mapping["reference_input_fingerprint"]] = fingerprint
+            if self.mapping.get("reference_action"):
+                failure_fields[self.mapping["reference_action"]] = None
+            if self.mapping.get("sync_status"):
+                failure_fields[self.mapping["sync_status"]] = "等待参考图处理"
+            if self.mapping.get("error_message"):
+                failure_fields[self.mapping["error_message"]] = str(exc)[:1000]
+            self.client.update_record_fields(record.record_id, failure_fields)
+            print(f"  ⚠️ AI参考图生成失败，脚本保留并暂停同步: {exc}")
+            return None
+
+    def _mark_done(
+        self,
+        record: RemakeRecord,
+        fields: Dict[str, object],
+        sync_status_override: Optional[str] = None,
+    ) -> None:
         status_field = self.mapping["status"]
         error_field = self.mapping.get("error_message")
         done_fields = {status_field: STATUS_DONE}
@@ -448,7 +800,7 @@ class VideoRemakePipeline:
             and has_text_value(fields.get(self.mapping["synced_script_id"]))
         )
         if self.mapping.get("sync_status") and not already_synced:
-            done_fields[self.mapping["sync_status"]] = "待同步"
+            done_fields[self.mapping["sync_status"]] = sync_status_override or "待同步"
         if error_field:
             done_fields[error_field] = ""
         self.client.update_record_fields(record.record_id, done_fields)
@@ -502,12 +854,35 @@ def main() -> None:
     parser.add_argument("--feishu-url", "-u", help="飞书多维表格链接")
     parser.add_argument("--limit", "-n", type=int, help="限制处理数量")
     parser.add_argument("--dry-run", action="store_true", help="只查看待处理任务")
+    parser.add_argument("--init-fields-only", action="store_true", help="只初始化表格字段，不处理任务")
     args = parser.parse_args()
+    if args.limit is not None and args.limit <= 0:
+        parser.error("--limit 必须大于 0")
 
     app_token, table_id = resolve_feishu_config(args.feishu_url)
     client = FeishuBitableClient(app_token=app_token, table_id=table_id)
 
     field_names = client.list_field_names()
+    if not args.dry_run:
+        field_specs = [(VIDEO_DURATION_FIELD_NAME, 2, "Number", None)]
+        if REFERENCE_FRAMES_ENABLED:
+            field_specs.append((REFERENCE_FIELD_NAME, 17, "Attachment", None))
+        if REFERENCE_IMAGE_ENABLED:
+            field_specs.extend(REFERENCE_FIELD_SPECS)
+        for field_name, field_type, ui_type, field_property in field_specs:
+            if field_name in field_names:
+                continue
+            try:
+                print(f"🧩 表格缺少【{field_name}】，正在创建字段...")
+                client.create_field(
+                    field_name,
+                    field_type=field_type,
+                    ui_type=ui_type,
+                    property=field_property,
+                )
+                field_names = client.list_field_names()
+            except Exception as exc:
+                print(f"⚠️ 创建【{field_name}】失败，将继续使用兼容路径: {exc}")
     mapping = resolve_field_mapping(field_names)
     validate_required_fields(mapping)
 
@@ -515,13 +890,27 @@ def main() -> None:
     for key, value in mapping.items():
         if value:
             print(f"   {key}: {value}")
+    if args.init_fields_only:
+        print("\n✅ 字段初始化完成，未处理任何任务")
+        return
 
-    records = load_pending_records(client, mapping, limit=args.limit)
-    print(f"\n📌 找到待处理任务 {len(records)} 条")
-    if not records:
+    all_records = client.list_records(page_size=100)
+    action_records = load_reference_action_records(all_records, mapping, limit=args.limit)
+    remaining_limit = None if args.limit is None else max(args.limit - len(action_records), 0)
+    records = (
+        []
+        if remaining_limit == 0
+        else load_pending_records(client, mapping, limit=remaining_limit, records=all_records)
+    )
+    print(
+        f"\n📌 找到待处理脚本任务 {len(records)} 条，"
+        f"参考图确认/重做任务 {len(action_records)} 条"
+    )
+    if not records and not action_records:
         return
 
     pipeline = VideoRemakePipeline(client, mapping)
+    action_stats = pipeline.process_reference_actions(action_records, dry_run=args.dry_run)
     stats = pipeline.process_records(records, dry_run=args.dry_run)
 
     print(f"\n{'=' * 70}")
@@ -531,6 +920,9 @@ def main() -> None:
     print(f"成功: {stats['success']}")
     print(f"不适合复刻: {stats.get('not_suitable', 0)}")
     print(f"失败: {stats['failed']}")
+    print(f"参考图确认: {action_stats['confirmed']}")
+    print(f"参考图重做: {action_stats['regenerated']}")
+    print(f"参考图操作失败: {action_stats['failed']}")
 
 
 if __name__ == "__main__":
