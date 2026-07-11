@@ -772,6 +772,8 @@ def _target_exceeds_completed_task(task: dict[str, Any] | None, target: int) -> 
 
 
 def _rds_needs_scanner(task: dict[str, Any] | None) -> bool:
+    if not task:
+        return False
     return decide_factory_state(task).should_scan_from_rds
 
 

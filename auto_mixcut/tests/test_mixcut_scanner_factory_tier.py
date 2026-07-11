@@ -12,6 +12,7 @@ from scripts.run_mixcut_task_scanner import (
     _feishu_state_allows_scan,
     _mixcut_quantity_goal,
     _parse_factory_tier,
+    _rds_needs_scanner,
 )
 
 
@@ -76,6 +77,9 @@ class MixcutScannerFactoryTierTest(unittest.TestCase):
         self.assertFalse(_feishu_state_allows_scan("暂停", target_increased=True))
         self.assertFalse(_feishu_state_allows_scan("不处理", target_increased=True))
         self.assertTrue(_feishu_state_allows_scan("完成", target_increased=True))
+
+    def test_missing_rds_task_does_not_make_blank_feishu_row_runnable(self):
+        self.assertFalse(_rds_needs_scanner(None))
 
     def test_ads_continue_only_when_rds_requests_guard_again(self):
         self.assertTrue(
