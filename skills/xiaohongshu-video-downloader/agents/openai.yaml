@@ -1,0 +1,4 @@
+interface:
+  display_name: "XHS/TikTok Video Downloader"
+  short_description: "Download XHS and TikTok videos by link"
+  default_prompt: "Use $xiaohongshu-video-downloader to download this Xiaohongshu or TikTok video link to a local MP4 file."
