@@ -8,11 +8,12 @@ import os
 import re
 import shutil
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
 from app.db import AutoPublishDB, default_video_dir
+from app.metadata import is_title_compatible_with_country, localized_template_title
 from app.models import ScriptMetadata
 
 
@@ -43,6 +44,17 @@ def sync_mixcut_videos(
     pull_output_qc: bool = True,
     dry_run: bool = False,
 ) -> Dict[str, Any]:
+    if auto_publish_db.is_mixcut_scheduling_paused():
+        return {
+            "candidates": 0,
+            "synced": [],
+            "skipped": [],
+            "task_sync": [],
+            "qc_sync": {"skipped": True, "reason": "mixcut_scheduling_paused"},
+            "dry_run": dry_run,
+            "paused": True,
+        }
+
     from auto_mixcut.core.bootstrap import build_context
     _ensure_auto_mixcut_env_defaults()
     ctx = build_context()
@@ -225,7 +237,7 @@ def build_mixcut_metadata(output: Dict[str, Any], product: Dict[str, Any], store
     product_id = str(output.get("product_id") or product.get("product_id") or "").strip()
     template_id = str(output.get("template_id") or "default").strip() or "default"
     title_pack = build_simple_mixcut_title(output, product, product_id=product_id)
-    return ScriptMetadata(
+    metadata = ScriptMetadata(
         canonical_script_key=f"mixcut:{output_id}",
         script_id=output_id,
         source_record_id=output_id,
@@ -247,6 +259,13 @@ def build_mixcut_metadata(output: Dict[str, Any], product: Dict[str, Any], store
         cart_enabled="是",
         content_branch="商品展示型",
     )
+    if not is_title_compatible_with_country(metadata.short_video_title, metadata.target_country):
+        metadata = replace(
+            metadata,
+            short_video_title=localized_template_title(metadata),
+            title_source="mixcut_localized_template",
+        )
+    return metadata
 
 
 def build_simple_mixcut_title(output: Dict[str, Any], product: Dict[str, Any], product_id: str = "") -> Dict[str, str]:

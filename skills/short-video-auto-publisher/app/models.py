@@ -41,6 +41,7 @@ class AccountConfig:
     publish_time_1: str
     publish_time_2: str
     publish_time_3: str
+    publish_channel: str = "GeeLark"
     nurture_enabled: bool = False
     nurture_daily_count: int = 2
     nurture_only: bool = False

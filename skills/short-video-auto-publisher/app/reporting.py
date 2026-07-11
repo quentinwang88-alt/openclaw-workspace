@@ -11,6 +11,17 @@ from typing import Any, Dict, Iterable, List, Sequence
 from app.db import AutoPublishDB
 
 
+PUBLISH_CHANNEL_FIELD_PROPERTY = {
+    "options": [
+        {"name": "GeeLark"},
+        {"name": "NeoBund"},
+        {"name": "DryRun"},
+        {"name": "手动"},
+        {"name": "暂停"},
+    ]
+}
+
+
 REPORT_FIELDS: Sequence[Dict[str, Any]] = (
     {"name": "内部脚本键", "type": 1, "ui_type": "Text"},
     {"name": "脚本ID", "type": 1, "ui_type": "Text"},
@@ -34,6 +45,7 @@ REPORT_FIELDS: Sequence[Dict[str, Any]] = (
     {"name": "计划发布时间", "type": 1, "ui_type": "Text"},
     {"name": "发布时间", "type": 1, "ui_type": "Text"},
     {"name": "发布任务ID", "type": 1, "ui_type": "Text"},
+    {"name": "实际发布渠道", "type": 3, "ui_type": "SingleSelect", "property": PUBLISH_CHANNEL_FIELD_PROPERTY},
     {"name": "发布结果", "type": 1, "ui_type": "Text"},
     {"name": "错误信息", "type": 1, "ui_type": "Text"},
     {"name": "最后更新时间", "type": 1, "ui_type": "Text"},
@@ -58,6 +70,7 @@ MANUAL_QUEUE_FIELDS: Sequence[Dict[str, Any]] = (
     {"name": "自动发布结果", "type": 1, "ui_type": "Text"},
     {"name": "自动发布时间", "type": 1, "ui_type": "Text"},
     {"name": "自动发布任务ID", "type": 1, "ui_type": "Text"},
+    {"name": "实际发布渠道", "type": 3, "ui_type": "SingleSelect", "property": PUBLISH_CHANNEL_FIELD_PROPERTY},
     {"name": "自动异常信息", "type": 1, "ui_type": "Text"},
     {
         "name": "最终处理状态",
@@ -102,6 +115,8 @@ PRODUCT_PUBLISH_REPORT_FIELDS: Sequence[Dict[str, Any]] = (
     {"name": "产品ID", "type": 1, "ui_type": "Text"},
     {"name": "产品主图", "type": 17, "ui_type": "Attachment"},
     {"name": "产品待发布视频数量", "type": 2, "ui_type": "Number"},
+    {"name": "未排期可用视频数量", "type": 2, "ui_type": "Number"},
+    {"name": "已排期未发布视频数量", "type": 2, "ui_type": "Number"},
     {
         "name": "排期策略",
         "type": 3,
@@ -111,6 +126,8 @@ PRODUCT_PUBLISH_REPORT_FIELDS: Sequence[Dict[str, Any]] = (
     {"name": "排期备注", "type": 1, "ui_type": "Text"},
     {"name": "优先排期更新时间", "type": 1, "ui_type": "Text"},
     {"name": "本周已发布视频数", "type": 2, "ui_type": "Number"},
+    {"name": "本周GeeLark已发布视频数", "type": 2, "ui_type": "Number"},
+    {"name": "本周NeoBund已发布视频数", "type": 2, "ui_type": "Number"},
     {"name": "上周已发布视频数", "type": 2, "ui_type": "Number"},
     {"name": "本月已发布视频数", "type": 2, "ui_type": "Number"},
     {"name": "上月已发布视频数", "type": 2, "ui_type": "Number"},
@@ -135,11 +152,17 @@ def ensure_report_fields(client: Any) -> Dict[str, int]:
                 field_name=spec["name"],
                 field_type=int(spec["type"]),
                 ui_type=str(spec["ui_type"]),
+                property=spec.get("property"),
             )
             created += 1
             existing.add(str(spec["name"]))
         except Exception as exc:
             if "FieldNameDuplicated" in str(exc):
+                existing.add(str(spec["name"]))
+                continue
+            if spec["name"] == "实际发布渠道":
+                client.create_field(field_name=spec["name"], field_type=1, ui_type="Text")
+                created += 1
                 existing.add(str(spec["name"]))
                 continue
             raise
@@ -210,6 +233,29 @@ def _field_text(value: Any) -> str:
         parts = [_field_text(item) for item in value]
         return ",".join(item for item in parts if item)
     return _normalize_text(value)
+
+
+def _row_value(row: Any, key: str) -> Any:
+    if isinstance(row, dict):
+        return row.get(key)
+    try:
+        return row[key]
+    except Exception:
+        return ""
+
+
+def _infer_publish_channel(row: Any) -> str:
+    task_id = _normalize_text(_row_value(row, "publish_task_id"))
+    configured_channel = _normalize_text(_row_value(row, "publish_channel"))
+    if task_id.startswith("neobund:"):
+        return "NeoBund"
+    if task_id.startswith("dryrun-"):
+        return "DryRun"
+    if configured_channel:
+        return configured_channel
+    if task_id:
+        return "GeeLark"
+    return ""
 
 
 def _has_attachment(value: Any) -> bool:
@@ -356,10 +402,14 @@ def build_product_publish_report_fields(
         "店铺ID": _normalize_text(row.get("store_id")),
         "产品ID": _normalize_text(row.get("product_id")),
         "产品待发布视频数量": int(row.get("pending_video_count") or 0),
+        "未排期可用视频数量": int(row.get("pending_video_count") or 0),
+        "已排期未发布视频数量": int(row.get("scheduled_unpublished_count") or 0),
         "排期策略": _normalize_text(row.get("schedule_strategy")) or "普通",
         "排期备注": _normalize_text(row.get("schedule_note")),
         "优先排期更新时间": _normalize_text(row.get("priority_updated_at")),
         "本周已发布视频数": int(row.get("this_week_published") or 0),
+        "本周GeeLark已发布视频数": int(row.get("this_week_geelark_published") or 0),
+        "本周NeoBund已发布视频数": int(row.get("this_week_neobund_published") or 0),
         "上周已发布视频数": int(row.get("last_week_published") or 0),
         "本月已发布视频数": int(row.get("current_month_published") or 0),
         "上月已发布视频数": int(row.get("previous_month_published") or 0),
@@ -459,6 +509,7 @@ def build_manual_queue_fields(
         "自动发布结果": _normalize_text(row.get("publish_result")),
         "自动发布时间": _normalize_text(row.get("published_at")),
         "自动发布任务ID": _normalize_text(row.get("publish_task_id")),
+        "实际发布渠道": _infer_publish_channel(row),
         "自动异常信息": upload_error or error_message,
         "最终处理状态": final_status,
         "是否需要人工处理": need_manual,
@@ -502,6 +553,7 @@ def build_report_fields(row: Any) -> Dict[str, Any]:
         "计划发布时间": planned_publish_at,
         "发布时间": _normalize_text(row["published_at"]),
         "发布任务ID": _normalize_text(row["publish_task_id"]),
+        "实际发布渠道": _infer_publish_channel(row),
         "发布结果": _normalize_text(row["publish_result"]),
         "错误信息": _normalize_text(row["error_message"]),
         "最后更新时间": updated_at,

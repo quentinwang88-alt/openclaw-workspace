@@ -89,26 +89,33 @@ TITLE_LABEL_PREFIX_RE = re.compile(
 )
 
 COUNTRY_LANGUAGE_HINTS = {
+    "th": ("泰国", "泰语"),
     "thailand": ("泰国", "泰语"),
     "thai": ("泰国", "泰语"),
     "泰国": ("泰国", "泰语"),
+    "id": ("印度尼西亚", "印尼语"),
     "indonesia": ("印度尼西亚", "印尼语"),
     "indonesian": ("印度尼西亚", "印尼语"),
     "印尼": ("印度尼西亚", "印尼语"),
     "印度尼西亚": ("印度尼西亚", "印尼语"),
+    "my": ("马来西亚", "马来语"),
     "malaysia": ("马来西亚", "马来语"),
     "malay": ("马来西亚", "马来语"),
     "马来西亚": ("马来西亚", "马来语"),
+    "vn": ("越南", "越南语"),
     "vietnam": ("越南", "越南语"),
     "vietnamese": ("越南", "越南语"),
     "越南": ("越南", "越南语"),
+    "jp": ("日本", "日语"),
     "japan": ("日本", "日语"),
     "japanese": ("日本", "日语"),
     "日本": ("日本", "日语"),
+    "kr": ("韩国", "韩语"),
     "korea": ("韩国", "韩语"),
     "south korea": ("韩国", "韩语"),
     "korean": ("韩国", "韩语"),
     "韩国": ("韩国", "韩语"),
+    "ph": ("菲律宾", "菲律宾语或当地常用英语"),
     "philippines": ("菲律宾", "菲律宾语或当地常用英语"),
     "philippine": ("菲律宾", "菲律宾语或当地常用英语"),
     "菲律宾": ("菲律宾", "菲律宾语或当地常用英语"),
@@ -119,6 +126,7 @@ COUNTRY_LANGUAGE_HINTS = {
     "英国": ("英国", "英语"),
     "uk": ("英国", "英语"),
     "united kingdom": ("英国", "英语"),
+    "sg": ("新加坡", "英语或当地主要使用语言"),
     "singapore": ("新加坡", "英语或当地主要使用语言"),
     "新加坡": ("新加坡", "英语或当地主要使用语言"),
     "china": ("中国", "中文"),
@@ -295,7 +303,7 @@ def localized_template_title(metadata: ScriptMetadata) -> str:
     )
     seed = metadata.canonical_script_key or metadata.script_id or metadata.script_text
     index = int(hashlib.md5(str(seed or "").encode("utf-8")).hexdigest()[:8], 16)
-    if country in {"thailand", "thai", "泰国"}:
+    if country in {"th", "thailand", "thai", "泰国"}:
         templates = (
             "บรรยากาศวันสบายๆ ที่ดูน่าจำ",
             "มุมเล็กๆ ที่ดูเข้ากับวันนี้",
@@ -305,7 +313,7 @@ def localized_template_title(metadata: ScriptMetadata) -> str:
             "ไอเดียเล็กๆ สำหรับลุคสบายๆ",
             "มุมนี้ทำให้ของชิ้นนี้ดูน่ารักขึ้น",
         )
-    elif country in {"vietnam", "vietnamese", "越南"}:
+    elif country in {"vn", "vietnam", "vietnamese", "越南"}:
         templates = (
             "Một khoảnh khắc đời thường rất dễ nhớ",
             "Một chút bình yên trong ngày thường",
@@ -315,7 +323,7 @@ def localized_template_title(metadata: ScriptMetadata) -> str:
             "Nhìn đơn giản mà rất dễ hợp mỗi ngày",
             "Một điểm nhỏ làm tổng thể gọn hơn",
         )
-    elif country in {"malaysia", "malay", "马来西亚"}:
+    elif country in {"my", "malaysia", "malay", "马来西亚"}:
         templates = (
             "Momen harian yang terasa tenang",
             "Suasana ringkas yang nampak natural",
@@ -371,27 +379,31 @@ def is_title_compatible_with_country(title: str, target_country: str) -> bool:
         return False
     if TITLE_LABEL_PREFIX_RE.match(str(title or "").strip()):
         return False
-    if normalized_country in {"thailand", "thai", "泰国"}:
-        return contains_thai(text)
-    if normalized_country in {"japan", "japanese", "日本"}:
+    if normalized_country in {"th", "thailand", "thai", "泰国"}:
+        return contains_thai(text) and not contains_cjk(text)
+    if normalized_country in {"jp", "japan", "japanese", "日本"}:
         return contains_japanese(text)
-    if normalized_country in {"korea", "south korea", "korean", "韩国"}:
-        return contains_korean(text)
+    if normalized_country in {"kr", "korea", "south korea", "korean", "韩国"}:
+        return contains_korean(text) and not contains_cjk(text)
     if normalized_country in {"china", "中国"}:
         return contains_cjk(text)
     if normalized_country in {
         "indonesia",
         "indonesian",
+        "id",
         "印尼",
         "印度尼西亚",
         "malaysia",
         "malay",
+        "my",
         "马来西亚",
         "vietnam",
         "vietnamese",
+        "vn",
         "越南",
         "philippines",
         "philippine",
+        "ph",
         "菲律宾",
         "usa",
         "us",
@@ -401,6 +413,7 @@ def is_title_compatible_with_country(title: str, target_country: str) -> bool:
         "united kingdom",
         "英国",
         "singapore",
+        "sg",
         "新加坡",
     }:
         return not contains_cjk(text)

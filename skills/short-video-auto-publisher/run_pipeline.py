@@ -9,7 +9,7 @@ import json
 import os
 import sys
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, Tuple
 
@@ -29,8 +29,14 @@ from app.metadata import (  # noqa: E402
     resolve_field_mapping as resolve_script_mapping,
     sanitize_title,
 )
+from app.manual_publish import (  # noqa: E402
+    MANUAL_PUBLISH_FIELD_ALIASES,
+    ensure_manual_publish_fields,
+    sync_manual_publish_requests,
+)
 from app.models import ScriptMetadata  # noqa: E402
 from app.mixcut import sync_mixcut_publish_results, sync_mixcut_videos  # noqa: E402
+from app.neobund_publish import NeoBundPublishAdapter  # noqa: E402
 from app.notifications import (  # noqa: E402
     default_queue_date,
     default_summary_date,
@@ -40,9 +46,8 @@ from app.notifications import (  # noqa: E402
     send_feishu_webhook_text,
     send_openclaw_feishu_text,
 )
-from app.publishers import DryRunPublishAdapter, GeeLarkPublishAdapter, HttpPublishAdapter  # noqa: E402
+from app.publishers import DryRunPublishAdapter, GeeLarkPublishAdapter, HttpPublishAdapter, RoutedPublishAdapter  # noqa: E402
 from app.reporting import (  # noqa: E402
-    apply_manual_publish_statuses_from_table,
     product_publish_periods,
     sync_manual_publish_queue_table,
     sync_product_schedule_preferences_table,
@@ -52,6 +57,7 @@ from app.reporting import (  # noqa: E402
 from app.scheduler import (  # noqa: E402
     ACCOUNT_FIELD_ALIASES,
     RUN_MANAGER_FIELD_ALIASES,
+    normalize_publish_channel,
     resolve_field_mapping as resolve_table_mapping,
     schedule_slots,
     sync_accounts,
@@ -85,6 +91,10 @@ DEFAULT_REPORT_FEISHU_URL = (
 DEFAULT_MANUAL_QUEUE_FEISHU_URL = (
     "https://gcngopvfvo0q.feishu.cn/wiki/"
     "NKKFwOIyqiD46PkZ27yc4tNJn3z?table=tblP6lL3ABNxOInH&view=vewJI1HObF"
+)
+DEFAULT_MANUAL_PUBLISH_FEISHU_URL = (
+    "https://gcngopvfvo0q.feishu.cn/wiki/"
+    "WtYOwvKGUivSLfkwiq0cB1SFnwb?table=tblNoxxGk7IRuuIP&view=vewqjtXydQ"
 )
 DEFAULT_PRODUCT_PUBLISH_REPORT_FEISHU_URL = (
     "https://gcngopvfvo0q.feishu.cn/wiki/"
@@ -263,23 +273,65 @@ def apply_account_id_overrides_to_records(
     return {"configured": len(overrides), "records_overridden": changed}
 
 
-def sync_recent_manual_publish_statuses(db: AutoPublishDB, args: argparse.Namespace) -> Dict[str, int]:
-    lookback_days = max(0, int(getattr(args, "manual_status_lookback_days", 3) or 0))
-    if lookback_days <= 0:
-        return {
-            "manual_rows_checked": 0,
-            "manual_rows_marked_published": 0,
-            "manual_rows_skipped": 0,
-            "manual_rows_failed": 0,
-            "lookback_days": 0,
-        }
-    today = datetime.now().date()
-    days = {(today - timedelta(days=offset)).isoformat() for offset in range(lookback_days + 1)}
-    app_token, table_id = resolve_feishu_config(resolve_manual_queue_feishu_url(args))
-    client = FeishuBitableClient(app_token=app_token, table_id=table_id)
-    stats = apply_manual_publish_statuses_from_table(db, client, days=days)
-    stats["lookback_days"] = lookback_days
-    return stats
+def resolve_account_publish_channel_overrides(args: argparse.Namespace) -> Dict[str, str]:
+    """读取本地发布渠道覆盖。
+
+    支持配置：
+    {
+      "account_publish_channel_overrides": {
+        "THFJ01:泰国发饰1": "NeoBund",
+        "user97605042600660": "NeoBund"
+      }
+    }
+    """
+    config = load_local_config(getattr(args, "config_path", DEFAULT_CONFIG_PATH))
+    overrides: Dict[str, str] = {}
+    for key in ("account_publish_channel_overrides", "publish_channel_overrides"):
+        raw = config.get(key)
+        if not isinstance(raw, dict):
+            continue
+        for source, value in raw.items():
+            source_text = str(source or "").strip()
+            channel = normalize_publish_channel(value)
+            if source_text and channel:
+                overrides[source_text] = channel
+    return overrides
+
+
+def apply_account_publish_channel_overrides(db: AutoPublishDB, args: argparse.Namespace) -> Dict[str, int]:
+    overrides = resolve_account_publish_channel_overrides(args)
+    if not overrides:
+        return {"configured": 0, "accounts_overridden": 0}
+
+    now_text = db._now_text()  # noqa: SLF001 - 当前项目 DB 封装未暴露批量账号渠道覆盖接口
+    changed = 0
+    with db._connect() as conn:  # noqa: SLF001
+        for key, channel in overrides.items():
+            rowcount = 0
+            if ":" in key or "/" in key:
+                separator = ":" if ":" in key else "/"
+                store_id, account_name = [part.strip() for part in key.split(separator, 1)]
+                if store_id and account_name:
+                    rowcount = conn.execute(
+                        """
+                        UPDATE account_configs
+                        SET publish_channel = ?, updated_at = ?
+                        WHERE store_id = ?
+                          AND account_name = ?
+                        """,
+                        (channel, now_text, store_id, account_name),
+                    ).rowcount
+            else:
+                rowcount = conn.execute(
+                    """
+                    UPDATE account_configs
+                    SET publish_channel = ?, updated_at = ?
+                    WHERE account_id = ?
+                    """,
+                    (channel, now_text, key),
+                ).rowcount
+            changed += int(rowcount or 0)
+    return {"configured": len(overrides), "accounts_overridden": changed}
 
 
 def resolve_publish_api_token(args: argparse.Namespace) -> str:
@@ -305,6 +357,69 @@ def resolve_publish_api_token(args: argparse.Namespace) -> str:
         if value:
             return value
     return ""
+
+
+def resolve_neobund_access_token(args: argparse.Namespace) -> str:
+    explicit = str(getattr(args, "neobund_access_token", "") or "").strip()
+    if explicit:
+        return explicit
+
+    explicit_publish_token = str(getattr(args, "publish_api_token", "") or "").strip()
+    if explicit_publish_token:
+        return explicit_publish_token
+
+    for key in (
+        "SHORT_VIDEO_AUTO_PUBLISH_NEOBUND_ACCESS_TOKEN",
+        "NEOBUND_ACCESS_TOKEN",
+        "NEOBUND_API_TOKEN",
+    ):
+        value = str(os.environ.get(key, "") or "").strip()
+        if value:
+            return value
+
+    config = load_local_config(getattr(args, "config_path", DEFAULT_CONFIG_PATH))
+    for key in ("neobund_access_token", "neobund_token", "neobund_api_token"):
+        value = str(config.get(key, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def resolve_neobund_cookie(args: argparse.Namespace) -> str:
+    explicit = str(getattr(args, "neobund_cookie", "") or "").strip()
+    if explicit:
+        return explicit
+
+    for key in (
+        "SHORT_VIDEO_AUTO_PUBLISH_NEOBUND_COOKIE",
+        "NEOBUND_COOKIE",
+    ):
+        value = str(os.environ.get(key, "") or "").strip()
+        if value:
+            return value
+
+    config = load_local_config(getattr(args, "config_path", DEFAULT_CONFIG_PATH))
+    for key in ("neobund_cookie", "neobund_cookie_header"):
+        value = str(config.get(key, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def resolve_neobund_account_id_map(args: argparse.Namespace) -> Dict[str, Any]:
+    explicit = str(getattr(args, "neobund_account_map_json", "") or "").strip()
+    if explicit:
+        payload = json.loads(explicit)
+        if not isinstance(payload, dict):
+            raise ValueError("NeoBund 账号映射必须是 JSON 对象")
+        return payload
+
+    config = load_local_config(getattr(args, "config_path", DEFAULT_CONFIG_PATH))
+    for key in ("neobund_account_id_map", "neobund_auth_id_map", "neobund_account_map"):
+        payload = config.get(key)
+        if isinstance(payload, dict):
+            return payload
+    return {}
 
 
 def resolve_feishu_webhook_url(args: argparse.Namespace) -> str:
@@ -374,6 +489,18 @@ def resolve_manual_queue_feishu_url(args: argparse.Namespace) -> str:
     return DEFAULT_MANUAL_QUEUE_FEISHU_URL
 
 
+def resolve_manual_publish_feishu_url(args: argparse.Namespace) -> str:
+    explicit = str(getattr(args, "manual_publish_feishu_url", "") or "").strip()
+    if explicit:
+        return explicit
+    config = load_local_config(getattr(args, "config_path", DEFAULT_CONFIG_PATH))
+    for key in ("manual_publish_feishu_url", "manual_publish_request_feishu_url"):
+        value = str(config.get(key, "") or "").strip()
+        if value:
+            return value
+    return DEFAULT_MANUAL_PUBLISH_FEISHU_URL
+
+
 def resolve_feishu_config(feishu_url: str) -> Tuple[str, str]:
     info = parse_feishu_bitable_url(feishu_url)
     if not info:
@@ -386,34 +513,68 @@ def resolve_feishu_config(feishu_url: str) -> Tuple[str, str]:
 
 def ensure_account_nurture_fields(client: FeishuBitableClient, field_names: list[str]) -> list[str]:
     existing = set(field_names)
-    if "是否开启养号" not in existing:
+
+    def create_optional_field(
+        field_name: str,
+        *,
+        field_type: int,
+        ui_type: str,
+        property: Dict[str, Any] | None = None,
+        fallback_to_text: bool = True,
+    ) -> None:
+        if field_name in existing:
+            return
         try:
             client.create_field(
-                "是否开启养号",
+                field_name,
+                field_type=field_type,
+                ui_type=ui_type,
+                property=property,
+            )
+            existing.add(field_name)
+            return
+        except Exception:
+            pass
+        if not fallback_to_text:
+            return
+        try:
+            client.create_field(field_name, field_type=1, ui_type="Text")
+            existing.add(field_name)
+        except Exception:
+            return
+
+    if "发布渠道" not in existing:
+        create_optional_field(
+            "发布渠道",
+            field_type=3,
+            ui_type="SingleSelect",
+            property={
+                "options": [
+                    {"name": "GeeLark"},
+                    {"name": "NeoBund"},
+                    {"name": "手动"},
+                    {"name": "暂停"},
+                ]
+            },
+        )
+    if "是否开启养号" not in existing:
+        create_optional_field(
+            "是否开启养号",
+            field_type=3,
+            ui_type="SingleSelect",
+            property={"options": [{"name": "是"}, {"name": "否"}]},
+        )
+    if "每日养号条数" not in existing:
+        create_optional_field("每日养号条数", field_type=2, ui_type="Number")
+    if "是否仅养号" not in existing:
+        create_optional_field("是否仅养号", field_type=7, ui_type="Checkbox", fallback_to_text=False)
+        if "是否仅养号" not in existing:
+            create_optional_field(
+                "是否仅养号",
                 field_type=3,
                 ui_type="SingleSelect",
                 property={"options": [{"name": "是"}, {"name": "否"}]},
             )
-        except Exception:
-            client.create_field("是否开启养号", field_type=1, ui_type="Text")
-    if "每日养号条数" not in existing:
-        try:
-            client.create_field("每日养号条数", field_type=2, ui_type="Number")
-        except Exception:
-            client.create_field("每日养号条数", field_type=1, ui_type="Text")
-    if "是否仅养号" not in existing:
-        try:
-            client.create_field("是否仅养号", field_type=7, ui_type="Checkbox")
-        except Exception:
-            try:
-                client.create_field(
-                    "是否仅养号",
-                    field_type=3,
-                    ui_type="SingleSelect",
-                    property={"options": [{"name": "是"}, {"name": "否"}]},
-                )
-            except Exception:
-                client.create_field("是否仅养号", field_type=1, ui_type="Text")
     return client.list_field_names()
 
 
@@ -428,43 +589,84 @@ def build_title_generator(mode: str, llm_route: str):
     )
 
 
+def build_geelark_publish_adapter(args: argparse.Namespace) -> GeeLarkPublishAdapter:
+    resolved_token = resolve_publish_api_token(args)
+    return GeeLarkPublishAdapter(
+        token=resolved_token,
+        endpoint=args.geelark_task_add_endpoint,
+        upload_endpoint=args.geelark_upload_get_url_endpoint,
+        auth_header=args.geelark_auth_header,
+        auth_scheme=args.geelark_auth_scheme,
+        plan_name_field=args.geelark_plan_name_field,
+        remark_field=args.geelark_remark_field,
+        task_type_field=args.geelark_task_type_field,
+        list_field=args.geelark_list_field,
+        task_type_value=args.geelark_task_type_value,
+        env_id_field=args.geelark_env_id_field,
+        video_field=args.geelark_video_field,
+        schedule_at_field=args.geelark_schedule_at_field,
+        video_desc_field=args.geelark_video_desc_field,
+        product_id_field=args.geelark_product_id_field,
+        product_title_field=args.geelark_product_title_field,
+        ref_video_id_field=args.geelark_ref_video_id_field,
+        upload_file_type_field=args.geelark_upload_file_type_field,
+        status_endpoint=args.geelark_status_endpoint,
+        status_method=args.geelark_status_method,
+        status_task_id_field=args.geelark_status_task_id_field,
+        task_id_paths=args.geelark_task_id_paths,
+        upload_url_paths=args.geelark_upload_url_paths,
+        resource_url_paths=args.geelark_resource_url_paths,
+        status_value_paths=args.geelark_status_value_paths,
+        success_values=args.geelark_success_values,
+        failure_values=args.geelark_failure_values,
+        published_at_paths=args.geelark_published_at_paths,
+        error_message_paths=args.geelark_error_message_paths,
+        extra_body_json=args.geelark_extra_body_json,
+    )
+
+
+def build_neobund_publish_adapter(args: argparse.Namespace) -> NeoBundPublishAdapter:
+    return NeoBundPublishAdapter(
+        base_url=args.neobund_base_url,
+        access_token=resolve_neobund_access_token(args),
+        cookie=resolve_neobund_cookie(args),
+        account_id_map=resolve_neobund_account_id_map(args),
+        is_precheck=1 if args.neobund_precheck else 0,
+        shoppable_commit_path=args.neobund_shoppable_commit_path,
+        shoppable_list_path=args.neobund_shoppable_list_path,
+        organic_commit_path=args.neobund_organic_commit_path,
+        organic_list_path=args.neobund_organic_list_path,
+        ai_generated_field=args.neobund_ai_generated_field,
+        timeout=args.neobund_request_timeout,
+    )
+
+
 def build_publish_adapter(args: argparse.Namespace):
     mode = args.publish_mode
-    resolved_token = resolve_publish_api_token(args)
     if mode == "http":
+        resolved_token = resolve_publish_api_token(args)
         return HttpPublishAdapter(args.publish_api_base_url, token=resolved_token)
     if mode == "geelark":
-        return GeeLarkPublishAdapter(
-            token=resolved_token,
-            endpoint=args.geelark_task_add_endpoint,
-            upload_endpoint=args.geelark_upload_get_url_endpoint,
-            auth_header=args.geelark_auth_header,
-            auth_scheme=args.geelark_auth_scheme,
-            plan_name_field=args.geelark_plan_name_field,
-            remark_field=args.geelark_remark_field,
-            task_type_field=args.geelark_task_type_field,
-            list_field=args.geelark_list_field,
-            task_type_value=args.geelark_task_type_value,
-            env_id_field=args.geelark_env_id_field,
-            video_field=args.geelark_video_field,
-            schedule_at_field=args.geelark_schedule_at_field,
-            video_desc_field=args.geelark_video_desc_field,
-            product_id_field=args.geelark_product_id_field,
-            product_title_field=args.geelark_product_title_field,
-            ref_video_id_field=args.geelark_ref_video_id_field,
-            upload_file_type_field=args.geelark_upload_file_type_field,
-            status_endpoint=args.geelark_status_endpoint,
-            status_method=args.geelark_status_method,
-            status_task_id_field=args.geelark_status_task_id_field,
-            task_id_paths=args.geelark_task_id_paths,
-            upload_url_paths=args.geelark_upload_url_paths,
-            resource_url_paths=args.geelark_resource_url_paths,
-            status_value_paths=args.geelark_status_value_paths,
-            success_values=args.geelark_success_values,
-            failure_values=args.geelark_failure_values,
-            published_at_paths=args.geelark_published_at_paths,
-            error_message_paths=args.geelark_error_message_paths,
-            extra_body_json=args.geelark_extra_body_json,
+        return build_geelark_publish_adapter(args)
+    if mode == "neobund":
+        return build_neobund_publish_adapter(args)
+    if mode == "auto":
+        geelark_adapter = build_geelark_publish_adapter(args)
+        neobund_adapter = build_neobund_publish_adapter(args)
+        dryrun_adapter = DryRunPublishAdapter()
+        account_channels = AutoPublishDB(Path(args.db_path)).list_account_publish_channels()
+        return RoutedPublishAdapter(
+            default_adapter=geelark_adapter,
+            channel_adapters={
+                "GeeLark": geelark_adapter,
+                "NeoBund": neobund_adapter,
+            },
+            account_channels=account_channels,
+            task_prefix_adapters={
+                "neobund:": neobund_adapter,
+                "dryrun-": dryrun_adapter,
+            },
+            default_channel="GeeLark",
         )
     return DryRunPublishAdapter()
 
@@ -547,8 +749,16 @@ def command_sync_accounts(args: argparse.Namespace) -> None:
     records = client.list_records(page_size=100, limit=args.limit)
     account_override_stats = apply_account_id_overrides_to_records(records, mapping, args)
     count = sync_accounts(records, mapping, db)
+    publish_channel_override_stats = apply_account_publish_channel_overrides(db, args)
     override_stats = apply_disabled_store_overrides(db, args)
-    print({"accounts_upserted": count, "account_id_overrides": account_override_stats, "disabled_store_overrides": override_stats})
+    print(
+        {
+            "accounts_upserted": count,
+            "account_id_overrides": account_override_stats,
+            "publish_channel_overrides": publish_channel_override_stats,
+            "disabled_store_overrides": override_stats,
+        }
+    )
 
 
 def sync_product_schedule_preferences_before_schedule(db: AutoPublishDB, args: argparse.Namespace) -> Dict[str, Any]:
@@ -688,6 +898,28 @@ def command_sync_manual_queue_table(args: argparse.Namespace) -> None:
         include_published=args.include_published,
     )
     print(stats)
+
+
+def command_sync_manual_publish_requests(args: argparse.Namespace) -> None:
+    with exclusive_run_lock("schedule"):
+        video_dir = ensure_video_storage_ready(args.video_dir)
+        db = AutoPublishDB(Path(args.db_path))
+        app_token, table_id = resolve_feishu_config(resolve_manual_publish_feishu_url(args))
+        client = FeishuBitableClient(app_token=app_token, table_id=table_id)
+        field_stats = ensure_manual_publish_fields(client)
+        field_names = client.list_field_names()
+        mapping = resolve_table_mapping(field_names, MANUAL_PUBLISH_FIELD_ALIASES)
+        records = client.list_records(page_size=100, limit=args.limit)
+        publisher = build_publish_adapter(args)
+        stats = sync_manual_publish_requests(
+            records,
+            mapping,
+            db,
+            publisher,
+            client=client,
+            video_dir=video_dir,
+        )
+        print({"fields": field_stats, "manual_publish_requests": stats})
 
 
 def command_cleanup_published_videos(args: argparse.Namespace) -> None:
@@ -904,10 +1136,13 @@ def _command_run_all_locked(args: argparse.Namespace) -> None:
     account_records = account_client.list_records(page_size=100, limit=args.limit)
     summary["account_id_overrides"] = apply_account_id_overrides_to_records(account_records, account_mapping, args)
     summary["sync_accounts"] = {"accounts_upserted": sync_accounts(account_records, account_mapping, db)}
+    summary["publish_channel_overrides"] = apply_account_publish_channel_overrides(db, args)
     summary["disabled_store_overrides"] = apply_disabled_store_overrides(db, args)
     print(f"[run-all] sync_accounts done {summary['sync_accounts']}", flush=True)
     if summary["account_id_overrides"]["records_overridden"]:
         print(f"[run-all] account_id_overrides {summary['account_id_overrides']}", flush=True)
+    if summary["publish_channel_overrides"]["accounts_overridden"]:
+        print(f"[run-all] publish_channel_overrides {summary['publish_channel_overrides']}", flush=True)
     if summary["disabled_store_overrides"]["disabled_stores"]:
         print(f"[run-all] disabled_store_overrides {summary['disabled_store_overrides']}", flush=True)
 
@@ -947,13 +1182,34 @@ def _command_run_all_locked(args: argparse.Namespace) -> None:
     summary["sync_results_before_schedule"] = sync_publish_results(db, publisher)
     print(f"[run-all] sync_results before schedule done {summary['sync_results_before_schedule']}", flush=True)
 
+    if not args.no_sync_manual_publish:
+        print("[run-all] sync_manual_publish_requests start", flush=True)
+        try:
+            manual_app_token, manual_table_id = resolve_feishu_config(resolve_manual_publish_feishu_url(args))
+            manual_client = FeishuBitableClient(app_token=manual_app_token, table_id=manual_table_id)
+            manual_field_stats = ensure_manual_publish_fields(manual_client)
+            manual_field_names = manual_client.list_field_names()
+            manual_mapping = resolve_table_mapping(manual_field_names, MANUAL_PUBLISH_FIELD_ALIASES)
+            manual_records = manual_client.list_records(page_size=100, limit=args.limit)
+            summary["sync_manual_publish_requests"] = {
+                "fields": manual_field_stats,
+                **sync_manual_publish_requests(
+                    manual_records,
+                    manual_mapping,
+                    db,
+                    publisher,
+                    client=manual_client,
+                    video_dir=video_dir,
+                ),
+            }
+        except Exception as exc:
+            summary["sync_manual_publish_requests"] = {"failed": 1, "error": str(exc)}
+        print(f"[run-all] sync_manual_publish_requests done {summary['sync_manual_publish_requests']}", flush=True)
+
     print("[run-all] schedule start", flush=True)
     print("[run-all] sync_product_schedule_preferences start", flush=True)
     summary["sync_product_schedule_preferences"] = sync_product_schedule_preferences_before_schedule(db, args)
     print(f"[run-all] sync_product_schedule_preferences done {summary['sync_product_schedule_preferences']}", flush=True)
-    print("[run-all] sync_recent_manual_statuses start", flush=True)
-    summary["sync_recent_manual_statuses"] = sync_recent_manual_publish_statuses(db, args)
-    print(f"[run-all] sync_recent_manual_statuses done {summary['sync_recent_manual_statuses']}", flush=True)
     summary["enforce_retry_limit_before_schedule"] = db.enforce_retry_limit(
         max_auto_retries=args.max_auto_retries,
     )
@@ -1121,9 +1377,22 @@ def build_parser() -> argparse.ArgumentParser:
     add_notification_args(notify_product_weekly)
     notify_product_weekly.set_defaults(func=command_notify_product_publish_weekly)
 
+    def add_neobund_args(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--neobund-base-url", default="https://www.neobund.ai/np", help="NeoBund API Base URL")
+        command.add_argument("--neobund-access-token", default="", help="NeoBund 登录 access_token；也可写入配置 neobund_access_token")
+        command.add_argument("--neobund-cookie", default="", help="NeoBund 登录 Cookie header；也可写入配置 neobund_cookie")
+        command.add_argument("--neobund-account-map-json", default="", help='账号ID到 NeoBund authId 的临时映射 JSON；为空时账号ID直通')
+        command.add_argument("--neobund-precheck", action="store_true", help="启用 TikTok API Pre-Check；默认 Publish Directly")
+        command.add_argument("--neobund-shoppable-commit-path", default="/shoppable/video/commit", help="NeoBund 带货视频提交路径")
+        command.add_argument("--neobund-shoppable-list-path", default="/shoppable/video/list", help="NeoBund 带货视频列表/状态路径")
+        command.add_argument("--neobund-organic-commit-path", default="/shoppable/video/commit", help="NeoBund 非带货视频提交路径")
+        command.add_argument("--neobund-organic-list-path", default="/shoppable/video/list", help="NeoBund 非带货视频列表/状态路径")
+        command.add_argument("--neobund-ai-generated-field", default="isAIGC", help="NeoBund AI 生成内容标记字段名")
+        command.add_argument("--neobund-request-timeout", type=int, default=300, help="NeoBund 请求超时时间秒，默认 300")
+
     schedule = subparsers.add_parser("schedule", help="按 48 小时窗口增量补排")
     schedule.add_argument("--product-report-feishu-url", default=DEFAULT_PRODUCT_PUBLISH_REPORT_FEISHU_URL, help="店铺产品发布汇总表飞书 URL，用于排期策略回读")
-    schedule.add_argument("--publish-mode", choices=["dry-run", "http", "geelark"], default="dry-run")
+    schedule.add_argument("--publish-mode", choices=["dry-run", "http", "geelark", "neobund", "auto"], default="dry-run")
     schedule.add_argument("--publish-api-base-url", default="", help="自动发布 API Base URL")
     schedule.add_argument("--publish-api-token", default="", help="自动发布 API Token")
     schedule.add_argument("--geelark-task-add-endpoint", default="https://openapi.geelark.cn/open/v1/task/add", help="GeeLark task/add 接口")
@@ -1155,10 +1424,11 @@ def build_parser() -> argparse.ArgumentParser:
     schedule.add_argument("--geelark-failure-values", default="failed,error,-1,4,5,7", help="GeeLark 失败状态值，逗号分隔")
     schedule.add_argument("--geelark-published-at-paths", default="", help="GeeLark 返回体发布时间候选路径，逗号分隔")
     schedule.add_argument("--geelark-error-message-paths", default="data.items.0.failDesc,items.0.failDesc,data.failDesc,failDesc,message,error_message,data.message,data.error_message", help="GeeLark 返回体错误信息候选路径，逗号分隔")
+    add_neobund_args(schedule)
     schedule.set_defaults(func=command_schedule)
 
     sync_results = subparsers.add_parser("sync-results", help="同步定时发布结果")
-    sync_results.add_argument("--publish-mode", choices=["dry-run", "http", "geelark"], default="dry-run")
+    sync_results.add_argument("--publish-mode", choices=["dry-run", "http", "geelark", "neobund", "auto"], default="dry-run")
     sync_results.add_argument("--publish-api-base-url", default="", help="自动发布 API Base URL")
     sync_results.add_argument("--publish-api-token", default="", help="自动发布 API Token")
     sync_results.add_argument("--geelark-task-add-endpoint", default="https://openapi.geelark.cn/open/v1/task/add", help="GeeLark task/add 接口")
@@ -1190,6 +1460,7 @@ def build_parser() -> argparse.ArgumentParser:
     sync_results.add_argument("--geelark-failure-values", default="failed,error,-1,4,5,7", help="GeeLark 失败状态值，逗号分隔")
     sync_results.add_argument("--geelark-published-at-paths", default="", help="GeeLark 返回体发布时间候选路径，逗号分隔")
     sync_results.add_argument("--geelark-error-message-paths", default="data.items.0.failDesc,items.0.failDesc,data.failDesc,failDesc,message,error_message,data.message,data.error_message", help="GeeLark 返回体错误信息候选路径，逗号分隔")
+    add_neobund_args(sync_results)
     sync_results.set_defaults(func=command_sync_results)
 
     refresh_titles = subparsers.add_parser("refresh-titles", help="只刷新数据库中已有脚本主数据的短视频标题")
@@ -1205,7 +1476,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_all.add_argument("--run-manager-feishu-url", default=DEFAULT_RUN_MANAGER_FEISHU_URL, help="运行管理表飞书 URL")
     run_all.add_argument("--account-feishu-url", default=DEFAULT_ACCOUNT_FEISHU_URL, help="账号配置飞书 URL")
     run_all.add_argument("--report-feishu-url", default=DEFAULT_REPORT_FEISHU_URL, help="发布追踪表飞书 URL")
-    run_all.add_argument("--manual-queue-feishu-url", default=DEFAULT_MANUAL_QUEUE_FEISHU_URL, help="人工发布清单表飞书 URL")
+    run_all.add_argument("--manual-publish-feishu-url", default=DEFAULT_MANUAL_PUBLISH_FEISHU_URL, help="主动人工发布请求表飞书 URL")
     run_all.add_argument("--product-report-feishu-url", default=DEFAULT_PRODUCT_PUBLISH_REPORT_FEISHU_URL, help="店铺产品发布汇总表飞书 URL，用于排期策略回读")
     run_all.add_argument("--video-dir", default=str(default_video_dir()), help="本地视频目录")
     run_all.add_argument("--product-id", help="只处理指定产品 ID")
@@ -1213,12 +1484,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_all.add_argument("--limit", type=int, help="限制处理数量")
     run_all.add_argument("--mixcut-sync-limit", type=int, default=20, help="每轮最多同步多少条混剪成片到发布池，默认 20")
     run_all.add_argument("--no-sync-mixcut", action="store_true", help="本轮不自动同步混剪成片")
+    run_all.add_argument("--no-sync-manual-publish", action="store_true", help="本轮不处理主动人工发布请求表")
     run_all.add_argument("--title-mode", choices=["heuristic", "llm", "fallback"], default="fallback")
     run_all.add_argument("--llm-route", default="auto", help="标题生成 LLM 线路")
     run_all.add_argument("--cleanup-published-days", type=int, default=60, help="已发布本地视频保留天数，默认 60；传 0 可关闭")
     run_all.add_argument("--max-auto-retries", type=int, default=2, help="失败后最多自动重试次数，默认 2")
-    run_all.add_argument("--manual-status-lookback-days", type=int, default=3, help="排期前回读最近 N 天人工清单状态，默认 3；传 0 可关闭")
-    run_all.add_argument("--publish-mode", choices=["dry-run", "http", "geelark"], default="dry-run")
+    run_all.add_argument("--publish-mode", choices=["dry-run", "http", "geelark", "neobund", "auto"], default="dry-run")
     run_all.add_argument("--publish-api-base-url", default="", help="自动发布 API Base URL")
     run_all.add_argument("--publish-api-token", default="", help="自动发布 API Token")
     run_all.add_argument("--geelark-task-add-endpoint", default="https://openapi.geelark.cn/open/v1/task/add", help="GeeLark task/add 接口")
@@ -1250,6 +1521,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_all.add_argument("--geelark-failure-values", default="failed,error,-1,4,5,7", help="GeeLark 失败状态值，逗号分隔")
     run_all.add_argument("--geelark-published-at-paths", default="", help="GeeLark 返回体发布时间候选路径，逗号分隔")
     run_all.add_argument("--geelark-error-message-paths", default="data.items.0.failDesc,items.0.failDesc,data.failDesc,failDesc,message,error_message,data.message,data.error_message", help="GeeLark 返回体错误信息候选路径，逗号分隔")
+    add_neobund_args(run_all)
     run_all.set_defaults(func=command_run_all)
 
     return parser

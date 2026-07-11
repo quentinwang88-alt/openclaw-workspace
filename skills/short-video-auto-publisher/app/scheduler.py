@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import requests
 
 from app.db import AutoPublishDB, default_video_dir, is_nurture_candidate
+from app.metadata import sanitize_title
 from app.models import AccountConfig
 from app.publishers import BasePublishAdapter, DryRunPublishAdapter
 
@@ -20,6 +21,7 @@ RUN_MANAGER_FIELD_ALIASES: Dict[str, List[str]] = {
     "run_video_status": ["跑视频状态", "状态"],
     "publish_enabled": ["是否发布", "是否自动发布"],
     "video_attachment": ["视频附件", "生成视频"],
+    "short_video_title": ["短视频标题", "视频标题", "发布标题", "人工标题"],
     "video_link": ["视频链接", "视频附件 / 视频链接"],
     "download_status": ["下载状态"],
     "local_file_path": ["本地文件路径"],
@@ -37,6 +39,7 @@ ACCOUNT_FIELD_ALIASES: Dict[str, List[str]] = {
     "account_name": ["账号名称"],
     "store_id": ["店铺ID"],
     "account_status": ["账号状态"],
+    "publish_channel": ["发布渠道", "发布平台", "发布方式", "publish_channel"],
     "publish_time_1": ["发布时间1"],
     "publish_time_2": ["发布时间2"],
     "publish_time_3": ["发布时间3"],
@@ -59,6 +62,38 @@ def normalize_text(raw_value: Any) -> str:
     return str(raw_value).strip()
 
 
+def _choice_text(raw_value: Any) -> str:
+    if isinstance(raw_value, dict):
+        for key in ("text", "name", "value"):
+            text = normalize_text(raw_value.get(key))
+            if text:
+                return text
+        return ""
+    if isinstance(raw_value, list):
+        for item in raw_value:
+            text = _choice_text(item)
+            if text:
+                return text
+        return ""
+    return normalize_text(raw_value)
+
+
+def normalize_publish_channel(raw_value: Any) -> str:
+    text = _choice_text(raw_value)
+    if not text:
+        return "GeeLark"
+    compact = text.strip().lower().replace(" ", "").replace("-", "").replace("_", "")
+    if compact in {"neobund", "neobundai", "neobundai"} or "neobund" in compact:
+        return "NeoBund"
+    if compact in {"geelark", "geelarkcloudphone"} or "geelark" in compact:
+        return "GeeLark"
+    if compact in {"manual", "hand", "human", "人工", "手动", "人工发布", "手动发布"}:
+        return "手动"
+    if compact in {"pause", "paused", "disabled", "disable", "stop", "暂停", "停用", "停止"}:
+        return "暂停"
+    return text
+
+
 def normalize_checkbox(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -67,6 +102,25 @@ def normalize_checkbox(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "y", "是", "已勾选", "勾选", "checked"}
     return False
+
+
+def should_mark_ai_for_geelark(candidate: Any) -> Optional[bool]:
+    """Original/remake videos should be marked as AI-generated in GeeLark."""
+    markers = " ".join(
+        str(getattr(candidate, attr, "") or "").strip().lower()
+        for attr in ("script_source", "publish_purpose", "content_branch")
+    )
+    if "混剪" in markers or "mixcut" in markers:
+        return None
+    return True
+
+
+def is_short_video_remake_candidate(candidate: Any) -> bool:
+    markers = " ".join(
+        str(getattr(candidate, attr, "") or "").strip()
+        for attr in ("script_source", "publish_purpose", "content_branch")
+    )
+    return "短视频复刻" in markers
 
 
 def normalize_int(value: Any, default: int = 0) -> int:
@@ -101,6 +155,7 @@ def sync_accounts(records: Iterable[Any], mapping: Dict[str, Optional[str]], db:
                 account_name=account_name or account_id,
                 store_id=store_id,
                 account_status=normalize_text(fields.get(mapping.get("account_status"))) or "暂停",
+                publish_channel=normalize_publish_channel(fields.get(mapping.get("publish_channel"))),
                 publish_time_1=normalize_text(fields.get(mapping.get("publish_time_1"))),
                 publish_time_2=normalize_text(fields.get(mapping.get("publish_time_2"))),
                 publish_time_3=normalize_text(fields.get(mapping.get("publish_time_3"))),
@@ -132,7 +187,7 @@ def sync_videos(
     download_dir: Optional[Path],
     client: Any,
 ) -> Dict[str, int]:
-    stats = {"synced": 0, "skipped": 0, "download_failed": 0}
+    stats = {"synced": 0, "skipped": 0, "download_failed": 0, "titles_updated": 0}
     base_dir = _ensure_download_dir(download_dir)
 
     for record in records:
@@ -195,6 +250,13 @@ def sync_videos(
             run_video_status=run_status,
             publish_status=normalize_text(fields.get(mapping.get("publish_status"))) or "待排期",
         )
+        manual_title = sanitize_title(fields.get(mapping.get("short_video_title")))
+        if manual_title:
+            stats["titles_updated"] += db.update_short_video_title(
+                canonical_script_key=resolved_canonical_key,
+                short_video_title=manual_title,
+                title_source="run_manager_manual",
+            )
         stats["synced"] += 1
     return stats
 
@@ -282,10 +344,15 @@ def schedule_slots(
         for candidate in candidates:
             if prefer_nurture and has_nurture_candidate and not is_nurture_candidate(candidate):
                 break
+            if db.has_active_script_assignment(candidate.canonical_script_key, exclude_slot_id=int(slot["slot_id"])):
+                continue
             if not is_nurture_candidate(candidate):
                 if db.count_recent_product_for_account(str(slot["account_id"] or ""), candidate.product_id, target_time, hours=24) >= 2:
                     continue
-                if db.has_recent_family_conflict(str(slot["store_id"] or ""), candidate.content_family_key, target_time, hours=48):
+                if (
+                    not is_short_video_remake_candidate(candidate)
+                    and db.has_recent_family_conflict(str(slot["store_id"] or ""), candidate.content_family_key, target_time, hours=48)
+                ):
                     continue
             selected = candidate
             break
@@ -307,6 +374,7 @@ def schedule_slots(
                 product_id="" if is_nurture_candidate(selected) or str(selected.cart_enabled or "").strip() == "否" else selected.product_id,
                 product_title=selected.product_title,
                 ref_video_id=selected.ref_video_id,
+                mark_ai=should_mark_ai_for_geelark(selected),
             )
         except Exception as exc:
             create_failed += 1
@@ -314,15 +382,15 @@ def schedule_slots(
             error_message = str(exc)
             if "phone env not found" in error_message.lower():
                 disabled_accounts.add(account_id)
-                db.disable_account(account_id, reason=f"GeeLark 云手机环境不存在，已暂停账号：{error_message}")
+                db.disable_account(account_id, reason=f"发布账号环境不存在，已暂停账号：{error_message}")
             elif _is_retryable_create_error(error_message):
                 retryable_create_failed += 1
                 disabled_accounts.add(account_id)
-                db.mark_slot_pending_reason(int(slot["slot_id"]), reason=f"创建 GeeLark 定时任务暂时失败，等待重试：{error_message}")
+                db.mark_slot_pending_reason(int(slot["slot_id"]), reason=f"创建自动发布定时任务暂时失败，等待重试：{error_message}")
             else:
-                db.cancel_slot(int(slot["slot_id"]), reason=f"创建 GeeLark 定时任务失败：{error_message}")
+                db.cancel_slot(int(slot["slot_id"]), reason=f"创建自动发布定时任务失败：{error_message}")
             continue
-        db.assign_slot(
+        assigned = db.assign_slot(
             slot_id=int(slot["slot_id"]),
             canonical_script_key=selected.canonical_script_key,
             script_id=selected.script_id,
@@ -331,6 +399,10 @@ def schedule_slots(
             account_name=account_name,
             planned_publish_at=target_time,
         )
+        if not assigned:
+            skipped += 1
+            blocked_by_rules += 1
+            continue
         scheduled += 1
 
     return SchedulingStats(
@@ -371,7 +443,7 @@ def sync_publish_results(
             )
             stats["published"] += 1
         elif status.state == "failed":
-            if scheduled_for + grace > now:
+            if not task_id.startswith("neobund:") and scheduled_for + grace > now:
                 stats["pending"] += 1
                 continue
             db.mark_publish_result(
@@ -385,5 +457,15 @@ def sync_publish_results(
             )
             stats["failed"] += 1
         else:
+            if str(task["publish_task_id"] or "").startswith("neobund:") and str(task["schedule_status"] or "") == "已取消":
+                db.assign_slot(
+                    slot_id=int(task["slot_id"]),
+                    canonical_script_key=str(task["canonical_script_key"] or ""),
+                    script_id=str(task["script_id"]),
+                    publish_task_id=task_id,
+                    account_id=str(task["account_id"] or ""),
+                    account_name=str(task["account_name"] or ""),
+                    planned_publish_at=scheduled_for,
+                )
             stats["pending"] += 1
     return stats

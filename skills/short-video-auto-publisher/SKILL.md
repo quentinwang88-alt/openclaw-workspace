@@ -4,8 +4,8 @@ description: |
   短视频自动发布 skill。当用户说“跑一遍短视频自动发布”“执行短视频自动发布”“视频自动发布”“自动发布短视频”“GeeLark排期发布”时，优先匹配此 skill。
   基于现有飞书生产脚本表、短视频自动脚本运行管理表和账号表，
   同步脚本主数据、回收并下载已生成视频、按账号固定发布时间槽做未来 48 小时增量补排，
-  再调用 GeeLark 创建定时发布任务并同步发布结果。
-  适用于“跑一遍短视频自动发布”“同步视频并排期”“刷新标题并纠正当地语言标题”“查询 GeeLark 发布结果”等请求。
+  再调用 GeeLark 或 NeoBund 创建定时发布任务并同步发布结果。
+  适用于“跑一遍短视频自动发布”“同步视频并排期”“刷新标题并纠正当地语言标题”“查询 GeeLark/NeoBund 发布结果”等请求。
   不用于达人视频宫格图、达人打标、Kalodata 拉数、建联话术生成。
 ---
 
@@ -20,6 +20,7 @@ description: |
 - 视频自动发布
 - 自动发布短视频
 - GeeLark 自动发布
+- NeoBund 自动发布
 - 同步视频并排期
 - 查询短视频发布结果
 
@@ -41,8 +42,8 @@ description: |
 5. 下载视频到本地目录，写入自动发布数据库
 6. 同步账号配置，并按账号固定发布时间生成未来 48 小时槽位
 7. 根据两条硬规则做增量补排
-8. 调 GeeLark 创建定时发布任务
-9. 查询 GeeLark 任务状态并回写数据库
+8. 调 GeeLark 或 NeoBund 创建定时发布任务
+9. 查询发布任务状态并回写数据库
 
 ## 默认入口
 
@@ -50,7 +51,7 @@ description: |
 
 ```bash
 python3 /Users/likeu3/.openclaw/workspace/skills/short-video-auto-publisher/run_pipeline.py run-all \
-  --publish-mode geelark
+  --publish-mode auto
 ```
 
 常用分步命令：
@@ -59,8 +60,24 @@ python3 /Users/likeu3/.openclaw/workspace/skills/short-video-auto-publisher/run_
 python3 /Users/likeu3/.openclaw/workspace/skills/short-video-auto-publisher/run_pipeline.py sync-script-db
 python3 /Users/likeu3/.openclaw/workspace/skills/short-video-auto-publisher/run_pipeline.py sync-accounts
 python3 /Users/likeu3/.openclaw/workspace/skills/short-video-auto-publisher/run_pipeline.py sync-videos
+python3 /Users/likeu3/.openclaw/workspace/skills/short-video-auto-publisher/run_pipeline.py schedule --publish-mode auto
+python3 /Users/likeu3/.openclaw/workspace/skills/short-video-auto-publisher/run_pipeline.py sync-results --publish-mode auto
+```
+
+NeoBund 灰度通道：
+
+```bash
+python3 /Users/likeu3/.openclaw/workspace/skills/short-video-auto-publisher/run_pipeline.py schedule --publish-mode auto
+python3 /Users/likeu3/.openclaw/workspace/skills/short-video-auto-publisher/run_pipeline.py sync-results --publish-mode auto
+```
+
+强制单平台调试：
+
+```bash
 python3 /Users/likeu3/.openclaw/workspace/skills/short-video-auto-publisher/run_pipeline.py schedule --publish-mode geelark
+python3 /Users/likeu3/.openclaw/workspace/skills/short-video-auto-publisher/run_pipeline.py schedule --publish-mode neobund
 python3 /Users/likeu3/.openclaw/workspace/skills/short-video-auto-publisher/run_pipeline.py sync-results --publish-mode geelark
+python3 /Users/likeu3/.openclaw/workspace/skills/short-video-auto-publisher/run_pipeline.py sync-results --publish-mode neobund
 ```
 
 ## 执行约束
@@ -132,6 +149,35 @@ python3 /Users/likeu3/.openclaw/workspace/skills/short-video-auto-publisher/run_
    - `/Users/likeu3/.openclaw/shared/data/short_video_auto_publisher_config.json`
 
 因此在 OpenClaw 中执行本 skill 时，不需要再额外四处搜索 GeeLark token；默认配置存在时可直接执行。
+
+## NeoBund
+
+NeoBund 第一阶段是并行发布通道，不替换 GeeLark，且只对接 `Shoppable Contents` 带货视频；`Organic Contents` 非带货视频需要单独通道。共存期推荐使用 `--publish-mode auto`：账号表 `发布渠道` 为 `NeoBund` 的账号走 NeoBund，其它账号默认走 GeeLark；历史任务按任务 ID 前缀回查，`neobund:<taskId>` 走 NeoBund，旧 GeeLark 任务仍走 GeeLark。
+
+账号表里的 `账号ID` 可以填 NeoBund `authId`，也可以填页面里显示的 `username`，发布前会自动解析成 `authId`。如果飞书 API 没有建字段权限，需要在账号表页面手动新增 `发布渠道` 字段，并给 NeoBund 账号填 `NeoBund`；临时过渡也可以在本地配置里加覆盖：
+
+```json
+{
+  "neobund_access_token": "...",
+  "neobund_cookie": "...",
+  "account_publish_channel_overrides": {
+    "user97605042600660": "NeoBund"
+  },
+  "neobund_account_id_map": {
+    "old-account-id": "neobund-auth-id"
+  }
+}
+```
+
+探针命令只查询账号/商品或上传视频，不创建真实发布任务：
+
+```bash
+python3 /Users/likeu3/.openclaw/workspace/skills/short-video-auto-publisher/scripts/neobund_probe.py
+python3 /Users/likeu3/.openclaw/workspace/skills/short-video-auto-publisher/scripts/neobund_probe.py --account-id <authId> --list-products --product-id <ttProductId>
+python3 /Users/likeu3/.openclaw/workspace/skills/short-video-auto-publisher/scripts/neobund_probe.py --upload-only --video-path /path/to/video.mp4
+```
+
+NeoBund 创建的任务 ID 会写成 `neobund:<taskId>`，用于和历史 GeeLark 任务区分。默认 `Publish Directly`；需要预检时再加 `--neobund-precheck`。
 
 ## 推荐触发说法
 

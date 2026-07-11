@@ -17,6 +17,7 @@ if str(SKILL_DIR) not in sys.path:
 
 from app.db import AutoPublishDB
 from app.models import AccountConfig, ScriptMetadata
+from app.notifications import format_product_publish_weekly_report
 from app.reporting import REPORT_FIELDS, ensure_report_fields, sync_product_publish_report_table, sync_publish_report_table
 
 
@@ -136,8 +137,25 @@ class ReportingTest(unittest.TestCase):
         self.assertEqual(client.updated_records[0]["record_id"], "rpt-1")
         self.assertEqual(client.updated_records[0]["fields"]["内部脚本键"], "rec-001:S1")
         self.assertEqual(client.updated_records[0]["fields"]["发布任务ID"], "task-001")
+        self.assertEqual(client.updated_records[0]["fields"]["实际发布渠道"], "GeeLark")
         self.assertEqual(client.updated_records[0]["fields"]["排期状态"], "已排期")
         self.assertEqual(client.updated_records[0]["fields"]["计划发布时间"], "2026-04-13 12:00:00")
+
+    def test_product_publish_report_includes_scheduled_unpublished_count(self) -> None:
+        client = DummyClient(fields=[])
+
+        stats = sync_product_publish_report_table(self.db, client, reference_date="2026-04-14", upload_images=False)
+
+        self.assertEqual(stats["created_records"], 2)
+        rows = [item["fields"] for item in client.created_records]
+        store_row = next(row for row in rows if row["汇总类型"] == "店铺汇总")
+        product_row = next(row for row in rows if row["汇总唯一键"] == "SHOP-01|P1001")
+        self.assertEqual(store_row["产品待发布视频数量"], 0)
+        self.assertEqual(store_row["未排期可用视频数量"], 0)
+        self.assertEqual(store_row["已排期未发布视频数量"], 1)
+        self.assertEqual(product_row["产品待发布视频数量"], 0)
+        self.assertEqual(product_row["未排期可用视频数量"], 0)
+        self.assertEqual(product_row["已排期未发布视频数量"], 1)
 
     def test_product_publish_report_creates_store_summary_and_product_detail(self) -> None:
         self.db.mark_publish_result(
@@ -162,9 +180,13 @@ class ReportingTest(unittest.TestCase):
         self.assertEqual(store_rows[0]["店铺ID"], "SHOP-01")
         self.assertEqual(store_rows[0]["产品ID"], "")
         self.assertEqual(store_rows[0]["产品待发布视频数量"], 0)
+        self.assertEqual(store_rows[0]["未排期可用视频数量"], 0)
+        self.assertEqual(store_rows[0]["已排期未发布视频数量"], 0)
         self.assertEqual(store_rows[0]["本周已发布视频数"], 1)
         self.assertEqual(product_rows[0]["汇总唯一键"], "SHOP-01|P1001")
         self.assertEqual(product_rows[0]["产品待发布视频数量"], 0)
+        self.assertEqual(product_rows[0]["未排期可用视频数量"], 0)
+        self.assertEqual(product_rows[0]["已排期未发布视频数量"], 0)
         self.assertEqual(product_rows[0]["本周已发布视频数"], 1)
 
     def test_product_publish_report_includes_pending_video_count(self) -> None:
@@ -216,8 +238,131 @@ class ReportingTest(unittest.TestCase):
         store_row = next(row for row in rows if row["汇总类型"] == "店铺汇总")
         pending_product_row = next(row for row in rows if row["汇总唯一键"] == "SHOP-01|P2002")
         self.assertEqual(store_row["产品待发布视频数量"], 1)
+        self.assertEqual(store_row["未排期可用视频数量"], 1)
+        self.assertEqual(store_row["已排期未发布视频数量"], 0)
         self.assertEqual(pending_product_row["产品待发布视频数量"], 1)
+        self.assertEqual(pending_product_row["未排期可用视频数量"], 1)
+        self.assertEqual(pending_product_row["已排期未发布视频数量"], 0)
         self.assertEqual(pending_product_row["本周已发布视频数"], 0)
+
+    def test_product_publish_report_breaks_out_neobund_channel(self) -> None:
+        self.db.mark_publish_result(
+            script_id="001_M1_M",
+            publish_task_id="task-001",
+            schedule_status="已发布",
+            publish_status="已发布",
+            publish_result="发布成功",
+            published_at="2026-04-13 12:00:00",
+        )
+        self.db.upsert_account_configs(
+            [
+                AccountConfig(
+                    account_id="acc-neo",
+                    account_name="Neo账号",
+                    store_id="SHOP-01",
+                    account_status="可用",
+                    publish_time_1="13:00",
+                    publish_time_2="",
+                    publish_time_3="",
+                    publish_channel="NeoBund",
+                )
+            ]
+        )
+        self.db.upsert_script_metadata(
+            [
+                ScriptMetadata(
+                    script_id="002_M1_M",
+                    source_record_id="rec-002",
+                    script_slot="S1",
+                    task_no="002",
+                    store_id="SHOP-01",
+                    product_id="P2002",
+                    parent_slot="M1",
+                    direction_label="日常轻分享流",
+                    variant_strength="母版",
+                    target_country="Thailand",
+                    product_type="耳环",
+                    content_family_key="P2002_M1",
+                    script_text="script",
+                    short_video_title="title-002",
+                    title_source="test",
+                )
+            ]
+        )
+        self.db.upsert_video_asset(
+            script_id="002_M1_M",
+            run_manager_record_id="run-002",
+            video_source_type="link",
+            video_source_value="https://example.com/video2.mp4",
+            local_file_path="/tmp/002_M1_M.mp4",
+            download_status="下载成功",
+            run_video_status="已提交",
+            publish_status="已排期",
+        )
+        self.db.generate_future_slots(datetime(2026, 4, 13, 10, 0, 0), 24)
+        neo_slot = next(
+            row
+            for row in self.db.list_pending_slots(datetime(2026, 4, 13, 10, 0, 0), 24)
+            if row["account_id"] == "acc-neo"
+        )
+        self.db.assign_slot(
+            slot_id=int(neo_slot["slot_id"]),
+            script_id="002_M1_M",
+            publish_task_id="neobund:002",
+            account_id="acc-neo",
+            account_name="Neo账号",
+            planned_publish_at=datetime(2026, 4, 13, 13, 0, 0),
+        )
+        self.db.mark_publish_result(
+            script_id="002_M1_M",
+            publish_task_id="neobund:002",
+            schedule_status="已发布",
+            publish_status="已发布",
+            publish_result="发布成功",
+            published_at="2026-04-13 13:00:00",
+        )
+        client = DummyClient(fields=[])
+
+        stats = sync_product_publish_report_table(self.db, client, reference_date="2026-04-14", upload_images=False)
+
+        self.assertEqual(stats["created_records"], 3)
+        rows = [item["fields"] for item in client.created_records]
+        store_row = next(row for row in rows if row["汇总类型"] == "店铺汇总")
+        neobund_row = next(row for row in rows if row["汇总唯一键"] == "SHOP-01|P2002")
+        self.assertEqual(store_row["本周GeeLark已发布视频数"], 1)
+        self.assertEqual(store_row["本周NeoBund已发布视频数"], 1)
+        self.assertEqual(neobund_row["本周NeoBund已发布视频数"], 1)
+
+        message = format_product_publish_weekly_report(
+            [
+                {
+                    "store_id": "SHOP-01",
+                    "product_id": "P1001",
+                    "this_week_published": 1,
+                    "last_week_published": 0,
+                    "current_month_published": 1,
+                    "this_week_geelark_published": 1,
+                    "this_week_neobund_published": 0,
+                },
+                {
+                    "store_id": "SHOP-01",
+                    "product_id": "P2002",
+                    "this_week_published": 1,
+                    "last_week_published": 0,
+                    "current_month_published": 1,
+                    "this_week_geelark_published": 0,
+                    "this_week_neobund_published": 1,
+                },
+            ],
+            periods={
+                "this_week_label": "2026-04-13 ~ 2026-04-14",
+                "last_week_label": "",
+                "current_month_label": "",
+                "previous_month_label": "",
+            },
+        )
+        self.assertIn("本周渠道：GeeLark 1 条  |  NeoBund 1 条", message)
+        self.assertIn("P2002: 1（NeoBund 1）", message)
 
     def test_product_publish_report_syncs_schedule_preferences_from_existing_rows(self) -> None:
         self.db.mark_publish_result(

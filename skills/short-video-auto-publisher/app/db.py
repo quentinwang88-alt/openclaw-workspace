@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from datetime import datetime, time, timedelta
@@ -56,6 +57,34 @@ class AutoPublishDB:
         conn.row_factory = sqlite3.Row
         return conn
 
+    def is_mixcut_scheduling_paused(self) -> bool:
+        explicit = str(os.environ.get("SHORT_VIDEO_AUTO_PUBLISH_PAUSE_MIXCUT", "") or "").strip().lower()
+        if explicit:
+            return explicit in {"1", "true", "yes", "y", "是", "暂停", "paused"}
+
+        config_path = Path(
+            os.environ.get(
+                "SHORT_VIDEO_AUTO_PUBLISH_CONFIG_PATH",
+                "/Users/likeu3/.openclaw/shared/data/short_video_auto_publisher_config.json",
+            )
+        )
+        default_path = default_db_path().resolve(strict=False)
+        if self.db_path.resolve(strict=False) != default_path and not os.environ.get("SHORT_VIDEO_AUTO_PUBLISH_CONFIG_PATH"):
+            return False
+        try:
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        if not isinstance(payload, dict):
+            return False
+        for key in ("mixcut_scheduling_paused", "pause_mixcut_scheduling", "disable_mixcut_scheduling"):
+            value = payload.get(key)
+            if isinstance(value, bool):
+                return value
+            if str(value or "").strip().lower() in {"1", "true", "yes", "y", "是", "暂停", "paused"}:
+                return True
+        return False
+
     @staticmethod
     def _now_text() -> str:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -84,10 +113,16 @@ class AutoPublishDB:
             self._ensure_column(conn, "account_configs", "nurture_enabled", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "account_configs", "nurture_daily_count", "INTEGER NOT NULL DEFAULT 2")
             self._ensure_column(conn, "account_configs", "nurture_only", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "account_configs", "publish_channel", "TEXT NOT NULL DEFAULT 'GeeLark'")
             self._ensure_column(conn, "publish_slots", "error_message", "TEXT")
+            self._ensure_column(conn, "publish_slots", "slot_source", "TEXT NOT NULL DEFAULT 'auto'")
+            self._ensure_column(conn, "publish_slots", "manual_request_record_id", "TEXT")
+            self._ensure_column(conn, "publish_slots", "title_override", "TEXT")
+            self._ensure_column(conn, "publish_slots", "channel_override", "TEXT")
             self._ensure_disabled_products_table(conn)
             self._ensure_product_schedule_preferences_table(conn)
             self._ensure_notification_log_table(conn)
+            self._ensure_manual_publish_requests_table(conn)
             self._ensure_indexes(conn)
 
     def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_def: str) -> None:
@@ -154,6 +189,7 @@ class AutoPublishDB:
                 account_name TEXT NOT NULL,
                 store_id TEXT NOT NULL,
                 account_status TEXT NOT NULL,
+                publish_channel TEXT NOT NULL DEFAULT 'GeeLark',
                 publish_time_1 TEXT,
                 publish_time_2 TEXT,
                 publish_time_3 TEXT,
@@ -175,6 +211,10 @@ class AutoPublishDB:
                 schedule_status TEXT NOT NULL DEFAULT '待排期',
                 publish_task_id TEXT,
                 error_message TEXT,
+                slot_source TEXT NOT NULL DEFAULT 'auto',
+                manual_request_record_id TEXT,
+                title_override TEXT,
+                channel_override TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE(account_id, scheduled_for)
@@ -184,6 +224,7 @@ class AutoPublishDB:
         self._ensure_disabled_products_table(conn)
         self._ensure_product_schedule_preferences_table(conn)
         self._ensure_notification_log_table(conn)
+        self._ensure_manual_publish_requests_table(conn)
         self._ensure_indexes(conn)
 
     def _ensure_disabled_products_table(self, conn: sqlite3.Connection) -> None:
@@ -227,6 +268,30 @@ class AutoPublishDB:
             """
         )
 
+    def _ensure_manual_publish_requests_table(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS manual_publish_requests (
+                record_id TEXT PRIMARY KEY,
+                canonical_script_key TEXT,
+                script_id TEXT,
+                store_id TEXT,
+                account_id TEXT,
+                account_name TEXT,
+                scheduled_for TEXT,
+                publish_channel TEXT,
+                product_id TEXT,
+                short_video_title TEXT,
+                local_file_path TEXT,
+                publish_task_id TEXT,
+                request_status TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
     def _ensure_indexes(self, conn: sqlite3.Connection) -> None:
         conn.executescript(
             """
@@ -256,6 +321,12 @@ class AutoPublishDB:
 
             CREATE INDEX IF NOT EXISTS idx_publish_slots_task_id
             ON publish_slots(publish_task_id);
+
+            CREATE INDEX IF NOT EXISTS idx_publish_slots_manual_request
+            ON publish_slots(manual_request_record_id);
+
+            CREATE INDEX IF NOT EXISTS idx_manual_publish_requests_status
+            ON manual_publish_requests(request_status, scheduled_for);
 
             CREATE INDEX IF NOT EXISTS idx_product_schedule_preferences_strategy
             ON product_schedule_preferences(schedule_strategy, store_id, product_id);
@@ -618,6 +689,295 @@ class AutoPublishDB:
                 ),
             )
 
+    def update_short_video_title(
+        self,
+        *,
+        canonical_script_key: str,
+        short_video_title: str,
+        title_source: str = "run_manager_manual",
+    ) -> int:
+        resolved_key = self._resolve_canonical_for_write(canonical_script_key=canonical_script_key)
+        title = str(short_video_title or "").strip()
+        if not resolved_key or not title:
+            return 0
+        now = self._now_text()
+        with self._connect() as conn:
+            return int(
+                conn.execute(
+                    """
+                    UPDATE script_metadata
+                    SET short_video_title = ?,
+                        title_source = ?,
+                        updated_at = ?
+                    WHERE canonical_script_key = ?
+                    """,
+                    (title, str(title_source or "run_manager_manual").strip(), now, resolved_key),
+                ).rowcount
+                or 0
+            )
+
+    def upsert_manual_publish_request(
+        self,
+        *,
+        record_id: str,
+        canonical_script_key: str,
+        script_id: str,
+        store_id: str,
+        account_id: str,
+        account_name: str,
+        scheduled_for: str,
+        publish_channel: str,
+        product_id: str,
+        short_video_title: str,
+        local_file_path: str,
+        publish_task_id: str = "",
+        request_status: str = "待创建",
+        error_message: str = "",
+    ) -> None:
+        now = self._now_text()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO manual_publish_requests (
+                    record_id, canonical_script_key, script_id, store_id, account_id, account_name,
+                    scheduled_for, publish_channel, product_id, short_video_title, local_file_path,
+                    publish_task_id, request_status, error_message, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(record_id) DO UPDATE SET
+                    canonical_script_key = excluded.canonical_script_key,
+                    script_id = excluded.script_id,
+                    store_id = excluded.store_id,
+                    account_id = excluded.account_id,
+                    account_name = excluded.account_name,
+                    scheduled_for = excluded.scheduled_for,
+                    publish_channel = excluded.publish_channel,
+                    product_id = excluded.product_id,
+                    short_video_title = excluded.short_video_title,
+                    local_file_path = excluded.local_file_path,
+                    publish_task_id = COALESCE(NULLIF(excluded.publish_task_id, ''), manual_publish_requests.publish_task_id),
+                    request_status = excluded.request_status,
+                    error_message = excluded.error_message,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    record_id,
+                    canonical_script_key,
+                    script_id,
+                    store_id,
+                    account_id,
+                    account_name,
+                    scheduled_for,
+                    publish_channel,
+                    product_id,
+                    short_video_title,
+                    local_file_path,
+                    publish_task_id,
+                    request_status,
+                    error_message,
+                    now,
+                    now,
+                ),
+            )
+
+    def mark_manual_publish_request(
+        self,
+        *,
+        record_id: str,
+        request_status: str,
+        publish_task_id: str = "",
+        error_message: str = "",
+    ) -> None:
+        now = self._now_text()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE manual_publish_requests
+                SET request_status = ?,
+                    publish_task_id = COALESCE(NULLIF(?, ''), publish_task_id),
+                    error_message = ?,
+                    updated_at = ?
+                WHERE record_id = ?
+                """,
+                (request_status, publish_task_id, error_message, now, record_id),
+            )
+
+    def get_account_config_by_name(self, account_name: str) -> Optional[sqlite3.Row]:
+        text = str(account_name or "").strip()
+        if not text:
+            return None
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM account_configs
+                WHERE account_name = ?
+                ORDER BY account_status = '可用' DESC, account_id ASC
+                LIMIT 2
+                """,
+                (text,),
+            ).fetchall()
+        if len(rows) == 1:
+            return rows[0]
+        return None
+
+    def get_slot_for_account_time(self, *, account_id: str, scheduled_for: str) -> Optional[sqlite3.Row]:
+        with self._connect() as conn:
+            return conn.execute(
+                """
+                SELECT *
+                FROM publish_slots
+                WHERE account_id = ?
+                  AND scheduled_for = ?
+                LIMIT 1
+                """,
+                (str(account_id or "").strip(), str(scheduled_for or "").strip()),
+            ).fetchone()
+
+    def get_manual_publish_slot(self, record_id: str) -> Optional[sqlite3.Row]:
+        with self._connect() as conn:
+            return conn.execute(
+                """
+                SELECT *
+                FROM publish_slots
+                WHERE manual_request_record_id = ?
+                ORDER BY updated_at DESC, slot_id DESC
+                LIMIT 1
+                """,
+                (str(record_id or "").strip(),),
+            ).fetchone()
+
+    def assign_manual_slot(
+        self,
+        *,
+        record_id: str,
+        store_id: str,
+        account_id: str,
+        account_name: str,
+        scheduled_for: str,
+        canonical_script_key: str,
+        script_id: str,
+        publish_task_id: str,
+        title_override: str,
+        channel_override: str,
+    ) -> Dict[str, Any]:
+        now = self._now_text()
+        with self._connect() as conn:
+            existing = conn.execute(
+                """
+                SELECT *
+                FROM publish_slots
+                WHERE account_id = ?
+                  AND scheduled_for = ?
+                LIMIT 1
+                """,
+                (account_id, scheduled_for),
+            ).fetchone()
+            if existing is not None:
+                existing_task_id = str(existing["publish_task_id"] or "").strip()
+                existing_status = str(existing["schedule_status"] or "").strip()
+                existing_record_id = str(existing["manual_request_record_id"] or "").strip()
+                if existing_status == "已发布" or (
+                    existing_status == "已排期"
+                    and existing_task_id
+                    and existing_record_id != str(record_id or "").strip()
+                ):
+                    return {
+                        "assigned": 0,
+                        "conflict": 1,
+                        "error": (
+                            "已有远端发布任务冲突："
+                            f"slot_id={existing['slot_id']}，"
+                            f"任务ID={existing_task_id or '-'}，"
+                            f"状态={existing_status}"
+                        ),
+                    }
+                conn.execute(
+                    """
+                    UPDATE publish_slots
+                    SET store_id = ?,
+                        account_name = ?,
+                        canonical_script_key = ?,
+                        script_id = ?,
+                        schedule_status = '已排期',
+                        publish_task_id = ?,
+                        error_message = NULL,
+                        slot_source = 'manual',
+                        manual_request_record_id = ?,
+                        title_override = ?,
+                        channel_override = ?,
+                        updated_at = ?
+                    WHERE slot_id = ?
+                    """,
+                    (
+                        store_id,
+                        account_name,
+                        canonical_script_key,
+                        script_id,
+                        publish_task_id,
+                        record_id,
+                        title_override,
+                        channel_override,
+                        now,
+                        int(existing["slot_id"]),
+                    ),
+                )
+                slot_id = int(existing["slot_id"])
+            else:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO publish_slots (
+                        store_id, account_id, account_name, scheduled_for,
+                        canonical_script_key, script_id, schedule_status, publish_task_id,
+                        error_message, slot_source, manual_request_record_id, title_override, channel_override,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, '已排期', ?, NULL, 'manual', ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        store_id,
+                        account_id,
+                        account_name,
+                        scheduled_for,
+                        canonical_script_key,
+                        script_id,
+                        publish_task_id,
+                        record_id,
+                        title_override,
+                        channel_override,
+                        now,
+                        now,
+                    ),
+                )
+                slot_id = int(cursor.lastrowid)
+
+            conn.execute(
+                """
+                UPDATE video_assets
+                SET publish_status = '已排期',
+                    account_id = ?,
+                    account_name = ?,
+                    planned_publish_at = ?,
+                    published_at = NULL,
+                    publish_task_id = ?,
+                    publish_result = NULL,
+                    error_message = NULL,
+                    updated_at = ?
+                WHERE canonical_script_key = ?
+                """,
+                (account_id, account_name, scheduled_for, publish_task_id, now, canonical_script_key),
+            )
+            conn.execute(
+                """
+                UPDATE manual_publish_requests
+                SET publish_task_id = ?,
+                    request_status = '已创建',
+                    error_message = '',
+                    updated_at = ?
+                WHERE record_id = ?
+                """,
+                (publish_task_id, now, record_id),
+            )
+        return {"assigned": 1, "conflict": 0, "slot_id": slot_id}
+
     def disable_product(self, product_id: str, reason: str = "") -> Dict[str, int]:
         product = str(product_id or "").strip()
         if not product:
@@ -932,13 +1292,14 @@ class AutoPublishDB:
                 """
                 INSERT INTO account_configs (
                     account_id, account_name, store_id, account_status,
-                    publish_time_1, publish_time_2, publish_time_3,
+                    publish_channel, publish_time_1, publish_time_2, publish_time_3,
                     nurture_enabled, nurture_daily_count, nurture_only, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(account_id) DO UPDATE SET
                     account_name = excluded.account_name,
                     store_id = excluded.store_id,
                     account_status = excluded.account_status,
+                    publish_channel = excluded.publish_channel,
                     publish_time_1 = excluded.publish_time_1,
                     publish_time_2 = excluded.publish_time_2,
                     publish_time_3 = excluded.publish_time_3,
@@ -953,6 +1314,7 @@ class AutoPublishDB:
                         item.account_name,
                         item.store_id,
                         item.account_status,
+                        item.publish_channel,
                         item.publish_time_1,
                         item.publish_time_2,
                         item.publish_time_3,
@@ -1027,6 +1389,7 @@ class AutoPublishDB:
                 SELECT account_id, account_name, store_id, publish_time_1, publish_time_2, publish_time_3
                 FROM account_configs
                 WHERE account_status = '可用'
+                  AND COALESCE(publish_channel, 'GeeLark') NOT IN ('手动', '暂停')
                 """
             ).fetchall()
             for account in accounts:
@@ -1082,19 +1445,21 @@ class AutoPublishDB:
         with self._connect() as conn:
             return conn.execute(
                 """
-                SELECT ps.*
+                SELECT ps.*, ac.publish_channel AS publish_channel
                 FROM publish_slots ps
                 INNER JOIN account_configs ac ON ac.account_id = ps.account_id
                 WHERE ps.scheduled_for >= ?
                   AND ps.scheduled_for <= ?
                   AND ps.schedule_status = '待排期'
                   AND ac.account_status = '可用'
+                  AND COALESCE(ac.publish_channel, 'GeeLark') NOT IN ('手动', '暂停')
                 ORDER BY ps.scheduled_for ASC, ps.account_id ASC
                 """,
                 (now.strftime("%Y-%m-%d %H:%M:%S"), end_at.strftime("%Y-%m-%d %H:%M:%S")),
             ).fetchall()
 
     def list_ready_candidates(self, store_id: str) -> List[PublishCandidate]:
+        pause_mixcut = 1 if self.is_mixcut_scheduling_paused() else 0
         with self._connect() as conn:
             rows = conn.execute(
                 """
@@ -1114,6 +1479,16 @@ class AutoPublishDB:
                   AND va.download_status = '下载成功'
                   AND va.publish_status = '待排期'
                   AND COALESCE(psp.schedule_strategy, '普通') <> '暂停'
+                  AND NOT (
+                      ? = 1
+                      AND (
+                          COALESCE(sm.script_source, '') LIKE '%混剪%'
+                          OR COALESCE(sm.publish_purpose, '') LIKE '%混剪%'
+                          OR COALESCE(sm.content_branch, '') LIKE '%混剪%'
+                          OR sm.canonical_script_key LIKE 'mixcut:%'
+                          OR COALESCE(va.video_source_type, '') = 'mixcut_output'
+                      )
+                  )
                   AND NOT EXISTS (
                       SELECT 1
                       FROM publish_slots published
@@ -1153,7 +1528,7 @@ class AutoPublishDB:
                          sm.script_id ASC,
                          sm.canonical_script_key ASC
                 """,
-                (store_id,),
+                (store_id, pause_mixcut),
             ).fetchall()
         return [
             PublishCandidate(
@@ -1186,6 +1561,21 @@ class AutoPublishDB:
                 "SELECT * FROM account_configs WHERE account_id = ?",
                 (account_id,),
             ).fetchone()
+
+    def list_account_publish_channels(self) -> Dict[str, str]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT account_id, publish_channel
+                FROM account_configs
+                WHERE COALESCE(account_id, '') <> ''
+                """
+            ).fetchall()
+        return {
+            str(row["account_id"] or "").strip(): str(row["publish_channel"] or "").strip()
+            for row in rows
+            if str(row["account_id"] or "").strip()
+        }
 
     def count_scheduled_nurture_for_account_day(self, account_id: str, target_time: datetime) -> int:
         day_start = datetime.combine(target_time.date(), time.min).strftime("%Y-%m-%d %H:%M:%S")
@@ -1299,6 +1689,33 @@ class AutoPublishDB:
             ).fetchone()
         return row is not None
 
+    def get_active_script_assignment(self, canonical_script_key: str, *, exclude_slot_id: int = 0) -> Optional[sqlite3.Row]:
+        resolved_key = self._resolve_canonical_for_write(canonical_script_key=canonical_script_key)
+        if not resolved_key:
+            return None
+        with self._connect() as conn:
+            return conn.execute(
+                """
+                SELECT slot_id, account_id, account_name, scheduled_for, schedule_status, publish_task_id
+                FROM publish_slots
+                WHERE canonical_script_key = ?
+                  AND (
+                      schedule_status = '已发布'
+                      OR (
+                          schedule_status = '已排期'
+                          AND COALESCE(publish_task_id, '') <> ''
+                      )
+                  )
+                  AND (? <= 0 OR slot_id <> ?)
+                ORDER BY scheduled_for ASC, slot_id ASC
+                LIMIT 1
+                """,
+                (resolved_key, int(exclude_slot_id or 0), int(exclude_slot_id or 0)),
+            ).fetchone()
+
+    def has_active_script_assignment(self, canonical_script_key: str, *, exclude_slot_id: int = 0) -> bool:
+        return self.get_active_script_assignment(canonical_script_key, exclude_slot_id=exclude_slot_id) is not None
+
     def assign_slot(
         self,
         *,
@@ -1309,7 +1726,8 @@ class AutoPublishDB:
         account_name: str,
         planned_publish_at: datetime,
         canonical_script_key: str = "",
-    ) -> None:
+        allow_duplicate: bool = False,
+    ) -> bool:
         now = self._now_text()
         planned_text = planned_publish_at.strftime("%Y-%m-%d %H:%M:%S")
         resolved_key = self._resolve_canonical_for_write(
@@ -1317,6 +1735,43 @@ class AutoPublishDB:
             script_id=script_id,
         )
         with self._connect() as conn:
+            if resolved_key and not allow_duplicate:
+                duplicate = conn.execute(
+                    """
+                    SELECT slot_id, account_id, account_name, scheduled_for, schedule_status, publish_task_id
+                    FROM publish_slots
+                    WHERE canonical_script_key = ?
+                      AND (
+                          schedule_status = '已发布'
+                          OR (
+                              schedule_status = '已排期'
+                              AND COALESCE(publish_task_id, '') <> ''
+                          )
+                      )
+                      AND slot_id <> ?
+                    ORDER BY scheduled_for ASC, slot_id ASC
+                    LIMIT 1
+                    """,
+                    (resolved_key, int(slot_id)),
+                ).fetchone()
+                if duplicate:
+                    reason = (
+                        "内部脚本键已被其他发布槽位占用，等待重新选择候选："
+                        f"slot_id={duplicate['slot_id']}，"
+                        f"账号={duplicate['account_name'] or duplicate['account_id']}，"
+                        f"时间={duplicate['scheduled_for']}"
+                    )
+                    conn.execute(
+                        """
+                        UPDATE publish_slots
+                        SET error_message = ?,
+                            updated_at = ?
+                        WHERE slot_id = ?
+                          AND schedule_status = '待排期'
+                        """,
+                        (reason, now, slot_id),
+                    )
+                    return False
             conn.execute(
                 """
                 UPDATE publish_slots
@@ -1336,6 +1791,7 @@ class AutoPublishDB:
                 """,
                 (script_id, account_id, account_name, planned_text, publish_task_id, now, resolved_key),
             )
+        return True
 
     def cancel_slot(self, slot_id: int, reason: str = "") -> int:
         now = self._now_text()
@@ -1471,11 +1927,14 @@ class AutoPublishDB:
             return conn.execute(
                 """
                 SELECT ps.slot_id, ps.publish_task_id, ps.scheduled_for, ps.account_id, ps.account_name,
+                       ps.schedule_status,
                        ps.store_id, ps.canonical_script_key, ps.script_id, va.local_file_path,
-                       sm.short_video_title, sm.product_id, sm.content_family_key
+                       sm.short_video_title, sm.product_id, sm.content_family_key,
+                       COALESCE(ac.publish_channel, '') AS publish_channel
                 FROM publish_slots ps
                 INNER JOIN video_assets va ON va.canonical_script_key = ps.canonical_script_key
                 INNER JOIN script_metadata sm ON sm.canonical_script_key = ps.canonical_script_key
+                LEFT JOIN account_configs ac ON ac.account_id = ps.account_id
                 WHERE (
                     ps.schedule_status = '已排期'
                     OR (
@@ -1483,6 +1942,10 @@ class AutoPublishDB:
                         AND COALESCE(ps.error_message, '') LIKE '%超过自动重试上限%'
                         AND COALESCE(ps.publish_task_id, '') <> ''
                         AND ps.scheduled_for <= ?
+                    )
+                    OR (
+                        ps.schedule_status = '已取消'
+                        AND COALESCE(ps.publish_task_id, '') LIKE 'neobund:%'
                     )
                 )
                 ORDER BY ps.scheduled_for ASC
@@ -1595,6 +2058,7 @@ class AutoPublishDB:
                        va.publish_task_id,
                        va.publish_result,
                        va.error_message,
+                       COALESCE(ac.publish_channel, '') AS publish_channel,
                        ps.schedule_status AS latest_schedule_status,
                        ps.scheduled_for AS latest_slot_scheduled_for,
                        ps.updated_at AS slot_updated_at,
@@ -1609,6 +2073,8 @@ class AutoPublishDB:
                     ORDER BY COALESCE(ps2.updated_at, ps2.created_at) DESC, ps2.slot_id DESC
                     LIMIT 1
                 )
+                LEFT JOIN account_configs ac
+                    ON ac.account_id = COALESCE(NULLIF(va.account_id, ''), ps.account_id)
                 ORDER BY COALESCE(va.planned_publish_at, ps.scheduled_for, ''), sm.script_id, sm.canonical_script_key
                 """
             ).fetchall()
@@ -1642,10 +2108,16 @@ class AutoPublishDB:
                        ps.account_name,
                        ps.script_id,
                        ps.publish_task_id,
+                       CASE
+                           WHEN COALESCE(ac.publish_channel, '') <> '' THEN ac.publish_channel
+                           WHEN COALESCE(ps.publish_task_id, '') LIKE 'neobund:%' THEN 'NeoBund'
+                           ELSE 'GeeLark'
+                       END AS publish_channel,
                        sm.product_id,
                        COALESCE(NULLIF(ps.error_message, ''), '未返回失败原因') AS error_message
                 FROM publish_slots ps
                 LEFT JOIN script_metadata sm ON sm.canonical_script_key = ps.canonical_script_key
+                LEFT JOIN account_configs ac ON ac.account_id = ps.account_id
                 WHERE ps.scheduled_for >= ?
                   AND ps.scheduled_for < ?
                   AND ps.schedule_status = '发布失败'
@@ -1662,10 +2134,16 @@ class AutoPublishDB:
                        ps.account_name,
                        ps.script_id,
                        ps.publish_task_id,
+                       CASE
+                           WHEN COALESCE(ac.publish_channel, '') <> '' THEN ac.publish_channel
+                           WHEN COALESCE(ps.publish_task_id, '') LIKE 'neobund:%' THEN 'NeoBund'
+                           ELSE 'GeeLark'
+                       END AS publish_channel,
                        sm.product_id,
                        COALESCE(NULLIF(ps.error_message, ''), '超过自动重试上限') AS error_message
                 FROM publish_slots ps
                 LEFT JOIN script_metadata sm ON sm.canonical_script_key = ps.canonical_script_key
+                LEFT JOIN account_configs ac ON ac.account_id = ps.account_id
                 WHERE ps.scheduled_for >= ?
                   AND ps.scheduled_for < ?
                   AND ps.schedule_status = '已取消'
@@ -1676,12 +2154,43 @@ class AutoPublishDB:
             ).fetchall()
             account_rows = conn.execute(
                 """
-                SELECT store_id,
-                       account_id,
-                       account_name,
+                SELECT ps.store_id,
+                       ps.account_id,
+                       ps.account_name,
+                       CASE
+                           WHEN COALESCE(ac.publish_channel, '') <> '' THEN ac.publish_channel
+                           WHEN COALESCE(ps.publish_task_id, '') LIKE 'neobund:%' THEN 'NeoBund'
+                           ELSE 'GeeLark'
+                       END AS publish_channel,
+                       COUNT(*) AS total,
+                       SUM(CASE WHEN ps.schedule_status = '已发布' THEN 1 ELSE 0 END) AS published,
+                       SUM(CASE WHEN ps.schedule_status = '发布失败' THEN 1 ELSE 0 END) AS failed,
+                       SUM(
+                           CASE
+                               WHEN ps.schedule_status = '已取消'
+                                    AND COALESCE(ps.error_message, '') LIKE '%超过自动重试上限%'
+                               THEN 1 ELSE 0
+                           END
+                       ) AS abnormal_cancelled
+                FROM publish_slots ps
+                LEFT JOIN account_configs ac ON ac.account_id = ps.account_id
+                WHERE ps.scheduled_for >= ?
+                  AND ps.scheduled_for < ?
+                GROUP BY ps.store_id, ps.account_id, ps.account_name, publish_channel
+                HAVING total > 0
+                ORDER BY failed DESC, abnormal_cancelled DESC, published DESC, ps.account_name ASC
+                """,
+                (start_at, end_at),
+            ).fetchall()
+            channel_rows = conn.execute(
+                """
+                SELECT publish_channel,
                        COUNT(*) AS total,
                        SUM(CASE WHEN schedule_status = '已发布' THEN 1 ELSE 0 END) AS published,
                        SUM(CASE WHEN schedule_status = '发布失败' THEN 1 ELSE 0 END) AS failed,
+                       SUM(CASE WHEN schedule_status = '已排期' THEN 1 ELSE 0 END) AS scheduled,
+                       SUM(CASE WHEN schedule_status = '待排期' THEN 1 ELSE 0 END) AS pending,
+                       SUM(CASE WHEN schedule_status = '已取消' THEN 1 ELSE 0 END) AS cancelled,
                        SUM(
                            CASE
                                WHEN schedule_status = '已取消'
@@ -1689,12 +2198,21 @@ class AutoPublishDB:
                                THEN 1 ELSE 0
                            END
                        ) AS abnormal_cancelled
-                FROM publish_slots
-                WHERE scheduled_for >= ?
-                  AND scheduled_for < ?
-                GROUP BY store_id, account_id, account_name
-                HAVING total > 0
-                ORDER BY failed DESC, abnormal_cancelled DESC, published DESC, account_name ASC
+                FROM (
+                    SELECT ps.schedule_status,
+                           ps.error_message,
+                           CASE
+                               WHEN COALESCE(ac.publish_channel, '') <> '' THEN ac.publish_channel
+                               WHEN COALESCE(ps.publish_task_id, '') LIKE 'neobund:%' THEN 'NeoBund'
+                               ELSE 'GeeLark'
+                           END AS publish_channel
+                    FROM publish_slots ps
+                    LEFT JOIN account_configs ac ON ac.account_id = ps.account_id
+                    WHERE ps.scheduled_for >= ?
+                      AND ps.scheduled_for < ?
+                )
+                GROUP BY publish_channel
+                ORDER BY published DESC, failed DESC, scheduled DESC, total DESC, publish_channel ASC
                 """,
                 (start_at, end_at),
             ).fetchall()
@@ -1711,6 +2229,7 @@ class AutoPublishDB:
             "failures": [dict(row) for row in failures],
             "abnormal_cancellations": [dict(row) for row in abnormal_cancellations],
             "accounts": [dict(row) for row in account_rows],
+            "channels": [dict(row) for row in channel_rows],
         }
 
     def list_store_publish_summary_rows(
@@ -1735,17 +2254,36 @@ class AutoPublishDB:
                            COUNT(DISTINCT sm.canonical_script_key) AS script_count,
                            COUNT(DISTINCT sm.product_id) AS product_count,
                            MAX(ps.scheduled_for) AS latest_published_at,
-                           SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
-                               AS this_week_published,
-                           SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
-                               AS last_week_published,
+                               SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
+                                   AS this_week_published,
+                               SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ?
+                                        AND (
+                                            CASE
+                                                WHEN COALESCE(ps.publish_task_id, '') LIKE 'neobund:%' THEN 'NeoBund'
+                                                WHEN COALESCE(ps.publish_task_id, '') LIKE 'dryrun-%' THEN 'DryRun'
+                                                ELSE COALESCE(NULLIF(ac.publish_channel, ''), 'GeeLark')
+                                            END
+                                        ) = 'GeeLark'
+                                        THEN 1 ELSE 0 END) AS this_week_geelark_published,
+                               SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ?
+                                        AND (
+                                            CASE
+                                                WHEN COALESCE(ps.publish_task_id, '') LIKE 'neobund:%' THEN 'NeoBund'
+                                                WHEN COALESCE(ps.publish_task_id, '') LIKE 'dryrun-%' THEN 'DryRun'
+                                                ELSE COALESCE(NULLIF(ac.publish_channel, ''), 'GeeLark')
+                                            END
+                                        ) = 'NeoBund'
+                                        THEN 1 ELSE 0 END) AS this_week_neobund_published,
+                               SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
+                                   AS last_week_published,
                            SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
                                AS current_month_published,
                            SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
                                AS previous_month_published
-                    FROM publish_slots ps
-                    INNER JOIN script_metadata sm ON sm.canonical_script_key = ps.canonical_script_key
-                    WHERE ps.schedule_status = '已发布'
+                        FROM publish_slots ps
+                        INNER JOIN script_metadata sm ON sm.canonical_script_key = ps.canonical_script_key
+                        LEFT JOIN account_configs ac ON ac.account_id = ps.account_id
+                        WHERE ps.schedule_status = '已发布'
                       AND ps.scheduled_for >= ?
                       AND ps.scheduled_for < ?
                       AND COALESCE(sm.store_id, '') <> ''
@@ -1770,6 +2308,15 @@ class AutoPublishDB:
                       )
                     GROUP BY sm.store_id
                 ),
+                scheduled AS (
+                    SELECT sm.store_id,
+                           COUNT(DISTINCT ps.canonical_script_key) AS scheduled_unpublished_count
+                    FROM publish_slots ps
+                    INNER JOIN script_metadata sm ON sm.canonical_script_key = ps.canonical_script_key
+                    WHERE ps.schedule_status = '已排期'
+                      AND COALESCE(sm.store_id, '') <> ''
+                    GROUP BY sm.store_id
+                ),
                 prefs AS (
                     SELECT store_id,
                            MAX(CASE WHEN schedule_strategy = '优先' THEN 1 ELSE 0 END) AS has_priority,
@@ -1782,6 +2329,8 @@ class AutoPublishDB:
                     SELECT store_id FROM published
                     UNION
                     SELECT store_id FROM pending
+                    UNION
+                    SELECT store_id FROM scheduled
                 )
                 SELECT keys.store_id,
                        '' AS product_id,
@@ -1789,6 +2338,7 @@ class AutoPublishDB:
                        COALESCE(published.script_count, 0) AS script_count,
                        COALESCE(published.product_count, pending.pending_product_count, 0) AS product_count,
                        COALESCE(pending.pending_video_count, 0) AS pending_video_count,
+                       COALESCE(scheduled.scheduled_unpublished_count, 0) AS scheduled_unpublished_count,
                        CASE
                            WHEN COALESCE(prefs.has_priority, 0) = 1 THEN '优先'
                            WHEN COALESCE(prefs.has_paused, 0) = 1 THEN '暂停'
@@ -1797,25 +2347,33 @@ class AutoPublishDB:
                        '' AS schedule_note,
                        COALESCE(prefs.priority_updated_at, '') AS priority_updated_at,
                        COALESCE(published.latest_published_at, '') AS latest_published_at,
-                       COALESCE(published.this_week_published, 0) AS this_week_published,
-                       COALESCE(published.last_week_published, 0) AS last_week_published,
+                           COALESCE(published.this_week_published, 0) AS this_week_published,
+                           COALESCE(published.this_week_geelark_published, 0) AS this_week_geelark_published,
+                           COALESCE(published.this_week_neobund_published, 0) AS this_week_neobund_published,
+                           COALESCE(published.last_week_published, 0) AS last_week_published,
                        COALESCE(published.current_month_published, 0) AS current_month_published,
                        COALESCE(published.previous_month_published, 0) AS previous_month_published
                 FROM keys
                 LEFT JOIN published ON published.store_id = keys.store_id
                 LEFT JOIN pending ON pending.store_id = keys.store_id
+                LEFT JOIN scheduled ON scheduled.store_id = keys.store_id
                 LEFT JOIN prefs ON prefs.store_id = keys.store_id
                 WHERE COALESCE(published.this_week_published, 0) > 0
                    OR COALESCE(published.last_week_published, 0) > 0
                    OR COALESCE(published.current_month_published, 0) > 0
                    OR COALESCE(published.previous_month_published, 0) > 0
                    OR COALESCE(pending.pending_video_count, 0) > 0
+                   OR COALESCE(scheduled.scheduled_unpublished_count, 0) > 0
                 ORDER BY this_week_published DESC, current_month_published DESC, keys.store_id ASC
                 """,
                 (
-                    this_week_start,
-                    this_week_end,
-                    last_week_start,
+                        this_week_start,
+                        this_week_end,
+                        this_week_start,
+                        this_week_end,
+                        this_week_start,
+                        this_week_end,
+                        last_week_start,
                     last_week_end,
                     current_month_start,
                     current_month_end,
@@ -1850,17 +2408,36 @@ class AutoPublishDB:
                            MIN(sm.source_record_id) AS source_record_id,
                            COUNT(DISTINCT sm.canonical_script_key) AS script_count,
                            MAX(ps.scheduled_for) AS latest_published_at,
-                           SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
-                               AS this_week_published,
-                           SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
-                               AS last_week_published,
+                               SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
+                                   AS this_week_published,
+                               SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ?
+                                        AND (
+                                            CASE
+                                                WHEN COALESCE(ps.publish_task_id, '') LIKE 'neobund:%' THEN 'NeoBund'
+                                                WHEN COALESCE(ps.publish_task_id, '') LIKE 'dryrun-%' THEN 'DryRun'
+                                                ELSE COALESCE(NULLIF(ac.publish_channel, ''), 'GeeLark')
+                                            END
+                                        ) = 'GeeLark'
+                                        THEN 1 ELSE 0 END) AS this_week_geelark_published,
+                               SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ?
+                                        AND (
+                                            CASE
+                                                WHEN COALESCE(ps.publish_task_id, '') LIKE 'neobund:%' THEN 'NeoBund'
+                                                WHEN COALESCE(ps.publish_task_id, '') LIKE 'dryrun-%' THEN 'DryRun'
+                                                ELSE COALESCE(NULLIF(ac.publish_channel, ''), 'GeeLark')
+                                            END
+                                        ) = 'NeoBund'
+                                        THEN 1 ELSE 0 END) AS this_week_neobund_published,
+                               SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
+                                   AS last_week_published,
                            SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
                                AS current_month_published,
                            SUM(CASE WHEN ps.scheduled_for >= ? AND ps.scheduled_for < ? THEN 1 ELSE 0 END)
                                AS previous_month_published
-                    FROM publish_slots ps
-                    INNER JOIN script_metadata sm ON sm.canonical_script_key = ps.canonical_script_key
-                    WHERE ps.schedule_status = '已发布'
+                        FROM publish_slots ps
+                        INNER JOIN script_metadata sm ON sm.canonical_script_key = ps.canonical_script_key
+                        LEFT JOIN account_configs ac ON ac.account_id = ps.account_id
+                        WHERE ps.schedule_status = '已发布'
                       AND ps.scheduled_for >= ?
                       AND ps.scheduled_for < ?
                       AND COALESCE(sm.store_id, '') <> ''
@@ -1887,27 +2464,45 @@ class AutoPublishDB:
                       )
                     GROUP BY sm.store_id, sm.product_id
                 ),
+                scheduled AS (
+                    SELECT sm.store_id,
+                           sm.product_id,
+                           MIN(sm.source_record_id) AS source_record_id,
+                           COUNT(DISTINCT ps.canonical_script_key) AS scheduled_unpublished_count
+                    FROM publish_slots ps
+                    INNER JOIN script_metadata sm ON sm.canonical_script_key = ps.canonical_script_key
+                    WHERE ps.schedule_status = '已排期'
+                      AND COALESCE(sm.store_id, '') <> ''
+                      AND COALESCE(sm.product_id, '') <> ''
+                    GROUP BY sm.store_id, sm.product_id
+                ),
                 keys AS (
                     SELECT store_id, product_id FROM published
                     UNION
                     SELECT store_id, product_id FROM pending
+                    UNION
+                    SELECT store_id, product_id FROM scheduled
                 )
                 SELECT keys.store_id,
                        keys.product_id,
-                       COALESCE(published.source_record_id, pending.source_record_id, '') AS source_record_id,
+                       COALESCE(published.source_record_id, pending.source_record_id, scheduled.source_record_id, '') AS source_record_id,
                        COALESCE(published.script_count, 0) AS script_count,
                        COALESCE(pending.pending_video_count, 0) AS pending_video_count,
+                       COALESCE(scheduled.scheduled_unpublished_count, 0) AS scheduled_unpublished_count,
                        COALESCE(psp.schedule_strategy, '普通') AS schedule_strategy,
                        COALESCE(psp.schedule_note, '') AS schedule_note,
                        COALESCE(psp.priority_updated_at, '') AS priority_updated_at,
                        COALESCE(published.latest_published_at, '') AS latest_published_at,
-                       COALESCE(published.this_week_published, 0) AS this_week_published,
-                       COALESCE(published.last_week_published, 0) AS last_week_published,
+                           COALESCE(published.this_week_published, 0) AS this_week_published,
+                           COALESCE(published.this_week_geelark_published, 0) AS this_week_geelark_published,
+                           COALESCE(published.this_week_neobund_published, 0) AS this_week_neobund_published,
+                           COALESCE(published.last_week_published, 0) AS last_week_published,
                        COALESCE(published.current_month_published, 0) AS current_month_published,
                        COALESCE(published.previous_month_published, 0) AS previous_month_published
                 FROM keys
                 LEFT JOIN published ON published.store_id = keys.store_id AND published.product_id = keys.product_id
                 LEFT JOIN pending ON pending.store_id = keys.store_id AND pending.product_id = keys.product_id
+                LEFT JOIN scheduled ON scheduled.store_id = keys.store_id AND scheduled.product_id = keys.product_id
                 LEFT JOIN product_schedule_preferences psp
                     ON psp.store_id = keys.store_id AND psp.product_id = keys.product_id
                 WHERE COALESCE(published.this_week_published, 0) > 0
@@ -1915,12 +2510,17 @@ class AutoPublishDB:
                    OR COALESCE(published.current_month_published, 0) > 0
                    OR COALESCE(published.previous_month_published, 0) > 0
                    OR COALESCE(pending.pending_video_count, 0) > 0
+                   OR COALESCE(scheduled.scheduled_unpublished_count, 0) > 0
                 ORDER BY keys.store_id ASC, this_week_published DESC, current_month_published DESC, pending_video_count DESC, keys.product_id ASC
                 """,
                 (
-                    this_week_start,
-                    this_week_end,
-                    last_week_start,
+                        this_week_start,
+                        this_week_end,
+                        this_week_start,
+                        this_week_end,
+                        this_week_start,
+                        this_week_end,
+                        last_week_start,
                     last_week_end,
                     current_month_start,
                     current_month_end,
@@ -1982,6 +2582,7 @@ class AutoPublishDB:
                        ps.schedule_status,
                        ps.publish_task_id,
                        ps.error_message AS slot_error_message,
+                       COALESCE(ac.publish_channel, '') AS publish_channel,
                        sm.product_id,
                        sm.short_video_title,
                        sm.script_source,
@@ -1997,6 +2598,7 @@ class AutoPublishDB:
                 FROM publish_slots ps
                 INNER JOIN script_metadata sm ON sm.canonical_script_key = ps.canonical_script_key
                 INNER JOIN video_assets va ON va.canonical_script_key = ps.canonical_script_key
+                LEFT JOIN account_configs ac ON ac.account_id = ps.account_id
                 WHERE ps.scheduled_for >= ?
                   AND ps.scheduled_for < ?
                   AND ps.schedule_status IN ({placeholders})

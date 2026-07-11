@@ -38,6 +38,7 @@ def format_daily_publish_summary(summary: Dict[str, Any], *, max_failure_lines: 
     abnormal_cancellations: List[Dict[str, Any]] = list(summary.get("abnormal_cancellations") or [])
     abnormal_events = failures + abnormal_cancellations
     accounts: List[Dict[str, Any]] = list(summary.get("accounts") or [])
+    channels: List[Dict[str, Any]] = list(summary.get("channels") or [])
 
     lines = [
         f"短视频自动发布日报 - {summary.get('date')}",
@@ -49,6 +50,23 @@ def format_daily_publish_summary(summary: Dict[str, Any], *, max_failure_lines: 
         f"已取消：{int(summary.get('cancelled') or 0)}",
         f"异常取消：{int(summary.get('abnormal_cancelled') or 0)}",
     ]
+
+    if channels:
+        lines.append("")
+        lines.append("发布渠道统计：")
+        for channel in channels:
+            channel_name = _text(channel.get("publish_channel")) or "未知渠道"
+            lines.append(
+                "- "
+                f"{channel_name}："
+                f"总 {int(channel.get('total') or 0)}，"
+                f"成功 {int(channel.get('published') or 0)}，"
+                f"失败 {int(channel.get('failed') or 0)}，"
+                f"仍在排期 {int(channel.get('scheduled') or 0)}，"
+                f"待排期 {int(channel.get('pending') or 0)}，"
+                f"已取消 {int(channel.get('cancelled') or 0)}，"
+                f"异常取消 {int(channel.get('abnormal_cancelled') or 0)}"
+            )
 
     successful_accounts = [
         account
@@ -109,6 +127,7 @@ def format_daily_publish_summary(summary: Dict[str, Any], *, max_failure_lines: 
                 f"{time_text} "
                 f"{event_type} "
                 f"{_text(row.get('store_id'))}/{_text(row.get('account_name'))} "
+                f"渠道={_text(row.get('publish_channel')) or '-'} "
                 f"脚本ID={_text(row.get('script_id')) or '-'} "
                 f"产品ID={_text(row.get('product_id')) or '-'} "
                 f"任务ID={_text(row.get('publish_task_id')) or '-'} "
@@ -187,7 +206,7 @@ def format_product_publish_weekly_report(
     if not rows:
         return f"产品发布周报 - {periods.get('this_week_label', '')}\n本周暂无产品发布。"
     store_map: Dict[str, Dict[str, Any]] = defaultdict(
-        lambda: {"this_week": 0, "last_week": 0, "this_month": 0, "products": []}
+        lambda: {"this_week": 0, "last_week": 0, "this_month": 0, "geelark": 0, "neobund": 0, "products": []}
     )
     for row in rows:
         store_id = _text(row.get("store_id")) or "未知"
@@ -195,17 +214,30 @@ def format_product_publish_weekly_report(
         tw = int(row.get("this_week_published") or 0)
         lw = int(row.get("last_week_published") or 0)
         tm = int(row.get("current_month_published") or 0)
+        geelark = int(row.get("this_week_geelark_published") or 0)
+        neobund = int(row.get("this_week_neobund_published") or 0)
         store_map[store_id]["this_week"] += tw
         store_map[store_id]["last_week"] += lw
         store_map[store_id]["this_month"] += tm
+        store_map[store_id]["geelark"] += geelark
+        store_map[store_id]["neobund"] += neobund
         if tw > 0:
-            store_map[store_id]["products"].append(f"  {product_id}: {tw}")
+            channel_parts = []
+            if neobund:
+                channel_parts.append(f"NeoBund {neobund}")
+            if geelark:
+                channel_parts.append(f"GeeLark {geelark}")
+            suffix = f"（{', '.join(channel_parts)}）" if channel_parts else ""
+            store_map[store_id]["products"].append(f"  {product_id}: {tw}{suffix}")
     total_tw = sum(int(row.get("this_week_published") or 0) for row in rows)
     total_lw = sum(int(row.get("last_week_published") or 0) for row in rows)
     total_tm = sum(int(row.get("current_month_published") or 0) for row in rows)
+    total_geelark = sum(int(row.get("this_week_geelark_published") or 0) for row in rows)
+    total_neobund = sum(int(row.get("this_week_neobund_published") or 0) for row in rows)
     lines = [
         f"产品发布周报 - {periods.get('this_week_label', '')}",
         f"本周已发布：{total_tw} 条  |  上周：{total_lw} 条  |  本月：{total_tm} 条",
+        f"本周渠道：GeeLark {total_geelark} 条  |  NeoBund {total_neobund} 条",
     ]
     for store_id, payload in sorted(
         store_map.items(),
@@ -215,6 +247,8 @@ def format_product_publish_weekly_report(
         name = store_id
         lines.append("")
         lines.append(f"{name}：本周 {count}（上周 {payload['last_week']}，本月 {payload['this_month']}）")
+        if payload["geelark"] or payload["neobund"]:
+            lines.append(f"  渠道：GeeLark {payload['geelark']}，NeoBund {payload['neobund']}")
         for product in payload["products"][:max_items]:
             lines.append(product)
     if table_url:

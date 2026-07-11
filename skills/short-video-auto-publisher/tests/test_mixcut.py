@@ -20,6 +20,7 @@ from app.mixcut import (  # noqa: E402
     build_mixcut_metadata,
     build_simple_mixcut_title,
 )
+from app.metadata import contains_cjk, contains_thai  # noqa: E402
 
 
 class MixcutBridgeTest(unittest.TestCase):
@@ -49,8 +50,9 @@ class MixcutBridgeTest(unittest.TestCase):
         self.assertEqual(metadata.publish_purpose, "混剪视频")
         self.assertEqual(metadata.content_family_key, "mixcut:1734482585843304442:AI_OUTERWEAR_PRODUCT_FIRST_20S")
         self.assertIn("material_id=OUT_001", metadata.script_text)
-        self.assertEqual(metadata.short_video_title, "米白短款外套")
-        self.assertEqual(metadata.title_source, "mixcut_simple_product_title")
+        self.assertTrue(contains_thai(metadata.short_video_title))
+        self.assertFalse(contains_cjk(metadata.short_video_title))
+        self.assertEqual(metadata.title_source, "mixcut_localized_template")
 
     def test_mixcut_title_uses_manual_title_first(self) -> None:
         title = build_simple_mixcut_title(

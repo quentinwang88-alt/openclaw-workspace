@@ -22,7 +22,7 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
 fi
 
 set +e
-/usr/bin/python3 "$WORKDIR/run_pipeline.py" run-all --publish-mode geelark >"$TMP_LOG" 2>&1
+/usr/bin/python3 "$WORKDIR/run_pipeline.py" run-all --publish-mode auto >"$TMP_LOG" 2>&1
 STATUS=$?
 set -e
 

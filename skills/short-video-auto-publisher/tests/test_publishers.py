@@ -18,7 +18,35 @@ SKILL_DIR = TESTS_DIR.parent
 if str(SKILL_DIR) not in sys.path:
     sys.path.insert(0, str(SKILL_DIR))
 
-from app.publishers import GeeLarkPublishAdapter  # noqa: E402
+from app.models import PublishTaskStatus  # noqa: E402
+from app.publishers import BasePublishAdapter, GeeLarkPublishAdapter, RoutedPublishAdapter  # noqa: E402
+
+
+class RecordingPublishAdapter(BasePublishAdapter):
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.created = []
+        self.queried = []
+
+    def create_scheduled_task(
+        self,
+        *,
+        account_id: str,
+        video_path: str,
+        title: str,
+        publish_at: datetime,
+        script_id: str,
+        product_id: str = "",
+        product_title: str = "",
+        ref_video_id: str = "",
+        mark_ai=None,
+    ) -> str:
+        self.created.append({"account_id": account_id, "script_id": script_id, "product_id": product_id})
+        return f"{self.name}:{account_id}:{script_id}"
+
+    def query_task_status(self, *, task_id: str, scheduled_for: datetime) -> PublishTaskStatus:
+        self.queried.append(task_id)
+        return PublishTaskStatus(state="pending", result=self.name)
 
 
 class GeeLarkPublishAdapterTest(unittest.TestCase):
@@ -93,6 +121,28 @@ class GeeLarkPublishAdapterTest(unittest.TestCase):
         )
 
         self.assertEqual(task_id, "614372922865225911")
+
+    @patch("app.publishers.requests.request")
+    def test_create_scheduled_task_can_mark_ai_generated_video(self, mock_request: Mock) -> None:
+        mock_response = Mock()
+        mock_response.json.return_value = {"data": {"taskIds": ["614372922865225911"]}}
+        mock_response.raise_for_status.return_value = None
+        mock_request.return_value = mock_response
+
+        adapter = GeeLarkPublishAdapter(
+            token="secret",
+            extra_body_json='{"top_level":{"markAI":false}}',
+        )
+        adapter.create_scheduled_task(
+            account_id="acc-1",
+            video_path="https://demo.geelark.cn/open-upload/demo.mp4",
+            title="hello",
+            publish_at=datetime(2026, 4, 9, 12, 0, 0),
+            script_id="001_M1_M",
+            mark_ai=True,
+        )
+
+        self.assertIs(mock_request.call_args.kwargs["json"]["markAI"], True)
 
     @patch("app.publishers.requests.request")
     def test_create_scheduled_task_uploads_local_file_before_adding_task(self, mock_request: Mock) -> None:
@@ -459,6 +509,62 @@ class GeeLarkPublishAdapterTest(unittest.TestCase):
 
         self.assertEqual(task_id, "614372922865225911")
         self.assertEqual(mock_request.call_count, 2)
+
+
+class RoutedPublishAdapterTest(unittest.TestCase):
+    def test_create_scheduled_task_routes_by_account_publish_channel(self) -> None:
+        geelark = RecordingPublishAdapter("geelark")
+        neobund = RecordingPublishAdapter("neobund")
+        router = RoutedPublishAdapter(
+            default_adapter=geelark,
+            channel_adapters={"GeeLark": geelark, "NeoBund": neobund},
+            account_channels={"acc-neo": "NeoBund"},
+        )
+
+        neo_task = router.create_scheduled_task(
+            account_id="acc-neo",
+            video_path="/tmp/demo.mp4",
+            title="hello",
+            publish_at=datetime(2026, 6, 29, 18, 0, 0),
+            script_id="2337_M1_M",
+            product_id="1735933492508132405",
+        )
+        gee_task = router.create_scheduled_task(
+            account_id="acc-gee",
+            video_path="/tmp/demo.mp4",
+            title="hello",
+            publish_at=datetime(2026, 6, 29, 19, 0, 0),
+            script_id="2338_M1_M",
+        )
+
+        self.assertEqual(neo_task, "neobund:acc-neo:2337_M1_M")
+        self.assertEqual(gee_task, "geelark:acc-gee:2338_M1_M")
+        self.assertEqual(len(neobund.created), 1)
+        self.assertEqual(len(geelark.created), 1)
+
+    def test_query_task_status_routes_by_task_prefix(self) -> None:
+        geelark = RecordingPublishAdapter("geelark")
+        neobund = RecordingPublishAdapter("neobund")
+        router = RoutedPublishAdapter(
+            default_adapter=geelark,
+            channel_adapters={"GeeLark": geelark, "NeoBund": neobund},
+            account_channels={},
+            task_prefix_adapters={"neobund:": neobund},
+        )
+
+        neo_status = router.query_task_status(
+            task_id="neobund:623335",
+            scheduled_for=datetime(2026, 6, 29, 18, 0, 0),
+        )
+        gee_status = router.query_task_status(
+            task_id="614372922865225911",
+            scheduled_for=datetime(2026, 6, 29, 18, 0, 0),
+        )
+
+        self.assertEqual(neo_status.result, "neobund")
+        self.assertEqual(gee_status.result, "geelark")
+        self.assertEqual(neobund.queried, ["neobund:623335"])
+        self.assertEqual(geelark.queried, ["614372922865225911"])
 
 
 if __name__ == "__main__":

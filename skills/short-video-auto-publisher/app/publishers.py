@@ -30,6 +30,7 @@ class BasePublishAdapter(ABC):
         product_id: str = "",
         product_title: str = "",
         ref_video_id: str = "",
+        mark_ai: Optional[bool] = None,
     ) -> str:
         raise NotImplementedError
 
@@ -58,6 +59,7 @@ class DryRunPublishAdapter(BasePublishAdapter):
         product_id: str = "",
         product_title: str = "",
         ref_video_id: str = "",
+        mark_ai: Optional[bool] = None,
     ) -> str:
         digest = hashlib.md5(f"{account_id}:{script_id}:{publish_at.isoformat()}".encode("utf-8")).hexdigest()[:10]
         return f"dryrun-{digest}"
@@ -90,6 +92,7 @@ class HttpPublishAdapter(BasePublishAdapter):
         product_id: str = "",
         product_title: str = "",
         ref_video_id: str = "",
+        mark_ai: Optional[bool] = None,
     ) -> str:
         response = requests.post(
             f"{self.base_url}/scheduled-tasks",
@@ -103,6 +106,7 @@ class HttpPublishAdapter(BasePublishAdapter):
                 "product_id": product_id,
                 "product_title": product_title,
                 "ref_video_id": ref_video_id,
+                "mark_ai": mark_ai,
             },
             timeout=60,
         )
@@ -424,6 +428,7 @@ class GeeLarkPublishAdapter(BasePublishAdapter):
         product_id: str = "",
         product_title: str = "",
         ref_video_id: str = "",
+        mark_ai: Optional[bool] = None,
     ) -> str:
         resolved_video_path = str(video_path or "").strip()
         if resolved_video_path.startswith(("http://", "https://")):
@@ -434,6 +439,8 @@ class GeeLarkPublishAdapter(BasePublishAdapter):
             raise RuntimeError(f"GeeLark 视频路径不可用，既不是 URL 也不是本地文件: {video_path}")
         top_level = dict(self.extra_body.get("top_level", {})) if isinstance(self.extra_body.get("top_level"), dict) else {}
         item_level = dict(self.extra_body.get("item", {})) if isinstance(self.extra_body.get("item"), dict) else {}
+        if mark_ai is not None:
+            top_level["markAI"] = bool(mark_ai)
         item_payload: Dict[str, Any] = {
             self.schedule_at_field: int(publish_at.timestamp()),
             self.env_id_field: account_id,
@@ -556,4 +563,135 @@ class GeeLarkPublishAdapter(BasePublishAdapter):
                 statuses[task_id] = PublishTaskStatus(state="pending", result="待执行")
                 continue
             statuses[task_id] = self._parse_task_status_payload({"data": {"items": [item]}, "items": [item], **item})
+        return statuses
+
+
+class RoutedPublishAdapter(BasePublishAdapter):
+    """Route publish operations by account channel and remote task id prefix."""
+
+    def __init__(
+        self,
+        *,
+        default_adapter: BasePublishAdapter,
+        channel_adapters: Dict[str, BasePublishAdapter],
+        account_channels: Dict[str, str],
+        task_prefix_adapters: Optional[Dict[str, BasePublishAdapter]] = None,
+        default_channel: str = "GeeLark",
+    ):
+        self.default_adapter = default_adapter
+        self.default_channel = self._normalize_channel(default_channel)
+        self.channel_adapters = {
+            self._normalize_channel(channel): adapter
+            for channel, adapter in channel_adapters.items()
+            if str(channel or "").strip()
+        }
+        self.account_channels = {
+            str(account_id or "").strip(): self._normalize_channel(channel)
+            for account_id, channel in account_channels.items()
+            if str(account_id or "").strip()
+        }
+        self.task_prefix_adapters = {
+            str(prefix or "").strip(): adapter
+            for prefix, adapter in (task_prefix_adapters or {}).items()
+            if str(prefix or "").strip()
+        }
+
+    @staticmethod
+    def _normalize_channel(channel: str) -> str:
+        text = str(channel or "").strip()
+        if not text:
+            return "GeeLark"
+        compact = text.lower().replace(" ", "").replace("-", "").replace("_", "")
+        if "neobund" in compact:
+            return "NeoBund"
+        if "geelark" in compact:
+            return "GeeLark"
+        if compact in {"manual", "human", "人工", "手动", "人工发布", "手动发布"}:
+            return "手动"
+        if compact in {"pause", "paused", "disabled", "disable", "stop", "暂停", "停用", "停止"}:
+            return "暂停"
+        return text
+
+    def _adapter_for_account(self, account_id: str) -> BasePublishAdapter:
+        channel = self.account_channels.get(str(account_id or "").strip(), self.default_channel)
+        if channel in {"手动", "暂停"}:
+            raise RuntimeError(f"账号发布渠道为{channel}，跳过自动创建发布任务: account_id={account_id}")
+        return self.channel_adapters.get(channel, self.default_adapter)
+
+    def _adapter_for_channel(self, channel: str) -> BasePublishAdapter:
+        normalized = self._normalize_channel(channel)
+        if normalized in {"手动", "暂停"}:
+            raise RuntimeError(f"发布渠道为{normalized}，跳过自动创建发布任务")
+        return self.channel_adapters.get(normalized, self.default_adapter)
+
+    def _adapter_for_task_id(self, task_id: str) -> BasePublishAdapter:
+        text = str(task_id or "").strip()
+        for prefix, adapter in self.task_prefix_adapters.items():
+            if text.startswith(prefix):
+                return adapter
+        return self.default_adapter
+
+    def create_scheduled_task(
+        self,
+        *,
+        account_id: str,
+        video_path: str,
+        title: str,
+        publish_at: datetime,
+        script_id: str,
+        product_id: str = "",
+        product_title: str = "",
+        ref_video_id: str = "",
+        mark_ai: Optional[bool] = None,
+    ) -> str:
+        adapter = self._adapter_for_account(account_id)
+        return adapter.create_scheduled_task(
+            account_id=account_id,
+            video_path=video_path,
+            title=title,
+            publish_at=publish_at,
+            script_id=script_id,
+            product_id=product_id,
+            product_title=product_title,
+            ref_video_id=ref_video_id,
+            mark_ai=mark_ai,
+        )
+
+    def create_scheduled_task_for_channel(
+        self,
+        *,
+        channel: str,
+        account_id: str,
+        video_path: str,
+        title: str,
+        publish_at: datetime,
+        script_id: str,
+        product_id: str = "",
+        product_title: str = "",
+        ref_video_id: str = "",
+        mark_ai: Optional[bool] = None,
+    ) -> str:
+        adapter = self._adapter_for_channel(channel)
+        return adapter.create_scheduled_task(
+            account_id=account_id,
+            video_path=video_path,
+            title=title,
+            publish_at=publish_at,
+            script_id=script_id,
+            product_id=product_id,
+            product_title=product_title,
+            ref_video_id=ref_video_id,
+            mark_ai=mark_ai,
+        )
+
+    def query_task_status(self, *, task_id: str, scheduled_for: datetime) -> PublishTaskStatus:
+        adapter = self._adapter_for_task_id(task_id)
+        return adapter.query_task_status(task_id=task_id, scheduled_for=scheduled_for)
+
+    def query_task_statuses(self, tasks: Iterable[Any]) -> Dict[str, PublishTaskStatus]:
+        statuses: Dict[str, PublishTaskStatus] = {}
+        for task in tasks:
+            task_id = str(task["publish_task_id"] or "").strip()
+            scheduled_for = datetime.strptime(str(task["scheduled_for"]), "%Y-%m-%d %H:%M:%S")
+            statuses[task_id] = self.query_task_status(task_id=task_id, scheduled_for=scheduled_for)
         return statuses
