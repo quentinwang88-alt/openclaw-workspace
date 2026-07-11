@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from src.enums import AnalysisStatus, DisplayAnalysisStatus
 from src.models import CandidateTask, FeatureAnalysisResult, ScoredAnalysisResult, TableConfig
@@ -32,6 +32,7 @@ class ResultWriter(object):
         "v2_differentiation_conclusion",
         "v2_brief_reason",
         "v2_risk_tags",
+        "early_rising",
     }
 
     FEISHU_WORKFLOW_KEYS = {
@@ -208,6 +209,7 @@ class ResultWriter(object):
             ]:
                 self._set_field(fields, writeback_map, key, "")
             self._set_field(fields, writeback_map, "analysis_error", (error_message or "")[:500])
+        self._set_field(fields, writeback_map, "early_rising", self._is_early_rising(task))
         for key in sorted(self.FEISHU_HIDDEN_DETAIL_KEYS):
             self._set_field(fields, writeback_map, key, self._empty_field_value(key))
         return fields
@@ -221,6 +223,39 @@ class ResultWriter(object):
         if key in {"reserve_created_at", "reserve_expires_at"}:
             return None
         return ""
+
+    def _is_early_rising(self, task: Optional[CandidateTask]) -> bool:
+        if not task:
+            return False
+        extra_fields = getattr(task, "extra_fields", {}) or {}
+        sales_7d = self._number_from_extra(extra_fields, ["7日销量", "7天销量", "sales_7d"])
+        age_days = self._number_from_extra(extra_fields, ["上架天数", "product_age_days", "listing_days"])
+        if sales_7d is None or age_days is None:
+            return False
+        return age_days <= 90 and sales_7d >= 50
+
+    def _number_from_extra(self, extra_fields: Dict[str, Any], field_names) -> Optional[float]:
+        for field_name in field_names:
+            value = extra_fields.get(field_name)
+            parsed = self._parse_number(value)
+            if parsed is not None:
+                return parsed
+        return None
+
+    def _parse_number(self, value: Any) -> Optional[float]:
+        if value is None or value == "":
+            return None
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).replace(",", "").strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
 
     def _now_millis(self) -> int:
         return int(datetime.now().timestamp() * 1000)

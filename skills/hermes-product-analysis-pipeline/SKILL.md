@@ -81,6 +81,41 @@ This script already handles:
 - writing back after each batch
 - stopping only when the queue is empty
 
+## Manual sourcing / 人工选品评分
+
+When the user asks to process the manual sourcing table (`人工选品`, `人工选品评分`, `人工选品主表`), do **not** use title parsing or title keywords as scoring evidence.
+
+Use the manual route inside the Hermes project:
+
+```bash
+cd /Users/likeu3/Desktop/skills/workspace-archive-20260419-131447/skills/hermes-product-analysis/manual
+python3 run_pipeline.py analyze
+```
+
+This entry now applies shared visual-only controls before analysis:
+- `产品标题` is only used for log display and scope matching.
+- `product_title`, notes, competitor notes, price, and title keyword fields are blanked before feature analysis, direction matching, and scoring.
+- The run log should **not** contain `标题关键词`.
+
+For scoped reruns, prefer:
+
+```bash
+cd /Users/likeu3/Desktop/skills/workspace-archive-20260419-131447/skills/hermes-product-analysis
+python3 manual/scripts/rerun_manual_by_market.py --market TH --manual-category 发饰
+```
+
+For headscarf/scarf visual-only rescoring, prefer:
+
+```bash
+cd /Users/likeu3/Desktop/skills/workspace-archive-20260419-131447/skills/hermes-product-analysis
+python3 manual/scripts/rescore_scarf_visual_only.py --market TH
+```
+
+Hard checks:
+- If the log prints `标题关键词`, the run is using an outdated manual flow and must be stopped/fixed.
+- Do not switch to a fallback that scores from title text.
+- Do not run 1688 lookup from this step; sourcing is downstream and manually gated.
+
 ## Built-in 1688 supply lookup
 
 Use this only after Selection Agent has produced candidate products that need supply lookup. Do not run 1688 lookup for all products.
