@@ -451,6 +451,40 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
         self.assertEqual(fields["内容分支"], "非商品展示型")
         self.assertEqual(fields["免参考图"], "是")
 
+    def test_nurture_task_with_reference_frames_disables_reference_free_flag(self) -> None:
+        source_field_names = [
+            "产品编码",
+            "任务编号",
+            "是否可同步母版",
+            "产品图片",
+            "脚本方向一",
+            "脚本来源",
+            "发布用途",
+        ]
+        mapping = resolve_field_mapping(source_field_names, SOURCE_FIELD_ALIASES)
+        tasks = build_sync_tasks(
+            [
+                TableRecord(
+                    record_id="rec_nurture_ref",
+                    fields={
+                        "产品编码": "YR029",
+                        "任务编号": "029",
+                        "是否可同步母版": True,
+                        "产品图片": [{"file_token": "reference_1"}],
+                        "脚本方向一": "final storyboard",
+                        "脚本来源": "养号复刻",
+                        "发布用途": "养号",
+                    },
+                ),
+            ],
+            mapping,
+        )
+
+        fields = build_target_fields(tasks[0], self.target_mapping)
+
+        self.assertEqual(fields["参考图"], [{"file_token": "reference_1"}])
+        self.assertEqual(fields["免参考图"], "否")
+
     def test_build_prompt_with_anchor_falls_back_to_raw_script_without_anchor_fields(self) -> None:
         prompt = build_prompt_with_anchor(
             build_sync_tasks(

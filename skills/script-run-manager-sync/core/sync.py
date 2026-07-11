@@ -500,7 +500,7 @@ def build_target_fields(
     if mapping.get("video_duration"):
         fields[mapping["video_duration"]] = task.video_duration or 15
     if mapping.get("reference_free") and is_nurture_task(task):
-        fields[mapping["reference_free"]] = "是"
+        fields[mapping["reference_free"]] = "否" if task.reference_images else "是"
     return fields
 
 
