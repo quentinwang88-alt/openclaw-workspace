@@ -77,71 +77,71 @@
     "hair_clip": {
       "series_name_cn": "发夹系列",
       "series_code_prefix": "HC",
-      "core_terms": ["kẹp tóc nữ", "kẹp tóc", "phụ kiện tóc nữ"],
-      "material_terms": ["vải satin", "nhung", "đính ngọc trai", "bóng nhẹ", "màu trơn"],
+      "core_terms": ["kẹp tóc nữ", "kẹp tóc", "phụ kiện tóc nữ", "kẹp tóc hoa", "kẹp tóc đính đá", "kẹp tóc ngọc trai"],
+      "material_terms": ["vải satin", "nhung", "đính ngọc trai", "đính đá", "đính đá pha lê", "đính charm", "bóng nhẹ", "màu trơn"],
       "fit_terms": ["cỡ nhỏ", "cỡ vừa", "cỡ lớn", "nhẹ đầu"],
-      "structure_terms": ["kẹp chắc", "dễ kẹp", "giữ tóc gọn"],
-      "style_terms": ["phong cách Hàn Quốc", "tối giản", "xinh xắn", "dễ phối"]
+      "structure_terms": ["kẹp chắc", "dễ kẹp", "giữ tóc gọn", "kẹp tóc phía sau"],
+      "style_terms": ["phong cách Hàn Quốc", "tối giản", "xinh xắn", "dễ phối", "cute"]
     },
     "claw_clip": {
       "series_name_cn": "鲨鱼夹系列",
       "series_code_prefix": "CC",
       "core_terms": ["kẹp tóc càng cua", "kẹp càng cua", "kẹp tóc nữ"],
-      "material_terms": ["nhựa acrylic", "nhựa", "màu trơn", "bóng nhẹ", "vân đá"],
-      "fit_terms": ["cỡ lớn", "phù hợp tóc dày", "nhẹ đầu"],
-      "structure_terms": ["kẹp chắc tóc", "răng kẹp chắc", "búi tóc dễ dàng"],
-      "style_terms": ["phong cách Hàn Quốc", "tối giản", "sang nhẹ", "dùng hằng ngày"]
+      "material_terms": ["nhựa acrylic", "nhựa", "màu trơn", "bóng nhẹ", "vân đá", "trong suốt", "màu đen", "màu hồng", "màu trắng"],
+      "fit_terms": ["cỡ lớn", "cỡ nhỏ", "cỡ vừa", "dáng dài", "phù hợp tóc dày", "nhẹ đầu"],
+      "structure_terms": ["kẹp chắc tóc", "răng kẹp chắc", "5 răng", "3 răng", "búi tóc dễ dàng"],
+      "style_terms": ["phong cách Hàn Quốc", "tối giản", "sang nhẹ", "dùng hằng ngày", "cute"]
     },
     "hair_bow": {
       "series_name_cn": "蝴蝶结发饰系列",
       "series_code_prefix": "HB",
       "core_terms": ["kẹp tóc nơ", "nơ tóc", "kẹp nơ tóc"],
-      "material_terms": ["vải satin", "nhung", "ren", "nơ to", "nơ nhỏ"],
-      "fit_terms": ["cỡ lớn", "cỡ nhỏ", "nhẹ đầu"],
+      "material_terms": ["vải satin", "nhung", "ren", "nơ ruy băng", "nơ voan", "nơ to", "nơ nhỏ", "màu đen", "màu trắng"],
+      "fit_terms": ["cỡ lớn", "cỡ nhỏ", "bản to", "nơ dài", "nhẹ đầu"],
       "structure_terms": ["dễ kẹp", "kẹp chắc", "dễ tạo kiểu"],
-      "style_terms": ["phong cách Hàn Quốc", "tiểu thư", "xinh xắn", "đi học", "đi chơi"]
+      "style_terms": ["phong cách Hàn Quốc", "tiểu thư", "xinh xắn", "đi học", "đi chơi", "cute"]
     },
     "headband": {
       "series_name_cn": "发箍系列",
       "series_code_prefix": "HD",
-      "core_terms": ["băng đô tóc nữ", "băng đô", "cài tóc nữ"],
-      "material_terms": ["vải satin", "nhung", "vải mềm", "màu trơn", "họa tiết đơn giản"],
+      "core_terms": ["băng đô tóc nữ", "băng đô", "băng đô tóc", "cài tóc nữ"],
+      "material_terms": ["vải satin", "nhung", "vải mềm", "màu trơn", "họa tiết đơn giản", "nơ", "hoa"],
       "fit_terms": ["đeo thoải mái", "nhẹ đầu", "không đau đầu"],
       "structure_terms": ["giữ tóc mái", "dễ tạo kiểu", "co giãn"],
-      "style_terms": ["phong cách Hàn Quốc", "tối giản", "xinh xắn", "dùng hằng ngày"]
+      "style_terms": ["phong cách Hàn Quốc", "tối giản", "xinh xắn", "dùng hằng ngày", "đi học", "đi chơi"]
     },
     "scrunchie": {
       "series_name_cn": "大肠发圈系列",
       "series_code_prefix": "SC",
       "core_terms": ["scrunchies cột tóc", "dây buộc tóc scrunchies", "dây buộc tóc vải"],
-      "material_terms": ["vải satin", "lụa", "vải mềm", "phồng", "màu trơn"],
+      "material_terms": ["vải satin", "lụa", "vải mềm", "phồng", "màu trơn", "nhung", "nơ"],
       "fit_terms": ["cỡ lớn", "cỡ vừa", "co giãn"],
       "structure_terms": ["buộc tóc dễ", "không kéo tóc", "không đau đầu"],
-      "style_terms": ["phong cách Hàn Quốc", "xinh xắn", "dễ phối", "dùng hằng ngày"]
+      "style_terms": ["phong cách Hàn Quốc", "xinh xắn", "dễ phối", "dùng hằng ngày", "cute"]
     },
     "hair_tie": {
       "series_name_cn": "发圈/皮筋系列",
       "series_code_prefix": "HT",
       "core_terms": ["dây buộc tóc", "thun cột tóc", "cột tóc nữ"],
-      "material_terms": ["dây thun", "vải co giãn", "màu trơn", "có nơ"],
+      "material_terms": ["dây thun", "vải co giãn", "màu trơn", "có nơ", "lò xo"],
       "fit_terms": ["co giãn", "nhẹ đầu", "vừa tóc"],
-      "structure_terms": ["buộc chắc", "dễ dùng", "không kéo tóc"],
-      "style_terms": ["xinh xắn", "dùng hằng ngày", "phong cách Hàn Quốc"]
+      "structure_terms": ["buộc chắc", "dễ dùng", "không kéo tóc", "buộc tóc dễ"],
+      "style_terms": ["xinh xắn", "dùng hằng ngày", "phong cách Hàn Quốc", "cute"]
     },
     "hair_pin": {
       "series_name_cn": "边夹/发卡系列",
       "series_code_prefix": "HP",
-      "core_terms": ["kẹp tóc mái", "kẹp mái", "kẹp tóc nhỏ"],
-      "material_terms": ["kim loại", "đính ngọc trai", "đính đá", "màu trơn"],
-      "fit_terms": ["cỡ nhỏ", "cỡ vừa", "nhẹ đầu"],
-      "structure_terms": ["dễ kẹp", "giữ tóc mái", "kẹp chắc"],
-      "style_terms": ["xinh xắn", "tối giản", "phong cách Hàn Quốc"]
+      "core_terms": ["kẹp tóc mái", "kẹp mái", "kẹp tóc nhỏ", "kẹp mái mỏ vịt"],
+      "material_terms": ["kim loại", "đính ngọc trai", "đính đá", "đính đá pha lê", "màu trơn"],
+      "fit_terms": ["cỡ nhỏ", "cỡ vừa", "nhẹ đầu", "kẹp mái 1 bên", "kẹp mái 2 bên"],
+      "structure_terms": ["dễ kẹp", "giữ tóc mái", "kẹp chắc", "mỏ vịt"],
+      "style_terms": ["xinh xắn", "tối giản", "phong cách Hàn Quốc", "cute"]
     },
     "unknown_hair_accessory": {
       "series_name_cn": "发饰系列",
       "series_code_prefix": "HA",
-      "core_terms": ["phụ kiện tóc nữ", "phụ kiện tóc", "kẹp tóc nữ"],
-      "material_terms": ["màu trơn", "vải mềm", "đính ngọc trai"],
+      "core_terms": ["phụ kiện tóc nữ", "phụ kiện tóc", "kẹp tóc nữ", "phụ kiện kẹp tóc nữ", "phụ kiện cài tóc nữ"],
+      "material_terms": ["màu trơn", "vải mềm", "đính ngọc trai", "đính đá", "nơ", "hoa"],
       "fit_terms": ["nhẹ đầu", "đeo thoải mái"],
       "structure_terms": ["dễ dùng", "dễ tạo kiểu"],
       "style_terms": ["phong cách Hàn Quốc", "xinh xắn", "dùng hằng ngày"]

@@ -1072,28 +1072,35 @@ HAIR_TITLE_COLOR_TERMS = (
     "สีดำ", "สีขาว", "สีครีม", "สีเบจ", "สีน้ำตาล", "สีชมพู", "สีแดง", "สีเหลือง",
     "สีเขียว", "สีฟ้า", "สีม่วง", "สีเงิน", "สีทอง", "สีมัสตาร์ด", "เหลืองเขียวมัสตาร์ด",
     "ดำ", "ขาว", "ครีม", "เบจ", "น้ำตาล", "ชมพู", "แดง", "เหลือง", "เขียว", "มัสตาร์ด",
-    "đen", "trắng", "kem", "be", "nâu", "hồng", "đỏ", "vàng", "xanh", "tím",
+    "màu đen", "màu hồng", "màu trắng", "màu xanh dương", "màu đỏ", "màu xanh lá cây",
+    "màu tím", "màu vàng", "màu xanh", "đen", "trắng", "kem", "be", "nâu", "hồng", "đỏ",
+    "vàng", "xanh", "tím",
 )
 HAIR_TITLE_PATTERN_TERMS = (
     "ลายจุด", "ลายดอก", "ลายหินอ่อน", "ลายเสือ", "ลายตาราง", "สีพื้น",
-    "chấm bi", "hoa", "vân đá", "da báo", "kẻ caro", "màu trơn",
+    "chấm bi", "họa tiết hoa", "hoa sứ", "hoa lan", "hoa hồng", "hoa trà", "hoa tulip",
+    "hoa", "vân đá", "da báo", "kẻ caro", "màu trơn",
 )
 HAIR_TITLE_SHAPE_TERMS = (
     "ทรงหัวใจ", "รูปหัวใจ", "ทรงฉลาม", "โบว์ใหญ่", "โบว์เล็ก", "ขอบสูง", "มินิ",
-    "hình tim", "nơ to", "nơ nhỏ", "mini",
+    "hình tim", "nơ ruy băng", "nơ voan", "nơ bản to", "nơ dài", "nơ to", "nơ nhỏ",
+    "hình bướm", "mini",
 )
 HAIR_TITLE_STRUCTURE_TERMS = (
     "แม่เหล็ก", "แบบแม่เหล็ก", "ฟันหนีบ", "ฟันหนีบแข็งแรง", "กิ๊บเป๊าะแป๊ะ",
     "อะคริลิก", "พลาสติก", "ผ้าซาติน", "ผ้ากำมะหยี่", "ประดับมุก", "ประดับคริสตัล",
-    "nam châm", "răng kẹp", "nhựa acrylic", "nhựa", "vải satin", "nhung", "đính ngọc trai", "đính đá",
+    "nam châm", "răng kẹp", "5 răng", "3 răng", "mỏ vịt", "càng cua", "nhựa acrylic",
+    "nhựa", "vải satin", "nhung", "kim loại", "đính ngọc trai", "đính đá pha lê", "đính đá",
+    "đính charm", "ngọc trai", "pha lê", "ruy băng", "voan", "lò xo", "trong suốt",
 )
 HAIR_TITLE_USE_TERMS = (
     "รวบผม", "จัดทรงผม", "ติดหน้าม้า", "ผมด้านข้าง", "มวยผม", "หางม้า", "ผมหนา",
-    "búi tóc", "tóc mái", "tóc dày", "buộc tóc", "giữ tóc",
+    "búi tóc", "tóc mái", "tóc phía sau", "tóc dày", "tóc ngắn", "buộc tóc", "cột tóc",
+    "kẹp mái", "giữ tóc mái", "giữ tóc",
 )
 HAIR_TITLE_STYLE_TERMS = (
     "สไตล์เกาหลี", "มินิมอล", "ลุคหวาน", "น่ารัก", "สดใส", "หรูหรา", "เรียบง่าย",
-    "Hàn Quốc", "tối giản", "xinh xắn", "tiểu thư", "sang nhẹ",
+    "phong cách Hàn Quốc", "Hàn Quốc", "tối giản", "xinh xắn", "tiểu thư", "sang nhẹ", "cute", "xinh",
 )
 
 

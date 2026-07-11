@@ -218,7 +218,30 @@ def _check_hair_accessory_generic_title(
     category: str = "女装上装/外套",
     country: str = "TH",
 ) -> None:
-    if (category or "").strip() != "发饰" or (country or "TH").strip().upper() != "TH":
+    if (category or "").strip() != "发饰":
+        return
+    normalized_country = (country or "TH").strip().upper()
+    if normalized_country == "VN":
+        lower = title.lower()
+        generic_groups = [
+            ("dễ kẹp", "dễ dùng", "dễ tạo kiểu", "giữ tóc gọn"),
+            ("dùng hằng ngày", "dễ phối", "đi học", "đi chơi"),
+            ("tối giản", "xinh xắn", "phong cách hàn quốc", "hàn quốc"),
+        ]
+        generic_hits = 0
+        for group in generic_groups:
+            if any(term in lower for term in group):
+                generic_hits += 1
+        concrete_terms = [
+            "màu", "chấm bi", "hoa", "vân đá", "đính", "ngọc trai", "đá", "pha lê",
+            "nơ", "satin", "nhung", "acrylic", "kim loại", "răng", "càng cua",
+            "mỏ vịt", "bản to", "cỡ", "ruy băng", "voan", "lò xo", "trong suốt",
+        ]
+        has_concrete = any(term in lower for term in concrete_terms)
+        if generic_hits >= 3 and not has_concrete:
+            issues.append("越南发饰标题过于通用，建议保留原标题中的颜色/图案/形状/结构差异点")
+        return
+    if normalized_country != "TH":
         return
     generic_groups = [
         ("รวบผมง่าย", "จัดทรง"),

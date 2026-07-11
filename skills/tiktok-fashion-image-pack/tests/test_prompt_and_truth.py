@@ -48,6 +48,7 @@ class ProductTruthTests(unittest.TestCase):
         vn_text = build_keywords_prompt_text("claw_clip", category="发饰", country="VN")
         self.assertIn("กิ๊บหนีบผม", th_text)
         self.assertIn("kẹp tóc càng cua", vn_text)
+        self.assertIn("5 răng", vn_text)
         self.assertEqual(get_series_info("claw_clip", category="发饰", country="VN")["series_code_prefix"], "CC")
 
     def test_hair_accessory_title_prompt_uses_vn_template(self) -> None:
@@ -68,6 +69,14 @@ class ProductTruthTests(unittest.TestCase):
         )
         self.assertNotIn("标题缺少泰语内容", result["issues"])
         self.assertNotIn("标题缺少发饰核心品类词（如 kẹp tóc / băng đô / scrunchies）", result["issues"])
+
+    def test_vietnam_hair_accessory_title_qa_flags_generic_repetition(self) -> None:
+        result = qa_title(
+            tk_title="kẹp tóc nữ dễ kẹp dùng hằng ngày phong cách Hàn Quốc",
+            category="发饰",
+            country="VN",
+        )
+        self.assertTrue(any("过于通用" in issue for issue in result["issues"]))
 
     def test_hair_accessory_title_qa_flags_generic_repetition(self) -> None:
         result = qa_title(
@@ -134,6 +143,27 @@ class ProductTruthTests(unittest.TestCase):
         )
         self.assertEqual(truth["subtype"], "hair_clip")
         self.assertIn("แม่เหล็ก", truth["grip_structure"])
+
+    def test_title_only_fallback_extracts_vietnam_hair_bow_differentiators(self) -> None:
+        truth = build_title_fallback_truth(
+            original_title="kẹp tóc nơ bản to màu đen nơ ruy băng phong cách Hàn Quốc",
+            category="发饰",
+            country="VN",
+        )
+        self.assertEqual(truth["subtype"], "hair_bow")
+        self.assertEqual(truth["main_color"], "màu đen")
+        self.assertIn("nơ bản to", truth["decorative_elements"])
+        self.assertIn("nơ ruy băng", truth["core_selling_points"])
+
+    def test_title_only_fallback_extracts_vietnam_duckbill_hair_pin(self) -> None:
+        truth = build_title_fallback_truth(
+            original_title="kẹp mái mỏ vịt cỡ nhỏ giữ tóc mái gọn xinh xắn",
+            category="发饰",
+            country="VN",
+        )
+        self.assertEqual(truth["subtype"], "hair_pin")
+        self.assertIn("mỏ vịt", truth["grip_structure"])
+        self.assertIn("giữ tóc mái", truth["core_selling_points"])
 
     def test_heuristic_infers_leather(self) -> None:
         truth = heuristic_product_truth(["black_pu_leather_jacket.jpg"])
