@@ -19,6 +19,7 @@ from auto_mixcut.skills.bgm_audio_analysis_skill import BgmAudioAnalysisSkill  #
 from auto_mixcut.skills.bgm_tag_fusion_skill import BgmTagFusionSkill  # noqa: E402
 from auto_mixcut.skills.bgm_tagging_skill import BgmTaggingSkill  # noqa: E402
 from auto_mixcut.skills.rds_repository_skill import RDSRepositorySkill  # noqa: E402
+from auto_mixcut.domain.markets import canonical_market  # noqa: E402
 
 APP_TOKEN = "IFa5w98VBif8j7kIitIcLaqLncb"
 TABLE_ID = "tblgdVFb6GDSPW3E"
@@ -49,8 +50,16 @@ def main():
         row = {"bgm_id": bgm_id}
         row["track_name"] = _cell_text(fields.get("BGM名称")) or "Unknown"
         row["artist_name"] = _cell_text(fields.get("Artist/来源")) or _cell_text(fields.get("Artist")) or _cell_text(fields.get("艺术家")) or ""
-        row["source_platform"] = "feishu"
-        row["source_url"] = _cell_text(fields.get("Artlist链接")) or _cell_text(fields.get("来源链接")) or ""
+        tiktok_source_url = _cell_text(fields.get("TK来源链接"))
+        row["source_platform"] = "tiktok" if tiktok_source_url else "feishu"
+        row["country"] = canonical_market(_cell_text(fields.get("国家")))
+        row["priority_use"] = 1 if _cell_bool(fields.get("是否优先使用")) else 0
+        row["source_url"] = (
+            tiktok_source_url
+            or _cell_text(fields.get("Artlist链接"))
+            or _cell_text(fields.get("来源链接"))
+            or ""
+        )
         row["official_tags_json"] = "[]"
         row["license_note"] = _cell_text(fields.get("授权信息")) or _attachment_summary(fields.get("授权凭证文件")) or ""
         row["status"] = _normalize_track_status(fields.get("状态"))
@@ -287,6 +296,13 @@ def _cell_text(value) -> str:
         items = [_cell_text(v) for v in value if _cell_text(v)]
         return ", ".join(items) if items else ""
     return str(value).strip()
+
+
+def _cell_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = _cell_text(value).strip().lower()
+    return text in {"1", "true", "yes", "y", "是", "已勾选"}
 
 
 if __name__ == "__main__":

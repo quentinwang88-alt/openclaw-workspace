@@ -47,6 +47,7 @@ def multi_select(options: List[str]) -> Dict[str, Any]:
 
 
 MARKETS = ["越南", "泰国", "马来西亚", "东南亚通用"]
+COUNTRIES = ["越南", "泰国", "马来西亚", "菲律宾", "新加坡", "印度尼西亚", "中国台湾", "东南亚通用"]
 PLACEMENTS = ["自然流量", "广告投放", "店铺视频"]
 CATEGORIES = ["发饰", "耳饰", "女装上装", "围巾帽子", "通用时尚"]
 MOODS = ["轻甜", "日常干净", "柔和女性化", "时髦", "干净高级", "温暖舒适", "冬季柔和", "夏日清爽", "生活感", "活泼", "简洁干净"]
@@ -62,6 +63,7 @@ SUBSCRIPTION_PLANS = ["Social", "Pro Music", "Pro Music & SFX", "Business", "未
 DOWNLOAD_VERSIONS = ["Full Mix", "Instrumental", "No Vocals", "Stem", "未知"]
 FILE_FORMATS = ["MP3", "WAV", "M4A", "未知"]
 CLEARLIST_STATUS = ["已加入", "未加入", "待确认", "不适用"]
+TIKTOK_EXTRACTION_STATUS = ["待提取", "处理中", "已完成", "需人工处理", "失败"]
 
 
 TABLE_URLS = {
@@ -82,6 +84,10 @@ TABLE_FIELDS: Dict[str, List[Dict[str, Any]]] = {
         {"name": "BGM名称", **TEXT},
         {"name": "音频文件", **ATTACHMENT},
         {"name": "Artlist链接", **URL},
+        {"name": "TK来源链接", **URL},
+        {"name": "提取状态", **single_select(TIKTOK_EXTRACTION_STATUS)},
+        {"name": "国家", **single_select(COUNTRIES)},
+        {"name": "是否优先使用", **CHECKBOX},
         {"name": "授权凭证文件", **ATTACHMENT},
         {"name": "备注", **TEXT},
         {"name": "AI情绪标签", **multi_select(MOODS)},
@@ -327,7 +333,11 @@ def autofill_bgm_tags(dry_run: bool = False) -> Dict[str, Any]:
 
 def _feishu_bgm_track(fields: Dict[str, Any]) -> Dict[str, Any]:
     file_name = _attachment_name(fields.get("音频文件")) or _text(fields.get("BGM名称")) or "bgm.mp3"
-    source_url = _urlish(fields.get("Artlist链接")) or _urlish(fields.get("来源链接"))
+    source_url = (
+        _urlish(fields.get("TK来源链接"))
+        or _urlish(fields.get("Artlist链接"))
+        or _urlish(fields.get("来源链接"))
+    )
     return {
         "bgm_id": _text(fields.get("BGM编号")) or new_id("BGM"),
         "track_name": _text(fields.get("BGM名称")) or Path(file_name).stem,
@@ -384,11 +394,13 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--prune-extra", action="store_true")
     parser.add_argument("--autofill-tags", action="store_true")
+    parser.add_argument("--table", choices=sorted(TABLE_FIELDS), help="只检查或更新指定表")
     args = parser.parse_args()
     if args.autofill_tags:
         results = [autofill_bgm_tags(dry_run=args.dry_run)]
     else:
-        results = [ensure_table(name, dry_run=args.dry_run, prune_extra=args.prune_extra) for name in TABLE_FIELDS]
+        table_names = [args.table] if args.table else list(TABLE_FIELDS)
+        results = [ensure_table(name, dry_run=args.dry_run, prune_extra=args.prune_extra) for name in table_names]
     print(json.dumps(results, ensure_ascii=False, indent=2))
     return 1 if any(item["failed"] for item in results) else 0
 

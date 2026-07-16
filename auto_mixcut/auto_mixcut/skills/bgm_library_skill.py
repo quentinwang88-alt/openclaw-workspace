@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from auto_mixcut.core.ids import new_id
 from auto_mixcut.core.result import Result
+from auto_mixcut.domain.markets import canonical_market, market_matches
 
 from .context import SkillContext
 from .llm_prompts import BGM_ALLOWED_LABELS
@@ -177,23 +178,39 @@ class BgmLibrarySkill:
         template_id: str = "",
         energy: str = "",
         preferred_vocal_types: list[str] | None = None,
+        market: str = "",
     ) -> Result:
         tracks = self.ctx.repo.list_where("bgm_tracks", "1=1")
         usable = [t for t in tracks if _is_track_enabled(t)]
-        if not usable:
-            usable = [t for t in tracks if _is_license_not_blocked(t)]
+
+        if product_id and not market:
+            product = self.ctx.repo.get("products", "product_id", product_id) or {}
+            market = str(product.get("market") or "")
+        target_market = canonical_market(market)
+        country_tracks = [track for track in usable if market_matches(track.get("country"), target_market)]
+        use_country_pool = bool(target_market and country_tracks)
+        if use_country_pool:
+            usable = country_tracks
+            selection_scope = "country"
+            has_country_priority = any(_is_priority_track(track) for track in usable)
+        else:
+            selection_scope = "global_fallback" if target_market else "global"
+            has_country_priority = False
 
         scored = []
         for track in usable:
             score = self._score_track(track, category, mood, template_id, energy, preferred_vocal_types or [])
             score -= self._recent_usage_penalty(track, product_id=product_id, template_id=template_id)
-            scored.append((score, track))
+            priority_rank = 0
+            if use_country_pool and has_country_priority and not _is_priority_track(track):
+                priority_rank = 1
+            scored.append((priority_rank, score, track))
 
-        scored.sort(key=lambda x: x[0], reverse=True)
+        scored.sort(key=lambda item: (item[0], -item[1]))
 
         top = []
         seen_identities = set()
-        for score, track in scored:
+        for priority_rank, score, track in scored:
             identity = _track_identity(track)
             if identity and identity in seen_identities:
                 continue
@@ -208,6 +225,10 @@ class BgmLibrarySkill:
                 "vocal_type": track.get("vocal_type", "unknown"),
                 "status": track.get("status") or "active",
                 "license_status": track.get("license_status") or "pending",
+                "country": canonical_market(track.get("country")),
+                "priority_use": _is_priority_track(track),
+                "country_priority_rank": priority_rank,
+                "selection_scope": selection_scope,
                 "score": score,
                 "usage_count": int(track.get("usage_count") or 0),
                 "degrade_mode": _degrade_mode(track),
@@ -321,13 +342,6 @@ class BgmLibrarySkill:
             else:
                 score -= 0.25
 
-        license_status = str(track.get("license_status") or "").strip().lower()
-        if license_status == "verified":
-            score += 0.16
-        elif license_status == "pending":
-            score += 0.04
-        elif not license_status:
-            score -= 0.06
         if track.get("oss_object_id"):
             score += 0.08
 
@@ -463,14 +477,16 @@ def _is_track_enabled(track: dict) -> bool:
     status = str(track.get("status") or "active").strip().lower()
     if status in {"paused", "rejected", "expired", "inactive", "disabled", "暂停", "已拒绝", "已过期", "不可用"}:
         return False
-    return _is_license_not_blocked(track)
-
-
-def _is_license_not_blocked(track: dict) -> bool:
-    license_status = str(track.get("license_status") or "").strip().lower()
-    if license_status in {"unavailable", "restricted", "rejected", "expired", "不可用", "限制", "已拒绝", "已过期"}:
-        return False
     return True
+
+
+def _is_priority_track(track: dict) -> bool:
+    value = track.get("priority_use")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value or "").strip().lower() in {"1", "true", "yes", "是", "已勾选"}
 
 
 def _degrade_mode(track: dict) -> str:

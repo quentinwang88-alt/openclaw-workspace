@@ -367,9 +367,11 @@ def _ensure_bgm(ctx: SkillContext, plan: dict | None = None) -> Result:
         if isinstance(preferred_vocal_types, str):
             preferred_vocal_types = [preferred_vocal_types]
         category = ""
+        market = ""
         if product_id:
             product = ctx.repo.get("products", "product_id", product_id) or {}
             category = product.get("category", "")
+            market = product.get("market", "")
         rec = BgmLibrarySkill(ctx).get_recommendation(
             product_id=product_id,
             category=category,
@@ -377,6 +379,7 @@ def _ensure_bgm(ctx: SkillContext, plan: dict | None = None) -> Result:
             template_id=template_id,
             energy=energy,
             preferred_vocal_types=list(preferred_vocal_types or []),
+            market=market,
         )
         recs = rec.data.get("recommendations", []) if rec.success else []
         if recs:
@@ -472,23 +475,25 @@ def _choose_bgm_candidate_for_batch(ctx: SkillContext, recs: list[dict], plan: d
         name_count = int(name_counts.get(track_name_key, 0)) if track_name_key else 0
         over_cap = _over_cap(bgm_id, track_name_key)
         score = _safe_float(rec.get("score"), 0)
+        country_priority_rank = int(rec.get("country_priority_rank") or 0)
         usage = int(rec.get("usage_count") or 0)
         # diversity key: when all tracks are over cap, prefer least-recently-used
         annotated.append((
             over_cap,
             0 if is_ads and not over_cap else (id_count + name_count),
+            country_priority_rank,
             -score,
             usage,
             (index + variant_no - 1) % max(len(recs), 1),
             rec,
         ))
-    annotated.sort(key=lambda item: item[:5])
+    annotated.sort(key=lambda item: item[:6])
     # when all candidates are over cap, add fair round-robin among remaining
     all_over = all(a[0] for a in annotated)
     if all_over and len(annotated) > 1:
-        # rotate by batch position to cycle through available tracks
-        annotated.sort(key=lambda item: (item[3], item[4], -item[2]))
-    return annotated[0][5]
+        # Keep the country preference tier, then rotate fairly inside that tier.
+        annotated.sort(key=lambda item: (item[2], item[4], item[5], item[3]))
+    return annotated[0][6]
 
 
 def _is_ads_template(template_id: str) -> bool:

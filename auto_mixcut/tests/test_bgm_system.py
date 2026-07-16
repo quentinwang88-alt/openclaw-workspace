@@ -170,7 +170,7 @@ class BgmSystemTest(unittest.TestCase):
         untagged = next(item for item in rec.data["recommendations"] if item["bgm_id"] == "BGM_UNTAGGED_STILL_USABLE")
         self.assertEqual(untagged["degrade_mode"], "untagged_penalty")
 
-    def test_bgm_recommendation_uses_energy_vocal_and_filters_blocked_tracks(self):
+    def test_bgm_recommendation_uses_energy_vocal_and_ignores_license_status(self):
         base = {
             "mood_tags_json": json.dumps(["fashion_chic"]),
             "category_tags_json": json.dumps(["womens_outerwear"]),
@@ -196,7 +196,58 @@ class BgmSystemTest(unittest.TestCase):
         ids = [item["bgm_id"] for item in rec.data["recommendations"]]
         self.assertEqual(ids[0], "BGM_HIGH_INST")
         self.assertNotIn("BGM_PAUSED", ids)
-        self.assertNotIn("BGM_LICENSE_BLOCKED", ids)
+        self.assertIn("BGM_LICENSE_BLOCKED", ids)
+
+    def test_bgm_recommendation_uses_country_priority_then_country_then_global(self):
+        base = {
+            "mood_tags_json": json.dumps(["fashion_chic"]),
+            "category_tags_json": json.dumps(["generic_fashion"]),
+            "template_tags_json": json.dumps([]),
+            "bgm_tag_status": "tagged",
+            "tag_confidence": "high",
+            "status": "active",
+            "license_status": "verified",
+        }
+        self.ctx.repo.upsert(
+            "bgm_tracks",
+            "bgm_id",
+            {"bgm_id": "BGM_VN_PRIORITY", "track_name": "VN priority", **base, "country": "VN", "priority_use": 1},
+        )
+        self.ctx.repo.upsert(
+            "bgm_tracks",
+            "bgm_id",
+            {"bgm_id": "BGM_VN_NORMAL", "track_name": "VN normal", **base, "country": "越南", "priority_use": 0},
+        )
+        self.ctx.repo.upsert(
+            "bgm_tracks",
+            "bgm_id",
+            {"bgm_id": "BGM_TH_PRIORITY", "track_name": "TH priority", **base, "country": "TH", "priority_use": 1},
+        )
+
+        vn = BgmLibrarySkill(self.ctx).get_recommendation(market="VN", category="generic_fashion")
+        self.assertTrue(vn.success, vn.to_dict())
+        vn_items = vn.data["recommendations"]
+        self.assertEqual([item["bgm_id"] for item in vn_items], ["BGM_VN_PRIORITY", "BGM_VN_NORMAL"])
+        self.assertTrue(all(item["selection_scope"] == "country" for item in vn_items))
+        self.assertEqual([item["country_priority_rank"] for item in vn_items], [0, 1])
+
+        fallback = BgmLibrarySkill(self.ctx).get_recommendation(market="MY", category="generic_fashion")
+        self.assertTrue(fallback.success, fallback.to_dict())
+        fallback_items = fallback.data["recommendations"]
+        self.assertTrue(fallback_items)
+        self.assertTrue(all(item["selection_scope"] == "global_fallback" for item in fallback_items))
+        self.assertIn("BGM_TH_PRIORITY", {item["bgm_id"] for item in fallback_items})
+
+    def test_batch_choice_preserves_country_priority_rank(self):
+        chosen = _choose_bgm_candidate_for_batch(
+            self.ctx,
+            [
+                {"bgm_id": "BGM_VN_NORMAL", "track_name": "Normal", "score": 99, "country_priority_rank": 1},
+                {"bgm_id": "BGM_VN_PRIORITY", "track_name": "Priority", "score": 1, "country_priority_rank": 0},
+            ],
+            {},
+        )
+        self.assertEqual(chosen["bgm_id"], "BGM_VN_PRIORITY")
 
     def test_bgm_recommendation_dedupes_track_identity_and_prefers_operational_record(self):
         base = {

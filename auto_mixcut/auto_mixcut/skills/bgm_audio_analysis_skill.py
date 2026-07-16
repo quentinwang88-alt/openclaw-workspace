@@ -148,6 +148,15 @@ def analyze_audio_array(samples: np.ndarray, sample_rate: int) -> dict[str, Any]
     }
 
 
+def analyze_audio_file(path: Path) -> dict[str, Any]:
+    """Decode an audio file and return the same signal-only analysis used by the BGM skill."""
+    decoded = _decode_audio(Path(path))
+    if not decoded.success:
+        message = decoded.error.message if decoded.error else "audio analysis failed"
+        raise RuntimeError(message)
+    return analyze_audio_array(decoded.data["samples"], decoded.data["sample_rate"])
+
+
 def _decode_audio(path: Path, sample_rate: int = 22050, max_seconds: int = 120) -> Result:
     cmd = [
         "ffmpeg",

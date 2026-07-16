@@ -164,6 +164,7 @@ def main(argv: list[str] | None = None) -> int:
     bgm_rec.add_argument("--category", default="")
     bgm_rec.add_argument("--mood", default="")
     bgm_rec.add_argument("--template-id", default="")
+    bgm_rec.add_argument("--market", default="")
     args = parser.parse_args(argv)
     ctx = build_context(args.config)
     dispatch = {
@@ -206,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
         else BgmAudioAnalysisSkill(ctx).analyze_all(limit=args.limit, only_missing=args.only_missing, apply_tags=not args.no_apply_tags),
         "fuse-bgm-tags": lambda: BgmTagFusionSkill(ctx).fuse_track(args.bgm_id) if args.bgm_id else BgmTagFusionSkill(ctx).fuse_all(limit=args.limit),
         "bgm-library-calibrate": lambda: BgmTaggingSkill(ctx).calibrate_all(only_low_confidence=args.only_low_confidence, force=args.force),
-        "bgm-library-recommend": lambda: BgmLibrarySkill(ctx).get_recommendation(product_id=args.product_id, category=args.category, mood=args.mood, template_id=args.template_id),
+        "bgm-library-recommend": lambda: BgmLibrarySkill(ctx).get_recommendation(product_id=args.product_id, category=args.category, mood=args.mood, template_id=args.template_id, market=args.market),
     }
     res = dispatch[args.cmd]()
     print(json.dumps(res.to_dict(), ensure_ascii=False, indent=2, default=str))

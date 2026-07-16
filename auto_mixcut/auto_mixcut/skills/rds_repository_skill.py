@@ -163,6 +163,8 @@ def _ensure_runtime_compatibility_columns(ctx: SkillContext) -> Result:
         "bgm_tracks": {
             "status": "TEXT DEFAULT 'active'",
             "license_status": "TEXT",
+            "country": "TEXT",
+            "priority_use": "INTEGER DEFAULT 0",
             "audio_analysis_json": "TEXT",
             "audio_analyzed_at": "TEXT",
             "audio_tag_source": "TEXT",
@@ -745,6 +747,8 @@ def _ensure_mysql_runtime_compatibility_columns(ctx: SkillContext) -> Result:
         "bgm_tracks": {
             "status": "VARCHAR(64) DEFAULT 'active'",
             "license_status": "VARCHAR(64)",
+            "country": "VARCHAR(32)",
+            "priority_use": "TINYINT DEFAULT 0",
             "audio_analysis_json": "JSON",
             "audio_analyzed_at": "DATETIME",
             "audio_tag_source": "VARCHAR(64)",
@@ -765,6 +769,8 @@ def _ensure_mysql_runtime_compatibility_columns(ctx: SkillContext) -> Result:
                       track_name VARCHAR(512),
                       artist_name VARCHAR(256),
                       source_platform VARCHAR(128),
+                      country VARCHAR(32),
+                      priority_use TINYINT DEFAULT 0,
                       status VARCHAR(64) DEFAULT 'active',
                       license_status VARCHAR(64),
                       source_url TEXT,
