@@ -63,14 +63,24 @@ sys.path.insert(0, str(SKILL_ROOT))
 
 # ── LLM (doubao) ──
 from openai import OpenAI
+from app.services.llm_client import get_llm_client
 LLM_URL = os.environ.get('CREATOR_PROFILE_LLM_API_URL', os.environ.get('LLM_API_URL', 'https://ark.cn-beijing.volces.com/api/coding/v3'))
 LLM_KEY = os.environ.get('CREATOR_PROFILE_LLM_API_KEY', os.environ.get('LLM_API_KEY', ''))
 LLM_MODEL = os.environ.get('CREATOR_PROFILE_LLM_MODEL', os.environ.get('LLM_MODEL', 'Doubao-Seed-2.0-pro'))
 import httpx
+_USE_CODEX_LLM = 'codex' in LLM_URL.lower() or 'chatgpt.com' in LLM_URL.lower()
 _http = httpx.Client(transport=httpx.HTTPTransport(retries=0), timeout=180) if 'volces' in LLM_URL else None
-llm_client = OpenAI(api_key=LLM_KEY, base_url=LLM_URL, timeout=180, http_client=_http) if _http else OpenAI(api_key=LLM_KEY, base_url=LLM_URL, timeout=180)
+llm_client = None if _USE_CODEX_LLM else (OpenAI(api_key=LLM_KEY, base_url=LLM_URL, timeout=180, http_client=_http) if _http else OpenAI(api_key=LLM_KEY, base_url=LLM_URL, timeout=180))
+profile_llm_client = get_llm_client() if _USE_CODEX_LLM else None
 
 def call_json(prompt, system_prompt='', image_paths=None, max_tokens=500):
+    if profile_llm_client:
+        return profile_llm_client.call_json(
+            prompt=prompt,
+            image_paths=image_paths or [],
+            system_prompt=system_prompt,
+            max_tokens=max_tokens,
+        )
     msgs = [];
     if system_prompt: msgs.append({'role':'system','content':system_prompt})
     content = [{'type':'text','text':prompt}]
@@ -274,6 +284,38 @@ def generate_card_data(products, country, commission, supplement, product_imgs):
         print(f'    文案生成失败: {e}')
         return None
 
+def identify_products_from_images(product_imgs, fallback_products=None):
+    """多张产品图逐图识别产品名，避免把多个不同产品合成单品卡。"""
+    fallback_products = fallback_products or []
+    if not product_imgs:
+        return fallback_products
+    try:
+        expected = min(len(product_imgs), 3)
+        hint = '、'.join(fallback_products) if fallback_products else '无'
+        result = call_json(
+            prompt=f'''这批图片是建联小卡片的产品图，请逐张识别商品。
+
+要求：
+- 一张图片对应一个产品名
+- 如果多张图是不同产品，必须输出多个产品
+- 如果表格里的产品名只是泛称或只写了其中一个产品，不要合并
+- 最多输出 {expected} 个产品名
+- 产品名用中文短名，便于后续翻译
+
+表格产品名提示：{hint}
+图片数量：{len(product_imgs)}
+
+只输出JSON：{{"products":["产品1","产品2","产品3"]}}''',
+            system_prompt='电商商品识别助手。只输出合法JSON。',
+            image_paths=product_imgs[:3],
+            max_tokens=300,
+        )
+        inferred = [str(p).strip() for p in result.get('products', []) if str(p).strip()]
+        return inferred[:3] or fallback_products
+    except Exception as e:
+        print(f'    产品图识别失败: {e}')
+        return fallback_products
+
 def generate_card_image(card_data, product_imgs):
     """Codex image_generation 生成卡片。"""
     if not CODEX_TOKEN: raise RuntimeError('Codex token 不可用')
@@ -397,13 +439,13 @@ for rec in pending:
             path = download_feishu_img(ft)
             if path: product_imgs.append(path)
 
-    # 无产品名时从图片识别
-    if not products and product_imgs:
-        try:
-            r2 = call_json(prompt='识别商品图片，输出产品名列表。只输出JSON：{"products":["xxx","yyy"]}',
-                system_prompt='电商商品识别助手。只输出合法JSON。', image_paths=product_imgs[:3], max_tokens=200)
-            products = r2.get('products', []) or ['时尚单品']
-        except: products = ['时尚单品']
+    # 无产品名，或 1 个泛称产品名对应多张产品图时，按图片逐个识别产品。
+    if product_imgs and (not products or (len(products) == 1 and len(product_imgs) > 1)):
+        inferred_products = identify_products_from_images(product_imgs, products)
+        if len(inferred_products) > len(products):
+            products = inferred_products
+        elif not products:
+            products = inferred_products or ['时尚单品']
     elif not products:
         products = ['时尚单品']
 

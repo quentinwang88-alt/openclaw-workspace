@@ -4,6 +4,7 @@ LLM 调用客户端 — 双模式：Codex Responses API + OpenAI Chat Completion
 import base64
 import json
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -80,10 +81,22 @@ def _needs_proxy_bypass(url: str) -> bool:
 
 
 def _build_http_client(api_url: str) -> Any:
-    """构建 httpx 客户端，volces API 强制直连绕过系统代理。"""
+    """构建 httpx 客户端。
+
+    Volces API 强制直连绕过系统代理；Codex 本地入口优先使用本机代理，
+    避免长任务中频繁 connection error。
+    """
+    import httpx
     if _needs_proxy_bypass(api_url):
-        import httpx
         return httpx.Client(transport=httpx.HTTPTransport(retries=0), timeout=LLM_TIMEOUT)
+    if _is_codex_backend(api_url):
+        proxy = os.environ.get("ALL_PROXY") or os.environ.get("HTTPS_PROXY") or ""
+        if not proxy:
+            proxy = "socks5://127.0.0.1:10808"
+        try:
+            return httpx.Client(proxy=proxy, timeout=httpx.Timeout(float(LLM_TIMEOUT), connect=15.0))
+        except Exception:
+            return None
     return None  # 使用 openai 默认行为（尊重系统代理）
 
 
@@ -170,15 +183,37 @@ class ProfileLLMClient:
             "model": self._model,
             "store": False,
             "input": [{"role": "user", "content": content}],
-            "max_output_tokens": max_tokens,
         }
         if system_prompt:
             kwargs["instructions"] = system_prompt
         if LLM_REASONING_EFFORT:
             kwargs["reasoning"] = {"effort": LLM_REASONING_EFFORT}
 
-        response = self._client.responses.create(**kwargs)
-        return response.output_text or ""
+        text_chunks: List[str] = []
+        fallback_text = ""
+        try:
+            with self._client.responses.stream(**kwargs) as stream:
+                for event in stream:
+                    event_type = str(getattr(event, "type", "") or "")
+                    if event_type == "response.output_text.delta":
+                        delta = str(getattr(event, "delta", "") or "")
+                        if delta:
+                            text_chunks.append(delta)
+                    elif event_type == "response.output_text.done":
+                        done_text = str(getattr(event, "text", "") or "")
+                        if done_text:
+                            fallback_text = done_text
+        except TypeError as exc:
+            # Codex streams can finish with response.output=None in the SDK
+            # final snapshot even though text deltas have already arrived.
+            if "NoneType" not in str(exc):
+                raise
+            text = fallback_text.strip() or "".join(text_chunks).strip()
+            if text:
+                return text
+            raise
+
+        return fallback_text.strip() or "".join(text_chunks).strip()
 
     def _call_chat(self, prompt: str, image_paths: List[str],
                    system_prompt: Optional[str], max_tokens: int) -> str:
