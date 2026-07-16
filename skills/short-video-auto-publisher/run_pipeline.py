@@ -1101,6 +1101,30 @@ def _command_run_all_locked(args: argparse.Namespace) -> None:
     video_dir = ensure_video_storage_ready(args.video_dir)
 
     db = AutoPublishDB(Path(args.db_path))
+    if args.manual_publish_only:
+        publisher = build_publish_adapter(args)
+        print("[run-all] sync_manual_publish_requests start", flush=True)
+        manual_app_token, manual_table_id = resolve_feishu_config(resolve_manual_publish_feishu_url(args))
+        manual_client = FeishuBitableClient(app_token=manual_app_token, table_id=manual_table_id)
+        manual_field_stats = ensure_manual_publish_fields(manual_client)
+        manual_field_names = manual_client.list_field_names()
+        manual_mapping = resolve_table_mapping(manual_field_names, MANUAL_PUBLISH_FIELD_ALIASES)
+        manual_records = manual_client.list_records(page_size=100, limit=args.limit)
+        summary["sync_manual_publish_requests"] = {
+            "fields": manual_field_stats,
+            **sync_manual_publish_requests(
+                manual_records,
+                manual_mapping,
+                db,
+                publisher,
+                client=manual_client,
+                video_dir=video_dir,
+            ),
+        }
+        print(f"[run-all] sync_manual_publish_requests done {summary['sync_manual_publish_requests']}", flush=True)
+        print(summary)
+        return
+
     title_generator = build_title_generator(args.title_mode, args.llm_route)
     existing_lookup = db.build_metadata_lookup()
 
@@ -1485,6 +1509,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_all.add_argument("--mixcut-sync-limit", type=int, default=20, help="每轮最多同步多少条混剪成片到发布池，默认 20")
     run_all.add_argument("--no-sync-mixcut", action="store_true", help="本轮不自动同步混剪成片")
     run_all.add_argument("--no-sync-manual-publish", action="store_true", help="本轮不处理主动人工发布请求表")
+    run_all.add_argument("--manual-publish-only", action="store_true", help="仅处理主动人工发布请求表，不运行其它同步与补排")
     run_all.add_argument("--title-mode", choices=["heuristic", "llm", "fallback"], default="fallback")
     run_all.add_argument("--llm-route", default="auto", help="标题生成 LLM 线路")
     run_all.add_argument("--cleanup-published-days", type=int, default=60, help="已发布本地视频保留天数，默认 60；传 0 可关闭")

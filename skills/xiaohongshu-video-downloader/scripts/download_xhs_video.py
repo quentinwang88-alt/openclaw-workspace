@@ -64,6 +64,26 @@ def request_text_and_url(url: str, headers: dict[str, str]) -> tuple[str, str]:
         return response.read().decode("utf-8", errors="replace"), response.geturl()
 
 
+def request_text_and_url_via_cdp(url: str, cdp_url: str) -> tuple[str, str]:
+    """Load a post in an existing logged-in Chrome session and return rendered HTML."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError("Playwright is required for --cdp-url") from exc
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.connect_over_cdp(cdp_url)
+        if not browser.contexts:
+            raise RuntimeError("Chrome CDP session has no browser context")
+        page = browser.contexts[0].new_page()
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+            page.wait_for_timeout(6_000)
+            return page.content(), page.url
+        finally:
+            page.close()
+
+
 def detect_platform(url: str) -> str:
     parsed = urllib.parse.urlparse(url)
     host = parsed.netloc.lower()
@@ -121,7 +141,7 @@ def extract_note_id(url: str, text: str) -> str:
 
 def extract_tiktok_id(url: str, text: str) -> str:
     parsed = urllib.parse.urlparse(url)
-    match = re.search(r"/video/(\d+)", parsed.path)
+    match = re.search(r"/(?:video|photo)/(\d+)", parsed.path)
     if match:
         return match.group(1)
     for pattern in (r'"id"\s*:\s*"(\d{12,24})"', r'"item_id"\s*:\s*(?:"|\u0022)?(\d{12,24})'):
@@ -183,6 +203,85 @@ def extract_tiktok_title(data: object, text: str, item_id: str) -> str | None:
             if title and not is_generic_title(title):
                 return title
     return None
+
+
+def _first_media_url(value: object) -> str | None:
+    if isinstance(value, str) and value.startswith(("http://", "https://")):
+        return decode_url(value)
+    if isinstance(value, dict):
+        for key in ("playUrl", "play_url", "url", "uri"):
+            result = _first_media_url(value.get(key))
+            if result:
+                return result
+        for key in ("urlList", "url_list", "urls"):
+            result = _first_media_url(value.get(key))
+            if result:
+                return result
+    if isinstance(value, list):
+        for item in value:
+            result = _first_media_url(item)
+            if result:
+                return result
+    return None
+
+
+def extract_tiktok_music(data: object, item_id: str) -> dict[str, object] | None:
+    """Return the platform music asset associated with a TikTok post."""
+    candidates: list[tuple[int, dict[str, object]]] = []
+    for item in walk_values(data):
+        if not isinstance(item, dict):
+            continue
+        music = item.get("music")
+        if not isinstance(music, dict):
+            continue
+        play_url = _first_media_url(music.get("playUrl") or music.get("play_url"))
+        if not play_url:
+            continue
+        score = 10
+        if str(item.get("id") or item.get("itemId") or "") == item_id:
+            score += 100
+        if music.get("title"):
+            score += 5
+        candidates.append(
+            (
+                score,
+                {
+                    "id": str(music.get("id") or music.get("mid") or ""),
+                    "title": str(music.get("title") or "").strip(),
+                    "author": str(music.get("authorName") or music.get("author") or "").strip(),
+                    "original": bool(music.get("original")),
+                    "play_url": play_url,
+                },
+            )
+        )
+    return max(candidates, key=lambda pair: pair[0])[1] if candidates else None
+
+
+def extract_tiktok_music_from_html(text: str) -> dict[str, object] | None:
+    """Read the audio element rendered for photo posts in TikTok web."""
+    audio_match = re.search(r"<audio[^>]+src=[\"']([^\"']+)[\"']", text, flags=re.IGNORECASE)
+    if not audio_match:
+        return None
+    play_url = decode_url(audio_match.group(1))
+    link_match = re.search(
+        r"href=[\"'](?:https?://www\.tiktok\.com)?/music/([^\"'?]+?)-(\d{8,})[^\"']*[\"']",
+        text,
+        flags=re.IGNORECASE,
+    )
+    title = "TikTok original sound"
+    music_id = ""
+    if link_match:
+        slug = urllib.parse.unquote(link_match.group(1)).replace("-", " ").strip()
+        title = slug or title
+        music_id = link_match.group(2)
+    return {
+        "id": music_id,
+        "title": title,
+        "author": "",
+        # DOM fallback cannot prove that the asset is a licensed catalog song.
+        "original": True,
+        "play_url": play_url,
+    }
 
 
 def is_generic_title(value: str) -> bool:
@@ -440,6 +539,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--title-filename", action="store_true", help="Include note title in generated filename")
     parser.add_argument("--print-json", action="store_true", help="Print machine-readable JSON result")
     parser.add_argument("--no-verify", action="store_true", help="Skip ffprobe validation")
+    parser.add_argument(
+        "--metadata-only",
+        action="store_true",
+        help="Resolve post metadata/music without requiring or downloading a video stream",
+    )
+    parser.add_argument(
+        "--cdp-url",
+        help="Optional existing Chrome CDP endpoint used to render pages blocked to plain HTTP",
+    )
     return parser.parse_args()
 
 
@@ -452,21 +560,49 @@ def main() -> int:
 
     page_text = ""
     title = None
+    music = None
     item_id = "direct"
 
     if ".mp4" in args.url:
         candidates = [Candidate(url=args.url, label="direct", score=999)]
     else:
-        page_text, final_url = request_text_and_url(args.url, headers)
+        if args.cdp_url:
+            page_text, final_url = request_text_and_url_via_cdp(args.url, args.cdp_url)
+        else:
+            page_text, final_url = request_text_and_url(args.url, headers)
         normalized = normalize_page_text(page_text)
         if platform == "tiktok":
             item_id = extract_tiktok_id(final_url, normalized)
             candidates, json_blocks = extract_tiktok_candidates(page_text)
             title = extract_tiktok_title(json_blocks, normalized, item_id)
+            music = extract_tiktok_music(json_blocks, item_id)
+            if not music and args.cdp_url:
+                music = extract_tiktok_music_from_html(page_text)
         else:
             item_id = extract_note_id(final_url, normalized)
             title = extract_xhs_title(normalized)
             candidates = extract_xhs_candidates(page_text)
+
+    if args.metadata_only:
+        result = {
+            "ok": True,
+            "platform": platform,
+            "path": "",
+            "size": 0,
+            "item_id": item_id,
+            "note_id": item_id if platform == "xhs" else None,
+            "title": title,
+            "music": music,
+            "selected_label": None,
+            "selected_url": None,
+            "candidate_count": len(candidates),
+            "probe": {},
+        }
+        if args.print_json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        else:
+            print(json.dumps(result, ensure_ascii=False))
+        return 0
 
     if not candidates:
         raise SystemExit(f"No downloadable video stream was found in the {platform} page.")
@@ -507,6 +643,7 @@ def main() -> int:
         "item_id": item_id,
         "note_id": item_id if platform == "xhs" else None,
         "title": title,
+        "music": music,
         "selected_label": selected.label,
         "selected_url": selected.url,
         "candidate_count": len(candidates),
