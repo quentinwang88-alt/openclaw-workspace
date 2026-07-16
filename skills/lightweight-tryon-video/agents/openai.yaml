@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI 轻量试穿视频"
+  short_description: "模板化编排、生成、字幕与质检 8–10 秒稳定试穿视频"
+  default_prompt: "Use $lightweight-tryon-video to create four stable try-on video jobs for this product."

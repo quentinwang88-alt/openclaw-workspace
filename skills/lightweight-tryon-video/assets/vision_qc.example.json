@@ -1,0 +1,22 @@
+{
+  "scene_consistency": 28,
+  "person_naturalness": 18,
+  "clothing_clarity": 19,
+  "action_completeness": 14,
+  "realism": 14,
+  "phone_covers_face": true,
+  "clothing_identifiable": true,
+  "no_severe_body_anomaly": true,
+  "scene_matches_template": true,
+  "action_complete": true,
+  "camera_motion_matches": true,
+  "upper_garment_fully_visible": true,
+  "brightness_adequate": true,
+  "no_overexposure": true,
+  "product_color_preserved": true,
+  "visible_anchor_count": 3,
+  "evidence": [
+    "左后方低床、右后方灰色落地帘、右侧开放架稳定可见",
+    "手机全程遮脸，商品颜色与结构没有明显漂移"
+  ]
+}

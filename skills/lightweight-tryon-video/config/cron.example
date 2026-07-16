@@ -1,0 +1,26 @@
+# macOS crontab 示例。先按实际 Python 路径和日志目录调整；不要直接复制到 crontab。
+# 单一锁避免模板同步、任务推送和人工复核回读并发写入。
+
+# 每 10 分钟：飞书模板 -> SQLite
+*/10 * * * * /Users/likeu3/.openclaw/workspace/skills/lightweight-tryon-video/scripts/feishu_sync_once.sh pull-templates >> /Users/likeu3/.openclaw/workspace/skills/lightweight-tryon-video/var/feishu-sync.log 2>&1
+
+# 每 5 分钟错峰：原始脚本表轻量下拉 -> 轻量视频任务
+1-59/5 * * * * /Users/likeu3/.openclaw/workspace/skills/lightweight-tryon-video/scripts/feishu_sync_once.sh pull-source >> /Users/likeu3/.openclaw/workspace/skills/lightweight-tryon-video/var/feishu-sync.log 2>&1
+
+# 每 5 分钟：先回读产品穿搭图确认，再由门禁补建视频任务
+*/5 * * * * /Users/likeu3/.openclaw/workspace/skills/lightweight-tryon-video/scripts/feishu_sync_once.sh pull-visual-plans >> /Users/likeu3/.openclaw/workspace/skills/lightweight-tryon-video/var/feishu-sync.log 2>&1
+
+# 每 5 分钟错峰：SQLite 视觉方案 -> 飞书产品视觉方案表
+2-59/5 * * * * /Users/likeu3/.openclaw/workspace/skills/lightweight-tryon-video/scripts/feishu_sync_once.sh push-visual-plans >> /Users/likeu3/.openclaw/workspace/skills/lightweight-tryon-video/var/feishu-sync.log 2>&1
+
+# 每 5 分钟错峰：SQLite 视频任务/QC -> 飞书复核台
+3-59/5 * * * * /Users/likeu3/.openclaw/workspace/skills/lightweight-tryon-video/scripts/feishu_sync_once.sh push-review >> /Users/likeu3/.openclaw/workspace/skills/lightweight-tryon-video/var/feishu-sync.log 2>&1
+
+# 每 5 分钟错峰：飞书人工复核 -> SQLite；需要时幂等创建补生成子任务
+4-59/5 * * * * /Users/likeu3/.openclaw/workspace/skills/lightweight-tryon-video/scripts/feishu_sync_once.sh pull-review >> /Users/likeu3/.openclaw/workspace/skills/lightweight-tryon-video/var/feishu-sync.log 2>&1
+
+# 每 5 分钟错峰：回读生成配置 -> 运行管理表排队 -> 初始成片回流 -> LikeU/BGM 最终成片
+2-59/5 * * * * /Users/likeu3/.openclaw/workspace/skills/lightweight-tryon-video/scripts/feishu_sync_once.sh sync-run-manager >> /Users/likeu3/.openclaw/workspace/skills/lightweight-tryon-video/var/feishu-sync.log 2>&1
+
+# 每天 03:17：全量补偿
+17 3 * * * /Users/likeu3/.openclaw/workspace/skills/lightweight-tryon-video/scripts/feishu_sync_once.sh sync-all >> /Users/likeu3/.openclaw/workspace/skills/lightweight-tryon-video/var/feishu-sync.log 2>&1

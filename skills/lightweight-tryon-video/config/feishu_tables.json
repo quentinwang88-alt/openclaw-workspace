@@ -1,0 +1,40 @@
+{
+  "sync_enabled": true,
+  "review_enabled": true,
+  "tables": {
+    "persona": {
+      "url": "https://gcngopvfvo0q.feishu.cn/wiki/PudmwsVSviAXuwk6FkfcZUSbnCh?table=tbllV5lEIBlDCoJQ&view=vewIYHfnmY"
+    },
+    "scene": {
+      "url": "https://gcngopvfvo0q.feishu.cn/wiki/UY1mwlCtSiTkTBkS2wOcHvCjndb?table=tblSPOEiZAG9sgHD&view=vewEvsPB8O"
+    },
+    "action": {
+      "url": "https://gcngopvfvo0q.feishu.cn/wiki/Qq45wbLFCirD1IkNXlac5v2nnud?table=tblr9nEfMBhpsqlY&view=vewPTBBk7i"
+    },
+    "shot_plan": {
+      "url": "https://gcngopvfvo0q.feishu.cn/base/Zn5DbzSz7aJFq9sWeA4cW1YinSg?table=tblpDl7UVEC6L5eS"
+    },
+    "styling": {
+      "url": "https://gcngopvfvo0q.feishu.cn/wiki/D6GywYTaUixWPDkiwAHcTiMJnmc?table=tblpfrfcCYV9FAGs&view=vewBuZ4Ep4"
+    },
+    "subtitle": {
+      "url": "https://gcngopvfvo0q.feishu.cn/wiki/X9pkwvGwMiuCStkDzZ9cBH3Rnve?table=tblXKmmwQdtAIaEP&view=vewGshL1nx"
+    },
+    "review": {
+      "url": "https://gcngopvfvo0q.feishu.cn/wiki/VzzSwpifLio0Edk51HXcPmVened?table=tblMJa2F2o1Fs30b&view=vewMQatJUW"
+    },
+    "visual_plan": {
+      "url": "https://gcngopvfvo0q.feishu.cn/base/KpT4biGMfardSMsjhubcaro0nit?table=tblVFCfeWNSzlWGH"
+    }
+  },
+  "product_workbench": {
+    "url": ""
+  },
+  "source_script": {
+    "url": "https://gcngopvfvo0q.feishu.cn/wiki/ZezEwZ7cKiUyeakdlI3cUuU1nRf?table=tblHRLMr9b3fvxBw&view=vewPpvR2oT"
+  },
+  "run_manager": {
+    "url": "https://gcngopvfvo0q.feishu.cn/base/UvErb5HRWaGESXsBs18cvB3FnEe?table=tbl4eKSVgHw8IyDh&view=vewo6WdFGb",
+    "store_id": "myps01"
+  }
+}

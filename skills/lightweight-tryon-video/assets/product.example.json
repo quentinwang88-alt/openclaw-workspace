@@ -1,0 +1,36 @@
+{
+  "product_id": "DEMO_GRAY_TANK_001",
+  "product_name": "灰色修身背心",
+  "market": "TH",
+  "language": "th",
+  "category": "tank_top",
+  "sub_category": "fitted_tank",
+  "product_title": "灰色修身短款针织背心",
+  "product_images": [
+    "https://example.com/product-front.jpg",
+    "https://example.com/product-back.jpg"
+  ],
+  "core_selling_points": [
+    "修身但不紧",
+    "短款显比例"
+  ],
+  "recommended_scene_pool": [
+    "SCENE_A_001",
+    "SCENE_B_001",
+    "SCENE_C_001"
+  ],
+  "recommended_action_pool": [],
+  "recommended_styling_pool": [
+    "STYLE_003",
+    "STYLE_001"
+  ],
+  "subtitle_angle_pool": [
+    "fit_point",
+    "comfort_point",
+    "single_judgement",
+    "simple_recommendation"
+  ],
+  "target_publish_count": 4,
+  "status": "ready",
+  "notes": "替换示例 URL 后再用于真实生成。"
+}
