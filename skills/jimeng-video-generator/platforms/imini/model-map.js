@@ -16,8 +16,13 @@ function mapModelForJimeng(model) {
 
 function mapModelForImini(model) {
   const normalized = String(model || '').trim().toLowerCase();
+  if (normalized.includes('seedance 2.0 fast vip')) {
+    return 'Seedance 2.0 Fast VIP';
+  }
+  if (normalized.includes('seedance 2.0 vip')) {
+    return 'Seedance 2.0 VIP';
+  }
   if (normalized.includes('seedance 2.0 fast')) {
-    if (normalized.includes('vip')) return 'Seedance 2.0 Fast';
     return 'Seedance 2.0 Fast';
   }
   if (normalized.includes('seedance 2.0')) {

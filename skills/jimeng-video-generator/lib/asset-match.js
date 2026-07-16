@@ -18,8 +18,9 @@ function parseContentIdMetadata(value, label = '内容ID') {
   const markerPattern = new RegExp(`【\\s*${safeLabel}\\s*】|(?:^|\\n)\\s*${safeLabel}`, 'i');
   const markerMatch = markerPattern.exec(rawText);
   if (markerMatch) {
-    const section = rawText.slice(markerMatch.index, markerMatch.index + 120);
-    const idMatch = section.match(/[-:：]\s*([A-Za-z0-9][A-Za-z0-9_-]{1,63})/);
+    const section = rawText.slice(markerMatch.index, markerMatch.index + 180);
+    const valueSection = rawText.slice(markerMatch.index + markerMatch[0].length, markerMatch.index + 180);
+    const idMatch = valueSection.match(/^\s*(?:[-:：]\s*)?([A-Za-z0-9][A-Za-z0-9_-]{1,127})/);
     if (idMatch) {
       const id = String(idMatch[1] || '').trim();
       if (id) {

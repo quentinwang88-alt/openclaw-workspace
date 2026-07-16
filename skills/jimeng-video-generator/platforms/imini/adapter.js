@@ -16,6 +16,11 @@ function canHandle(context, config) {
   return resolved.channel === 'imini';
 }
 
+function shouldUseDirectReferenceFirstFrame(context) {
+  const strategy = String(context.firstFrameStrategy || '').trim().toLowerCase();
+  return strategy === '直接使用确认穿搭图' || strategy === '直接使用原始脚本参考图' || strategy === 'direct_reference' || strategy === 'confirmed_outfit_direct' || strategy === 'source_script_reference_direct';
+}
+
 async function processIminiTask({ page, context, config, token, traceId }) {
   const resolved = resolveChannel(context, config);
 
@@ -40,11 +45,41 @@ async function processIminiTask({ page, context, config, token, traceId }) {
   const iminiConfig = (channelConfig || {}).imini || {};
   const originalImagePaths = context.taskFolderImages || [];
 
+  if (String(context.taskSource || '').trim() === '轻量试穿视频') {
+    const mappedModel = mapModelForImini(context.model);
+    if (mappedModel !== context.model) {
+      return { success: false, error: `轻视频模型必须精确执行，目标=${context.model}，映射=${mappedModel || '不支持'}`, code: 'unsupported_model', shouldBlock: true };
+    }
+    if (![8, 10].includes(Number(context.duration))) {
+      return { success: false, error: `轻视频时长必须精确为 8 或 10 秒，当前=${context.duration}`, code: 'invalid_duration', shouldBlock: true };
+    }
+    if (String(context.resolution || '').toUpperCase() !== '720P') {
+      return { success: false, error: `轻视频分辨率必须精确为 720P，当前=${context.resolution || '空'}`, code: 'invalid_resolution', shouldBlock: true };
+    }
+    if (!shouldUseDirectReferenceFirstFrame(context) || originalImagePaths.length === 0) {
+      return { success: false, error: '轻视频必须直接使用原始脚本参考图作为首帧', code: 'missing_source_reference', shouldBlock: true };
+    }
+  }
+
   console.log(`  🎯 imini 渠道处理: ${context.taskName}`);
   console.log(`    渠道来源: ${resolved.source}`);
   console.log(`    路由原因: ${resolved.reason}`);
 
-  if (iminiConfig.firstFrame?.enabled !== false && originalImagePaths.length > 0) {
+  if (shouldUseDirectReferenceFirstFrame(context) && originalImagePaths.length > 0) {
+    context._firstFramePrompt = '直接使用原始脚本表产品参考图的第一张，不重新生成首帧';
+    context._firstFrameImagePath = originalImagePaths[0];
+    context._productLock = null;
+    if (token) {
+      try {
+        await updateRecord(config, token, context.recordId, compactFields({
+          [config.fields.firstFramePrompt || '首帧提示词']: context._firstFramePrompt,
+          [config.fields.firstFrameStatus || '首帧状态']: '已使用原始脚本参考图'
+        }));
+      } catch (error) {
+        console.log(`  ⚠️ 原始脚本参考图首帧状态回写失败，不影响 imini 提交: ${error.message}`);
+      }
+    }
+  } else if (iminiConfig.firstFrame?.enabled !== false && originalImagePaths.length > 0) {
     const pipelineResult = await runFirstFramePipeline(context, config, originalImagePaths);
 
     if (!pipelineResult.success) {
@@ -114,5 +149,6 @@ async function processIminiTask({ page, context, config, token, traceId }) {
 
 module.exports = {
   canHandle,
-  processIminiTask
+  processIminiTask,
+  shouldUseDirectReferenceFirstFrame
 };

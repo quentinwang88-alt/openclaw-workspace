@@ -70,6 +70,7 @@ function parseArgs(argv) {
     downloadOnly: false,
     oneShot: false,
     forceSubmit: false,
+    focusBrowser: false,
     limit: 1,
     recordId: '',
     productId: '',
@@ -83,6 +84,7 @@ function parseArgs(argv) {
     else if (arg === '--download-only' || arg === '--resume-only') args.downloadOnly = true;
     else if (arg === '--one-shot') args.oneShot = true;
     else if (arg === '--force-submit') args.forceSubmit = true;
+    else if (arg === '--focus-browser') args.focusBrowser = true;
     else if (arg === '--no-ensure-schema') args.ensureSchema = false;
     else if (arg.startsWith('--config=')) args.configPath = arg.slice('--config='.length);
     else if (arg === '--config') args._expectConfig = true;
@@ -484,7 +486,20 @@ function buildTracePayload(context, config, traceId, submitIndex, referenceResul
   };
 }
 
-async function connectBrowser(config) {
+function shouldBringBrowserToFront(config, args = {}) {
+  return args.focusBrowser === true ||
+    config.bringBrowserToFront === true ||
+    process.env.JIMENG_BRING_TO_FRONT === '1';
+}
+
+async function prepareSegmentPage(page, config, args = {}) {
+  if (shouldBringBrowserToFront(config, args)) {
+    await page.bringToFront().catch(() => {});
+  }
+  await page.setViewport({ width: 1600, height: 1000 }).catch(() => {});
+}
+
+async function connectBrowser(config, args = {}) {
   const browser = await puppeteer.connect({
     browserURL: `http://${config.cdpHost || '127.0.0.1'}:${config.cdpPort || 9222}`,
     defaultViewport: null,
@@ -493,8 +508,7 @@ async function connectBrowser(config) {
   });
   const pages = await browser.pages();
   const page = await selectJimengPage(pages) || pages[0] || await browser.newPage();
-  await page.bringToFront().catch(() => {});
-  await page.setViewport({ width: 1600, height: 1000 }).catch(() => {});
+  await prepareSegmentPage(page, config, args);
   return { browser, page };
 }
 
@@ -576,7 +590,7 @@ async function selectJimengPage(pages) {
   return best?.page || null;
 }
 
-async function getIminiPage(browser, config) {
+async function getIminiPage(browser, config, args = {}) {
   const pages = await browser.pages();
   let page = pages.find(item => item.url().includes('imini.com'));
   if (!page) {
@@ -589,8 +603,7 @@ async function getIminiPage(browser, config) {
   if (!page) {
     page = await browser.newPage();
   }
-  await page.bringToFront().catch(() => {});
-  await page.setViewport({ width: 1600, height: 1000 }).catch(() => {});
+  await prepareSegmentPage(page, config, args);
   if (config.channels?.imini?.baseUrl && !String(page.url() || '').includes('imini.com/zh/video')) {
     await page.goto(config.channels.imini.baseUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
   }
@@ -736,7 +749,30 @@ async function cleanupTempTask(traceId, config) {
 }
 
 async function runDownloadOnly(config, token, args) {
-  const { browser, page } = await connectBrowser(config);
+  const assetScanNeededMessage = '发现待回写任务，需要连接浏览器检查资产页';
+  const preflightSummary = await syncCompletedSubmissions({
+    config,
+    token,
+    page: null,
+    dryRun: args.dryRun,
+    limit: args.limit,
+    traceId: '',
+    recordId: args.recordId,
+    taskNames: null,
+    channelFilter: '',
+    currentGeneratingCount: null,
+    allowAssetScan: false,
+    assetScanCooldownMessage: assetScanNeededMessage
+  });
+  if ((preflightSummary.skipped || 0) === 0 || preflightSummary.reason !== assetScanNeededMessage) {
+    return {
+      ...preflightSummary,
+      browserSkipped: true
+    };
+  }
+  console.log(`📎 回流预检: ${preflightSummary.reason || '发现待回写任务，继续后台检查资产页'}`);
+
+  const { browser, page } = await connectBrowser(config, args);
   let assetPage = null;
   try {
     let currentGeneratingCount = null;
@@ -747,7 +783,7 @@ async function runDownloadOnly(config, token, args) {
       console.log(`⚠️ 获取生成中数量失败，按保守模式继续回流: ${error.message}`);
     }
     assetPage = await browser.newPage();
-    await assetPage.setViewport({ width: 1600, height: 1000 }).catch(() => {});
+    await prepareSegmentPage(assetPage, config, args);
     return syncCompletedSubmissions({
       config,
       token,
@@ -799,7 +835,7 @@ async function main() {
     return;
   }
 
-  const { browser, page } = await connectBrowser(config);
+  const { browser, page } = await connectBrowser(config, args);
   let failedCount = 0;
   let jimengGeneratingCount = null;
   try {

@@ -118,7 +118,7 @@ async function attemptSubmit(page, context, productLock, firstFrameImagePath, co
   const ratioMapped = mapRatioForImini(context.ratio);
   await selectRatio(page, ratioMapped);
 
-  const resolutionMapped = mapResolutionForImini(iminiConfig.defaultResolution || '480P');
+  const resolutionMapped = mapResolutionForImini(context.resolution || iminiConfig.defaultResolution || '480P');
   await selectResolution(page, resolutionMapped);
 
   await sleep(1000);

@@ -144,8 +144,9 @@ function parseContentIdMetadata(value, label = '内容ID') {
   const markerPattern = new RegExp(`【\\s*${safeLabel}\\s*】|(?:^|\\n)\\s*${safeLabel}`, 'i');
   const markerMatch = markerPattern.exec(rawText);
   if (markerMatch) {
-    const section = rawText.slice(markerMatch.index, markerMatch.index + 120);
-    const idMatch = section.match(/[-:：]\s*([A-Za-z0-9][A-Za-z0-9_-]{1,63})/);
+    const section = rawText.slice(markerMatch.index, markerMatch.index + 180);
+    const valueSection = rawText.slice(markerMatch.index + markerMatch[0].length, markerMatch.index + 180);
+    const idMatch = valueSection.match(/^\s*(?:[-:：]\s*)?([A-Za-z0-9][A-Za-z0-9_-]{1,127})/);
     if (idMatch) {
       const id = String(idMatch[1] || '').trim();
       if (id) {
@@ -1686,9 +1687,35 @@ async function isVideoDetailOpen(page) {
       .map(el => (el.textContent || '').replace(/\s+/g, ' ').trim())
       .filter(Boolean);
 
+    const hasLargeVisibleVideo = Array.from(document.querySelectorAll('video')).some(video => {
+      const style = getComputedStyle(video);
+      const rect = video.getBoundingClientRect();
+      return (
+        style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        style.opacity !== '0' &&
+        rect.width >= 400 &&
+        rect.height >= 400
+      );
+    });
+
     return visibleTexts.some(text => text.includes('下载')) &&
-      visibleTexts.some(text => text.includes('视频提示词') || text.includes('重新编辑') || text.includes('再次生成'));
+      (
+        visibleTexts.some(text => text.includes('视频提示词') || text.includes('重新编辑') || text.includes('再次生成')) ||
+        hasLargeVisibleVideo
+      );
   });
+}
+
+async function waitForVideoDetailOpen(page, timeoutMs = 10000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await isVideoDetailOpen(page)) {
+      return true;
+    }
+    await sleep(500);
+  }
+  return false;
 }
 
 async function listVideoCardTargets(page) {
@@ -1829,6 +1856,43 @@ async function listVideoCardTargets(page) {
     const scrollTarget = pickScrollable();
     const scrollTop = scrollTarget ? (scrollTarget.scrollTop || 0) : (window.scrollY || 0);
     const dedupe = new Set();
+    // New Jimeng asset pages expose a stable card wrapper while their nested
+    // image/video elements can be rejected by legacy navigation heuristics.
+    // Prefer the wrapper directly when present, then fall back to media-based
+    // discovery for older layouts.
+    const directCards = Array.from(document.querySelectorAll('[class*="asset-video-card"], [class*="videoCard"]'))
+      // Jimeng's current grid keeps `visibility:hidden` on the card wrapper
+      // while explicitly showing its media children. The card is visibly
+      // clickable despite that inherited wrapper value, so geometry and a
+      // real media child are the reliable signals here.
+      .filter(target => Boolean(target.querySelector('video, img, canvas')))
+      .map(target => {
+        const rect = target.getBoundingClientRect();
+        return {
+          x: rect.x + rect.width / 2,
+          y: rect.y + rect.height / 2,
+          width: rect.width,
+          height: rect.height,
+          absoluteTop: rect.top + scrollTop,
+          absoluteBottom: rect.bottom + scrollTop,
+          absoluteY: rect.y + rect.height / 2 + scrollTop,
+          sourceTag: 'CARD',
+          sourceText: (target.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 120)
+        };
+      })
+      .filter(item => item.width >= 120 && item.height >= 120 && item.x >= 80 && item.y >= 80)
+      .sort((a, b) => a.y - b.y || a.x - b.x)
+      .filter(item => {
+        const key = `${Math.round(item.x / 20)}:${Math.round(item.absoluteY / 20)}`;
+        if (dedupe.has(key)) return false;
+        dedupe.add(key);
+        return true;
+      })
+      .slice(0, 40);
+    if (directCards.length > 0) {
+      return directCards;
+    }
+    dedupe.clear();
     return Array.from(document.querySelectorAll('video, img, canvas'))
       .filter(isVisible)
       .map(el => ({ media: el, target: pickClickable(el) }))
@@ -2179,8 +2243,14 @@ async function openMatchingVideoDetail(page, config, token, submission, claimPoo
   } else {
     console.log(`🧭 资产页头部优先模式：第 ${scanStrategy.runNumber} 轮，从头开始优先检查新生成数据`);
   }
+  await page.bringToFront().catch(() => {});
   await ensureHealthyAssetPage(page, config);
   await ensureVideoAssetTab(page);
+  // The current Jimeng asset page mounts the grid shell before hydrating the
+  // clickable video cards. Reading immediately after the tab looks healthy can
+  // therefore return zero candidates even though media nodes appear moments
+  // later. Give the grid one stable render window before the first scan.
+  await sleep(3500);
 
   for (let batchIndex = 0; batchIndex < scanBatches; batchIndex++) {
     let windowCandidates = [];
@@ -2216,13 +2286,38 @@ async function openMatchingVideoDetail(page, config, token, submission, claimPoo
               const allImages = document.querySelectorAll('img').length;
               const allCanvases = document.querySelectorAll('canvas').length;
               const cardClasses = document.querySelectorAll('[class*="asset-"],[class*="videoCard"],[class*="context-menu"]').length;
-              return { allVideos, allImages, allCanvases, cardClasses };
+              const directCards = Array.from(document.querySelectorAll('[class*="asset-video-card"], [class*="videoCard"]'));
+              const directCardPreview = directCards.slice(0, 3).map(el => {
+                const rect = el.getBoundingClientRect();
+                const style = getComputedStyle(el);
+                return {
+                  cls: String(el.className || '').slice(0, 100),
+                  rect: [Math.round(rect.left), Math.round(rect.top), Math.round(rect.width), Math.round(rect.height)],
+                  display: style.display,
+                  visibility: style.visibility,
+                  opacity: style.opacity
+                };
+              });
+              return { allVideos, allImages, allCanvases, cardClasses, directCards: directCards.length, directCardPreview };
             }).catch(() => ({ error: 'diagnostic_failed' }));
-            console.log(`⚠️  资产视频首屏为空，第 ${emptyInitialCandidateReads}/2 次重新进入资产列表后重试... (raw: v=${rawDiagnostic.allVideos} i=${rawDiagnostic.allImages} c=${rawDiagnostic.allCanvases} cls=${rawDiagnostic.cardClasses})`);
+            console.log(`⚠️  资产视频首屏为空，第 ${emptyInitialCandidateReads}/2 次重新进入资产列表后重试... (raw: v=${rawDiagnostic.allVideos} i=${rawDiagnostic.allImages} c=${rawDiagnostic.allCanvases} cls=${rawDiagnostic.cardClasses} direct=${rawDiagnostic.directCards} preview=${JSON.stringify(rawDiagnostic.directCardPreview || [])})`);
             if (emptyInitialCandidateReads <= 2) {
+              // First retry on the current page. Reloading immediately can keep
+              // restarting the lazy hydration cycle and make every scan miss.
+              await sleep(4000);
+              bufferedCandidates = await withAssetStepTimeout(
+                listVideoCardTargets(page),
+                20000,
+                `延迟重读资产视频候选 batch=${batchIndex + 1}`
+              );
+              if (bufferedCandidates.length > 0) {
+                console.log(`🔎 延迟重读资产视频候选 batch=${batchIndex + 1}: ${bufferedCandidates.length} 个`);
+                bufferIndex = 0;
+                continue;
+              }
               await ensureHealthyAssetPage(page, config, 2);
               await ensureVideoAssetTab(page);
-              await sleep(1500);
+              await sleep(3500);
               continue;
             }
             throw new Error('资产视频首屏连续为空，拒绝将本轮记录为成功扫描');
@@ -2306,11 +2401,42 @@ async function openMatchingVideoDetail(page, config, token, submission, claimPoo
         `x=${Math.round(candidate.x)}, y=${Math.round(candidate.y)}, absY=${Math.round(candidate.absoluteY || candidate.y)}, ` +
         `size=${Math.round(candidate.width)}x${Math.round(candidate.height)}`
       );
-      await page.mouse.click(candidate.x, candidate.y);
-      await sleep(1800);
-
-      if (!await isVideoDetailOpen(page)) {
+      await page.bringToFront().catch(() => {});
+      if (candidate.sourceTag === 'CARD') {
+        // The new grid paints visible children inside a wrapper that remains
+        // `visibility:hidden`; coordinate clicks can be swallowed by that
+        // wrapper. Dispatch the click on the visible media node itself.
+        const cardClickResult = await page.evaluate(({ x, y }) => {
+          const cards = Array.from(document.querySelectorAll('[class*="asset-video-card"], [class*="videoCard"]'));
+          const nearest = cards
+            .map(card => {
+              const rect = card.getBoundingClientRect();
+              const cx = rect.left + rect.width / 2;
+              const cy = rect.top + rect.height / 2;
+              return { card, distance: Math.abs(cx - x) + Math.abs(cy - y) };
+            })
+            .sort((a, b) => a.distance - b.distance)[0];
+          const target = nearest?.card?.querySelector('img, video, canvas') || nearest?.card;
+          target?.click();
+          return {
+            cardCount: cards.length,
+            distance: nearest?.distance ?? null,
+            targetTag: target?.tagName || '',
+            targetClass: String(target?.className || '').slice(0, 80)
+          };
+        }, { x: candidate.x, y: candidate.y });
+        console.log(`   DOM 卡片点击: ${JSON.stringify(cardClickResult)}`);
+      } else {
+        console.log(`   坐标点击媒体: source=${candidate.sourceTag || 'unknown'}`);
+        await page.mouse.click(candidate.x, candidate.y);
+      }
+      if (!await waitForVideoDetailOpen(page, 10000)) {
         console.log(`⏭️  候选 batch=${batchIndex + 1} item=${index + 1} 未打开视频详情，跳过`);
+        // A stale/partially mounted overlay can remain even when the detail
+        // readiness probe times out. Close it before trying the next card so
+        // subsequent clicks are not swallowed by the overlay.
+        await page.keyboard.press('Escape').catch(() => {});
+        await sleep(800);
         streamIndex += 1;
         continue;
       }
@@ -3000,11 +3126,39 @@ async function main() {
   if (!config.appToken || !config.tableId) {
     throw new Error('飞书配置不完整：未能解析 appToken/tableId');
   }
+
+  const iminiOnlyDirectClaim = args.channel === 'imini' && args.ignoreGeneratingCount;
+  const shouldPreflightWithoutBrowser = !args.forceAssetRead && !iminiOnlyDirectClaim;
+  if (shouldPreflightWithoutBrowser) {
+    const assetScanNeededMessage = '发现待回写任务，需要连接浏览器检查资产页';
+    const preflightSummary = await syncCompletedSubmissions({
+      config,
+      token,
+      page: null,
+      dryRun: args.dryRun,
+      limit: args.limit,
+      traceId: args.traceId,
+      recordId: args.recordId,
+      taskNames: args.taskNames,
+      channelFilter: args.channel,
+      currentGeneratingCount: null,
+      allowAssetScan: false,
+      assetScanCooldownMessage: assetScanNeededMessage
+    });
+    if ((preflightSummary.skipped || 0) === 0 || preflightSummary.reason !== assetScanNeededMessage) {
+      console.log(JSON.stringify({
+        ...preflightSummary,
+        browserSkipped: true
+      }, null, 2));
+      return;
+    }
+    console.log(`ℹ️  回流预检: ${preflightSummary.reason || '发现待回写任务，继续后台检查资产页'}`);
+  }
+
   const { browser, page } = await connectBrowser(config);
 
   try {
     let currentGeneratingCount = null;
-    const iminiOnlyDirectClaim = args.channel === 'imini' && args.ignoreGeneratingCount;
 
     if (iminiOnlyDirectClaim) {
       console.log('ℹ️  imini 定向回流：跳过通用生成状态检查，直接扫描 imini 资产页');

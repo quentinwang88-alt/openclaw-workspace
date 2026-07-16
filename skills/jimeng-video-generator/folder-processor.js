@@ -435,13 +435,20 @@ async function safeHandleEvaluate(handle, label, pageFunction, ...args) {
   throw lastError;
 }
 
-async function prepareAutomationPage(page) {
+function shouldBringAutomationPageToFront() {
+  return process.env.JIMENG_BRING_TO_FRONT === '1';
+}
+
+async function prepareAutomationPage(page, options = {}) {
   if (!page) return;
 
-  try {
-    await page.bringToFront();
-  } catch (error) {
-    // 忽略 bringToFront 失败，继续尝试后续页面操作
+  const bringToFront = options.bringToFront === true || shouldBringAutomationPageToFront();
+  if (bringToFront) {
+    try {
+      await page.bringToFront();
+    } catch (error) {
+      // 忽略 bringToFront 失败，继续尝试后续页面操作
+    }
   }
 
   try {
@@ -733,6 +740,43 @@ async function switchToReusableCreationSession(page) {
     await page.mouse.click(target.x, target.y, { delay: 80 });
   }
   return target;
+}
+
+async function openNewCreationConversation(page) {
+  const result = await safePageEvaluate(page, '打开即梦新对话', () => {
+    const isVisible = el => {
+      if (!el) return false;
+      const style = getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return (
+        style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        style.opacity !== '0' &&
+        rect.width > 0 &&
+        rect.height > 0
+      );
+    };
+    const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
+    const candidates = Array.from(document.querySelectorAll('button, [role="button"], div, span'))
+      .filter(isVisible)
+      .filter(el => normalize(el.textContent) === '新对话')
+      .map(el => {
+        const clickable = el.closest('button, [role="button"]') || el;
+        const rect = clickable.getBoundingClientRect();
+        return { clickable, rect };
+      })
+      .filter(item => item.rect.left < 380 && item.rect.top < 260 && item.rect.width > 20 && item.rect.height > 20)
+      .sort((a, b) => (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height));
+    const target = candidates[0];
+    if (!target) return { clicked: false, reason: 'new_conversation_not_found' };
+    target.clickable.click();
+    return { clicked: true };
+  }).catch(error => ({ clicked: false, reason: error.message }));
+  if (result.clicked) {
+    console.log('  🆕 默认创作会话正忙，已打开独立新对话继续提单');
+    await sleep(1800);
+  }
+  return result;
 }
 
 async function openVideoCreationEntry(page) {
@@ -1458,6 +1502,12 @@ async function resetVideoGenerationPage(page, baseUrl = DEFAULT_CONFIG.baseUrl) 
             await ensureCleanReusableCreation('reuse');
             return;
           }
+          const newConversation = await openNewCreationConversation(page);
+          if (newConversation.clicked) {
+            await ensureReusableCreationVideoMode(page).catch(() => {});
+            await ensureCleanReusableCreation('new-conversation');
+            return;
+          }
           await forceOpenReusableCreationUrl('reuse-force', { blankFirst: true });
           await ensureCleanReusableCreation('reuse-force');
           return;
@@ -1498,6 +1548,12 @@ async function resetVideoGenerationPage(page, baseUrl = DEFAULT_CONFIG.baseUrl) 
             );
             if (reuseReady) {
               await ensureCleanReusableCreation('goto-reuse');
+              return;
+            }
+            const newConversation = await openNewCreationConversation(page);
+            if (newConversation.clicked) {
+              await ensureReusableCreationVideoMode(page).catch(() => {});
+              await ensureCleanReusableCreation('goto-new-conversation');
               return;
             }
             await forceOpenReusableCreationUrl('goto-reuse-force', { blankFirst: true });
@@ -1585,8 +1641,8 @@ async function getActiveFileInputs(page) {
 async function getVisibleToolbarState(page) {
   const comboboxes = await getVisibleElementHandles(page, 'div[role="combobox"]', 1200);
   const buttons = await getVisibleElementHandles(page, 'button', 1200);
-  const ratioPattern = /(^|\D)(\d+:\d+)(\D|$)/;
-  const extractRatio = text => String(text || '').match(ratioPattern)?.[2] || '';
+  const ratioPattern = /(9:16|16:9|1:1|4:3|3:4|21:9)/;
+  const extractRatio = text => String(text || '').match(ratioPattern)?.[1] || '';
   const ratioButton = buttons.find(btn => ratioPattern.test(btn.text));
   const generationButton = buttons.find(btn => btn.text.includes('视频生成'));
   const modelButton = buttons.find(btn => /Seedance|视频\s*3/.test(btn.text));
@@ -1777,8 +1833,8 @@ function isDurationMatch(actual, expected) {
 }
 
 function isRatioMatch(actual, expected) {
-  const match = String(actual || '').match(/(^|\D)(\d+:\d+)(\D|$)/);
-  return (match?.[2] || '') === String(expected || '');
+  const match = String(actual || '').match(/(9:16|16:9|1:1|4:3|3:4|21:9)/);
+  return (match?.[1] || '') === String(expected || '');
 }
 
 async function getUploadAreaPreviewState(inputHandle) {
@@ -2484,7 +2540,10 @@ async function selectModel(page, modelName) {
     // 精确匹配
     if (isModelMatch(optionModel, modelName)) {
       console.log(`  匹配到: ${text.substring(0, 50)}...`);
-      await option.click();
+      // The current Jimeng dropdown can keep Puppeteer's ElementHandle.click
+      // waiting even after the selection has already changed. A DOM click
+      // dispatches the same React event and returns immediately.
+      await safeHandleEvaluate(option, '点击模型选项', el => el.click());
       await sleep(500);
       
       // 验证选择是否生效
@@ -2512,7 +2571,7 @@ async function selectModel(page, modelName) {
           const optText = retryTexts[retryIndex] || '';
           const optModel = normalizeModelVariantName(optText);
           if (isModelMatch(optModel, optionModel)) {
-            await opt.click();
+            await safeHandleEvaluate(opt, '重试点击模型选项', el => el.click());
             await sleep(500);
             break;
           }
@@ -2626,7 +2685,7 @@ async function selectRatio(page, ratio) {
         if (!isVisible(el)) return false;
         const rect = el.getBoundingClientRect();
         const text = String(el.textContent || '').replace(/\s+/g, ' ').trim();
-        return rect.y >= 250 && rect.y < window.innerHeight - 8 && text.match(/(^|\D)(\d+:\d+)(\D|$)/);
+        return rect.y >= 250 && rect.y < window.innerHeight - 8 && text.match(/(9:16|16:9|1:1|4:3|3:4|21:9)/);
       })
       .sort((a, b) => {
         const ar = a.getBoundingClientRect();
@@ -2643,7 +2702,7 @@ async function selectRatio(page, ratio) {
     }
     
     const currentText = String(ratioButton.textContent || '').replace(/\s+/g, ' ').trim();
-    const currentRatio = currentText.match(/(^|\D)(\d+:\d+)(\D|$)/)?.[2] || currentText;
+    const currentRatio = currentText.match(/(9:16|16:9|1:1|4:3|3:4|21:9)/)?.[1] || currentText;
     console.log('当前比例:', currentRatio);
     
     // 如果已经是目标比例，直接返回
@@ -2845,8 +2904,9 @@ async function selectDuration(page, duration) {
         })
         .filter(item =>
           /^\d+s$/.test(item.text) &&
-          item.clickRect.top >= window.innerHeight * 0.55 &&
-          item.clickRect.top < window.innerHeight - 8
+          item.clickRect.left >= window.innerWidth * 0.45 &&
+          item.clickRect.top >= 0 &&
+          item.clickRect.top < window.innerHeight - 4
         )
         .sort((a, b) => {
           const targetY = window.innerHeight - 72;
@@ -2889,6 +2949,55 @@ async function selectDuration(page, duration) {
     return false;
   }
   await sleep(1000);
+
+  // New Jimeng uses a slider + spinbutton popover instead of listbox options.
+  const spinbuttonResult = await safePageEvaluate(page, '设置时长数值输入框', targetDuration => {
+    const inputs = Array.from(document.querySelectorAll('input[role="spinbutton"], input[type="number"]'));
+    const input = inputs.find(el => {
+      const style = getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      const min = Number(el.min || el.getAttribute('aria-valuemin') || 0);
+      const max = Number(el.max || el.getAttribute('aria-valuemax') || 999);
+      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0 && targetDuration >= min && targetDuration <= max;
+    });
+    if (!input) return { found: false };
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+    if (setter) setter.call(input, String(targetDuration));
+    else input.value = String(targetDuration);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    input.blur();
+    return {
+      found: true,
+      value: input.value,
+      min: input.min || input.getAttribute('aria-valuemin') || '',
+      max: input.max || input.getAttribute('aria-valuemax') || ''
+    };
+  }, Number(duration)).catch(() => ({ found: false }));
+  if (spinbuttonResult.found) {
+    await page.keyboard.press('Enter').catch(() => {});
+    await sleep(800);
+    let selectedDuration = (await getVisibleToolbarState(page)).duration;
+    if (!isDurationMatch(selectedDuration, duration)) {
+      const spinbutton = await page.$('input[role="spinbutton"], input[type="number"]');
+      const box = await spinbutton?.boundingBox().catch(() => null);
+      if (box && box.width > 0 && box.height > 0) {
+        await page.mouse.click(box.x + Math.min(24, box.width / 2), box.y + box.height / 2, { clickCount: 3, delay: 60 });
+        await page.keyboard.down(process.platform === 'darwin' ? 'Meta' : 'Control');
+        await page.keyboard.press('A');
+        await page.keyboard.up(process.platform === 'darwin' ? 'Meta' : 'Control');
+        await page.keyboard.type(String(duration), { delay: 80 });
+        await page.keyboard.press('Enter');
+        await sleep(1000);
+        selectedDuration = (await getVisibleToolbarState(page)).duration;
+      }
+    }
+    if (isDurationMatch(selectedDuration, duration)) {
+      console.log(`  ✅ 已通过数值输入设置时长: ${selectedDuration}`);
+      return true;
+    }
+    console.log(`  ⚠️ 时长数值输入后未生效，当前: ${selectedDuration || '未知'}，继续尝试旧版选项`);
+  }
   
   const listbox = await page.waitForSelector('div[role="listbox"]', { timeout: 5000 }).catch(() => null);
   const targetText = `${duration}s`;
