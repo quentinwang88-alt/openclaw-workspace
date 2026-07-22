@@ -20,8 +20,15 @@ class OSSStorageSkill:
         source_type: str = "self_shot",
         source_trust_level: str = "high",
         product_binding_type: str = "exact_sku",
+        allow_source_reference: bool = False,
+        source_reference_count: int = 0,
     ) -> Result:
-        gate = _anchor_gate(self.ctx, product_id)
+        gate = _anchor_gate(
+            self.ctx,
+            product_id,
+            allow_source_reference=allow_source_reference,
+            source_reference_count=source_reference_count,
+        )
         if not gate.success:
             return gate
         product = self.ctx.repo.get("products", "product_id", product_id) or {}
@@ -59,10 +66,21 @@ class OSSStorageSkill:
         return asset_write if not asset_write.success else Result.ok({"asset_id": asset_id, "oss_object": oss_row})
 
 
-def _anchor_gate(ctx: SkillContext, product_id: str) -> Result:
+def _anchor_gate(
+    ctx: SkillContext,
+    product_id: str,
+    *,
+    allow_source_reference: bool = False,
+    source_reference_count: int = 0,
+) -> Result:
     product = ctx.repo.get("products", "product_id", product_id)
     if product and product.get("anchor_status") == "confirmed":
         return Result.ok()
+    if product and allow_source_reference and int(source_reference_count) > 0:
+        return Result.ok({
+            "gate_mode": "source_reference",
+            "source_reference_count": int(source_reference_count),
+        })
     return Result.fail("ANCHOR_REQUIRED", "confirmed product anchor is required before upload", {"product_id": product_id})
 
 

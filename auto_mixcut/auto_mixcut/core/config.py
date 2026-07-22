@@ -31,6 +31,7 @@ class Settings:
     @classmethod
     def load(cls, config_path: str | None = None) -> "Settings":
         root = Path(os.environ.get("AUTO_MIXCUT_ROOT", Path.cwd())).resolve()
+        _load_dotenv(root / ".env.local")
         _load_dotenv(root / ".env")
         _load_dotenv(Path.home() / ".env")
         data: Dict[str, Any] = {}

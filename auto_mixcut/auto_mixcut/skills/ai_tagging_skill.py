@@ -39,7 +39,14 @@ class AITaggingSkill:
         )
         return Result.ok({"ai_batch_id": batch_id, "total_segments": len(segments)})
 
-    def poll_results(self, product_id: str, prompt_version: str = "v1.0", force: bool = False, source_types: list[str] | None = None) -> Result:
+    def poll_results(
+        self,
+        product_id: str,
+        prompt_version: str = "v1.0",
+        force: bool = False,
+        source_types: list[str] | None = None,
+        reference_images: list[str] | None = None,
+    ) -> Result:
         segments = _segments_for_source_types(self.ctx, product_id, source_types)
         segments = _limit_segments(segments)
         completed = skipped = failed = 0
@@ -62,7 +69,10 @@ class AITaggingSkill:
                     results.append({"status": "failed", "segment_id": segment["segment_id"], "error_code": "TAG_TOTAL_TIMEOUT"})
                     continue
                 segment_id = str(segment.get("segment_id") or "")
-                results.append(self._poll_segment(product_id, segment, idx, prompt_version, force, latest_tags.get(segment_id, {}), frame_counts.get(segment_id)).data)
+                results.append(self._poll_segment(
+                    product_id, segment, idx, prompt_version, force,
+                    latest_tags.get(segment_id, {}), frame_counts.get(segment_id), reference_images,
+                ).data)
                 _emit_progress(product_id, len(results), total, started_at, progress_every)
         else:
             results_by_segment = {}
@@ -77,6 +87,7 @@ class AITaggingSkill:
                     force,
                     latest_tags.get(str(segment.get("segment_id") or ""), {}),
                     frame_counts.get(str(segment.get("segment_id") or "")),
+                    reference_images,
                 ): segment["segment_id"]
                 for idx, segment in indexed
             }
@@ -132,12 +143,32 @@ class AITaggingSkill:
     def retry_failed(self, product_id: str) -> Result:
         return self.poll_results(product_id)
 
-    def _poll_segment(self, product_id: str, segment: dict, idx: int, prompt_version: str, force: bool, latest_tag: dict | None = None, frame_count: int | None = None) -> Result:
+    def _poll_segment(
+        self,
+        product_id: str,
+        segment: dict,
+        idx: int,
+        prompt_version: str,
+        force: bool,
+        latest_tag: dict | None = None,
+        frame_count: int | None = None,
+        reference_images: list[str] | None = None,
+    ) -> Result:
         if not force and (latest_tag if latest_tag is not None else _latest_tag(self.ctx, segment["segment_id"])):
             return Result.ok({"status": "skipped", "segment_id": segment["segment_id"], "reason": "tag_exists"})
         call = self.router.call(
             "segment_tagging_default",
-            {"segment_id": segment["segment_id"], "index": idx, "prompt_version": prompt_version, "image_count": frame_count if frame_count is not None else _frame_count(self.ctx, segment["segment_id"])},
+            {
+                "segment_id": segment["segment_id"],
+                "asset_id": segment["asset_id"],
+                "product_id": product_id,
+                "index": idx,
+                "prompt_version": prompt_version,
+                "image_count": frame_count if frame_count is not None else _frame_count(self.ctx, segment["segment_id"]),
+                "reference_image_paths": reference_images or [],
+                "reference_image_count": len(reference_images or []),
+                "source_reference_mode": bool(reference_images),
+            },
             product_id=product_id,
             segment_id=segment["segment_id"],
             asset_id=segment["asset_id"],

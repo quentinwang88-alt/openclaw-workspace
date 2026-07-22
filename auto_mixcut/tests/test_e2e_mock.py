@@ -69,6 +69,26 @@ class AutoMixcutMockE2ETest(unittest.TestCase):
         self.assertEqual(asset["has_watermark"], "processed")
         self.assertEqual(self.ctx.repo.list_where("segments", "product_id=?", ("VN_HAIR_002",)), [])
 
+    def test_source_reference_mode_uploads_without_confirming_anchor(self):
+        create = RDSRepositorySkill(self.ctx).create_product_task(
+            "TH_REF_001", "Source reference jacket", "TH", "outerwear", 1,
+        )
+        self.assertTrue(create.success, create.to_dict())
+        source = Path(self.tmp.name) / "source_reference.mp4"
+        source.write_bytes(b"mock source reference video")
+        uploaded = OSSStorageSkill(self.ctx).upload_asset(
+            "TH_REF_001",
+            str(source),
+            source_type="ai_generated",
+            source_trust_level="medium",
+            product_binding_type="exact_sku",
+            allow_source_reference=True,
+            source_reference_count=2,
+        )
+        self.assertTrue(uploaded.success, uploaded.to_dict())
+        product = self.ctx.repo.get("products", "product_id", "TH_REF_001")
+        self.assertEqual(product["anchor_status"], "pending")
+
     def _create_mock_assets(self, count: int):
         root = Path(self.tmp.name) / "assets"
         root.mkdir(parents=True, exist_ok=True)

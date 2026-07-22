@@ -74,17 +74,28 @@ class LLMRouterSkill:
                 "meta": {"call_id": "CACHE", "call_type": call_type, "model_tier": tier_name, "retry_count": 0},
             })
 
-        image_paths = _frame_paths(self.ctx, segment_id, max_count=9) if segment_id else payload.get("image_paths") or []
+        if segment_id:
+            references = [
+                str(Path(value).expanduser().resolve())
+                for value in (payload.get("reference_image_paths") or [])[:3]
+                if Path(str(value)).expanduser().is_file()
+            ]
+            image_paths = references + _frame_paths(self.ctx, segment_id, max_count=max(1, 9 - len(references)))
+        else:
+            image_paths = payload.get("image_paths") or []
 
         audio_path = ""
         if self._is_audio_call(call_type) and tier.get("audio_input", True) is not False:
             audio_path = payload.get("audio_path") or _find_audio_path(self.ctx, asset_id)
 
-        provider_name = tier.get("primary_provider", "mock")
+        vision_provider_override = os.environ.get("AUTO_MIXCUT_VISION_PROVIDER", "").strip() if self._is_vision_call(call_type) else ""
+        vision_model_override = os.environ.get("AUTO_MIXCUT_VISION_MODEL", "").strip() if self._is_vision_call(call_type) else ""
+        provider_name = vision_provider_override or tier.get("primary_provider", "mock")
         fallback_name = tier.get("fallback_provider", "")
         escalation_tier = routing.get("escalate_tier") if routing.get("escalate_on_failure") else None
 
         route_policy = self._resolve_route_policy(call_type, tier_name)
+        provider_errors: List[str] = []
 
         def exec_fn(tier_cfg: dict, tier_label: str, provider_label: str = "", model_name: str = "", escalated_from: str = "") -> Tuple[Optional[Dict[str, Any]], str, int, int, str]:
             model = model_name or tier_cfg.get("model_name", "unknown")
@@ -123,18 +134,23 @@ class LLMRouterSkill:
                         if resp.text:
                             return {"text": resp.text}, model, attempt, latency, selected_provider
                         if attempt < max_retries:
+                            provider_errors.append(f"{selected_provider}: empty response")
                             time.sleep(retry_delays[min(attempt, len(retry_delays) - 1)] / 1000.0)
                             continue
+                        provider_errors.append(f"{selected_provider}: empty response")
                         return None, model, attempt, latency, selected_provider
                     except Exception as exc:
                         latency = int((time.time() - started) * 1000)
+                        provider_errors.append(f"{selected_provider}: {_safe_provider_error(exc)}")
                         if not _is_retryable(exc) or attempt >= max_retries:
                             return None, model, attempt, latency, selected_provider
                         delay = retry_delays[min(attempt, len(retry_delays) - 1)] / 1000.0
                         time.sleep(delay)
             return None, model, max_retries, 0, selected_provider
 
-        response, model_used, retry_count, latency_ms, provider_used = exec_fn(tier, tier_name, provider_name)
+        response, model_used, retry_count, latency_ms, provider_used = exec_fn(
+            tier, tier_name, provider_name, vision_model_override,
+        )
         if response is None and fallback_name and tier.get("fallback_model"):
             fallback_tier = {**tier, "model_name": tier.get("fallback_model")}
             response, model_used, retry_count2, latency_ms2, provider_used = exec_fn(
@@ -169,19 +185,23 @@ class LLMRouterSkill:
                 tier_name = escalation_tier
 
         if response is None:
+            provider_error = "; ".join(provider_errors[-3:])[:1500]
+            exhausted_message = "all retries and escalations exhausted"
+            if provider_error:
+                exhausted_message += f": {provider_error}"
             self._write_log(
                 call_id=new_id("LLM"), call_type=call_type, tier=tier, model_name=model_used,
                 prompt_version=prompt_version, input_hash=input_hash, result_status="failed",
-                error_code="LLM_CALL_EXHAUSTED", error_message="all retries and escalations exhausted",
+                error_code="LLM_CALL_EXHAUSTED", error_message=exhausted_message,
                 product_id=product_id, segment_id=segment_id, asset_id=asset_id,
                 output_id=output_id, task_id=task_id, retry_count=retry_count,
                 escalation_count=escalation_count, escalated_from=escalated_from,
                 image_count=len(image_paths), latency_ms=latency_ms,
                 route_policy=route_policy, provider=provider_used,
             )
-            return Result.fail("LLM_CALL_EXHAUSTED", "all retries and escalations exhausted", {
+            return Result.fail("LLM_CALL_EXHAUSTED", exhausted_message, {
                 "call_type": call_type, "tier": tier_name, "retry_count": retry_count,
-                "escalation_count": escalation_count,
+                "escalation_count": escalation_count, "provider_error": provider_error,
             })
 
         response = self._normalize_response(call_type, response, payload)
@@ -291,7 +311,16 @@ class LLMRouterSkill:
             product = self.ctx.repo.get("products", "product_id", product_id) or {}
             asset = self.ctx.repo.get("assets", "asset_id", payload.get("asset_id", "")) or {}
             segment = self.ctx.repo.get("segments", "segment_id", segment_id) or {}
-            return segment_tagging_prompt(product, asset, segment)
+            prompt = segment_tagging_prompt(product, asset, segment)
+            if payload.get("source_reference_mode"):
+                count = min(3, int(payload.get("reference_image_count") or 0))
+                prompt += (
+                    f"\n\n本次不使用商品锚点卡。输入图片中的前 {count} 张是原始脚本表的同一SKU商品参考图，"
+                    "后续图片是当前视频片段的连续抽帧。请直接对照参考图判断商品类目、颜色、版型和关键结构；"
+                    "明显不一致时 primary_shot_role=unusable、mixcut_usability=no、risk_level=high；"
+                    "看不清时提高 needs_human_review，禁止把计划标签当成画面事实。"
+                )
+            return prompt
         if call_type == "ai_generated_consistency_check":
             return consistency_prompt()
         if call_type == "watermark_detection":
@@ -548,6 +577,17 @@ def _frame_paths(ctx: SkillContext, segment_id: str, max_count: int) -> List[str
         if path and path.exists() and path.stat().st_size > 1024:
             paths.append(str(path))
     return paths
+
+
+def _safe_provider_error(exc: Exception) -> str:
+    """Keep actionable provider errors while removing credential-shaped text."""
+
+    import re
+
+    message = str(exc or "").strip() or type(exc).__name__
+    message = re.sub(r"ark-[A-Za-z0-9-]+", "ark-***", message)
+    message = re.sub(r"(?i)(authorization[\"']?\s*[:=]\s*[\"']?bearer\s+)[^\s\"']+", r"\1***", message)
+    return message[:1200]
 
 
 def _is_retryable(exc: Exception) -> bool:

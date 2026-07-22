@@ -131,7 +131,15 @@ class OpenAICompatibleProvider(LLMProvider):
                 raise RuntimeError("openai package required for OpenAICompatibleProvider")
             base_url = self._config.get("base_url", "")
             api_key = os.environ.get(self._config.get("api_key_env", ""), "")
-            self._client = OpenAI(base_url=base_url, api_key=api_key, timeout=self._config.get("default_timeout", 180))
+            # Retry policy belongs to LLMRouterSkill.  Leaving the OpenAI SDK
+            # default retries enabled multiplies every logical retry and can
+            # turn one provider/configuration error into a request storm.
+            self._client = OpenAI(
+                base_url=base_url,
+                api_key=api_key,
+                timeout=self._config.get("default_timeout", 180),
+                max_retries=0,
+            )
         return self._client
 
     def call_text(self, prompt: str, image_paths: List[str], model: str, max_output_tokens: int, timeout_ms: int) -> LLMResponse:
