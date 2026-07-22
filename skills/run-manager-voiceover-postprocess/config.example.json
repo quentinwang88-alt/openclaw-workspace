@@ -1,0 +1,12 @@
+{
+  "feishu_app_id": "",
+  "feishu_app_secret": "",
+  "appToken": "",
+  "tableId": "",
+  "viewId": "",
+  "voiceover_env": "development",
+  "tts_provider": "elevenlabs",
+  "tts_voice_id": "",
+  "elevenlabs_api_key": "",
+  "voiceover_rule_version": "1.0.0"
+}

@@ -418,6 +418,7 @@ class LightTryonTestCase(unittest.TestCase):
         self.assertEqual(record["状态"], "待处理")
         self.assertEqual(record["任务名"], jobs[0]["job_id"])
         self.assertEqual(record["内容ID"], jobs[0]["job_id"])
+        self.assertEqual(record["商品ID"], jobs[0]["product_id"])
         self.assertEqual(record["视频比例"], "9:16")
         self.assertIn(record["视频时长"], {8, 10})
         self.assertEqual(record["模型"], "Seedance 2.0")

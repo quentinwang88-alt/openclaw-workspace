@@ -7,11 +7,13 @@ from typing import Any, Iterable
 from .database import LightTryonDB
 from .feishu_mappings import SOURCE_SCRIPT_INPUT_FIELDS, SOURCE_SCRIPT_TRIGGER_FIELDS
 from .models import ProductInput
+from .narrative_orchestrator import plan_enhanced_variants
 from .visual_plans import create_confirmed_video_jobs, orchestrate_visual_plans
 from .utils import normalized_list, now_iso, safe_slug, stable_hash
+from .voiceover_engine_bridge import load_active_voiceover_hooks, load_product_voiceover_usage
 
 
-SOURCE_CONFIG_VERSION = "source-visual-plan-v3"
+SOURCE_CONFIG_VERSION = "source-visual-plan-v4"
 REQUEST_COUNTS = {
     "不生成": 0,
     "不跑": 0,
@@ -85,6 +87,16 @@ def _request_count(value: Any) -> int | None:
     if normalized not in REQUEST_COUNTS:
         raise ValueError(f"非法轻量视频生成数量: {_text(value)}")
     return REQUEST_COUNTS[normalized]
+
+
+def _enhanced_request_count(value: Any) -> int:
+    normalized = re.sub(r"\s+", "", _text(value))
+    if not normalized or normalized in {"不生成", "不跑"}:
+        return 0
+    match = re.fullmatch(r"生成(5|10|20|50)(?:个)?", normalized)
+    if not match:
+        raise ValueError(f"非法口播增强视频数量: {_text(value)}")
+    return int(match.group(1))
 
 
 def _now_ms() -> int:
@@ -239,6 +251,9 @@ def find_source_records(client: Any, product_ref: str) -> list[dict[str, Any]]:
             "styling_preference": _selection_values(_source_value(fields, "styling_preference")),
             "action_preference": _selection_values(_source_value(fields, "action_preference")),
             "shot_plan_preference": _text(_source_value(fields, "shot_plan_preference")),
+            "video_combination_strategy": _text(_source_value(fields, "video_combination_strategy")),
+            "enhanced_video_count": _text(_source_value(fields, "enhanced_video_count")),
+            "voiceover_test_directions": _selection_values(_source_value(fields, "voiceover_test_directions")),
             "image_count": len(images) if isinstance(images, list) else 0,
             "request": _text(_source_value(fields, "request")),
             "light_video_status": _text(fields.get("轻量视频状态")),
@@ -317,6 +332,9 @@ def _source_payload(record: Any) -> dict[str, Any]:
         "styling_preference": _selection_values(_source_value(fields, "styling_preference")),
         "action_preference": _selection_values(_source_value(fields, "action_preference")),
         "shot_plan_preference": _text(_source_value(fields, "shot_plan_preference")),
+        "video_combination_strategy": _text(_source_value(fields, "video_combination_strategy")),
+        "enhanced_video_count": _text(_source_value(fields, "enhanced_video_count")),
+        "voiceover_test_directions": _selection_values(_source_value(fields, "voiceover_test_directions")),
         "images": image_fingerprints,
         "config_version": SOURCE_CONFIG_VERSION,
     }
@@ -371,40 +389,47 @@ def process_source_requests(
     dry_run: bool = False,
 ) -> dict[str, Any]:
     selected_ids = {str(item).strip() for item in (record_ids or []) if str(item).strip()}
-    candidates: list[tuple[Any, int]] = []
+    candidates: list[tuple[Any, int, int]] = []
     invalid: list[tuple[Any, Exception]] = []
     for record in client.list_records(page_size=500):
         if selected_ids and record.record_id not in selected_ids:
             continue
         try:
             count = _request_count(_source_value(record.fields or {}, "request"))
+            enhanced_count = _enhanced_request_count(_source_value(record.fields or {}, "enhanced_video_count"))
         except Exception as exc:
             invalid.append((record, exc))
             continue
-        if count is None:
+        if count is None and enhanced_count == 0:
             continue
-        candidates.append((record, count))
+        candidates.append((record, int(count or 0), enhanced_count))
         if limit and len(candidates) >= int(limit):
             break
     if dry_run:
         return {
             "dry_run": True,
             "candidates": len(candidates),
-            "items": [{"record_id": record.record_id, "requested_count": count, "product_code": _text(_source_value(record.fields, "product_code"))} for record, count in candidates],
+            "items": [{
+                "record_id": record.record_id,
+                "requested_count": count,
+                "enhanced_requested_count": enhanced_count,
+                "product_code": _text(_source_value(record.fields, "product_code")),
+            } for record, count, enhanced_count in candidates],
             "invalid": [{"record_id": record.record_id, "error": str(exc)} for record, exc in invalid],
         }
 
     summary = {
         "candidates": len(candidates), "created_visual_plans": 0, "active_visual_plans": 0,
-        "created_jobs": 0, "existing_jobs": 0, "skipped": 0, "disabled": 0, "failed": len(invalid),
+        "created_jobs": 0, "existing_jobs": 0, "created_narrative_variants": 0,
+        "existing_narrative_variants": 0, "skipped": 0, "disabled": 0, "failed": len(invalid),
     }
     errors = [{"record_id": record.record_id, "error": str(exc)} for record, exc in invalid]
-    for record, count in candidates:
+    for record, count, enhanced_count in candidates:
         payload = _source_payload(record)
         source_hash = stable_hash(payload, length=24)
         previous = db.get_source_request(record.record_id)
         changed = not previous or previous.get("source_hash") != source_hash or int(previous.get("requested_count") or 0) != count
-        if count == 0:
+        if count == 0 and enhanced_count == 0:
             existing_jobs = db.list_jobs(source_script_record_id=record.record_id)
             job_ids = [job["job_id"] for job in existing_jobs]
             db.supersede_visual_plans(record.record_id, [])
@@ -473,14 +498,17 @@ def process_source_requests(
             })
             db.upsert_product(product)
             before_ids = {row["visual_plan_id"] for row in db.list_visual_plans(source_record_id=record.record_id)}
-            visual_plans = orchestrate_visual_plans(
-                db,
-                internal_product_id,
-                source_record_id=record.record_id,
-                scene_values=payload["scene_preference"],
-                styling_values=payload["styling_preference"],
-                per_plan_video_count=count,
-                allow_scene_text_fallback=True,
+            visual_plans = (
+                orchestrate_visual_plans(
+                    db,
+                    internal_product_id,
+                    source_record_id=record.record_id,
+                    scene_values=payload["scene_preference"],
+                    styling_values=payload["styling_preference"],
+                    per_plan_video_count=count,
+                    allow_scene_text_fallback=True,
+                )
+                if count > 0 else []
             )
             visual_plan_ids = [row["visual_plan_id"] for row in visual_plans]
             summary["created_visual_plans"] += len(set(visual_plan_ids) - before_ids)
@@ -493,6 +521,28 @@ def process_source_requests(
                     summary["existing_jobs"] += int(create_result["existing"])
             jobs = [job for job in db.list_jobs(source_script_record_id=record.record_id) if job.get("visual_plan_id") in visual_plan_ids]
             job_ids = [job["job_id"] for job in jobs]
+            narrative_result: dict[str, Any] = {"created": 0, "existing": 0}
+            combination_strategy = payload["video_combination_strategy"] or (
+                "自动组合" if enhanced_count > 0 else "基础轻视频"
+            )
+            if enhanced_count > 0 and combination_strategy in {"自动组合", "口播增强"}:
+                hooks = load_active_voiceover_hooks()
+                historical_usage = load_product_voiceover_usage(
+                    internal_product_id, legacy_narrative_db=db
+                )
+                narrative_result = plan_enhanced_variants(
+                    db,
+                    internal_product_id,
+                    hooks,
+                    count=enhanced_count,
+                    available_evidence=payload["voiceover_test_directions"],
+                    target_duration_seconds=22,
+                    plan_version=f"source-narrative-v2-{source_hash}",
+                    random_seed=source_hash,
+                    historical_usage=historical_usage,
+                )
+                summary["created_narrative_variants"] += int(narrative_result.get("created") or 0)
+                summary["existing_narrative_variants"] += int(narrative_result.get("existing") or 0)
             outfit_statuses = {str(row.get("outfit_image_status") or "pending") for row in visual_plans}
             if "failed" in outfit_statuses:
                 status = "失败"
@@ -500,9 +550,11 @@ def process_source_requests(
                 status = "待首帧确认"
             elif outfit_statuses & {"pending", "generating"}:
                 status = "待首帧生成"
+            elif enhanced_count > 0 and not jobs:
+                status = "待编排"
             else:
                 status = _derive_source_status(jobs)
-            expected_videos = len(visual_plans) * count
+            expected_videos = len(visual_plans) * count + enhanced_count
             should_write = (
                 changed
                 or bool(set(visual_plan_ids) - before_ids)
@@ -524,7 +576,12 @@ def process_source_requests(
                 "visual_plan_ids": visual_plan_ids,
                 "last_processed_at": now_iso(), "error_message": "",
             })
-            if not changed and not (set(visual_plan_ids) - before_ids) and not record_created_jobs:
+            if (
+                not changed
+                and not (set(visual_plan_ids) - before_ids)
+                and not record_created_jobs
+                and not int(narrative_result.get("created") or 0)
+            ):
                 summary["skipped"] += 1
         except Exception as exc:
             message = str(exc)

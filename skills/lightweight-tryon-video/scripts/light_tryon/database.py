@@ -5,8 +5,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
-from .models import PlannedJob, ProductInput
-from .utils import json_dumps, json_loads, normalized_list, now_iso, read_json
+from .models import ContentStrategy, NarrativeVariant, PlannedJob, ProductInput
+from .utils import json_dumps, json_loads, normalized_list, now_iso, read_json, safe_slug
 
 
 TEMPLATE_TABLES = {
@@ -30,6 +30,11 @@ ID_COLUMNS = {
     "products_for_light_video": "product_id",
     "video_jobs": "job_id",
     "product_visual_plans": "visual_plan_id",
+    "content_strategies": "strategy_group_id",
+    "narrative_variants": "variant_id",
+    "content_production_batches": "batch_id",
+    "media_assets": "asset_id",
+    "supplement_shots": "shot_id",
 }
 
 JSON_COLUMNS = {
@@ -52,11 +57,17 @@ JSON_COLUMNS = {
     "source_script_requests": {"job_ids", "visual_plan_ids", "source_payload"},
     "product_visual_plans": {"product_images", "outfit_image_attachments", "outfit_request_payload", "outfit_qc_result", "job_ids"},
     "visual_plan_attempts": {"request_payload", "response_payload"},
+    "content_strategies": {"secondary_selling_points", "required_evidence", "source_payload"},
+    "narrative_variants": {"voiceover_request", "voiceover_response", "beat_plan", "tts_timeline", "assembly_plan"},
+    "media_assets": {"expected_tags", "observed_tags", "qc_result", "auto_mixcut_segment_ids"},
+    "supplement_shots": {"reference_assets", "expected_tags", "prompt_payload", "qc_result"},
 }
 
 JSON_OBJECT_COLUMNS = {
     "prompt_payload", "qc_result", "request_payload", "response_payload", "template_versions",
     "template_snapshots", "source_payload", "outfit_request_payload", "outfit_qc_result",
+    "voiceover_request", "voiceover_response", "assembly_plan",
+    "expected_tags", "observed_tags",
 }
 
 
@@ -405,6 +416,107 @@ CREATE TABLE IF NOT EXISTS visual_plan_attempts (
     UNIQUE(visual_plan_id, attempt_no)
 );
 
+CREATE TABLE IF NOT EXISTS content_strategies (
+    strategy_group_id TEXT PRIMARY KEY,
+    product_id TEXT NOT NULL REFERENCES products_for_light_video(product_id) ON DELETE RESTRICT,
+    hook_id TEXT NOT NULL,
+    hook_name TEXT NOT NULL DEFAULT '',
+    hook_type TEXT NOT NULL DEFAULT '',
+    primary_selling_point TEXT NOT NULL,
+    secondary_selling_points TEXT NOT NULL DEFAULT '[]',
+    visual_focus TEXT NOT NULL DEFAULT '',
+    required_evidence TEXT NOT NULL DEFAULT '[]',
+    selection_weight REAL NOT NULL DEFAULT 1,
+    plan_version TEXT NOT NULL DEFAULT 'narrative-v1',
+    status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','disabled','superseded')),
+    source_payload TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(product_id, plan_version, hook_id, primary_selling_point)
+);
+
+CREATE TABLE IF NOT EXISTS narrative_variants (
+    variant_id TEXT PRIMARY KEY,
+    strategy_group_id TEXT NOT NULL REFERENCES content_strategies(strategy_group_id) ON DELETE RESTRICT,
+    product_id TEXT NOT NULL REFERENCES products_for_light_video(product_id) ON DELETE RESTRICT,
+    format_type TEXT NOT NULL CHECK (format_type IN ('basic_8_10','enhanced_18_24')),
+    target_duration_seconds INTEGER NOT NULL CHECK (target_duration_seconds BETWEEN 8 AND 24),
+    variant_no INTEGER NOT NULL CHECK (variant_no >= 1),
+    execution_seed TEXT NOT NULL,
+    plan_version TEXT NOT NULL DEFAULT 'narrative-v1',
+    workflow_state TEXT NOT NULL DEFAULT 'planned',
+    source_job_id TEXT NOT NULL DEFAULT '',
+    production_batch_id TEXT NOT NULL DEFAULT '',
+    voiceover_status TEXT NOT NULL DEFAULT 'pending',
+    voiceover_request TEXT NOT NULL DEFAULT '{}',
+    voiceover_response TEXT NOT NULL DEFAULT '{}',
+    beat_plan TEXT NOT NULL DEFAULT '[]',
+    tts_timeline TEXT NOT NULL DEFAULT '[]',
+    assembly_plan TEXT NOT NULL DEFAULT '{}',
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(product_id, plan_version, variant_no)
+);
+
+CREATE TABLE IF NOT EXISTS content_production_batches (
+    batch_id TEXT PRIMARY KEY,
+    canonical_product_id TEXT NOT NULL,
+    product_id TEXT NOT NULL,
+    source_key TEXT NOT NULL,
+    batch_no INTEGER NOT NULL CHECK(batch_no >= 1),
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(canonical_product_id, source_key),
+    UNIQUE(canonical_product_id, batch_no)
+);
+
+CREATE TABLE IF NOT EXISTS media_assets (
+    asset_id TEXT PRIMARY KEY,
+    product_id TEXT NOT NULL REFERENCES products_for_light_video(product_id) ON DELETE RESTRICT,
+    source_job_id TEXT NOT NULL DEFAULT '',
+    source_type TEXT NOT NULL DEFAULT 'ai_generated',
+    file_path TEXT NOT NULL DEFAULT '',
+    file_sha256 TEXT NOT NULL,
+    file_size INTEGER NOT NULL DEFAULT 0,
+    expected_tags TEXT NOT NULL DEFAULT '{}',
+    observed_tags TEXT NOT NULL DEFAULT '{}',
+    qc_result TEXT NOT NULL DEFAULT '{}',
+    tag_status TEXT NOT NULL DEFAULT 'pending',
+    asset_status TEXT NOT NULL DEFAULT 'received',
+    auto_mixcut_asset_id TEXT NOT NULL DEFAULT '',
+    auto_mixcut_segment_ids TEXT NOT NULL DEFAULT '[]',
+    tagger_version TEXT NOT NULL DEFAULT '',
+    tag_taxonomy_version TEXT NOT NULL DEFAULT 'ltv-asset-tags-v1',
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(product_id, file_sha256, tag_taxonomy_version)
+);
+
+CREATE TABLE IF NOT EXISTS supplement_shots (
+    shot_id TEXT PRIMARY KEY,
+    variant_id TEXT NOT NULL REFERENCES narrative_variants(variant_id) ON DELETE CASCADE,
+    beat_id TEXT NOT NULL,
+    shot_role TEXT NOT NULL,
+    duration_seconds INTEGER NOT NULL CHECK (duration_seconds BETWEEN 4 AND 10),
+    priority TEXT NOT NULL DEFAULT 'required',
+    status TEXT NOT NULL DEFAULT 'planned',
+    reference_assets TEXT NOT NULL DEFAULT '[]',
+    expected_tags TEXT NOT NULL DEFAULT '{}',
+    prompt_payload TEXT NOT NULL DEFAULT '{}',
+    qc_result TEXT NOT NULL DEFAULT '{}',
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 2,
+    output_asset_id TEXT NOT NULL DEFAULT '',
+    fallback_strategy TEXT NOT NULL DEFAULT '',
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(variant_id, beat_id, shot_role)
+);
+
 CREATE INDEX IF NOT EXISTS idx_video_jobs_generation ON video_jobs(generation_status, publish_priority DESC, created_at);
 CREATE INDEX IF NOT EXISTS idx_video_jobs_qc ON video_jobs(qc_status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_video_jobs_product ON video_jobs(product_id, variant_no);
@@ -415,6 +527,11 @@ CREATE INDEX IF NOT EXISTS idx_source_script_requests_product ON source_script_r
 CREATE INDEX IF NOT EXISTS idx_visual_plans_source ON product_visual_plans(source_record_id, plan_status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_visual_plans_product ON product_visual_plans(product_id, plan_status, updated_at);
 CREATE INDEX IF NOT EXISTS idx_visual_plan_attempts ON visual_plan_attempts(visual_plan_id, attempt_no);
+CREATE INDEX IF NOT EXISTS idx_content_strategies_product ON content_strategies(product_id, plan_version, status);
+CREATE INDEX IF NOT EXISTS idx_narrative_variants_product ON narrative_variants(product_id, plan_version, workflow_state);
+CREATE INDEX IF NOT EXISTS idx_content_batches_product ON content_production_batches(canonical_product_id, batch_no);
+CREATE INDEX IF NOT EXISTS idx_media_assets_product ON media_assets(product_id, tag_status, asset_status);
+CREATE INDEX IF NOT EXISTS idx_supplement_shots_variant ON supplement_shots(variant_id, status);
 """
 
 
@@ -587,11 +704,15 @@ MIGRATION_COLUMNS: dict[str, dict[str, str]] = {
         "run_manager_last_synced_at": "TEXT NOT NULL DEFAULT ''",
         "run_manager_trace_id": "TEXT NOT NULL DEFAULT ''",
         "run_manager_result_status": "TEXT NOT NULL DEFAULT ''",
+        "run_manager_result_source_token": "TEXT NOT NULL DEFAULT ''",
         "run_manager_source_hash": "TEXT NOT NULL DEFAULT ''",
     },
     "source_script_requests": {
         "source_product_code": "TEXT NOT NULL DEFAULT ''",
         "visual_plan_ids": "TEXT NOT NULL DEFAULT '[]'",
+    },
+    "narrative_variants": {
+        "production_batch_id": "TEXT NOT NULL DEFAULT ''",
     },
     "product_visual_plans": {
         "review_source_hash": "TEXT NOT NULL DEFAULT ''",
@@ -650,7 +771,7 @@ class LightTryonDB:
                 "WHERE scene_id='SCENE_E_001' AND shot_profile_id='SHOT_FULL_FIXED'"
             )
             conn.execute(
-                "INSERT INTO schema_meta(key, value) VALUES('schema_version','2.2.0') "
+                "INSERT INTO schema_meta(key, value) VALUES('schema_version','3.1.0') "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
             )
 
@@ -837,6 +958,198 @@ class LightTryonDB:
                 else:
                     existing += 1
         return {"created": created, "existing": existing}
+
+    def upsert_content_strategy(self, strategy: ContentStrategy | dict[str, Any]) -> dict[str, Any]:
+        payload = strategy.to_dict() if isinstance(strategy, ContentStrategy) else dict(strategy)
+        self._upsert("content_strategies", payload)
+        return self.get_content_strategy(str(payload["strategy_group_id"])) or {}
+
+    def get_content_strategy(self, strategy_group_id: str) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM content_strategies WHERE strategy_group_id=?", (strategy_group_id,)
+            ).fetchone()
+            return self._decode_row("content_strategies", row)
+
+    def list_content_strategies(
+        self, product_id: str, *, plan_version: str | None = None, status: str | None = "active"
+    ) -> list[dict[str, Any]]:
+        clauses = ["product_id=?"]
+        params: list[Any] = [product_id]
+        if plan_version:
+            clauses.append("plan_version=?")
+            params.append(plan_version)
+        if status:
+            clauses.append("status=?")
+            params.append(status)
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM content_strategies WHERE " + " AND ".join(clauses)
+                + " ORDER BY selection_weight DESC, strategy_group_id",
+                params,
+            )
+            return [self._decode_row("content_strategies", row) or {} for row in rows]
+
+    def create_narrative_variants(self, variants: Sequence[NarrativeVariant]) -> dict[str, int]:
+        created = existing = 0
+        now = now_iso()
+        with self.connection() as conn:
+            for variant in variants:
+                data = variant.to_dict()
+                columns = list(data) + ["created_at", "updated_at"]
+                values = [data[name] for name in data] + [now, now]
+                cursor = conn.execute(
+                    f"INSERT OR IGNORE INTO narrative_variants ({','.join(columns)}) "
+                    f"VALUES ({','.join('?' for _ in columns)})",
+                    values,
+                )
+                if cursor.rowcount:
+                    created += 1
+                else:
+                    existing += 1
+        return {"created": created, "existing": existing}
+
+    def get_or_create_content_batch(
+        self,
+        product_id: str,
+        source_key: str,
+        *,
+        canonical_product_id: str = "",
+    ) -> dict[str, Any]:
+        """Allocate one readable batch per stable source key; retries reuse it."""
+
+        product = str(product_id or "").strip()
+        canonical = str(canonical_product_id or product).strip()
+        key = str(source_key or "").strip()
+        if not product or not canonical or not key:
+            raise ValueError("内容批次缺少 product_id、canonical_product_id 或 source_key")
+        with self.connection() as conn:
+            existing = conn.execute(
+                "SELECT * FROM content_production_batches WHERE canonical_product_id=? AND source_key=?",
+                (canonical, key),
+            ).fetchone()
+            if existing:
+                return dict(existing)
+            batch_no = int(conn.execute(
+                "SELECT COALESCE(MAX(batch_no),0)+1 FROM content_production_batches WHERE canonical_product_id=?",
+                (canonical,),
+            ).fetchone()[0])
+            date_key = now_iso()[:10].replace("-", "")
+            batch_id = f"{safe_slug(canonical, 30)}_{date_key}_B{batch_no:02d}"
+            now = now_iso()
+            conn.execute(
+                """
+                INSERT INTO content_production_batches(
+                  batch_id,canonical_product_id,product_id,source_key,batch_no,status,created_at,updated_at
+                ) VALUES(?,?,?,?,?,'active',?,?)
+                """,
+                (batch_id, canonical, product, key, batch_no, now, now),
+            )
+            return {
+                "batch_id": batch_id,
+                "canonical_product_id": canonical,
+                "product_id": product,
+                "source_key": key,
+                "batch_no": batch_no,
+                "status": "active",
+                "created_at": now,
+                "updated_at": now,
+            }
+
+    def get_narrative_variant(self, variant_id: str) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            row = conn.execute("SELECT * FROM narrative_variants WHERE variant_id=?", (variant_id,)).fetchone()
+            return self._decode_row("narrative_variants", row)
+
+    def list_narrative_variants(
+        self, product_id: str, *, plan_version: str | None = None, workflow_state: str | None = None
+    ) -> list[dict[str, Any]]:
+        clauses = ["product_id=?"]
+        params: list[Any] = [product_id]
+        if plan_version:
+            clauses.append("plan_version=?")
+            params.append(plan_version)
+        if workflow_state:
+            clauses.append("workflow_state=?")
+            params.append(workflow_state)
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM narrative_variants WHERE " + " AND ".join(clauses)
+                + " ORDER BY variant_no, variant_id",
+                params,
+            )
+            return [self._decode_row("narrative_variants", row) or {} for row in rows]
+
+    def update_narrative_variant(self, variant_id: str, **changes: Any) -> dict[str, Any]:
+        current = self.get_narrative_variant(variant_id)
+        if not current:
+            raise KeyError(f"找不到增强型内容变体: {variant_id}")
+        self._upsert("narrative_variants", {**current, **changes, "variant_id": variant_id})
+        return self.get_narrative_variant(variant_id) or {}
+
+    def upsert_media_asset(self, data: dict[str, Any]) -> dict[str, Any]:
+        asset_id = str(data.get("asset_id") or "")
+        existing = self.get_media_asset(asset_id) if asset_id else None
+        self._upsert("media_assets", {**(existing or {}), **data})
+        return self.get_media_asset(asset_id) or {}
+
+    def get_media_asset(self, asset_id: str) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            row = conn.execute("SELECT * FROM media_assets WHERE asset_id=?", (asset_id,)).fetchone()
+            return self._decode_row("media_assets", row)
+
+    def find_media_asset_by_hash(
+        self, product_id: str, file_sha256: str, *, taxonomy_version: str = "ltv-asset-tags-v1"
+    ) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM media_assets WHERE product_id=? AND file_sha256=? AND tag_taxonomy_version=?",
+                (product_id, file_sha256, taxonomy_version),
+            ).fetchone()
+            return self._decode_row("media_assets", row)
+
+    def list_media_assets(self, product_id: str, *, tag_status: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM media_assets WHERE product_id=?"
+        params: list[Any] = [product_id]
+        if tag_status:
+            query += " AND tag_status=?"
+            params.append(tag_status)
+        query += " ORDER BY created_at, asset_id"
+        with self.connection() as conn:
+            return [self._decode_row("media_assets", row) or {} for row in conn.execute(query, params)]
+
+    def upsert_supplement_shot(self, data: dict[str, Any]) -> dict[str, Any]:
+        shot_id = str(data.get("shot_id") or "")
+        current = self.get_supplement_shot(shot_id) if shot_id else None
+        self._upsert("supplement_shots", {**(current or {}), **data})
+        return self.get_supplement_shot(shot_id) or {}
+
+    def get_supplement_shot(self, shot_id: str) -> dict[str, Any] | None:
+        with self.connection() as conn:
+            row = conn.execute("SELECT * FROM supplement_shots WHERE shot_id=?", (shot_id,)).fetchone()
+            return self._decode_row("supplement_shots", row)
+
+    def list_supplement_shots(self, variant_id: str) -> list[dict[str, Any]]:
+        with self.connection() as conn:
+            return [
+                self._decode_row("supplement_shots", row) or {}
+                for row in conn.execute(
+                    "SELECT * FROM supplement_shots WHERE variant_id=? ORDER BY created_at, shot_id",
+                    (variant_id,),
+                )
+            ]
+
+    def list_product_supplement_shots(self, product_id: str) -> list[dict[str, Any]]:
+        with self.connection() as conn:
+            return [
+                self._decode_row("supplement_shots", row) or {}
+                for row in conn.execute(
+                    "SELECT s.* FROM supplement_shots s "
+                    "JOIN narrative_variants v ON v.variant_id=s.variant_id "
+                    "WHERE v.product_id=? ORDER BY s.created_at, s.shot_id",
+                    (product_id,),
+                )
+            ]
 
     def upsert_visual_plan(self, data: dict[str, Any]) -> dict[str, Any]:
         existing = self.get_visual_plan(str(data.get("visual_plan_id") or ""))
@@ -1133,13 +1446,15 @@ class LightTryonDB:
         *,
         attachments: list[dict[str, Any]],
         trace_id: str = "",
+        source_file_token: str = "",
     ) -> None:
         with self.connection() as conn:
             cursor = conn.execute(
                 "UPDATE video_jobs SET generation_status='success', qc_status='pending', last_error='', "
                 "raw_video_attachments=?, run_manager_sync_status='returned', run_manager_result_status='uploaded', "
+                "run_manager_result_source_token=CASE WHEN ?='' THEN run_manager_result_source_token ELSE ? END, "
                 "run_manager_trace_id=CASE WHEN ?='' THEN run_manager_trace_id ELSE ? END, updated_at=? WHERE job_id=?",
-                (json_dumps(attachments), trace_id, trace_id, now_iso(), job_id),
+                (json_dumps(attachments), source_file_token, source_file_token, trace_id, trace_id, now_iso(), job_id),
             )
             if cursor.rowcount != 1:
                 raise KeyError(f"找不到任务: {job_id}")
@@ -1251,11 +1566,13 @@ class LightTryonDB:
             cursor = conn.execute(
                 "UPDATE video_jobs SET review_video_process_status=?, review_video_source_hash=?, "
                 "raw_video_path=CASE WHEN ?='' THEN raw_video_path ELSE ? END, "
-                "raw_video_attachments=?, final_video_attachments=CASE WHEN ? IS NULL THEN final_video_attachments ELSE ? END, "
+                "raw_video_attachments=CASE WHEN ? IS NULL THEN raw_video_attachments ELSE ? END, "
+                "final_video_attachments=CASE WHEN ? IS NULL THEN final_video_attachments ELSE ? END, "
                 "review_video_process_error=?, review_video_processed_at=CASE WHEN ?='' THEN review_video_processed_at ELSE ? END, updated_at=? "
                 "WHERE job_id=?",
                 (
                     str(status), str(source_hash), str(raw_path), str(raw_path),
+                    None if raw_attachments is None else 1,
                     json_dumps(raw_attachments or []),
                     None if final_attachments is None else 1,
                     json_dumps(final_attachments or []),

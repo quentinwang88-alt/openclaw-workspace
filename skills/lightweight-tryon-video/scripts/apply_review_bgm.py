@@ -34,6 +34,7 @@ from light_tryon.database import LightTryonDB
 from light_tryon.feishu_client import load_feishu_config, resolve_endpoints
 from light_tryon.feishu_sync import build_clients
 from light_tryon.utils import stable_hash
+from light_tryon.workers import validate_video_decode
 
 
 POLICY_VERSION = "light-tryon-auto-mixcut-bgm-v1.0.0"
@@ -74,9 +75,12 @@ def _mix_video(
     ffmpeg_bin: str,
 ) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
+    source_size = source.stat().st_size
     start_sec = max(float(track.get("recommended_start_sec") or 0), 0)
     audio_filter = _bgm_audio_filter(track, duration_ms)
     duration_sec = max(duration_ms, 500) / 1000
+    temporary = target.with_name(f".{target.stem}.{os.getpid()}.tmp{target.suffix}")
+    temporary.unlink(missing_ok=True)
     command = [
         ffmpeg_bin,
         "-y",
@@ -106,11 +110,24 @@ def _mix_video(
         "2",
         "-movflags",
         "+faststart",
-        str(target),
+        str(temporary),
     ]
-    proc = subprocess.run(command, capture_output=True, text=True, timeout=300)
-    if proc.returncode != 0 or not target.is_file() or target.stat().st_size <= 0:
-        raise RuntimeError((proc.stderr or "BGM mix failed")[-3000:])
+    try:
+        proc = subprocess.run(command, capture_output=True, text=True, timeout=300)
+        if proc.returncode != 0 or not temporary.is_file() or temporary.stat().st_size <= 0:
+            raise RuntimeError((proc.stderr or "BGM mix failed")[-3000:])
+        if temporary.stat().st_size < max(200_000, int(source_size * 0.10)):
+            raise RuntimeError(
+                f"BGM成片体积异常: source={source_size} output={temporary.stat().st_size}"
+            )
+        validate_video_decode(
+            temporary,
+            ffmpeg_bin=ffmpeg_bin,
+            expected_duration=duration_sec,
+        )
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def main() -> int:
@@ -182,6 +199,12 @@ def main() -> int:
             if not source.is_file():
                 raise FileNotFoundError(f"找不到品牌后处理视频: {source}")
             duration_ms = _probe_duration_ms(source, args.ffprobe)
+            validate_video_decode(
+                source,
+                ffmpeg_bin=args.ffmpeg,
+                ffprobe_bin=args.ffprobe,
+                expected_duration=duration_ms / 1000,
+            )
             audio_path = _bgm_track_path(ctx, track)
             if not audio_path or not audio_path.is_file():
                 raise FileNotFoundError(f"BGM音频不可用: {track.get('bgm_id')}")

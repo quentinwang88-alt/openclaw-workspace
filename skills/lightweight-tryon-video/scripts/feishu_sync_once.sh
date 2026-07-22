@@ -5,8 +5,25 @@ SKILL_DIR="${0:A:h:h}"
 LOCK_DIR="${TMPDIR:-/tmp}/light-tryon-feishu-sync.lock"
 
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  exit 0
+  lock_pid=""
+  if [[ -r "$LOCK_DIR/pid" ]]; then
+    read -r lock_pid < "$LOCK_DIR/pid" || true
+  fi
+  if [[ "$lock_pid" == <-> ]] && kill -0 "$lock_pid" 2>/dev/null; then
+    exit 0
+  fi
+  # A killed or crashed sync can leave the directory behind forever. Only
+  # remove the expected PID marker, then reclaim the empty stale lock.
+  rm -f "$LOCK_DIR/pid" 2>/dev/null || exit 0
+  rmdir "$LOCK_DIR" 2>/dev/null || exit 0
+  mkdir "$LOCK_DIR" 2>/dev/null || exit 0
 fi
-trap 'rmdir "$LOCK_DIR"' EXIT INT TERM
+print -r -- "$$" > "$LOCK_DIR/pid"
+
+cleanup_lock() {
+  rm -f "$LOCK_DIR/pid" 2>/dev/null || true
+  rmdir "$LOCK_DIR" 2>/dev/null || true
+}
+trap cleanup_lock EXIT INT TERM HUP
 
 python3 "$SKILL_DIR/scripts/run_pipeline.py" feishu "$@"

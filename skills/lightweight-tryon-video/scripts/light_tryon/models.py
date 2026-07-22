@@ -128,3 +128,49 @@ class PlannedJob:
 
     def to_dict(self) -> dict[str, Any]:
         return self.__dict__.copy()
+
+
+@dataclass(frozen=True)
+class ContentStrategy:
+    """A reusable hook/selling-point strategy; repetition is intentionally allowed."""
+
+    strategy_group_id: str
+    product_id: str
+    hook_id: str
+    hook_name: str
+    hook_type: str
+    primary_selling_point: str
+    secondary_selling_points: list[str] = field(default_factory=list)
+    visual_focus: str = ""
+    required_evidence: list[str] = field(default_factory=list)
+    selection_weight: float = 1.0
+    plan_version: str = "narrative-v1"
+    status: str = "active"
+    source_payload: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.__dict__.copy()
+
+
+@dataclass(frozen=True)
+class NarrativeVariant:
+    """One executable variant under a strategy group.
+
+    ``basic_8_10`` remains video-first. ``enhanced_18_24`` is planned from the
+    hook/selling-point combination and then aligned to the existing voiceover.
+    """
+
+    variant_id: str
+    strategy_group_id: str
+    product_id: str
+    format_type: str
+    target_duration_seconds: int
+    variant_no: int
+    execution_seed: str
+    plan_version: str = "narrative-v1"
+    workflow_state: str = "planned"
+    source_job_id: str = ""
+    production_batch_id: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.__dict__.copy()

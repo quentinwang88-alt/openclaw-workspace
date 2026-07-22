@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import shutil
 import subprocess
@@ -71,8 +72,28 @@ def run_generation_worker(
                 raise WorkerError(f"worker 返回的视频文件不存在: {output_path}")
             response["output_video_path"] = str(output_path.resolve())
             db.complete_generation(job["job_id"], response)
+            # Asset tagging is a shared downstream stage. Register immediately;
+            # the idempotent tag worker can then reuse auto_mixcut without
+            # blocking the generation worker or changing the 8-10s flow.
+            from .asset_ingestion import register_media_asset
+
+            registered, _ = register_media_asset(
+                db,
+                job["product_id"],
+                output_path,
+                source_job_id=job["job_id"],
+                expected_tags={
+                    "shot_profile_id": job.get("shot_profile_id"),
+                    "action_id": job.get("action_id"),
+                    "scene_id": job.get("scene_id"),
+                    "visual_plan_id": job.get("visual_plan_id"),
+                },
+            )
             summary["success"] += 1
-            summary["items"].append({"job_id": job["job_id"], "status": "success", "output": response["output_video_path"]})
+            summary["items"].append({
+                "job_id": job["job_id"], "status": "success", "output": response["output_video_path"],
+                "asset_id": registered["asset_id"], "asset_tag_status": registered["tag_status"],
+            })
         except Exception as exc:  # 单条失败不阻塞其他任务
             retryable = int(job.get("retry_count") or 0) < int(max_attempts)
             db.fail_generation(job["job_id"], str(exc), retryable=retryable)
@@ -138,6 +159,42 @@ def probe_video(path: str | Path, ffprobe_bin: str = "ffprobe") -> dict[str, Any
         "avg_frame_rate": video_stream.get("avg_frame_rate") or "",
         "has_video_stream": True,
     }
+
+
+def validate_video_decode(
+    path: str | Path,
+    *,
+    ffmpeg_bin: str = "ffmpeg",
+    ffprobe_bin: str = "ffprobe",
+    expected_duration: float | None = None,
+) -> dict[str, Any]:
+    """Fully decode the video stream so truncated/corrupt H.264 cannot be uploaded."""
+    video_path = Path(path).expanduser().resolve()
+    probe = probe_video(video_path, ffprobe_bin=ffprobe_bin)
+    duration = float(probe.get("duration_seconds") or 0)
+    if expected_duration is not None and abs(duration - float(expected_duration)) > 0.25:
+        raise WorkerError(
+            f"视频时长异常: expected={float(expected_duration):.3f}s actual={duration:.3f}s"
+        )
+    command = [
+        ffmpeg_bin, "-v", "error", "-xerror", "-i", str(video_path),
+        "-map", "0:v:0", "-f", "null", "-",
+    ]
+    completed = subprocess.run(command, text=True, capture_output=True, check=False, timeout=300)
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "视频完整解码失败").strip()
+        raise WorkerError(f"视频流损坏: {detail[-2000:]}")
+    return probe
+
+
+def _temporary_media_path(target: Path) -> Path:
+    handle = tempfile.NamedTemporaryFile(
+        prefix=f".{target.stem}.", suffix=target.suffix, dir=target.parent, delete=False,
+    )
+    path = Path(handle.name)
+    handle.close()
+    path.unlink(missing_ok=True)
+    return path
 
 
 def structural_qc(probe: dict[str, Any], *, min_duration: float = 8.0, max_duration: float = 10.0) -> dict[str, Any]:
@@ -351,40 +408,46 @@ def render_subtitles(
         )
     if not srt_lines:
         raise ValueError("字幕计划没有有效文字")
-    with tempfile.TemporaryDirectory(prefix="ltv_subtitle_") as tmp:
-        srt_path = Path(tmp) / "captions.srt"
-        srt_path.write_text("\n".join(srt_lines), encoding="utf-8")
-        escaped = str(srt_path).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
-        style = (
-            f"FontName={font_name},FontSize=19,PrimaryColour=&H00FFFFFF,"
-            "OutlineColour=&H80000000,BorderStyle=3,Outline=1,Shadow=0,"
-            "Alignment=2,MarginV=110"
-        )
-        filter_value = f"subtitles='{escaped}':force_style='{style}'"
-        command = [
-            ffmpeg_bin,
-            "-y",
-            "-i",
-            str(source),
-            "-vf",
-            filter_value,
-            "-c:v",
-            "libx264",
-            "-preset",
-            "medium",
-            "-crf",
-            "18",
-            "-c:a",
-            "copy",
-            "-movflags",
-            "+faststart",
-            str(target),
-        ]
-        completed = subprocess.run(command, text=True, capture_output=True, check=False, timeout=300)
-        if completed.returncode != 0:
-            raise WorkerError((completed.stderr or "ffmpeg 字幕烧录失败")[-3000:])
-    if not target.is_file() or target.stat().st_size <= 0:
-        raise WorkerError("字幕烧录未生成有效文件")
+    temporary_target = _temporary_media_path(target)
+    try:
+        with tempfile.TemporaryDirectory(prefix="ltv_subtitle_") as tmp:
+            srt_path = Path(tmp) / "captions.srt"
+            srt_path.write_text("\n".join(srt_lines), encoding="utf-8")
+            escaped = str(srt_path).replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+            style = (
+                f"FontName={font_name},FontSize=19,PrimaryColour=&H00FFFFFF,"
+                "OutlineColour=&H80000000,BorderStyle=3,Outline=1,Shadow=0,"
+                "Alignment=2,MarginV=110"
+            )
+            filter_value = f"subtitles='{escaped}':force_style='{style}'"
+            command = [
+                ffmpeg_bin,
+                "-y",
+                "-i",
+                str(source),
+                "-vf",
+                filter_value,
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                "18",
+                "-c:a",
+                "copy",
+                "-movflags",
+                "+faststart",
+                str(temporary_target),
+            ]
+            completed = subprocess.run(command, text=True, capture_output=True, check=False, timeout=300)
+            if completed.returncode != 0:
+                raise WorkerError((completed.stderr or "ffmpeg 字幕烧录失败")[-3000:])
+        if not temporary_target.is_file() or temporary_target.stat().st_size <= 0:
+            raise WorkerError("字幕烧录未生成有效文件")
+        validate_video_decode(temporary_target, ffmpeg_bin=ffmpeg_bin)
+        os.replace(temporary_target, target)
+    finally:
+        temporary_target.unlink(missing_ok=True)
     return {"output_video_path": str(target), "cue_count": len(cues), "font_name": font_name}
 
 
@@ -522,29 +585,40 @@ def render_brand_overlay(
     fade_in = min(display_seconds / 2, max(0.0, float(0.12 if raw_fade_in is None else raw_fade_in)))
     fade_out = min(display_seconds / 2, max(0.0, float(0.18 if raw_fade_out is None else raw_fade_out)))
     fade_out_start = max(fade_in, display_seconds - fade_out)
-    with tempfile.TemporaryDirectory(prefix="ltv_brand_") as tmp:
-        overlay_path = Path(tmp) / "brand-overlay.png"
-        overlay_meta = _render_brand_overlay_png(probe["width"], probe["height"], brand_plan, overlay_path)
-        brand_filters = ["format=rgba"]
-        if fade_in > 0:
-            brand_filters.append(f"fade=t=in:st=0:d={fade_in:.3f}:alpha=1")
-        if fade_out > 0:
-            brand_filters.append(f"fade=t=out:st={fade_out_start:.3f}:d={fade_out:.3f}:alpha=1")
-        filter_value = (
-            f"[1:v]{','.join(brand_filters)}[brand];"
-            f"[0:v][brand]overlay=0:0:enable='between(t,0,{display_seconds:.3f})':shortest=1[v]"
+    temporary_target = _temporary_media_path(target)
+    try:
+        with tempfile.TemporaryDirectory(prefix="ltv_brand_") as tmp:
+            overlay_path = Path(tmp) / "brand-overlay.png"
+            overlay_meta = _render_brand_overlay_png(probe["width"], probe["height"], brand_plan, overlay_path)
+            brand_filters = ["format=rgba"]
+            if fade_in > 0:
+                brand_filters.append(f"fade=t=in:st=0:d={fade_in:.3f}:alpha=1")
+            if fade_out > 0:
+                brand_filters.append(f"fade=t=out:st={fade_out_start:.3f}:d={fade_out:.3f}:alpha=1")
+            filter_value = (
+                f"[1:v]{','.join(brand_filters)}[brand];"
+                f"[0:v][brand]overlay=0:0:enable='between(t,0,{display_seconds:.3f})':shortest=1[v]"
+            )
+            command = [
+                ffmpeg_bin, "-y", "-i", str(source), "-loop", "1", "-i", str(overlay_path),
+                "-filter_complex", filter_value, "-map", "[v]", "-map", "0:a?",
+                "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
+                "-c:a", "copy", "-movflags", "+faststart", str(temporary_target),
+            ]
+            completed = subprocess.run(command, text=True, capture_output=True, check=False, timeout=300)
+            if completed.returncode != 0:
+                raise WorkerError((completed.stderr or "品牌叠加失败")[-3000:])
+        if not temporary_target.is_file() or temporary_target.stat().st_size <= 0:
+            raise WorkerError("品牌叠加未生成有效文件")
+        validate_video_decode(
+            temporary_target,
+            ffmpeg_bin=ffmpeg_bin,
+            ffprobe_bin=ffprobe_bin,
+            expected_duration=float(probe.get("duration_seconds") or 0),
         )
-        command = [
-            ffmpeg_bin, "-y", "-i", str(source), "-loop", "1", "-i", str(overlay_path),
-            "-filter_complex", filter_value, "-map", "[v]", "-map", "0:a?",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
-            "-c:a", "copy", "-movflags", "+faststart", str(target),
-        ]
-        completed = subprocess.run(command, text=True, capture_output=True, check=False, timeout=300)
-        if completed.returncode != 0:
-            raise WorkerError((completed.stderr or "品牌叠加失败")[-3000:])
-    if not target.is_file() or target.stat().st_size <= 0:
-        raise WorkerError("品牌叠加未生成有效文件")
+        os.replace(temporary_target, target)
+    finally:
+        temporary_target.unlink(missing_ok=True)
     cover_path = Path(cover_output).expanduser().resolve() if cover_output else target.with_name(target.stem + "_cover.jpg")
     cover_path.parent.mkdir(parents=True, exist_ok=True)
     cover_command = [

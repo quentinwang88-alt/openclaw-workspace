@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import mimetypes
+import os
+import tempfile
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from .asset_ingestion import register_media_asset
 from .database import LightTryonDB
+from .prompting import build_brand_plan
 from .utils import now_iso, stable_hash
 from .workers import render_postprocessed_video
 
@@ -71,8 +75,32 @@ def process_review_videos(
             summary["items"].append({"job_id": job_id, "status": "failed", "error": "本地不存在该视频任务"})
             continue
         prompt_payload = job.get("prompt_payload") or {}
-        subtitle_plan = prompt_payload.get("subtitle_plan") or {}
-        brand_plan = prompt_payload.get("brand_plan") or {}
+        subtitle_plan = dict(prompt_payload.get("subtitle_plan") or {})
+        brand_plan = dict(prompt_payload.get("brand_plan") or {})
+        if not brand_plan:
+            context = db.get_job_context(job_id)
+            brand_plan = build_brand_plan(context.get("persona") or {}, context.get("product") or {})
+        if brand_plan.get("enabled") and not brand_plan.get("dynamic_subtitles_enabled", False):
+            subtitle_plan = {
+                **subtitle_plan,
+                "cues": [],
+                "render_mode": "disabled",
+                "disabled_reason": "brand_cover_only",
+            }
+        existing_raw = {
+            str(item.get("file_token") or ""): item
+            for item in (job.get("raw_video_attachments") or [])
+            if isinstance(item, dict) and item.get("file_token")
+        }
+        raw_attachments_for_db: list[dict[str, Any]] = []
+        for item in initial:
+            previous = existing_raw.get(str(item.get("file_token") or ""), {})
+            source_metadata = {
+                key: value
+                for key, value in previous.items()
+                if key.startswith("source_") and value not in (None, "")
+            }
+            raw_attachments_for_db.append({**item, **source_metadata})
         source_hash = stable_hash(
             REVIEW_POSTPROCESS_VERSION, initial, subtitle_plan, brand_plan, length=24,
         )
@@ -94,7 +122,7 @@ def process_review_videos(
                 job_id,
                 status="processing",
                 source_hash=source_hash,
-                raw_attachments=initial,
+                raw_attachments=raw_attachments_for_db,
                 error="",
             )
             attachment = (fields.get("初始成片") or [])[0]
@@ -102,7 +130,26 @@ def process_review_videos(
             if not str(content_type or "").startswith("video/") and Path(file_name).suffix.lower() not in {".mp4", ".mov", ".m4v", ".webm"}:
                 raise ValueError(f"初始成片不是支持的视频文件: {file_name}")
             raw_path = job_dir / f"initial{_safe_suffix(file_name, content_type)}"
-            raw_path.write_bytes(content)
+            with tempfile.NamedTemporaryFile(
+                prefix=f".{raw_path.stem}.", suffix=raw_path.suffix, dir=job_dir, delete=False,
+            ) as handle:
+                temporary_raw = Path(handle.name)
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_raw, raw_path)
+            asset_row, _ = register_media_asset(
+                db,
+                job["product_id"],
+                raw_path,
+                source_job_id=job_id,
+                expected_tags={
+                    "shot_profile_id": job.get("shot_profile_id"),
+                    "action_id": job.get("action_id"),
+                    "scene_id": job.get("scene_id"),
+                    "visual_plan_id": job.get("visual_plan_id"),
+                },
+            )
             final_path = job_dir / f"{job_id}_final.mp4"
             cover_path = job_dir / f"{job_id}_cover.jpg"
             result = renderer(
@@ -137,7 +184,7 @@ def process_review_videos(
                 status="success",
                 source_hash=source_hash,
                 raw_path=str(raw_path),
-                raw_attachments=initial,
+                raw_attachments=raw_attachments_for_db,
                 final_attachments=final_attachments,
                 error="",
                 processed_at=now_iso(),
@@ -146,6 +193,7 @@ def process_review_videos(
             summary["items"].append({
                 "job_id": job_id, "status": "success", "output_video_path": str(rendered),
                 "final_file_token": uploaded.get("file_token") or "",
+                "asset_id": asset_row["asset_id"], "asset_tag_status": asset_row["tag_status"],
             })
         except Exception as exc:
             message = str(exc)[:2000]
@@ -153,7 +201,7 @@ def process_review_videos(
                 job_id,
                 status="failed",
                 source_hash=source_hash,
-                raw_attachments=initial,
+                raw_attachments=raw_attachments_for_db,
                 error=message,
             )
             try:

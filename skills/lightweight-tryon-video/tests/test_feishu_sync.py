@@ -5,6 +5,7 @@ import unittest
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SKILL_DIR / "scripts"))
@@ -29,6 +30,7 @@ from light_tryon.run_manager_sync import (
     ensure_run_manager_schema,
     pull_generation_preferences,
     pull_run_manager_results,
+    resolve_run_manager_identity,
     sync_jobs_to_run_manager,
 )
 from light_tryon.source_script_sync import ensure_source_schema, find_source_records, process_source_requests, set_source_request
@@ -217,6 +219,7 @@ class FeishuSyncTestCase(unittest.TestCase):
             "fields": {
                 "每方案视频数量": "每方案 1 个", "产品图片": [{"file_token": "product", "name": "product.jpg"}],
                 "产品编码": "QUEUE_SKU", "一级类目": "女装", "目标国家": "泰国", "目标语言": "泰语", "产品类型": "上装",
+                "店铺ID": "SHOP_TH_1",
             },
         }])
         process_source_requests(self.db, source)
@@ -239,7 +242,8 @@ class FeishuSyncTestCase(unittest.TestCase):
         self.assertEqual(queued["created"], 1)
         fields = run.records[0].fields
         self.assertEqual(fields["脚本ID"], job["job_id"])
-        self.assertEqual(fields["店铺ID"], "myps01")
+        self.assertEqual(fields["商品ID"], "QUEUE_SKU")
+        self.assertEqual(fields["店铺ID"], "SHOP_TH_1")
         self.assertEqual(fields["模型"], "Seedance 2.0 VIP")
         self.assertEqual(fields["视频时长"], 10)
         self.assertEqual(fields["分辨率"], "720P")
@@ -251,6 +255,14 @@ class FeishuSyncTestCase(unittest.TestCase):
         self.assertNotEqual(run.uploads[0]["name"], outfit.name)
         repeated = sync_jobs_to_run_manager(self.db, review, run, job_ids=[job["job_id"]])
         self.assertEqual(repeated["skipped"], 1)
+        previous_fingerprint = fields["来源指纹"]
+        product = self.db.get_product(job["product_id"])
+        product["account_id"] = "SHOP_TH_2"
+        self.db.upsert_product(product)
+        identity_update = sync_jobs_to_run_manager(self.db, review, run, job_ids=[job["job_id"]])
+        self.assertEqual(identity_update["updated"], 1)
+        self.assertEqual(fields["店铺ID"], "SHOP_TH_2")
+        self.assertNotEqual(fields["来源指纹"], previous_fingerprint)
         run.records[0].fields.update({
             "状态": "已完成", "结果回传状态": "uploaded", "最新追踪ID": "trace-queue",
             "生成视频": [{"file_token": "video-output", "name": "output.mp4", "type": "video/mp4", "size": 10}],
@@ -264,6 +276,95 @@ class FeishuSyncTestCase(unittest.TestCase):
         self.assertEqual(stored["generation_model"], "Seedance 2.0 VIP")
         self.assertEqual(stored["duration_seconds"], 10)
         self.assertEqual(stored["run_manager_sync_status"], "returned")
+        self.assertEqual(stored["run_manager_result_source_token"], "video-output")
+        # 飞书附件在后处理/重传后可能不再携带 source_* 扩展信息；独立的来源 token
+        # 仍应确保同一运行表结果不会被重复回流和再次渲染。
+        raw_without_source_metadata = [
+            {key: value for key, value in item.items() if not key.startswith("source_")}
+            for item in stored["raw_video_attachments"]
+        ]
+        self.db.update_review_video_processing(
+            job["job_id"], status="success", source_hash="postprocess-hash",
+            raw_attachments=raw_without_source_metadata,
+        )
+        repeated_result = pull_run_manager_results(self.db, review, run, job_ids=[job["job_id"]])
+        self.assertEqual(repeated_result["returned"], 0)
+        self.assertEqual(repeated_result["skipped"], 1)
+
+    def test_source_identity_is_required_and_submitted_job_is_never_reset(self):
+        source = FakeClient([{
+            "record_id": "rec_source_identity_guard",
+            "fields": {
+                "每方案视频数量": "每方案 1 个",
+                "产品图片": [{"file_token": "product", "name": "product.jpg"}],
+                "产品编码": "IDENTITY_SKU",
+                "一级类目": "女装", "目标国家": "泰国", "目标语言": "泰语", "产品类型": "上装",
+            },
+        }])
+        process_source_requests(self.db, source)
+        plan_id = self.db.get_source_request("rec_source_identity_guard")["visual_plan_ids"][0]
+        outfit = Path(self.tmp.name) / "identity-confirmed.jpg"
+        outfit.write_bytes(b"confirmed-outfit")
+        confirm_outfit_image(self.db, plan_id, image_path=str(outfit))
+        process_source_requests(self.db, source)
+        job = self.db.list_jobs(source_script_record_id="rec_source_identity_guard")[0]
+        review = FakeClient([{"record_id": "rec_review_identity", "fields": {}}])
+        push_reviews(self.db, review, job_ids=[job["job_id"]])
+        review.records[0].fields["生成渠道"] = "即梦"
+        pull_generation_preferences(self.db, review, job_ids=[job["job_id"]])
+        run = FakeClient(fields=[])
+        missing_store = sync_jobs_to_run_manager(self.db, review, run, job_ids=[job["job_id"]])
+        self.assertEqual(missing_store["failed"], 1)
+        self.assertIn("缺少店铺ID", missing_store["items"][0]["error"])
+
+        product = self.db.get_product(job["product_id"])
+        product["account_id"] = "SHOP_TH_GUARD"
+        self.db.upsert_product(product)
+        queued = sync_jobs_to_run_manager(self.db, review, run, job_ids=[job["job_id"]])
+        self.assertEqual(queued["created"], 1)
+        run.records[0].fields.update({
+            "商品ID": "OSG_rec_source_identity_guard", "店铺ID": "myps01", "来源指纹": "stale",
+            "状态": "已提交", "执行归属": "worker", "已提交次数": 1, "最新追踪ID": "trace-active",
+        })
+        protected = sync_jobs_to_run_manager(self.db, review, run, job_ids=[job["job_id"]])
+        self.assertEqual(protected["blocked"], 1)
+        self.assertEqual(run.records[0].fields["状态"], "已提交")
+        self.assertEqual(run.records[0].fields["执行归属"], "worker")
+        self.assertEqual(run.records[0].fields["最新追踪ID"], "trace-active")
+
+        # A historical duplicate must not stop every other task. The locally
+        # bound record remains authoritative and neither active row is reset.
+        run.records.append(SimpleNamespace(
+            record_id="rec_historical_duplicate",
+            fields={
+                **run.records[0].fields,
+                "状态": "已提交", "最新追踪ID": "trace-historical",
+            },
+        ))
+        duplicate_safe = sync_jobs_to_run_manager(self.db, review, run, job_ids=[job["job_id"]])
+        self.assertEqual(duplicate_safe["blocked"], 1)
+        self.assertEqual(run.records[0].fields["最新追踪ID"], "trace-active")
+        self.assertEqual(run.records[1].fields["最新追踪ID"], "trace-historical")
+        run.records[1].fields.update({
+            "状态": "已完成", "结果回传状态": "uploaded",
+            "生成视频": [{"file_token": "historical-video", "name": "historical.mp4"}],
+        })
+        historical_result = pull_run_manager_results(self.db, review, run, job_ids=[job["job_id"]])
+        self.assertEqual(historical_result["returned"], 1)
+        self.assertEqual(self.db.get_job(job["job_id"])["run_manager_record_id"], "rec_historical_duplicate")
+
+    def test_run_manager_identity_rejects_internal_source_key_and_keeps_legacy_fallback(self):
+        with self.assertRaisesRegex(ValueError, "内部商品键"):
+            resolve_run_manager_identity({
+                "product_id": "OSG_rec_bad",
+                "source_script_record_id": "rec_bad",
+                "source_product_code": "OSG_rec_bad",
+                "account_id": "SHOP_TH_1",
+            }, "myps01")
+        self.assertEqual(
+            resolve_run_manager_identity({"product_id": "LEGACY_SKU"}, "LEGACY_STORE"),
+            ("LEGACY_SKU", "LEGACY_STORE"),
+        )
 
     def test_template_pull_updates_disabled_and_then_skips(self):
         clients = template_clients()
@@ -416,6 +517,43 @@ class FeishuSyncTestCase(unittest.TestCase):
         disabled = process_source_requests(self.db, source)
         self.assertEqual(disabled["disabled"], 1)
         self.assertEqual(len(self.db.list_jobs(source_script_record_id="rec_source_1")), 5)
+
+    def test_source_enhanced_only_request_plans_from_existing_hook_library(self):
+        source = FakeClient([{
+            "record_id": "rec_source_enhanced",
+            "fields": {
+                "每方案视频数量": "不生成",
+                "视频组合策略": "口播增强",
+                "口播增强视频数量": "生成 5 个",
+                "口播测试方向": ["版型", "细节"],
+                "产品图片": [{"file_token": "token_enhanced", "name": "enhanced.jpg"}],
+                "产品编码": "ENHANCED_SKU",
+                "产品名称": "短款外套",
+                "产品卖点说明": ["短款版型", "金属拉链细节"],
+                "一级类目": "女装",
+                "目标国家": "泰国",
+                "目标语言": "泰语",
+                "产品类型": "外套",
+            },
+        }])
+        hooks = [
+            {"hook_id": "GENERAL_PRODUCT_SHARE", "hook_name": "通用轻分享型"},
+            {"hook_id": "DETAIL_SURPRISE", "hook_name": "细节惊喜型"},
+        ]
+        with patch("light_tryon.source_script_sync.load_active_voiceover_hooks", return_value=hooks), patch(
+            "light_tryon.source_script_sync.load_product_voiceover_usage",
+            return_value={"recent_count": 0},
+        ):
+            first = process_source_requests(self.db, source)
+            second = process_source_requests(self.db, source)
+        self.assertEqual(first["created_narrative_variants"], 5)
+        self.assertEqual(second["created_narrative_variants"], 0)
+        self.assertEqual(second["existing_narrative_variants"], 5)
+        product_id = self.db.get_source_request("rec_source_enhanced")["product_id"]
+        variants = self.db.list_narrative_variants(product_id)
+        self.assertEqual(len(variants), 5)
+        self.assertEqual(source.records[0].fields["预计视频总数"], 5)
+        self.assertEqual(source.records[0].fields["轻量视频状态"], "待编排")
 
     def test_source_scene_change_creates_new_active_config_without_mixing_old_jobs(self):
         source = FakeClient([{

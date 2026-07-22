@@ -5,7 +5,8 @@ description: >-
   scene/action/styling/subtitle/persona templates, import apparel SKUs, deterministically
   create product visual plans and gated 8–10 second video jobs, assemble strict product-faithful prompts, export
   Jimeng-compatible task records, run command-based generation workers, burn in localized
-  subtitles, perform structural and visual QC, and prepare manual review. Use for requests
+  subtitles, perform structural and visual QC, prepare manual review, and plan 18–24 second
+  voiceover-enhanced variants without replacing the existing hook or voiceover writing flow. Use for requests
   mentioning AI 轻量试穿视频、固定女生/房间/机位、模板化换装、自然流铺量、试穿任务单、
   8–10 秒女装视频、Scene A/B/C、ACT/STYLE/SUB 模板，or maintaining this production line
   in OpenClaw/Codex.
@@ -13,7 +14,7 @@ description: >-
 
 # AI 轻量试穿视频模板系统
 
-使用独立模板线生产稳定的 8–10 秒女装试穿视频。不要把任务转成原创脚本、剧情复刻或混剪任务。
+使用独立模板线生产稳定的 8–10 秒女装试穿视频；增强型入口只负责内容组合、Beat、补镜头和素材打标编排，不替代现有钩子库或口播写作流程。
 
 ## 运行边界
 
@@ -245,6 +246,75 @@ python3 skills/lightweight-tryon-video/scripts/run_pipeline.py feishu pull-sourc
 飞书维护人设、账号品牌视觉、场景环境、镜头方案、动作、搭配、字幕和产品视觉方案复核；SQLite 仍是商品、方案、任务、生成、后处理、QC 的执行真相源。账号品牌 Logo 会在模板同步时缓存到本地，后期精确叠加，不交给视频模型生成。模板同步后会在同一轮自动刷新原始脚本表的场景、搭配、动作和镜头方案名称选项。选填的场景参考图会缓存到本地并进入穿搭图请求；为空时使用场景文字。下装颜色由系统自动解析，不增加原始脚本操作字段；产品视觉方案表中的“实际下装颜色/实际下装版型”仅用于查看结果。新增场景只需在场景环境库增加一条环境记录，不要为全身、半身、推近重复建场景。
 
 复核台生成配置只由运营维护，普通系统回推不会覆盖已选渠道、模型、时长或重跑勾选。`生成渠道=不生成` 永远不入队；运行管理表记录通过 `脚本ID=视频任务ID` 幂等关联，结果先回到 `初始成片`，再进入最终后期。
+
+## 口播增强型视频（18–24 秒）
+
+数据库 V3.1 包含内容策略、增强型变体、公共素材、补充镜头和自动生产批次表。原有 `video_jobs` 仍严格保持 8–10 秒，不改变“先有视频、再配口播”的生产顺序。
+
+系统直接读取当前口播系统数据库中的 `ACTIVE` 钩子和同一商品的共享内容台账，建立策略池并进行“历史降权 + 本批覆盖 + 唯一组合用完后再重复”。不需要运营导出或维护第二份钩子 JSON；重要事实仍可复用，但近期高频钩子、卖点和钩子×卖点组合会自动降权。比较型钩子会先校验多色等事实前提，避免只凭文案模板硬套：
+
+```bash
+python3 skills/lightweight-tryon-video/scripts/run_pipeline.py narrative plan \
+  --product-id <商品ID> --count 20 --duration 22 \
+  --evidence 主穿搭图 --evidence 上半身试穿
+```
+
+8–10 秒基础视频、18–24 秒增强视频和生成后复刻视频共用中央商品内容台账；不会在智能混剪里另建文案规则。外部商品编码是稳定主身份，`OSG_...` 等内部 ID 自动登记为别名；幂等重跑沿用原批次，新 `plan_version` 自动分配下一批次。查看某商品最近使用的格式、批次、钩子和卖点：
+
+```bash
+python3 skills/lightweight-tryon-video/scripts/run_pipeline.py narrative content-memory \
+  --product-id <商品ID>
+```
+
+完整跨批次规则见 [商品级口播内容记忆](references/product-voiceover-content-memory-v1.md)。
+
+先将已生成的基础轻视频登记并复用智能混剪完成真实打标。`expected_tags` 只是生成意图，不能作为口播证据或剪辑依据。历史任务可批量补登记。增强型轻视频默认使用原始脚本表的商品参考图直连视觉打标，不要求建立智能混剪商品锚点；参考图会与视频抽帧共同交给视觉模型比对，但不会把商品状态伪造成 `confirmed`，也不会认领智能混剪任务。仍可显式切回旧锚点模式：
+
+```bash
+python3 skills/lightweight-tryon-video/scripts/run_pipeline.py asset backfill \
+  --product-id <商品ID>
+python3 skills/lightweight-tryon-video/scripts/run_pipeline.py asset tag \
+  --product-id <商品ID> --anchor-mode source_reference --limit 10
+```
+
+需要使用旧锚点门禁时传 `--anchor-mode confirmed_anchor`。任何视觉调用失败、空角色标签或不可用片段都必须重试或进入人工复核，禁止用计划标签兜底。
+
+有足够的 `observed_tags` 后，先按实际可见镜头生成 18–24 秒无声视觉粗剪和客观时间轴：
+
+```bash
+python3 skills/lightweight-tryon-video/scripts/run_pipeline.py narrative assemble \
+  --variant-id <NAR_ID>
+```
+
+正式口播直接调用当前口播流程；适配器只传钩子 ID、主辅卖点、目标时长和粗剪证据，不添加另一套写作风格，也不允许下游改写：
+
+```bash
+python3 skills/lightweight-tryon-video/scripts/run_pipeline.py narrative voiceover \
+  --variant-id <NAR_ID>
+```
+
+完成口播 Beat 后，系统先把每个卖点映射为必须可见的镜头角色，再按已打标素材计算缺口并最多规划 3 个补充镜头。闭合方式、领口、腰线、颜色和面料等具体口播必须命中对应证据镜头，不能只用普通试穿画面代替。每条 Prompt 都完整写明人物、场景、商品、穿搭、构图、分秒动作和负面约束，不得使用“同一套/同一个女生/与主场景相同”等跨任务指代：
+
+```bash
+python3 skills/lightweight-tryon-video/scripts/run_pipeline.py narrative plan-supplements \
+  --variant-id <NAR_ID> --context-file /path/context.json \
+  --reference /path/confirmed-outfit.jpg
+```
+
+口播确认后用当前 TTS 适配器一次性合成完整口播；18 秒以上视频禁止逐句或分块拼接音频。增强型泰语默认使用自然偏慢的 `-18%` 语速，以减少 22 秒成片尾部空白；运营仍可显式覆盖。系统读取 TTS 服务返回的词级时间边界，把每条口播定位到真实语音区间，并据此重新选择和排列证据镜头。若真实 TTS 超出视频时长，任务回到现有口播流程精简，不通过强制倍速或下游改写硬塞。最后只将连续口播音轨混入重排后的画面；V1 不随机叠加模型 BGM，避免口播被盖住：
+
+```bash
+python3 skills/lightweight-tryon-video/scripts/run_pipeline.py narrative tts \
+  --variant-id <NAR_ID> --provider edge --voice-id th-TH-PremwadeeNeural
+python3 skills/lightweight-tryon-video/scripts/run_pipeline.py narrative assemble \
+  --variant-id <NAR_ID>
+python3 skills/lightweight-tryon-video/scripts/run_pipeline.py narrative mix \
+  --variant-id <NAR_ID>
+```
+
+完整顺序是：`飞书选择数量 → 策略变体 → 基础素材真实打标 → 证据粗剪 → 现有口播 → 单次连续 TTS → 按真实台词时间重排画面 → 缺口补镜头并重新打标 → 混音 → 终检`。如果口播 Beat 暴露必要画面缺口，则最多补 3 个镜头；缺口未关闭时禁止混音。新镜头回传并真实打标后重新编排画面，旧的组装和混音结果随之失效。
+
+完整数据契约、状态流转和降级规则见 [口播增强型轻视频开发说明](references/voiceover-enhanced-video-v1.md)。
 
 ## 模板管理
 

@@ -462,10 +462,11 @@ def build_jimeng_record(context: dict[str, Any], prompt_payload: dict[str, Any])
     job = context["job"]
     product = context["product"]
     generation = prompt_payload["generation"]
+    business_product_id = str(product.get("source_product_code") or job["product_id"]).strip()
     return {
         "任务名": job["job_id"],
         "内容ID": job["job_id"],
-        "商品ID": job["product_id"],
+        "商品ID": business_product_id,
         "状态": "待处理",
         "提示词": prompt_payload["positive_prompt"],
         "参考图": prompt_payload.get("reference_images") or [],

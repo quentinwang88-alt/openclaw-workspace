@@ -376,6 +376,9 @@ SOURCE_SCRIPT_INPUT_FIELDS: dict[str, tuple[str, ...]] = {
     "styling_preference": ("轻量视频搭配",),
     "action_preference": ("轻量视频动作",),
     "shot_plan_preference": ("轻量视频镜头方案",),
+    "video_combination_strategy": ("视频组合策略",),
+    "enhanced_video_count": ("口播增强视频数量",),
+    "voiceover_test_directions": ("口播测试方向",),
 }
 
 SOURCE_SCRIPT_TRIGGER_FIELDS = (
@@ -384,6 +387,9 @@ SOURCE_SCRIPT_TRIGGER_FIELDS = (
     multi("轻量视频搭配", "light_video_styling", ["自动选择", "白色高腰阔腿裤", "经典蓝色直筒牛仔裤", "白色高腰短裤", "纯色休闲短裤", "简洁半裙", "保持商品原套装"]),
     single("轻量视频镜头方案", "light_video_shot_plan", ["自动选择", "外套重点展示", "上装平衡展示", "全身穿搭展示", "通用平衡展示"]),
     multi("轻量视频动作", "light_video_action", ["自动选择"]),
+    single("视频组合策略", "video_combination_strategy", ["基础轻视频", "自动组合", "口播增强"]),
+    single("口播增强视频数量", "enhanced_video_count", ["不生成", "生成 5 个", "生成 10 个", "生成 20 个", "生成 50 个"]),
+    multi("口播测试方向", "voiceover_test_directions", ["自动", "版型", "细节", "多色", "场景"]),
     field("预计视觉方案数", "estimated_visual_plan_count", NUMBER),
     field("预计视频总数", "estimated_video_count", NUMBER),
     field("视觉方案ID", "visual_plan_ids"),

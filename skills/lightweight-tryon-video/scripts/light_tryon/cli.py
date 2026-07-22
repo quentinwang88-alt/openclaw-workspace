@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .database import LightTryonDB, TEMPLATE_TABLES
+from .diversity import assess_product_asset_capacity, evaluate_product_diversity
 from .feishu_client import load_feishu_config, make_client, resolve_endpoints, resolve_run_manager_endpoint, resolve_source_endpoint
 from .feishu_sync import (
     build_clients,
@@ -24,8 +25,13 @@ from .feishu_sync import (
     push_visual_plans,
 )
 from .review_video_processing import process_review_videos
-from .run_manager_sync import ensure_run_manager_schema, pull_generation_preferences, pull_run_manager_results, sync_jobs_to_run_manager
+from .run_manager_sync import build_run_manager_sync_snapshots, ensure_run_manager_schema, pull_generation_preferences, pull_run_manager_results, sync_jobs_to_run_manager
 from .models import ProductInput
+from .asset_ingestion import backfill_asset_visual_fingerprints, backfill_generated_job_assets, process_pending_asset_tags, register_media_asset, tag_supplement_assets_by_contract
+from .assembly_planner import plan_variant_rough_cut, plan_variant_voiceover_cut, render_variant_rough_cut
+from .narrative_orchestrator import generate_variant_voiceover, plan_enhanced_variants, plan_variant_supplements
+from .narrative_render import render_narrative_voiceover_mix
+from .narrative_run_manager import pull_supplement_results, sync_supplement_shots
 from .planner import plan_product
 from .prompting import PROMPT_BUILDER_VERSION, build_prompt
 from .review import export_review_html, set_manual_review
@@ -40,7 +46,10 @@ from .workers import (
     run_generation_worker,
 )
 from .source_script_sync import ensure_source_schema, find_source_records, process_source_requests, set_source_request
+from .tts_bridge import synthesize_variant_tts
 from .visual_plans import confirm_outfit_image, create_confirmed_video_jobs, run_outfit_generation_worker
+from .voiceover_engine_bridge import load_active_voiceover_hooks, load_product_voiceover_usage
+from .supplement_shots import plan_product_diversity_pool, plan_product_richness_pool
 
 
 SKILL_DIR = Path(__file__).resolve().parents[2]
@@ -76,7 +85,7 @@ def _db(args: argparse.Namespace) -> LightTryonDB:
 def cmd_init(args: argparse.Namespace) -> dict[str, Any]:
     db = _db(args)
     counts = db.seed_templates(args.templates) if args.seed else {}
-    return {"database": str(db.path), "schema_version": "2.2.0", "seeded": counts}
+    return {"database": str(db.path), "schema_version": "3.1.0", "seeded": counts}
 
 
 def cmd_template_list(args: argparse.Namespace) -> dict[str, Any]:
@@ -229,14 +238,25 @@ def cmd_export_jimeng(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def cmd_generate(args: argparse.Namespace) -> dict[str, Any]:
-    return run_generation_worker(
-        _db(args),
+    db = _db(args)
+    result = run_generation_worker(
+        db,
         args.command,
         limit=args.limit,
         timeout=args.timeout,
         provider=args.provider,
         max_attempts=args.max_attempts,
     )
+    if not args.no_asset_tag:
+        product_ids = sorted({
+            str((db.get_job(item.get("job_id") or "") or {}).get("product_id") or "")
+            for item in result.get("items", []) if item.get("status") == "success"
+        } - {""})
+        result["asset_tagging"] = [
+            process_pending_asset_tags(db, product_id=product_id, limit=args.asset_tag_limit)
+            for product_id in product_ids
+        ]
+    return result
 
 
 def cmd_qc(args: argparse.Namespace) -> dict[str, Any]:
@@ -348,6 +368,227 @@ def cmd_stats(args: argparse.Namespace) -> dict[str, Any]:
     return _db(args).stats()
 
 
+def cmd_narrative_plan(args: argparse.Namespace) -> dict[str, Any]:
+    db = _db(args)
+    if args.hooks_file:
+        payload = read_json(args.hooks_file)
+        hooks = payload.get("hooks") if isinstance(payload, dict) else payload
+        if not isinstance(hooks, list):
+            raise ValueError("钩子文件必须是数组，或包含 hooks 数组")
+        hook_source = "file"
+    else:
+        hooks = load_active_voiceover_hooks(args.voiceover_root, db_path=args.voiceover_db)
+        hook_source = "voiceover_copy_engine"
+    historical_usage = load_product_voiceover_usage(
+        args.product_id,
+        args.voiceover_root,
+        db_path=args.voiceover_db,
+        legacy_narrative_db=db,
+    )
+    evidence = args.evidence or []
+    result = plan_enhanced_variants(
+        db, args.product_id, hooks, count=args.count,
+        available_evidence=evidence, target_duration_seconds=args.duration,
+        plan_version=args.plan_version, random_seed=args.random_seed,
+        historical_usage=historical_usage,
+    )
+    result["hook_source"] = hook_source
+    return result
+
+
+def cmd_narrative_list(args: argparse.Namespace) -> dict[str, Any]:
+    db = _db(args)
+    items = db.list_narrative_variants(
+        args.product_id, plan_version=args.plan_version, workflow_state=args.workflow_state,
+    )
+    return {"count": len(items), "items": items}
+
+
+def cmd_narrative_content_memory(args: argparse.Namespace) -> dict[str, Any]:
+    return load_product_voiceover_usage(
+        args.product_id,
+        args.voiceover_root,
+        db_path=args.voiceover_db,
+        legacy_narrative_db=_db(args),
+    )
+
+
+def cmd_narrative_voiceover(args: argparse.Namespace) -> dict[str, Any]:
+    db = _db(args)
+    timeline = read_json(args.timeline_file) if args.timeline_file else None
+    if timeline is not None and not isinstance(timeline, dict):
+        raise ValueError("画面时间轴 JSON 顶层必须是对象")
+    if timeline is None and not args.command:
+        variant = db.get_narrative_variant(args.variant_id) or {}
+        timeline = (variant.get("assembly_plan") or {}).get("visual_timeline")
+    return generate_variant_voiceover(
+        db, args.variant_id, args.command or "", available_evidence=args.evidence or [], timeout=args.timeout,
+        timeline=timeline, voiceover_root=args.voiceover_root, voiceover_db=args.voiceover_db,
+        model_command=args.model_command or "", qc_model_command=args.qc_model_command or "",
+    )
+
+
+def cmd_narrative_assemble(args: argparse.Namespace) -> dict[str, Any]:
+    db = _db(args)
+    variant = db.get_narrative_variant(args.variant_id) or {}
+    plan = (
+        plan_variant_voiceover_cut(db, args.variant_id)
+        if variant.get("tts_timeline")
+        else plan_variant_rough_cut(db, args.variant_id)
+    )
+    if args.plan_only:
+        return {"variant_id": args.variant_id, "status": "planned", "assembly_plan": plan}
+    output = args.output or str(SKILL_DIR / "var" / "narrative_roughcuts" / f"{args.variant_id}.mp4")
+    return render_variant_rough_cut(db, args.variant_id, output, ffmpeg_bin=args.ffmpeg)
+
+
+def cmd_narrative_tts(args: argparse.Namespace) -> dict[str, Any]:
+    output_dir = args.output_dir or str(SKILL_DIR / "var" / "narrative_tts")
+    return synthesize_variant_tts(
+        _db(args),
+        args.variant_id,
+        output_dir=output_dir,
+        provider_name=args.provider,
+        voice_id=args.voice_id,
+        rate_percent=args.rate_percent,
+        voiceover_root=args.voiceover_root,
+        ffmpeg_bin=args.ffmpeg,
+        ffprobe_bin=args.ffprobe,
+    )
+
+
+def cmd_narrative_mix(args: argparse.Namespace) -> dict[str, Any]:
+    output = args.output or str(SKILL_DIR / "var" / "narrative_final" / f"{args.variant_id}.mp4")
+    return render_narrative_voiceover_mix(
+        _db(args), args.variant_id, output, ffmpeg_bin=args.ffmpeg, ffprobe_bin=args.ffprobe,
+    )
+
+
+def cmd_narrative_supplements(args: argparse.Namespace) -> dict[str, Any]:
+    context = read_json(args.context_file)
+    if not isinstance(context, dict):
+        raise ValueError("补充镜头上下文 JSON 顶层必须是对象")
+    return plan_variant_supplements(
+        _db(args), args.variant_id, context=context, reference_assets=args.reference or [],
+        max_generated_shots=args.max_generated_shots,
+    )
+
+
+def cmd_narrative_richness_pool(args: argparse.Namespace) -> dict[str, Any]:
+    return plan_product_richness_pool(
+        _db(args), args.product_id, roles=args.role, plan_version=args.plan_version,
+    )
+
+
+def cmd_narrative_capacity(args: argparse.Namespace) -> dict[str, Any]:
+    return assess_product_asset_capacity(
+        _db(args), args.product_id, target_count=args.target_count, plan_version=args.plan_version,
+    )
+
+
+def cmd_narrative_diversity_pool(args: argparse.Namespace) -> dict[str, Any]:
+    forced_role_actions: dict[str, str] = {}
+    for value in args.force_role_action or []:
+        role, separator, action_id = str(value).partition("=")
+        if not separator or not role.strip() or not action_id.strip():
+            raise ValueError("--force-role-action 必须使用 镜头角色=动作版本 格式")
+        forced_role_actions[role.strip()] = action_id.strip()
+    return plan_product_diversity_pool(
+        _db(args), args.product_id, target_count=args.target_count, plan_version=args.plan_version,
+        forced_role_actions=forced_role_actions,
+    )
+
+
+def cmd_narrative_diversity_qc(args: argparse.Namespace) -> dict[str, Any]:
+    return evaluate_product_diversity(
+        _db(args), args.product_id, plan_version=args.plan_version, persist=not args.no_persist,
+    )
+
+
+def _narrative_run_client(args: argparse.Namespace) -> tuple[dict[str, Any], Any]:
+    config = load_feishu_config(args.config)
+    if not config.get("sync_enabled", True):
+        raise RuntimeError("飞书同步已关闭")
+    endpoint = resolve_run_manager_endpoint(config)
+    if not endpoint:
+        raise ValueError("飞书配置缺少 run_manager.url")
+    return config, make_client(endpoint)
+
+
+def cmd_narrative_sync_supplements(args: argparse.Namespace) -> dict[str, Any]:
+    config, client = _narrative_run_client(args)
+    db = _db(args)
+    diversity_plan: dict[str, Any] = {}
+    if not args.no_auto_diversity:
+        try:
+            diversity_plan = plan_product_diversity_pool(
+                db,
+                args.product_id,
+                target_count=args.target_count,
+                plan_version=args.plan_version,
+            )
+        except Exception as exc:
+            diversity_plan = {"status": "skipped", "reason": str(exc)}
+    result = sync_supplement_shots(
+        db, client, product_id=args.product_id,
+        store_id=str((config.get("run_manager") or {}).get("store_id") or "myps01"),
+        channel=args.channel, model=args.model, dry_run=args.dry_run,
+    )
+    result["diversity_plan"] = diversity_plan
+    return result
+
+
+def cmd_narrative_pull_supplements(args: argparse.Namespace) -> dict[str, Any]:
+    _, client = _narrative_run_client(args)
+    return pull_supplement_results(
+        _db(args), client, product_id=args.product_id,
+        output_dir=args.output_dir or str(SKILL_DIR / "var" / "narrative_supplements"),
+    )
+
+
+def cmd_asset_register(args: argparse.Namespace) -> dict[str, Any]:
+    expected = read_json(args.expected_tags) if args.expected_tags else {}
+    if not isinstance(expected, dict):
+        raise ValueError("expected-tags JSON 顶层必须是对象")
+    asset, created = register_media_asset(
+        _db(args), args.product_id, args.file, source_job_id=args.source_job_id,
+        source_type=args.source_type, expected_tags=expected,
+    )
+    return {"created": created, "asset": asset}
+
+
+def cmd_asset_fingerprint(args: argparse.Namespace) -> dict[str, Any]:
+    return backfill_asset_visual_fingerprints(
+        _db(args), product_id=args.product_id, ffmpeg_bin=args.ffmpeg,
+    )
+
+
+def cmd_asset_backfill(args: argparse.Namespace) -> dict[str, Any]:
+    return backfill_generated_job_assets(
+        _db(args), product_id=args.product_id, job_ids=args.job_id, limit=args.limit,
+    )
+
+
+def cmd_asset_tag(args: argparse.Namespace) -> dict[str, Any]:
+    return process_pending_asset_tags(
+        _db(args), product_id=args.product_id, limit=args.limit, tag_command=args.command or "",
+        auto_mixcut_root=args.auto_mixcut_root, auto_mixcut_config=args.auto_mixcut_config,
+        anchor_mode=args.anchor_mode, source_job_ids=args.source_job_id or [],
+    )
+
+
+def cmd_asset_tag_supplements(args: argparse.Namespace) -> dict[str, Any]:
+    return tag_supplement_assets_by_contract(
+        _db(args), product_id=args.product_id, source_job_ids=args.source_job_id,
+        ffmpeg_bin=args.ffmpeg, ffprobe_bin=args.ffprobe,
+    )
+
+
+def cmd_asset_list(args: argparse.Namespace) -> dict[str, Any]:
+    items = _db(args).list_media_assets(args.product_id, tag_status=args.tag_status)
+    return {"count": len(items), "items": items}
+
+
 def cmd_visual_plan_list(args: argparse.Namespace) -> dict[str, Any]:
     items = _db(args).list_visual_plans(
         source_record_id=args.source_record_id,
@@ -435,10 +676,21 @@ def cmd_feishu_pull_review(args: argparse.Namespace) -> dict[str, Any]:
 
 def cmd_feishu_process_review_videos(args: argparse.Namespace) -> dict[str, Any]:
     _, clients = _feishu(args, require_review=True)
-    return process_review_videos(
-        _db(args), clients["review"], job_ids=args.job_id, limit=args.limit, force=args.force,
+    db = _db(args)
+    result = process_review_videos(
+        db, clients["review"], job_ids=args.job_id, limit=args.limit, force=args.force,
         ffmpeg_bin=args.ffmpeg, ffprobe_bin=args.ffprobe, subtitle_font_name=args.font_name,
     )
+    if not args.no_asset_tag:
+        product_ids = sorted({
+            str((db.get_job(item.get("job_id") or "") or {}).get("product_id") or "")
+            for item in result.get("items", []) if item.get("status") == "success"
+        } - {""})
+        result["asset_tagging"] = [
+            process_pending_asset_tags(db, product_id=product_id, limit=args.asset_tag_limit)
+            for product_id in product_ids
+        ]
+    return result
 
 
 def _run_manager_feishu(args: argparse.Namespace) -> tuple[dict[str, Any], Any, Any]:
@@ -457,15 +709,23 @@ def cmd_feishu_ensure_run_manager_schema(args: argparse.Namespace) -> dict[str, 
 def cmd_feishu_sync_run_manager(args: argparse.Namespace) -> dict[str, Any]:
     config, review_client, run_client = _run_manager_feishu(args)
     db = _db(args)
+    review_groups, run_groups = build_run_manager_sync_snapshots(review_client, run_client)
     result: dict[str, Any] = {
-        "preferences": pull_generation_preferences(db, review_client, job_ids=args.job_id, dry_run=args.dry_run),
+        "preferences": pull_generation_preferences(
+            db, review_client, job_ids=args.job_id, dry_run=args.dry_run,
+            review_groups=review_groups,
+        ),
     }
     result["queue"] = sync_jobs_to_run_manager(
         db, review_client, run_client, job_ids=args.job_id, limit=args.limit, dry_run=args.dry_run,
         store_id=str((config.get("run_manager") or {}).get("store_id") or "myps01"),
+        review_groups=review_groups, run_groups=run_groups,
     )
     if not args.dry_run:
-        result["results"] = pull_run_manager_results(db, review_client, run_client, job_ids=args.job_id)
+        result["results"] = pull_run_manager_results(
+            db, review_client, run_client, job_ids=args.job_id,
+            review_groups=review_groups, run_groups=run_groups,
+        )
         returned_ids = [item["job_id"] for item in result["results"].get("items", []) if item.get("status") == "returned"]
         if returned_ids and not args.no_postprocess:
             result["postprocess"] = process_review_videos(
@@ -473,6 +733,15 @@ def cmd_feishu_sync_run_manager(args: argparse.Namespace) -> dict[str, Any]:
                 subtitle_font_name=args.font_name,
             )
             completed_ids = [item["job_id"] for item in result["postprocess"].get("items", []) if item.get("status") == "success"]
+            if completed_ids and not args.no_asset_tag:
+                product_ids = sorted({
+                    str((db.get_job(job_id) or {}).get("product_id") or "")
+                    for job_id in completed_ids
+                } - {""})
+                result["asset_tagging"] = [
+                    process_pending_asset_tags(db, product_id=product_id, limit=args.asset_tag_limit)
+                    for product_id in product_ids
+                ]
             if completed_ids and not args.no_bgm:
                 command = [
                     sys.executable, str(SKILL_DIR / "scripts" / "apply_review_bgm.py"), "--db", str(db.path),
@@ -706,6 +975,8 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--limit", type=int, default=1)
     generate.add_argument("--timeout", type=int, default=900)
     generate.add_argument("--max-attempts", type=int, default=2)
+    generate.add_argument("--no-asset-tag", action="store_true", help="生成成功后仅登记素材，不立即调用统一打标")
+    generate.add_argument("--asset-tag-limit", type=int, default=10, help="每个产品本轮最多立即打标的素材数")
     generate.set_defaults(func=cmd_generate)
 
     qc = sub.add_parser("qc", help="运行结构 QC，可选外部视觉 QC")
@@ -754,6 +1025,156 @@ def build_parser() -> argparse.ArgumentParser:
 
     stats = sub.add_parser("stats", help="查看生产状态汇总")
     stats.set_defaults(func=cmd_stats)
+
+    narrative = sub.add_parser("narrative", help="口播增强型轻视频内容策略与补充镜头")
+    narrative_sub = narrative.add_subparsers(dest="narrative_command", required=True)
+    narrative_plan = narrative_sub.add_parser("plan", help="读取商品历史后建立策略池，唯一组合用完再重复")
+    narrative_plan.add_argument("--product-id", required=True)
+    narrative_plan.add_argument("--hooks-file", help="可选钩子候选 JSON；留空时直接读取现有口播系统 ACTIVE 钩子")
+    narrative_plan.add_argument("--voiceover-root", help="现有口播系统目录；默认 ~/voiceover_copy_engine")
+    narrative_plan.add_argument("--voiceover-db", help="现有口播系统 SQLite；默认使用其 var/voiceover.sqlite")
+    narrative_plan.add_argument("--count", type=int, required=True)
+    narrative_plan.add_argument("--duration", type=int, default=22)
+    narrative_plan.add_argument("--plan-version", default="narrative-v1")
+    narrative_plan.add_argument("--random-seed")
+    narrative_plan.add_argument("--evidence", action="append", help="已经具备的画面证据标签")
+    narrative_plan.set_defaults(func=cmd_narrative_plan)
+    narrative_list = narrative_sub.add_parser("list", help="查询增强型内容变体")
+    narrative_list.add_argument("--product-id", required=True)
+    narrative_list.add_argument("--plan-version")
+    narrative_list.add_argument("--workflow-state")
+    narrative_list.set_defaults(func=cmd_narrative_list)
+    narrative_memory = narrative_sub.add_parser("content-memory", help="查看该商品跨批次、跨视频类型的口播使用记录")
+    narrative_memory.add_argument("--product-id", required=True)
+    narrative_memory.add_argument("--voiceover-root", help="现有口播系统目录；默认 ~/voiceover_copy_engine")
+    narrative_memory.add_argument("--voiceover-db", help="现有口播系统 SQLite；默认使用其 var/voiceover.sqlite")
+    narrative_memory.set_defaults(func=cmd_narrative_content_memory)
+    narrative_voiceover = narrative_sub.add_parser("voiceover", help="调用现有口播流程，不改变话术风格")
+    narrative_voiceover.add_argument("--variant-id", required=True)
+    narrative_voiceover.add_argument("--command", help="兼容外部 JSON worker；留空时直接复用现有口播系统")
+    narrative_voiceover.add_argument("--timeline-file", help="实际成片或粗剪片的客观画面时间轴 JSON")
+    narrative_voiceover.add_argument("--voiceover-root", help="现有口播系统目录；默认 ~/voiceover_copy_engine")
+    narrative_voiceover.add_argument("--voiceover-db", help="现有口播系统 SQLite 路径")
+    narrative_voiceover.add_argument("--model-command", help="口播系统正式模型命令；留空沿用其本地配置")
+    narrative_voiceover.add_argument("--qc-model-command", help="口播系统独立质检模型命令")
+    narrative_voiceover.add_argument("--evidence", action="append")
+    narrative_voiceover.add_argument("--timeout", type=int, default=600)
+    narrative_voiceover.set_defaults(func=cmd_narrative_voiceover)
+    narrative_assemble = narrative_sub.add_parser("assemble", help="按实际素材标签规划并渲染18–24秒无口播视觉粗剪")
+    narrative_assemble.add_argument("--variant-id", required=True)
+    narrative_assemble.add_argument("--output")
+    narrative_assemble.add_argument("--ffmpeg", default=DEFAULT_FFMPEG)
+    narrative_assemble.add_argument("--plan-only", action="store_true")
+    narrative_assemble.set_defaults(func=cmd_narrative_assemble)
+    narrative_tts = narrative_sub.add_parser("tts", help="用真实TTS生成语义块音频并按实测时长回校")
+    narrative_tts.add_argument("--variant-id", required=True)
+    narrative_tts.add_argument("--provider", default="edge", choices=["edge", "elevenlabs"])
+    narrative_tts.add_argument("--voice-id", default="th-TH-PremwadeeNeural")
+    narrative_tts.add_argument(
+        "--rate-percent",
+        type=int,
+        default=-18,
+        help="TTS speaking-rate adjustment; enhanced Thai narration defaults to a fuller, natural -18%% pace",
+    )
+    narrative_tts.add_argument("--output-dir")
+    narrative_tts.add_argument("--voiceover-root", help="现有口播系统目录；默认 ~/voiceover_copy_engine")
+    narrative_tts.add_argument("--ffmpeg", default=DEFAULT_FFMPEG)
+    narrative_tts.add_argument("--ffprobe", default=DEFAULT_FFPROBE)
+    narrative_tts.set_defaults(func=cmd_narrative_tts)
+    narrative_mix = narrative_sub.add_parser("mix", help="将视觉粗剪与真实TTS音轨合成为待终检成片")
+    narrative_mix.add_argument("--variant-id", required=True)
+    narrative_mix.add_argument("--output")
+    narrative_mix.add_argument("--ffmpeg", default=DEFAULT_FFMPEG)
+    narrative_mix.add_argument("--ffprobe", default=DEFAULT_FFPROBE)
+    narrative_mix.set_defaults(func=cmd_narrative_mix)
+    narrative_supplements = narrative_sub.add_parser("plan-supplements", help="检查素材缺口并编译补镜头提示词")
+    narrative_supplements.add_argument("--variant-id", required=True)
+    narrative_supplements.add_argument("--context-file", required=True)
+    narrative_supplements.add_argument("--reference", action="append")
+    narrative_supplements.add_argument("--max-generated-shots", type=int, default=2)
+    narrative_supplements.set_defaults(func=cmd_narrative_supplements)
+    narrative_richness = narrative_sub.add_parser("plan-richness-pool", help="为多条长视频建立可共享的专用细节与动作镜头池")
+    narrative_richness.add_argument("--product-id", required=True)
+    narrative_richness.add_argument("--plan-version", default="narrative-voiceover-bridge-v2")
+    narrative_richness.add_argument("--role", action="append")
+    narrative_richness.set_defaults(func=cmd_narrative_richness_pool)
+    narrative_capacity = narrative_sub.add_parser("capacity", help="按目标产量评估独立素材容量和镜头缺口")
+    narrative_capacity.add_argument("--product-id", required=True)
+    narrative_capacity.add_argument("--target-count", type=int)
+    narrative_capacity.add_argument("--plan-version")
+    narrative_capacity.set_defaults(func=cmd_narrative_capacity)
+    narrative_diversity_pool = narrative_sub.add_parser("plan-diversity-pool", help="按容量缺口自动建立动作变体补镜头任务")
+    narrative_diversity_pool.add_argument("--product-id", required=True)
+    narrative_diversity_pool.add_argument("--target-count", type=int)
+    narrative_diversity_pool.add_argument("--plan-version", default="narrative-voiceover-bridge-v2")
+    narrative_diversity_pool.add_argument(
+        "--force-role-action", action="append",
+        help="容量已达标但批次QC仍不足时，按 镜头角色=动作版本 强制补充；可重复传入",
+    )
+    narrative_diversity_pool.set_defaults(func=cmd_narrative_diversity_pool)
+    narrative_diversity_qc = narrative_sub.add_parser("diversity-qc", help="检查同批成片首镜、共享时长和镜头顺序重复度")
+    narrative_diversity_qc.add_argument("--product-id", required=True)
+    narrative_diversity_qc.add_argument("--plan-version")
+    narrative_diversity_qc.add_argument("--no-persist", action="store_true")
+    narrative_diversity_qc.set_defaults(func=cmd_narrative_diversity_qc)
+    narrative_sync_supplements = narrative_sub.add_parser("sync-supplements", help="将补充镜头同步到短视频自动运行管理表")
+    narrative_sync_supplements.add_argument("--product-id", required=True)
+    narrative_sync_supplements.add_argument("--config")
+    narrative_sync_supplements.add_argument("--channel", choices=["即梦", "iMini"], default="即梦")
+    narrative_sync_supplements.add_argument("--model", choices=["Seedance 2.0", "Seedance 2.0 VIP"], default="Seedance 2.0 VIP")
+    narrative_sync_supplements.add_argument("--target-count", type=int)
+    narrative_sync_supplements.add_argument("--plan-version", default="narrative-voiceover-bridge-v2")
+    narrative_sync_supplements.add_argument("--no-auto-diversity", action="store_true")
+    narrative_sync_supplements.add_argument("--dry-run", action="store_true")
+    narrative_sync_supplements.set_defaults(func=cmd_narrative_sync_supplements)
+    narrative_pull_supplements = narrative_sub.add_parser("pull-supplements", help="仅从运行管理表回流已经生成的补充镜头")
+    narrative_pull_supplements.add_argument("--product-id", required=True)
+    narrative_pull_supplements.add_argument("--config")
+    narrative_pull_supplements.add_argument("--output-dir")
+    narrative_pull_supplements.set_defaults(func=cmd_narrative_pull_supplements)
+
+    asset = sub.add_parser("asset", help="轻视频素材统一入库并复用智能混剪打标")
+    asset_sub = asset.add_subparsers(dest="asset_command", required=True)
+    asset_register = asset_sub.add_parser("register", help="按文件哈希幂等登记素材")
+    asset_register.add_argument("--product-id", required=True)
+    asset_register.add_argument("--file", required=True)
+    asset_register.add_argument("--source-job-id", default="")
+    asset_register.add_argument("--source-type", default="ai_generated")
+    asset_register.add_argument("--expected-tags", help="计划标签 JSON 文件")
+    asset_register.set_defaults(func=cmd_asset_register)
+    asset_fingerprint = asset_sub.add_parser("fingerprint", help="计算多帧画面指纹并归并近似重复素材")
+    asset_fingerprint.add_argument("--product-id", required=True)
+    asset_fingerprint.add_argument("--ffmpeg", default=DEFAULT_FFMPEG)
+    asset_fingerprint.set_defaults(func=cmd_asset_fingerprint)
+    asset_backfill = asset_sub.add_parser("backfill", help="将已有轻视频初始成片幂等登记到统一素材库")
+    asset_backfill.add_argument("--product-id")
+    asset_backfill.add_argument("--job-id", action="append")
+    asset_backfill.add_argument("--limit", type=int)
+    asset_backfill.set_defaults(func=cmd_asset_backfill)
+    asset_tag = asset_sub.add_parser("tag", help="切分、抽帧并调用智能混剪统一打标")
+    asset_tag.add_argument("--product-id", required=True)
+    asset_tag.add_argument("--limit", type=int, default=10)
+    asset_tag.add_argument("--command", help="可选外部打标 worker；留空时直接复用 auto_mixcut")
+    asset_tag.add_argument("--auto-mixcut-root")
+    asset_tag.add_argument("--auto-mixcut-config")
+    asset_tag.add_argument("--source-job-id", action="append", help="只处理指定来源任务的素材，可重复传入")
+    asset_tag.add_argument(
+        "--anchor-mode",
+        choices=["source_reference", "confirmed_anchor"],
+        default="source_reference",
+        help="默认直接用原始脚本商品参考图，不要求智能混剪商品锚点",
+    )
+    asset_tag.set_defaults(func=cmd_asset_tag)
+    asset_tag_supplements = asset_sub.add_parser("tag-supplements", help="按生成镜头契约回退标记已通过结构质检的补充镜头")
+    asset_tag_supplements.add_argument("--product-id", required=True)
+    asset_tag_supplements.add_argument("--source-job-id", action="append", required=True)
+    asset_tag_supplements.add_argument("--ffmpeg", default=DEFAULT_FFMPEG)
+    asset_tag_supplements.add_argument("--ffprobe", default=DEFAULT_FFPROBE)
+    asset_tag_supplements.set_defaults(func=cmd_asset_tag_supplements)
+    asset_list = asset_sub.add_parser("list", help="查询素材打标与质检状态")
+    asset_list.add_argument("--product-id", required=True)
+    asset_list.add_argument("--tag-status")
+    asset_list.set_defaults(func=cmd_asset_list)
 
     visual = sub.add_parser("visual-plan", help="产品视觉方案、产品穿搭图和确认后视频任务")
     visual_sub = visual.add_subparsers(dest="visual_plan_command", required=True)
@@ -817,6 +1238,8 @@ def build_parser() -> argparse.ArgumentParser:
     feishu_process_videos.add_argument("--ffmpeg", default=DEFAULT_FFMPEG)
     feishu_process_videos.add_argument("--ffprobe", default=DEFAULT_FFPROBE)
     feishu_process_videos.add_argument("--font-name", default="Arial Unicode MS")
+    feishu_process_videos.add_argument("--no-asset-tag", action="store_true", help="仅登记初始成片，不立即调用统一打标")
+    feishu_process_videos.add_argument("--asset-tag-limit", type=int, default=10, help="每个产品本轮最多立即打标的素材数")
     feishu_process_videos.set_defaults(func=cmd_feishu_process_review_videos)
     feishu_run_schema = feishu_sub.add_parser("ensure-run-manager-schema", help="幂等补齐短视频自动运行管理表的轻视频字段")
     feishu_run_schema.add_argument("--dry-run", action="store_true")
@@ -827,6 +1250,8 @@ def build_parser() -> argparse.ArgumentParser:
     feishu_run_sync.add_argument("--dry-run", action="store_true")
     feishu_run_sync.add_argument("--no-postprocess", action="store_true")
     feishu_run_sync.add_argument("--no-bgm", action="store_true")
+    feishu_run_sync.add_argument("--no-asset-tag", action="store_true", help="回流后仅登记素材，不立即调用统一打标")
+    feishu_run_sync.add_argument("--asset-tag-limit", type=int, default=10, help="每个产品本轮最多立即打标的素材数")
     feishu_run_sync.add_argument("--ffmpeg", default=DEFAULT_FFMPEG)
     feishu_run_sync.add_argument("--ffprobe", default=DEFAULT_FFPROBE)
     feishu_run_sync.add_argument("--font-name", default="Arial Unicode MS")

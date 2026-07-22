@@ -38,8 +38,8 @@ RUN_MANAGER_FIELDS: tuple[dict[str, Any], ...] = (
     {"name": "错误信息", "type": 1, "ui_type": "Text"},
 )
 
-ACTIVE_STATUSES = {"待处理", "部分提交", "生成中", "提交中", "处理中"}
-PATCHABLE_STATUSES = {"", "失败", "阻塞", "已提交", "已完成", "完成", "生成完成"}
+ACTIVE_STATUSES = {"待处理", "部分提交", "已提交", "生成中", "提交中", "处理中"}
+PATCHABLE_STATUSES = {"", "失败", "阻塞", "已完成", "完成", "生成完成"}
 
 
 def _attr(item: Any, name: str, default: Any = None) -> Any:
@@ -75,6 +75,55 @@ def _resolve_review_record(job: dict[str, Any], grouped: dict[str, list[dict[str
     if len(candidates) == 1:
         return candidates[0]
     raise ValueError(f"复核台存在 {len(candidates)} 条重复视频任务ID，且本地没有唯一绑定记录")
+
+
+def _group_run_records(client: Any) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in _records(client):
+        job_id = str(row["fields"].get("脚本ID") or row["fields"].get("内容ID") or "").strip()
+        if job_id:
+            grouped.setdefault(job_id, []).append(row)
+    return grouped
+
+
+def _resolve_run_record(
+    job: dict[str, Any],
+    grouped: dict[str, list[dict[str, Any]]],
+    *,
+    prefer_result: bool = False,
+) -> dict[str, Any] | None:
+    candidates = grouped.get(str(job.get("job_id") or ""), [])
+    if not candidates:
+        return None
+    bound_record_id = str(job.get("run_manager_record_id") or "").strip()
+    bound = next((item for item in candidates if item["record_id"] == bound_record_id), None)
+    if prefer_result:
+        ready = [
+            item for item in candidates
+            if str(item["fields"].get("结果回传状态") or "").lower() == "uploaded"
+            and isinstance(item["fields"].get("生成视频"), list)
+            and item["fields"]["生成视频"]
+        ]
+        if len(ready) == 1:
+            return ready[0]
+        if len(ready) > 1:
+            bound_ready = next((item for item in ready if item["record_id"] == bound_record_id), None)
+            if bound_ready:
+                return bound_ready
+            raise ValueError(f"运行管理表存在 {len(ready)} 条已完成的重复轻视频脚本ID，且本地没有唯一绑定记录")
+    if bound:
+        return bound
+    if len(candidates) == 1:
+        return candidates[0]
+    raise ValueError(f"运行管理表存在 {len(candidates)} 条重复轻视频脚本ID，且本地没有唯一绑定记录")
+
+
+def build_run_manager_sync_snapshots(
+    review_client: Any,
+    run_client: Any,
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
+    """Read each remote table once for a complete queue/pull synchronization pass."""
+    return _group_review_records(review_client), _group_run_records(run_client)
 
 
 def ensure_run_manager_schema(client: Any, *, dry_run: bool = False) -> dict[str, Any]:
@@ -114,16 +163,57 @@ def _duration(value: Any, fallback: int) -> int:
     return result
 
 
+def resolve_run_manager_identity(product: dict[str, Any], legacy_store_id: str = "") -> tuple[str, str]:
+    """Resolve business-facing product/store IDs without leaking internal OSG keys."""
+    internal_product_id = str(product.get("product_id") or "").strip()
+    source_record_id = str(product.get("source_script_record_id") or "").strip()
+    source_product_code = str(product.get("source_product_code") or "").strip()
+    account_id = str(product.get("account_id") or "").strip()
+
+    if source_record_id:
+        if not source_product_code:
+            raise ValueError(f"原始脚本商品缺少产品编码: {source_record_id}")
+        if source_product_code.startswith("OSG_"):
+            raise ValueError(f"原始脚本产品编码不能使用内部商品键: {source_product_code}")
+        if not account_id:
+            raise ValueError(f"原始脚本商品缺少店铺ID: {source_record_id}")
+        return source_product_code, account_id
+
+    business_product_id = source_product_code or internal_product_id
+    target_store_id = account_id or str(legacy_store_id or "").strip()
+    if not business_product_id:
+        raise ValueError("运行管理表商品ID为空")
+    if not target_store_id:
+        raise ValueError("运行管理表店铺ID为空")
+    return business_product_id, target_store_id
+
+
+def build_run_manager_source_hash(
+    job: dict[str, Any],
+    product: dict[str, Any],
+    business_product_id: str,
+    target_store_id: str,
+) -> str:
+    return stable_hash(
+        job["job_id"], job.get("prompt_payload"),
+        str(job.get("generation_model") or "Seedance 2.0"),
+        int(job.get("duration_seconds") or 8),
+        job.get("generation_channel"), product.get("product_images") or [],
+        business_product_id, target_store_id, length=24,
+    )
+
+
 def pull_generation_preferences(
     db: LightTryonDB,
     review_client: Any,
     *,
     job_ids: Iterable[str] | None = None,
     dry_run: bool = False,
+    review_groups: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     selected = {str(item).strip() for item in (job_ids or []) if str(item).strip()}
     summary: dict[str, Any] = {"processed": 0, "updated": 0, "skipped": 0, "failed": 0, "errors": []}
-    grouped = _group_review_records(review_client)
+    grouped = review_groups if review_groups is not None else _group_review_records(review_client)
     for job_id, candidates in grouped.items():
         if selected and job_id not in selected:
             summary["skipped"] += 1
@@ -199,17 +289,12 @@ def sync_jobs_to_run_manager(
     limit: int | None = None,
     dry_run: bool = False,
     store_id: str = "myps01",
+    review_groups: dict[str, list[dict[str, Any]]] | None = None,
+    run_groups: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     selected = {str(item).strip() for item in (job_ids or []) if str(item).strip()}
-    review_groups = _group_review_records(review_client)
-    run_rows = _records(run_client)
-    run_by_job: dict[str, dict[str, Any]] = {}
-    for row in run_rows:
-        key = str(row["fields"].get("脚本ID") or row["fields"].get("内容ID") or "").strip()
-        if key:
-            if key in run_by_job:
-                raise ValueError(f"运行管理表存在重复轻视频脚本ID: {key}")
-            run_by_job[key] = row
+    review_groups = review_groups if review_groups is not None else _group_review_records(review_client)
+    run_groups = run_groups if run_groups is not None else _group_run_records(run_client)
     jobs = [
         job for job in db.list_jobs()
         if str(job.get("generation_channel") or "no_generate") != "no_generate"
@@ -232,14 +317,11 @@ def sync_jobs_to_run_manager(
             if model not in {"Seedance 2.0", "Seedance 2.0 VIP"} or duration not in {8, 10}:
                 raise ValueError(f"不支持的硬约束组合: {model} / {duration}秒")
             product = db.get_product(job["product_id"]) or {}
-            target_store_id = str(store_id or "").strip()
-            if not target_store_id:
-                raise ValueError("运行管理表店铺ID配置为空")
-            source_hash = stable_hash(
-                job_id, job.get("prompt_payload"), model, duration, job.get("generation_channel"),
-                product.get("product_images") or [], target_store_id, length=24,
+            business_product_id, target_store_id = resolve_run_manager_identity(product, store_id)
+            source_hash = build_run_manager_source_hash(
+                job, product, business_product_id, target_store_id,
             )
-            existing = run_by_job.get(job_id)
+            existing = _resolve_run_record(job, run_groups)
             rerun = bool(job.get("generation_rerun"))
             if existing and str(existing["fields"].get("来源指纹") or "") == source_hash and not rerun:
                 db.update_run_manager_sync(job_id, record_id=existing["record_id"], status="queued", source_hash=source_hash)
@@ -267,6 +349,7 @@ def sync_jobs_to_run_manager(
             fields = {
                 **base,
                 "脚本ID": job_id,
+                "商品ID": business_product_id,
                 "店铺ID": target_store_id,
                 "任务来源": "轻量试穿视频",
                 "首帧策略": "直接使用原始脚本参考图",
@@ -323,26 +406,32 @@ def pull_run_manager_results(
     run_client: Any,
     *,
     job_ids: Iterable[str] | None = None,
+    review_groups: dict[str, list[dict[str, Any]]] | None = None,
+    run_groups: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     selected = {str(item).strip() for item in (job_ids or []) if str(item).strip()}
-    review_groups = _group_review_records(review_client)
+    review_groups = review_groups if review_groups is not None else _group_review_records(review_client)
     summary: dict[str, Any] = {"checked": 0, "returned": 0, "generating": 0, "failed": 0, "skipped": 0, "items": []}
     content_hash_owners: dict[str, str] = {}
-    for row in _records(run_client):
-        fields = row["fields"]
-        job_id = str(fields.get("脚本ID") or fields.get("内容ID") or "").strip()
+    run_groups = run_groups if run_groups is not None else _group_run_records(run_client)
+    for job_id in run_groups:
         if not job_id or (selected and job_id not in selected):
             continue
         job = db.get_job(job_id)
         if not job or str(job.get("generation_channel") or "no_generate") == "no_generate":
             summary["skipped"] += 1
             continue
-        summary["checked"] += 1
-        trace_id = str(fields.get("最新追踪ID") or "")
-        status = str(fields.get("状态") or "")
-        result_status = str(fields.get("结果回传状态") or "")
-        videos = fields.get("生成视频") if isinstance(fields.get("生成视频"), list) else []
+        review: dict[str, Any] | None = None
         try:
+            row = _resolve_run_record(job, run_groups, prefer_result=True)
+            if not row:
+                continue
+            fields = row["fields"]
+            summary["checked"] += 1
+            trace_id = str(fields.get("最新追踪ID") or "")
+            status = str(fields.get("状态") or "")
+            result_status = str(fields.get("结果回传状态") or "")
+            videos = fields.get("生成视频") if isinstance(fields.get("生成视频"), list) else []
             review = _resolve_review_record(job, review_groups)
             if not review:
                 raise ValueError("轻视频复核表不存在该任务")
@@ -354,11 +443,33 @@ def pull_run_manager_results(
                     for item in (job.get("raw_video_attachments") or [])
                     if isinstance(item, dict)
                 }
+                same_stable_source = bool(
+                    source_file_token
+                    and source_file_token == str(job.get("run_manager_result_source_token") or "").strip()
+                )
                 if (
-                    str(job.get("run_manager_sync_status") or "") == "returned"
-                    and source_file_token
-                    and source_file_token in existing_sources
+                    source_file_token
+                    and (
+                        same_stable_source
+                        or (
+                            str(job.get("run_manager_sync_status") or "") == "returned"
+                            and source_file_token in existing_sources
+                        )
+                    )
                 ):
+                    if same_stable_source and str(job.get("run_manager_sync_status") or "") != "returned":
+                        db.update_run_manager_sync(
+                            job_id,
+                            record_id=row["record_id"],
+                            status="returned",
+                            error="",
+                            trace_id=trace_id,
+                            result_status=result_status,
+                        )
+                        review_client.update_record_fields(review["record_id"], {
+                            "生成状态": "生成成功", "生成失败原因": "", "队列同步状态": "已回流",
+                            "队列错误信息": "", "最新追踪ID": trace_id,
+                        })
                     summary["skipped"] += 1
                     continue
                 content, file_name, content_type, size = run_client.download_attachment_bytes(source)
@@ -378,7 +489,20 @@ def pull_run_manager_results(
                     "初始成片": [{"file_token": uploaded["file_token"]}], "生成状态": "生成成功", "生成失败原因": "",
                     "队列同步状态": "已回流", "队列错误信息": "", "最新追踪ID": trace_id,
                 })
-                db.set_run_manager_result(job_id, attachments=attachments, trace_id=trace_id)
+                db.update_run_manager_sync(
+                    job_id,
+                    record_id=row["record_id"],
+                    status="returned",
+                    error="",
+                    trace_id=trace_id,
+                    result_status=result_status,
+                )
+                db.set_run_manager_result(
+                    job_id,
+                    attachments=attachments,
+                    trace_id=trace_id,
+                    source_file_token=source_file_token,
+                )
                 summary["returned"] += 1
                 summary["items"].append({"job_id": job_id, "status": "returned", "trace_id": trace_id})
             elif status in {"失败", "阻塞"}:
@@ -393,8 +517,9 @@ def pull_run_manager_results(
                 summary["generating"] += 1
         except Exception as exc:
             error = str(exc)[:2000]
-            db.update_run_manager_sync(job_id, record_id=row["record_id"], status="failed", error=error, trace_id=trace_id)
-            review_client.update_record_fields(review["record_id"], {"队列同步状态": "失败", "队列错误信息": error})
+            db.update_run_manager_sync(job_id, status="failed", error=error)
+            if review:
+                review_client.update_record_fields(review["record_id"], {"队列同步状态": "失败", "队列错误信息": error})
             summary["failed"] += 1
             summary["items"].append({"job_id": job_id, "status": "failed", "error": error})
     return summary
