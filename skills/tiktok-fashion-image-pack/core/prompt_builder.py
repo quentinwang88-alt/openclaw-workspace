@@ -14,6 +14,12 @@ def build_main_image_prompt(
     label_override: str = "",
     country: str = "TH",
 ) -> str:
+    if is_wig(product_truth):
+        return build_wig_main_image_prompt(
+            product_truth=product_truth,
+            brand_name=brand_name,
+            country=country,
+        )
     if is_hair_accessory(product_truth):
         return build_hair_accessory_main_image_prompt(
             product_truth=product_truth,
@@ -82,6 +88,8 @@ Suggested scenes: {scenes}.
 
 
 def select_main_image_layout(product_truth: Dict[str, Any]) -> Dict[str, str]:
+    if is_wig(product_truth):
+        return select_wig_layout(product_truth)
     if is_hair_accessory(product_truth):
         return select_hair_accessory_layout(product_truth)
     colors = [str(item).strip() for item in product_truth.get("sellable_colors_observed") or [] if str(item).strip()]
@@ -109,6 +117,130 @@ def select_main_image_layout(product_truth: Dict[str, Any]) -> Dict[str, str]:
     return {
         "template": "womens_tops_single_hero_detail_sidebar",
         "instructions": build_default_single_layout(),
+    }
+
+
+def build_wig_main_image_prompt(
+    *,
+    product_truth: Dict[str, Any],
+    brand_name: str,
+    country: str,
+) -> str:
+    layout = select_wig_layout(product_truth)
+    product_truth["main_image_template"] = layout["template"]
+    preserve = join_list(product_truth.get("must_preserve"))
+    must_not_add = join_list(product_truth.get("must_not_add"))
+    facts = [
+        f"product form: {product_truth.get('product_form')}",
+        f"subtype: {product_truth.get('subtype')}",
+        f"main/root color: {product_truth.get('main_color')} / {product_truth.get('root_color')}",
+        f"gradient/highlights: {product_truth.get('color_gradient')}",
+        f"fiber type: {product_truth.get('fiber_type')}",
+        f"construction: {product_truth.get('construction_type')}",
+        f"lace area: {product_truth.get('lace_area')}",
+        f"length: {product_truth.get('length')}",
+        f"texture/curl: {product_truth.get('texture')} / {product_truth.get('curl_pattern')}",
+        f"bangs/layers: {product_truth.get('bangs')} / {product_truth.get('layers')}",
+        f"parting/hairline: {product_truth.get('parting_type')} / {product_truth.get('hairline_type')}",
+    ]
+    return f"""
+Create one 1:1 square high-conversion Mexico ecommerce hero image for the wig or hairpiece shown in the attached supplier images.
+
+Target market: {country or "MX"}.
+This is a product-first listing hero, not a brand poster and not a luxury beauty advertisement.
+
+STRICT PRODUCT FIDELITY:
+- IMAGE 1 is the promoted product/color and the primary truth reference.
+- Preserve exactly: {'; '.join(facts)}.
+- Must preserve: {preserve}.
+- Do NOT add or change: {must_not_add}.
+- Never convert a ponytail piece, clip-in extension, or topper into a full wig. Never upgrade synthetic fiber to human hair, and never invent heat resistance, density, lace dimensions, baby hair, free parting, cap/attachment features, gifts, or pack quantity.
+- Keep individual strand direction, wave spacing, curl size, root-to-tip gradient, layers, ends, and overall silhouette faithful.
+
+MEXICO MODEL DIRECTION:
+- Use a clean white or very soft cream background with subtle natural separation between two views.
+- Use a realistic adult Mexican/Latina woman with healthy warm skin tone, visible natural skin texture, defined brows and lashes, restrained warm eye makeup, and warm nude or rose-brown lips. Use a natural smile or calm confident gaze.
+- Styling should feel polished and conversion-focused, with a simple white, black, cream, or olive top. Avoid cultural stereotypes, heavy jewelry, clothing logos, plastic skin, extreme contouring, and luxury-editorial retouching.
+- Hair must remain the first read and occupy at least 55% of the useful visual area; never crop the proof product or its ends.
+- No text of any kind, including no "{brand_name}", no product name, no Spanish copy, no logo, no border, no watermark, no badge, no price, no icons, and no decorative graphics.
+- Objective clean ecommerce lighting, accurate color, realistic fiber texture, soft natural shadow only.
+
+LAYOUT:
+{layout["instructions"]}
+
+REQUIRED PROOF:
+{layout["required_proof"]}
+""".strip()
+
+
+def select_wig_layout(product_truth: Dict[str, Any]) -> Dict[str, str]:
+    product_form = str(product_truth.get("product_form") or "").strip().lower()
+    if not product_form:
+        subtype = str(product_truth.get("subtype") or "").strip().lower()
+        if subtype == "ponytail_piece":
+            product_form = "ponytail_piece"
+        elif subtype == "clip_in_extension":
+            product_form = "clip_in_extension"
+        elif subtype == "hair_topper":
+            product_form = "hair_topper"
+        elif subtype in {"lace_front_wig", "full_cap_wig", "u_part_wig", "headband_wig"}:
+            product_form = "full_wig"
+        else:
+            product_form = "unknown"
+    if product_form == "ponytail_piece":
+        attachment = (
+            "Add a small factual fastening close-up only because the source confirms it."
+            if product_truth.get("has_attachment_reference") else
+            "No fastening close-up is allowed because the source does not confirm the comb/drawstring structure."
+        )
+        return {
+            "template": "ponytail_worn_product_attachment_split",
+            "instructions": (
+                "Left 55-60%: back or three-quarter worn ponytail effect showing the real attachment position and full ends. "
+                "Right 40-45%: the complete detached ponytail piece from base to ends on white. " + attachment
+            ),
+            "required_proof": "Show one worn ponytail result and one complete detached ponytail piece. Do not depict a full wig or a lace hairline.",
+        }
+    if product_form == "clip_in_extension":
+        count_rule = (
+            f"Show exactly {product_truth.get('pack_count')} only if this count is explicitly confirmed by the source."
+            if str(product_truth.get("pack_count") or "unknown").lower() not in {"", "unknown", "none"} else
+            "Do not state or visually imply an exact piece count unless every included piece is visible in the supplier source."
+        )
+        return {
+            "template": "clip_in_worn_exact_pack_split",
+            "instructions": (
+                "Left 55-60%: realistic back/three-quarter worn extension result, without creating a wig hairline. "
+                "Right 40-45%: detached wefts laid flat, preserving observed widths, clips, length, color, and ends. " + count_rule
+            ),
+            "required_proof": "Show the worn length/volume result and the actual clip-in wefts. Never replace the pieces with a full wig.",
+        }
+    if product_form == "hair_topper":
+        return {
+            "template": "hair_topper_worn_base_split",
+            "instructions": (
+                "Left 55-60%: top/front worn coverage effect with a believable blend into the wearer's own hair. "
+                "Right 40-45%: complete detached topper viewed from the sourced top/base angle. Show clips, lace, or base area only when visible in the source."
+            ),
+            "required_proof": "Show the top/crown coverage result and the complete detached topper. Do not extend it into a full-cap wig.",
+        }
+    if product_form == "unknown":
+        return {
+            "template": "hair_product_form_safe_proof_split",
+            "instructions": (
+                "The product form is unresolved. Use a conservative two-panel layout: a wearer context only if supported by the source, "
+                "plus a large complete product-only proof. Do not invent a full cap, lace, ponytail drawstring, extension clips, or topper base."
+            ),
+            "required_proof": "Keep the supplied product completely visible and structurally unresolved; do not present it as a confirmed full wig or extension type.",
+        }
+    return {
+        "template": "wig_model_front_back_split",
+        "instructions": (
+            "Left 58-62%: a large front/slight-three-quarter chest-up worn effect with hairline or bangs clearly visible. "
+            "Right 38-42%: a complete back view on the same wearer or neutral mannequin, fully visible from crown to ends. "
+            "Preserve the exact part, hairline or bangs, root color, gradient placement, length, layers, wave/curl rhythm, and ends across both views."
+        ),
+        "required_proof": "The image must contain both the front worn model effect and the complete back-view proof from crown to ends; do not replace either view with a close-up.",
     }
 
 
@@ -409,6 +541,10 @@ def has_material_mood(product_truth: Dict[str, Any]) -> bool:
 
 def is_hair_accessory(product_truth: Dict[str, Any]) -> bool:
     return str(product_truth.get("category") or "").strip().lower() in {"hair_accessory", "hair_accessories", "发饰"}
+
+
+def is_wig(product_truth: Dict[str, Any]) -> bool:
+    return str(product_truth.get("category") or "").strip().lower() in {"wig", "wigs", "假发", "假髮", "peluca", "pelucas"}
 
 
 def is_multicolor_product(product_truth: Dict[str, Any]) -> bool:

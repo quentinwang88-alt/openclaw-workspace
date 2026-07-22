@@ -1,13 +1,13 @@
 ---
 name: tiktok-fashion-image-pack
-description: Generate and QA likeU TikTok Shop fashion product image packs from Feishu bitable records. Use when the user wants OpenClaw to read supplier/product images from Feishu, infer product facts, create high-trust CHUUCHOP-inspired main images for womens tops/jackets or hair accessories with `likeU · product type` microcopy, upload results back to Feishu, or develop/operate this image-generation pipeline.
+description: Generate and QA likeU TikTok Shop fashion product image packs from Feishu bitable records. Use when OpenClaw needs to read supplier/product images from Feishu, infer product facts, create high-trust main/scene images for womens tops, hair accessories, or Mexico-market wigs and hairpieces, generate localized titles, upload results, or develop and operate this image-generation pipeline.
 ---
 
 # TikTok Fashion Image Pack
 
 ## Overview
 
-Create product-truth-driven TikTok Shop images for likeU. The mature flow supports `女装上装/外套`; the lightweight category extension supports `发饰`. It generates 1:1 main images and optional scene images, writes `Product Truth JSON`, prompts, generated attachments, and QA fields back to Feishu.
+Create product-truth-driven TikTok Shop images for likeU. The mature flow supports `女装上装/外套`; category extensions support `发饰` and Mexico-market `假发`. It generates 1:1 main images and optional scene images, writes `Product Truth JSON`, prompts, generated attachments, and QA fields back to Feishu.
 
 The system intentionally avoids pure AI fashion posters. It follows this sequence:
 
@@ -113,6 +113,22 @@ Main image layout is selected automatically:
 
 Hair accessory scene slots use `H1-H6`. If Feishu still passes the old S slots, the runner maps `S1-S6` to `H1-H6` for `类目=发饰`.
 
+## Wig Extension — Mexico
+
+Use `references/wig_category_plan.md` for category behavior. Set `国家=MX` and `类目=假发`.
+
+- Route `product_form` before prompting: `full_wig`, `ponytail_piece`, `clip_in_extension`, `hair_topper`, or `unknown`. Never convert a hairpiece into a full wig.
+- Full-wig main image: `wig_model_front_back_split`, front-worn Mexican/Latina model plus complete back-view proof.
+- Ponytail, clip-in, and topper main images use distinct worn-effect + complete-product proof layouts with sourced attachment/base details only.
+- Use polished but believable Mexican/Latina commercial beauty styling: healthy warm skin, visible skin texture, defined brows/lashes, restrained warm eye makeup, warm nude/rose-brown lips, and simple neutral clothing.
+- Scene/detail slots `W1-W6` change purpose by product form: worn effect, full back/detached product, hairline/base/fiber detail, sourced cap/attachment or fallback, color/length detail, and lifestyle/color proof.
+- Missing hairline or cap source images trigger safe W3/W4 fallbacks instead of invented structures.
+- Missing attachment/base images also trigger a safe W4 fallback. Missing real full-wig back references are recorded as visual-inference risk.
+- `cabello humano`, heat resistance, density, lace size, cap size, and numeric length are evidence-gated.
+- Use `Peluca`, `Coleta postiza`, `Extensiones de cabello con clip`, or `Topper capilar` according to the confirmed product form.
+- All Mexico wig/hairpiece listing images prohibit text, logo, border, watermark, price, badges, and decorative graphics.
+- Default legacy S selections map to W slots for wig records.
+
 ## QA
 
 QA compares source image and generated image against `Product Truth JSON`. It rejects material changes, invented structural details, misleading accessories, and obvious AI distortions. See `references/qa_rules.md`.
@@ -128,6 +144,7 @@ If QA fails, the runner retries once by default with the issue list appended to 
 - Scene images are not generated from the already-generated main image. Use supplier references plus `Product Truth JSON`; the main image can be treated only as style context in future extensions.
 - Default womenswear scene slots are `S1,S2,S3,S4`: hero lifestyle try-on, daily use atmosphere, fit/color proof, and material/construction detail.
 - Default hair accessory scene slots are `H1,H2,H3,H4`: worn close-up hero, daily hairstyle scene, product detail/scale, and product/color proof.
+- Default wig scene slots are `W1-W6`; W3/W4 are source-sufficiency gated.
 - Multi-color womenswear products auto-expand from S1-S4 to S1-S6. Multi-color hair accessories auto-expand from H1-H4 to H1-H6.
 - Scene preferences are optional. Blank or `自动匹配` uses automatic scene choice.
 

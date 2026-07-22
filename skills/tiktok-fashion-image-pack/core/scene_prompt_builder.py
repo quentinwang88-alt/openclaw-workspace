@@ -10,11 +10,13 @@ DEFAULT_SCENE_SLOTS = ["S1", "S2", "S3", "S4"]
 MULTICOLOR_EXTRA_SCENE_SLOTS = ["S5", "S6"]
 HAIR_ACCESSORY_SCENE_SLOTS = ["H1", "H2", "H3", "H4"]
 HAIR_ACCESSORY_EXTRA_SCENE_SLOTS = ["H5", "H6"]
+WIG_SCENE_SLOTS = ["W1", "W2", "W3", "W4", "W5", "W6"]
 ALL_SCENE_SLOTS = [
     *DEFAULT_SCENE_SLOTS,
     *MULTICOLOR_EXTRA_SCENE_SLOTS,
     *HAIR_ACCESSORY_SCENE_SLOTS,
     *HAIR_ACCESSORY_EXTRA_SCENE_SLOTS,
+    *WIG_SCENE_SLOTS,
 ]
 
 
@@ -28,6 +30,20 @@ def build_scene_image_prompts(
     has_scene_reference: bool = False,
 ) -> List[Dict[str, Any]]:
     slots = normalize_scene_slots(scene_slots)
+    if is_wig(product_truth):
+        slots = normalize_wig_slots(slots)
+        if slots == WIG_SCENE_SLOTS[:4]:
+            slots = list(WIG_SCENE_SLOTS)
+        return [
+            build_wig_scene_spec(
+                slot=slot,
+                product_truth=product_truth,
+                country=country,
+                scene_preference=scene_preference,
+                has_scene_reference=has_scene_reference,
+            )
+            for slot in slots
+        ]
     if is_hair_accessory(product_truth):
         slots = normalize_hair_accessory_slots(slots)
         if is_multicolor_product(product_truth) and slots == HAIR_ACCESSORY_SCENE_SLOTS:
@@ -57,6 +73,64 @@ def build_scene_image_prompts(
         )
         prompts.append(spec)
     return prompts
+
+
+def build_wig_scene_spec(
+    *,
+    slot: str,
+    product_truth: Dict[str, Any],
+    country: str,
+    scene_preference: str = "",
+    has_scene_reference: bool = False,
+) -> Dict[str, Any]:
+    normalized_slot = slot.upper().strip()
+    facts = build_product_fact_lines(product_truth)
+    scene = wig_slot_scene_strategy(normalized_slot, product_truth)
+    colors = [str(item).strip() for item in product_truth.get("sellable_colors_observed") or [] if str(item).strip()]
+    target_color = choose_wig_slot_target_color(normalized_slot, colors)
+    preserve = join_list(product_truth.get("must_preserve"))
+    must_not_add = join_list(product_truth.get("must_not_add"))
+    preference_line = f"\nUser scene preference: {scene_preference.strip()}." if scene_preference.strip() else ""
+    scene_reference_rule = build_scene_reference_rule(has_scene_reference)
+    prompt = f"""
+Create one 1:1 square TikTok Shop Mexico product-listing image for the wig or hairpiece image pack.
+
+Image slot: {normalized_slot} - {scene["role"]}.
+Target market: {country or "MX"}.
+Use supplier product images as strict product-truth references. IMAGE 1 remains the promoted style/color.
+{scene_reference_rule}
+
+STRICT WIG FIDELITY:
+- Preserve exactly: {'; '.join(facts)}.
+- Must preserve: {preserve}.
+- Do NOT add or change: {must_not_add}.
+- Target color/style: {target_color}.
+- Keep root color, gradient/highlight placement, length, density appearance, layers, bangs, parting, wave/curl rhythm, ends, and silhouette identical to the source.
+- Never claim or visually imply human hair, heat resistance, lace dimensions, baby hair, free parting, cap features, or included gifts without source evidence.
+- If a required structure is not visible in the source, use the stated fallback composition instead of inventing it.
+
+SCENE DIRECTION:
+{scene["instruction"]}
+- Keep this slot distinct from the others in angle and information purpose.
+{preference_line}
+
+MEXICO LISTING STYLE:
+- Clean, objective, high-trust ecommerce image. No text, logo, brand name, border, watermark, badge, price, icons, or decorative graphics.
+- For worn scenes, use a realistic adult Mexican/Latina shopper with healthy warm skin, visible natural skin texture, defined brows and lashes, restrained warm eye makeup, and warm nude or rose-brown lips. Use a natural smile or calm confident gaze.
+- Dress her in a simple white, black, cream, or olive top. Avoid cultural stereotypes, heavy jewelry, clothing logos, plastic skin, extreme contouring, and luxury-editorial retouching.
+- Product-first composition. The face may be partial or softly present, but the wig hairline, length, color, and texture must remain the first read.
+- Use warm natural daylight and a restrained modern vanity/cafe/home/city setting only where the slot calls for lifestyle context.
+
+NEGATIVE PROMPT:
+wrong root color, moved highlights, changed curl size, changed length, extra density, fake lace, invented baby hair, false scalp, changed parting, extra gifts, text, logo, border, watermark, price, plastic AI face, fantasy hair, cultural stereotypes.
+""".strip()
+    return {
+        "image_id": normalized_slot,
+        "image_role": scene["role"],
+        "strategy": scene["strategy"],
+        "target_color": target_color,
+        "prompt": prompt,
+    }
 
 
 def build_hair_accessory_scene_spec(
@@ -227,6 +301,19 @@ def normalize_hair_accessory_slots(slots: List[str]) -> List[str]:
     return mapped or list(HAIR_ACCESSORY_SCENE_SLOTS)
 
 
+def normalize_wig_slots(slots: List[str]) -> List[str]:
+    if not slots:
+        return list(WIG_SCENE_SLOTS)
+    mapping = {f"S{i}": f"W{i}" for i in range(1, 7)}
+    mapped: List[str] = []
+    for slot in slots:
+        normalized = str(slot or "").upper().strip()
+        normalized = mapping.get(normalized, normalized)
+        if normalized in WIG_SCENE_SLOTS and normalized not in mapped:
+            mapped.append(normalized)
+    return mapped or list(WIG_SCENE_SLOTS)
+
+
 def parse_scene_slots(raw_value: Any) -> List[str]:
     if isinstance(raw_value, list):
         parts = []
@@ -383,6 +470,119 @@ def hair_accessory_slot_scene_strategy(slot: str, product_truth: Dict[str, Any],
     return {"role": role, "strategy": strategy, "instruction": instruction}
 
 
+def wig_slot_scene_strategy(slot: str, product_truth: Dict[str, Any]) -> Dict[str, str]:
+    product_form = str(product_truth.get("product_form") or "full_wig").strip().lower()
+    has_hairline = bool(product_truth.get("has_hairline_reference"))
+    has_cap = bool(product_truth.get("has_cap_construction_reference"))
+    has_attachment = bool(product_truth.get("has_attachment_reference"))
+    multicolor = is_multicolor_product(product_truth)
+    if slot == "W1":
+        if product_form == "ponytail_piece":
+            return {
+                "role": "worn ponytail effect",
+                "strategy": "ponytail_worn_effect",
+                "instruction": "Show a back or three-quarter worn ponytail effect with the attachment area naturally concealed and the full length visible. Do not create a wig hairline or full-cap coverage.",
+            }
+        if product_form == "clip_in_extension":
+            return {
+                "role": "worn clip-in extension effect",
+                "strategy": "clip_in_worn_effect",
+                "instruction": "Show the added back length/volume blending into the wearer's own hair. Do not create a new scalp, wig hairline, or full-cap silhouette.",
+            }
+        if product_form == "hair_topper":
+            return {
+                "role": "top and front worn coverage effect",
+                "strategy": "hair_topper_worn_effect",
+                "instruction": "Show the crown/top coverage and blend from a slightly elevated front/three-quarter angle. Keep the topper coverage area believable and do not turn it into a full wig.",
+            }
+        return {
+            "role": "natural front worn effect",
+            "strategy": "wig_front_worn",
+            "instruction": (
+                "Show a realistic front or slight three-quarter worn effect from chest-up. Keep the exact hairline or bangs, "
+                "parting, crown height, face-framing layers, root color, and front length. Avoid a perfect beauty portrait."
+            ),
+        }
+    if slot == "W2":
+        if product_form in {"ponytail_piece", "clip_in_extension", "hair_topper", "unknown"}:
+            role_by_form = {
+                "ponytail_piece": "complete detached ponytail proof",
+                "clip_in_extension": "complete detached extension pieces proof",
+                "hair_topper": "complete detached topper proof",
+                "unknown": "complete product-form proof",
+            }
+            return {
+                "role": role_by_form[product_form],
+                "strategy": "hairpiece_complete_product_proof",
+                "instruction": "Show the complete detached product on white from its real base to every end. Preserve observed piece count, widths, base shape, clips, color, length, and texture; do not invent missing pieces or turn it into a full wig.",
+            }
+        return {
+            "role": "full back length and texture proof",
+            "strategy": "wig_back_proof",
+            "instruction": (
+                "Show the complete back view from crown to ends on a wearer or neutral mannequin. Keep the full length visible "
+                "and make the layer pattern, wave/curl spacing, color gradient, density appearance, and ends easy to inspect."
+            ),
+        }
+    if slot == "W3":
+        if product_form in {"ponytail_piece", "clip_in_extension", "hair_topper"}:
+            return {
+                "role": "base weft and fiber detail",
+                "strategy": "hairpiece_base_fiber_detail",
+                "instruction": "Show a sourced close detail of the product base/weft and adjacent fibers. Preserve the actual base shape and sheen; if the base is not visible in the source, show only a fiber/color detail and do not invent construction.",
+            }
+        instruction = (
+            "Create a close proof image of the real hairline/lace/parting shown in the source. Preserve lace width/depth, knot visibility, "
+            "part direction, scalp appearance, and baby hair exactly."
+            if has_hairline else
+            "No clear hairline/lace source exists. Do not invent lace or scalp. Use a crown, bangs, parting, or front-fiber detail that is actually visible in the source."
+        )
+        return {"role": "hairline and parting proof", "strategy": "wig_hairline_proof", "instruction": instruction}
+    if slot == "W4":
+        if product_form in {"ponytail_piece", "clip_in_extension", "hair_topper"}:
+            attachment_names = {
+                "ponytail_piece": "comb/drawstring",
+                "clip_in_extension": "clips and weft widths",
+                "hair_topper": "base area and clips",
+            }
+            instruction = (
+                f"Show the real {attachment_names[product_form]} from the source, preserving exact count, position, shape, and scale."
+                if has_attachment else
+                "No clear attachment/base source exists. Do not invent fastening parts. Replace this slot with a clean side/profile or detached-product view proving silhouette and length."
+            )
+            return {"role": "attachment structure or safe product fallback", "strategy": "hairpiece_attachment_or_fallback", "instruction": instruction}
+        instruction = (
+            "Show the real inside cap construction from the source: lace area, wefts, combs, clips, elastic straps, adjustment hooks, and cap edge. Do not add components."
+            if has_cap else
+            "No clear cap-construction source exists. Do not invent an interior. Replace this slot with a clean side/profile product view proving silhouette, layers, and front-to-back length."
+        )
+        return {"role": "cap construction or side-view proof", "strategy": "wig_cap_or_fallback", "instruction": instruction}
+    if slot == "W5":
+        return {
+            "role": "fiber color and length detail",
+            "strategy": "wig_fiber_detail",
+            "instruction": (
+                "Create a close product detail under neutral daylight showing fiber surface, realistic sheen, root-to-tip color transition, "
+                "wave/curl shape, layers, and ends. Include a visual length comparison only when the source contains a confirmed measurement; never invent numbers or text."
+            ),
+        }
+    if slot == "W6" and multicolor:
+        instruction = (
+            "Create an observed color-options proof. Keep IMAGE 1 as the largest product and show only confirmed sellable colors as smaller separate product views. "
+            "All colors must retain the identical cap, cut, length, layers, and texture. No labels or swatch text."
+        )
+        strategy = "wig_color_options"
+        role = "observed color options proof"
+    else:
+        instruction = (
+            "Create one realistic everyday styling scene in a restrained modern Mexico home, vanity, cafe, or city context. "
+            "Keep the wig fully readable and unchanged; avoid costumes, fantasy styling, and stereotyped props."
+        )
+        strategy = "wig_daily_lifestyle"
+        role = "daily lifestyle worn effect"
+    return {"role": role, "strategy": strategy, "instruction": instruction}
+
+
 def choose_slot_target_color(slot: str, colors: List[str]) -> str:
     hero_color = colors[0] if colors else "IMAGE 1 hero color"
     if slot == "S5":
@@ -410,6 +610,13 @@ def choose_hair_slot_target_color(slot: str, colors: List[str]) -> str:
         return hero_color
     if slot == "H4" and len(colors) > 1:
         return f"{hero_color}; show other colors only as compact product-only references"
+    return hero_color
+
+
+def choose_wig_slot_target_color(slot: str, colors: List[str]) -> str:
+    hero_color = colors[0] if colors else "IMAGE 1 hero color/style"
+    if slot == "W6" and len(colors) > 1:
+        return f"{hero_color}; other confirmed colors only as smaller separate product views"
     return hero_color
 
 
@@ -470,6 +677,27 @@ def hair_detail_action_line(slot: str, action: str) -> str:
 
 
 def build_product_fact_lines(product_truth: Dict[str, Any]) -> List[str]:
+    if is_wig(product_truth):
+        keys = [
+            ("subtype", "subtype"),
+            ("source_image_type", "source image type"),
+            ("main_color", "main color"),
+            ("root_color", "root color"),
+            ("color_gradient", "gradient/highlights"),
+            ("fiber_type", "fiber type"),
+            ("construction_type", "construction"),
+            ("lace_area", "lace area"),
+            ("hairline_type", "hairline"),
+            ("parting_type", "parting"),
+            ("length", "length"),
+            ("density", "density"),
+            ("texture", "texture"),
+            ("curl_pattern", "curl pattern"),
+            ("bangs", "bangs"),
+            ("layers", "layers"),
+            ("cap_features", "cap features"),
+        ]
+        return [f"{label}: {product_truth.get(key)}" for key, label in keys]
     if is_hair_accessory(product_truth):
         keys = [
             ("subtype", "subtype"),
@@ -560,6 +788,10 @@ def is_multicolor_product(product_truth: Dict[str, Any]) -> bool:
 
 def is_hair_accessory(product_truth: Dict[str, Any]) -> bool:
     return str(product_truth.get("category") or "").strip().lower() in {"hair_accessory", "hair_accessories", "发饰"}
+
+
+def is_wig(product_truth: Dict[str, Any]) -> bool:
+    return str(product_truth.get("category") or "").strip().lower() in {"wig", "wigs", "假发", "假髮", "peluca", "pelucas"}
 
 
 def is_product_only_reference(product_truth: Dict[str, Any]) -> bool:

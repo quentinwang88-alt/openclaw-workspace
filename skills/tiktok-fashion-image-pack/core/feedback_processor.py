@@ -74,6 +74,15 @@ STRUCTURE_KEYWORDS = (
     "扣齿",
     "珍珠",
     "水钻",
+    "假发",
+    "发际线",
+    "分缝",
+    "帽网",
+    "蕾丝",
+    "lace",
+    "卷度",
+    "发根",
+    "渐变",
 )
 
 PROMPT_TEMPLATE_PATH = SKILL_DIR / "prompts" / "feedback_fix.md"
@@ -192,6 +201,11 @@ def expand_feedback_issues(issues: str) -> str:
         )
     if re.search(r"(夹齿|扣齿|齿|夹子|固定|卡扣)", issue_text):
         additions.append("夹持/固定结构必须清晰可见，形状、方向和数量参考原始商品图，不要被头发或手遮挡。")
+    if re.search(r"(假发|发际线|分缝|帽网|蕾丝|lace|卷度|发根|渐变|刘海|发尾|发长)", issue_text, re.IGNORECASE):
+        additions.append(
+            "假发必须保持原始商品图中的主色、发根色、渐变/挑染位置、长度、层次、刘海、分缝、卷度节奏和发尾轮廓；"
+            "没有原图依据时不得新增 lace、baby hair、帽网梳齿、卡扣、调节带、真人发或耐热声明。"
+        )
     if re.search(r"(套装|数量|几件|件数|多了|少了|颜色)", issue_text):
         additions.append("如果反馈涉及颜色或数量，最终图只能保留被确认的颜色/件数；不确定套装数量时不要生成套装。")
 
@@ -224,7 +238,7 @@ def find_scene_image_path(
     target_slot: str,
     output_dir: Path,
 ) -> Optional[str]:
-    """Find and download a specific scene image by slot label (S1-S6 or H1-H6).
+    """Find and download a specific scene image by slot label (S1-S6, H1-H6, or W1-W6).
 
     Uses 场景图生成明细 to locate the correct attachment in 场景图结果.
     """

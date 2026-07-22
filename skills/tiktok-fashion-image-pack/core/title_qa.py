@@ -16,13 +16,13 @@ PROMO_PATTERNS = re.compile(
     r"(จัดส่งฟรี|ส่งฟรี|ลดราคา|โปรโมชั่น|โปร\s?ฯ|ส่วนลด|โค้ด|Flash\s*Sale|"
     r"รีวิว|ของแท้\s*100%|ประกัน|รับรอง|การันตี|ลด\s*\d+|ลดสูงสุด|"
     r"เพียง\s*\d+\s*บาท|แถมฟรี|ซื้อ\s*\d+\s*แถม|โปร\s*แรง|"
-    r"ฟรี|ลดราคาแรง)",
+    r"ฟรี|ลดราคาแรง|envío\s*gratis|oferta|descuento|cupón|rebaja|promoción)",
     re.IGNORECASE,
 )
 ABSOLUTE_PATTERNS = re.compile(
     r"(ที่สุด|ดีที่สุด|ยอดเยี่ยมที่สุด|ฮิตที่สุด|ขายดีที่สุด|ขายดีสุด|"
     r"100%|100\s*%|รับประกัน\s*\d+\s*ปี|ไม่มีวัน|ตลอดไป|"
-    r"ของแท้)",
+    r"ของแท้|mejor|el\s*más\s*vendido|calidad\s*garantizada)",
     re.IGNORECASE,
 )
 BRAND_PATTERNS = re.compile(r"\b(likeU|like\s*U|likeyou|H&M|Zara|Uniqlo|Shein)\b", re.IGNORECASE)
@@ -32,6 +32,9 @@ YEAR_PATTERNS = re.compile(r"\b(202[0-9]|19\d{2})\b")
 DOWN_CLAIM = re.compile(r"ขนเป็ด|ขนห่าน|ขนนก|down\s*feather", re.IGNORECASE)
 REAL_LEATHER_CLAIM = re.compile(r"หนังแท้|หนังวัว|หนังแกะ|หนังลูกวัว|genuine\s*leather|real\s*leather", re.IGNORECASE)
 REAL_FUR_CLAIM = re.compile(r"ขนแท้|เฟอร์แท้|fur\s*แท้|พรีเมียมแท้", re.IGNORECASE)
+HUMAN_HAIR_CLAIM = re.compile(r"cabello\s+humano|pelo\s+humano|human\s+hair", re.IGNORECASE)
+AMBIGUOUS_NATURAL_HAIR_CLAIM = re.compile(r"cabello\s+natural|pelo\s+natural", re.IGNORECASE)
+HEAT_RESISTANT_CLAIM = re.compile(r"resistente\s+al\s+calor|heat[- ]resistant", re.IGNORECASE)
 
 
 def qa_title(
@@ -97,6 +100,21 @@ def _check_compliance(
         issues.append("不合规: 非羽绒商品标题不得写 ขนเป็ด / 羽绒承诺")
         risk = True
 
+    category = str(product_truth.get("category") or "").strip().lower()
+    if category == "wig":
+        fiber_type = str(product_truth.get("fiber_type") or material or "unknown").strip().lower()
+        if fiber_type != "human_hair" and HUMAN_HAIR_CLAIM.search(title):
+            issues.append("不合规: 未证实真人发的假发标题不得写 cabello humano")
+            risk = True
+        if fiber_type != "human_hair" and AMBIGUOUS_NATURAL_HAIR_CLAIM.search(title):
+            issues.append("不合规: 合成纤维不得用 cabello natural；自然观感应写 aspecto natural")
+            risk = True
+        heat_resistance = str(product_truth.get("heat_resistance") or "unknown").strip().lower()
+        heat_confirmed = heat_resistance not in {"", "unknown", "none", "no", "false", "未确认", "不明"}
+        if not heat_confirmed and HEAT_RESISTANT_CLAIM.search(title):
+            issues.append("不合规: 未证实耐热能力的假发标题不得写 resistente al calor")
+            risk = True
+
     return risk
 
 
@@ -150,6 +168,19 @@ def _check_core_term(
 ) -> None:
     normalized_country = (country or "TH").strip().upper()
     normalized_category = (category or "女装上装/外套").strip()
+    if normalized_country == "MX":
+        if not LATIN_CHAR_RANGE.search(title):
+            issues.append("标题缺少墨西哥西班牙语/拉丁字母内容")
+            return
+        if normalized_category == "假发":
+            hair_product_terms = (
+                "peluca", "coleta postiza", "extensión de coleta", "extensiones de cabello",
+                "extensiones con clip", "topper capilar", "postizo superior", "prótesis capilar parcial",
+            )
+            if not any(term in title.lower() for term in hair_product_terms):
+                issues.append("标题缺少准确的假发/马尾/接发片/发顶片核心品类词")
+            return
+        return
     if normalized_country == "VN":
         if not LATIN_CHAR_RANGE.search(title):
             issues.append("标题缺少越南语/拉丁字母内容")

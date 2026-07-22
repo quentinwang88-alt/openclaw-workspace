@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 SKILL_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_KEYWORDS_PATH = SKILL_DIR / "references" / "title_keywords_th_womens_outerwear.json"
 HAIR_ACCESSORY_KEYWORDS_PATH = SKILL_DIR / "references" / "title_keywords_hair_accessories.json"
+WIG_MX_KEYWORDS_PATH = SKILL_DIR / "references" / "title_keywords_wigs_mx.json"
 
 
 SUBTYPE_SERIES_MAP: Dict[str, str] = {
@@ -37,6 +38,17 @@ HAIR_ACCESSORY_SUBTYPE_SERIES_MAP: Dict[str, str] = {
     "unknown_hair_accessory": "unknown_hair_accessory",
 }
 
+WIG_SUBTYPE_SERIES_MAP: Dict[str, str] = {
+    "lace_front_wig": "lace_front_wig",
+    "full_cap_wig": "full_cap_wig",
+    "u_part_wig": "u_part_wig",
+    "headband_wig": "headband_wig",
+    "ponytail_piece": "ponytail_piece",
+    "clip_in_extension": "clip_in_extension",
+    "hair_topper": "hair_topper",
+    "unknown_wig": "unknown_wig",
+}
+
 
 def normalize_country(country: str = "") -> str:
     value = (country or "TH").strip().upper()
@@ -44,6 +56,8 @@ def normalize_country(country: str = "") -> str:
         return "TH"
     if value in ("VIETNAM", "VIET NAM", "เวียดนาม"):
         return "VN"
+    if value in ("MEXICO", "MÉXICO", "MEX", "墨西哥"):
+        return "MX"
     return value or "TH"
 
 
@@ -51,6 +65,8 @@ def normalize_category(category: str = "") -> str:
     value = (category or "女装上装/外套").strip()
     if value in ("hair_accessory", "hair_accessories", "发饰", "頭飾"):
         return "发饰"
+    if value in ("wig", "wigs", "假发", "假髮", "peluca", "pelucas"):
+        return "假发"
     if value in ("womens_tops", "women_outerwear", "女装上装", "女装外套", "女装上装/外套"):
         return "女装上装/外套"
     return value
@@ -68,6 +84,8 @@ def load_keywords_for(category: str = "女装上装/外套", country: str = "TH"
     if normalized_category == "发饰":
         data = load_keywords(HAIR_ACCESSORY_KEYWORDS_PATH)
         return data.get(normalized_country, data.get("TH", {}))
+    if normalized_category == "假发":
+        return load_keywords(WIG_MX_KEYWORDS_PATH)
     return load_keywords(DEFAULT_KEYWORDS_PATH)
 
 
@@ -84,6 +102,9 @@ def resolve_keyword_group(
     if normalized_category == "发饰":
         lookup_key = HAIR_ACCESSORY_SUBTYPE_SERIES_MAP.get(subtype, "unknown_hair_accessory")
         return keywords.get(lookup_key, keywords.get("unknown_hair_accessory", {}))
+    if normalized_category == "假发":
+        lookup_key = WIG_SUBTYPE_SERIES_MAP.get(subtype, "unknown_wig")
+        return keywords.get(lookup_key, keywords.get("unknown_wig", {}))
     lookup_key = SUBTYPE_SERIES_MAP.get(subtype, "unknown_womens_top")
     return keywords.get(lookup_key, keywords.get("unknown_womens_top", {}))
 

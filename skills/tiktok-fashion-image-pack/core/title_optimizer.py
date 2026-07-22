@@ -26,6 +26,7 @@ TITLE_TEMPLATE_PATHS = {
     ("女装上装/外套", "TH"): DEFAULT_TEMPLATE_PATH,
     ("发饰", "TH"): SKILL_DIR / "prompts" / "发饰_泰国.md",
     ("发饰", "VN"): SKILL_DIR / "prompts" / "发饰_越南.md",
+    ("假发", "MX"): SKILL_DIR / "prompts" / "假发_墨西哥.md",
 }
 
 

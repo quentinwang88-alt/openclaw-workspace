@@ -4,8 +4,8 @@ Human input fields:
 
 - `原始图片`: attachment, one or more supplier/product images.
 - `原始场景参考图`: optional attachment, scene/style references only. These do not participate in product truth recognition.
-- `国家`: target market, default `TH`.
-- `类目`: supported values include `女装上装/外套` and lightweight `发饰`.
+- `国家`: target market; supported options include `TH`, `VN`, and `MX`.
+- `类目`: supported values include `女装上装/外套`, `发饰`, and `假发`.
 - `生成图类型`: `只首图`, `只场景图`, `首图+场景图`, `首图+详情图`, or `全套图包`.
 - `生成状态`: set to `待生成` to enqueue a record.
 - `备注` / `人工覆盖要求`: optional override notes.
@@ -20,7 +20,13 @@ System output fields:
 - `质检结果`, `质检问题`, `需复核原因`: QA writeback.
 - `场景图质检结果`, `场景图质检问题`, `场景图生成明细`: scene image QA and per-slot run details.
 - `场景偏好`: optional single select. Blank or `自动匹配` lets AI choose from product/category/country.
-- `场景图槽位`: optional multi select. Blank means S1-S4 for womenswear and H1-H4 for hair accessories. Selected values can include `S1 主点击试穿`, `S2 日常氛围`, `S3 版型/颜色证明`, `S4 材质结构细节`, `H1 发饰佩戴近景`, `H2 发型搭配场景`, `H3 发饰细节比例`, `H4 发饰颜色/商品证明`.
+- `场景图槽位`: optional multi select. Blank means S1-S4 for womenswear, H1-H4 for hair accessories, and W1-W6 for wigs. Wig slots cover front wear, back proof, hairline/lace, cap/fallback, fiber/color/length detail, and lifestyle/color proof.
+
+Wig-specific system fields:
+
+- `假发产品形态`, `发丝材质`, `帽网结构`, `Lace范围`, `发际线/分缝`
+- `假发长度`, `卷度/密度`, `发根/渐变`
+- `帽网细节`, `耐热信息`, `假发结构参考充分性`
 
 Brand fields:
 

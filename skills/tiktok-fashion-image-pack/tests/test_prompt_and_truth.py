@@ -99,6 +99,72 @@ class ProductTruthTests(unittest.TestCase):
         self.assertEqual(truth["product_type_name_en"], "CLAW CLIP")
         self.assertIn("actual size scale", truth["must_preserve"])
 
+    def test_wig_truth_normalization_requires_structure_evidence(self) -> None:
+        truth = normalize_product_truth({
+            "category": "wig",
+            "subtype": "lace_front_wig",
+            "main_color": "dark brown to blonde",
+            "fiber_type": "synthetic",
+            "construction_type": "lace_front",
+            "texture": "wavy",
+            "has_hairline_reference": True,
+            "has_cap_construction_reference": False,
+        })
+        self.assertEqual(truth["category"], "wig")
+        self.assertEqual(truth["product_type_name_en"], "LACE FRONT WIG")
+        self.assertEqual(truth["material"], "synthetic")
+        self.assertNotIn("missing clear hairline/lace reference", truth["review_reasons"])
+        self.assertIn("missing cap construction reference", truth["review_reasons"])
+
+    def test_wig_heuristic_uses_category_and_texture(self) -> None:
+        truth = heuristic_product_truth(["rubia_ondulada_lace_front_65cm.jpg"], category="假发")
+        self.assertEqual(truth["category"], "wig")
+        self.assertEqual(truth["subtype"], "lace_front_wig")
+        self.assertEqual(truth["texture"], "wavy")
+
+    def test_wig_heuristic_routes_hairpiece_forms(self) -> None:
+        ponytail = heuristic_product_truth(["coleta_postiza_ondulada.jpg"], category="假发")
+        clip_in = heuristic_product_truth(["extensiones_con_clip_7_piezas.jpg"], category="假发")
+        topper = heuristic_product_truth(["topper_capilar.jpg"], category="假发")
+        self.assertEqual((ponytail["subtype"], ponytail["product_form"]), ("ponytail_piece", "ponytail_piece"))
+        self.assertEqual((clip_in["subtype"], clip_in["product_form"]), ("clip_in_extension", "clip_in_extension"))
+        self.assertEqual((topper["subtype"], topper["product_form"]), ("hair_topper", "hair_topper"))
+        self.assertIn("missing attachment/base reference", "; ".join(clip_in["review_reasons"]))
+
+    def test_wig_mx_keywords_and_title_template(self) -> None:
+        keyword_text = build_keywords_prompt_text("lace_front_wig", category="假发", country="MX")
+        self.assertIn("peluca lace front", keyword_text)
+        prompt = build_title_prompt(
+            product_truth={"subtype": "lace_front_wig", "fiber_type": "synthetic", "texture": "wavy"},
+            subtype="lace_front_wig",
+            category="假发",
+            country="MX",
+        )
+        self.assertIn("TikTok Shop México", prompt)
+        self.assertIn("cabello humano", prompt)
+
+    def test_hairpiece_mx_keywords_use_accurate_product_terms(self) -> None:
+        self.assertIn("coleta postiza", build_keywords_prompt_text("ponytail_piece", category="假发", country="MX"))
+        self.assertIn("extensiones de cabello con clip", build_keywords_prompt_text("clip_in_extension", category="假发", country="MX"))
+        self.assertIn("topper capilar", build_keywords_prompt_text("hair_topper", category="假发", country="MX"))
+        result = qa_title(
+            tk_title="Extensiones de cabello con clip largas onduladas color castaño",
+            product_truth={"category": "wig", "subtype": "clip_in_extension", "fiber_type": "synthetic"},
+            category="假发",
+            country="MX",
+        )
+        self.assertFalse(any("核心品类词" in issue for issue in result["issues"]))
+
+    def test_wig_mx_title_qa_rejects_false_human_hair(self) -> None:
+        result = qa_title(
+            tk_title="Peluca lace front para mujer larga ondulada de cabello humano color castaño",
+            product_truth={"category": "wig", "subtype": "lace_front_wig", "fiber_type": "synthetic"},
+            category="假发",
+            country="MX",
+        )
+        self.assertEqual(result["result"], "不通过")
+        self.assertTrue(any("cabello humano" in issue for issue in result["issues"]))
+
     def test_hair_accessory_heuristic_uses_category(self) -> None:
         truth = heuristic_product_truth(["large_claw_clip_black.jpg"], category="发饰")
         self.assertEqual(truth["category"], "hair_accessory")
@@ -113,6 +179,27 @@ class ProductTruthTests(unittest.TestCase):
         )
         self.assertEqual(category, "发饰")
         self.assertEqual(country, "TH")
+
+    def test_title_only_context_infers_mx_wig(self) -> None:
+        category, country = infer_title_context_from_text(
+            original_title="Peluca lace front larga ondulada de fibra sintética color castaño",
+            category="",
+            country="",
+        )
+        self.assertEqual(category, "假发")
+        self.assertEqual(country, "MX")
+
+    def test_title_only_fallback_extracts_mx_wig_facts(self) -> None:
+        truth = build_title_fallback_truth(
+            original_title="Peluca lace front larga ondulada de fibra sintética rubia 65 cm",
+            category="假发",
+            country="MX",
+        )
+        self.assertEqual(truth["category"], "wig")
+        self.assertEqual(truth["subtype"], "lace_front_wig")
+        self.assertEqual(truth["fiber_type"], "synthetic")
+        self.assertEqual(truth["texture"], "wavy")
+        self.assertEqual(truth["length"], "65 cm")
 
     def test_title_only_fallback_truth_for_hair_accessory(self) -> None:
         truth = build_title_fallback_truth(
@@ -256,6 +343,47 @@ class PromptBuilderTests(unittest.TestCase):
         self.assertIn("hair accessories", prompt)
         self.assertIn("claw teeth", prompt)
         self.assertNotIn("collar, closure, pocket", prompt)
+
+    def test_wig_main_image_uses_front_model_back_view_layout(self) -> None:
+        truth = normalize_product_truth({
+            "category": "wig",
+            "subtype": "lace_front_wig",
+            "source_image_type": "product_only",
+            "main_color": "dark brown to blonde",
+            "root_color": "dark brown",
+            "color_gradient": "blonde from mid-length to ends",
+            "fiber_type": "synthetic",
+            "construction_type": "lace_front",
+            "texture": "wavy",
+            "length": "65 cm",
+        })
+        layout = select_main_image_layout(truth)
+        prompt = build_main_image_prompt(product_truth=truth, brand_name="likeU", country="MX")
+        self.assertEqual(layout["template"], "wig_model_front_back_split")
+        self.assertIn("adult Mexican/Latina woman", prompt)
+        self.assertIn("complete back view", prompt)
+        self.assertIn('no "likeU"', prompt)
+        self.assertIn("both the front worn model effect and the complete back-view proof", prompt)
+
+    def test_hairpiece_main_layouts_do_not_convert_to_full_wig(self) -> None:
+        cases = [
+            ("ponytail_piece", "ponytail_worn_product_attachment_split", "Do not depict a full wig"),
+            ("clip_in_extension", "clip_in_worn_exact_pack_split", "Never replace the pieces with a full wig"),
+            ("hair_topper", "hair_topper_worn_base_split", "Do not extend it into a full-cap wig"),
+        ]
+        for subtype, template, proof in cases:
+            truth = normalize_product_truth({
+                "category": "wig",
+                "subtype": subtype,
+                "main_color": "dark brown",
+                "fiber_type": "synthetic",
+                "texture": "wavy",
+            })
+            layout = select_main_image_layout(truth)
+            prompt = build_main_image_prompt(product_truth=truth, brand_name="likeU", country="MX")
+            self.assertEqual(layout["template"], template)
+            self.assertIn(proof, prompt)
+            self.assertIn("warm nude or rose-brown lips", prompt)
 
     def test_product_only_reference_uses_faceless_tryon_layout(self) -> None:
         truth = normalize_product_truth({
@@ -470,6 +598,65 @@ class ScenePromptBuilderTests(unittest.TestCase):
         self.assertIn("hair accessory", prompts[0]["prompt"])
         self.assertIn("large bow", prompts[1]["prompt"])
 
+    def test_wig_default_scene_slots_expand_to_w_six_with_safe_fallbacks(self) -> None:
+        truth = normalize_product_truth({
+            "category": "wig",
+            "subtype": "full_cap_wig",
+            "source_image_type": "product_only",
+            "main_color": "brown blonde ombre",
+            "root_color": "dark brown",
+            "color_gradient": "blonde ends",
+            "fiber_type": "synthetic",
+            "construction_type": "full_cap",
+            "texture": "wavy",
+            "has_hairline_reference": False,
+            "has_cap_construction_reference": False,
+        })
+        prompts = build_scene_image_prompts(product_truth=truth, brand_name="likeU", country="MX")
+        self.assertEqual([item["image_id"] for item in prompts], ["W1", "W2", "W3", "W4", "W5", "W6"])
+        self.assertIn("Do not invent lace or scalp", prompts[2]["prompt"])
+        self.assertIn("Do not invent an interior", prompts[3]["prompt"])
+        self.assertIn("No text, logo, brand name, border", prompts[0]["prompt"])
+
+    def test_clip_in_w_slots_use_product_and_attachment_proof(self) -> None:
+        truth = normalize_product_truth({
+            "category": "wig",
+            "subtype": "clip_in_extension",
+            "main_color": "black",
+            "fiber_type": "synthetic",
+            "texture": "straight",
+            "has_attachment_reference": False,
+        })
+        prompts = build_scene_image_prompts(product_truth=truth, brand_name="likeU", country="MX")
+        self.assertEqual(prompts[0]["strategy"], "clip_in_worn_effect")
+        self.assertEqual(prompts[1]["strategy"], "hairpiece_complete_product_proof")
+        self.assertEqual(prompts[3]["strategy"], "hairpiece_attachment_or_fallback")
+        self.assertIn("Do not invent fastening parts", prompts[3]["prompt"])
+
+    def test_wig_qa_prompts_use_model_and_back_view_checks(self) -> None:
+        truth = normalize_product_truth({
+            "category": "wig",
+            "subtype": "lace_front_wig",
+            "fiber_type": "synthetic",
+            "construction_type": "lace_front",
+            "texture": "wavy",
+        })
+        main_prompt = build_visual_qa_prompt(truth)
+        scene_prompt = build_scene_qa_prompt(truth, "hairline and parting proof")
+        self.assertIn("墨西哥市场假发/接发产品首图质检员", main_prompt)
+        self.assertIn("真人正面", main_prompt)
+        self.assertIn("W3/W4", scene_prompt)
+
+    def test_hairpiece_qa_requires_correct_product_form(self) -> None:
+        truth = normalize_product_truth({
+            "category": "wig",
+            "subtype": "ponytail_piece",
+            "fiber_type": "synthetic",
+        })
+        main_prompt = build_visual_qa_prompt(truth)
+        self.assertIn("不得生成整顶假发", main_prompt)
+        self.assertIn("真实马尾佩戴效果", main_prompt)
+
     def test_hair_accessory_multicolor_default_scene_prompts_expand_to_h_six(self) -> None:
         truth = normalize_product_truth({
             "category": "hair_accessory",
@@ -508,6 +695,9 @@ class ScenePromptBuilderTests(unittest.TestCase):
 
     def test_feedback_targets_accept_h_slots(self) -> None:
         self.assertEqual(parse_feedback_targets("首图,H1,H4"), ["首图", "H1", "H4"])
+
+    def test_feedback_targets_accept_w_slots(self) -> None:
+        self.assertEqual(parse_feedback_targets("首图,W1,W4"), ["首图", "W1", "W4"])
 
     def test_hair_accessory_feedback_expansion(self) -> None:
         expanded = expand_feedback_issues("H1 发夹夹齿不对，多了珍珠")

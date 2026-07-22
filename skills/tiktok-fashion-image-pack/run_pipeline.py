@@ -74,6 +74,17 @@ FIELD = {
     "pockets": "口袋结构",
     "sleeves": "袖型/袖口",
     "hem": "下摆结构",
+    "wig_product_form": "假发产品形态",
+    "wig_fiber_type": "发丝材质",
+    "wig_construction": "帽网结构",
+    "wig_lace_area": "Lace范围",
+    "wig_hairline_parting": "发际线/分缝",
+    "wig_length": "假发长度",
+    "wig_texture_density": "卷度/密度",
+    "wig_root_gradient": "发根/渐变",
+    "wig_cap_features": "帽网细节",
+    "wig_heat_resistance": "耐热信息",
+    "wig_source_sufficiency": "假发结构参考充分性",
     "selling_points": "核心卖点",
     "scenes": "适合场景",
     "customer": "目标人群",
@@ -929,7 +940,10 @@ def infer_title_context_from_text(
     resolved_country = (country or "").strip().upper()
     text = original_title or ""
     if not resolved_country:
-        if re.search(r"[\u0E00-\u0E7F]", text):
+        lower = text.lower()
+        if any(token in lower for token in ("peluca", "lace front", "fibra sintética", "cabello humano", "ondulada", "lacia", "rizada")):
+            resolved_country = "MX"
+        elif re.search(r"[\u0E00-\u0E7F]", text):
             resolved_country = "TH"
         elif re.search(r"[À-ỹĐđ]", text) or any(token in text.lower() for token in ("kẹp", "băng đô", "dây buộc", "scrunchie")):
             resolved_country = "VN"
@@ -939,13 +953,23 @@ def infer_title_context_from_text(
     resolved_category = (category or "").strip()
     if not resolved_category:
         lower = text.lower()
+        wig_terms = (
+            "peluca", "lace front", "front lace", "wig", "假发", "假髮",
+            "fibra sintética", "cabello humano", "coleta postiza", "cola de caballo",
+            "extensiones de cabello", "extensiones con clip", "topper capilar", "发片", "马尾", "发顶片",
+        )
         hair_terms = (
             "กิ๊บ", "ที่คาดผม", "ยางมัดผม", "ยางรัดผม", "โบว์ติดผม",
             "เครื่องประดับผม", "อุปกรณ์ตกแต่งผม", "kẹp tóc", "kẹp càng cua",
             "kẹp mái", "băng đô", "dây buộc tóc", "thun cột tóc", "nơ tóc",
             "scrunchie", "scrunchies", "发夹", "发箍", "发圈", "头饰",
         )
-        resolved_category = "发饰" if any(term in lower or term in text for term in hair_terms) else "女装上装/外套"
+        if any(term in lower or term in text for term in wig_terms):
+            resolved_category = "假发"
+        elif any(term in lower or term in text for term in hair_terms):
+            resolved_category = "发饰"
+        else:
+            resolved_category = "女装上装/外套"
 
     return resolved_category, resolved_country
 
@@ -957,7 +981,10 @@ def build_title_fallback_truth(
     country: str,
 ) -> Dict[str, Any]:
     truth = heuristic_product_truth([original_title or "title_only"], category=category)
-    if str(truth.get("category") or "").strip().lower() == "hair_accessory":
+    normalized_truth_category = str(truth.get("category") or "").strip().lower()
+    if normalized_truth_category == "wig":
+        enrich_wig_truth_from_title(truth, original_title)
+    elif normalized_truth_category == "hair_accessory":
         enrich_hair_accessory_truth_from_title(truth, original_title, country)
     truth["source_image_type"] = "title_only"
     truth["confidence"] = min(float(truth.get("confidence") or 0.35), 0.45)
@@ -968,8 +995,71 @@ def build_title_fallback_truth(
     for item in reasons:
         if item not in truth["review_reasons"]:
             truth["review_reasons"].append(item)
-    truth["target_customer"] = truth.get("target_customer") or ("Thai shoppers" if country == "TH" else "Vietnam shoppers")
+    default_customer = {
+        "TH": "Thai shoppers",
+        "VN": "Vietnam shoppers",
+        "MX": "Mexico wig shoppers",
+    }.get(country, "local shoppers")
+    truth["target_customer"] = truth.get("target_customer") or default_customer
     return truth
+
+
+def enrich_wig_truth_from_title(truth: Dict[str, Any], original_title: str) -> None:
+    text = original_title or ""
+    lower = text.lower()
+    if "lace front" in lower or "encaje frontal" in lower:
+        truth["subtype"] = "lace_front_wig"
+        truth["construction_type"] = "lace_front"
+        truth["product_type_name_en"] = "LACE FRONT WIG"
+    elif "u-part" in lower or "peluca en u" in lower:
+        truth["subtype"] = "u_part_wig"
+        truth["construction_type"] = "u_part"
+        truth["product_type_name_en"] = "U-PART WIG"
+    elif "diadema" in lower or "headband" in lower:
+        truth["subtype"] = "headband_wig"
+        truth["construction_type"] = "headband"
+        truth["product_type_name_en"] = "HEADBAND WIG"
+    elif "coleta postiza" in lower or "cola de caballo" in lower or "ponytail" in lower:
+        truth["subtype"] = "ponytail_piece"
+        truth["product_form"] = "ponytail_piece"
+        truth["construction_type"] = "ponytail_attachment"
+        truth["product_type_name_en"] = "PONYTAIL EXTENSION"
+    elif "extensiones" in lower and ("clip" in lower or "broche" in lower):
+        truth["subtype"] = "clip_in_extension"
+        truth["product_form"] = "clip_in_extension"
+        truth["construction_type"] = "clip_in"
+        truth["product_type_name_en"] = "CLIP-IN EXTENSION"
+    elif "topper" in lower or "postizo superior" in lower or "prótesis capilar parcial" in lower:
+        truth["subtype"] = "hair_topper"
+        truth["product_form"] = "hair_topper"
+        truth["construction_type"] = "topper_base"
+        truth["product_type_name_en"] = "HAIR TOPPER"
+    if "cabello humano" in lower or "pelo humano" in lower:
+        truth["fiber_type"] = "human_hair"
+        truth["material"] = "human_hair"
+    elif "fibra sintética" in lower or "peluca sintética" in lower:
+        truth["fiber_type"] = "synthetic"
+        truth["material"] = "synthetic"
+    if "ondulad" in lower or "wavy" in lower:
+        truth["texture"] = "wavy"
+    elif "rizad" in lower or "curly" in lower:
+        truth["texture"] = "curly"
+    elif "lacia" in lower or "liso" in lower or "straight" in lower:
+        truth["texture"] = "straight"
+    color_terms = [
+        term for term in (
+            "negra", "negro", "rubia", "rubio", "castaño", "marrón", "cobriza",
+            "gris", "platinado", "rosa", "roja", "degradado",
+        ) if term in lower
+    ]
+    if color_terms:
+        truth["main_color"] = ", ".join(color_terms[:2])
+    length_match = re.search(r"\b(\d{2,3})\s*(cm|pulgadas?)\b", lower)
+    if length_match:
+        truth["length"] = f"{length_match.group(1)} {length_match.group(2)}"
+    truth["review_reasons"] = list(truth.get("review_reasons") or []) + [
+        "title-only wig facts require source-image confirmation before image generation"
+    ]
 
 
 def enrich_hair_accessory_truth_from_title(truth: Dict[str, Any], original_title: str, country: str) -> None:
@@ -1120,7 +1210,7 @@ def _make_series_code(
 def download_source_images(client: FeishuBitableClient, record: TableRecord, source_dir: Path) -> List[Path]:
     attachments = extract_attachments(record.fields.get(FIELD["source_images"]))
     paths: List[Path] = []
-    for attachment in attachments[:4]:
+    for attachment in attachments[:6]:
         paths.append(client.download_attachment(attachment, source_dir))
     return paths
 
@@ -1134,6 +1224,52 @@ def download_scene_reference_images(client: FeishuBitableClient, record: TableRe
 
 
 def build_truth_update(truth: Dict[str, Any]) -> Dict[str, Any]:
+    if str(truth.get("category") or "").strip().lower() in {"wig", "wigs", "假发", "假髮", "peluca", "pelucas"}:
+        source_sufficiency = []
+        source_sufficiency.append(
+            "有发际线参考" if truth.get("has_hairline_reference") else "缺少发际线/lace参考"
+        )
+        source_sufficiency.append(
+            "有帽网结构参考" if truth.get("has_cap_construction_reference") else "缺少帽网结构参考"
+        )
+        if truth.get("product_form") in {"ponytail_piece", "clip_in_extension", "hair_topper"}:
+            source_sufficiency.append(
+                "有固定结构参考" if truth.get("has_attachment_reference") else "缺少固定结构参考"
+            )
+        return {
+            FIELD["subtype"]: truth.get("subtype"),
+            FIELD["wig_product_form"]: truth.get("product_form"),
+            FIELD["main_color"]: truth.get("main_color"),
+            FIELD["multicolor"]: bool(truth.get("is_probably_multicolor")),
+            FIELD["sellable_colors"]: join_list(truth.get("sellable_colors_observed")),
+            FIELD["material"]: truth.get("fiber_type"),
+            FIELD["silhouette"]: truth.get("texture"),
+            FIELD["length"]: truth.get("length"),
+            FIELD["collar"]: truth.get("bangs"),
+            FIELD["closure"]: truth.get("construction_type"),
+            FIELD["pockets"]: truth.get("lace_area"),
+            FIELD["sleeves"]: truth.get("parting_type"),
+            FIELD["hem"]: truth.get("layers"),
+            FIELD["wig_fiber_type"]: truth.get("fiber_type"),
+            FIELD["wig_construction"]: truth.get("construction_type"),
+            FIELD["wig_lace_area"]: truth.get("lace_area"),
+            FIELD["wig_hairline_parting"]: f"{truth.get('hairline_type')} / {truth.get('parting_type')}",
+            FIELD["wig_length"]: truth.get("length"),
+            FIELD["wig_texture_density"]: f"{truth.get('texture')} / {truth.get('curl_pattern')} / {truth.get('density')}",
+            FIELD["wig_root_gradient"]: f"{truth.get('root_color')} / {truth.get('color_gradient')}",
+            FIELD["wig_cap_features"]: truth.get("cap_features"),
+            FIELD["wig_heat_resistance"]: truth.get("heat_resistance"),
+            FIELD["wig_source_sufficiency"]: "；".join(source_sufficiency),
+            FIELD["selling_points"]: join_list(truth.get("core_selling_points")),
+            FIELD["scenes"]: join_list(truth.get("recommended_scenes")),
+            FIELD["customer"]: truth.get("target_customer"),
+            FIELD["must_preserve"]: join_list(truth.get("must_preserve")),
+            FIELD["must_not_add"]: join_list(truth.get("must_not_add")),
+            FIELD["template"]: truth.get("main_image_template"),
+            FIELD["detail_sequence"]: join_list(truth.get("detail_image_sequence")),
+            FIELD["confidence"]: truth.get("confidence"),
+            FIELD["review_reason"]: join_list(truth.get("review_reasons")),
+        }
     if str(truth.get("category") or "").strip().lower() in {"hair_accessory", "hair_accessories", "发饰"}:
         return {
             FIELD["subtype"]: truth.get("subtype"),

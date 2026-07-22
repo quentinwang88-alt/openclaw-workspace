@@ -1,0 +1,74 @@
+{
+  "lace_front_wig": {
+    "series_name_cn": "蕾丝前额假发系列",
+    "series_code_prefix": "WLF",
+    "core_terms": ["peluca lace front", "peluca de encaje frontal", "peluca para mujer"],
+    "material_terms": ["fibra sintética", "cabello humano", "aspecto natural"],
+    "fit_terms": ["larga", "media", "corta", "ajustable", "con fleco", "sin fleco"],
+    "structure_terms": ["ondulada", "lacia", "rizada", "degradado", "raya al medio", "raya lateral"],
+    "style_terms": ["uso diario", "fiesta", "estilo natural"]
+  },
+  "full_cap_wig": {
+    "series_name_cn": "全帽假发系列",
+    "series_code_prefix": "WFC",
+    "core_terms": ["peluca completa", "peluca para mujer", "peluca sintética"],
+    "material_terms": ["fibra sintética", "cabello humano", "aspecto natural"],
+    "fit_terms": ["larga", "media", "corta", "ajustable", "con fleco", "sin fleco"],
+    "structure_terms": ["ondulada", "lacia", "rizada", "degradado", "con capas"],
+    "style_terms": ["uso diario", "fiesta", "estilo natural"]
+  },
+  "u_part_wig": {
+    "series_name_cn": "U型假发系列",
+    "series_code_prefix": "WUP",
+    "core_terms": ["peluca U-Part", "peluca en U", "peluca para mujer"],
+    "material_terms": ["fibra sintética", "cabello humano", "aspecto natural"],
+    "fit_terms": ["larga", "media", "ajustable"],
+    "structure_terms": ["ondulada", "lacia", "rizada", "abertura en U"],
+    "style_terms": ["uso diario", "estilo natural"]
+  },
+  "headband_wig": {
+    "series_name_cn": "发带假发系列",
+    "series_code_prefix": "WHB",
+    "core_terms": ["peluca con diadema", "peluca headband", "peluca para mujer"],
+    "material_terms": ["fibra sintética", "cabello humano", "aspecto natural"],
+    "fit_terms": ["larga", "media", "ajustable"],
+    "structure_terms": ["ondulada", "lacia", "rizada", "con diadema"],
+    "style_terms": ["uso diario", "fácil de colocar"]
+  },
+  "ponytail_piece": {
+    "series_name_cn": "马尾接发系列",
+    "series_code_prefix": "WPT",
+    "core_terms": ["coleta postiza", "extensión de coleta", "cola de caballo postiza"],
+    "material_terms": ["fibra sintética", "cabello humano", "aspecto natural"],
+    "fit_terms": ["larga", "media", "voluminosa", "fácil de colocar"],
+    "structure_terms": ["ondulada", "lacia", "rizada", "con cordón", "con peine"],
+    "style_terms": ["uso diario", "fiesta", "peinado rápido"]
+  },
+  "clip_in_extension": {
+    "series_name_cn": "Clip-in接发片系列",
+    "series_code_prefix": "WCI",
+    "core_terms": ["extensiones de cabello con clip", "extensiones clip-in", "postizos con clip"],
+    "material_terms": ["fibra sintética", "cabello humano", "aspecto natural"],
+    "fit_terms": ["largas", "medias", "para dar volumen", "fáciles de colocar"],
+    "structure_terms": ["onduladas", "lacias", "rizadas", "con clips", "en piezas"],
+    "style_terms": ["uso diario", "fiesta", "cambio de look"]
+  },
+  "hair_topper": {
+    "series_name_cn": "发顶片系列",
+    "series_code_prefix": "WTP",
+    "core_terms": ["topper capilar", "postizo superior", "prótesis capilar parcial"],
+    "material_terms": ["fibra sintética", "cabello humano", "aspecto natural"],
+    "fit_terms": ["corto", "medio", "largo", "ajustable"],
+    "structure_terms": ["con clips", "con raya", "cobertura superior", "con base"],
+    "style_terms": ["uso diario", "volumen en la coronilla", "cobertura superior"]
+  },
+  "unknown_wig": {
+    "series_name_cn": "假发系列",
+    "series_code_prefix": "WIG",
+    "core_terms": ["peluca para mujer", "peluca"],
+    "material_terms": ["fibra sintética", "cabello humano", "aspecto natural"],
+    "fit_terms": ["larga", "media", "corta", "ajustable", "con fleco", "sin fleco"],
+    "structure_terms": ["ondulada", "lacia", "rizada", "degradado", "con capas"],
+    "style_terms": ["uso diario", "fiesta", "estilo natural"]
+  }
+}
