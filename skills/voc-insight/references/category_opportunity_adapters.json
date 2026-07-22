@@ -1,0 +1,93 @@
+{
+  "version": "category_opportunity_adapters_v1",
+  "categories": {
+    "wigs": {
+      "opportunities": [
+        {
+          "semantic_key": "low_shine_natural_clip_in",
+          "opportunity_type": "feature_upgrade",
+          "product_forms": ["clip_in_extension"],
+          "required_signal_groups": [["natural_look"], ["synthetic_shine_issue"]],
+          "title_zh": "低光泽、自然衔接的卡扣接发",
+          "user_job": "增加长度和发量，同时尽量不显露假发感",
+          "unmet_need": "自然感得到认可，但部分商品仍出现合成纤维反光",
+          "opportunity_hypothesis": "低光泽纤维和更自然的发束衔接可能改善近距离佩戴效果",
+          "must_have_specs": ["自然光下低光泽", "发束与原发衔接自然"],
+          "optional_specs": ["自然卷度", "不同发量规格"],
+          "avoid_specs": ["明显塑料反光", "远景自然但近景暴露纤维感"],
+          "inspection_checks": ["自然光正面和侧面近景反光检查", "佩戴后衔接区域近景检查"]
+        },
+        {
+          "semantic_key": "accurate_color_matching",
+          "opportunity_type": "feature_upgrade",
+          "product_forms": ["clip_in_extension", "ponytail_extension"],
+          "required_signal_groups": [["color_match"], ["color_match_issue"]],
+          "title_zh": "更准确、易选择的接发色号体系",
+          "user_job": "在线选择能与原发自然融合的颜色",
+          "unmet_need": "颜色表现是购买理由，但图片与实物偏差会直接破坏衔接效果",
+          "opportunity_hypothesis": "自然光色卡、渐变色号和更清晰的选色说明可能降低色差风险",
+          "must_have_specs": ["自然光实拍色卡", "主图与实物颜色一致"],
+          "optional_specs": ["渐变色号", "原发颜色对照指南"],
+          "avoid_specs": ["滤镜改变色号", "只使用单一棚拍光线"],
+          "inspection_checks": ["自然光下实物与主图对比", "接入原发后的色差检查"]
+        },
+        {
+          "semantic_key": "stable_easy_attachment",
+          "opportunity_type": "established_preference",
+          "product_forms": ["clip_in_extension", "ponytail_extension"],
+          "required_signal_groups": [["hold_stability", "easy_install"]],
+          "title_zh": "固定稳定、容易完成佩戴的接发结构",
+          "user_job": "快速完成接发造型并在活动时保持稳定",
+          "unmet_need": "用户认可更好的抓力和简单操作，但固定体验仍需跨商品验证",
+          "opportunity_hypothesis": "优化夹齿、梳齿或抽绳结构可能同时提升易用性和稳定性",
+          "must_have_specs": ["固定件闭合正常", "佩戴步骤清晰"],
+          "optional_specs": ["夹齿防滑结构", "抽绳与梳齿组合"],
+          "avoid_specs": ["固定件松动", "必须反复调整才能稳定"],
+          "inspection_checks": ["摇头和轻度活动后的稳定测试", "新手完整佩戴用时记录"]
+        },
+        {
+          "semantic_key": "full_wig_easy_fit",
+          "opportunity_type": "pain_gap",
+          "product_forms": ["full_wig", "lace_wig"],
+          "required_signal_groups": [["natural_look"], ["fit_concealment_issue", "installation_difficulty_issue", "length_fit_issue"]],
+          "title_zh": "更易贴合、减少鼓包的整顶假发",
+          "user_job": "较少学习成本地完成自然贴合的整顶佩戴",
+          "unmet_need": "自然造型有吸引力，但真发遮盖、鼓包和刘海调整增加使用门槛",
+          "opportunity_hypothesis": "更包容的帽围结构、遮盖设计和清晰佩戴说明可能降低初次使用门槛",
+          "must_have_specs": ["后脑区域贴合", "真发遮盖后无明显鼓包"],
+          "optional_specs": ["可调帽围", "预修剪刘海或长度指引"],
+          "avoid_specs": ["遮盖后明显鼓包", "刘海长度信息不清"],
+          "inspection_checks": ["不同发量真人的鼓包测试", "首次佩戴完整流程记录"]
+        },
+        {
+          "semantic_key": "reusable_tangle_resistant_fiber",
+          "opportunity_type": "feature_upgrade",
+          "product_forms": [],
+          "required_signal_groups": [["quality_durability", "tangle_resistance"], ["tangle_shedding_issue", "quality_durability_issue"]],
+          "title_zh": "更耐梳理、支持重复使用的假发纤维",
+          "user_job": "多次佩戴和梳理后仍保持顺滑完整",
+          "unmet_need": "质量和柔顺是重要购买理由，但部分商品仍存在打结、掉发和一次性使用风险",
+          "opportunity_hypothesis": "改进纤维、发束固定和梳理耐受性可能提高重复使用体验",
+          "must_have_specs": ["单次梳理无明显大量掉发", "多次使用后不快速打结"],
+          "optional_specs": ["可安全梳理", "明确护理说明"],
+          "avoid_specs": ["一次使用后严重打结", "发束固定不牢"],
+          "inspection_checks": ["固定次数往复梳理测试", "多次佩戴后的打结和掉发记录"]
+        },
+        {
+          "semantic_key": "natural_volume_ponytail",
+          "opportunity_type": "established_preference",
+          "product_forms": ["ponytail_extension"],
+          "required_signal_groups": [["natural_look"], ["volume_length"]],
+          "title_zh": "自然卷度、发量充足的马尾接发",
+          "user_job": "快速获得明显但自然的马尾长度和发量",
+          "unmet_need": "用户希望造型变化明显，同时维持自然感和舒适度",
+          "opportunity_hypothesis": "自然卷度、合理发量和较轻重量的组合可能形成稳定方向",
+          "must_have_specs": ["卷度自然", "发量与标称一致"],
+          "optional_specs": ["轻量结构", "多长度选择"],
+          "avoid_specs": ["发量稀疏", "重量过大影响舒适度"],
+          "inspection_checks": ["背面发量覆盖检查", "连续佩戴舒适度记录"]
+        }
+      ]
+    }
+  }
+}

@@ -44,6 +44,16 @@ env -u HTTP_PROXY -u HTTPS_PROXY python3 skills/voc-insight/scripts/run_voc_insi
   --batch-id FM_TH_HAIRCLIP_20260622_165607 --scope product \
   --product-id 1729659517276948599 --usecase ads_mixcut --write
 
+# 墨西哥假发 VOC 富化预检（金标质量门 + 形态/类目草稿，不写正式表）
+env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy python3 \
+  skills/voc-insight/scripts/enrich_wigs_voc.py \
+  --batch-id FM_MX_WIGS_20260717_144121
+
+# 金标质量门通过后，仅发布 evidence + form summary（不会发布 ADS）
+env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy python3 \
+  skills/voc-insight/scripts/enrich_wigs_voc.py \
+  --batch-id FM_MX_WIGS_20260717_144121 --write-enriched
+
 # ADS 钩子包（读取商品内容任务表的人工确认字段 + 落库到 voc_ads_hook_package）
 env -u HTTP_PROXY -u HTTPS_PROXY python3 skills/voc-insight/scripts/build_ads_hook_package.py \
   --batch-id FM_TH_HAIRCLIP_20260622_165607 \
@@ -123,9 +133,12 @@ env -u HTTP_PROXY -u HTTPS_PROXY python3 skills/voc-insight/scripts/build_ads_ho
 skills/voc-insight/
   SKILL.md                       本文件
   scripts/run_voc_insight.py     确定性执行入口（含 DDL，--write 自动建表）
+  scripts/enrich_wigs_voc.py     MX 假发原始 VOC 富化 dry-run（金标未过不放行）
   references/schema.md           RDS 表结构 + 新增表 DDL
   references/scoring_rules.md    样本门槛 + 升级规则 + guardrails
   references/output_contract.md  输出 JSON 结构
+  references/wigs_voc_taxonomy_v1.json   MX 假发形态/信号/质量目标词表
+  references/wigs_voc_gold_sample_v1.json 20 条人工金标
 ```
 
 ## 设计原则（V1）

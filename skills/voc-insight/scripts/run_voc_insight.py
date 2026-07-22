@@ -107,6 +107,61 @@ def load_video_proof_taxonomy() -> Dict[str, Any]:
             pass
     return {}
 
+
+_CATEGORY_SIGNAL_META_CACHE: Optional[Dict[str, Dict[str, str]]] = None
+
+
+def load_category_signal_meta() -> Dict[str, Dict[str, str]]:
+    """Load category signal metadata while preserving legacy signal behavior."""
+    global _CATEGORY_SIGNAL_META_CACHE
+    if _CATEGORY_SIGNAL_META_CACHE is not None:
+        return _CATEGORY_SIGNAL_META_CACHE
+    merged: Dict[str, Dict[str, str]] = {}
+    for filename in ("wigs_voc_taxonomy_v1.json",):
+        path = os.path.join(_REFS_DIR, filename)
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                payload = json.load(f)
+            for tag, entry in (payload.get("signals") or {}).items():
+                if not isinstance(entry, dict):
+                    continue
+                merged[str(tag)] = {
+                    str(k): str(v) for k, v in entry.items()
+                    if k in {"insight_type", "insight_role", "insight_id", "title_zh", "local_voice"}
+                }
+        except Exception:
+            continue
+    _CATEGORY_SIGNAL_META_CACHE = merged
+    return merged
+
+
+def signal_meta_for_tag(tag: str, agg: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    if tag in SIGNAL_META:
+        return SIGNAL_META[tag]
+    category_meta = load_category_signal_meta().get(tag)
+    if category_meta:
+        return category_meta
+    sentiment_counts = dict((agg or {}).get("sentiment_counts") or {})
+    negative = int(sentiment_counts.get("negative") or 0)
+    positive = int(sentiment_counts.get("positive") or 0)
+    if negative > positive:
+        return {
+            "insight_type": "pain_point",
+            "insight_role": "risk_guard",
+            "insight_id": "pain_" + tag,
+            "title_zh": tag,
+            "local_voice": "",
+        }
+    return {
+        "insight_type": "selling_point",
+        "insight_role": "product_core_selling_point",
+        "insight_id": "selling_" + tag,
+        "title_zh": tag,
+        "local_voice": "",
+    }
+
 def proof_meta_for_signal(signal_tag: str, insight_type: str, insight_role: str) -> Dict[str, Any]:
     taxonomy = load_video_proof_taxonomy()
     signal_map = taxonomy.get("signal_map", {})
@@ -148,12 +203,14 @@ FORM_CANDIDATE = "form_candidate"           # >=5 products AND >=30 voc
 FORM_ADS = "ads_candidate"                  # >=8 products AND >=60 voc
 # category-level
 CATEGORY_CANDIDATE = "category_candidate"
+CATEGORY_ADS_CANDIDATE = "category_ads_candidate"
 
 USECASES_BY_CONFIDENCE: Dict[str, List[str]] = {
     FORM_ADS: [USECASE_ADS, USECASE_CONTENT, USECASE_CREATOR, USECASE_SELECTION],
     FORM_CANDIDATE: [USECASE_CONTENT, USECASE_CREATOR, USECASE_ADS],
     FORM_PARTIAL: [USECASE_CREATOR, USECASE_CONTENT],
-    CATEGORY_CANDIDATE: [USECASE_ADS, USECASE_CONTENT, USECASE_CREATOR, USECASE_SELECTION],
+    CATEGORY_CANDIDATE: [USECASE_CONTENT, USECASE_CREATOR, USECASE_SELECTION],
+    CATEGORY_ADS_CANDIDATE: [USECASE_ADS, USECASE_CONTENT, USECASE_CREATOR, USECASE_SELECTION],
     FORM_OBSERVE_ONLY: [],
 }
 NOT_FOR_USECASES: Dict[str, List[str]] = {
@@ -166,7 +223,8 @@ MIN_FORM_INSIGHT_EVIDENCE = 2
 # Min forms a signal must cover (with >=1 evidence) to be promoted to category.
 MIN_CATEGORY_FORMS = 3
 MIN_CATEGORY_PRODUCTS = 10
-MIN_CATEGORY_VOC = 15
+MIN_CATEGORY_VOC = 30
+MIN_CATEGORY_ADS_VOC = 80
 MAX_CATEGORY_FORM_CONTRIB = 0.60
 MAX_CATEGORY_PRODUCT_CONTRIB = 0.30
 
@@ -433,6 +491,8 @@ def category_confidence(form_covered: int, products: int, voc: int,
         notes.append("single_product_bias")
     if max_form_contrib > MAX_CATEGORY_FORM_CONTRIB or max_product_contrib > MAX_CATEGORY_PRODUCT_CONTRIB:
         return FORM_PARTIAL, notes
+    if voc >= MIN_CATEGORY_ADS_VOC:
+        return CATEGORY_ADS_CANDIDATE, notes
     return CATEGORY_CANDIDATE, notes
 
 
@@ -510,13 +570,7 @@ def aggregate_signals(rows: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, Any
 
 def build_insight(tag: str, scope: str, scope_key: str, confidence: str,
                   agg: Dict[str, Any], extra_notes: Optional[List[str]] = None) -> Dict[str, Any]:
-    meta = SIGNAL_META.get(tag, {
-        "insight_type": "selling_point",
-        "insight_role": "product_core_selling_point",
-        "insight_id": "selling_" + tag,
-        "title_zh": tag,
-        "local_voice": "",
-    })
+    meta = signal_meta_for_tag(tag, agg)
     insight_type = meta["insight_type"]
     insight_role = meta.get("insight_role", "product_core_selling_point")
     rec, not_for = usecases_for(confidence, insight_type, insight_role)
@@ -962,6 +1016,9 @@ def run_pipeline(args: argparse.Namespace) -> Dict[str, Any]:
             # category confidence = best among category insights
             cat_conf = FORM_OBSERVE_ONLY
             for ins in cat_insights:
+                if ins["confidence"] == CATEGORY_ADS_CANDIDATE:
+                    cat_conf = CATEGORY_ADS_CANDIDATE
+                    break
                 if ins["confidence"] == CATEGORY_CANDIDATE:
                     cat_conf = CATEGORY_CANDIDATE
                     break

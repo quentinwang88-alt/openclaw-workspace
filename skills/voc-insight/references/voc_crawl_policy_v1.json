@@ -1,0 +1,125 @@
+{
+  "policy_version": "voc_crawl_policy_v1",
+  "scope": {
+    "required": ["batch_id", "market", "category_key"],
+    "optional": ["category_scope_name"],
+    "reject_cross_scope_rows": true
+  },
+  "sample_pools": {
+    "allowed": ["natural_distribution", "diagnostic_risk"],
+    "default": "natural_distribution",
+    "do_not_mix_for_prevalence": true
+  },
+  "quotas": {
+    "category": {
+      "min_products": 20,
+      "min_effective_voc": 100,
+      "target_effective_voc": 150
+    },
+    "product_form": {
+      "min_products": 5,
+      "min_effective_voc": 30,
+      "max_single_product_share": 0.3
+    },
+    "single_product": {
+      "min_effective_voc_for_clue": 3,
+      "max_natural_distribution_reviews": 10
+    }
+  },
+  "product_identity": {
+    "priority": ["source_product_id", "product_id_from_stable_url", "url_sha256"],
+    "quarantine_if_all_missing": true,
+    "derived_url_id_prefix": "urlsha256:"
+  },
+  "review_identity": {
+    "priority": ["source_review_id", "derived_review_fingerprint"],
+    "fingerprint_fields": ["source_name", "fastmoss_product_id", "normalized_voc_text", "reviewed_at_or_empty"],
+    "hash": "sha256"
+  },
+  "normalization": {
+    "unicode": "NFKC",
+    "trim": true,
+    "collapse_whitespace": true,
+    "preserve_original_text": true,
+    "translate_before_hash": false
+  },
+  "required_product_fields": [
+    "batch_id",
+    "market",
+    "category_key",
+    "fastmoss_product_id"
+  ],
+  "degradable_product_fields": {
+    "pool_type": "unknown",
+    "product_title": "",
+    "category_path": "",
+    "sales_metric_json": {}
+  },
+  "required_voc_fields": [
+    "batch_id",
+    "fastmoss_product_id",
+    "voc_text"
+  ],
+  "derived_voc_fields": {
+    "normalized_voc_text": "normalize(voc_text)",
+    "voc_text_hash": "sha256(normalized_voc_text)",
+    "voc_rank": "source_rank_or_page_order_from_1",
+    "pool_type": "inherit_product_pool_type_or_unknown"
+  },
+  "statuses": [
+    "success",
+    "success_partial",
+    "no_visible_voc",
+    "blocked_auth",
+    "blocked_captcha",
+    "rate_limited",
+    "transient_network_error",
+    "parser_changed",
+    "permanent_not_found",
+    "missing_product_identity",
+    "invalid_scope"
+  ],
+  "retry": {
+    "automatic_for": ["timeout", "connection_reset", "http_429", "http_5xx"],
+    "same_run_max_attempts": 3,
+    "backoff_seconds": [30, 120, 600],
+    "jitter_ratio_max": 0.3,
+    "delayed_retry_seconds": [21600, 86400],
+    "do_not_blind_retry": ["blocked_auth", "blocked_captcha", "parser_changed", "missing_product_identity"]
+  },
+  "recrawl": {
+    "new_pool_no_visible_voc_days": 7,
+    "classic_pool_no_visible_voc_days": 30,
+    "permanent_not_found_verify_days": 7
+  },
+  "resume": {
+    "persist_per_product": true,
+    "upsert_reviews": true,
+    "store_last_success_cursor": true,
+    "do_not_rollback_other_products": true
+  },
+  "dedupe": {
+    "same_review_id_same_product": "keep_one",
+    "same_text_same_product": "keep_one",
+    "same_long_text_cross_product": "keep_and_flag_suspected_template",
+    "same_short_text_cross_product": "keep"
+  },
+  "proxy_evidence": {
+    "allowed": true,
+    "required_fields": ["evidence_scope", "proxy_for_product_id", "source_product_id"],
+    "evidence_scope_value": "category_proxy",
+    "allow_product_reputation_inference": false
+  },
+  "circuit_breakers": {
+    "consecutive_review_section_not_loaded": 5,
+    "core_node_missing_product_ratio": 0.2,
+    "invalid_or_empty_voc_ratio": 0.5,
+    "no_visible_voc_ratio_when_target_gt_10": 0.8,
+    "max_single_product_voc_share": 0.3
+  },
+  "quality_statuses": ["ok", "warning", "blocked"],
+  "minimum_downstream_tables": [
+    "fastmoss_voc_product_snapshot",
+    "fastmoss_voc_raw"
+  ]
+}

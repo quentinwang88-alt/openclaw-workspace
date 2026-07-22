@@ -1,0 +1,28 @@
+{
+  "version": "voc_aspect_taxonomy_v1",
+  "default_sample_pool": "natural_distribution",
+  "default_evidence_scope": "direct",
+  "signals": {
+    "natural_look": {"aspect_group": "appearance", "opinion_target": "自然衔接与真人发感", "desired_outcome": "佩戴后与原发自然衔接", "controllability": "product_spec"},
+    "appearance_style": {"aspect_group": "appearance", "opinion_target": "整体造型效果", "desired_outcome": "佩戴后造型更好看", "controllability": "product_spec"},
+    "color_match": {"aspect_group": "color", "opinion_target": "色号与颜色表现", "desired_outcome": "实物颜色与展示一致并融入原发", "controllability": "product_spec"},
+    "color_match_issue": {"aspect_group": "color", "opinion_target": "色号准确度", "desired_outcome": "实物色号与图片和原发匹配", "controllability": "product_spec", "severity": "medium"},
+    "texture_softness": {"aspect_group": "material", "opinion_target": "触感柔软度", "desired_outcome": "触感柔软且便于梳理", "controllability": "product_spec"},
+    "volume_length": {"aspect_group": "appearance", "opinion_target": "发量与长度", "desired_outcome": "达到预期发量、长度和蓬松度", "controllability": "product_spec"},
+    "easy_install": {"aspect_group": "install", "opinion_target": "佩戴便利性", "desired_outcome": "无需复杂学习即可完成佩戴", "controllability": "product_spec"},
+    "installation_difficulty_issue": {"aspect_group": "install", "opinion_target": "佩戴学习门槛", "desired_outcome": "佩戴步骤清晰且完成后自然", "controllability": "content_instruction", "severity": "medium"},
+    "hold_stability": {"aspect_group": "hold", "opinion_target": "固定稳定性", "desired_outcome": "活动后仍保持稳定", "controllability": "product_spec"},
+    "fit_concealment_issue": {"aspect_group": "install", "opinion_target": "贴合与真发遮盖", "desired_outcome": "佩戴后无明显鼓包或真发外露", "controllability": "product_spec", "severity": "high"},
+    "length_fit_issue": {"aspect_group": "fit", "opinion_target": "长度与尺寸适配", "desired_outcome": "长度和刘海无需大量二次修剪", "controllability": "product_spec", "severity": "medium"},
+    "comfort_weight": {"aspect_group": "comfort", "opinion_target": "重量与舒适度", "desired_outcome": "长时间佩戴负担较小", "controllability": "product_spec"},
+    "styleability": {"aspect_group": "usage", "opinion_target": "梳理与造型能力", "desired_outcome": "可以安全梳理并调整造型", "controllability": "product_spec"},
+    "tangle_resistance": {"aspect_group": "durability", "opinion_target": "抗打结与掉发", "desired_outcome": "梳理和使用过程中不易打结掉发", "controllability": "product_spec"},
+    "tangle_shedding_issue": {"aspect_group": "durability", "opinion_target": "打结与掉发", "desired_outcome": "多次梳理后仍保持完整顺滑", "controllability": "product_spec", "severity": "high"},
+    "quality_durability": {"aspect_group": "material", "opinion_target": "材质与耐用性", "desired_outcome": "材质和做工支持重复使用", "controllability": "product_spec"},
+    "quality_durability_issue": {"aspect_group": "material", "opinion_target": "材质与耐用性", "desired_outcome": "避免一次性使用或快速损坏", "controllability": "product_spec", "severity": "high"},
+    "synthetic_shine_issue": {"aspect_group": "appearance", "opinion_target": "合成纤维光泽", "desired_outcome": "自然光下无明显塑料反光", "controllability": "product_spec", "severity": "medium"},
+    "value_price": {"aspect_group": "value", "opinion_target": "价格质量比", "desired_outcome": "价格与实际质量相匹配", "controllability": "offer"},
+    "repeat_purchase": {"aspect_group": "trust", "opinion_target": "复购与推荐意愿", "desired_outcome": "产品体验足以支持再次购买", "controllability": "uncontrollable"},
+    "fast_shipping_mx": {"aspect_group": "fulfillment", "opinion_target": "到货速度", "desired_outcome": "按承诺时间送达", "controllability": "fulfillment"}
+  }
+}

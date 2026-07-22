@@ -45,7 +45,7 @@
   "scope_key": "basic_hair_clip | hair_clip",
   "title_zh": "款式好看、颜色/造型容易被认可",
   "local_voice": "สวย น่ารัก สีตรงใจ",
-  "confidence": "partial_candidate | form_candidate | ads_candidate | category_candidate | observe_only",
+  "confidence": "partial_candidate | form_candidate | ads_candidate | category_candidate | category_ads_candidate | observe_only",
   "product_count": 5,
   "evidence_count": 22,
   "signal_tags": ["appearance_cute_color"],

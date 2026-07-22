@@ -21,11 +21,13 @@
 
 - 覆盖 **≥3** 个商品形态
 - 覆盖 **≥10** 个商品
-- 总 VOC **≥20**
+- 同一信号有效证据 **≥30**
 - 单一形态贡献 **≤60%**
 - 单一商品贡献 **≤30%**
 
-不满足 80 VOC / 形态数 / 商品数 → `observe_only`（仍输出观察）；
+满足上述条件但信号证据 `<80` → `category_candidate`，可用于内容、达人和选品参考，不能进入 ADS；
+信号证据 `≥80` → `category_ads_candidate`，才允许进入类目级 ADS 候选；
+不满足 30 条证据 / 形态数 / 商品数 → `observe_only`（仍输出观察）；
 满足样本量但有贡献偏态 → `partial_candidate` 并打 `single_form_bias` / `single_product_bias`。
 
 判定函数：`category_confidence(...)`。
@@ -71,7 +73,8 @@
 | `ads_candidate` | ads_mixcut, content_copy, creator_brief, selection | — |
 | `form_candidate` | content_copy, creator_brief, ads_mixcut | — |
 | `partial_candidate` | creator_brief, content_copy | ads_mixcut, selection |
-| `category_candidate` + `product_core_selling_point` | ads_mixcut, content_copy, creator_brief, selection | — |
+| `category_candidate` + `product_core_selling_point` | content_copy, creator_brief, selection | ads_mixcut |
+| `category_ads_candidate` + `product_core_selling_point` | ads_mixcut, content_copy, creator_brief, selection | — |
 | `category_candidate` + `fulfillment_trust` | content_copy, creator_brief | ads_mixcut, selection |
 | `category_candidate` + `offer_selling_point` | content_copy, creator_brief | ads_mixcut, selection |
 | `observe_only` | — | 全部 |

@@ -30,13 +30,33 @@ except ImportError:
 
 USECASE_ADS = "ads_mixcut"
 CORE_ROLE = "product_core_selling_point"
-CORE_INSIGHT_IDS = {"selling_appearance_cute_color", "selling_hold_quality"}
-NON_CORE_IDS = {"selling_fast_shipping", "selling_value_quantity", "pain_slow_shipping", "pain_fulfillment_missing"}
+CORE_INSIGHT_IDS = {
+    "selling_appearance_cute_color", "selling_hold_quality",
+    "selling_natural_look", "selling_appearance_style", "selling_color_match",
+    "selling_texture_softness", "selling_volume_length", "selling_easy_install",
+    "selling_hold_stability", "selling_styleability", "selling_tangle_resistance",
+}
+NON_CORE_IDS = {
+    "selling_fast_shipping", "selling_value_quantity", "selling_value_price",
+    "selling_repeat_purchase", "pain_slow_shipping", "pain_fulfillment_missing",
+    "pain_tangle_shedding", "pain_synthetic_shine", "pain_fit_concealment",
+    "pain_length_fit", "pain_color_match", "pain_installation_difficulty",
+    "pain_quality_durability",
+}
 VIDEO_USAGE_LANES = {"video_hook", "video_support"}
 MIN_ADS_VIDEO_FIT_SCORE = 70
 HOOK_INTENTS = {
     "selling_appearance_cute_color": "tryon_result",
     "selling_hold_quality": "contrast_reveal",
+    "selling_natural_look": "tryon_result",
+    "selling_appearance_style": "tryon_result",
+    "selling_color_match": "tryon_result",
+    "selling_texture_softness": "material_closeup",
+    "selling_volume_length": "tryon_result",
+    "selling_easy_install": "contrast_reveal",
+    "selling_hold_stability": "contrast_reveal",
+    "selling_styleability": "material_closeup",
+    "selling_tangle_resistance": "material_closeup",
 }
 
 # taxonomy + adapter paths
@@ -74,6 +94,7 @@ CATEGORY_TO_ADAPTER_KEY = {
     "womens_tops": "womens_outerwear",
     "womens_outerwear": "womens_outerwear",
     "bags": "bags",
+    "wigs": "wigs",
 }
 
 def select_category_adapter(point: Dict[str, Any], anchor: Dict[str, Any],

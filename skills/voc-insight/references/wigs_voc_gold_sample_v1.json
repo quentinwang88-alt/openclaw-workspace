@@ -1,0 +1,147 @@
+{
+  "version": "v1",
+  "batch_id": "FM_MX_WIGS_20260717_144121",
+  "review_note": "20条人工金标，覆盖主要形态、正向、负向、混合、规格噪声和错商品评论。",
+  "samples": [
+    {
+      "fastmoss_product_id": "1731590920635385759",
+      "voc_rank": 1,
+      "is_valid_voc": true,
+      "product_form": "ponytail_extension",
+      "signal_tags": ["natural_look", "texture_softness", "volume_length", "fast_shipping_mx"]
+    },
+    {
+      "fastmoss_product_id": "1731590920635385759",
+      "voc_rank": 4,
+      "is_valid_voc": true,
+      "product_form": "ponytail_extension",
+      "signal_tags": ["natural_look", "easy_install", "hold_stability", "quality_durability", "repeat_purchase"]
+    },
+    {
+      "fastmoss_product_id": "1731766816177097065",
+      "voc_rank": 1,
+      "is_valid_voc": true,
+      "product_form": "hairpiece_extension",
+      "signal_tags": []
+    },
+    {
+      "fastmoss_product_id": "1731766816177097065",
+      "voc_rank": 2,
+      "is_valid_voc": true,
+      "product_form": "hairpiece_extension",
+      "signal_tags": ["synthetic_shine_issue"]
+    },
+    {
+      "fastmoss_product_id": "1731905963149002749",
+      "voc_rank": 1,
+      "is_valid_voc": true,
+      "product_form": "clip_in_extension",
+      "signal_tags": ["appearance_style", "color_match", "styleability", "tangle_resistance", "value_price"]
+    },
+    {
+      "fastmoss_product_id": "1731905963149002749",
+      "voc_rank": 2,
+      "is_valid_voc": true,
+      "product_form": "clip_in_extension",
+      "signal_tags": ["appearance_style", "easy_install", "hold_stability"]
+    },
+    {
+      "fastmoss_product_id": "1732681153678312722",
+      "voc_rank": 1,
+      "is_valid_voc": true,
+      "product_form": "full_wig",
+      "signal_tags": ["appearance_style", "fit_concealment_issue", "length_fit_issue", "installation_difficulty_issue"]
+    },
+    {
+      "fastmoss_product_id": "1732681153678312722",
+      "voc_rank": 4,
+      "is_valid_voc": false,
+      "product_form": "full_wig",
+      "signal_tags": []
+    },
+    {
+      "fastmoss_product_id": "1732681153678312722",
+      "voc_rank": 5,
+      "is_valid_voc": true,
+      "product_form": "full_wig",
+      "signal_tags": ["natural_look", "texture_softness", "tangle_resistance", "quality_durability", "value_price"]
+    },
+    {
+      "fastmoss_product_id": "1732696336446096638",
+      "voc_rank": 3,
+      "is_valid_voc": true,
+      "product_form": "braiding_hair",
+      "signal_tags": ["tangle_shedding_issue", "quality_durability_issue", "value_price", "fast_shipping_mx"]
+    },
+    {
+      "fastmoss_product_id": "1732870379371988423",
+      "voc_rank": 3,
+      "is_valid_voc": false,
+      "product_form": "clip_in_extension",
+      "signal_tags": []
+    },
+    {
+      "fastmoss_product_id": "1732870379371988423",
+      "voc_rank": 4,
+      "is_valid_voc": true,
+      "product_form": "clip_in_extension",
+      "signal_tags": ["natural_look", "quality_durability"]
+    },
+    {
+      "fastmoss_product_id": "1733047521668138716",
+      "voc_rank": 2,
+      "is_valid_voc": true,
+      "product_form": "clip_in_extension",
+      "signal_tags": ["appearance_style", "synthetic_shine_issue", "color_match_issue"]
+    },
+    {
+      "fastmoss_product_id": "1733558186017326634",
+      "voc_rank": 1,
+      "is_valid_voc": false,
+      "product_form": "clip_in_extension",
+      "signal_tags": []
+    },
+    {
+      "fastmoss_product_id": "1733558186017326634",
+      "voc_rank": 3,
+      "is_valid_voc": true,
+      "product_form": "clip_in_extension",
+      "signal_tags": ["synthetic_shine_issue", "length_fit_issue", "value_price"]
+    },
+    {
+      "fastmoss_product_id": "1733592079774287402",
+      "voc_rank": 1,
+      "is_valid_voc": true,
+      "product_form": "braiding_hair",
+      "signal_tags": ["color_match"]
+    },
+    {
+      "fastmoss_product_id": "1733812024348477196",
+      "voc_rank": 4,
+      "is_valid_voc": true,
+      "product_form": "ponytail_extension",
+      "signal_tags": ["appearance_style", "color_match", "volume_length", "repeat_purchase"]
+    },
+    {
+      "fastmoss_product_id": "1733812024348477196",
+      "voc_rank": 5,
+      "is_valid_voc": true,
+      "product_form": "ponytail_extension",
+      "signal_tags": ["tangle_shedding_issue", "quality_durability_issue"]
+    },
+    {
+      "fastmoss_product_id": "1734489403845150567",
+      "voc_rank": 1,
+      "is_valid_voc": true,
+      "product_form": "clip_in_extension",
+      "signal_tags": ["natural_look", "volume_length", "styleability", "tangle_resistance", "quality_durability"]
+    },
+    {
+      "fastmoss_product_id": "1734489403845150567",
+      "voc_rank": 4,
+      "is_valid_voc": true,
+      "product_form": "clip_in_extension",
+      "signal_tags": ["appearance_style", "quality_durability", "value_price"]
+    }
+  ]
+}

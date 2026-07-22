@@ -62,6 +62,78 @@
       "negative_constraints": ["不要塞入夸张大件", "不要只做静物摆拍"]
     },
     {
+      "adapter_id": "wigs.appearance_transform.blend_reveal",
+      "category": "wigs",
+      "product_form": "*",
+      "proof_archetype": "appearance_transform",
+      "priority": 110,
+      "allowed_segment_types": ["tryon_result", "mirror_routine", "product_display"],
+      "required_action_zh": "先展示佩戴前状态，再实际佩戴假发或接发，最后在自然光下展示正面、发根衔接和背面效果",
+      "shot_plan": ["佩戴前发型或商品本体", "完成佩戴或接发", "正面发根近景", "转身展示背面长度和发量"],
+      "safe_micro_actions": ["整理发际线", "轻转头", "拨开发丝展示衔接", "背面停留展示"],
+      "negative_constraints": ["不要用滤镜改变发色", "不要省略真实佩戴状态", "不要宣称百分百真人发"]
+    },
+    {
+      "adapter_id": "wigs.installation_routine.attach_and_release",
+      "category": "wigs",
+      "product_form": "*",
+      "proof_archetype": "installation_routine",
+      "priority": 110,
+      "allowed_segment_types": ["tryon_result", "mirror_routine"],
+      "required_action_zh": "近景展示卡扣、抽绳或头套结构，完成关键佩戴步骤后手离开并展示完成状态",
+      "shot_plan": ["固定结构近景", "实际佩戴固定", "手离开", "完成状态展示"],
+      "safe_micro_actions": ["打开并扣合卡扣", "收紧抽绳", "整理发根", "手离开后转头"],
+      "negative_constraints": ["不要隐藏关键固定步骤", "不要生成商品不存在的固定结构"]
+    },
+    {
+      "adapter_id": "wigs.state_stability.gentle_turn",
+      "category": "wigs",
+      "product_form": "*",
+      "proof_archetype": "state_stability_proof",
+      "priority": 110,
+      "allowed_segment_types": ["tryon_result", "mirror_routine"],
+      "required_action_zh": "完成佩戴后手离开固定位置，轻微左右转头并停留展示位置没有明显移动",
+      "shot_plan": ["完成佩戴", "手离开固定处", "轻微左右转头", "发根和固定位置近景"],
+      "safe_micro_actions": ["轻转头", "抬手再放下", "拨动少量发丝"],
+      "negative_constraints": ["不要剧烈甩头", "不要承诺全天不掉", "不要拉扯头皮"]
+    },
+    {
+      "adapter_id": "wigs.texture_hand.finger_comb",
+      "category": "wigs",
+      "product_form": "*",
+      "proof_archetype": "texture_hand_proof",
+      "priority": 110,
+      "allowed_segment_types": ["product_display", "detail_atmosphere"],
+      "required_action_zh": "近景展示发丝后，用手指从中段轻梳到发尾，保留梳理后的真实状态",
+      "shot_plan": ["发丝纹理近景", "手指轻梳一次", "发尾状态停留"],
+      "safe_micro_actions": ["手指轻梳", "轻抚发丝", "提起一小束展示垂感"],
+      "negative_constraints": ["不要宣称永久柔顺", "不要把合成发改成真人发材质"]
+    },
+    {
+      "adapter_id": "wigs.comb_through.single_pass",
+      "category": "wigs",
+      "product_form": "*",
+      "proof_archetype": "comb_through_proof",
+      "priority": 110,
+      "allowed_segment_types": ["product_display", "detail_atmosphere"],
+      "required_action_zh": "用宽齿梳对一小束发丝完成一次连续梳理，并展示梳理后的发尾",
+      "shot_plan": ["梳理前发束近景", "宽齿梳单次通过", "梳理后发尾停留"],
+      "safe_micro_actions": ["宽齿梳单次梳理", "手扶发束", "展示梳齿和发尾"],
+      "negative_constraints": ["不要承诺永不打结或掉发", "不要反复剪辑伪造一次通过"]
+    },
+    {
+      "adapter_id": "wigs.styling_action.safe_style",
+      "category": "wigs",
+      "product_form": "*",
+      "proof_archetype": "styling_action_proof",
+      "priority": 110,
+      "allowed_segment_types": ["product_display", "tryon_result", "mirror_routine"],
+      "required_action_zh": "先确认商品耐热或可造型属性，再展示一次安全梳理或低风险造型动作及结果",
+      "shot_plan": ["造型前状态", "安全梳理或造型动作", "造型后状态"],
+      "safe_micro_actions": ["梳理发丝", "低风险定型", "整理卷度"],
+      "negative_constraints": ["未确认耐热时禁止热工具", "不要承诺反复高温不损伤"]
+    },
+    {
       "adapter_id": "generic.appearance_transform.default",
       "category": "*",
       "product_form": "*",

@@ -1,0 +1,4 @@
+interface:
+  display_name: "VOC 产品机会洞察"
+  short_description: "独立分析消费者VOC机会，并同步飞书表格和知识库报告"
+  default_prompt: "Use $voc-opportunity-insight to analyze a VOC batch, sync structured opportunity evidence to Feishu Bitable, and publish the overview as a Feishu wiki document."

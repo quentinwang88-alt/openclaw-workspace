@@ -1,0 +1,128 @@
+{
+  "contract_version": "voc_opportunity_output_contract_v2",
+  "mode": "opportunity_reference",
+  "forbidden_outputs": [
+    "recommended_product_id",
+    "product_potential_score",
+    "final_action",
+    "recommended_test",
+    "need_lookup",
+    "procurement_conclusion",
+    "margin_conclusion"
+  ],
+  "confidence_levels": {
+    "signal_only": {
+      "description": "insufficient breadth for an opportunity conclusion"
+    },
+    "emerging_opportunity": {
+      "min_products": 3,
+      "min_evidence": 10
+    },
+    "direction_candidate": {
+      "min_products": 5,
+      "min_evidence": 20,
+      "max_single_product_contribution": 0.3
+    },
+    "stable_reference": {
+      "min_products": 8,
+      "min_evidence": 40,
+      "min_batches": 2,
+      "max_single_product_contribution": 0.3
+    }
+  },
+  "opportunity_types": [
+    "established_preference",
+    "pain_gap",
+    "feature_upgrade",
+    "usage_scenario",
+    "risk_only"
+  ],
+  "trend_statuses": [
+    "first_observation",
+    "new",
+    "strengthened",
+    "stable",
+    "weakened",
+    "disappeared"
+  ],
+  "atomic_evidence_required_fields": [
+    "atomic_evidence_id",
+    "evidence_id",
+    "segment_index",
+    "market",
+    "category_key",
+    "product_id",
+    "product_form",
+    "sample_pool",
+    "evidence_scope",
+    "aspect_group",
+    "signal_tag",
+    "polarity",
+    "opinion_text",
+    "source_text",
+    "extraction_method",
+    "extractor_version"
+  ],
+  "signal_summary_required_metrics": [
+    "evidence_count",
+    "product_count",
+    "batch_count",
+    "positive_count",
+    "negative_count",
+    "natural_sample_count",
+    "diagnostic_sample_count",
+    "direct_evidence_count",
+    "proxy_evidence_count",
+    "max_product_contribution",
+    "max_form_contribution",
+    "evidence_refs",
+    "contradicting_evidence_refs"
+  ],
+  "opportunity_card_required_fields": [
+    "opportunity_id",
+    "run_id",
+    "market",
+    "category_key",
+    "product_forms",
+    "opportunity_type",
+    "title_zh",
+    "user_job",
+    "unmet_need",
+    "opportunity_hypothesis",
+    "must_have_specs",
+    "optional_specs",
+    "avoid_specs",
+    "supporting_signal_ids",
+    "contradicting_signal_ids",
+    "metrics",
+    "confidence",
+    "evidence_refs",
+    "limitations",
+    "status",
+    "generated_at"
+  ],
+  "claim_validation": {
+    "require_evidence_for_user_job": true,
+    "require_evidence_or_hypothesis_flag_for_specs": true,
+    "require_existing_evidence_refs": true,
+    "preserve_contradicting_evidence": true,
+    "model_cannot_raise_confidence": true,
+    "model_cannot_change_metrics": true
+  },
+  "default_artifacts": [
+    "voc_opportunity_overview.md",
+    "voc_opportunity_cards.json",
+    "voc_opportunity_cards.csv",
+    "voc_spec_risk_library.csv",
+    "voc_atomic_evidence.csv"
+  ],
+  "persistence_tables": [
+    "voc_opportunity_run",
+    "voc_atomic_evidence",
+    "voc_signal_summary",
+    "voc_opportunity_card",
+    "voc_opportunity_evidence_map",
+    "voc_spec_risk_library",
+    "voc_opportunity_delta"
+  ]
+}

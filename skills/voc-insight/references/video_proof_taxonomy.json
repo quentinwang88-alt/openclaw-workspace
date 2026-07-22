@@ -1,6 +1,170 @@
 {
   "version": "v1",
   "signal_map": {
+    "natural_look": {
+      "voc_signal": "natural_look",
+      "proof_archetype": "appearance_transform",
+      "usage_lane": "video_hook",
+      "video_fit_score": 90,
+      "required_beats": ["before_state", "wear_or_attach", "hairline_or_blend_closeup", "turn_reveal"],
+      "visual_goal_zh": "佩戴前后对比，并近景展示发际线或与原发的衔接",
+      "forbidden_claims": ["不要承诺百分百真人发", "不要只凭远景声称完全看不出"]
+    },
+    "appearance_style": {
+      "voc_signal": "appearance",
+      "proof_archetype": "appearance_transform",
+      "usage_lane": "video_hook",
+      "video_fit_score": 85,
+      "required_beats": ["before_state", "wear_or_attach", "reveal_after"],
+      "visual_goal_zh": "展示佩戴前后整体造型变化",
+      "forbidden_claims": ["不要把审美反馈写成适合所有人"]
+    },
+    "color_match": {
+      "voc_signal": "color_match",
+      "proof_archetype": "appearance_transform",
+      "usage_lane": "video_hook",
+      "video_fit_score": 80,
+      "required_beats": ["daylight_color", "attach_to_hair", "blend_closeup"],
+      "visual_goal_zh": "在自然光下展示色号以及与原发的衔接效果",
+      "forbidden_claims": ["不要承诺色号适配所有发色", "不要通过滤镜改变颜色"]
+    },
+    "texture_softness": {
+      "voc_signal": "texture",
+      "proof_archetype": "texture_hand_proof",
+      "usage_lane": "video_hook",
+      "video_fit_score": 75,
+      "required_beats": ["fiber_closeup", "finger_comb", "result_state"],
+      "visual_goal_zh": "用手指或宽齿梳展示纤维触感与梳理状态",
+      "forbidden_claims": ["不要仅凭画面宣称真人发", "不要承诺永久柔顺"]
+    },
+    "volume_length": {
+      "voc_signal": "volume_length",
+      "proof_archetype": "appearance_transform",
+      "usage_lane": "video_hook",
+      "video_fit_score": 80,
+      "required_beats": ["before_state", "wear_or_attach", "back_view_reveal"],
+      "visual_goal_zh": "从背面展示佩戴前后长度与发量变化",
+      "forbidden_claims": ["不要夸大实际长度和发量"]
+    },
+    "easy_install": {
+      "voc_signal": "installation",
+      "proof_archetype": "installation_routine",
+      "usage_lane": "video_hook",
+      "video_fit_score": 80,
+      "required_beats": ["show_attachment", "install_action", "hands_off_result"],
+      "visual_goal_zh": "完整展示关键固定步骤和手离开后的完成状态",
+      "forbidden_claims": ["不要省略关键固定步骤", "不要承诺所有人一次成功"]
+    },
+    "hold_stability": {
+      "voc_signal": "stability",
+      "proof_archetype": "state_stability_proof",
+      "usage_lane": "video_hook",
+      "video_fit_score": 80,
+      "required_beats": ["install_action", "hands_off", "gentle_head_turn", "after_state"],
+      "visual_goal_zh": "完成佩戴后轻微转头，展示固定位置没有明显移动",
+      "forbidden_claims": ["不要做剧烈甩头测试", "不要承诺全天不掉"]
+    },
+    "styleability": {
+      "voc_signal": "styleability",
+      "proof_archetype": "styling_action_proof",
+      "usage_lane": "video_hook",
+      "video_fit_score": 75,
+      "required_beats": ["before_style", "safe_styling_action", "after_style"],
+      "visual_goal_zh": "展示安全范围内的梳理或造型动作及结果",
+      "forbidden_claims": ["未确认耐热信息时不要使用高温工具", "不要承诺反复造型不损伤"]
+    },
+    "tangle_resistance": {
+      "voc_signal": "combability",
+      "proof_archetype": "comb_through_proof",
+      "usage_lane": "video_hook",
+      "video_fit_score": 75,
+      "required_beats": ["fiber_closeup", "single_comb_pass", "result_state"],
+      "visual_goal_zh": "用一次真实梳理动作展示当下的顺滑状态",
+      "forbidden_claims": ["不要承诺永不打结或永不掉发", "不要剪掉失败镜头伪造效果"]
+    },
+    "value_price": {
+      "voc_signal": "price_value",
+      "proof_archetype": "copy_only",
+      "usage_lane": "copy_only",
+      "video_fit_score": 30,
+      "required_beats": [],
+      "visual_goal_zh": "价格质量比只用于商品卡或辅助文案",
+      "copy_lane_reason": "price value is not a visual proof"
+    },
+    "repeat_purchase": {
+      "voc_signal": "trust",
+      "proof_archetype": "copy_only",
+      "usage_lane": "copy_only",
+      "video_fit_score": 25,
+      "required_beats": [],
+      "visual_goal_zh": "复购意愿只作为辅助信任信息",
+      "copy_lane_reason": "repeat purchase cannot be proven by product footage"
+    },
+    "fast_shipping_mx": {
+      "voc_signal": "fulfillment",
+      "proof_archetype": "copy_only",
+      "usage_lane": "copy_only",
+      "video_fit_score": 20,
+      "required_beats": [],
+      "visual_goal_zh": "到货及时只作为辅助信任信息",
+      "copy_lane_reason": "fulfillment speed cannot be proven by product footage"
+    },
+    "tangle_shedding_issue": {
+      "voc_signal": "risk_pain",
+      "proof_archetype": "reject",
+      "usage_lane": "reject",
+      "video_fit_score": 0,
+      "required_beats": [],
+      "visual_goal_zh": "打结掉发风险，不可包装成卖点"
+    },
+    "synthetic_shine_issue": {
+      "voc_signal": "risk_pain",
+      "proof_archetype": "reject",
+      "usage_lane": "reject",
+      "video_fit_score": 0,
+      "required_beats": [],
+      "visual_goal_zh": "塑料光泽风险，不可包装成卖点"
+    },
+    "fit_concealment_issue": {
+      "voc_signal": "risk_pain",
+      "proof_archetype": "reject",
+      "usage_lane": "reject",
+      "video_fit_score": 0,
+      "required_beats": [],
+      "visual_goal_zh": "贴合遮盖风险，不可包装成卖点"
+    },
+    "length_fit_issue": {
+      "voc_signal": "risk_pain",
+      "proof_archetype": "reject",
+      "usage_lane": "reject",
+      "video_fit_score": 0,
+      "required_beats": [],
+      "visual_goal_zh": "长度尺寸风险，不可包装成卖点"
+    },
+    "color_match_issue": {
+      "voc_signal": "risk_pain",
+      "proof_archetype": "reject",
+      "usage_lane": "reject",
+      "video_fit_score": 0,
+      "required_beats": [],
+      "visual_goal_zh": "色号不匹配风险，不可包装成卖点"
+    },
+    "installation_difficulty_issue": {
+      "voc_signal": "risk_pain",
+      "proof_archetype": "reject",
+      "usage_lane": "reject",
+      "video_fit_score": 0,
+      "required_beats": [],
+      "visual_goal_zh": "佩戴学习门槛，不可包装成卖点"
+    },
+    "quality_durability_issue": {
+      "voc_signal": "risk_pain",
+      "proof_archetype": "reject",
+      "usage_lane": "reject",
+      "video_fit_score": 0,
+      "required_beats": [],
+      "visual_goal_zh": "材质耐用风险，不可包装成卖点"
+    },
     "appearance_cute_color": {
       "voc_signal": "appearance",
       "proof_archetype": "appearance_transform",

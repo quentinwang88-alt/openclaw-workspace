@@ -1,0 +1,199 @@
+{
+  "version": "v1",
+  "market": "MX",
+  "category_key": "wigs",
+  "language": "es-MX",
+  "product_forms": {
+    "full_wig": "整顶假发",
+    "lace_wig": "蕾丝/发际线假发",
+    "ponytail_extension": "马尾接发",
+    "clip_in_extension": "卡扣接发",
+    "braiding_hair": "编发发束",
+    "hairpiece_extension": "隐形接发/局部发片",
+    "unknown_wig_extension": "未知假发/接发"
+  },
+  "attributes": {
+    "hair_material": ["synthetic", "human_hair", "mixed", "unknown"],
+    "texture": ["straight", "wavy", "curly", "kinky", "braided", "unknown"],
+    "length_band": ["short", "medium", "long", "extra_long", "unknown"],
+    "install_method": ["full_cap", "lace", "clip", "drawstring", "crochet", "halo", "unknown"],
+    "product_pack_type": ["single_or_unspecified", "bulk_or_assorted_set"]
+  },
+  "signals": {
+    "natural_look": {
+      "label_zh": "自然度/真人发感",
+      "insight_type": "selling_point",
+      "insight_role": "product_core_selling_point",
+      "insight_id": "selling_natural_look",
+      "title_zh": "佩戴后自然，真人发感更强",
+      "local_voice": "Se ve natural, como cabello real"
+    },
+    "appearance_style": {
+      "label_zh": "整体造型好看",
+      "insight_type": "selling_point",
+      "insight_role": "product_core_selling_point",
+      "insight_id": "selling_appearance_style",
+      "title_zh": "佩戴后的整体造型更好看",
+      "local_voice": "Se ve bonita y cambia el look"
+    },
+    "color_match": {
+      "label_zh": "色号与颜色表现",
+      "insight_type": "selling_point",
+      "insight_role": "product_core_selling_point",
+      "insight_id": "selling_color_match",
+      "title_zh": "颜色好看，色号更容易融入原发",
+      "local_voice": "El tono combina bien con el cabello"
+    },
+    "texture_softness": {
+      "label_zh": "触感柔软",
+      "insight_type": "selling_point",
+      "insight_role": "product_core_selling_point",
+      "insight_id": "selling_texture_softness",
+      "title_zh": "触感柔软，梳理时更顺滑",
+      "local_voice": "Se siente suave y agradable"
+    },
+    "volume_length": {
+      "label_zh": "发量、长度与蓬松度",
+      "insight_type": "selling_point",
+      "insight_role": "product_core_selling_point",
+      "insight_id": "selling_volume_length",
+      "title_zh": "长度和发量能够明显改变造型",
+      "local_voice": "Da buen largo y volumen"
+    },
+    "easy_install": {
+      "label_zh": "佩戴操作方便",
+      "insight_type": "selling_point",
+      "insight_role": "product_core_selling_point",
+      "insight_id": "selling_easy_install",
+      "title_zh": "佩戴步骤简单，容易完成造型",
+      "local_voice": "Es fácil y práctica de poner"
+    },
+    "hold_stability": {
+      "label_zh": "固定稳定性",
+      "insight_type": "selling_point",
+      "insight_role": "product_core_selling_point",
+      "insight_id": "selling_hold_stability",
+      "title_zh": "佩戴后固定状态更稳定",
+      "local_voice": "Se mantiene firme al usarla"
+    },
+    "comfort_weight": {
+      "label_zh": "重量与舒适性",
+      "insight_type": "selling_point",
+      "insight_role": "product_core_selling_point",
+      "insight_id": "selling_comfort_weight",
+      "title_zh": "重量较轻，佩戴负担更小",
+      "local_voice": "No se siente pesada"
+    },
+    "styleability": {
+      "label_zh": "梳理和造型能力",
+      "insight_type": "selling_point",
+      "insight_role": "product_core_selling_point",
+      "insight_id": "selling_styleability",
+      "title_zh": "可以通过梳理或热工具调整造型",
+      "local_voice": "Se puede peinar y acomodar"
+    },
+    "tangle_resistance": {
+      "label_zh": "不易打结/掉发正反馈",
+      "insight_type": "selling_point",
+      "insight_role": "product_core_selling_point",
+      "insight_id": "selling_tangle_resistance",
+      "title_zh": "梳理过程中不易打结或明显掉发",
+      "local_voice": "No se enreda ni se cae fácilmente"
+    },
+    "quality_durability": {
+      "label_zh": "材质与耐用性正反馈",
+      "insight_type": "selling_point",
+      "insight_role": "product_core_selling_point",
+      "insight_id": "selling_quality_durability",
+      "title_zh": "材质和做工得到正向评价",
+      "local_voice": "Se siente de buena calidad"
+    },
+    "value_price": {
+      "label_zh": "价格质量比",
+      "insight_type": "selling_point",
+      "insight_role": "offer_selling_point",
+      "insight_id": "selling_value_price",
+      "title_zh": "价格与实际质量的匹配度较高",
+      "local_voice": "Buena calidad por el precio"
+    },
+    "repeat_purchase": {
+      "label_zh": "复购与推荐",
+      "insight_type": "selling_point",
+      "insight_role": "fulfillment_trust",
+      "insight_id": "selling_repeat_purchase",
+      "title_zh": "复购和推荐意愿形成辅助信任",
+      "local_voice": "La volvería a comprar"
+    },
+    "fast_shipping_mx": {
+      "label_zh": "到货及时",
+      "insight_type": "selling_point",
+      "insight_role": "fulfillment_trust",
+      "insight_id": "selling_fast_shipping",
+      "title_zh": "到货及时可作为辅助信任点",
+      "local_voice": "Llegó a tiempo o antes de lo esperado"
+    },
+    "tangle_shedding_issue": {
+      "label_zh": "打结、掉发风险",
+      "insight_type": "pain_point",
+      "insight_role": "risk_guard",
+      "insight_id": "pain_tangle_shedding",
+      "title_zh": "容易打结或掉发会影响重复使用",
+      "local_voice": "Se enreda o suelta cabello con facilidad"
+    },
+    "synthetic_shine_issue": {
+      "label_zh": "塑料光泽/假发感",
+      "insight_type": "pain_point",
+      "insight_role": "risk_guard",
+      "insight_id": "pain_synthetic_shine",
+      "title_zh": "光泽过强会暴露合成发质感",
+      "local_voice": "El brillo hace que se vea sintética"
+    },
+    "fit_concealment_issue": {
+      "label_zh": "贴合与真发遮盖问题",
+      "insight_type": "pain_point",
+      "insight_role": "risk_guard",
+      "insight_id": "pain_fit_concealment",
+      "title_zh": "真发鼓包或发根衔接会影响自然度",
+      "local_voice": "Puede notarse el cabello real o la raíz"
+    },
+    "length_fit_issue": {
+      "label_zh": "长度/尺寸问题",
+      "insight_type": "pain_point",
+      "insight_role": "risk_guard",
+      "insight_id": "pain_length_fit",
+      "title_zh": "刘海、长度或尺寸可能需要二次调整",
+      "local_voice": "El largo o el fleco puede requerir ajuste"
+    },
+    "color_match_issue": {
+      "label_zh": "色号不匹配风险",
+      "insight_type": "pain_point",
+      "insight_role": "risk_guard",
+      "insight_id": "pain_color_match",
+      "title_zh": "色号选错会影响与原发的衔接效果",
+      "local_voice": "El tono puede no coincidir con el cabello"
+    },
+    "installation_difficulty_issue": {
+      "label_zh": "佩戴学习门槛",
+      "insight_type": "pain_point",
+      "insight_role": "risk_guard",
+      "insight_id": "pain_installation_difficulty",
+      "title_zh": "佩戴方法需要学习，否则容易显得不自然",
+      "local_voice": "Puede requerir práctica para colocarla bien"
+    },
+    "quality_durability_issue": {
+      "label_zh": "材质与耐用性风险",
+      "insight_type": "pain_point",
+      "insight_role": "risk_guard",
+      "insight_id": "pain_quality_durability",
+      "title_zh": "材质或耐用性可能只适合短期使用",
+      "local_voice": "La calidad puede durar solo pocos usos"
+    }
+  },
+  "quality_targets": {
+    "form_accuracy_min": 0.9,
+    "validity_accuracy_min": 0.95,
+    "signal_precision_min": 0.85,
+    "signal_recall_min": 0.8,
+    "risk_as_selling_max": 0
+  }
+}
