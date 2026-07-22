@@ -141,6 +141,24 @@ class ManualPublishTest(unittest.TestCase):
         self.assertEqual(stats["created"], 1)
         self.assertIs(publisher.calls[0]["mark_ai"], False)
 
+    def test_failed_manual_request_is_excluded_from_auto_candidates(self) -> None:
+        client = DummyManualClient()
+        publisher = FlakyPublisher(failures=3)
+
+        stats = sync_manual_publish_requests(
+            [self._record("rec-manual-failed")],
+            self._mapping(),
+            self.db,
+            publisher,
+            client=client,
+            video_dir=Path(self.temp_dir.name) / "videos",
+            create_retry_attempts=3,
+            retry_sleep_seconds=0,
+        )
+
+        self.assertEqual(stats["create_failed"], 1)
+        self.assertEqual(self.db.list_ready_candidates("SHOP-01"), [])
+
     def test_frame_rate_failed_manual_request_retries_after_rescheduling(self) -> None:
         record = self._record("rec-manual-frame-rate-retry")
         record.fields.update(

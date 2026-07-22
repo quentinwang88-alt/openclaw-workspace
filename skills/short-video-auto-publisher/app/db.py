@@ -1478,6 +1478,7 @@ class AutoPublishDB:
                   AND COALESCE(va.local_file_path, '') <> ''
                   AND va.download_status = '下载成功'
                   AND va.publish_status = '待排期'
+                  AND sm.canonical_script_key NOT LIKE 'manual:%'
                   AND COALESCE(psp.schedule_strategy, '普通') <> '暂停'
                   AND NOT (
                       ? = 1

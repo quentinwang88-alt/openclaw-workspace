@@ -12,7 +12,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 from app.db import AutoPublishDB
 from app.metadata import sanitize_title
 from app.models import ScriptMetadata
-from app.publishers import BasePublishAdapter
+from app.publishers import BasePublishAdapter, GeeLarkPublishAdapter
 from app.scheduler import normalize_publish_channel, resolve_field_mapping
 
 
@@ -315,6 +315,9 @@ def _create_task(
     request: ManualPublishRequest,
     local_file_path: str,
 ) -> str:
+    if request.publish_channel == "NeoBund" and isinstance(publisher, GeeLarkPublishAdapter):
+        raise RuntimeError("人工任务指定 NeoBund，但当前发布模式是 GeeLark；请使用 --publish-mode auto 或 neobund")
+
     create_for_channel = getattr(publisher, "create_scheduled_task_for_channel", None)
     kwargs = {
         "account_id": request.account_id,

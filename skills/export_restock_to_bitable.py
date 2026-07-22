@@ -192,6 +192,9 @@ def _build_bitable_fields(item: dict) -> Dict[str, Any]:
     stock_priority = _get_priority_tuple(item, "stock_priority")
     effective_days = round(float(item.get('days_with_transit', item.get('purchase_sale_days', 0)) or 0), 1)
     stock_days = round(float(item.get('purchase_sale_days', 0) or 0), 1)
+    risk_flag = item.get('risk_flag') or ""
+    if risk_flag == "依赖在途" and int(item.get('in_transit', 0) or 0) <= 0:
+        risk_flag = ""
 
     return {
         "Name": item.get('title') or item['sku'],
@@ -206,7 +209,7 @@ def _build_bitable_fields(item: dict) -> Dict[str, Any]:
         "紧急程度": priority_map.get(effective_priority[1], '⏰ 库存预警'),
         "现货优先级": stock_priority[0],
         "实际优先级": effective_priority[0],
-        "风险标记": item.get('risk_flag') or "",
+        "风险标记": risk_flag,
         "ABC分类": item.get('sku_class') or "",
         "安全天数": item.get('safety_days_used'),
         "补货周期": item.get('lead_time_used'),

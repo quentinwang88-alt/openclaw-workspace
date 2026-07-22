@@ -17,9 +17,30 @@ Hermes 现在按三层处理：
 核心约束：
 
 - 不实现抓取、主图补充、上架日期解析、价格标准化等 Layer 1 / Layer 2 能力。
-- 所有流程必须按 `crawl_batch_id + market_id + category_id` 隔离。
+- 所有流程必须按 `crawl_batch_id + market_id + category_id + category_name` 隔离。
 - 市场报告通过 `direction_execution_brief` 影响选品，不直接给方向下所有商品加分。
 - 如果同批 brief 不 ready，Selection Agent 先等待/重试；超过重试后才允许 previous brief 或 fallback brief，并打风险标记。
+
+## 2026-07-18 强制流程约束
+
+本节覆盖本文中任何更早的采样、类目或缓存描述：
+
+- Market Agent 必须视觉分析当前 scope 的全部 `ready_for_agents` 商品。允许复用兼容缓存，不允许只分析候选池或代表样本。
+- `womens_tops` 和 `apparel_accessory` 必须传 `--category-name`；夹克、针织衫、围巾等三级类目不得共用 taxonomy 或视觉缓存。
+- 视觉缓存身份包含 `category_scope_name + image_signature + taxonomy_fingerprint`。标题不参与视觉缓存失效，也不得影响视觉评分。
+- 正式发布前必须同时满足：可重试/缺失视觉画像为 0、`other <= 15%`、最大单方向 `<= 75%`、推荐方向样本数 `>= 10`。
+- 未通过质量门的运行只保留 scoped `__latest_attempt` 诊断，不发飞书报告、不覆盖正式 scoped latest，也不允许 Selection 消费。
+- Selection 候选商品缺视觉画像时自动补打；可重试失败需在当前运行再尝试一次。仍失败则状态为 `candidate_visual_incomplete`，整轮不得标记成功。
+- 1688 同相似等级且有价格的候选，优先保留以图搜品原始顺序，再比较价格；不得用最低价替换视觉最接近结果。
+- 找货与毛利不影响 `product_potential_score`，只影响最终动作和执行状态；1688 仍保持每批 5-10 条、间隔 10-30 秒、单条回写和断点续跑。
+
+当前共享 taxonomy scope：
+
+```text
+womens_tops + 女士夹克与风衣 -> jackets_outerwear
+womens_tops + 女士毛衣与针织衫 -> sweaters_knitwear
+apparel_accessory + 围巾&围脖 -> scarves
+```
 
 ## 默认入口：传统选品分析
 
@@ -215,9 +236,9 @@ brief 缺失时允许 fallback，但必须打：
 
 - `brief_from_previous_batch`
 
-## 历史边界
+## 当前类目边界
 
-- 只支持 `发饰` 和 `轻上装`
+- 支持已注册 profile 的发饰、耳饰、服装配件、女装上装和假发；共享二级类目必须使用三级类目 scope。
 - 没有 `product_images` 不进入分析
 - 人工类目优先，无人工类目才调 Hermes 识别
 - Hermes 只能返回固定 JSON，不允许自由文本

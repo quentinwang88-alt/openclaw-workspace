@@ -2996,7 +2996,52 @@ async function selectDuration(page, duration) {
       console.log(`  ✅ 已通过数值输入设置时长: ${selectedDuration}`);
       return true;
     }
-    console.log(`  ⚠️ 时长数值输入后未生效，当前: ${selectedDuration || '未知'}，继续尝试旧版选项`);
+    console.log(`  ⚠️ 时长数值输入后未生效，当前: ${selectedDuration || '未知'}，继续尝试滑杆或旧版选项`);
+    await page.keyboard.press('Escape').catch(() => {});
+    await sleep(300);
+    await clickBottomDurationDropdown();
+    await sleep(500);
+  }
+
+  // Some Seedance VIP pages render duration as a slider. Driving it with
+  // keyboard events is more reliable than mutating React's input value.
+  const sliderState = await safePageEvaluate(page, '聚焦时长滑杆', () => {
+    const sliders = Array.from(document.querySelectorAll('[role="slider"]'));
+    const slider = sliders.find(el => {
+      const style = getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    });
+    if (!slider) return { found: false };
+    slider.focus();
+    return {
+      found: true,
+      min: Number(slider.getAttribute('aria-valuemin') || 0),
+      max: Number(slider.getAttribute('aria-valuemax') || 0),
+      now: Number(slider.getAttribute('aria-valuenow') || 0)
+    };
+  }).catch(() => ({ found: false }));
+  if (sliderState.found) {
+    const min = Number.isFinite(sliderState.min) ? sliderState.min : 0;
+    const max = Number.isFinite(sliderState.max) && sliderState.max > min ? sliderState.max : 60;
+    if (Number(duration) >= min && Number(duration) <= max) {
+      await page.keyboard.press('Home').catch(() => {});
+      for (let second = min; second < Number(duration); second++) {
+        await page.keyboard.press('ArrowRight').catch(() => {});
+      }
+      await page.keyboard.press('Enter').catch(() => {});
+      await sleep(800);
+      const selectedDuration = (await getVisibleToolbarState(page)).duration;
+      if (isDurationMatch(selectedDuration, duration)) {
+        console.log(`  ✅ 已通过滑杆键盘设置时长: ${selectedDuration}`);
+        return true;
+      }
+      console.log(`  ⚠️ 时长滑杆设置后未生效，当前: ${selectedDuration || '未知'}`);
+      await page.keyboard.press('Escape').catch(() => {});
+      await sleep(300);
+      await clickBottomDurationDropdown();
+      await sleep(500);
+    }
   }
   
   const listbox = await page.waitForSelector('div[role="listbox"]', { timeout: 5000 }).catch(() => null);
