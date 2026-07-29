@@ -252,6 +252,7 @@ def import_record(
     asset_row = {
         "asset_id": asset_id,
         "product_id": product_id,
+        "canonical_product_id": str(product.get("canonical_product_id") or product_id),
         "source_type": "ai_generated",
         "source_trust_level": "medium",
         "product_binding_type": "exact_sku",
@@ -265,6 +266,8 @@ def import_record(
         "asset_status": "active",
         "human_review_status": "pending",
         "source_identity": prompt_id,
+        "source_flow": "prompt_package",
+        "source_record_id": record_id,
         "scene_tag": str(package.get("segment_type") or ""),
         "prompt_package_id": prompt_id,
         "slot_role": str(package.get("slot_role") or ""),
@@ -272,7 +275,10 @@ def import_record(
         "hook_intent": str(package.get("hook_intent") or ""),
         "generation_type": "image_to_video",
         "generation_model": "jimeng",
+        "generation_channel": "jimeng",
         "generation_prompt": prompt_text,
+        "source_completed_at": now,
+        "visual_scope": "global",
     }
     asset_write = ctx.repo.upsert("assets", "asset_id", asset_row)
     if not asset_write.success:
@@ -282,6 +288,7 @@ def import_record(
         "segment_id": segment_id,
         "asset_id": asset_id,
         "product_id": product_id,
+        "canonical_product_id": str(product.get("canonical_product_id") or product_id),
         "segment_oss_object_id": oss_row["object_id"],
         "start_ms": 0,
         "end_ms": duration_ms,
@@ -302,6 +309,7 @@ def import_record(
         "slot_role": str(package.get("slot_role") or ""),
         "ai_gen_grade": str(package.get("ai_gen_grade") or ""),
         "hook_intent": str(package.get("hook_intent") or ""),
+        "visual_scope": "global",
     }
     segment_write = ctx.repo.upsert("segments", "segment_id", segment_row)
     if not segment_write.success:

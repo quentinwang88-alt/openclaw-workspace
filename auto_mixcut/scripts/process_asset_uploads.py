@@ -105,6 +105,8 @@ def process_record(ctx, client: AutoMixcutFeishuClient, record: Any, dry_run: bo
         source_type=source_type,
         source_trust_level=trust,
         product_binding_type=binding_type,
+        source_flow="manual_upload",
+        source_identity=f"manual:{record.record_id}:{attachment.get('file_token') or file_name}",
     )
     if not uploaded.success:
         err = uploaded.error.message if uploaded.error else "unknown error"

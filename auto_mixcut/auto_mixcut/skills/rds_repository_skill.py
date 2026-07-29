@@ -33,10 +33,15 @@ class RDSRepositorySkill:
                 usage_tables = ensure_material_usage_tables(self.ctx)
                 if not usage_tables.success:
                     return usage_tables
+                from .output_material_usage_skill import ensure_output_material_usage_table
+
+                output_usage = ensure_output_material_usage_table(self.ctx)
+                if not output_usage.success:
+                    return output_usage
                 product_run_locks = ensure_product_run_lock_table(self.ctx)
                 if not product_run_locks.success:
                     return product_run_locks
-                return Result.ok({"migrations": ["ensure_mysql_core_tables", "ensure_llm_router_tables", "ensure_runtime_compatibility_columns", "ensure_reference_image_tables", "ensure_material_usage_tables", "ensure_product_run_lock_table"], "db_provider": "mysql"})
+                return Result.ok({"migrations": ["ensure_mysql_core_tables", "ensure_llm_router_tables", "ensure_runtime_compatibility_columns", "ensure_reference_image_tables", "ensure_material_usage_tables", "ensure_output_material_usage_table", "ensure_product_run_lock_table"], "db_provider": "mysql"})
             return Result.fail("MYSQL_MIGRATION_UNAVAILABLE", "mysql repository cannot initialize tables")
         migrations_dir = self.ctx.settings.root_dir / "migrations"
         sql_files = sorted(m for m in migrations_dir.glob("*.sql") if not m.name.endswith("_mysql_init.sql"))
@@ -55,10 +60,15 @@ class RDSRepositorySkill:
         usage_tables = ensure_material_usage_tables(self.ctx)
         if not usage_tables.success:
             return usage_tables
+        from .output_material_usage_skill import ensure_output_material_usage_table
+
+        output_usage = ensure_output_material_usage_table(self.ctx)
+        if not output_usage.success:
+            return output_usage
         product_run_locks = ensure_product_run_lock_table(self.ctx)
         if not product_run_locks.success:
             return product_run_locks
-        return Result.ok({"migrations": [m.name for m in sql_files] + ["ensure_reference_image_tables", "ensure_material_usage_tables", "ensure_product_run_lock_table"]})
+        return Result.ok({"migrations": [m.name for m in sql_files] + ["ensure_reference_image_tables", "ensure_material_usage_tables", "ensure_output_material_usage_table", "ensure_product_run_lock_table"]})
 
     def create_product_task(
         self,
@@ -70,11 +80,13 @@ class RDSRepositorySkill:
         shop_id: str = "",
         priority: str = "normal",
     ) -> Result:
+        existing_product = self.ctx.repo.get("products", "product_id", product_id) or {}
         product = self.ctx.repo.upsert(
             "products",
             "product_id",
             {
                 "product_id": product_id,
+                "canonical_product_id": existing_product.get("canonical_product_id") or product_id,
                 "product_name": product_name,
                 "market": market,
                 "category": category,
@@ -105,8 +117,15 @@ class RDSRepositorySkill:
 
 def _ensure_runtime_compatibility_columns(ctx: SkillContext) -> Result:
     additions = {
-        "products": {"preferred_mood": "TEXT"},
+        "products": {"preferred_mood": "TEXT", "canonical_product_id": "TEXT"},
         "content_tasks": {
+            "content_mode": "TEXT DEFAULT 'auto'",
+            "target_language": "TEXT",
+            "target_duration_ms": "INTEGER",
+            "voiceover_variant_id": "TEXT",
+            "voiceover_job_id": "TEXT",
+            "voiceover_status": "TEXT",
+            "narrative_failure_reason": "TEXT",
             "ai_supplement_status": "TEXT",
             "ai_supplement_package_count": "INTEGER DEFAULT 0",
             "ai_supplement_detail_json": "TEXT",
@@ -122,6 +141,12 @@ def _ensure_runtime_compatibility_columns(ctx: SkillContext) -> Result:
             "guard_detail_json": "TEXT",
         },
         "assets": {
+            "canonical_product_id": "TEXT",
+            "source_flow": "TEXT",
+            "source_record_id": "TEXT",
+            "generation_channel": "TEXT",
+            "source_completed_at": "TEXT",
+            "visual_scope": "TEXT DEFAULT 'global'",
             "source_identity": "TEXT",
             "scene_tag": "TEXT",
             "prompt_package_id": "TEXT",
@@ -130,6 +155,8 @@ def _ensure_runtime_compatibility_columns(ctx: SkillContext) -> Result:
             "hook_intent": "TEXT",
         },
         "segments": {
+            "canonical_product_id": "TEXT",
+            "visual_scope": "TEXT DEFAULT 'global'",
             "visual_phash": "TEXT",
             "used_in_rejected_outputs_count": "INTEGER DEFAULT 0",
             "prompt_package_id": "TEXT",
@@ -144,6 +171,16 @@ def _ensure_runtime_compatibility_columns(ctx: SkillContext) -> Result:
         "segment_tags": {"text_overlay_risk": "TEXT", "text_language": "TEXT", "text_overlay_reason": "TEXT", "hook_visual_type": "TEXT"},
         "render_plans": {
             "output_id": "TEXT",
+            "content_mode": "TEXT DEFAULT 'bgm'",
+            "voiceover_variant_id": "TEXT",
+            "voiceover_oss_object_id": "TEXT",
+            "hook_id": "TEXT",
+            "primary_selling_point": "TEXT",
+            "beat_plan_json": "TEXT",
+            "tts_timeline_json": "TEXT",
+            "evidence_gap_json": "TEXT",
+            "audio_policy_json": "TEXT",
+            "match_plan_version": "TEXT",
         },
         "mixcut_batches": {
             "final_qc_async_status": "TEXT",
@@ -152,6 +189,17 @@ def _ensure_runtime_compatibility_columns(ctx: SkillContext) -> Result:
             "final_qc_async_updated_at": "TEXT",
         },
         "outputs": {
+            "content_mode": "TEXT DEFAULT 'bgm'",
+            "target_language": "TEXT",
+            "voiceover_variant_id": "TEXT",
+            "hook_id": "TEXT",
+            "hook_text": "TEXT",
+            "primary_selling_point": "TEXT",
+            "voiceover_text": "TEXT",
+            "voiceover_oss_object_id": "TEXT",
+            "voiceover_qc_status": "TEXT",
+            "reuse_mode": "TEXT",
+            "match_plan_version": "TEXT",
             "bgm_output_oss_object_id": "TEXT",
             "human_feedback_reason": "TEXT",
             "remix_plan_json": "TEXT",
@@ -159,6 +207,8 @@ def _ensure_runtime_compatibility_columns(ctx: SkillContext) -> Result:
             "bgm_plan_json": "TEXT",
             "avg_completion_rate": "REAL",
             "published_at": "TEXT",
+            "publish_task_id": "TEXT",
+            "publish_result": "TEXT",
         },
         "bgm_tracks": {
             "status": "TEXT DEFAULT 'active'",
@@ -271,6 +321,7 @@ def _ensure_mysql_core_tables(ctx: SkillContext) -> Result:
         CREATE TABLE IF NOT EXISTS products (
           id BIGINT PRIMARY KEY AUTO_INCREMENT,
           product_id VARCHAR(128) NOT NULL UNIQUE,
+          canonical_product_id VARCHAR(128),
           product_name VARCHAR(512),
           market VARCHAR(64),
           category VARCHAR(128),
@@ -348,6 +399,7 @@ def _ensure_mysql_core_tables(ctx: SkillContext) -> Result:
           id BIGINT PRIMARY KEY AUTO_INCREMENT,
           asset_id VARCHAR(128) NOT NULL UNIQUE,
           product_id VARCHAR(128) NOT NULL,
+          canonical_product_id VARCHAR(128),
           source_type VARCHAR(64),
           source_trust_level VARCHAR(64),
           product_binding_type VARCHAR(64),
@@ -376,6 +428,8 @@ def _ensure_mysql_core_tables(ctx: SkillContext) -> Result:
           ai_tag_status VARCHAR(64),
           human_review_status VARCHAR(64),
           source_identity VARCHAR(256),
+          source_flow VARCHAR(64),
+          source_record_id VARCHAR(128),
           scene_tag VARCHAR(256),
           prompt_package_id VARCHAR(128),
           slot_role VARCHAR(64),
@@ -384,10 +438,14 @@ def _ensure_mysql_core_tables(ctx: SkillContext) -> Result:
           generation_job_id VARCHAR(128),
           generation_type VARCHAR(128),
           generation_model VARCHAR(128),
+          generation_channel VARCHAR(64),
           generation_prompt TEXT,
+          source_completed_at DATETIME,
+          visual_scope VARCHAR(64) DEFAULT 'global',
           created_at DATETIME,
           updated_at DATETIME,
-          KEY idx_assets_product (product_id)
+          KEY idx_assets_product (product_id),
+          KEY idx_assets_canonical_product (canonical_product_id)
         )
         """,
         """
@@ -396,6 +454,7 @@ def _ensure_mysql_core_tables(ctx: SkillContext) -> Result:
           segment_id VARCHAR(128) NOT NULL UNIQUE,
           asset_id VARCHAR(128) NOT NULL,
           product_id VARCHAR(128) NOT NULL,
+          canonical_product_id VARCHAR(128),
           segment_oss_object_id VARCHAR(128),
           thumbnail_oss_object_id VARCHAR(128),
           start_ms INT,
@@ -436,6 +495,7 @@ def _ensure_mysql_core_tables(ctx: SkillContext) -> Result:
           slot_role VARCHAR(64),
           ai_gen_grade VARCHAR(32),
           hook_intent VARCHAR(128),
+          visual_scope VARCHAR(64) DEFAULT 'global',
           product_mismatch_suspect TINYINT DEFAULT 0,
           product_mismatch_reason TEXT,
           product_mismatch_output_id VARCHAR(128),
@@ -443,6 +503,7 @@ def _ensure_mysql_core_tables(ctx: SkillContext) -> Result:
           created_at DATETIME,
           updated_at DATETIME,
           KEY idx_segments_product (product_id),
+          KEY idx_segments_canonical_product (canonical_product_id),
           KEY idx_segments_asset (asset_id)
         )
         """,
@@ -673,6 +734,67 @@ def _ensure_mysql_core_tables(ctx: SkillContext) -> Result:
           updated_at DATETIME
         )
         """,
+        """
+        CREATE TABLE IF NOT EXISTS product_identity_aliases (
+          id BIGINT PRIMARY KEY AUTO_INCREMENT,
+          alias_id VARCHAR(128) NOT NULL UNIQUE,
+          canonical_product_id VARCHAR(128) NOT NULL,
+          product_id VARCHAR(128),
+          local_product_id VARCHAR(256),
+          store_id VARCHAR(128),
+          market VARCHAR(64),
+          alias_type VARCHAR(64),
+          alias_value VARCHAR(256),
+          status VARCHAR(64) DEFAULT 'active',
+          source VARCHAR(128),
+          created_at DATETIME,
+          updated_at DATETIME,
+          KEY idx_product_alias_canonical (canonical_product_id),
+          KEY idx_product_alias_product (product_id),
+          KEY idx_product_alias_value (alias_type, alias_value)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS material_source_registry (
+          id BIGINT PRIMARY KEY AUTO_INCREMENT,
+          source_key VARCHAR(128) NOT NULL UNIQUE,
+          source_system VARCHAR(64) NOT NULL,
+          source_record_id VARCHAR(128),
+          source_result_index INT DEFAULT 1,
+          source_flow VARCHAR(64),
+          script_id VARCHAR(128),
+          product_id VARCHAR(128),
+          canonical_product_id VARCHAR(128),
+          local_product_id VARCHAR(256),
+          source_market VARCHAR(64),
+          source_store_id VARCHAR(128),
+          channel VARCHAR(64),
+          model VARCHAR(128),
+          trace_id VARCHAR(128),
+          platform_task_id VARCHAR(128),
+          completed_at DATETIME,
+          attachment_token VARCHAR(256),
+          file_name VARCHAR(512),
+          file_size BIGINT,
+          file_hash VARCHAR(128),
+          ingest_policy VARCHAR(64) DEFAULT 'auto',
+          ingest_status VARCHAR(64) DEFAULT 'discovered',
+          oss_object_id VARCHAR(128),
+          asset_id VARCHAR(128),
+          legacy_flag TINYINT DEFAULT 0,
+          retry_count INT DEFAULT 0,
+          last_error TEXT,
+          source_payload_json JSON,
+          created_at DATETIME,
+          updated_at DATETIME,
+          KEY idx_material_source_product_status (canonical_product_id, ingest_status),
+          KEY idx_material_source_execution_product (product_id),
+          KEY idx_material_source_record (source_record_id),
+          KEY idx_material_source_script (script_id),
+          KEY idx_material_source_completed (completed_at),
+          KEY idx_material_source_legacy_status (legacy_flag, ingest_status)
+        )
+        """,
     ]
     try:
         with ctx.repo.connect() as conn:
@@ -686,8 +808,15 @@ def _ensure_mysql_core_tables(ctx: SkillContext) -> Result:
 
 def _ensure_mysql_runtime_compatibility_columns(ctx: SkillContext) -> Result:
     additions = {
-        "products": {"preferred_mood": "JSON"},
+        "products": {"preferred_mood": "JSON", "canonical_product_id": "VARCHAR(128)"},
         "content_tasks": {
+            "content_mode": "VARCHAR(32) DEFAULT 'auto'",
+            "target_language": "VARCHAR(64)",
+            "target_duration_ms": "INT",
+            "voiceover_variant_id": "VARCHAR(128)",
+            "voiceover_job_id": "VARCHAR(128)",
+            "voiceover_status": "VARCHAR(64)",
+            "narrative_failure_reason": "TEXT",
             "ai_supplement_status": "VARCHAR(64)",
             "ai_supplement_package_count": "INT DEFAULT 0",
             "ai_supplement_detail_json": "JSON",
@@ -703,6 +832,12 @@ def _ensure_mysql_runtime_compatibility_columns(ctx: SkillContext) -> Result:
             "guard_detail_json": "JSON",
         },
         "assets": {
+            "canonical_product_id": "VARCHAR(128)",
+            "source_flow": "VARCHAR(64)",
+            "source_record_id": "VARCHAR(128)",
+            "generation_channel": "VARCHAR(64)",
+            "source_completed_at": "DATETIME",
+            "visual_scope": "VARCHAR(64) DEFAULT 'global'",
             "source_identity": "VARCHAR(256)",
             "scene_tag": "VARCHAR(256)",
             "prompt_package_id": "VARCHAR(128)",
@@ -711,6 +846,8 @@ def _ensure_mysql_runtime_compatibility_columns(ctx: SkillContext) -> Result:
             "hook_intent": "VARCHAR(128)",
         },
         "segments": {
+            "canonical_product_id": "VARCHAR(128)",
+            "visual_scope": "VARCHAR(64) DEFAULT 'global'",
             "visual_phash": "VARCHAR(64)",
             "used_in_outputs_count": "INT DEFAULT 0",
             "used_in_rejected_outputs_count": "INT DEFAULT 0",
@@ -726,6 +863,16 @@ def _ensure_mysql_runtime_compatibility_columns(ctx: SkillContext) -> Result:
         "segment_tags": {"text_overlay_risk": "VARCHAR(64)", "text_language": "VARCHAR(64)", "text_overlay_reason": "TEXT"},
         "render_plans": {
             "output_id": "VARCHAR(128)",
+            "content_mode": "VARCHAR(32) DEFAULT 'bgm'",
+            "voiceover_variant_id": "VARCHAR(128)",
+            "voiceover_oss_object_id": "VARCHAR(128)",
+            "hook_id": "VARCHAR(128)",
+            "primary_selling_point": "TEXT",
+            "beat_plan_json": "JSON",
+            "tts_timeline_json": "JSON",
+            "evidence_gap_json": "JSON",
+            "audio_policy_json": "JSON",
+            "match_plan_version": "VARCHAR(64)",
         },
         "mixcut_batches": {
             "final_qc_async_status": "VARCHAR(64)",
@@ -734,6 +881,17 @@ def _ensure_mysql_runtime_compatibility_columns(ctx: SkillContext) -> Result:
             "final_qc_async_updated_at": "DATETIME",
         },
         "outputs": {
+            "content_mode": "VARCHAR(32) DEFAULT 'bgm'",
+            "target_language": "VARCHAR(64)",
+            "voiceover_variant_id": "VARCHAR(128)",
+            "hook_id": "VARCHAR(128)",
+            "hook_text": "TEXT",
+            "primary_selling_point": "TEXT",
+            "voiceover_text": "LONGTEXT",
+            "voiceover_oss_object_id": "VARCHAR(128)",
+            "voiceover_qc_status": "VARCHAR(64)",
+            "reuse_mode": "VARCHAR(64)",
+            "match_plan_version": "VARCHAR(64)",
             "bgm_output_oss_object_id": "VARCHAR(128)",
             "human_feedback_reason": "TEXT",
             "remix_plan_json": "JSON",

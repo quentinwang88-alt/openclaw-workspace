@@ -6,6 +6,7 @@ from auto_mixcut.core.result import Result
 
 from .context import SkillContext
 from .feishu_review_skill import sync_product_task_best_effort
+from .material_pool_query import list_material_segments
 from .render_plan_skill import estimate_render_plan_capacity
 
 MAX_SEGMENT_REUSE_PER_BATCH = 2
@@ -23,7 +24,7 @@ class ReadinessCheckSkill:
     def check_product(self, product_id: str, requested_count: int | None = None) -> Result:
         task = _task(self.ctx, product_id)
         requested = requested_count if requested_count is not None else int((task or {}).get("requested_variant_count") or 0)
-        segments = self.ctx.repo.list_where("segments", "product_id=?", (product_id,))
+        segments = list_material_segments(self.ctx, product_id)
         counts = {"hero": 0, "detail": 0, "result": 0, "scene": 0, "ending": 0}
         total_usable = 0
         for seg in segments:

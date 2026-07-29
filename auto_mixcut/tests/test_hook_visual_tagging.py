@@ -98,6 +98,22 @@ class HookVisualTaggingTest(unittest.TestCase):
         self.assertIn(tags[0]["hook_visual_type"], VALID_TYPES)
         self.assertEqual(tags[0]["hook_visual_type"], "product_reveal")
 
+    def test_tagging_excludes_archived_segments(self):
+        product_id = "PROD_ARCHIVED_FILTER"
+        for segment_id, status in (("SEG_ACTIVE", "created"), ("SEG_ARCHIVED", "archived")):
+            self.ctx.repo.upsert("segments", "segment_id", {
+                "segment_id": segment_id,
+                "asset_id": f"ASSET_{segment_id}",
+                "product_id": product_id,
+                "source_type": "light_video",
+                "segment_status": status,
+            })
+
+        submitted = AITaggingSkill(self.ctx).submit_batch(product_id)
+
+        self.assertTrue(submitted.success, submitted.to_dict())
+        self.assertEqual(submitted.data["total_segments"], 1)
+
     # 2-V1 续：enrich 能把 hook_visual_type 加载进 segment
     def test_enrich_loads_hook_visual_type(self):
         segment_id = "SEG_ENRICH_HV"

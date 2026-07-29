@@ -53,7 +53,7 @@ class SegmentSkill:
         if asset.get("has_watermark") == "yes":
             return Result.fail("ASSET_REJECTED_WATERMARK", "watermarked asset cannot be segmented", {"asset_id": asset_id})
         duration = int(asset.get("duration_ms") or 3000)
-        windows = [(0, min(duration, 3000))] if duration <= 5000 or asset["media_type"] == "image" else _windows(duration)
+        windows = _segment_windows(duration, str(asset.get("media_type") or "video"))
         product = self.ctx.repo.get("products", "product_id", asset["product_id"]) or {}
         existing = self.ctx.repo.list_where("segments", "asset_id=?", (asset_id,))
         existing_windows = {
@@ -92,6 +92,7 @@ class SegmentSkill:
                 "segment_id": segment_id,
                 "asset_id": asset_id,
                 "product_id": asset["product_id"],
+                "canonical_product_id": asset.get("canonical_product_id") or asset["product_id"],
                 "segment_oss_object_id": oss_row["object_id"],
                 "start_ms": start,
                 "end_ms": end,
@@ -111,6 +112,7 @@ class SegmentSkill:
                 "slot_role": asset.get("slot_role") or "",
                 "ai_gen_grade": asset.get("ai_gen_grade") or "",
                 "hook_intent": asset.get("hook_intent") or "",
+                "visual_scope": asset.get("visual_scope") or "global",
             }
             write = self.ctx.repo.upsert("segments", "segment_id", seg_row)
             if not write.success:
@@ -129,6 +131,15 @@ def _windows(duration_ms: int):
             windows.append((start, end))
         start += 3000
     return windows or [(0, min(duration_ms, 3000))]
+
+
+def _segment_windows(duration_ms: int, media_type: str) -> list[tuple[int, int]]:
+    duration_ms = max(1, int(duration_ms or 0))
+    if media_type == "image":
+        return [(0, min(duration_ms, 3000))]
+    if duration_ms <= 5000:
+        return [(0, duration_ms)]
+    return _windows(duration_ms)
 
 
 def _segment_asset_limit() -> int:

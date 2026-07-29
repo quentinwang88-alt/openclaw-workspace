@@ -22,6 +22,9 @@ class OSSStorageSkill:
         product_binding_type: str = "exact_sku",
         allow_source_reference: bool = False,
         source_reference_count: int = 0,
+        canonical_product_id: str = "",
+        source_flow: str = "",
+        source_identity: str = "",
     ) -> Result:
         gate = _anchor_gate(
             self.ctx,
@@ -32,6 +35,7 @@ class OSSStorageSkill:
         if not gate.success:
             return gate
         product = self.ctx.repo.get("products", "product_id", product_id) or {}
+        resolved_canonical_product_id = str(canonical_product_id or product.get("canonical_product_id") or product_id).strip()
         source = Path(file_path)
         if not source.exists():
             return Result.fail("LOCAL_FILE_NOT_FOUND", "asset file does not exist", {"file_path": file_path})
@@ -52,6 +56,7 @@ class OSSStorageSkill:
             {
                 "asset_id": asset_id,
                 "product_id": product_id,
+                "canonical_product_id": resolved_canonical_product_id,
                 "source_type": source_type,
                 "source_trust_level": source_trust_level,
                 "product_binding_type": product_binding_type,
@@ -61,6 +66,9 @@ class OSSStorageSkill:
                 "asset_status": "uploaded",
                 "probe_status": "pending",
                 "has_watermark": "pending",
+                "source_flow": source_flow,
+                "source_identity": source_identity,
+                "visual_scope": "global",
             },
         )
         return asset_write if not asset_write.success else Result.ok({"asset_id": asset_id, "oss_object": oss_row})

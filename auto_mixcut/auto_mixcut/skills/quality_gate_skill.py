@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 import subprocess
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from auto_mixcut.adapters.oss import file_sha256
@@ -18,6 +20,7 @@ from .usage_counter_skill import refresh_output_segment_usage
 
 AUDIO_MEAN_MIN_DB = -16.0
 AUDIO_TAIL_MIN_DB = -16.0
+VOICEOVER_AUDIO_MEAN_MIN_DB = -20.0
 
 
 class QualityGateSkill:
@@ -26,7 +29,20 @@ class QualityGateSkill:
 
     def check_batch(self, batch_id: str) -> Result:
         outputs = self.ctx.repo.list_where("outputs", "batch_id=?", (batch_id,))
-        results = [self.check_output(o["output_id"]).to_dict() for o in outputs]
+        max_workers = _quality_concurrency()
+        if max_workers <= 1 or len(outputs) <= 1:
+            results = [self.check_output(o["output_id"]).to_dict() for o in outputs]
+        else:
+            by_id = {}
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {pool.submit(self.check_output, output["output_id"]): output["output_id"] for output in outputs}
+                for future in as_completed(futures):
+                    output_id = futures[future]
+                    try:
+                        by_id[output_id] = future.result().to_dict()
+                    except Exception as exc:
+                        by_id[output_id] = Result.fail("QUALITY_GATE_EXCEPTION", str(exc), {"output_id": output_id}).to_dict()
+            results = [by_id[output["output_id"]] for output in outputs]
         return Result.ok({"batch_id": batch_id, "results": results})
 
     def check_output(self, output_id: str) -> Result:
@@ -35,6 +51,7 @@ class QualityGateSkill:
             return Result.fail("OUTPUT_NOT_FOUND", "output not found", {"output_id": output_id})
         slots = self.ctx.repo.list_where("output_segments", "output_id=? ORDER BY slot_index", (output_id,))
         reasons = []
+        warnings = []
         first = _segment_bundle(self.ctx, slots[0]["segment_id"]) if slots else None
         expected_duration = _expected_duration_ms(slots)
         actual_duration = int(output.get("duration_ms") or 0)
@@ -46,12 +63,16 @@ class QualityGateSkill:
             reasons.append("duration out of supported range")
         if output.get("width") != 1080 or output.get("height") != 1920:
             reasons.append("resolution is not 1080x1920")
+        content_mode = str(output.get("content_mode") or "bgm").lower()
         volume = _audio_volume(self.ctx, output)
         if volume is None:
             reasons.append("audio volume could not be measured")
-        elif volume < AUDIO_MEAN_MIN_DB:
+        elif volume < (VOICEOVER_AUDIO_MEAN_MIN_DB if content_mode == "voiceover" else AUDIO_MEAN_MIN_DB):
             reasons.append(f"audio mean volume too low ({volume:.1f} dB)")
-        reasons.extend(_audio_tail_window_reasons(self.ctx, output, actual_duration))
+        if content_mode == "voiceover":
+            reasons.extend(_voiceover_reasons(self.ctx, output, slots, actual_duration))
+        else:
+            reasons.extend(_audio_tail_window_reasons(self.ctx, output, actual_duration))
         if first:
             tag = first["tag"]
             segment = first["segment"]
@@ -82,8 +103,13 @@ class QualityGateSkill:
         if "detail" in required_roles and "detail" not in used_roles:
             reasons.append("missing detail segment")
         assets = {s["asset_id"] for s in slots if s.get("asset_id")}
-        if len(assets) < 3:
-            reasons.append("unique_source_assets < 3")
+        required_asset_count = 2 if actual_duration <= 10000 else 3
+        if len(assets) < required_asset_count:
+            message = f"unique_source_assets < {required_asset_count}"
+            if content_mode == "voiceover":
+                warnings.append(message)
+            else:
+                reasons.append(message)
         similarity = None
         status = "passed" if not reasons else "failed"
         if status == "passed" and _is_ads_mode():
@@ -96,13 +122,16 @@ class QualityGateSkill:
                     reasons.append(f"output similarity gate: {decision}")
             else:
                 similarity = similarity_result.to_dict()
-        self.ctx.repo.update("outputs", "output_id", output_id, {"machine_quality_status": status})
+        patch = {"machine_quality_status": status}
+        if content_mode == "voiceover":
+            patch["voiceover_qc_status"] = status
+        self.ctx.repo.update("outputs", "output_id", output_id, patch)
         _sync_render_plan_quality_status(self.ctx, output, status)
         refresh_output_segment_usage(self.ctx, output_id)
         product_id = str(output.get("product_id") or "")
         if product_id:
             MaterialUsageLedgerSkill(self.ctx).refresh_product(product_id)
-        return Result.ok({"output_id": output_id, "machine_quality_status": status, "score": 100 if status == "passed" else 60, "reasons": reasons, "similarity": similarity})
+        return Result.ok({"output_id": output_id, "machine_quality_status": status, "score": 100 if status == "passed" else 60, "reasons": reasons, "warnings": warnings, "similarity": similarity})
 
 
 def _segment_bundle(ctx: SkillContext, segment_id: str):
@@ -206,6 +235,40 @@ def _audio_tail_window_reasons(ctx: SkillContext, output: dict, actual_duration_
         elif volume < AUDIO_TAIL_MIN_DB:
             reasons.append(f"audio tail window t-{offset}s too low ({volume:.1f} dB)")
     return reasons
+
+
+def _voiceover_reasons(ctx: SkillContext, output: dict, slots: list[dict], actual_duration_ms: int) -> list[str]:
+    reasons = []
+    if not output.get("voiceover_oss_object_id"):
+        reasons.append("voiceover audio object is missing")
+    plans = ctx.repo.list_where("render_plans", "output_id=? ORDER BY id DESC LIMIT 1", (output.get("output_id"),))
+    plan = plans[0] if plans else {}
+    if plan.get("evidence_gap_json"):
+        reasons.append("voiceover evidence gaps remain")
+    timeline = plan.get("tts_timeline_json") or []
+    if isinstance(timeline, dict):
+        timeline = timeline.get("placements") or timeline.get("lines") or []
+    ends = []
+    for row in timeline if isinstance(timeline, list) else []:
+        try:
+            ends.append(int(row.get("end_ms") or round(float(row.get("end_seconds") or 0) * 1000)))
+        except (TypeError, ValueError):
+            continue
+    if ends and max(ends) > actual_duration_ms + 500:
+        reasons.append("tts timeline exceeds rendered duration")
+    plan_segments = ((plan.get("plan_json") or {}).get("segments") or []) if plan else []
+    if any(row.get("critical_evidence") and row.get("required_shot_roles") and not row.get("evidence_match") for row in plan_segments):
+        reasons.append("required voiceover evidence is not matched")
+    if not slots:
+        reasons.append("voiceover output has no material slots")
+    return reasons
+
+
+def _quality_concurrency() -> int:
+    try:
+        return max(1, min(3, int(os.environ.get("AUTO_MIXCUT_QUALITY_CONCURRENCY", "3") or "3")))
+    except ValueError:
+        return 3
 
 
 def _expected_duration_ms(slots: list[dict]) -> int:

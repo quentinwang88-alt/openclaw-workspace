@@ -22,6 +22,7 @@ from .hard_subtitle_policy import (
     is_unusable_hard_subtitle,
 )
 from .material_policy_skill import MaterialPolicySkill, PUBLISHED_RESULT_VALUES, TRUSTED_REAL_SOURCE_TYPES
+from .material_pool_query import list_material_segments
 from .material_usage_ledger_skill import MaterialUsageLedgerSkill
 from .usage_counter_skill import (
     FAILED_OUTPUT_SEGMENT_STATUSES,
@@ -43,6 +44,7 @@ REAL_SOURCE_TYPES = TRUSTED_REAL_SOURCE_TYPES
 FALLBACK_TEMPLATE_ID = "GENERAL_BALANCED_15S"
 MIN_RENDER_PLAN_DURATION_MS = 12000
 MAX_SEGMENT_REUSE_PER_BATCH = 2
+MAX_CORE_SEGMENT_REUSE_PER_BATCH = 1
 MAX_SUPPORT_SEGMENT_REUSE_PER_BATCH = 3
 MAX_FIRST_SEGMENT_REUSE_PER_BATCH = 1
 MAX_FIRST_ASSET_REUSE_PER_BATCH = 2
@@ -452,7 +454,7 @@ def estimate_render_plan_capacity(ctx: SkillContext, product_id: str, count: int
         return {"planned_count": 0, "skipped_count": 0, "template_counts": {}, "segment_counts": {}}
     templates = _load_templates(ctx)
     product = ctx.repo.get("products", "product_id", product_id) or {}
-    segments = ctx.repo.list_where("segments", "product_id=?", (product_id,))
+    segments = list_material_segments(ctx, product_id)
     segments = _render_eligible_segments(_enrich_segments_for_selection(ctx, segments))
     first_slot_candidates = sum(1 for segment in segments if "hero" in (segment.get("effective_roles_json") or []))
     batch_state = {"segments": set(), "segment_counts": {}, "core_segment_counts": {}, "assets": {}, "first_assets": set(), "first_asset_counts": {}, "first_segment_counts": {}, "template_counts": {}}
@@ -756,7 +758,7 @@ def _select_segments(ctx: SkillContext, product_id: str, slots, batch_state: dic
     state = batch_state or {"segments": set(), "assets": {}, "first_assets": set()}
     segments = state.get("_selection_segments")
     if segments is None:
-        segments = ctx.repo.list_where("segments", "product_id=?", (product_id,))
+        segments = list_material_segments(ctx, product_id)
         segments = _enrich_segments_for_selection(ctx, segments)
         segments = _render_eligible_segments(segments)
         state["_selection_segments"] = segments
@@ -1079,7 +1081,29 @@ def _filter_ai_core_prompt_packages(
         prompt_id = _ai_prompt_package_id(segment)
         if prompt_id and prompt_id in valid_ids:
             filtered.append(segment)
+            continue
+        if _is_reference_validated_ai_core(segment):
+            filtered.append(segment)
     return filtered
+
+
+def _is_reference_validated_ai_core(segment: dict) -> bool:
+    """Allow cross-flow AI videos after the representative segment passed vision tagging."""
+    if str(segment.get("source_type") or "") != "ai_generated":
+        return False
+    if str(segment.get("product_match_status") or "") not in {"trusted_by_source", "anchor_pass"}:
+        return False
+    if str(segment.get("mixcut_usability") or "") != "yes":
+        return False
+    if str(segment.get("risk_level") or "") not in {"low", "medium"}:
+        return False
+    if str(segment.get("product_visibility") or "") not in {"high", "medium"}:
+        return False
+    if str(segment.get("confidence") or "") not in {"high", "medium"}:
+        return False
+    if bool(segment.get("needs_human_review")):
+        return False
+    return bool(segment.get("_latest_tag"))
 
 
 def _voc_required_slot_index(
@@ -1106,7 +1130,7 @@ def _usable_voc_ads_hook_segments(ctx: SkillContext, product_id: str, state: dic
     segments = state.get("_selection_segments")
     if segments is None:
         try:
-            segments = ctx.repo.list_where("segments", "product_id=?", (product_id,))
+            segments = list_material_segments(ctx, product_id)
         except Exception:
             segments = []
         segments = _enrich_segments_for_selection(ctx, segments)
@@ -1890,7 +1914,7 @@ def precheck_hook_coverage(ctx: SkillContext, product_id: str, required_count: i
       3. hook_visual_type ≠ none（有视觉钩子，改动2 字段；老素材 NULL 视为无钩子）
       4. 无水印、risk=low 或受信任（沿用 _passes_first_slot_floor 口径）
     """
-    segments = ctx.repo.list_where("segments", "product_id=?", (product_id,))
+    segments = list_material_segments(ctx, product_id)
     if not segments:
         return {"ok": False, "gap": {"product_id": product_id, "missing_role": "hero", "expected_hook_visual_type": "any", "expected_segment_type": "home_lifestyle", "shortfall": required_count}}
     enriched = _render_eligible_segments(_enrich_segments_for_selection(ctx, segments))
@@ -2078,7 +2102,7 @@ def _segment_reuse_cap_for_slot(state: dict, role: str, slot_index: int) -> int:
 def _core_segment_reuse_cap(state: dict) -> int:
     if state.get("reuse_mode") in {"fill_target", "final_fill"}:
         return FILL_MODE_SEGMENT_REUSE_PER_BATCH
-    return MAX_SEGMENT_REUSE_PER_BATCH
+    return MAX_CORE_SEGMENT_REUSE_PER_BATCH
 
 
 def _first_segment_reuse_cap(state: dict) -> int:

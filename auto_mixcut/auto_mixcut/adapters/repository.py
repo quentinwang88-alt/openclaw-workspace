@@ -62,6 +62,12 @@ JSON_FIELDS = {
     "reason_json",
     "ai_supplement_detail_json",
     "guard_detail_json",
+    "source_payload_json",
+    "beat_plan_json",
+    "tts_timeline_json",
+    "evidence_gap_json",
+    "audio_policy_json",
+    "roles_json",
 }
 
 
@@ -126,6 +132,32 @@ class SQLiteRepository:
             return Result.ok(row)
         except Exception as exc:
             return Result.fail("RDS_WRITE_FAILED", str(exc), {"table": table, "row": row})
+
+    def bulk_upsert(self, table: str, key: str, rows: Iterable[Dict[str, Any]]) -> Result:
+        rows = [dict(row) for row in rows]
+        if not rows:
+            return Result.ok({"table": table, "written": 0})
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        has_updated_at = self._has_column(table, "updated_at")
+        normalized = []
+        for row in rows:
+            row.setdefault("created_at", now)
+            if has_updated_at:
+                row.setdefault("updated_at", now)
+            normalized.append(row)
+        cols = list(normalized[0])
+        if any(set(row) != set(cols) for row in normalized):
+            return Result.fail("RDS_WRITE_FAILED", "bulk rows must use the same columns", {"table": table})
+        payloads = [{column: self._encode(column, row[column]) for column in cols} for row in normalized]
+        placeholders = ", ".join(["?"] * len(cols))
+        updates = ", ".join([f"{column}=excluded.{column}" for column in cols if column != key])
+        sql = f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({placeholders}) ON CONFLICT({key}) DO UPDATE SET {updates}"
+        try:
+            with self.connect() as conn:
+                conn.executemany(sql, [[payload[column] for column in cols] for payload in payloads])
+            return Result.ok({"table": table, "written": len(normalized)})
+        except Exception as exc:
+            return Result.fail("RDS_WRITE_FAILED", str(exc), {"table": table, "row_count": len(normalized)})
 
     def insert(self, table: str, row: Dict[str, Any]) -> Result:
         row = dict(row)
@@ -368,6 +400,33 @@ class MySQLRepository:
             return Result.ok(row)
         except Exception as exc:
             return Result.fail("RDS_WRITE_FAILED", str(exc), {"table": table, "row": row})
+
+    def bulk_upsert(self, table: str, key: str, rows: Iterable[Dict[str, Any]]) -> Result:
+        rows = [dict(row) for row in rows]
+        if not rows:
+            return Result.ok({"table": table, "written": 0})
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        has_updated_at = self._has_column(table, "updated_at")
+        normalized = []
+        for row in rows:
+            row.setdefault("created_at", now)
+            if has_updated_at:
+                row.setdefault("updated_at", now)
+            normalized.append(row)
+        cols = list(normalized[0])
+        if any(set(row) != set(cols) for row in normalized):
+            return Result.fail("RDS_WRITE_FAILED", "bulk rows must use the same columns", {"table": table})
+        payloads = [{column: self._encode(column, row[column]) for column in cols} for row in normalized]
+        placeholders = ", ".join(["%s"] * len(cols))
+        updates = ", ".join([f"{column}=VALUES({column})" for column in cols if column != key])
+        sql = f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({placeholders}) ON DUPLICATE KEY UPDATE {updates}"
+        try:
+            with self.connect() as conn:
+                with conn.cursor() as cur:
+                    cur.executemany(sql, [[payload[column] for column in cols] for payload in payloads])
+            return Result.ok({"table": table, "written": len(normalized)})
+        except Exception as exc:
+            return Result.fail("RDS_WRITE_FAILED", str(exc), {"table": table, "row_count": len(normalized)})
 
     def insert(self, table: str, row: Dict[str, Any]) -> Result:
         row = dict(row)

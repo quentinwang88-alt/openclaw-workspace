@@ -14,6 +14,7 @@ from .context import SkillContext
 from .bgm_usage_skill import refresh_bgm_track_usage
 from .feishu_review_skill import sync_product_task_best_effort
 from .hard_subtitle_policy import is_repairable_bottom_caption
+from .output_material_usage_skill import OutputMaterialUsageSkill
 from .rds_repository_skill import RDSRepositorySkill
 from .usage_counter_skill import is_good_rendered_output, refresh_segment_usage
 
@@ -101,7 +102,7 @@ class RenderSkill:
         if self.ctx.ffmpeg.mock:
             subtitles = _subtitle_plan(self.ctx, plan)
             bgm_object = None
-            bgm_plan = _bgm_manifest(_default_bgm_plan())
+            bgm_plan = _audio_manifest_for_mock(plan)
         product = self.ctx.repo.get("products", "product_id", plan["product_id"]) or {}
         out_key = f"auto_mixcut/outputs/{product.get('market','NA')}/{product.get('category','uncategorized')}/{plan['product_id']}/{plan['batch_id']}/variant_{plan['variant_no']:03d}.mp4"
         cover_key = f"auto_mixcut/covers/{product.get('market','NA')}/{product.get('category','uncategorized')}/{plan['product_id']}/{plan['batch_id']}/variant_{plan['variant_no']:03d}.jpg"
@@ -116,14 +117,42 @@ class RenderSkill:
         self.ctx.repo.upsert("oss_objects", "object_id", out_obj)
         self.ctx.repo.upsert("oss_objects", "object_id", cover_obj)
         duration_ms = _planned_duration_ms(plan, segments)
-        output_row = {"output_id": output_id, "batch_id": plan["batch_id"], "product_id": plan["product_id"], "variant_no": plan["variant_no"], "template_id": plan["template_id"], "output_oss_object_id": out_obj["object_id"], "cover_oss_object_id": cover_obj["object_id"], "duration_ms": duration_ms, "width": 1080, "height": 1920, "render_status": "rendered", "machine_quality_status": "pending", "human_quality_status": "pending", "bgm_plan_json": {**bgm_plan, "oss_object_id": bgm_object, "loudness_normalized": True}}
+        output_row = {
+            "output_id": output_id,
+            "batch_id": plan["batch_id"],
+            "product_id": plan["product_id"],
+            "variant_no": plan["variant_no"],
+            "template_id": plan["template_id"],
+            "output_oss_object_id": out_obj["object_id"],
+            "cover_oss_object_id": cover_obj["object_id"],
+            "duration_ms": duration_ms,
+            "width": 1080,
+            "height": 1920,
+            "render_status": "rendered",
+            "machine_quality_status": "pending",
+            "human_quality_status": "pending",
+            "content_mode": plan.get("content_mode") or "bgm",
+            "target_language": _target_language(self.ctx, plan),
+            "voiceover_variant_id": plan.get("voiceover_variant_id"),
+            "hook_id": plan.get("hook_id"),
+            "primary_selling_point": plan.get("primary_selling_point"),
+            "voiceover_oss_object_id": plan.get("voiceover_oss_object_id"),
+            "match_plan_version": plan.get("match_plan_version"),
+            "hook_text": _hook_text(plan),
+            "voiceover_text": _voiceover_text(plan),
+            "reuse_mode": "material_library",
+            "bgm_plan_json": {**bgm_plan, "oss_object_id": bgm_object, "loudness_normalized": True},
+        }
         self.ctx.repo.upsert("outputs", "output_id", output_row)
         for slot in segments:
             self.ctx.repo.insert("output_segments", {"output_id": output_id, "segment_id": slot["segment_id"], "asset_id": slot["asset_id"], "slot_index": slot["slot"], "role_used": slot["role"], "start_ms_in_output": slot["start_ms_in_output"], "end_ms_in_output": slot["end_ms_in_output"]})
             refresh_segment_usage(self.ctx, slot["segment_id"])
+        usage_snapshot = OutputMaterialUsageSkill(self.ctx).refresh_output(output_id)
+        if not usage_snapshot.success:
+            return usage_snapshot
         consumed_prompt_packages = _mark_prompt_packages_consumed_for_output(self.ctx, segments)
         _record_bgm_usage(self.ctx, output_row, bgm_plan)
-        manifest_data = {"output_id": output_id, "batch_id": plan["batch_id"], "product_id": plan["product_id"], "template_id": plan["template_id"], "duration_ms": duration_ms, "output_oss_object_id": out_obj["object_id"], "cover_oss_object_id": cover_obj["object_id"], "segments": segments, "subtitles": subtitles, "bgm": {**bgm_plan, "oss_object_id": bgm_object, "loudness_normalized": True}, "machine_quality_status": "pending", "experiment_group": plan["template_id"], "experiment_batch": plan["batch_id"], "consumed_prompt_package_ids": consumed_prompt_packages}
+        manifest_data = {"output_id": output_id, "batch_id": plan["batch_id"], "product_id": plan["product_id"], "template_id": plan["template_id"], "duration_ms": duration_ms, "output_oss_object_id": out_obj["object_id"], "cover_oss_object_id": cover_obj["object_id"], "content_mode": plan.get("content_mode") or "bgm", "voiceover_variant_id": plan.get("voiceover_variant_id"), "voiceover_oss_object_id": plan.get("voiceover_oss_object_id"), "match_plan_version": plan.get("match_plan_version"), "tts_timeline": plan.get("tts_timeline_json") or [], "evidence_gaps": plan.get("evidence_gap_json") or [], "segments": segments, "material_usage": usage_snapshot.data.get("rows") or [], "subtitles": subtitles, "bgm": {**bgm_plan, "oss_object_id": bgm_object, "loudness_normalized": True}, "machine_quality_status": "pending", "experiment_group": plan["template_id"], "experiment_batch": plan["batch_id"], "consumed_prompt_package_ids": consumed_prompt_packages}
         manifest.write_text(json.dumps(manifest_data, ensure_ascii=False, indent=2), encoding="utf-8")
         man_key = f"auto_mixcut/manifests/{product.get('market','NA')}/{product.get('category','uncategorized')}/{plan['product_id']}/{plan['batch_id']}/variant_{plan['variant_no']:03d}.json"
         man_upload = self.ctx.oss.upload(manifest, man_key)
@@ -149,9 +178,19 @@ class RenderSkill:
             return tool_check
         work_dir = output_path.parent / f"{output_path.stem}_parts"
         work_dir.mkdir(parents=True, exist_ok=True)
-        bgm = _ensure_bgm(self.ctx, plan)
-        if not bgm.success:
-            return bgm
+        content_mode = str(plan.get("content_mode") or "bgm").lower()
+        bgm = None
+        voiceover_path = None
+        if content_mode == "voiceover":
+            voiceover_path = require_oss_object_path(self.ctx, plan.get("voiceover_oss_object_id"), "render_voiceover")
+            if not voiceover_path or not voiceover_path.exists():
+                return Result.fail("VOICEOVER_AUDIO_MISSING", "voiceover audio object could not be resolved", {"render_plan_id": plan.get("render_plan_id")})
+            if plan.get("evidence_gap_json"):
+                return Result.fail("VOICEOVER_EVIDENCE_GAPS", "render is blocked while evidence gaps remain", {"evidence_gaps": plan.get("evidence_gap_json")})
+        else:
+            bgm = _ensure_bgm(self.ctx, plan)
+            if not bgm.success:
+                return bgm
         parts = []
         for slot in slots:
             source = _segment_path(self.ctx, slot["segment_id"])
@@ -200,17 +239,25 @@ class RenderSkill:
         if not concat.success:
             return concat
         drawtext = _drawtext_filter(subtitles)
-        bgm_bed = _render_bgm_bed(self.ctx, bgm.data, _planned_duration_ms(plan, slots), work_dir)
-        if not bgm_bed.success:
-            return bgm_bed
+        audio_path = voiceover_path
+        if content_mode != "voiceover":
+            bgm_bed = _render_bgm_bed(self.ctx, bgm.data, _planned_duration_ms(plan, slots), work_dir)
+            if not bgm_bed.success:
+                return bgm_bed
+            audio_path = Path(bgm_bed.data["path"])
+        audio_filter = (
+            f"[1:a]aresample=44100,apad,atrim=duration={duration_arg},loudnorm=I=-16:TP=-1.5:LRA=11[a]"
+            if content_mode == "voiceover"
+            else "[1:a]anull[a]"
+        )
         final_args = [
             "-y",
             "-i",
             str(video_only),
             "-i",
-            str(bgm_bed.data["path"]),
+            str(audio_path),
             "-filter_complex",
-            f"[0:v]{drawtext}[v];[1:a]anull[a]",
+            f"[0:v]{drawtext}[v];{audio_filter}",
             "-map",
             "[v]",
             "-map",
@@ -243,6 +290,8 @@ class RenderSkill:
         data = probed.data
         if data.get("width") != 1080 or data.get("height") != 1920 or not data.get("has_audio"):
             return Result.fail("RENDER_FAILED", "rendered output failed technical probe", {"probe": data})
+        if content_mode == "voiceover":
+            return Result.ok({"path": str(output_path), "probe": data, "bgm_object": None, "bgm": {"policy": "disabled_for_voiceover"}})
         return Result.ok({"path": str(output_path), "probe": data, "bgm_object": bgm.data.get("object_id"), "bgm": _bgm_manifest(bgm.data)})
 
 
@@ -257,6 +306,41 @@ def _planned_duration_ms(plan: dict, segments: list[dict]) -> int:
         return max(int(slot.get("end_ms_in_output") or 0) for slot in segments)
     except (TypeError, ValueError, StopIteration):
         return 15000
+
+
+def _voiceover_text(plan: dict) -> str | None:
+    beats = plan.get("beat_plan_json") or []
+    if isinstance(beats, dict):
+        beats = beats.get("beats") or beats.get("lines") or []
+    texts = [str(beat.get("text") or beat.get("voiceover_text") or "").strip() for beat in beats if isinstance(beat, dict)]
+    return " ".join(text for text in texts if text) or None
+
+
+def _hook_text(plan: dict) -> str | None:
+    beats = plan.get("beat_plan_json") or []
+    if isinstance(beats, dict):
+        hook = beats.get("hook") or {}
+        if isinstance(hook, dict) and hook.get("text"):
+            return str(hook["text"])
+        beats = beats.get("beats") or beats.get("lines") or []
+    for beat in beats if isinstance(beats, list) else []:
+        if isinstance(beat, dict) and str(beat.get("role") or "") == "hook":
+            return str(beat.get("text") or beat.get("speech_text") or "") or None
+    return None
+
+
+def _audio_manifest_for_mock(plan: dict) -> dict:
+    if str(plan.get("content_mode") or "bgm").lower() == "voiceover":
+        return {"policy": "disabled_for_voiceover", "mock": True}
+    return _bgm_manifest(_default_bgm_plan())
+
+
+def _target_language(ctx: SkillContext, plan: dict) -> str | None:
+    batches = ctx.repo.list_where("mixcut_batches", "batch_id=? LIMIT 1", (plan.get("batch_id"),))
+    if not batches or not batches[0].get("task_id"):
+        return None
+    task = ctx.repo.get("content_tasks", "task_id", batches[0]["task_id"]) or {}
+    return str(task.get("target_language") or "").strip() or None
 
 
 def _actual_generated_count(ctx: SkillContext, product_id: str | None) -> int:

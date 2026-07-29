@@ -40,6 +40,7 @@ from auto_mixcut.skills.segment_skill import SegmentSkill
 from auto_mixcut.skills.usage_counter_skill import ads_fast_strict_outputs_enabled, is_ads_fast_output, is_good_rendered_output_strict
 from auto_mixcut.skills.watermark_detect_skill import WatermarkDetectSkill
 from auto_mixcut.skills.watermark_process_skill import WatermarkProcessSkill
+from auto_mixcut.skills.voiceover_mixcut_orchestrator_skill import VoiceoverMixcutOrchestratorSkill
 from auto_mixcut.skills.bgm_audio_analysis_skill import BgmAudioAnalysisSkill
 from auto_mixcut.skills.bgm_library_skill import BgmLibrarySkill
 from auto_mixcut.skills.bgm_tag_fusion_skill import BgmTagFusionSkill
@@ -109,6 +110,16 @@ def main(argv: list[str] | None = None) -> int:
     upload.add_argument("--product-binding-type", default="exact_sku")
     render = sub.add_parser("render")
     render.add_argument("--batch-id", required=True)
+    voiceover_plan = sub.add_parser("prepare-voiceover-plan")
+    voiceover_plan.add_argument("--task-id", required=True)
+    voiceover_plan.add_argument("--batch-id", required=True)
+    voiceover_plan.add_argument("--variant-no", type=int, required=True)
+    voiceover_plan.add_argument("--voiceover-variant-id", required=True)
+    voiceover_plan.add_argument("--voiceover-object-id", required=True)
+    voiceover_plan.add_argument("--tts-timeline-json", required=True)
+    voiceover_plan.add_argument("--beat-plan-json", required=True)
+    voiceover_plan.add_argument("--hook-id", default="")
+    voiceover_plan.add_argument("--primary-selling-point", default="")
     abort_batch = sub.add_parser("abort-batch")
     abort_batch.add_argument("--batch-id", required=True)
     abort_batch.add_argument("--reason", default="operator_abort")
@@ -187,6 +198,7 @@ def main(argv: list[str] | None = None) -> int:
         "render-plan": lambda: _render_plan(ctx, args.product_id, args.count, args.full_refresh, args.confirm_full_refresh, args.template_id),
         "top-up": lambda: _top_up(ctx, args.product_id, args.count, args.max_rounds, template_id=args.template_id),
         "render": lambda: RenderSkill(ctx).render_batch(args.batch_id),
+        "prepare-voiceover-plan": lambda: _prepare_voiceover_plan(ctx, args),
         "abort-batch": lambda: BatchControlSkill(ctx).abort_batch(args.batch_id, reason=args.reason),
         "final-video-qc": lambda: FinalVideoQCSkill(ctx).check_batch(args.batch_id),
         "execute-remix": lambda: RemixSkill(ctx).execute_output(args.output_id) if args.output_id else RemixSkill(ctx).execute_pending(args.batch_id, args.limit),
@@ -217,6 +229,29 @@ def main(argv: list[str] | None = None) -> int:
 def _tag(ctx, product_id):
     first = AITaggingSkill(ctx).submit_batch(product_id)
     return AITaggingSkill(ctx).poll_results(product_id) if first.success else first
+
+
+def _prepare_voiceover_plan(ctx, args):
+    try:
+        tts_timeline = json.loads(Path(args.tts_timeline_json).read_text(encoding="utf-8"))
+        beat_plan = json.loads(Path(args.beat_plan_json).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return Result.fail("VOICEOVER_PLAN_INPUT_INVALID", str(exc))
+    if not isinstance(tts_timeline, list):
+        return Result.fail("VOICEOVER_PLAN_INPUT_INVALID", "tts timeline JSON must be an array")
+    if not isinstance(beat_plan, (list, dict)):
+        return Result.fail("VOICEOVER_PLAN_INPUT_INVALID", "beat plan JSON must be an array or object")
+    return VoiceoverMixcutOrchestratorSkill(ctx).prepare_render_plan(
+        task_id=args.task_id,
+        batch_id=args.batch_id,
+        variant_no=args.variant_no,
+        voiceover_variant_id=args.voiceover_variant_id,
+        voiceover_oss_object_id=args.voiceover_object_id,
+        tts_timeline=tts_timeline,
+        beat_plan=beat_plan,
+        hook_id=args.hook_id,
+        primary_selling_point=args.primary_selling_point,
+    )
 
 
 def _bgm_tag(ctx, bgm_id, force):

@@ -264,6 +264,11 @@ def _ai_roles(segment: Dict[str, Any], asset: Dict[str, Any], tag: Dict[str, Any
 
 def _ai_roles_without_semantic_qc(segment: Dict[str, Any], asset: Dict[str, Any], tag: Dict[str, Any], config: AISegmentFactoryConfig) -> tuple[List[str], str]:
     segment_type = str(segment.get("segment_type") or asset.get("scene_tag") or "")
+    anchor_level = str(segment.get("anchor_match_level") or "")
+    if anchor_level in {"uncertain", "soft_pass"}:
+        return ["scene", "ending"], f"ai anchor {anchor_level}: scene/ending only"
+    if not segment_type:
+        return _ai_roles_for_missing_segment_type(segment, tag)
     rule = config.get_segment_type_rule(segment_type)
     possible_roles = set(rule.possible_roles or ["scene", "ending"])
     roles = {role for role in (rule.default_roles or []) if role in possible_roles}
@@ -288,7 +293,8 @@ def _ai_roles_without_semantic_qc(segment: Dict[str, Any], asset: Dict[str, Any]
         roles.add(slot_role)
     if not roles:
         roles = {"scene", "ending"}
-    return sorted(roles), "ai semantic qc disabled; roles inferred from prompt package and tag"
+    reason_prefix = "ai strict_pass; " if anchor_level == "strict_pass" else ""
+    return sorted(roles), reason_prefix + "semantic qc disabled; roles inferred from prompt package and tag"
 
 
 def _ai_roles_for_missing_segment_type(segment: Dict[str, Any], tag: Dict[str, Any]) -> tuple[List[str], str]:

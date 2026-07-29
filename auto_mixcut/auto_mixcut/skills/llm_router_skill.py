@@ -80,7 +80,8 @@ class LLMRouterSkill:
                 for value in (payload.get("reference_image_paths") or [])[:3]
                 if Path(str(value)).expanduser().is_file()
             ]
-            image_paths = references + _frame_paths(self.ctx, segment_id, max_count=max(1, 9 - len(references)))
+            frame_limit = max(1, min(9, int(payload.get("segment_frame_limit") or max(1, 9 - len(references)))))
+            image_paths = references + _frame_paths(self.ctx, segment_id, max_count=frame_limit)
         else:
             image_paths = payload.get("image_paths") or []
 

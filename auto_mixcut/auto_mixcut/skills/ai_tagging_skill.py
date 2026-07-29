@@ -18,10 +18,12 @@ class AITaggingSkill:
         self.ctx = ctx
         self.router = LLMRouterSkill(ctx)
 
-    def submit_batch(self, product_id: str, prompt_version: str = "v1.0", source_types: list[str] | None = None) -> Result:
+    def submit_batch(self, product_id: str, prompt_version: str = "v1.0", source_types: list[str] | None = None, tag_scope: str | None = None) -> Result:
         segments = _segments_for_source_types(self.ctx, product_id, source_types)
         segments = _limit_segments(segments)
         latest_tags = _latest_tags_by_segment(self.ctx, [str(segment.get("segment_id") or "") for segment in segments])
+        scope = _normalize_tag_scope(tag_scope)
+        segments = _apply_tag_scope(segments, latest_tags, scope=scope, force=False)
         segments = [segment for segment in segments if str(segment.get("segment_id") or "") not in latest_tags]
         batch_id = new_id("AIBATCH")
         self.ctx.repo.upsert(
@@ -37,7 +39,7 @@ class AITaggingSkill:
                 "prompt_version": prompt_version,
             },
         )
-        return Result.ok({"ai_batch_id": batch_id, "total_segments": len(segments)})
+        return Result.ok({"ai_batch_id": batch_id, "total_segments": len(segments), "tag_scope": scope})
 
     def poll_results(
         self,
@@ -46,12 +48,15 @@ class AITaggingSkill:
         force: bool = False,
         source_types: list[str] | None = None,
         reference_images: list[str] | None = None,
+        tag_scope: str | None = None,
     ) -> Result:
         segments = _segments_for_source_types(self.ctx, product_id, source_types)
         segments = _limit_segments(segments)
         completed = skipped = failed = 0
         segment_ids = [str(segment.get("segment_id") or "") for segment in segments if segment.get("segment_id")]
         latest_tags = _latest_tags_by_segment(self.ctx, segment_ids)
+        scope = _normalize_tag_scope(tag_scope)
+        segments = _apply_tag_scope(segments, latest_tags, scope=scope, force=force)
         if not force:
             skipped = sum(1 for segment in segments if str(segment.get("segment_id") or "") in latest_tags)
             segments = [segment for segment in segments if str(segment.get("segment_id") or "") not in latest_tags]
@@ -138,7 +143,7 @@ class AITaggingSkill:
                 str(quality.get("note") or "tagged material quality too low"),
                 {"completed_segments": completed, "skipped_segments": skipped, "failed_segments": failed, "concurrency": max_workers, "quality": quality},
             )
-        return Result.ok({"completed_segments": completed, "skipped_segments": skipped, "failed_segments": failed, "concurrency": max_workers, "quality": quality})
+        return Result.ok({"completed_segments": completed, "skipped_segments": skipped, "failed_segments": failed, "concurrency": max_workers, "tag_scope": scope, "quality": quality})
 
     def retry_failed(self, product_id: str) -> Result:
         return self.poll_results(product_id)
@@ -168,6 +173,7 @@ class AITaggingSkill:
                 "reference_image_paths": reference_images or [],
                 "reference_image_count": len(reference_images or []),
                 "source_reference_mode": bool(reference_images),
+                "segment_frame_limit": _tag_frame_limit(),
             },
             product_id=product_id,
             segment_id=segment["segment_id"],
@@ -259,12 +265,15 @@ def _latest_tags_by_segment(ctx: SkillContext, segment_ids: list[str]) -> dict[s
 
 
 def _segments_for_source_types(ctx: SkillContext, product_id: str, source_types: list[str] | None = None) -> list[dict]:
+    # NULL/empty is retained for legacy rows created before segment_status was
+    # mandatory; terminal states such as archived and tag_failed stay excluded.
+    status_clause = "(segment_status IS NULL OR segment_status='' OR segment_status IN ('created','qc_passed','qc_failed'))"
     if not source_types:
-        return ctx.repo.list_where("segments", "product_id=?", (product_id,))
+        return ctx.repo.list_where("segments", f"product_id=? AND {status_clause}", (product_id,))
     placeholders = ",".join("?" for _ in source_types)
     return ctx.repo.list_where(
         "segments",
-        f"product_id=? AND source_type IN ({placeholders})",
+        f"product_id=? AND source_type IN ({placeholders}) AND {status_clause}",
         (product_id, *source_types),
     )
 
@@ -285,11 +294,44 @@ def _limit_segments(segments):
     return segments
 
 
+def _normalize_tag_scope(value: str | None) -> str:
+    scope = str(value or os.environ.get("AUTO_MIXCUT_TAG_SCOPE", "all_segments") or "all_segments").strip().lower()
+    return "asset_representative" if scope in {"asset", "representative", "asset_representative"} else "all_segments"
+
+
+def _apply_tag_scope(segments: list[dict], latest_tags: dict[str, dict], *, scope: str, force: bool) -> list[dict]:
+    if scope != "asset_representative":
+        return segments
+    tagged_assets = set()
+    if not force:
+        tagged_assets = {
+            str(segment.get("asset_id") or "")
+            for segment in segments
+            if str(segment.get("segment_id") or "") in latest_tags
+        }
+    representatives = []
+    seen_assets = set(tagged_assets)
+    for segment in sorted(segments, key=lambda item: (str(item.get("asset_id") or ""), int(item.get("start_ms") or 0), str(item.get("segment_id") or ""))):
+        asset_id = str(segment.get("asset_id") or "")
+        if not asset_id or asset_id in seen_assets:
+            continue
+        seen_assets.add(asset_id)
+        representatives.append(segment)
+    return representatives
+
+
 def _tag_concurrency() -> int:
     try:
         return max(1, min(4, int(os.environ.get("AUTO_MIXCUT_TAG_CONCURRENCY", "2") or "2")))
     except ValueError:
         return 2
+
+
+def _tag_frame_limit() -> int:
+    try:
+        return max(1, min(9, int(os.environ.get("AUTO_MIXCUT_TAG_FRAME_LIMIT", "6") or "6")))
+    except ValueError:
+        return 6
 
 
 def _progress_every() -> int:
