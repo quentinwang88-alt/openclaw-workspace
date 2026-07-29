@@ -4,6 +4,7 @@ description: |
   将“原创视频脚本”飞书多维表格里勾选了“是否可同步”的记录，同步到“短视频自动脚本运行管理表”。
   每条脚本单独新增一条目标记录，默认把产品编码和脚本槽位写入任务名（例如 `产品编码.S1`、`产品编码.S1V1`）、把详细脚本写入提示词、把产品图片写入参考图。
   支持正式脚本和 20 个变体脚本，总计最多 24 条脚本；同步成功后自动取消源表勾选，并回写同步状态与同步时间。
+  同时支持“人工短视频脚本库”：用户可在飞书勾选 `立即同步` 让 OpenClaw 在一分钟内触发单条同步，或在对话中说“立即同步人工脚本库”。
 ---
 
 # Script Run Manager Sync
@@ -19,7 +20,8 @@ description: |
 5. 把脚本正文写入目标表 `提示词`
 6. 把 `产品图片` 写入目标表 `参考图`
 7. 默认从脚本主数据库/源表回查并写入 `脚本ID` 与 `店铺ID`
-8. 同步成功后回写源表 `同步状态` / `同步时间`，并自动取消 `是否可同步`
+8. 自动把上游来源归一为运行表单选字段 `脚本类型`：原创脚本 / 短视频复刻脚本 / 养号脚本
+9. 同步成功后回写源表 `同步状态` / `同步时间`，并自动取消 `是否可同步`
 
 ## 默认表格
 
@@ -63,6 +65,7 @@ python3 /Users/likeu3/.openclaw/workspace/skills/script-run-manager-sync/run_pip
 - 每个非空脚本都会新增一条目标记录
 - 同步成功后自动取消源表 `是否可同步`
 - 如果源表存在 `同步状态` / `同步时间` 字段，会自动回写结果
+- `短视频复刻` 必须同时具备复刻流水线的来源证据（`源复刻任务ID`，或 `脚本来源=短视频复刻` 且 `发布用途=短视频复刻`）；只有一个孤立的 `脚本类型=短视频复刻` 时按原创脚本处理，避免复制行残留值造成错分
 
 ## 字段要求
 
@@ -86,5 +89,34 @@ python3 /Users/likeu3/.openclaw/workspace/skills/script-run-manager-sync/run_pip
 - `参考图`
 - `脚本ID`
 - `店铺ID`
+- `脚本类型`
+
+`脚本类型` 是业务流水线分类，与运行表的生成平台 `渠道`（即梦 / iMini）相互独立。历史记录可先预览再幂等回填：
+
+```bash
+python3 skills/script-run-manager-sync/backfill_script_types.py
+python3 skills/script-run-manager-sync/backfill_script_types.py --apply
+```
+
+如需同时纠正源表里“只有复刻类型、没有复刻来源证据”的历史误标，并覆盖重算运行表分类：
+
+```bash
+python3 skills/script-run-manager-sync/backfill_script_types.py --overwrite --repair-source-mislabels
+python3 skills/script-run-manager-sync/backfill_script_types.py --overwrite --repair-source-mislabels --apply
+```
 
 如果目标表缺少 `店铺ID`，同步脚本会自动创建文本字段并在新同步记录中写入；对已经存在但 `店铺ID` 为空的待处理记录，也会在再次命中时补写。
+
+## 人工脚本库立即同步
+
+人工脚本库支持两种触发方式：
+
+1. 勾选 `同步`：由两小时定时任务统一同步。
+2. 勾选 `立即同步`：OpenClaw 在一分钟内接收请求，自动勾选 `同步` 并只处理这一条记录；执行后会自动取消 `立即同步`，最终结果写回 `状态` / `时间`。
+
+也可以在 OpenClaw 对话中明确说“立即同步人工脚本库”或“同步人工脚本 ID <record_id>”，并执行：
+
+```bash
+python3 /Users/likeu3/.openclaw/workspace/skills/script-run-manager-sync/run_pipeline.py \
+  --mode manual --source-kind manual
+```

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import random
 import time
 from dataclasses import dataclass
 from io import BytesIO
@@ -16,6 +17,26 @@ import requests
 
 class FeishuAPIError(Exception):
     """飞书 API 异常。"""
+
+
+TRANSIENT_FEISHU_MESSAGES = (
+    "data not ready", "system busy", "service busy", "too many requests",
+    "rate limit", "frequency limit", "timeout", "temporarily unavailable", "fail",
+)
+
+
+def _is_transient_feishu_response(response: requests.Response) -> bool:
+    status_code = int(getattr(response, "status_code", 200) or 200)
+    if status_code == 429 or status_code >= 500:
+        return True
+    try:
+        payload = response.json()
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(payload, dict) or payload.get("code") in (None, 0, "0"):
+        return False
+    message = str(payload.get("msg") or payload.get("message") or "").strip().lower()
+    return any(marker in message for marker in TRANSIENT_FEISHU_MESSAGES)
 
 
 @dataclass
@@ -97,6 +118,8 @@ class FeishuBitableClient:
         self.table_id = table_id
         self.access_token: Optional[str] = None
         self.token_expires_at: float = 0
+        self.request_count: int = 0
+        self.retry_count: int = 0
 
     def _get_access_token(self) -> str:
         if self.access_token and time.time() < self.token_expires_at:
@@ -114,13 +137,25 @@ class FeishuBitableClient:
 
     def _request(self, method: str, url: str, **kwargs) -> requests.Response:
         last_error: Optional[Exception] = None
-        for attempt in range(3):
+        last_response: Optional[requests.Response] = None
+        for attempt in range(4):
             try:
-                return requests.request(method, url, timeout=30, **kwargs)
+                self.request_count += 1
+                response = requests.request(method, url, timeout=30, **kwargs)
+                last_response = response
+                if not _is_transient_feishu_response(response):
+                    return response
+                last_error = FeishuAPIError(
+                    f"飞书暂时不可用: {getattr(response, 'status_code', '')} / "
+                    f"{str((response.json() or {}).get('msg') or '')[:200]}"
+                )
             except requests.exceptions.RequestException as exc:
                 last_error = exc
-                if attempt < 2:
-                    time.sleep(2 ** attempt)
+            if attempt < 3:
+                self.retry_count += 1
+                time.sleep((2 ** attempt) + random.uniform(0.05, 0.35))
+        if last_response is not None:
+            return last_response
         raise FeishuAPIError(f"飞书 API 请求失败: {last_error}")
 
     def list_fields(self) -> List[TableField]:
@@ -160,6 +195,20 @@ class FeishuBitableClient:
         result = response.json()
         if result.get("code") != 0:
             raise FeishuAPIError(f"创建字段失败: {result.get('msg')}")
+        return result.get("data", {})
+
+    def update_field(self, field_id: str, *, field_name: Optional[str] = None) -> Dict[str, Any]:
+        """Rename an existing field without changing its type or stored values."""
+        if not field_name:
+            return {}
+        url = (
+            f"https://open.feishu.cn/open-apis/bitable/v1/apps/"
+            f"{self.app_token}/tables/{self.table_id}/fields/{field_id}"
+        )
+        response = self._request("PUT", url, headers=self._headers(), json={"field_name": field_name})
+        result = response.json()
+        if result.get("code") != 0:
+            raise FeishuAPIError(f"更新字段失败: {result.get('msg')}")
         return result.get("data", {})
 
     def list_records(self, page_size: int = 100, limit: Optional[int] = None) -> List[TableRecord]:

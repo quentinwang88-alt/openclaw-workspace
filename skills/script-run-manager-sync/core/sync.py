@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from core.bitable import TableRecord
+from core.source_voiceover_plan import build_original_voiceover_payload
 
 
 SCRIPT_FIELD_SPECS: List[Dict[str, Any]] = [
@@ -57,10 +59,14 @@ SOURCE_FIELD_ALIASES: Dict[str, List[str]] = {
     "direction_4": ["母版方向4"],
     "product_images": ["产品图片", "商品图片", "图片"],
     "script_source": ["脚本来源", "来源"],
+    "source_script_type": ["脚本类型", "类型"],
+    "source_remake_record_id": ["源复刻任务ID", "源复刻记录ID", "复刻任务ID"],
     "publish_purpose": ["发布用途", "用途"],
     "cart_enabled": ["是否挂车", "挂车"],
     "content_branch": ["内容分支"],
     "video_duration": ["视频时长", "短视频时长", "时长", "视频秒数", "duration", "video_duration"],
+    "voiceover_expression_contract": ["口播表达合同"],
+    "voiceover_execution_plan": ["口播执行计划"],
     "sync_enabled": ["是否可同步", "是否可同步脚本"],
     "sync_master_enabled": ["是否可同步母版"],
     "sync_variant_enabled": ["是否可同步子变体"],
@@ -80,19 +86,37 @@ TARGET_FIELD_ALIASES: Dict[str, List[str]] = {
     "short_video_title": ["短视频标题", "标题"],
     "store_id": ["店铺ID"],
     "product_id": ["产品ID"],
+    "canonical_product_id": ["全球产品ID"],
     "parent_slot": ["所属母版"],
     "direction_label": ["母版方向"],
     "variant_strength": ["变体强度"],
-    "script_source": ["脚本来源", "来源"],
+    "script_source": ["任务来源", "脚本来源", "来源"],
+    "script_type": ["脚本类型"],
+    "target_language": ["目标语言", "语言", "target_language"],
     "publish_purpose": ["发布用途", "用途"],
     "cart_enabled": ["是否挂车", "挂车"],
     "content_branch": ["内容分支"],
     "reference_free": ["免参考图"],
     "video_duration": ["视频时长", "短视频时长", "时长", "视频秒数", "duration", "video_duration"],
+    "voiceover_expression_contract": ["口播表达合同"],
+    "voiceover_execution_plan": ["口播执行计划"],
     "task_status": ["任务状态", "状态"],
 }
 
 SCRIPT_ID_HEADER_PATTERN = re.compile(r"\A\s*【脚本ID】\s*\n-\s*[^\n\r]+(?:\r?\n){0,2}")
+
+SCRIPT_TYPE_ORIGINAL = "原创脚本"
+SCRIPT_TYPE_SHORT_VIDEO_REMAKE = "短视频复刻脚本"
+SCRIPT_TYPE_NURTURE = "养号脚本"
+SCRIPT_TYPE_LIGHT_VIDEO = "轻视频脚本"
+SCRIPT_TYPE_LIGHT_VIDEO_SUPPLEMENT = "轻视频补素材脚本"
+RUN_MANAGER_SCRIPT_TYPE_OPTIONS = (
+    SCRIPT_TYPE_ORIGINAL,
+    SCRIPT_TYPE_SHORT_VIDEO_REMAKE,
+    SCRIPT_TYPE_NURTURE,
+    SCRIPT_TYPE_LIGHT_VIDEO,
+    SCRIPT_TYPE_LIGHT_VIDEO_SUPPLEMENT,
+)
 
 
 @dataclass
@@ -116,10 +140,14 @@ class ScriptSyncTask:
     direction_label: str = ""
     variant_strength: str = ""
     script_source: str = ""
+    source_script_type: str = ""
+    source_remake_record_id: str = ""
     publish_purpose: str = ""
     cart_enabled: str = ""
     content_branch: str = ""
     video_duration: int = 15
+    voiceover_expression_contract: str = ""
+    voiceover_execution_plan: str = ""
 
 
 def is_variant_slot(task_suffix: str) -> bool:
@@ -191,12 +219,59 @@ def normalize_checkbox(value: Any) -> bool:
     return False
 
 
-def is_nurture_task(task: ScriptSyncTask) -> bool:
-    return (
-        normalize_text(task.script_source) == "养号复刻"
-        or normalize_text(task.publish_purpose) == "养号"
-        or normalize_text(task.content_branch) == "非商品展示型"
+def normalize_run_manager_script_type(
+    *,
+    script_source: Any = "",
+    source_script_type: Any = "",
+    source_remake_record_id: Any = "",
+    publish_purpose: Any = "",
+    content_branch: Any = "",
+    task_source: Any = "",
+) -> str:
+    """Map all current production entry names to one stable run-manager type."""
+    task_source_text = normalize_text(task_source)
+    if task_source_text in {"轻量试穿视频", SCRIPT_TYPE_LIGHT_VIDEO}:
+        return SCRIPT_TYPE_LIGHT_VIDEO
+    if task_source_text in {"口播增强补充镜头", SCRIPT_TYPE_LIGHT_VIDEO_SUPPLEMENT}:
+        return SCRIPT_TYPE_LIGHT_VIDEO_SUPPLEMENT
+
+    script_source_text = normalize_text(script_source)
+    source_script_type_text = normalize_text(source_script_type)
+    source_remake_record_id_text = normalize_text(source_remake_record_id)
+    publish_purpose_text = normalize_text(publish_purpose)
+    content_branch_text = normalize_text(content_branch)
+    upstream_types = {script_source_text, source_script_type_text, task_source_text}
+    if (
+        upstream_types & {"养号复刻", SCRIPT_TYPE_NURTURE}
+        or publish_purpose_text == "养号"
+        or content_branch_text == "非商品展示型"
+    ):
+        return SCRIPT_TYPE_NURTURE
+    # 原始脚本表中的“脚本类型”可能被复制/导入时误带。只有复刻流水线
+    # 同时留下来源记录 ID，或同时留下来源+用途，才把上游记录认定为复刻。
+    # 运行管理表自身的任务来源仍可作为直接、权威的分类依据。
+    short_markers = {"短视频复刻", SCRIPT_TYPE_SHORT_VIDEO_REMAKE}
+    if task_source_text in short_markers:
+        return SCRIPT_TYPE_SHORT_VIDEO_REMAKE
+    if source_remake_record_id_text and {script_source_text, source_script_type_text} & short_markers:
+        return SCRIPT_TYPE_SHORT_VIDEO_REMAKE
+    if script_source_text in short_markers and publish_purpose_text == "短视频复刻":
+        return SCRIPT_TYPE_SHORT_VIDEO_REMAKE
+    return SCRIPT_TYPE_ORIGINAL
+
+
+def task_script_type(task: ScriptSyncTask) -> str:
+    return normalize_run_manager_script_type(
+        script_source=task.script_source,
+        source_script_type=task.source_script_type,
+        source_remake_record_id=task.source_remake_record_id,
+        publish_purpose=task.publish_purpose,
+        content_branch=task.content_branch,
     )
+
+
+def is_nurture_task(task: ScriptSyncTask) -> bool:
+    return task_script_type(task) == SCRIPT_TYPE_NURTURE
 
 
 def extract_attachments(raw_value: Any) -> List[Dict[str, Any]]:
@@ -250,6 +325,18 @@ def compact_anchor_text(raw_value: Any, max_length: int = 80) -> str:
     return text[: max_length - 1].rstrip("，,；;、 ") + "…"
 
 
+def resolved_task_target_language(task: ScriptSyncTask) -> str:
+    """Resolve the run-manager target language before any media is created."""
+
+    explicit = compact_anchor_text(task.target_language, max_length=24)
+    if explicit:
+        return explicit
+    store_id = normalize_text(task.store_id).lower()
+    if store_id.startswith(("myps", "myalibaba", "thfz", "th")):
+        return "泰语"
+    return ""
+
+
 def remove_script_id_header(prompt_text: Any) -> str:
     text = normalize_text(prompt_text)
     if not text:
@@ -274,7 +361,7 @@ def build_prompt_with_anchor(task: ScriptSyncTask) -> str:
     product_type = compact_anchor_text(task.product_type, max_length=24)
     business_category = compact_anchor_text(task.business_category, max_length=16)
     product_params = compact_anchor_text(task.product_params, max_length=80)
-    target_language = compact_anchor_text(task.target_language, max_length=24) or "目标国家当地语言"
+    target_language = resolved_task_target_language(task) or "目标国家当地语言"
 
     if product_type:
         anchor_parts.append(product_type)
@@ -430,6 +517,7 @@ def build_sync_tasks(
             if not prompt_text:
                 continue
             metadata = derive_task_metadata(record, mapping, spec["task_suffix"], metadata_lookup=metadata_lookup)
+            source_plan = build_original_voiceover_payload(prompt_text)
             tasks.append(
                 ScriptSyncTask(
                     source_record_id=record.record_id,
@@ -444,10 +532,28 @@ def build_sync_tasks(
                     business_category=normalize_text(fields.get(mapping.get("business_category"))) if mapping.get("business_category") else "",
                     product_params=normalize_text(fields.get(mapping.get("product_params"))) if mapping.get("product_params") else "",
                     script_source=normalize_text(fields.get(mapping.get("script_source"))) if mapping.get("script_source") else "",
+                    source_script_type=normalize_text(fields.get(mapping.get("source_script_type"))) if mapping.get("source_script_type") else "",
+                    source_remake_record_id=normalize_text(fields.get(mapping.get("source_remake_record_id"))) if mapping.get("source_remake_record_id") else "",
                     publish_purpose=normalize_text(fields.get(mapping.get("publish_purpose"))) if mapping.get("publish_purpose") else "",
                     cart_enabled=normalize_text(fields.get(mapping.get("cart_enabled"))) if mapping.get("cart_enabled") else "",
                     content_branch=normalize_text(fields.get(mapping.get("content_branch"))) if mapping.get("content_branch") else "",
                     video_duration=normalize_video_duration(fields.get(mapping.get("video_duration")) if mapping.get("video_duration") else None),
+                    voiceover_expression_contract=(
+                        normalize_text(fields.get(mapping.get("voiceover_expression_contract")))
+                        if mapping.get("voiceover_expression_contract")
+                        else ""
+                    ) or (
+                        json.dumps(source_plan["expression_contract"], ensure_ascii=False)
+                        if source_plan else ""
+                    ),
+                    voiceover_execution_plan=(
+                        normalize_text(fields.get(mapping.get("voiceover_execution_plan")))
+                        if mapping.get("voiceover_execution_plan")
+                        else ""
+                    ) or (
+                        json.dumps(source_plan["execution_plan"], ensure_ascii=False)
+                        if source_plan else ""
+                    ),
                     **{key: value for key, value in metadata.items() if key != "canonical_script_key"},
                 )
             )
@@ -474,6 +580,12 @@ def build_target_fields(
         fields[mapping["script_id"]] = task.script_id
     if mapping.get("store_id") and task.store_id:
         fields[mapping["store_id"]] = task.store_id
+    if mapping.get("product_id") and task.product_id:
+        fields[mapping["product_id"]] = task.product_id
+    if mapping.get("canonical_product_id"):
+        canonical_product_id = task.product_id or task.product_code
+        if canonical_product_id:
+            fields[mapping["canonical_product_id"]] = canonical_product_id
     if mapping.get("internal_script_key"):
         internal_key = task.internal_script_key or task.task_name
         if internal_key:
@@ -481,16 +593,19 @@ def build_target_fields(
     if include_publish_metadata:
         if mapping.get("short_video_title") and task.short_video_title:
             fields[mapping["short_video_title"]] = task.short_video_title
-        if mapping.get("product_id") and task.product_id:
-            fields[mapping["product_id"]] = task.product_id
         if mapping.get("parent_slot") and task.parent_slot:
             fields[mapping["parent_slot"]] = task.parent_slot
         if mapping.get("direction_label") and task.direction_label:
             fields[mapping["direction_label"]] = task.direction_label
         if mapping.get("variant_strength") and task.variant_strength:
             fields[mapping["variant_strength"]] = task.variant_strength
-    if mapping.get("script_source") and task.script_source:
-        fields[mapping["script_source"]] = task.script_source
+    if mapping.get("script_source"):
+        fields[mapping["script_source"]] = task.script_source or "原创脚本"
+    if mapping.get("script_type"):
+        fields[mapping["script_type"]] = task_script_type(task)
+    resolved_language = resolved_task_target_language(task)
+    if mapping.get("target_language") and resolved_language:
+        fields[mapping["target_language"]] = resolved_language
     if mapping.get("publish_purpose") and task.publish_purpose:
         fields[mapping["publish_purpose"]] = task.publish_purpose
     if mapping.get("cart_enabled") and task.cart_enabled:
@@ -499,6 +614,10 @@ def build_target_fields(
         fields[mapping["content_branch"]] = task.content_branch
     if mapping.get("video_duration"):
         fields[mapping["video_duration"]] = task.video_duration or 15
+    if mapping.get("voiceover_expression_contract") and task.voiceover_expression_contract:
+        fields[mapping["voiceover_expression_contract"]] = task.voiceover_expression_contract
+    if mapping.get("voiceover_execution_plan") and task.voiceover_execution_plan:
+        fields[mapping["voiceover_execution_plan"]] = task.voiceover_execution_plan
     if mapping.get("reference_free") and is_nurture_task(task):
         fields[mapping["reference_free"]] = "否" if task.reference_images else "是"
     return fields

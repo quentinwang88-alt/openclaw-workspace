@@ -21,7 +21,13 @@ sys.path.insert(0, str(SKILL_DIR))
 
 from core.bitable import FeishuBitableClient, resolve_wiki_bitable_app_token  # noqa: E402
 from core.feishu_url_parser import parse_feishu_bitable_url  # noqa: E402
+from core.manual_source import (  # noqa: E402
+    build_manual_sync_tasks,
+    resolve_manual_field_mapping,
+    upsert_manual_metadata,
+)
 from core.sync import (  # noqa: E402
+    RUN_MANAGER_SCRIPT_TYPE_OPTIONS,
     SOURCE_FIELD_ALIASES,
     TARGET_FIELD_ALIASES,
     batch_records,
@@ -45,6 +51,10 @@ DEFAULT_SOURCE_FEISHU_URL = (
 DEFAULT_TARGET_FEISHU_URL = (
     "https://gcngopvfvo0q.feishu.cn/base/"
     "UvErb5HRWaGESXsBs18cvB3FnEe?table=tbl4eKSVgHw8IyDh&view=vewo6WdFGb"
+)
+DEFAULT_MANUAL_SOURCE_FEISHU_URL = (
+    "https://gcngopvfvo0q.feishu.cn/wiki/"
+    "LUfYwCLiTidK26kwTFBcrIignuI?table=tblyaHzECcsu4hyo&view=vewayNJu3z"
 )
 DEFAULT_METADATA_DB_PATH = os.environ.get(
     "SHORT_VIDEO_AUTO_PUBLISH_DB_PATH",
@@ -73,6 +83,21 @@ def print_field_mapping(title: str, mapping: dict) -> None:
 
 def ensure_target_default_fields(client: FeishuBitableClient, field_names: List[str]) -> List[str]:
     changed = False
+    for field_name in ("产品ID", "全球产品ID", "任务来源"):
+        if field_name in field_names:
+            continue
+        print(f"🧩 目标运行表缺少字段【{field_name}】，正在创建...")
+        client.create_field(field_name, field_type=1, ui_type="Text")
+        changed = True
+    if "脚本类型" not in field_names:
+        print("🧩 目标运行表缺少字段【脚本类型】，正在创建...")
+        client.create_field(
+            "脚本类型",
+            field_type=3,
+            ui_type="SingleSelect",
+            property={"options": [{"name": item} for item in RUN_MANAGER_SCRIPT_TYPE_OPTIONS]},
+        )
+        changed = True
     if "店铺ID" not in field_names:
         print("🧩 目标运行表缺少字段【店铺ID】，正在创建...")
         client.create_field("店铺ID", field_type=1, ui_type="Text")
@@ -93,6 +118,12 @@ def ensure_target_default_fields(client: FeishuBitableClient, field_names: List[
     if "视频时长" not in field_names:
         print("🧩 目标运行表缺少字段【视频时长】，正在创建...")
         client.create_field("视频时长", field_type=2, ui_type="Number")
+        changed = True
+    for field_name in ("口播表达合同", "口播执行计划"):
+        if field_name in field_names:
+            continue
+        print(f"🧩 目标运行表缺少字段【{field_name}】，正在创建...")
+        client.create_field(field_name, field_type=1, ui_type="Text")
         changed = True
     return client.list_field_names() if changed else field_names
 
@@ -218,7 +249,7 @@ def build_existing_target_updates(
     ):
         updates[prompt_field] = fields[prompt_field]
 
-    for logical_name in ("script_id", "store_id", "internal_script_key", "task_name"):
+    for logical_name in ("script_id", "store_id", "internal_script_key", "task_name", "script_type"):
         field_name = mapping.get(logical_name)
         if field_name and fields.get(field_name) and (allow_full_patch or not existing_target.fields.get(field_name)):
             updates[field_name] = fields[field_name]
@@ -306,7 +337,8 @@ def transfer_reference_images(
 def main() -> None:
     parser = argparse.ArgumentParser(description="原创视频脚本 -> 运行管理表 同步任务")
     parser.add_argument("--mode", choices=["manual", "scheduled"], default="manual", help="触发模式")
-    parser.add_argument("--source-feishu-url", default=DEFAULT_SOURCE_FEISHU_URL, help="源表飞书 URL")
+    parser.add_argument("--source-kind", choices=["production", "manual"], default="production", help="源表类型")
+    parser.add_argument("--source-feishu-url", help="源表飞书 URL；未传时按源表类型使用默认表")
     parser.add_argument("--target-feishu-url", default=DEFAULT_TARGET_FEISHU_URL, help="目标表飞书 URL")
     parser.add_argument("--limit", type=int, help="限制同步脚本条数")
     parser.add_argument("--product-code", help="只处理指定产品编码")
@@ -328,9 +360,12 @@ def main() -> None:
 
 def _main_with_lock(args: argparse.Namespace) -> None:
 
-    print(f"🚀 开始执行同步任务 | mode={args.mode}")
+    print(f"🚀 开始执行同步任务 | mode={args.mode} | source_kind={args.source_kind}")
 
-    source_app_token, source_table_id = resolve_feishu_config(args.source_feishu_url)
+    source_feishu_url = args.source_feishu_url or (
+        DEFAULT_MANUAL_SOURCE_FEISHU_URL if args.source_kind == "manual" else DEFAULT_SOURCE_FEISHU_URL
+    )
+    source_app_token, source_table_id = resolve_feishu_config(source_feishu_url)
     target_app_token, target_table_id = resolve_feishu_config(args.target_feishu_url)
 
     source_client = FeishuBitableClient(app_token=source_app_token, table_id=source_table_id)
@@ -338,14 +373,21 @@ def _main_with_lock(args: argparse.Namespace) -> None:
 
     source_field_names = source_client.list_field_names()
     target_field_names = ensure_target_default_fields(target_client, target_client.list_field_names())
-    source_mapping = resolve_field_mapping(source_field_names, SOURCE_FIELD_ALIASES)
+    source_mapping = (
+        resolve_manual_field_mapping(source_field_names)
+        if args.source_kind == "manual"
+        else resolve_field_mapping(source_field_names, SOURCE_FIELD_ALIASES)
+    )
     target_mapping = resolve_field_mapping(target_field_names, TARGET_FIELD_ALIASES)
 
-    validate_required_fields(
-        source_mapping,
-        ["product_code", "product_images"],
-    )
-    validate_script_fields(source_mapping)
+    if args.source_kind == "manual":
+        validate_required_fields(source_mapping, ["script_id", "script", "purpose", "store_id", "sync_enabled"])
+    else:
+        validate_required_fields(
+            source_mapping,
+            ["product_code", "product_images"],
+        )
+        validate_script_fields(source_mapping)
     validate_required_fields(target_mapping, ["task_name", "prompt", "reference_images", "script_id"])
     metadata_lookup = load_metadata_lookup(args.metadata_db_path)
 
@@ -358,14 +400,27 @@ def _main_with_lock(args: argparse.Namespace) -> None:
     target_records = target_client.list_records(page_size=100)
     target_indexes = build_target_record_indexes(target_records, target_mapping)
 
-    sync_tasks = build_sync_tasks(
-        source_records,
-        source_mapping,
-        product_code=args.product_code,
-        record_id=args.record_id,
-        limit=args.limit,
-        metadata_lookup=metadata_lookup,
-    )
+    manual_script_ids: Dict[str, str] = {}
+    preflight_errors: Dict[str, str] = {}
+    if args.source_kind == "manual":
+        manual_result = build_manual_sync_tasks(
+            source_records,
+            source_mapping,
+            record_id=args.record_id,
+            limit=args.limit,
+        )
+        sync_tasks = manual_result.tasks
+        manual_script_ids = manual_result.script_ids
+        preflight_errors = manual_result.errors
+    else:
+        sync_tasks = build_sync_tasks(
+            source_records,
+            source_mapping,
+            product_code=args.product_code,
+            record_id=args.record_id,
+            limit=args.limit,
+            metadata_lookup=metadata_lookup,
+        )
     tasks_by_source: Dict[str, List] = defaultdict(list)
     for task in sync_tasks:
         tasks_by_source[task.source_record_id].append(task)
@@ -374,6 +429,10 @@ def _main_with_lock(args: argparse.Namespace) -> None:
     print(f"   源表记录数: {len(source_records)}")
     print(f"   待同步源记录数: {len(tasks_by_source)}")
     print(f"   待新增脚本数: {len(sync_tasks)}")
+    if preflight_errors:
+        print(f"   输入校验失败源记录数: {len(preflight_errors)}")
+        for failed_record_id, message in list(preflight_errors.items())[:10]:
+            print(f"   - {failed_record_id}: {message}")
 
     if sync_tasks:
         print("\n🧩 任务预览:")
@@ -385,9 +444,36 @@ def _main_with_lock(args: argparse.Namespace) -> None:
         print("\n🔍 dry-run 模式，不执行写入。")
         return
 
+    failed_records = 0
+    if preflight_errors:
+        for failed_record_id, message in preflight_errors.items():
+            try:
+                failure_fields = build_source_failure_fields(
+                    source_mapping,
+                    error_message=message,
+                    synced_at=now_text(),
+                    sync_scope="人工脚本",
+                )
+                script_id_field = source_mapping.get("script_id")
+                if script_id_field and manual_script_ids.get(failed_record_id):
+                    failure_fields[script_id_field] = manual_script_ids[failed_record_id]
+                source_client.update_record_fields(failed_record_id, failure_fields)
+                print(f"   ❌ source_record_id={failed_record_id} 输入校验失败: {message}")
+            except Exception as exc:
+                print(f"   ⚠️ source_record_id={failed_record_id} 回写校验失败状态失败: {exc}")
+            failed_records += 1
+
+    if args.source_kind == "manual" and sync_tasks:
+        metadata_tasks = []
+        for task in sync_tasks:
+            existing_target, _ = find_existing_target(task, target_indexes)
+            if existing_target is None or can_update_existing_target(existing_target, target_mapping):
+                metadata_tasks.append(task)
+        registered = upsert_manual_metadata(metadata_tasks, args.metadata_db_path)
+        print(f"   ✅ 已登记人工脚本主数据: {registered} 条")
+
     image_cache: Dict[str, dict] = {}
     created = 0
-    failed_records = 0
 
     for source_record_id, source_tasks in tasks_by_source.items():
         try:
@@ -414,13 +500,27 @@ def _main_with_lock(args: argparse.Namespace) -> None:
                         unresolved_tasks.append(f"{task.script_id}: {conflict_reason}")
                         print(f"   ⚠️ {conflict_reason} | task={task.task_name}")
                         continue
-                    allow_full_patch = existing_reason != "脚本ID" and can_update_existing_target(existing_target, target_mapping)
+                    allow_full_patch = (
+                        existing_reason != "脚本ID" or args.source_kind == "manual"
+                    ) and can_update_existing_target(existing_target, target_mapping)
                     existing_updates = build_existing_target_updates(
                         existing_target,
                         fields,
                         target_mapping,
                         allow_full_patch=allow_full_patch,
                     )
+                    if (
+                        args.source_kind == "manual"
+                        and allow_full_patch
+                        and task.reference_images
+                        and target_mapping.get("reference_images")
+                    ):
+                        existing_updates[target_mapping["reference_images"]] = transfer_reference_images(
+                            source_client,
+                            target_client,
+                            task.reference_images,
+                            image_cache,
+                        )
                     if existing_updates:
                         target_client.update_record_fields(existing_target.record_id, existing_updates)
                         patched_names = "、".join(existing_updates.keys())
@@ -455,33 +555,35 @@ def _main_with_lock(args: argparse.Namespace) -> None:
             legacy_enabled = normalize_checkbox(source_fields.get(source_mapping["sync_enabled"])) if source_mapping.get("sync_enabled") else False
             master_enabled = normalize_checkbox(source_fields.get(source_mapping["sync_master_enabled"])) if source_mapping.get("sync_master_enabled") else False
             variant_enabled = normalize_checkbox(source_fields.get(source_mapping["sync_variant_enabled"])) if source_mapping.get("sync_variant_enabled") else False
-            source_client.update_record_fields(
-                source_record_id,
-                build_source_success_fields(
-                    source_mapping,
-                    synced_count=len(prepared_creates),
-                    synced_at=synced_at,
-                    sync_scope=summarize_sync_scope(source_tasks),
-                    patched_count=patched_for_source,
-                    existing_count=existing_for_source,
-                    cleared_legacy=legacy_enabled,
-                    cleared_master=master_enabled,
-                    cleared_variant=variant_enabled,
-                ),
+            success_fields = build_source_success_fields(
+                source_mapping,
+                synced_count=len(prepared_creates),
+                synced_at=synced_at,
+                sync_scope="人工脚本" if args.source_kind == "manual" else summarize_sync_scope(source_tasks),
+                patched_count=patched_for_source,
+                existing_count=existing_for_source,
+                cleared_legacy=legacy_enabled,
+                cleared_master=master_enabled,
+                cleared_variant=variant_enabled,
             )
+            script_id_field = source_mapping.get("script_id")
+            if args.source_kind == "manual" and script_id_field and manual_script_ids.get(source_record_id):
+                success_fields[script_id_field] = manual_script_ids[source_record_id]
+            source_client.update_record_fields(source_record_id, success_fields)
             print(f"   ✅ source_record_id={source_record_id} 已回写同步状态")
         except Exception as exc:
             failed_records += 1
             synced_at = now_text()
-            source_client.update_record_fields(
-                source_record_id,
-                build_source_failure_fields(
-                    source_mapping,
-                    error_message=str(exc),
-                    synced_at=synced_at,
-                    sync_scope=summarize_sync_scope(source_tasks),
-                ),
+            failure_fields = build_source_failure_fields(
+                source_mapping,
+                error_message=str(exc),
+                synced_at=synced_at,
+                sync_scope="人工脚本" if args.source_kind == "manual" else summarize_sync_scope(source_tasks),
             )
+            script_id_field = source_mapping.get("script_id")
+            if args.source_kind == "manual" and script_id_field and manual_script_ids.get(source_record_id):
+                failure_fields[script_id_field] = manual_script_ids[source_record_id]
+            source_client.update_record_fields(source_record_id, failure_fields)
             print(f"   ❌ source_record_id={source_record_id} 同步失败: {exc}")
 
     print("\n🎉 同步完成")

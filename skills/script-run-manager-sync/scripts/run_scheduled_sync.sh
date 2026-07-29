@@ -21,8 +21,11 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   exit 0
 fi
 
-if /usr/bin/python3 "$WORKDIR/skills/script-run-manager-sync/run_pipeline.py" --mode scheduled >"$TMP_LOG" 2>&1; then
-  if grep -q "待新增脚本数: 0" "$TMP_LOG"; then
+if {
+  /usr/bin/python3 "$WORKDIR/skills/script-run-manager-sync/run_pipeline.py" --mode scheduled
+  /usr/bin/python3 "$WORKDIR/skills/script-run-manager-sync/run_pipeline.py" --mode scheduled --source-kind manual
+} >"$TMP_LOG" 2>&1; then
+  if ! grep -Eq "待新增脚本数: [1-9]|输入校验失败源记录数: [1-9]" "$TMP_LOG"; then
     exit 0
   fi
 

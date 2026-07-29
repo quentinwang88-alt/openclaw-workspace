@@ -12,6 +12,9 @@ if str(SKILL_DIR) not in sys.path:
 
 from core.bitable import TableRecord
 from core.sync import (
+    SCRIPT_TYPE_NURTURE,
+    SCRIPT_TYPE_ORIGINAL,
+    SCRIPT_TYPE_SHORT_VIDEO_REMAKE,
     SOURCE_FIELD_ALIASES,
     SCRIPT_FIELD_SPECS,
     TARGET_FIELD_ALIASES,
@@ -24,11 +27,14 @@ from core.sync import (
     build_source_success_fields,
     build_sync_tasks,
     now_text,
+    normalize_run_manager_script_type,
     prepend_script_id_header,
     prompt_has_script_id_header,
+    resolved_task_target_language,
     resolve_field_mapping,
     summarize_sync_scope,
 )
+from core.source_voiceover_plan import build_original_voiceover_payload
 from run_pipeline import (
     build_existing_target_updates,
     build_target_record_indexes,
@@ -42,11 +48,17 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
         source_field_names = [
             "产品编码",
             "产品类型",
+            "目标语言",
             "一级类目",
             "产品参数信息",
             "任务编号",
             "店铺ID",
             "产品图片",
+            "脚本类型",
+            "脚本来源",
+            "源复刻任务ID",
+            "发布用途",
+            "内容分支",
             "视频时长",
             "是否可同步",
             "是否可同步母版",
@@ -70,6 +82,8 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
             "店铺ID",
             "内部脚本键",
             "脚本来源",
+            "脚本类型",
+            "目标语言",
             "发布用途",
             "是否挂车",
             "内容分支",
@@ -83,6 +97,28 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
     def test_script_specs_cover_24_slots(self) -> None:
         self.assertEqual(len(SCRIPT_FIELD_SPECS), 24)
 
+    def test_script_type_normalization_covers_original_remake_and_nurture(self) -> None:
+        self.assertEqual(normalize_run_manager_script_type(), SCRIPT_TYPE_ORIGINAL)
+        self.assertEqual(
+            normalize_run_manager_script_type(source_script_type="短视频复刻"),
+            SCRIPT_TYPE_ORIGINAL,
+        )
+        self.assertEqual(
+            normalize_run_manager_script_type(
+                source_script_type="短视频复刻",
+                source_remake_record_id="rec_remake_1",
+            ),
+            SCRIPT_TYPE_SHORT_VIDEO_REMAKE,
+        )
+        self.assertEqual(
+            normalize_run_manager_script_type(script_source="养号复刻"),
+            SCRIPT_TYPE_NURTURE,
+        )
+        self.assertEqual(
+            normalize_run_manager_script_type(publish_purpose="养号"),
+            SCRIPT_TYPE_NURTURE,
+        )
+
     def test_build_sync_tasks_creates_one_task_per_non_empty_script(self) -> None:
         records = [
             TableRecord(
@@ -90,6 +126,7 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
                 fields={
                     "产品编码": "ABC001",
                     "产品类型": "手镯",
+                    "目标语言": "泰语",
                     "一级类目": "配饰",
                     "产品参数信息": "细手圈，内径约56mm，圈宽2mm，开口可微调",
                     "任务编号": "003",
@@ -126,6 +163,103 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
         self.assertEqual(tasks[1].script_id, "003_M1_V1")
         self.assertEqual(tasks[2].script_id, "003_M2_M")
         self.assertEqual(tasks[3].script_id, "003_M4_V5")
+
+    def test_sync_preserves_source_voiceover_contract_and_execution_plan(self) -> None:
+        source_mapping = resolve_field_mapping(
+            list(self.mapping.values()) + ["口播表达合同", "口播执行计划"],
+            SOURCE_FIELD_ALIASES,
+        )
+        target_mapping = resolve_field_mapping(
+            list(self.target_mapping.values()) + ["口播表达合同", "口播执行计划"],
+            TARGET_FIELD_ALIASES,
+        )
+        contract = '{"schema_version":"voiceover-expression-contract-v2"}'
+        plan = '{"schema_version":"voiceover-execution-plan-v1","mode":"REUSE_APPROVED_COPY"}'
+        task = build_sync_tasks([
+            TableRecord("rec_voice", {
+                "产品编码": "ABC001",
+                "是否可同步母版": True,
+                "脚本方向一": "source script",
+                "口播表达合同": contract,
+                "口播执行计划": plan,
+            })
+        ], source_mapping)[0]
+        fields = build_target_fields(task, target_mapping)
+        self.assertEqual(fields["口播表达合同"], contract)
+        self.assertEqual(fields["口播执行计划"], plan)
+
+    def test_original_script_voiceover_becomes_a_fresh_copy_generation_route(self) -> None:
+        source = """【商品】短款外搭让比例更利落
+【镜头1|0-2s|hook】
+画面:正面上身
+口播:ดูทรงนี้ก่อนนะ
+【镜头2|2s|proof】
+画面:腰线近景
+口播:ชายเสื้ออยู่ใกล้เอวสูง
+【情绪】像朋友自然分享"""
+        payload = build_original_voiceover_payload(source)
+        self.assertIsNotNone(payload)
+        plan = payload["execution_plan"]
+        self.assertEqual(plan["mode"], "GENERATE_FROM_VERIFIED_VISUAL_FACTS")
+        self.assertNotIn("target_text", plan)
+        self.assertNotIn("ดูทรงนี้ก่อนนะ", str(payload))
+        contract = payload["expression_contract"]
+        self.assertEqual(contract["schema_version"], "voiceover-expression-contract-v2")
+        self.assertFalse(contract["hook_preconditions"]["newness_authorized"])
+        self.assertFalse(contract["hook_preconditions"]["audience_tension_authorized"])
+        self.assertFalse(contract["hook_preconditions"]["comparison_authorized"])
+        self.assertFalse(contract["hook_preconditions"]["social_proof_authorized"])
+        self.assertFalse(contract["hook_preconditions"]["audience_need_authorized"])
+        self.assertFalse(contract["hook_preconditions"]["visual_result_authorized"])
+        self.assertFalse(contract["speech_policy"]["soft_warning_polish_enabled"])
+        self.assertEqual(
+            contract["speech_policy"]["plan_mode"],
+            "deterministic_semantic_segments",
+        )
+
+    def test_original_script_exports_explicit_visual_facts(self) -> None:
+        source = """【商品】深色短款牛仔外套
+【镜头1|2s|hook】
+画面:翻领、前襟四颗纽扣和左右胸前口袋清楚可见，衣长落在腰部附近
+口播:ดูตัวนี้ก่อนนะ
+【镜头2|2s|proof】
+画面:近景可见深色牛仔车线和纽扣
+口播:ดูรายละเอียดตรงนี้
+"""
+        payload = build_original_voiceover_payload(source)
+        self.assertEqual(
+            payload["expression_contract"]["verified_visual_facts"],
+            [
+                {
+                    "concept_key": "pocket",
+                    "exact_fact_zh": "胸前带有口袋",
+                    "normalizer_text": "口袋",
+                    "operator_priority": "core",
+                },
+                {
+                    "concept_key": "cropped_length",
+                    "exact_fact_zh": "短款衣长落在腰部附近",
+                    "normalizer_text": "短款",
+                    "operator_priority": "normal",
+                },
+                {
+                    "concept_key": "closure_detail",
+                    "exact_fact_zh": "前襟有四颗可见纽扣",
+                    "normalizer_text": "前襟扣位",
+                    "operator_priority": "core",
+                },
+                {
+                    "concept_key": "seam_detail",
+                    "exact_fact_zh": "可见明线与车线细节",
+                    "normalizer_text": "分割明线",
+                    "operator_priority": "optional",
+                },
+            ],
+        )
+        self.assertEqual(
+            payload["expression_contract"]["product_category"],
+            {"category_zh": "牛仔夹克", "target_language_hint": "แจ็กเก็ตยีนส์"},
+        )
 
     def test_build_sync_tasks_uses_original_script_for_master_slot(self) -> None:
         records = [
@@ -258,6 +392,7 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
                 fields={
                     "产品编码": "ABC001",
                     "产品类型": "手镯",
+                    "目标语言": "泰语",
                     "一级类目": "配饰",
                     "产品参数信息": "细手圈，内径约56mm，圈宽2mm，开口可微调",
                     "任务编号": "003",
@@ -280,7 +415,32 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
         self.assertEqual(fields["脚本ID"], "003_M1_M")
         self.assertEqual(fields["店铺ID"], "MYPS01")
         self.assertEqual(fields["内部脚本键"], "rec_1:S1")
+        self.assertEqual(fields["脚本类型"], "原创脚本")
+        self.assertEqual(fields["目标语言"], "泰语")
         self.assertEqual(fields["视频时长"], 15)
+
+    def test_thai_store_fills_target_language_when_source_field_is_empty(self) -> None:
+        records = [
+            TableRecord(
+                record_id="rec_th_store",
+                fields={
+                    "产品编码": "ABC_TH",
+                    "产品类型": "外套",
+                    "目标语言": "",
+                    "店铺ID": "THFZ01",
+                    "是否可同步": True,
+                    "产品图片": [{"file_token": "file_1"}],
+                    "脚本方向一": "script one",
+                },
+            ),
+        ]
+
+        task = build_sync_tasks(records, self.mapping)[0]
+        fields = build_target_fields(task, self.target_mapping)
+
+        self.assertEqual(resolved_task_target_language(task), "泰语")
+        self.assertEqual(fields["目标语言"], "泰语")
+        self.assertIn("目标语言：泰语", fields["提示词"])
 
     def test_existing_script_id_backfills_store_id_when_empty(self) -> None:
         existing_target = TableRecord(
@@ -317,6 +477,7 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
         )
 
         self.assertEqual(updates["店铺ID"], "TH01")
+        self.assertEqual(updates["脚本类型"], "原创脚本")
 
     def test_build_target_fields_carries_video_duration(self) -> None:
         records = [
@@ -446,6 +607,7 @@ class ScriptRunManagerSyncTest(unittest.TestCase):
         fields = build_target_fields(tasks[0], self.target_mapping)
 
         self.assertEqual(fields["脚本来源"], "养号复刻")
+        self.assertEqual(fields["脚本类型"], "养号脚本")
         self.assertEqual(fields["发布用途"], "养号")
         self.assertEqual(fields["是否挂车"], "否")
         self.assertEqual(fields["内容分支"], "非商品展示型")

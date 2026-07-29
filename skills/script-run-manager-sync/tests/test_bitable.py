@@ -6,6 +6,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 import sys
+from unittest.mock import patch
 
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -17,8 +18,9 @@ from core.bitable import FeishuBitableClient, TableField
 
 
 class DummyResponse:
-    def __init__(self, payload):
+    def __init__(self, payload, status_code=200):
         self._payload = payload
+        self.status_code = status_code
 
     def json(self):
         return self._payload
@@ -67,6 +69,23 @@ class FakeClient(FeishuBitableClient):
 
 
 class BitableClientCompatibilityTest(unittest.TestCase):
+    @patch("core.bitable.time.sleep")
+    @patch("core.bitable.requests.request")
+    def test_request_retries_transient_business_error(self, request, sleep) -> None:
+        request.side_effect = [
+            DummyResponse({"code": 1254607, "msg": "Data not ready, please try again later"}),
+            DummyResponse({"code": 0, "data": {"items": []}}),
+        ]
+        client = FeishuBitableClient(app_token="app_token", table_id="tbl_token")
+        client.access_token = "test"
+        client.token_expires_at = 99999999999
+
+        records = client.list_records()
+
+        self.assertEqual(records, [])
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(sleep.call_count, 1)
+
     def test_list_fields_returns_table_field_objects(self) -> None:
         client = FakeClient()
 
