@@ -193,6 +193,39 @@ class CompleteScriptV3Tests(unittest.TestCase):
         self.assertNotEqual(signature(first), signature(second))
         self.assertTrue(any("＋" in item for item in first["forbidden_recent_patterns"]))
 
+    def test_upper_apparel_rotates_across_eight_unique_life_events(self) -> None:
+        recent = []
+        signatures = set()
+        for index in range(8):
+            contract = build_creative_diversity_contract(
+                product_code=f"P_ROTATE_{index}",
+                country="泰国",
+                category="女装",
+                product_type="外套",
+                direction=direction(),
+                recent_usage=recent,
+            )
+            signatures.add(
+                (
+                    contract["persona_role"],
+                    contract["scene_motif"],
+                    contract["opening_action"],
+                )
+            )
+            recent.append(contract)
+
+        self.assertEqual(8, len(signatures))
+        self.assertGreaterEqual(
+            len({contract["scene_motif"] for contract in recent}),
+            8,
+        )
+        self.assertTrue(
+            any("书店" in contract["scene_motif"] for contract in recent)
+        )
+        self.assertTrue(
+            any("展览" in contract["scene_motif"] for contract in recent)
+        )
+
     def test_creative_usage_ledger_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             storage = PipelineStorage(Path(temp_dir) / "stage0.sqlite3", database_url="sqlite")

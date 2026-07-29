@@ -15,7 +15,7 @@ from collections import Counter
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 
-CREATIVE_DIVERSITY_POLICY_VERSION = "creative-diversity-v2-carrier"
+CREATIVE_DIVERSITY_POLICY_VERSION = "creative-diversity-v3-upper-apparel-life-events"
 COMPLETE_BLUEPRINT_SCHEMA_VERSION = "complete-script-blueprint-v4-carrier"
 COMPLETE_SCRIPT_POLICY_VERSION = "complete-script-qc-v22-event-driven-light"
 
@@ -191,6 +191,54 @@ def _creative_combinations(
                 "opening_action": "完成外搭穿着动作后从沙发扶手拿起随身包",
                 "action_grammar": "完成穿着→拿起随身包→经过窗边准备离开",
                 "visual_tone": "自然窗光旁观记录",
+            },
+            {
+                "persona_role": "午休准备下楼的办公室使用者",
+                "viewer_relationship": "像同事分享午休出门时正在穿的一套外搭",
+                "scene_motif": "写字楼电梯厅的浅色金属墙面",
+                "opening_action": "外搭已经穿好，人物看一眼楼层指示后走向开启的电梯",
+                "action_grammar": "等待电梯→电梯门开启→自然走入",
+                "visual_tone": "固定机位午间行动记录",
+            },
+            {
+                "persona_role": "傍晚从书店离开的城市日常穿搭者",
+                "viewer_relationship": "像朋友分享逛完书店后这一身的真实状态",
+                "scene_motif": "书店出口旁的暖色书架过道",
+                "opening_action": "外搭已经穿好，人物把看完的书放回陈列台后转向出口",
+                "action_grammar": "放回书→沿书架过道前行→走向出口",
+                "visual_tone": "暖光下的低干预生活记录",
+            },
+            {
+                "persona_role": "周末准备逛街的城市日常穿搭者",
+                "viewer_relationship": "像朋友分享周末走动时整套穿搭的自然比例",
+                "scene_motif": "商场连廊靠窗的自然光休息区",
+                "opening_action": "外搭已经穿好，人物从窗边长椅自然起身并沿连廊前行",
+                "action_grammar": "从长椅起身→经过窗边→沿连廊继续前行",
+                "visual_tone": "自然光下的旁观式行动记录",
+            },
+            {
+                "persona_role": "下楼取件的公寓住户",
+                "viewer_relationship": "像邻居分享临时下楼时随手穿的一套外搭",
+                "scene_motif": "公寓大堂快递柜旁的干净墙面",
+                "opening_action": "外搭已经穿好，人物关上快递柜门后转身走向大堂出口",
+                "action_grammar": "关上柜门→转身经过大厅→走向出口",
+                "visual_tone": "公寓公共空间的日常记录",
+            },
+            {
+                "persona_role": "准备搭车去见朋友的城市日常穿搭者",
+                "viewer_relationship": "像朋友分享等车时这一身在自然走动中的样子",
+                "scene_motif": "公寓楼下有顶车道的自然光等候区",
+                "opening_action": "外搭已经穿好，人物从立柱旁走到等候线并看向来车方向",
+                "action_grammar": "走到等候区→自然停留→向来车方向继续前行",
+                "visual_tone": "有环境纵深的城市生活记录",
+            },
+            {
+                "persona_role": "周末去看展的城市日常穿搭者",
+                "viewer_relationship": "像朋友分享进入展览空间前这一身的整体效果",
+                "scene_motif": "小型展览空间入口的白墙走廊",
+                "opening_action": "外搭已经穿好，人物从导览牌旁自然转入主展厅方向",
+                "action_grammar": "经过导览牌→沿白墙前行→进入展厅",
+                "visual_tone": "白墙空间里的克制跟随记录",
             },
         ]
         if not any(token in action_text for token in ("button", "扣", "fasten", "前襟", "门襟")):
