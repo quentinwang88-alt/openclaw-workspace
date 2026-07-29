@@ -92,13 +92,15 @@ python3 skills/lightweight-tryon-video/scripts/run_pipeline.py job list --produc
 
 复核台选择 `生成渠道`、`生成模型` 和 `视频时长` 后，使用统一运行管理表排队，不再维护第二套轻视频生成表。默认 `生成渠道=不生成`；只有显式选择“自动 / 即梦 / iMini”才入队。运行管理表的 `参考图` 使用原始脚本表“产品图片”，保持附件顺序；iMini 直接使用第一张作为首帧。模型、8/10 秒和 720P 都是硬约束。
 
+基础轻视频入队时固定写 `脚本类型=轻视频脚本`。历史兼容入口手工创建的补充镜头仍写 `脚本类型=轻视频补素材脚本`，但口播重剪不再因普通 Beat 缺口自动创建补素材任务。该字段只表示业务来源，不替代生成平台 `渠道`。
+
 ```bash
 python3 skills/lightweight-tryon-video/scripts/run_pipeline.py feishu ensure-run-manager-schema --dry-run
 python3 skills/lightweight-tryon-video/scripts/run_pipeline.py feishu ensure-run-manager-schema
 python3 skills/lightweight-tryon-video/scripts/run_pipeline.py feishu sync-run-manager --job-id <JOB_ID>
 ```
 
-命令会完成配置回读、幂等入队、生成结果转存到 `初始成片`、LikeU 首屏/类目后期、BGM 混音并上传 `最终视频`。勾选 `重新提交生成` 时仅在同任务没有运行中实例时重置队列；同步成功后自动取消勾选。
+命令会完成配置回读、幂等入队、生成结果转存到 `初始成片`、LikeU 首屏/类目后期，并上传 `最终视频`。普通无口播任务可继续执行 BGM 混音；运行表中勾选了 `是否配口播` 或已有 `口播状态` 的任务会被自动排除在 BGM 阶段之外。口播链路固定为 `口播混音 → LikeU 首屏/类目后期 → 终检 → 回写运行表口播成片与轻视频复核表最终视频`，首屏渲染只重编码画面并复制口播音轨，不叠加 BGM。勾选 `重新提交生成` 时仅在同任务没有运行中实例时重置队列；同步成功后自动取消勾选。
 
 ### 6. 导出即梦任务包（兼容入口）
 
@@ -170,6 +172,8 @@ python3 skills/lightweight-tryon-video/scripts/apply_review_bgm.py
 ```
 
 该命令复用 auto_mixcut 的国家优先、标签评分、同批曲目去重、推荐起点、响度标准化和音量策略；默认按 `TH + womens_outerwear + daily_clean + medium + instrumental优先` 选择，并用 BGM 替换原音轨后覆盖复核台 `最终视频`。
+
+不要对口播成片运行该命令。`feishu sync-run-manager` 会按 `是否配口播` / `口播状态` 自动跳过口播任务；需要全批禁用 BGM 时继续使用 `--no-bgm`。
 
 ### 9. QC 与人工复核
 
@@ -293,7 +297,7 @@ python3 skills/lightweight-tryon-video/scripts/run_pipeline.py narrative voiceov
   --variant-id <NAR_ID>
 ```
 
-完成口播 Beat 后，系统先把每个卖点映射为必须可见的镜头角色，再按已打标素材计算缺口并最多规划 3 个补充镜头。闭合方式、领口、腰线、颜色和面料等具体口播必须命中对应证据镜头，不能只用普通试穿画面代替。每条 Prompt 都完整写明人物、场景、商品、穿搭、构图、分秒动作和负面约束，不得使用“同一套/同一个女生/与主场景相同”等跨任务指代：
+完成口播 Beat 后，系统只把首镜和一个主卖点 Beat 设为硬匹配；普通 Beat 与结尾使用同产品素材软匹配，不再逐句要求专属证据。若首镜或核心卖点确实缺少证据，只阻塞当前口播变体，不自动补素材。以下命令保留为运营明确决定补拍时的手工兼容入口：
 
 ```bash
 python3 skills/lightweight-tryon-video/scripts/run_pipeline.py narrative plan-supplements \
@@ -312,7 +316,7 @@ python3 skills/lightweight-tryon-video/scripts/run_pipeline.py narrative mix \
   --variant-id <NAR_ID>
 ```
 
-完整顺序是：`飞书选择数量 → 策略变体 → 基础素材真实打标 → 证据粗剪 → 现有口播 → 单次连续 TTS → 按真实台词时间重排画面 → 缺口补镜头并重新打标 → 混音 → 终检`。如果口播 Beat 暴露必要画面缺口，则最多补 3 个镜头；缺口未关闭时禁止混音。新镜头回传并真实打标后重新编排画面，旧的组装和混音结果随之失效。
+默认顺序是：`飞书选择数量 → 策略变体 → 基础素材真实打标 → 视觉粗剪 → 现有口播 → 单次连续 TTS → 按真实台词时间重排画面 → 混音 → 终检`。普通 Beat 缺少专属画面不再扩展流程；只有首镜或核心卖点缺少必要证据时，当前变体停止渲染并提示人工选择换卖点、换素材或放弃该变体。
 
 完整数据契约、状态流转和降级规则见 [口播增强型轻视频开发说明](references/voiceover-enhanced-video-v1.md)。
 

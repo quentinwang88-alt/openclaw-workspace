@@ -27,10 +27,13 @@ from light_tryon.planner import plan_product
 from light_tryon.prompting import PROMPT_BUILDER_VERSION, build_prompt
 from light_tryon.review_video_processing import process_review_videos
 from light_tryon.run_manager_sync import (
+    backfill_run_manager_result_hashes,
+    cleanup_run_manager_duplicates,
     ensure_run_manager_schema,
     pull_generation_preferences,
     pull_run_manager_results,
     resolve_run_manager_identity,
+    run_record_uses_voiceover,
     sync_jobs_to_run_manager,
 )
 from light_tryon.source_script_sync import ensure_source_schema, find_source_records, process_source_requests, set_source_request
@@ -44,6 +47,7 @@ class FakeClient:
         self.views = [{"view_id": "view_1", "view_name": "表格"}]
         self.table_name = "数据表"
         self.uploads = []
+        self.update_calls = []
 
     def list_records(self, page_size=500):
         return self.records
@@ -81,6 +85,7 @@ class FakeClient:
         for record in self.records:
             if record.record_id == record_id:
                 record.fields.update(fields)
+                self.update_calls.append((record_id, dict(fields)))
                 return
         raise KeyError(record_id)
 
@@ -143,6 +148,11 @@ class FeishuSyncTestCase(unittest.TestCase):
             self.assertEqual(len(names), len(set(names)), role)
             self.assertEqual(len(backends), len(set(backends)), role)
             self.assertEqual(names[0], mapping.primary_field)
+
+    def test_voiceover_run_is_excluded_from_bgm(self):
+        self.assertTrue(run_record_uses_voiceover({"是否配口播": True}))
+        self.assertTrue(run_record_uses_voiceover({"口播状态": "已完成"}))
+        self.assertFalse(run_record_uses_voiceover({"是否配口播": False, "口播状态": ""}))
 
     def test_schema_ensure_is_idempotent(self):
         clients = {role: FakeClient() for role in TABLE_MAPPINGS}
@@ -241,18 +251,31 @@ class FeishuSyncTestCase(unittest.TestCase):
         queued = sync_jobs_to_run_manager(self.db, review, run, job_ids=[job["job_id"]])
         self.assertEqual(queued["created"], 1)
         fields = run.records[0].fields
+        self.assertEqual(fields["任务名"], job["job_id"])
+        self.assertEqual(fields["内容ID"], job["job_id"])
         self.assertEqual(fields["脚本ID"], job["job_id"])
         self.assertEqual(fields["商品ID"], "QUEUE_SKU")
         self.assertEqual(fields["店铺ID"], "SHOP_TH_1")
+        self.assertEqual(fields["目标语言"], "th-TH")
         self.assertEqual(fields["模型"], "Seedance 2.0 VIP")
         self.assertEqual(fields["视频时长"], 10)
         self.assertEqual(fields["分辨率"], "720P")
         self.assertEqual(fields["渠道"], "iMini")
         self.assertEqual(fields["免参考图"], "否")
         self.assertEqual(fields["首帧策略"], "直接使用原始脚本参考图")
+        self.assertEqual(fields["脚本类型"], "轻视频脚本")
         self.assertEqual(run.uploads[0]["parent_type"], "bitable_image")
         self.assertIn("product", run.uploads[0]["name"])
         self.assertNotEqual(run.uploads[0]["name"], outfit.name)
+        pull_run_manager_results(self.db, review, run, job_ids=[job["job_id"]])
+        writes_after_first_generating_pull = len(review.update_calls)
+        pull_run_manager_results(self.db, review, run, job_ids=[job["job_id"]])
+        self.assertEqual(len(review.update_calls), writes_after_first_generating_pull)
+        stale_snapshot = sync_jobs_to_run_manager(
+            self.db, review, run, job_ids=[job["job_id"]], run_groups={},
+        )
+        self.assertEqual(stale_snapshot["skipped"], 1)
+        self.assertEqual(len(run.records), 1)
         repeated = sync_jobs_to_run_manager(self.db, review, run, job_ids=[job["job_id"]])
         self.assertEqual(repeated["skipped"], 1)
         previous_fingerprint = fields["来源指纹"]
@@ -277,6 +300,15 @@ class FeishuSyncTestCase(unittest.TestCase):
         self.assertEqual(stored["duration_seconds"], 10)
         self.assertEqual(stored["run_manager_sync_status"], "returned")
         self.assertEqual(stored["run_manager_result_source_token"], "video-output")
+        with self.db.connection() as conn:
+            conn.execute(
+                "UPDATE video_jobs SET run_manager_result_sha256='' WHERE job_id=?",
+                (job["job_id"],),
+            )
+        hash_backfill = backfill_run_manager_result_hashes(self.db, run)
+        self.assertEqual(hash_backfill["from_metadata"], 1)
+        self.assertEqual(hash_backfill["updated"], 1)
+        self.assertTrue(hash_backfill["unique_index"])
         # 飞书附件在后处理/重传后可能不再携带 source_* 扩展信息；独立的来源 token
         # 仍应确保同一运行表结果不会被重复回流和再次渲染。
         raw_without_source_metadata = [
@@ -332,6 +364,12 @@ class FeishuSyncTestCase(unittest.TestCase):
         self.assertEqual(run.records[0].fields["执行归属"], "worker")
         self.assertEqual(run.records[0].fields["最新追踪ID"], "trace-active")
 
+        run.records[0].fields["结果回传状态"] = "review_failed_or_missing_asset"
+        terminal_failure = pull_run_manager_results(self.db, review, run, job_ids=[job["job_id"]])
+        self.assertEqual(terminal_failure["failed"], 1)
+        self.assertEqual(self.db.get_job(job["job_id"])["run_manager_sync_status"], "failed")
+        run.records[0].fields["结果回传状态"] = ""
+
         # A historical duplicate must not stop every other task. The locally
         # bound record remains authoritative and neither active row is reset.
         run.records.append(SimpleNamespace(
@@ -350,8 +388,92 @@ class FeishuSyncTestCase(unittest.TestCase):
             "生成视频": [{"file_token": "historical-video", "name": "historical.mp4"}],
         })
         historical_result = pull_run_manager_results(self.db, review, run, job_ids=[job["job_id"]])
-        self.assertEqual(historical_result["returned"], 1)
-        self.assertEqual(self.db.get_job(job["job_id"])["run_manager_record_id"], "rec_historical_duplicate")
+        self.assertEqual(historical_result["returned"], 0)
+        self.assertEqual(historical_result["blocked"], 1)
+        self.assertEqual(historical_result["failed"], 0)
+        self.assertEqual(historical_result["items"][0]["status"], "blocked")
+        self.assertIn("重复轻视频内容ID", historical_result["items"][0]["error"])
+        self.assertEqual(self.db.get_job(job["job_id"])["run_manager_record_id"], run.records[0].record_id)
+
+        # A duplicate row that has never been claimed is safe to quarantine;
+        # already submitted rows above must remain untouched.
+        run.records[1].fields.update({
+            "状态": "待处理", "执行归属": "已分配但尚未提单", "已提交次数": 0, "最新追踪ID": "",
+            "结果回传状态": "", "生成视频": [],
+        })
+        quarantined = sync_jobs_to_run_manager(self.db, review, run, job_ids=[job["job_id"]])
+        self.assertEqual(quarantined["blocked"], 1)
+        self.assertEqual(quarantined["items"][0]["quarantined_run_rows"], 1)
+        self.assertEqual(run.records[0].fields["状态"], "已提交")
+        self.assertEqual(run.records[1].fields["状态"], "阻塞")
+        repeated_quarantine = sync_jobs_to_run_manager(self.db, review, run, job_ids=[job["job_id"]])
+        self.assertEqual(repeated_quarantine["items"][0]["quarantined_run_rows"], 0)
+        run.records[0].fields.update({
+            "结果回传状态": "uploaded",
+            "生成视频": [{"file_token": "valid-video", "name": "valid.mp4"}],
+        })
+        run.records[1].fields.update({
+            "状态": "已提交", "已提交次数": 1, "最新追踪ID": "trace-failed",
+            "结果回传状态": "review_failed_or_missing_asset", "生成视频": [],
+        })
+        cleanup_dry = cleanup_run_manager_duplicates(self.db, review, run, dry_run=True)
+        self.assertEqual(cleanup_dry["safe_groups"], 1)
+        self.assertEqual(cleanup_dry["planned_delete"], 1)
+        self.assertEqual(cleanup_dry["plans"][0]["keeper_reason"], "only_valid_video_result_row")
+        self.assertEqual(len(run.records), 2)
+        cleanup = cleanup_run_manager_duplicates(self.db, review, run)
+        self.assertEqual(cleanup["deleted"], 1)
+        self.assertEqual(len(run.records), 1)
+        self.assertEqual(run.records[0].record_id, "rec_1")
+        self.assertEqual(self.db.get_job(job["job_id"])["run_manager_record_id"], "rec_1")
+
+    def test_video_hash_is_unique_across_separate_result_pull_batches(self):
+        jobs = []
+        for index in (1, 2):
+            image = Path(self.tmp.name) / f"product-{index}.jpg"
+            image.write_bytes(f"product-{index}".encode())
+            product = ProductInput.from_dict({
+                "product_id": f"HASH_SKU_{index}",
+                "product_name": f"哈希防串单 {index}",
+                "product_images": [str(image)],
+                "account_id": "SHOP_HASH",
+                "target_publish_count": 1,
+            })
+            self.db.upsert_product(product)
+            planned = plan_product(self.db, product.product_id, count=1)[0]
+            self.db.create_jobs([planned])
+            payload = build_prompt(self.db.get_job_context(planned.job_id))
+            self.db.update_prompt(planned.job_id, payload, PROMPT_BUILDER_VERSION)
+            self.db.set_generation_preferences(
+                planned.job_id, channel="imini", model="Seedance 2.0", duration_seconds=8,
+            )
+            jobs.append(self.db.get_job(planned.job_id))
+
+        review = FakeClient()
+        push_reviews(self.db, review, job_ids=[job["job_id"] for job in jobs])
+        run = FakeClient(fields=[])
+        queued = sync_jobs_to_run_manager(
+            self.db, review, run, job_ids=[job["job_id"] for job in jobs], store_id="SHOP_HASH",
+        )
+        self.assertEqual(queued["created"], 2)
+        rows = {row.fields["内容ID"]: row for row in run.records}
+
+        first_id, second_id = jobs[0]["job_id"], jobs[1]["job_id"]
+        for job_id in (first_id, second_id):
+            rows[job_id].fields.update({
+                "状态": "已完成", "结果回传状态": "uploaded",
+                "生成视频": [{"file_token": f"video-{job_id}", "name": f"{job_id}.mp4"}],
+            })
+
+        first = pull_run_manager_results(self.db, review, run, job_ids=[first_id])
+        self.assertEqual(first["returned"], 1)
+        first_stored = self.db.get_job(first_id)
+        self.assertTrue(first_stored["run_manager_result_sha256"])
+
+        second = pull_run_manager_results(self.db, review, run, job_ids=[second_id])
+        self.assertEqual(second["returned"], 0)
+        self.assertEqual(second["failed"], 1)
+        self.assertIn(first_id, second["items"][0]["error"])
 
     def test_run_manager_identity_rejects_internal_source_key_and_keeps_legacy_fallback(self):
         with self.assertRaisesRegex(ValueError, "内部商品键"):

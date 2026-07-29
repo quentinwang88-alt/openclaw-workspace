@@ -458,6 +458,19 @@ def build_prompt(context: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def target_locale_from_language(language: Any) -> str:
+    value = str(language or "").strip().lower()
+    mapping = {
+        "th": "th-TH", "thai": "th-TH", "泰语": "th-TH", "th-th": "th-TH",
+        "en": "en-US", "english": "en-US", "英语": "en-US", "en-us": "en-US",
+        "vi": "vi-VN", "越南语": "vi-VN", "vi-vn": "vi-VN",
+        "ms": "ms-MY", "马来语": "ms-MY", "ms-my": "ms-MY",
+        "es": "es-ES", "西班牙语": "es-ES", "es-es": "es-ES",
+        "zh": "zh-CN", "中文": "zh-CN", "zh-cn": "zh-CN",
+    }
+    return mapping.get(value, str(language or "").strip())
+
+
 def build_jimeng_record(context: dict[str, Any], prompt_payload: dict[str, Any]) -> dict[str, Any]:
     job = context["job"]
     product = context["product"]
@@ -467,6 +480,7 @@ def build_jimeng_record(context: dict[str, Any], prompt_payload: dict[str, Any])
         "任务名": job["job_id"],
         "内容ID": job["job_id"],
         "商品ID": business_product_id,
+        "目标语言": target_locale_from_language(job.get("language")),
         "状态": "待处理",
         "提示词": prompt_payload["positive_prompt"],
         "参考图": prompt_payload.get("reference_images") or [],

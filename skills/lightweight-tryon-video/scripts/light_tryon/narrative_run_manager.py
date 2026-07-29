@@ -6,6 +6,7 @@ from typing import Any, Iterable
 
 from .asset_ingestion import register_media_asset
 from .database import LightTryonDB
+from .run_manager_sync import SCRIPT_TYPE_LIGHT_VIDEO_SUPPLEMENT
 from .utils import stable_hash
 
 
@@ -67,6 +68,12 @@ def sync_supplement_shots(
     model: str = "Seedance 2.0 VIP",
     dry_run: bool = False,
 ) -> dict[str, Any]:
+    normalized_store = str(store_id or "").strip().lower()
+    target_locale = (
+        "th-TH"
+        if normalized_store.startswith(("myps", "myalibaba", "thfz", "th"))
+        else ""
+    )
     shots = [
         shot for shot in db.list_product_supplement_shots(product_id)
         if str(shot.get("status") or "") in {"planned", "queued", "generating"}
@@ -127,6 +134,7 @@ def sync_supplement_shots(
             "内容ID": shot["shot_id"],
             "脚本ID": shot["shot_id"],
             "店铺ID": store_id,
+            "目标语言": target_locale,
             "商品ID": product_id,
             "状态": "待处理",
             "提示词": f"{positive}\n\n负面要求：{negative}" if negative else positive,
@@ -138,6 +146,7 @@ def sync_supplement_shots(
             "分辨率": "720P",
             "渠道": channel,
             "任务来源": "口播增强补充镜头",
+            "脚本类型": SCRIPT_TYPE_LIGHT_VIDEO_SUPPLEMENT,
             "首帧策略": "直接使用原始脚本参考图",
             "来源指纹": source_hash,
             "执行归属": "",

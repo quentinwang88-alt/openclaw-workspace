@@ -705,6 +705,7 @@ MIGRATION_COLUMNS: dict[str, dict[str, str]] = {
         "run_manager_trace_id": "TEXT NOT NULL DEFAULT ''",
         "run_manager_result_status": "TEXT NOT NULL DEFAULT ''",
         "run_manager_result_source_token": "TEXT NOT NULL DEFAULT ''",
+        "run_manager_result_sha256": "TEXT NOT NULL DEFAULT ''",
         "run_manager_source_hash": "TEXT NOT NULL DEFAULT ''",
     },
     "source_script_requests": {
@@ -762,6 +763,15 @@ class LightTryonDB:
                     if name not in existing:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_video_jobs_visual_plan ON video_jobs(visual_plan_id, variant_no)")
+            duplicate_result_hash = conn.execute(
+                "SELECT run_manager_result_sha256 FROM video_jobs "
+                "WHERE run_manager_result_sha256!='' GROUP BY run_manager_result_sha256 HAVING COUNT(*)>1 LIMIT 1"
+            ).fetchone()
+            if duplicate_result_hash is None:
+                conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_video_jobs_run_result_sha256 "
+                    "ON video_jobs(run_manager_result_sha256) WHERE run_manager_result_sha256!=''"
+                )
             conn.execute(
                 "UPDATE video_jobs SET shot_profile_id='SHOT_UPPER_FIXED' "
                 "WHERE scene_id IN ('SCENE_B_001','SCENE_D_001') AND shot_profile_id='SHOT_FULL_FIXED'"
@@ -1447,14 +1457,31 @@ class LightTryonDB:
         attachments: list[dict[str, Any]],
         trace_id: str = "",
         source_file_token: str = "",
+        source_sha256: str = "",
     ) -> None:
         with self.connection() as conn:
             cursor = conn.execute(
                 "UPDATE video_jobs SET generation_status='success', qc_status='pending', last_error='', "
                 "raw_video_attachments=?, run_manager_sync_status='returned', run_manager_result_status='uploaded', "
                 "run_manager_result_source_token=CASE WHEN ?='' THEN run_manager_result_source_token ELSE ? END, "
+                "run_manager_result_sha256=CASE WHEN ?='' THEN run_manager_result_sha256 ELSE ? END, "
                 "run_manager_trace_id=CASE WHEN ?='' THEN run_manager_trace_id ELSE ? END, updated_at=? WHERE job_id=?",
-                (json_dumps(attachments), source_file_token, source_file_token, trace_id, trace_id, now_iso(), job_id),
+                (
+                    json_dumps(attachments), source_file_token, source_file_token,
+                    source_sha256, source_sha256, trace_id, trace_id, now_iso(), job_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(f"找不到任务: {job_id}")
+
+    def set_run_manager_result_sha256(self, job_id: str, source_sha256: str) -> None:
+        digest = str(source_sha256 or "").strip().lower()
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            raise ValueError(f"非法视频 SHA256: {source_sha256}")
+        with self.connection() as conn:
+            cursor = conn.execute(
+                "UPDATE video_jobs SET run_manager_result_sha256=?, updated_at=? WHERE job_id=?",
+                (digest, now_iso(), job_id),
             )
             if cursor.rowcount != 1:
                 raise KeyError(f"找不到任务: {job_id}")

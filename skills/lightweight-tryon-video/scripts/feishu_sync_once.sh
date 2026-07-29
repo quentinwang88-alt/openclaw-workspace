@@ -3,6 +3,16 @@ set -euo pipefail
 
 SKILL_DIR="${0:A:h:h}"
 LOCK_DIR="${TMPDIR:-/tmp}/light-tryon-feishu-sync.lock"
+LOG_DIR="$SKILL_DIR/var"
+
+# launchd opens the current log before invoking this wrapper. Renaming an
+# oversized log here lets the next scheduled run start a fresh file while
+# retaining one previous generation for diagnosis.
+for log_file in "$LOG_DIR/run-manager-sync.log" "$LOG_DIR/run-manager-sync.error.log"; do
+  if [[ -f "$log_file" ]] && (( $(wc -c < "$log_file") > 10485760 )); then
+    mv -f "$log_file" "$log_file.1"
+  fi
+done
 
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   lock_pid=""

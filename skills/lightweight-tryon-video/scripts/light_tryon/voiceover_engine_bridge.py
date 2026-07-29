@@ -15,6 +15,7 @@ def _load_engine(
     root: str | Path | None = None,
     *,
     db_path: str | Path | None = None,
+    knowledge_snapshot_path: str | Path | None = None,
     model_command: str = "",
     qc_model_command: str = "",
 ):
@@ -29,6 +30,11 @@ def _load_engine(
     settings = Settings(
         db_path=Path(db_path).expanduser().resolve() if db_path else engine_root / "var" / "voiceover.sqlite",
         config_dir=engine_root / "config",
+        hook_knowledge_snapshot_path=(
+            Path(knowledge_snapshot_path).expanduser().resolve()
+            if knowledge_snapshot_path
+            else None
+        ),
         model_command=str(model_command or ""),
         qc_model_command=str(qc_model_command or ""),
     )
@@ -52,6 +58,10 @@ def load_active_voiceover_hooks(
             "hook_id": hook_id,
             "hook_name": str(row.get("archetype_name_zh") or row.get("archetype_id") or ""),
             "hook_type": mechanisms[0] if mechanisms else "governed_archetype",
+            "core_intent": str(row.get("core_intent") or ""),
+            "minimal_structure": normalized_list(row.get("minimal_structure_json")),
+            "attention_mechanisms": mechanisms,
+            "relation_modes": normalized_list(row.get("relation_modes_json")),
             "priority": 1.0,
             "weight": 1.0,
             "required_evidence": [],
@@ -219,6 +229,7 @@ def run_voiceover_engine_variant(
     *,
     root: str | Path | None = None,
     db_path: str | Path | None = None,
+    knowledge_snapshot_path: str | Path | None = None,
     model_command: str = "",
     qc_model_command: str = "",
 ) -> dict[str, Any]:
@@ -232,6 +243,7 @@ def run_voiceover_engine_variant(
     engine = _load_engine(
         root,
         db_path=db_path,
+        knowledge_snapshot_path=knowledge_snapshot_path,
         model_command=model_command,
         qc_model_command=qc_model_command,
     )
@@ -251,26 +263,26 @@ def run_voiceover_engine_variant(
         raise ValueError("客观画面时间轴与增强型视频目标时长不一致")
 
     hook_id = str(strategy.get("hook_id") or "").strip()
+    allowed_hook_ids = normalized_list(strategy.get("allowed_hook_ids"))
     active_hook_ids = {
         str(row.get("archetype_id") or "") for row in engine.hooks.list_archetypes("ACTIVE")
     }
-    if hook_id not in active_hook_ids:
+    if hook_id and hook_id not in active_hook_ids:
         raise ValueError(f"策略钩子不是现有口播库的 ACTIVE 原型: {hook_id}")
+    invalid_allowed = [item for item in allowed_hook_ids if item not in active_hook_ids]
+    if invalid_allowed:
+        raise ValueError(f"候选钩子包含非 ACTIVE 原型: {','.join(invalid_allowed)}")
 
     verified_points = normalized_list(product.get("core_selling_points"))
     if not verified_points:
         raise ValueError("商品缺少上游已确认卖点，不能生成口播")
-    claim_ids = _ensure_verified_claims(engine, product_id, verified_points, variant_id)
-    selected_claim_ids = _match_strategy_claims(
+    claim_ids = _ensure_verified_claims(
         engine,
-        claim_ids,
-        str(strategy.get("primary_selling_point") or ""),
-        normalized_list(strategy.get("secondary_selling_points")),
-        max_claims=_duration_claim_limit(engine, duration),
+        product_id,
+        verified_points,
+        variant_id,
+        visual_fact_inputs=product.get("visual_fact_inputs"),
     )
-    if not selected_claim_ids:
-        raise ValueError("主卖点没有映射到现有口播卖点概念，不能降级成自由发挥")
-
     source_ref = f"light-tryon://narrative/{variant_id}"
     content_format = str(variant.get("format_type") or "enhanced_18_24")
     batch_id = str(variant.get("production_batch_id") or variant.get("plan_version") or "")
@@ -280,6 +292,12 @@ def run_voiceover_engine_variant(
         "production_batch_id": batch_id,
         "strategy_group_id": variant.get("strategy_group_id"),
         "source_job_id": variant.get("source_job_id"),
+        "allowed_hook_ids": allowed_hook_ids,
+        "expression_contract": (
+            strategy.get("expression_contract")
+            if isinstance(strategy.get("expression_contract"), dict)
+            else {}
+        ),
     }
     video = _get_or_register_video(
         engine,
@@ -301,6 +319,32 @@ def run_voiceover_engine_variant(
             "uncertainties": normalized_list(timeline.get("uncertainties")),
         },
     )
+    # Materialize evidence before choosing forced claims. VoiceoverService also
+    # performs this step, but waiting until job.run() is too late: a broad raw
+    # anchor can normalize into both supported and unsupported subclaims.
+    engine.evidence.resolve_for_product(product_id, analysis["analysis_id"])
+    supported_claim_ids = {
+        str(row.get("claim_id") or "")
+        for row in engine.repo.list(
+            "claim_video_evidence",
+            "analysis_id=? AND status='SUPPORTED'",
+            (analysis["analysis_id"],),
+        )
+    }
+    evidence_backed_claim_ids = [
+        claim_id for claim_id in claim_ids if claim_id in supported_claim_ids
+    ]
+    selected_claim_ids = _match_strategy_claims(
+        engine,
+        evidence_backed_claim_ids,
+        str(strategy.get("primary_selling_point") or ""),
+        normalized_list(strategy.get("secondary_selling_points")),
+        max_claims=_duration_claim_limit(engine, duration),
+    )
+    if not selected_claim_ids:
+        raise ValueError(
+            "卖点没有同时通过概念映射与正向画面证据门禁，不能降级成自由发挥"
+        )
     job = _get_or_create_job(
         engine,
         product_id=product_id,
@@ -332,7 +376,10 @@ def run_voiceover_engine_variant(
         )
         for claim_id in selected_claim_ids
     }
-    return _adapt_ready_package(ready, analysis, variant_id, claim_role_map=claim_role_map)
+    adapted = _adapt_ready_package(ready, analysis, variant_id, claim_role_map=claim_role_map)
+    adapted["selected_claim_ids"] = selected_claim_ids
+    adapted["selected_claim_count"] = len(selected_claim_ids)
+    return adapted
 
 
 def _ensure_verified_claims(
@@ -340,6 +387,8 @@ def _ensure_verified_claims(
     product_id: str,
     selling_points: Iterable[str],
     variant_id: str,
+    *,
+    visual_fact_inputs: Any = None,
 ) -> list[str]:
     source = engine.claims.add_source(product_id, {
         "raw_text": "；".join(normalized_list(selling_points)),
@@ -357,9 +406,38 @@ def _ensure_verified_claims(
         existing_claims=claims,
         variant_id=variant_id,
     ))
+    claims.extend(
+        _ensure_visual_fact_claims(
+            engine,
+            product_id,
+            source["claim_source_id"],
+            visual_fact_inputs,
+            variant_id=variant_id,
+        )
+    )
     output: list[str] = []
     for claim in claims:
         if not claim.get("concept_id") or claim.get("allowed_strength") == "forbidden":
+            continue
+        existing_verified = engine.repo.list(
+            "product_claims",
+            "product_id=? AND concept_id=? AND verification_status='VERIFIED' AND claim_id<>?",
+            (product_id, claim.get("concept_id"), claim.get("claim_id")),
+            order_by="created_at",
+            limit=1,
+        )
+        if existing_verified:
+            # Repeated variants may arrive through different source strings.
+            # Reuse the canonical verified concept instead of promoting another
+            # active duplicate into allocation and coverage statistics.
+            output.append(str(existing_verified[0]["claim_id"]))
+            if claim.get("verification_status") == "PROPOSED":
+                engine.claims.review(claim["claim_id"], {
+                    "action": "REJECT",
+                    "allowed_strength": claim.get("allowed_strength") or "soft_only",
+                    "reviewed_by": "light-tryon-upstream-verified",
+                    "review_note": "同产品同概念已有 VERIFIED 事实，保留来源审计但不重复激活",
+                })
             continue
         if claim.get("verification_status") != "VERIFIED":
             claim = engine.claims.review(claim["claim_id"], {
@@ -371,7 +449,75 @@ def _ensure_verified_claims(
         output.append(str(claim["claim_id"]))
     if not output:
         raise ValueError("商品卖点没有形成可用的现有口播概念")
-    return output
+    return list(dict.fromkeys(output))
+
+
+_VISUAL_FACT_FORBIDDEN = (
+    "显瘦", "显高", "舒适", "保暖", "百搭", "好搭配", "上镜", "价格", "销量", "库存",
+)
+
+
+def _ensure_visual_fact_claims(
+    engine: Any,
+    product_id: str,
+    claim_source_id: str,
+    visual_fact_inputs: Any,
+    *,
+    variant_id: str,
+) -> list[dict[str, Any]]:
+    """Materialize upstream, shot-bound visible facts that taxonomy lacks.
+
+    This is deliberately not a fallback normalizer: only the original-script
+    caller can submit the exact fact and its supporting shot numbers. It gives
+    precise visual details (for example a sleeve gather or a shaped metal clasp)
+    an evidence path without turning them into inferred benefits.
+    """
+
+    concept = engine.repo.get("claim_concepts", "concept_id", "CCP_PRODUCT_SPECIFIC_DETAIL")
+    if not concept:
+        return []
+    rows = visual_fact_inputs if isinstance(visual_fact_inputs, list) else []
+    added: list[dict[str, Any]] = []
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        fact = str(raw.get("fact_text") or "").strip()
+        supports = raw.get("supported_shot_nos")
+        if not fact or not isinstance(supports, list) or not supports:
+            continue
+        if any(term in fact for term in _VISUAL_FACT_FORBIDDEN):
+            continue
+        existing = engine.repo.list(
+            "product_claims",
+            "product_id=? AND concept_id=? AND source_span=? AND verification_status='VERIFIED'",
+            (product_id, concept["concept_id"], fact),
+            limit=1,
+        )
+        if existing:
+            added.extend(existing)
+            continue
+        row = {
+            "claim_id": "PCL_LTV_VIS_" + stable_hash(product_id, fact, claim_source_id, length=16).upper(),
+            "product_id": product_id,
+            "claim_source_id": claim_source_id,
+            "concept_id": concept["concept_id"],
+            "source_span": fact,
+            "canonical_claim_zh": fact,
+            "claim_type": "feature",
+            "claim_theme": "detail",
+            "verification_status": "VERIFIED",
+            "evidence_requirement": "video_positive",
+            "allowed_strength": "factual",
+            "operator_priority": "core",
+            "risk_tags_json": [],
+            "normalizer_version": "original-shot-bound-visual-fact-v1",
+            "normalizer_confidence": 1.0,
+            "reviewed_by": "original-script-shot-bound-input",
+            "review_note": f"原创画面已绑定支持镜头 {supports}；增强变体 {variant_id}",
+        }
+        engine.repo.insert("product_claims", row)
+        added.append({**row, "canonical_key": concept.get("canonical_key"), "concept_name": concept.get("concept_name")})
+    return added
 
 
 def _ensure_exact_alias_claims(
@@ -479,7 +625,13 @@ def _match_strategy_claims(
         redundancy_group = {
             "cropped_length": "length_and_waist",
             "waist_definition": "length_and_waist",
-        }.get(key, key)
+            "closure_detail": "closure_detail",
+            "metal_snap_detail": "closure_detail",
+        }.get(
+            key,
+            "product_specific:" + str(claim.get("source_span") or claim.get("claim_id") or "")
+            if key == "product_specific_visible_detail" else key,
+        )
         if redundancy_group and redundancy_group in selected_concepts:
             return False
         selected.append(claim_id)
@@ -540,7 +692,10 @@ def _duration_claim_limit(engine: Any, duration: int) -> int:
     profile = (
         getattr(engine.voiceovers, "config", {}).get("durations", {}).get("profiles", {}).get(str(duration), {})
     )
-    return max(1, int(profile.get("max_bundles") or 1))
+    return max(
+        1,
+        int(profile.get("max_claims_per_bundle") or profile.get("max_bundles") or 1),
+    )
 
 
 def _get_or_register_video(
@@ -603,13 +758,22 @@ def _get_or_create_job(
     batch_id: str,
     source_context: dict[str, Any],
 ) -> dict[str, Any]:
-    rows = engine.repo.list(
-        "voiceover_jobs",
-        "product_id=? AND video_id=? AND target_duration_sec=? AND forced_hook_id=?",
-        (product_id, video_id, duration, hook_id),
-        order_by="created_at DESC",
-        limit=1,
-    )
+    if hook_id:
+        rows = engine.repo.list(
+            "voiceover_jobs",
+            "product_id=? AND video_id=? AND target_duration_sec=? AND forced_hook_id=?",
+            (product_id, video_id, duration, hook_id),
+            order_by="created_at DESC",
+            limit=1,
+        )
+    else:
+        rows = engine.repo.list(
+            "voiceover_jobs",
+            "product_id=? AND video_id=? AND target_duration_sec=? AND (forced_hook_id IS NULL OR forced_hook_id='')",
+            (product_id, video_id, duration),
+            order_by="created_at DESC",
+            limit=1,
+        )
     if rows:
         requested = {str(value) for value in claim_ids}
         existing = {str(value) for value in normalized_list(rows[0].get("forced_claim_ids"))}
@@ -628,7 +792,7 @@ def _get_or_create_job(
         "target_locale": locale,
         "target_duration_sec": duration,
         "account_style_id": "TH_FASHION_FRIENDLY_01",
-        "forced_hook_id": hook_id,
+        "forced_hook_id": hook_id or None,
         "forced_claim_ids": claim_ids,
         "content_format": content_format,
         "batch_id": batch_id,
@@ -735,6 +899,9 @@ def _adapt_ready_package(
         "voiceover_engine_analysis_id": (ready.get("video") or {}).get("analysis_id"),
         "voiceover_engine_qc": ready.get("qc") or {},
         "voiceover_engine_duration": ready.get("duration") or {},
+        "voiceover_expression_contract": ready.get("expression_contract") or {},
+        "voiceover_copy_plan": ready.get("copy_plan") or {},
+        "hook_id": str((ready.get("hook") or {}).get("archetype_id") or ""),
         "variant_id": variant_id,
         "downstream_rewritten": False,
     }
@@ -749,7 +916,9 @@ def _claim_shot_roles(canonical_key: str) -> list[str]:
         "waist_definition": ["detail_waistline", "fit_turn"],
         "stand_collar": ["detail_neckline"],
         "zip_closure": ["detail_closure"],
+        "closure_detail": ["detail_closure"],
         "metal_snap_detail": ["detail_closure", "detail_neckline"],
+        "ribbed_trim": ["detail_sleeve", "detail_waistline"],
         "decorative_pocket": ["detail_closure"],
         "seam_detail": ["detail_fabric"],
         "matte_texture": ["detail_fabric"],

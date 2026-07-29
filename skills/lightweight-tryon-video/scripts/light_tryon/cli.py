@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import shutil
 import subprocess
 import sys
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +28,7 @@ from .feishu_sync import (
     push_visual_plans,
 )
 from .review_video_processing import process_review_videos
-from .run_manager_sync import build_run_manager_sync_snapshots, ensure_run_manager_schema, pull_generation_preferences, pull_run_manager_results, sync_jobs_to_run_manager
+from .run_manager_sync import backfill_run_manager_result_hashes, build_run_manager_sync_snapshots, cleanup_run_manager_duplicates, ensure_run_manager_schema, pull_generation_preferences, pull_run_manager_results, run_record_uses_voiceover, sync_jobs_to_run_manager
 from .models import ProductInput
 from .asset_ingestion import backfill_asset_visual_fingerprints, backfill_generated_job_assets, process_pending_asset_tags, register_media_asset, tag_supplement_assets_by_contract
 from .assembly_planner import plan_variant_rough_cut, plan_variant_voiceover_cut, render_variant_rough_cut
@@ -80,6 +83,29 @@ def _db(args: argparse.Namespace) -> LightTryonDB:
     db = LightTryonDB(args.db)
     db.init_schema()
     return db
+
+
+@contextmanager
+def _run_manager_sync_lock(db: LightTryonDB):
+    """Serialize every CLI entry point that can create light-video run rows."""
+    lock_path = db.path.with_suffix(db.path.suffix + ".run-manager-sync.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+", encoding="utf-8")
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("已有轻视频运行表同步正在执行，本轮安全跳过，避免重复内容ID") from exc
+        handle.seek(0)
+        handle.truncate()
+        handle.write(str(os.getpid()))
+        handle.flush()
+        yield
+    finally:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
 
 def cmd_init(args: argparse.Namespace) -> dict[str, Any]:
@@ -706,26 +732,60 @@ def cmd_feishu_ensure_run_manager_schema(args: argparse.Namespace) -> dict[str, 
     return ensure_run_manager_schema(run_client, dry_run=args.dry_run)
 
 
+def cmd_feishu_cleanup_run_manager_duplicates(args: argparse.Namespace) -> dict[str, Any]:
+    _, review_client, run_client = _run_manager_feishu(args)
+    db = _db(args)
+    with _run_manager_sync_lock(db):
+        return cleanup_run_manager_duplicates(
+            db, review_client, run_client, dry_run=args.dry_run,
+        )
+
+
+def cmd_feishu_backfill_run_manager_hashes(args: argparse.Namespace) -> dict[str, Any]:
+    _, _, run_client = _run_manager_feishu(args)
+    db = _db(args)
+    with _run_manager_sync_lock(db):
+        return backfill_run_manager_result_hashes(db, run_client, dry_run=args.dry_run)
+
+
 def cmd_feishu_sync_run_manager(args: argparse.Namespace) -> dict[str, Any]:
+    started_at = time.monotonic()
     config, review_client, run_client = _run_manager_feishu(args)
     db = _db(args)
-    review_groups, run_groups = build_run_manager_sync_snapshots(review_client, run_client)
-    result: dict[str, Any] = {
-        "preferences": pull_generation_preferences(
-            db, review_client, job_ids=args.job_id, dry_run=args.dry_run,
-            review_groups=review_groups,
-        ),
-    }
-    result["queue"] = sync_jobs_to_run_manager(
-        db, review_client, run_client, job_ids=args.job_id, limit=args.limit, dry_run=args.dry_run,
-        store_id=str((config.get("run_manager") or {}).get("store_id") or "myps01"),
-        review_groups=review_groups, run_groups=run_groups,
-    )
-    if not args.dry_run:
-        result["results"] = pull_run_manager_results(
-            db, review_client, run_client, job_ids=args.job_id,
+    with _run_manager_sync_lock(db):
+        review_groups, run_groups = build_run_manager_sync_snapshots(review_client, run_client)
+        result: dict[str, Any] = {
+            "preferences": pull_generation_preferences(
+                db, review_client, job_ids=args.job_id, dry_run=args.dry_run,
+                review_groups=review_groups,
+            ),
+        }
+        if not args.dry_run:
+            result["results"] = pull_run_manager_results(
+                db, review_client, run_client, job_ids=args.job_id,
+                review_groups=review_groups, run_groups=run_groups,
+            )
+        result["queue"] = sync_jobs_to_run_manager(
+            db, review_client, run_client, job_ids=args.job_id, limit=args.limit, dry_run=args.dry_run,
+            store_id=str((config.get("run_manager") or {}).get("store_id") or "myps01"),
             review_groups=review_groups, run_groups=run_groups,
         )
+        local_job_ids = {
+            str(item.get("job_id") or "") for item in db.list_jobs()
+            if str(item.get("generation_channel") or "no_generate") != "no_generate"
+        }
+        result["health"] = {
+            "duration_seconds": round(time.monotonic() - started_at, 3),
+            "local_jobs": len(local_job_ids),
+            "duplicate_content_ids": sum(
+                1 for job_id, rows in run_groups.items() if job_id in local_job_ids and len(rows) > 1
+            ),
+            "feishu_requests": int(getattr(review_client, "request_count", 0)) + int(getattr(run_client, "request_count", 0)),
+            "feishu_retries": int(getattr(review_client, "retry_count", 0)) + int(getattr(run_client, "retry_count", 0)),
+        }
+        if args.dry_run:
+            return result
+    if not args.dry_run:
         returned_ids = [item["job_id"] for item in result["results"].get("items", []) if item.get("status") == "returned"]
         if returned_ids and not args.no_postprocess:
             result["postprocess"] = process_review_videos(
@@ -742,12 +802,25 @@ def cmd_feishu_sync_run_manager(args: argparse.Namespace) -> dict[str, Any]:
                     process_pending_asset_tags(db, product_id=product_id, limit=args.asset_tag_limit)
                     for product_id in product_ids
                 ]
-            if completed_ids and not args.no_bgm:
+            bgm_ids = []
+            voiceover_bgm_skipped = []
+            for job_id in completed_ids:
+                records = run_groups.get(job_id) or []
+                if any(run_record_uses_voiceover(dict(item.get("fields") or {})) for item in records):
+                    voiceover_bgm_skipped.append(job_id)
+                else:
+                    bgm_ids.append(job_id)
+            if voiceover_bgm_skipped:
+                result["bgm_guard"] = {
+                    "skipped_job_ids": voiceover_bgm_skipped,
+                    "reason": "voiceover_final_no_bgm",
+                }
+            if bgm_ids and not args.no_bgm:
                 command = [
                     sys.executable, str(SKILL_DIR / "scripts" / "apply_review_bgm.py"), "--db", str(db.path),
                     "--ffmpeg", args.ffmpeg, "--ffprobe", args.ffprobe,
                 ]
-                for job_id in completed_ids:
+                for job_id in bgm_ids:
                     command.extend(["--job-id", job_id])
                 proc = subprocess.run(command, capture_output=True, text=True, timeout=1800)
                 try:
@@ -756,6 +829,7 @@ def cmd_feishu_sync_run_manager(args: argparse.Namespace) -> dict[str, Any]:
                     result["bgm"] = {"ok": False, "stdout": proc.stdout[-2000:]}
                 if proc.returncode != 0:
                     result["bgm"] = {**result.get("bgm", {}), "ok": False, "error": proc.stderr[-2000:]}
+    result.setdefault("health", {})["duration_seconds"] = round(time.monotonic() - started_at, 3)
     return result
 
 
@@ -874,12 +948,20 @@ def cmd_feishu_sync_all(args: argparse.Namespace) -> dict[str, Any]:
     run_endpoint = resolve_run_manager_endpoint(config)
     if run_endpoint:
         run_client = make_client(run_endpoint)
-        result["generation_preferences"] = pull_generation_preferences(db, clients["review"])
-        result["run_manager_queue"] = sync_jobs_to_run_manager(
-            db, clients["review"], run_client,
-            store_id=str((config.get("run_manager") or {}).get("store_id") or "myps01"),
-        )
-        result["run_manager_results"] = pull_run_manager_results(db, clients["review"], run_client)
+        with _run_manager_sync_lock(db):
+            review_groups, run_groups = build_run_manager_sync_snapshots(clients["review"], run_client)
+            result["generation_preferences"] = pull_generation_preferences(
+                db, clients["review"], review_groups=review_groups,
+            )
+            result["run_manager_results"] = pull_run_manager_results(
+                db, clients["review"], run_client,
+                review_groups=review_groups, run_groups=run_groups,
+            )
+            result["run_manager_queue"] = sync_jobs_to_run_manager(
+                db, clients["review"], run_client,
+                store_id=str((config.get("run_manager") or {}).get("store_id") or "myps01"),
+                review_groups=review_groups, run_groups=run_groups,
+            )
     return result
 
 
@@ -1244,6 +1326,18 @@ def build_parser() -> argparse.ArgumentParser:
     feishu_run_schema = feishu_sub.add_parser("ensure-run-manager-schema", help="幂等补齐短视频自动运行管理表的轻视频字段")
     feishu_run_schema.add_argument("--dry-run", action="store_true")
     feishu_run_schema.set_defaults(func=cmd_feishu_ensure_run_manager_schema)
+    feishu_run_cleanup = feishu_sub.add_parser(
+        "cleanup-run-manager-duplicates",
+        help="安全保留有效/本地绑定记录并删除运行管理表的重复轻视频内容ID",
+    )
+    feishu_run_cleanup.add_argument("--dry-run", action="store_true")
+    feishu_run_cleanup.set_defaults(func=cmd_feishu_cleanup_run_manager_duplicates)
+    feishu_hash_backfill = feishu_sub.add_parser(
+        "backfill-run-manager-hashes",
+        help="回填历史生成视频SHA256并启用跨任务唯一门禁",
+    )
+    feishu_hash_backfill.add_argument("--dry-run", action="store_true")
+    feishu_hash_backfill.set_defaults(func=cmd_feishu_backfill_run_manager_hashes)
     feishu_run_sync = feishu_sub.add_parser("sync-run-manager", help="回读生成配置、幂等入队并将生成视频回流到复核表")
     feishu_run_sync.add_argument("--job-id", action="append", help="只处理指定轻视频任务 ID，可重复传入")
     feishu_run_sync.add_argument("--limit", type=int)

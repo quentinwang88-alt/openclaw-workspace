@@ -205,11 +205,14 @@ def backfill_generated_job_assets(
     result: dict[str, Any] = {"processed": 0, "created": 0, "existing": 0, "skipped": 0, "items": []}
     for job in jobs[: int(limit) if limit else None]:
         raw_path = Path(str(job.get("raw_video_path") or "")).expanduser()
-        output_path = Path(str(job.get("output_video_path") or "")).expanduser()
-        path = raw_path if raw_path.is_file() else output_path
-        if not path.is_file():
+        path = raw_path if raw_path.is_file() else None
+        if path is None:
             result["skipped"] += 1
-            result["items"].append({"job_id": job.get("job_id"), "status": "skipped", "reason": "video_file_missing"})
+            result["items"].append({
+                "job_id": job.get("job_id"),
+                "status": "skipped",
+                "reason": "clean_initial_video_missing",
+            })
             continue
         expected = _job_expected_tags(job)
         asset, created = register_media_asset(

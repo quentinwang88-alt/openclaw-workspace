@@ -16,7 +16,7 @@ SCRIPTS_DIR = SKILL_DIR / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from light_tryon.asset_ingestion import process_pending_asset_tags, register_media_asset  # noqa: E402
+from light_tryon.asset_ingestion import backfill_generated_job_assets, process_pending_asset_tags, register_media_asset  # noqa: E402
 from light_tryon.assembly_planner import plan_variant_rough_cut, plan_variant_voiceover_cut  # noqa: E402
 from light_tryon.content_strategy import build_strategy_pool, sample_execution_variants  # noqa: E402
 from light_tryon.database import LightTryonDB  # noqa: E402
@@ -65,6 +65,26 @@ class NarrativeEnhancementTestCase(unittest.TestCase):
             {"hook_id": "HOOK_RESULT", "hook_name": "结果钩子", "hook_type": "result", "priority": 2},
             {"hook_id": "HOOK_DETAIL", "hook_name": "细节钩子", "hook_type": "detail", "priority": 1},
         ]
+
+    def test_asset_backfill_does_not_treat_postprocessed_output_as_clean_initial_video(self) -> None:
+        final_path = self.root / "captioned-final.mp4"
+        final_path.write_bytes(b"postprocessed")
+
+        class FakeDB:
+            @staticmethod
+            def list_jobs(product_id=None):
+                return [{
+                    "job_id": "JOB_FINAL_ONLY",
+                    "product_id": "SKU-NARRATIVE-001",
+                    "raw_video_path": "",
+                    "output_video_path": str(final_path),
+                }]
+
+        result = backfill_generated_job_assets(FakeDB())
+
+        self.assertEqual(result["processed"], 0)
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(result["items"][0]["reason"], "clean_initial_video_missing")
 
     def test_weighted_sampling_allows_repeated_hooks_and_selling_points(self) -> None:
         strategies = build_strategy_pool(
@@ -200,6 +220,9 @@ class NarrativeEnhancementTestCase(unittest.TestCase):
             self.skipTest("existing voiceover engine is not installed")
         hooks = load_active_voiceover_hooks(voiceover_root, db_path=self.root / "voiceover.sqlite")
         hook = next(row for row in hooks if row["hook_id"] == "GENERAL_PRODUCT_SHARE")
+        self.assertTrue(hook["core_intent"])
+        self.assertTrue(hook["minimal_structure"])
+        self.assertTrue(hook["attention_mechanisms"])
         strategy = {
             "strategy_group_id": "STR_BRIDGE",
             **hook,
@@ -295,7 +318,10 @@ class NarrativeEnhancementTestCase(unittest.TestCase):
         self.assertEqual(response["status"], "READY_FOR_TTS")
         self.assertTrue(response["voiceover_text"])
         self.assertTrue(response["beats"])
-        self.assertEqual(len(response["beats"]), 5)
+        # Three supported facts can form hook + one connected proof + closing;
+        # beat count is not the same thing as claim count after bundle grouping.
+        self.assertEqual(len(response["beats"]), 3)
+        self.assertEqual(response["selected_claim_count"], 3)
         # The closing line is now bound to the final, actual visual slot rather
         # than being spoken before that detail enters frame.
         self.assertGreaterEqual(response["beats"][-1]["suggested_start_ms"], 19250)
@@ -318,6 +344,13 @@ class NarrativeEnhancementTestCase(unittest.TestCase):
             for claim_id in claim_ids
         }
         self.assertIn("soft_ivory_color", keys)
+        repeated = _ensure_verified_claims(
+            engine,
+            self.product.product_id,
+            ["这款皮衣整体为柔和的米杏纯白色调"],
+            "NAR_ALIAS_TEST_REPEAT",
+        )
+        self.assertEqual(claim_ids, repeated)
 
     def test_tts_timeline_uses_actual_beat_durations(self) -> None:
         beats = [
@@ -758,7 +791,7 @@ class NarrativeEnhancementTestCase(unittest.TestCase):
         ]
         self.db.update_narrative_variant(variant.variant_id, tts_timeline=aligned_lines)
         aligned = plan_variant_voiceover_cut(self.db, variant.variant_id)
-        self.assertEqual(aligned["plan_version"], "narrative-voiceover-cut-v3-diversity")
+        self.assertEqual(aligned["plan_version"], "narrative-voiceover-cut-v4-key-evidence")
         self.assertFalse(aligned["evidence_gaps"])
         self.assertEqual(sum(row["duration_ms"] for row in aligned["clips"]), 22000)
         zip_clips = [row for row in aligned["clips"] if row["beat_id"] == "B2"]
