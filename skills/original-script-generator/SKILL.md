@@ -324,6 +324,8 @@ python3 scripts/run_reality_reference_stage0.py --product-code <产品编码> --
 
 批次计划会读取并预留既有 `creative_pattern_usage`，以 `人物角色 × 场景母题 × 开场动作` 的实际近期使用量选择下一组组合；相同请求由冻结批次保证幂等，新批次不得因为同一产品/结构而自动复用旧创意组合。创意历史只影响候选选择，不形成新的脚本失败门槛。
 
+上装真人方向使用 10 套可执行生活事件组合轮换，不再只在办公室衣帽区、公寓玄关、服装收纳架和客厅窗边 4 套通勤模板中循环。新增组合覆盖电梯厅、书店出口、商场连廊、公寓取件、楼下等车和展览入口；这些场景与动作只属于 `CREATIVE_DESIGN`，不能作为卖点证据，也不新增质检规则或模型调用。
+
 ```bash
 python3 scripts/run_original_batch.py \
   --product-code <产品编码> --count 2 --mode plan-only --seed 1
