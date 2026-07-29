@@ -95,6 +95,9 @@ const DEFAULT_CONFIG = {
   ],
   fields: {
     taskName: '任务名',
+    contentId: '内容ID',
+    scriptId: '脚本ID',
+    taskSource: '任务来源',
     prompt: '提示词',
     images: ['参考图'],
     executionOwner: '执行归属',
@@ -665,6 +668,20 @@ async function listSubmitCandidateRecords(config, token) {
   });
 }
 
+async function listRecordsByContentId(config, token, contentId) {
+  const normalized = String(contentId || '').trim();
+  const fieldName = String(config.fields.contentId || '内容ID').trim();
+  if (!normalized || !fieldName) {
+    return [];
+  }
+  return searchRecords(config, token, {
+    filter: {
+      conjunction: 'and',
+      conditions: [{ field_name: fieldName, operator: 'is', value: [normalized] }]
+    }
+  });
+}
+
 function normalizeTextField(value) {
   if (value == null) return '';
   if (typeof value === 'string') return value.trim();
@@ -961,12 +978,21 @@ function buildTaskContext(record, config) {
   const executionOwnerParsed = parseExecutionOwner(executionOwner);
   const channel = normalizeTextField(fields[config.fields.channel || '渠道']);
   const channelSource = normalizeTextField(fields[config.fields.channelSource || '渠道来源']);
+  const taskSource = normalizeTextField(fields[config.fields.taskSource || '任务来源']);
+  const prompt = normalizeTextField(fields[config.fields.prompt]);
+  const contentId = normalizeTextField(fields[config.fields.contentId || '内容ID']) ||
+    parseContentIdMetadata(prompt, config.contentIdLabel || '内容ID').id;
+  const scriptId = normalizeTextField(fields[config.fields.scriptId || '脚本ID']) ||
+    parseScriptIdMetadata(prompt, config.fields.scriptId || '脚本ID').id;
 
   return {
     recordId: record.record_id,
     record,
     taskName,
-    prompt: normalizeTextField(fields[config.fields.prompt]),
+    prompt,
+    contentId,
+    scriptId,
+    taskSource,
     attachments: getAttachmentList(fields, config.fields.images || []),
     allowNoReferenceImage: normalizeBooleanField(fields[config.fields.allowNoReferenceImage]),
     model: normalizeModelName(fields[config.fields.model], config.defaultModel),
@@ -3051,6 +3077,36 @@ async function main() {
         console.log(`  ⏭️ 已按飞书最新渠道刷新，当前记录不属于本提单线，跳过: ${context.taskName}`);
         await sleep(800);
         continue;
+      }
+
+      const identityValues = [context.taskName, context.contentId, context.scriptId]
+        .map(value => String(value || '').trim())
+        .filter(Boolean);
+      const isLightVideo = String(context.contentId || '').startsWith('LTV_') || context.taskSource === '轻量试穿视频';
+      if (isLightVideo && context.contentId && new Set(identityValues).size > 1) {
+        const reason = `身份字段不一致，拒绝提单: 任务名=${context.taskName}, 内容ID=${context.contentId}, 脚本ID=${context.scriptId}`;
+        await updateStatus(config, token, context.recordId, STATUS.BLOCKED, {
+          [config.fields.result]: reason,
+          [config.fields.errorMessage]: reason
+        });
+        console.log(`  🛡️ ${reason}`);
+        await sleep(800);
+        continue;
+      }
+
+      if (context.contentId) {
+        const sameContentRows = await listRecordsByContentId(config, token, context.contentId);
+        if (sameContentRows.length > 1) {
+          const recordIds = sameContentRows.map(item => item.record_id).filter(Boolean);
+          const reason = `运行管理表存在 ${sameContentRows.length} 条重复内容ID，拒绝提单: ${context.contentId} (${recordIds.join(', ')})`;
+          await updateStatus(config, token, context.recordId, STATUS.BLOCKED, {
+            [config.fields.result]: reason,
+            [config.fields.errorMessage]: reason
+          });
+          console.log(`  🛡️ ${reason}`);
+          await sleep(800);
+          continue;
+        }
       }
 
       console.log(`\n🚀 处理记录: ${context.taskName}`);

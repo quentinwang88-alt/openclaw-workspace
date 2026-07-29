@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta
 from pathlib import Path
 import sys
@@ -677,6 +678,121 @@ class SchedulerTest(unittest.TestCase):
         self.assertIsNotNone(asset)
         self.assertEqual(asset["download_status"], "下载成功")
         self.assertEqual(asset["run_video_status"], "已完成")
+
+    def test_sync_videos_uses_oss_when_attachment_was_archived(self) -> None:
+        self._upsert_script("005_M1_V9", "P1001", "P1001_M1")
+        field_names = ["脚本ID", "状态", "是否发布", "OSS对象ID", "OSS路径"]
+        mapping = resolve_field_mapping(field_names, RUN_MANAGER_FIELD_ALIASES)
+        records = [
+            DummyRecord(
+                "run-oss",
+                {
+                    "脚本ID": "005_M1_V9",
+                    "状态": "已提交",
+                    "是否发布": True,
+                    "OSS对象ID": "OSS_123",
+                    "OSS路径": "auto_mixcut/materials/generated/P1001/video.mp4",
+                },
+            )
+        ]
+        with patch.dict("os.environ", {"PUBLISH_OSS_SOURCE_ENABLED": "1"}), patch(
+            "app.scheduler._download_from_oss", return_value=b"oss-video"
+        ) as download:
+            stats = sync_videos(records, mapping, self.db, download_dir=Path(self.temp_dir.name), client=DummyClient())
+        self.assertEqual(stats["synced"], 1)
+        download.assert_called_once_with(
+            object_id="OSS_123",
+            object_key="auto_mixcut/materials/generated/P1001/video.mp4",
+        )
+        asset = self.db.get_video_asset("005_M1_V9")
+        self.assertEqual(asset["video_source_type"], "oss_object")
+        self.assertEqual(asset["video_source_value"], "OSS_123")
+
+    def test_sync_videos_waits_instead_of_publishing_raw_when_voiceover_requested(self) -> None:
+        self._upsert_script("005_M1_V10", "P1001", "P1001_M1")
+        field_names = ["脚本ID", "状态", "是否发布", "生成视频", "是否配口播", "口播状态", "口播成片", "发布状态"]
+        mapping = resolve_field_mapping(field_names, RUN_MANAGER_FIELD_ALIASES)
+        record = DummyRecord("run-wait", {
+            "脚本ID": "005_M1_V10",
+            "状态": "已完成",
+            "是否发布": True,
+            "生成视频": [{"file_token": "raw-token", "name": "raw.mp4"}],
+            "是否配口播": True,
+            "口播状态": "处理中",
+        })
+
+        stats = sync_videos(
+            [record], mapping, self.db,
+            download_dir=Path(self.temp_dir.name) / "videos", client=DummyClient(),
+        )
+
+        self.assertEqual(stats["waiting_voiceover"], 1)
+        self.assertEqual(stats["synced"], 0)
+        self.assertEqual(self.db.get_video_asset("005_M1_V10")["publish_status"], "等待口播")
+
+    def test_sync_videos_prefers_completed_voiceover_attachment(self) -> None:
+        self._upsert_script("005_M1_V11", "P1001", "P1001_M1")
+        field_names = ["脚本ID", "状态", "是否发布", "生成视频", "是否配口播", "口播状态", "口播成片"]
+        mapping = resolve_field_mapping(field_names, RUN_MANAGER_FIELD_ALIASES)
+        record = DummyRecord("run-voiceover", {
+            "脚本ID": "005_M1_V11",
+            "状态": "已完成",
+            "是否发布": True,
+            "生成视频": [{"file_token": "raw-token", "name": "raw.mp4"}],
+            "是否配口播": True,
+            "口播状态": "已完成",
+            "口播成片": [{"file_token": "voiceover-token", "name": "voiceover.mp4"}],
+        })
+
+        stats = sync_videos(
+            [record], mapping, self.db,
+            download_dir=Path(self.temp_dir.name) / "videos", client=DummyClient(),
+        )
+
+        self.assertEqual(stats["synced"], 1)
+        asset = self.db.get_video_asset("005_M1_V11")
+        self.assertEqual(asset["video_source_type"], "voiceover_attachment")
+        self.assertEqual(asset["video_source_value"], "voiceover-token")
+        self.assertIn("_voiceover_", asset["local_file_path"])
+
+    def test_completed_voiceover_moves_waiting_asset_back_to_pending_schedule(self) -> None:
+        self._upsert_script("005_M1_V12", "P1001", "P1001_M1")
+        field_names = ["脚本ID", "状态", "是否发布", "生成视频", "是否配口播", "口播状态", "口播成片", "发布状态"]
+        mapping = resolve_field_mapping(field_names, RUN_MANAGER_FIELD_ALIASES)
+        raw_record = DummyRecord("run-transition", {
+            "脚本ID": "005_M1_V12",
+            "状态": "已完成",
+            "是否发布": True,
+            "生成视频": [{"file_token": "raw-token", "name": "raw.mp4"}],
+            "是否配口播": True,
+            "口播状态": "处理中",
+        })
+        sync_videos(
+            [raw_record], mapping, self.db,
+            download_dir=Path(self.temp_dir.name) / "videos", client=DummyClient(),
+        )
+        self.assertEqual(self.db.get_video_asset("005_M1_V12")["publish_status"], "等待口播")
+
+        completed_record = DummyRecord("run-transition", {
+            "脚本ID": "005_M1_V12",
+            "状态": "已完成",
+            "是否发布": True,
+            "生成视频": [{"file_token": "raw-token", "name": "raw.mp4"}],
+            "是否配口播": True,
+            "口播状态": "已完成",
+            "口播成片": [{"file_token": "voiceover-token-v2", "name": "voiceover.mp4"}],
+            "发布状态": "等待口播",
+        })
+        stats = sync_videos(
+            [completed_record], mapping, self.db,
+            download_dir=Path(self.temp_dir.name) / "videos", client=DummyClient(),
+        )
+
+        self.assertEqual(stats["synced"], 1)
+        asset = self.db.get_video_asset("005_M1_V12")
+        self.assertEqual(asset["publish_status"], "待排期")
+        self.assertEqual(asset["video_source_type"], "voiceover_attachment")
+        self.assertEqual(asset["video_source_value"], "voiceover-token-v2")
 
     def test_sync_videos_uses_manual_short_video_title_when_present(self) -> None:
         self._upsert_script("005_M1_V2", "P1005", "P1005_M1")

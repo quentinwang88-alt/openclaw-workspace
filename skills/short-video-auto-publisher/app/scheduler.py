@@ -5,7 +5,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import hashlib
+import os
 from pathlib import Path
+import sys
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
@@ -21,8 +24,14 @@ RUN_MANAGER_FIELD_ALIASES: Dict[str, List[str]] = {
     "run_video_status": ["跑视频状态", "状态"],
     "publish_enabled": ["是否发布", "是否自动发布"],
     "video_attachment": ["视频附件", "生成视频"],
+    "voiceover_requested": ["是否配口播"],
+    "voiceover_status": ["口播状态"],
+    "voiceover_attachment": ["口播成片"],
     "short_video_title": ["短视频标题", "视频标题", "发布标题", "人工标题"],
     "video_link": ["视频链接", "视频附件 / 视频链接"],
+    "oss_object_id": ["OSS对象ID"],
+    "oss_path": ["OSS路径"],
+    "material_asset_id": ["素材ID"],
     "download_status": ["下载状态"],
     "local_file_path": ["本地文件路径"],
     "publish_status": ["发布状态"],
@@ -140,6 +149,25 @@ def extract_attachment(raw_value: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+def select_publish_attachment(
+    fields: Dict[str, Any],
+    mapping: Dict[str, Optional[str]],
+) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Select the final publish artifact without leaking raw video.
+
+    When narration was requested, the generated source video is deliberately
+    blocked until a completed narration attachment exists.
+    """
+    requested = normalize_checkbox(fields.get(mapping.get("voiceover_requested")))
+    if not requested:
+        return extract_attachment(fields.get(mapping.get("video_attachment"))), "generated"
+    status = _choice_text(fields.get(mapping.get("voiceover_status")))
+    voiceover = extract_attachment(fields.get(mapping.get("voiceover_attachment")))
+    if status == "已完成" and voiceover:
+        return voiceover, "voiceover"
+    return None, "waiting_voiceover"
+
+
 def sync_accounts(records: Iterable[Any], mapping: Dict[str, Optional[str]], db: AutoPublishDB) -> int:
     configs: List[AccountConfig] = []
     for record in records:
@@ -179,6 +207,40 @@ def _download_from_url(url: str) -> bytes:
     return response.content
 
 
+def _oss_source_enabled() -> bool:
+    return str(os.environ.get("PUBLISH_OSS_SOURCE_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _download_from_oss(*, object_id: str = "", object_key: str = "") -> bytes:
+    root = Path(__file__).resolve().parents[3] / "auto_mixcut"
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from auto_mixcut.core.bootstrap import build_context
+    from auto_mixcut.core.storage_paths import resolve_oss_object_path
+
+    ctx = build_context()
+    object_id = str(object_id or "").strip().split(" / ", 1)[0]
+    object_key = str(object_key or "").strip().split(" / ", 1)[0]
+    if object_id:
+        resolved = resolve_oss_object_path(ctx, object_id, "publisher")
+        if not resolved.success:
+            message = resolved.error.message if resolved.error else "OSS object resolve failed"
+            raise RuntimeError(message)
+        content = Path(str(resolved.data["path"])).read_bytes()
+    elif object_key:
+        dest = default_video_dir() / "oss_cache" / Path(object_key).name
+        downloaded = ctx.oss.download(object_key, dest)
+        if not downloaded.success:
+            message = downloaded.error.message if downloaded.error else "OSS download failed"
+            raise RuntimeError(message)
+        content = dest.read_bytes()
+    else:
+        raise ValueError("missing OSS object source")
+    if not content:
+        raise ValueError("downloaded OSS video is empty")
+    return content
+
+
 def sync_videos(
     records: Sequence[Any],
     mapping: Dict[str, Optional[str]],
@@ -187,7 +249,13 @@ def sync_videos(
     download_dir: Optional[Path],
     client: Any,
 ) -> Dict[str, int]:
-    stats = {"synced": 0, "skipped": 0, "download_failed": 0, "titles_updated": 0}
+    stats = {
+        "synced": 0,
+        "skipped": 0,
+        "download_failed": 0,
+        "titles_updated": 0,
+        "waiting_voiceover": 0,
+    }
     base_dir = _ensure_download_dir(download_dir)
 
     for record in records:
@@ -216,16 +284,32 @@ def sync_videos(
                 stats["skipped"] += 1
                 continue
 
-        attachment = extract_attachment(fields.get(mapping.get("video_attachment")))
+        attachment, video_variant = select_publish_attachment(fields, mapping)
+        if video_variant == "waiting_voiceover":
+            db.mark_video_waiting_voiceover(resolved_canonical_key or resolved_script_id)
+            stats["waiting_voiceover"] += 1
+            stats["skipped"] += 1
+            continue
         video_link = normalize_text(fields.get(mapping.get("video_link")))
+        oss_object_id = normalize_text(fields.get(mapping.get("oss_object_id")))
+        oss_path = normalize_text(fields.get(mapping.get("oss_path")))
         local_file_path = normalize_text(fields.get(mapping.get("local_file_path")))
-        if local_file_path and Path(local_file_path).exists():
+        if video_variant != "voiceover" and local_file_path and Path(local_file_path).exists():
             resolved_local_path = local_file_path
         else:
-            resolved_local_path = str(base_dir / f"{resolved_script_id}.mp4")
+            if video_variant == "voiceover":
+                source_token = str((attachment or {}).get("file_token") or "voiceover")
+                source_suffix = hashlib.sha256(source_token.encode("utf-8")).hexdigest()[:10]
+                resolved_local_path = str(base_dir / f"{resolved_script_id}_voiceover_{source_suffix}.mp4")
+            else:
+                resolved_local_path = str(base_dir / f"{resolved_script_id}.mp4")
             if not Path(resolved_local_path).exists():
                 try:
-                    if attachment:
+                    if video_variant == "voiceover" and attachment:
+                        content, _, _, _ = client.download_attachment_bytes(attachment)
+                    elif _oss_source_enabled() and (oss_object_id or oss_path):
+                        content = _download_from_oss(object_id=oss_object_id, object_key=oss_path)
+                    elif attachment:
                         content, _, _, _ = client.download_attachment_bytes(attachment)
                     elif video_link:
                         content = _download_from_url(video_link)
@@ -237,8 +321,21 @@ def sync_videos(
                     stats["download_failed"] += 1
                     continue
 
-        source_value = attachment.get("file_token", "") if attachment else video_link
-        source_type = "attachment" if attachment else "link"
+        if video_variant == "voiceover" and attachment:
+            source_value = attachment.get("file_token", "")
+            source_type = "voiceover_attachment"
+        elif _oss_source_enabled() and (oss_object_id or oss_path):
+            source_value = oss_object_id or oss_path
+            source_type = "oss_object"
+        elif attachment:
+            source_value = attachment.get("file_token", "")
+            source_type = "attachment"
+        else:
+            source_value = video_link
+            source_type = "link"
+        requested_publish_status = normalize_text(fields.get(mapping.get("publish_status")))
+        if video_variant == "voiceover" and requested_publish_status == "等待口播":
+            requested_publish_status = "待排期"
         db.upsert_video_asset(
             canonical_script_key=resolved_canonical_key,
             script_id=resolved_script_id,
@@ -248,7 +345,7 @@ def sync_videos(
             local_file_path=resolved_local_path,
             download_status="下载成功",
             run_video_status=run_status,
-            publish_status=normalize_text(fields.get(mapping.get("publish_status"))) or "待排期",
+            publish_status=requested_publish_status or "待排期",
         )
         manual_title = sanitize_title(fields.get(mapping.get("short_video_title")))
         if manual_title:

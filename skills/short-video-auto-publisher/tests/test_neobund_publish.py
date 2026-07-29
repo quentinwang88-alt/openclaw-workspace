@@ -424,6 +424,41 @@ class NeoBundPublishAdapterTest(unittest.TestCase):
 
         self.assertEqual(task_id, "neobund:623335")
 
+    def test_organic_task_polls_after_empty_commit_response(self) -> None:
+        client = Mock()
+        client.commit_organic_video.return_value = {}
+        client.list_organic_videos.side_effect = [
+            {"records": []},
+            {
+                "records": [
+                    {
+                        "id": 906201,
+                        "remark": "manual_rec_organic",
+                        "videoTitle": "organic caption",
+                        "scheduledReleaseTime": "2026-06-29 20:00:00",
+                    }
+                ]
+            },
+        ]
+        adapter = NeoBundPublishAdapter(client=client)
+        adapter.upload_video = Mock(
+            return_value=NeoBundUploadResult(file_id="789", key="videos/organic.mp4", bucket_name="demo-bucket")
+        )
+
+        with patch("app.neobund_publish.time.sleep") as sleep_mock:
+            task_id = adapter.create_scheduled_task(
+                account_id="39291",
+                video_path="/tmp/organic.mp4",
+                title="organic caption",
+                publish_at=datetime(2026, 6, 29, 20, 0, 0),
+                script_id="manual_rec_organic",
+            )
+
+        self.assertEqual(task_id, "neobund:906201")
+        self.assertEqual(client.commit_organic_video.call_count, 1)
+        self.assertEqual(client.list_organic_videos.call_count, 2)
+        sleep_mock.assert_called_once_with(1)
+
     def test_query_status_maps_neobund_numeric_states(self) -> None:
         client = Mock()
         adapter = NeoBundPublishAdapter(client=client)

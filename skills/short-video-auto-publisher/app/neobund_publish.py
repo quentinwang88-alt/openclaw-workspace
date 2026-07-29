@@ -14,6 +14,7 @@ import secrets
 import shutil
 import string
 import subprocess
+import time
 import unicodedata
 from typing import Any, Dict, Iterable, Optional
 from urllib.parse import quote
@@ -740,7 +741,7 @@ class NeoBundPublishAdapter(BasePublishAdapter):
         result = self.client.commit_shoppable_video(payload)
         task_id = self._extract_commit_task_id(result)
         if not task_id:
-            task_id = self._find_committed_task_id(
+            task_id = self._find_committed_task_id_with_retry(
                 auth_id=auth_id,
                 script_id=script_id,
                 video_title=str(title or "").strip(),
@@ -777,7 +778,7 @@ class NeoBundPublishAdapter(BasePublishAdapter):
         result = self.client.commit_organic_video(payload)
         task_id = self._extract_commit_task_id(result)
         if not task_id:
-            task_id = self._find_committed_task_id(
+            task_id = self._find_committed_task_id_with_retry(
                 auth_id=auth_id,
                 script_id=script_id,
                 video_title=str(title or "").strip(),
@@ -788,6 +789,33 @@ class NeoBundPublishAdapter(BasePublishAdapter):
         if not task_id:
             raise RuntimeError(f"NeoBund 非带货发布接口未返回任务 ID: {result}")
         return f"{self.task_id_prefix}{task_id}"
+
+    def _find_committed_task_id_with_retry(
+        self,
+        *,
+        auth_id: str,
+        script_id: str,
+        video_title: str,
+        product_id: str,
+        scheduled_for: str,
+        content_type: str,
+    ) -> str:
+        # NeoBund can accept a task but return an empty body before its task list
+        # becomes consistent. Poll the list instead of submitting a duplicate.
+        for delay_seconds in (0, 1, 2, 4, 8):
+            if delay_seconds:
+                time.sleep(delay_seconds)
+            task_id = self._find_committed_task_id(
+                auth_id=auth_id,
+                script_id=script_id,
+                video_title=video_title,
+                product_id=product_id,
+                scheduled_for=scheduled_for,
+                content_type=content_type,
+            )
+            if task_id:
+                return task_id
+        return ""
 
     def _find_committed_task_id(
         self,

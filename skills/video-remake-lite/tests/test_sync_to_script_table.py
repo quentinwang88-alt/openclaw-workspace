@@ -22,6 +22,7 @@ from sync_to_script_table import (  # noqa: E402
     SOURCE_FIELD_ALIASES,
     TARGET_FIELD_ALIASES,
     STATUS_DONE,
+    remake_expression_carrier,
 )
 
 
@@ -110,6 +111,35 @@ class VideoRemakeScriptTableSyncTest(unittest.TestCase):
         self.assertEqual(fields["是否可同步母版"], False)
         self.assertEqual(fields["是否可同步"], False)
         self.assertTrue(fields["脚本方向一"].startswith("【脚本ID】\n- P10086_VRrec001_M\n\n"))
+
+    def test_remake_handoffs_voiceover_plan_only_for_explicit_voiceover_mode(self) -> None:
+        source_mapping = resolve_field_mapping(
+            list(self.source_mapping.values()) + ["口播表达合同", "口播执行计划"],
+            SOURCE_FIELD_ALIASES,
+        )
+        target_mapping = resolve_field_mapping(
+            list(self.target_mapping.values()) + ["口播表达合同", "口播执行计划"],
+            TARGET_FIELD_ALIASES,
+        )
+        plan = '{"schema_version":"voiceover-execution-plan-v1"}'
+        record = FakeRecord("rec_voice", {
+            "状态": STATUS_DONE,
+            "产品ID": "P1",
+            "产品图片": [{"file_token": "f1"}],
+            "最终视频提示词": "五、表达载体\n- 最终表达载体模式：口播型",
+            "口播表达合同": '{"schema_version":"voiceover-expression-contract-v2"}',
+            "口播执行计划": plan,
+        })
+        _script_id, output = build_target_fields(record, source_mapping, target_mapping)
+        self.assertEqual(output["口播执行计划"], plan)
+
+        record.fields["最终视频提示词"] = "五、表达载体\n- 最终表达载体模式：静默字幕型"
+        _script_id, output = build_target_fields(record, source_mapping, target_mapping)
+        self.assertNotIn("口播执行计划", output)
+
+    def test_remake_expression_carrier_requires_explicit_declaration(self) -> None:
+        self.assertEqual(remake_expression_carrier("最终表达载体模式：口播型"), "口播型")
+        self.assertEqual(remake_expression_carrier("不要添加口播"), "")
 
     def test_nurture_profile_marks_done_and_keeps_downstream_sync_enabled(self) -> None:
         record = FakeRecord(

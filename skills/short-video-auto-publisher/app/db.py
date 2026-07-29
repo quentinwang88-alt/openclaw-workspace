@@ -689,6 +689,24 @@ class AutoPublishDB:
                 ),
             )
 
+    def mark_video_waiting_voiceover(self, identifier: str) -> int:
+        resolved_key = self._resolve_canonical_for_write(canonical_script_key=identifier)
+        if not resolved_key:
+            return 0
+        with self._connect() as conn:
+            return int(
+                conn.execute(
+                    """
+                    UPDATE video_assets
+                    SET publish_status='等待口播', updated_at=?
+                    WHERE canonical_script_key=?
+                      AND publish_status IN ('待排期', '发布失败')
+                    """,
+                    (self._now_text(), resolved_key),
+                ).rowcount
+                or 0
+            )
+
     def update_short_video_title(
         self,
         *,

@@ -420,8 +420,41 @@ def sync_manual_publish_requests(
         retry_frame_rate_failure = status == "发布失败" and _is_frame_rate_check_failed(
             _text(fields.get(mapping.get("error_message")))
         )
+        slot = db.get_manual_publish_slot(record.record_id)
+        if status == "已创建" and not task_id:
+            slot_task_id = _text(slot["publish_task_id"]) if slot is not None else ""
+            if slot_task_id:
+                slot_status = _text(slot["schedule_status"])
+                slot_error = _text(slot["error_message"])
+                if slot_status == "已发布":
+                    db.mark_manual_publish_request(
+                        record_id=record.record_id,
+                        request_status="已发布",
+                        publish_task_id=slot_task_id,
+                    )
+                    _write_record_status(client, record.record_id, status="已发布", task_id=slot_task_id, error="")
+                elif slot_status == "发布失败":
+                    db.mark_manual_publish_request(
+                        record_id=record.record_id,
+                        request_status="发布失败",
+                        publish_task_id=slot_task_id,
+                        error_message=slot_error,
+                    )
+                    _write_record_status(client, record.record_id, status="发布失败", task_id=slot_task_id, error=slot_error)
+                else:
+                    db.mark_manual_publish_request(
+                        record_id=record.record_id,
+                        request_status="已创建",
+                        publish_task_id=slot_task_id,
+                    )
+                    _write_record_status(client, record.record_id, status="已创建", task_id=slot_task_id, error="")
+                stats["processed_skipped"] += 1
+                continue
+
+            # A stale source status is not proof of a remote task. Recover it so
+            # the normal creation path can submit exactly one new task.
+            status = "待创建"
         if (status in {"已创建", "已发布", "已取消"} or task_id) and not retry_frame_rate_failure:
-            slot = db.get_manual_publish_slot(record.record_id)
             if slot is not None:
                 slot_status = _text(slot["schedule_status"])
                 slot_task_id = _text(slot["publish_task_id"]) or task_id

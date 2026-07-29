@@ -71,6 +71,10 @@ const DEFAULT_CONFIG = {
     resultSyncStatus: '结果回传状态',
     videoAttachment: '生成视频',
     videoFileName: '生成视频文件名',
+    materialIngestStatus: '素材入库状态',
+    materialAssetId: '素材ID',
+    ossObjectId: 'OSS对象ID',
+    ossPath: 'OSS路径',
     submitTime: '提交时间',
     finishTime: '完成时间',
     errorMessage: '错误信息'
@@ -274,7 +278,10 @@ function parseArgs(argv) {
     taskNames: null,
     channel: '',
     ignoreGeneratingCount: false,
-    forceAssetRead: false
+    forceAssetRead: false,
+    assetScanBatches: null,
+    maxAssetCandidates: null,
+    disableAssetCursor: false
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -302,6 +309,12 @@ function parseArgs(argv) {
       args.ignoreGeneratingCount = true;
     } else if (arg === '--force-asset-read') {
       args.forceAssetRead = true;
+    } else if (arg === '--disable-asset-cursor') {
+      args.disableAssetCursor = true;
+    } else if (arg.startsWith('--asset-scan-batches=')) {
+      args.assetScanBatches = Number(arg.slice('--asset-scan-batches='.length)) || null;
+    } else if (arg.startsWith('--max-asset-candidates=')) {
+      args.maxAssetCandidates = Number(arg.slice('--max-asset-candidates='.length)) || null;
     }
   }
 
@@ -2597,6 +2610,10 @@ function buildRecordStateMap(records, config) {
       executionOwnerMachineId: parseExecutionOwner(fields[config.fields.executionOwner]).machineId,
       latestTraceId: String(fields[config.fields.latestTraceId] || '').trim(),
       resultSyncStatus: String(fields[config.fields.resultSyncStatus] || '').trim(),
+      materialIngestStatus: String(fields[config.fields.materialIngestStatus || '素材入库状态'] || '').trim(),
+      materialAssetId: String(fields[config.fields.materialAssetId || '素材ID'] || '').trim(),
+      ossObjectId: String(fields[config.fields.ossObjectId || 'OSS对象ID'] || '').trim(),
+      ossPath: String(fields[config.fields.ossPath || 'OSS路径'] || '').trim(),
       videoAttachmentCount: Array.isArray(fields[config.fields.videoAttachment])
         ? fields[config.fields.videoAttachment].length
         : 0
@@ -2648,9 +2665,15 @@ async function uploadExistingDownloads(config, token, submissions, dryRun = fals
     }
 
     const recordState = recordStateMap?.get(submission.record_id);
+    const ossArchived = Boolean(
+      recordState &&
+      recordState.materialIngestStatus === '已入库' &&
+      (recordState.ossObjectId || recordState.ossPath)
+    );
     const shouldRepairUploadedRecord =
       submission.status === 'uploaded' &&
       submission.uploaded_file_token &&
+      !ossArchived &&
       (!recordState ||
         recordState.resultSyncStatus !== 'uploaded' ||
         Number(recordState.videoAttachmentCount || 0) <= 0);
@@ -3116,6 +3139,9 @@ async function syncCompletedSubmissions({
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const config = loadConfig(args.configPath);
+  if (args.assetScanBatches != null) config.assetScanBatches = args.assetScanBatches;
+  if (args.maxAssetCandidates != null) config.maxAssetCandidates = args.maxAssetCandidates;
+  if (args.disableAssetCursor) config.assetCursorEnabled = false;
 
   if (!config.appId || !config.appSecret || (!config.tableUrl && (!config.appToken || !config.tableId))) {
     throw new Error('飞书配置不完整：需要 appId/appSecret，以及 tableUrl 或 appToken/tableId');

@@ -185,17 +185,18 @@ async function attemptSubmit(page, context, productLock, firstFrameImagePath, co
         const rect = el.getBoundingClientRect();
         const text = (el.textContent || '').trim();
         const cls = String(el.className || '');
-        if (!cls.includes('imini-select-selection-item')) continue;
-        if (rect.x > 80 && rect.x < 460 && rect.y > window.innerHeight - 240 && rect.width > 20 && rect.width < 160 && rect.height > 14 && rect.height < 60) {
+        const isVisualControl = cls.includes('imini-select-selection-item') || el.tagName === 'BUTTON';
+        if (!isVisualControl) continue;
+        if (rect.x > 80 && rect.x < 460 && rect.y > window.innerHeight - 260 && rect.width > 20 && rect.width < 180 && rect.height > 14 && rect.height < 60) {
           if (/^\d+s$/.test(text)) result.duration = text;
           if (/^\d+:\d+$/.test(text)) result.ratio = text;
           if (/^\d{3,4}P$/i.test(text)) result.resolution = text;
         }
       }
     }
-    const ta = document.querySelector('textarea, [role="textbox"]');
-    if (ta) {
-      result.promptText = (ta.value || ta.textContent || '').trim();
+    const editor = document.querySelector('[contenteditable="true"], textarea, input[role="textbox"], [role="textbox"]');
+    if (editor) {
+      result.promptText = (editor.value || editor.textContent || '').trim();
       result.promptLength = result.promptText.length;
     }
     return result;
@@ -432,19 +433,27 @@ async function switchToImageToVideo(page) {
         .filter(item =>
           item.text.includes('图片转视频') ||
           item.text.includes('图生视频') ||
-          item.text.includes('首帧')
+          item.text.includes('首帧') ||
+          item.text === '首尾帧'
         )
-        .sort((a, b) => a.text.length - b.text.length);
+        .sort((a, b) => {
+          const priority = text => text === '首尾帧' ? 0 : (text.includes('图片转视频') || text.includes('图生视频') ? 1 : 2);
+          return priority(a.text) - priority(b.text) || a.text.length - b.text.length;
+        });
 
       if (candidates.length > 0) {
-        const target = candidates[0].el.closest('button, [role="tab"], [role="combobox"], a') || candidates[0].el;
+        const target = candidates[0].el.closest('label, button, [role="tab"], [role="combobox"], a') || candidates[0].el;
         target.click();
         return true;
       }
       return false;
     });
-    if (clicked) await sleep(2000);
-    return clicked;
+    if (!clicked) return false;
+    await sleep(2000);
+    return await page.evaluate(() => {
+      const currentRadio = document.querySelector('input[type="radio"][value="first_last_frame"]');
+      return currentRadio ? currentRadio.checked === true : true;
+    });
   } catch (error) {
     console.log(`  ⚠️ 切换图片转视频模式失败: ${error.message}`);
     return false;
@@ -794,18 +803,22 @@ async function fillPrompt(page, prompt) {
         const rect = el.getBoundingClientRect();
         return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
       };
-      const textareas = Array.from(document.querySelectorAll('textarea, [role="textbox"], [contenteditable="true"]'))
+      const editors = Array.from(document.querySelectorAll('[contenteditable="true"], textarea, input[role="textbox"], [role="textbox"]'))
         .filter(isVisible);
-      if (textareas.length > 0) {
-        textareas[0].focus();
-        textareas[0].value = '';
-        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-          window.HTMLTextAreaElement.prototype, 'value'
-        );
-        if (nativeInputValueSetter && nativeInputValueSetter.set) {
-          nativeInputValueSetter.set.call(textareas[0], '');
+      if (editors.length > 0) {
+        const editor = editors[0];
+        editor.focus();
+        if (editor.isContentEditable) {
+          editor.textContent = '';
+        } else {
+          const proto = editor.tagName === 'TEXTAREA'
+            ? window.HTMLTextAreaElement.prototype
+            : window.HTMLInputElement.prototype;
+          const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
+          if (descriptor && descriptor.set) descriptor.set.call(editor, '');
+          else editor.value = '';
         }
-        textareas[0].dispatchEvent(new Event('input', { bubbles: true }));
+        editor.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
         return true;
       }
       return false;
@@ -814,20 +827,21 @@ async function fillPrompt(page, prompt) {
     if (!textareaFound) return false;
 
     const filled = await page.evaluate((value) => {
-      const ta = document.querySelector('textarea, [role="textbox"]');
-      if (!ta) return false;
-      ta.focus();
-      const proto = ta.tagName === 'TEXTAREA'
-        ? window.HTMLTextAreaElement.prototype
-        : window.HTMLInputElement.prototype;
-      const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
-      if (descriptor && descriptor.set) {
-        descriptor.set.call(ta, value);
+      const editor = document.querySelector('[contenteditable="true"], textarea, input[role="textbox"], [role="textbox"]');
+      if (!editor) return false;
+      editor.focus();
+      if (editor.isContentEditable) {
+        editor.textContent = value;
       } else {
-        ta.value = value;
+        const proto = editor.tagName === 'TEXTAREA'
+          ? window.HTMLTextAreaElement.prototype
+          : window.HTMLInputElement.prototype;
+        const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (descriptor && descriptor.set) descriptor.set.call(editor, value);
+        else editor.value = value;
       }
-      ta.dispatchEvent(new Event('input', { bubbles: true }));
-      ta.dispatchEvent(new Event('change', { bubbles: true }));
+      editor.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, inputType: 'insertText', data: value }));
+      editor.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
       return true;
     }, prompt);
     if (!filled) return false;
@@ -836,9 +850,9 @@ async function fillPrompt(page, prompt) {
     await sleep(1000);
 
     const actualContent = await page.evaluate(() => {
-      const ta = document.querySelector('textarea, [role="textbox"]');
-      if (!ta) return '';
-      return (ta.value || ta.textContent || '').trim();
+      const editor = document.querySelector('[contenteditable="true"], textarea, input[role="textbox"], [role="textbox"]');
+      if (!editor) return '';
+      return (editor.value || editor.textContent || '').trim();
     });
 
     const expectedLength = prompt.length;

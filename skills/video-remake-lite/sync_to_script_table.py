@@ -79,6 +79,8 @@ SOURCE_FIELD_ALIASES: Dict[str, List[str]] = {
     "final_storyboard": ["最终视频提示词", "最终短视频提示词", "最终复刻视频提示词", "最终固定分镜", "final_execution_prompt"],
     "negative_words": ["负面限制词"],
     "video_duration": ["视频时长", "短视频时长", "时长", "视频秒数", "duration", "video_duration"],
+    "voiceover_expression_contract": ["口播表达合同"],
+    "voiceover_execution_plan": ["口播执行计划"],
 }
 
 TARGET_FIELD_ALIASES: Dict[str, List[str]] = {
@@ -103,6 +105,8 @@ TARGET_FIELD_ALIASES: Dict[str, List[str]] = {
     "script_status": ["脚本状态"],
     "task_status": ["任务状态", "状态"],
     "source_remake_record_id": ["源复刻任务ID"],
+    "voiceover_expression_contract": ["口播表达合同"],
+    "voiceover_execution_plan": ["口播执行计划"],
     "sync_master_enabled": ["是否可同步母版", "同步母版"],
     "sync_enabled": ["是否可同步", "是否可同步脚本"],
 }
@@ -247,6 +251,19 @@ def normalize_video_duration(value: Any, default_seconds: int = 15) -> int:
     return int(round(duration))
 
 
+def remake_expression_carrier(final_storyboard: str) -> str:
+    """Return only an explicitly declared remake expression carrier.
+
+    A final prompt may mention a voiceover as a negative instruction.  We only
+    permit the central post-process hand-off when the remake card explicitly
+    says that this is a voiceover-led remake.
+    """
+
+    text = str(final_storyboard or "")
+    match = re.search(r"最终表达载体模式\s*[：:]\s*(口播型|静默字幕型)", text)
+    return match.group(1) if match else ""
+
+
 def build_script_id_for_profile(profile: str, task_no: str, source_record_id: str) -> str:
     parent_slot = "YR1" if profile == PROFILE_NURTURE else build_parent_slot(source_record_id)
     return _build_script_id(task_no, parent_slot, None)
@@ -298,6 +315,13 @@ def build_target_fields(
     publish_purpose = PUBLISH_PURPOSE_NURTURE if profile == PROFILE_NURTURE else SCRIPT_TYPE_SHORT_VIDEO_REMAKE
     sync_master_enabled = profile == PROFILE_NURTURE
     sync_enabled = profile == PROFILE_NURTURE
+    expression_carrier = remake_expression_carrier(final_storyboard)
+    source_contract = normalize_text(fields.get(source_mapping.get("voiceover_expression_contract")))
+    source_plan = normalize_text(fields.get(source_mapping.get("voiceover_execution_plan")))
+    # Silence/BGM remakes remain silence/BGM remakes.  An explicit, prepared
+    # source plan is required before a voiceover remake can enter the central
+    # TTS pipeline.
+    can_handoff_voiceover = expression_carrier == "口播型" and bool(source_contract or source_plan)
 
     target_fields: Dict[str, Any] = {}
     reference_status = normalize_text(fields.get(source_mapping.get("reference_status")))
@@ -333,6 +357,10 @@ def build_target_fields(
         "source_remake_record_id": source_record.record_id,
         "sync_master_enabled": sync_master_enabled,
         "sync_enabled": sync_enabled,
+        # A remake only passes a pre-built source plan through.  The sync
+        # worker must not infer a sales voiceover from a BGM/subtitle prompt.
+        "voiceover_expression_contract": source_contract if can_handoff_voiceover else "",
+        "voiceover_execution_plan": source_plan if can_handoff_voiceover else "",
     }
     for logical_name, value in values.items():
         field_name = target_mapping.get(logical_name)
@@ -544,6 +572,8 @@ def sync_records(args: argparse.Namespace) -> Dict[str, int]:
             ("视频时长", 2, "Number"),
             ("源复刻任务ID", 1, "Text"),
             ("脚本状态", 1, "Text"),
+            ("口播表达合同", 1, "Text"),
+            ("口播执行计划", 1, "Text"),
         ],
         allow_create=not args.dry_run,
     )

@@ -141,6 +141,26 @@ class ManualPublishTest(unittest.TestCase):
         self.assertEqual(stats["created"], 1)
         self.assertIs(publisher.calls[0]["mark_ai"], False)
 
+    def test_created_status_without_task_id_is_recovered_and_created(self) -> None:
+        record = self._record("rec-manual-stale-created")
+        record.fields["处理状态"] = "已创建"
+        client = DummyManualClient()
+        publisher = ChannelPublisher()
+
+        stats = sync_manual_publish_requests(
+            [record],
+            self._mapping(),
+            self.db,
+            publisher,
+            client=client,
+            video_dir=Path(self.temp_dir.name) / "videos",
+        )
+
+        self.assertEqual(stats["created"], 1)
+        self.assertEqual(len(publisher.calls), 1)
+        self.assertEqual(client.updates[-1]["fields"]["处理状态"], "已创建")
+        self.assertTrue(client.updates[-1]["fields"]["发布任务ID"])
+
     def test_failed_manual_request_is_excluded_from_auto_candidates(self) -> None:
         client = DummyManualClient()
         publisher = FlakyPublisher(failures=3)
