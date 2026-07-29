@@ -16,7 +16,12 @@ except ImportError:
     from db_compat import connect_sqlite_or_mysql
 
 
-PIPELINE_TABLES = {"contract_registry", "pipeline_runs", "stage_results"}
+PIPELINE_TABLES = {
+    "contract_registry",
+    "creative_pattern_usage",
+    "pipeline_runs",
+    "stage_results",
+}
 RUN_ARTIFACT_COLUMNS = {
     "anchor_card_json",
     "strategy_cards_json",
@@ -126,6 +131,29 @@ class PipelineStorage:
                     updated_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS creative_pattern_usage (
+                    usage_id TEXT PRIMARY KEY,
+                    product_code TEXT NOT NULL,
+                    country TEXT,
+                    category TEXT,
+                    direction_id TEXT,
+                    structure_family TEXT,
+                    persona_role TEXT,
+                    viewer_relationship TEXT,
+                    scene_motif TEXT,
+                    opening_action TEXT,
+                    action_grammar TEXT,
+                    visual_signature TEXT,
+                    hook_id TEXT,
+                    policy_version TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    source_run_id INTEGER,
+                    metadata_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    published_at TEXT
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_pipeline_runs_record_id
                 ON pipeline_runs(record_id);
 
@@ -143,6 +171,12 @@ class PipelineStorage:
 
                 CREATE INDEX IF NOT EXISTS idx_contract_registry_product_image_hash
                 ON contract_registry(product_image_hash);
+
+                CREATE INDEX IF NOT EXISTS idx_creative_pattern_usage_recent
+                ON creative_pattern_usage(country, category, status, created_at);
+
+                CREATE INDEX IF NOT EXISTS idx_creative_pattern_usage_product
+                ON creative_pattern_usage(product_code, created_at);
                 """
             )
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(pipeline_runs)")}
@@ -169,6 +203,114 @@ class PipelineStorage:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_stage_results_cache_key ON stage_results(cache_key)"
             )
+
+    def list_recent_creative_patterns(
+        self,
+        *,
+        country: str = "",
+        category: str = "",
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        conditions = ["status IN ('RESERVED','MACHINE_SCREENED','TEXT_APPROVED','VIDEO_GENERATED','PUBLISHED')"]
+        values: List[Any] = []
+        if country:
+            conditions.append("country = ?")
+            values.append(country)
+        if category:
+            conditions.append("category = ?")
+            values.append(category)
+        values.append(max(1, int(limit)))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM creative_pattern_usage
+                WHERE {' AND '.join(conditions)}
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                tuple(values),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def reserve_creative_pattern(self, row: Dict[str, Any]) -> str:
+        usage_id = str(row.get("usage_id") or "").strip()
+        if not usage_id:
+            raise ValueError("creative pattern usage_id is required")
+        now = self._now_string()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO creative_pattern_usage (
+                    usage_id, product_code, country, category, direction_id,
+                    structure_family, persona_role, viewer_relationship,
+                    scene_motif, opening_action, action_grammar,
+                    visual_signature, hook_id, policy_version, status,
+                    source_run_id, metadata_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    usage_id,
+                    str(row.get("product_code") or ""),
+                    str(row.get("country") or ""),
+                    str(row.get("category") or ""),
+                    str(row.get("direction_id") or ""),
+                    str(row.get("structure_family") or ""),
+                    str(row.get("persona_role") or ""),
+                    str(row.get("viewer_relationship") or ""),
+                    str(row.get("scene_motif") or ""),
+                    str(row.get("opening_action") or ""),
+                    str(row.get("action_grammar") or ""),
+                    str(row.get("visual_signature") or ""),
+                    str(row.get("hook_id") or ""),
+                    str(row.get("policy_version") or "creative-diversity-v1"),
+                    str(row.get("status") or "RESERVED"),
+                    row.get("source_run_id"),
+                    self._json_dump(row.get("metadata") or {}),
+                    now,
+                    now,
+                ),
+            )
+        return usage_id
+
+    def update_creative_pattern_status(
+        self,
+        usage_id: str,
+        status: str,
+        *,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        allowed = {"RESERVED", "MACHINE_SCREENED", "TEXT_APPROVED", "VIDEO_GENERATED", "PUBLISHED", "RELEASED"}
+        if status not in allowed:
+            raise ValueError(f"unsupported creative pattern status: {status}")
+        now = self._now_string()
+        updates = ["status = ?", "updated_at = ?"]
+        values: List[Any] = [status, now]
+        if metadata is not None:
+            updates.append("metadata_json = ?")
+            values.append(self._json_dump(metadata))
+        if status == "PUBLISHED":
+            updates.append("published_at = COALESCE(published_at, ?)")
+            values.append(now)
+        values.append(usage_id)
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE creative_pattern_usage SET {', '.join(updates)} WHERE usage_id = ?",
+                tuple(values),
+            )
+
+    def release_creative_patterns_for_run(self, source_run_id: int) -> int:
+        now = self._now_string()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE creative_pattern_usage
+                SET status = 'RELEASED', updated_at = ?
+                WHERE source_run_id = ? AND status = 'RESERVED'
+                """,
+                (now, int(source_run_id)),
+            )
+            return int(cursor.rowcount or 0)
 
     @staticmethod
     def _now_string() -> str:

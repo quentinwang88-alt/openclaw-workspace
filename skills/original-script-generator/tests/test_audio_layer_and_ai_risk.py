@@ -14,9 +14,11 @@ if str(SKILL_DIR) not in sys.path:
     sys.path.insert(0, str(SKILL_DIR))
 
 from core.json_parser import JSONParseError, validate_script_payload  # noqa: E402
+from core.pipeline import OriginalScriptPipeline  # noqa: E402
 from core.prompts import build_script_prompt, build_script_review_prompt  # noqa: E402
 from core.script_brief_builder import _ai_shot_risk_profile_key  # noqa: E402
 from core.script_renderer import render_script  # noqa: E402
+from core.structure_execution_compiler import compile_structure_execution_plan  # noqa: E402
 
 
 def _base_script() -> dict:
@@ -95,7 +97,91 @@ def _base_script() -> dict:
     }
 
 
+def _structure_plan() -> dict:
+    return compile_structure_execution_plan(
+        {
+            "direction_identity": {"macro_family_key": "HOOK>PROOF>USE_PROCESS"},
+            "hard_constraints": {
+                "beat_sequence": ["HOOK", "PROOF", "USE_PROCESS"],
+                "content_carrier": "MIXED",
+                "continuity_mode": "CONTINUOUS_LOW_CUT",
+                "visual_hook_type": "PRODUCT_REVEAL",
+                "shot_count": "UNAVAILABLE",
+            },
+            "provenance": {"direction_assignment_id": "SRA_SCHEMA_TEST"},
+        },
+        {"operation_policy": "result_first_process_avoid"},
+    )
+
+
 class AudioLayerAndAiRiskTest(unittest.TestCase):
+    def test_structure_plan_survives_normalization_and_overrides_model_metadata(self) -> None:
+        script = _base_script()
+        script["shot_skeleton"] = [
+            {
+                "shot_index": index,
+                "time_range": "old",
+                "role": "proof",
+                "shot_purpose": "模型旧骨架",
+                "proof_path": "A_result_detail_only",
+                "structure_beat": "WRONG",
+                "carrier_mode": "WRONG",
+                "continuity_group": "WRONG",
+                "opening_mechanism": "WRONG",
+            }
+            for index in range(1, 5)
+        ]
+        plan = _structure_plan()
+
+        OriginalScriptPipeline._prepare_and_validate_script_stage_payload(
+            data=script,
+            target_language="Vietnamese",
+            structure_execution_plan=plan,
+        )
+
+        for index, plan_shot in enumerate(plan["shot_plan"]):
+            for field in ("structure_beat", "carrier_mode", "continuity_group", "opening_mechanism"):
+                self.assertEqual(script["shot_skeleton"][index][field], plan_shot[field])
+                self.assertEqual(script["storyboard"][index][field], plan_shot[field])
+
+    def test_structure_plan_rebuilds_legacy_string_skeleton(self) -> None:
+        script = _base_script()
+        script["shot_skeleton"] = ["旧版镜头骨架"] * 4
+        plan = _structure_plan()
+
+        OriginalScriptPipeline._prepare_and_validate_script_stage_payload(
+            data=script,
+            target_language="Vietnamese",
+            structure_execution_plan=plan,
+        )
+
+        self.assertEqual(len(script["shot_skeleton"]), 4)
+        self.assertTrue(all(isinstance(item, dict) for item in script["shot_skeleton"]))
+        self.assertEqual(
+            [item["structure_beat"] for item in script["shot_skeleton"]],
+            [item["structure_beat"] for item in plan["shot_plan"]],
+        )
+
+    def test_structure_plan_builds_missing_skeleton_but_not_missing_storyboard(self) -> None:
+        script = _base_script()
+        plan = _structure_plan()
+
+        OriginalScriptPipeline._prepare_and_validate_script_stage_payload(
+            data=script,
+            target_language="Vietnamese",
+            structure_execution_plan=plan,
+        )
+        self.assertEqual(len(script["shot_skeleton"]), 4)
+
+        invalid_script = _base_script()
+        invalid_script["storyboard"] = invalid_script["storyboard"][:3]
+        with self.assertRaises(JSONParseError):
+            OriginalScriptPipeline._prepare_and_validate_script_stage_payload(
+                data=invalid_script,
+                target_language="Vietnamese",
+                structure_execution_plan=plan,
+            )
+
     def test_script_schema_accepts_audio_layer_and_ai_risk_fields(self) -> None:
         script = _base_script()
 

@@ -14,6 +14,11 @@ import requests
 
 FIELD_ALIASES = {
     "status": ["任务状态", "状态", "执行状态", "处理状态"],
+    "script_type": ["脚本类型", "类型"],
+    "script_source": ["脚本来源", "来源"],
+    "source_remake_record_id": ["源复刻任务ID", "源复刻记录ID", "复刻任务ID"],
+    "publish_purpose": ["发布用途", "用途"],
+    "content_branch": ["内容分支"],
     "generate_variants": ["生成变体", "是否生成变体", "要生成变体", "勾选生成变体"],
     "task_no": ["任务编号", "任务ID", "任务序号", "编号"],
     "product_images": ["产品图片", "商品图片", "图片", "主图", "商品主图"],

@@ -19,6 +19,7 @@ from core.pipeline import (  # noqa: E402
     OriginalScriptPipeline,
     STATUS_DONE,
     STATUS_PENDING_VARIANTS,
+    is_authoritative_remake_record,
     load_pending_records,
 )
 
@@ -157,6 +158,36 @@ class VariantTriggerFlowTest(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].record_id, "rec_done")
         self.assertEqual(records[0].fields["任务状态"], STATUS_PENDING_VARIANTS)
+
+    def test_pending_loader_ignores_authoritative_remake_but_keeps_type_only_copy(self) -> None:
+        mapping = {
+            "status": "任务状态",
+            "script_type": "脚本类型",
+            "script_source": "脚本来源",
+            "source_remake_record_id": "源复刻任务ID",
+            "publish_purpose": "发布用途",
+            "content_branch": "内容分支",
+        }
+        copied_original = TaskRecord(
+            record_id="rec_original",
+            fields={"任务状态": "待执行-全流程", "脚本类型": "短视频复刻"},
+        )
+        real_remake = TaskRecord(
+            record_id="rec_remake",
+            fields={
+                "任务状态": "待执行-全流程",
+                "脚本类型": "短视频复刻",
+                "脚本来源": "短视频复刻",
+                "源复刻任务ID": "source_1",
+            },
+        )
+
+        self.assertFalse(is_authoritative_remake_record(copied_original, mapping))
+        self.assertTrue(is_authoritative_remake_record(real_remake, mapping))
+        self.assertEqual(
+            [record.record_id for record in load_pending_records(_FakeClient([copied_original, real_remake]), mapping)],
+            ["rec_original"],
+        )
 
     def test_load_pending_records_skips_completed_checked_record_when_variants_already_exist(self) -> None:
         mapping = {

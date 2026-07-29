@@ -2,14 +2,9 @@
 
 ## Scope
 - This repo evolves the current pipeline; do not redesign the system from scratch.
-- Keep the current stages:
-  - `P1` 产品锚点卡
-  - `P2` 内容强策略卡
-  - `P3` 正式脚本生成
-  - `P4` 独立脚本质检
-  - `P5` 脚本修订
-  - `P6` 最终视频提示词生成
-  - `P7` 轻变体生成（可选）
+- Keep the production pipeline backward compatible.
+- The reality-reference stage-0 path is an isolated experiment: no Feishu writes,
+  no video generation, no variants, and a separate voiceover SQLite database.
 
 ## Core Principle
 - Prioritize `原生感成立 + 避免明显广告化`.
@@ -17,72 +12,61 @@
 - The content should feel like real sharing, not a product manual.
 
 ## Direction Rule
-- Preserve the 4-direction system: `S1 / S2 / S3 / S4`.
-- Do not make人物 / 穿搭 / 场景 / 情绪 into a universal template.
-- Direction-specific tendencies must stay visible:
-  - `S1`: more casual, more life-like, more spontaneous
-  - `S2`: more stable, balanced, clearly成立但不过度销售
-  - `S3`: more decisive and clear, but still native not salesy
-  - `S4`: stronger first-frame result feel, but not influencer-commercial
+- `S1 / S2 / S3 / S4` are compatibility output slots, not fixed creative
+  directions or fixed visual styles.
+- A direction is defined by its structure contract plus its selected observed
+  execution reference.  Return fewer directions when compatible observed
+  references are insufficient; never invent evidence to fill four slots.
+- Direction diversity must be visible in executable actions, carrier, camera
+  grammar and continuity, not in abstract personality labels.
 
 ## Strategy Card Requirements
-- `P2` must keep or generate these fields:
-  - `persona_presence_role`
-  - `persona_polish_level`
-  - `styling_base_logic`
-  - `styling_base_constraints`
-  - `scene_function`
-  - `opening_emotion`
-  - `middle_emotion`
-  - `ending_emotion`
-  - `product_dominance_rule`
-- `scene_function` must explain why the scene helps hook / proof / result / daily believability.
-- `styling_base_logic` must explain how the base look helps users see, judge, and believe the product.
-- Emotions must be a light flow across beginning / middle / ending, not just an ending garnish.
-- Prefer 镜头可感知状态 over abstract persona labels.
-- Each strategy should include at least one proof direction that resolves a concern, not just praises the product.
-- `scene_function` and `styling_base_logic` should answer “why this for this content, not something else”.
-- Only one high-design element should be strongly emphasized in a given script direction; the rest should stay ordinary.
+- The legacy production path may still consume the full P2 schema.
+- The reality-reference path uses a compact content-bundle brief: one coherent
+  mainline with two to three non-redundant, verified claim atoms and one observed
+  proof relationship.  P2-Lite remains only as a compatibility projection. Do
+  not add persona, styling, scene or emotion fields back into this compact layer.
 
 ## Script Requirements
-- In `P3`, key shots must show:
-  - 人物状态
-  - 穿搭底盘作用
-  - 场景功能
-  - 当前情绪
-- Key constraints:
-  - first shot must include both action and state
-  - at least one proof shot must explain how styling helps the product land
-  - middle proof should carry `middle_emotion`, not pure cold info
-  - ending must be the natural close of previous state, not only a selling sentence
-  - at least one proof shot should clearly show a concern being relieved
-  - emotion should stay light and continuous, not become a fully designed emotional arc
-  - avoid stacking multiple high-design atmosphere elements in one script
-- Avoid:
-  - persona tags only (`自然 / 松弛 / 微笑`) without shot function
-  - styling labels only (`基础白T`) without role
-  - scene names without function
-  - emotion only appearing at the ending
+- In the reality-reference path, visuals are generated before voiceover.
+- Every claim atom in the content bundle must be assigned to at least one
+  objectively supporting shot before the central voiceover engine is called.
+- Every shot must map to the exact structure plan and cite one or more
+  `reference_spine_orders`; observed order may be repeated but not inverted.
+- Unknown source properties remain unknown in `execution_reference`.  A later
+  complete-script blueprint may add location, lighting, creator identity and
+  styling only as explicitly labelled `CREATIVE_DESIGN`; those choices must
+  never be written back as source observations.
+- Product-specific anchors may replace the source product, but the action must
+  remain physically compatible with the target product.
+- Do not fall back to the legacy mirror / step-back / look-down / turn chain.
+- Do not require an abstract emotion arc.  A complete-script blueprint may
+  define concrete creator motivation, visible behaviour and speaking identity
+  when each field has an explicit downstream consumer.
+
+## Creative Diversity Rule
+- Allocate `persona_role × scene_motif × opening_action` in code before asking
+  a model to write the complete blueprint.
+- Compare against recent historical usage, not just the current batch.
+- A failed combination may be quarantined; its individual axes are not
+  permanent bans and may return through a different, genuinely distinct
+  combination.
+- Stage-0 text that passes rules remains `MACHINE_SCREENED`; it is not approved
+  for release until independent, native-language and content-human review pass.
 
 ## QC Requirements
-- Keep QC lightweight, but it should catch:
-  - action without state in the first shot
-  - proof shots without styling logic
-  - proof with praise only and no concern relief
-  - scene as location tag only
-  - middle section with only cold info and no felt emotion
-  - over-designed emotion flow
-  - multiple high-design elements causing ad-like risk
-  - person / styling / scene / emotion stealing focus from the product
-  - direction drift caused by the 4 directions becoming too similar in人物/底盘/场景功能/情绪流动
+- Reality-reference QC must catch missing execution lineage, inverted observed
+  order, abstract AI/meta instructions, legacy action chains, empty/generic
+  hooks and product claims that have no support anywhere in the whole video.
+- Voiceover is planned in semantic segments, not sentence-to-shot annotations.
+  Local timing/order mismatches are warnings; only an explicit MUST_SILENT
+  interval blocks speech. A natural audience/need callout may lead the visuals.
+- The opening must have an audible attention move. It does not have to name the
+  first-shot observation word for word, but empty taxonomy copy is not a pass.
 
 ## Video Prompt Requirements
 - Final video prompt must stay compact.
-- Only lightly preserve:
-  - 人物状态边界
-  - 穿搭底盘边界
-  - 商品主次关系
-  - 原生感边界
+- Preserve the observed execution relationship and product anchor constraints.
 - Do not re-expand into strategy explanation.
 
 ## Engineering Rule

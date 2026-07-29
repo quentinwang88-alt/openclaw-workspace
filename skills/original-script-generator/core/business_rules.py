@@ -511,6 +511,29 @@ def _scene_seed_signature(script_json: Dict[str, object]) -> Dict[str, str]:
     }
 
 
+def _explicit_structure_signature(script_json: Dict[str, object]) -> tuple:
+    storyboard = _collect_storyboard_shots(script_json)
+    beats: List[str] = []
+    carriers: List[str] = []
+    groups: List[str] = []
+    opening = ""
+    for index, shot in enumerate(storyboard):
+        beat = str(shot.get("structure_beat", "") or "").strip().upper()
+        carrier = str(shot.get("carrier_mode", "") or "").strip().upper()
+        group = str(shot.get("continuity_group", "") or "").strip()
+        if beat and (not beats or beats[-1] != beat):
+            beats.append(beat)
+        if carrier:
+            carriers.append(carrier)
+        if group:
+            groups.append(group)
+        if index == 0:
+            opening = str(shot.get("opening_mechanism", "") or "").strip().upper()
+    if not beats:
+        return ()
+    return (tuple(beats), tuple(carriers), tuple(groups), opening)
+
+
 def _scene_seed_similarity_issue(
     strategy_id: str,
     sibling_id: str,
@@ -521,8 +544,6 @@ def _scene_seed_similarity_issue(
     sibling = _scene_seed_signature(sibling_script)
     comparable_keys = [key for key, value in current.items() if value != "unknown" and sibling.get(key) != "unknown"]
     same_count = sum(1 for key in comparable_keys if current.get(key) == sibling.get(key))
-    if strategy_id == "S4" and sibling_id == "S1" and same_count >= 3:
-        return "S4 与 S1 的 scene_seed 生活片刻/小张力/观察路径过近，惊艳型没有从人物动机上拉开"
     if same_count >= 4:
         return f"{strategy_id} 与 {sibling_id} 的 scene_seed 四项路径高度同构"
     return None
@@ -544,8 +565,12 @@ def validate_script_direction_separation(
     proof_sequence = _extract_proof_sequence(script_json)
     ending_family = _classify_ending_family(script_json)
     storyboard = _collect_storyboard_shots(script_json)
+    routed_structure = isinstance(final_strategy.get("structure_contract"), dict) and bool(
+        final_strategy.get("structure_contract")
+    )
+    structure_signature = _explicit_structure_signature(script_json)
 
-    if strategy_id == "S4":
+    if strategy_id == "S4" and not routed_structure:
         early_focus = [_classify_shot_focus_family(shot) for shot in storyboard[:3]]
         early_focus = [item for item in early_focus if item]
         if len(early_focus) >= 3 and all(item == "localized_close" for item in early_focus[:3]):
@@ -554,7 +579,7 @@ def validate_script_direction_separation(
             return "S4 前段 proof 过早滑向细节拆解，没有尽快把首镜的结果感接实"
 
     target_siblings = existing_scripts.items()
-    if strategy_id == "S4" and "S1" in existing_scripts:
+    if strategy_id == "S4" and not routed_structure and "S1" in existing_scripts:
         target_siblings = [("S1", existing_scripts["S1"])]
 
     for sibling_id, sibling_script in target_siblings:
@@ -564,12 +589,20 @@ def validate_script_direction_separation(
         sibling_entry = _classify_entry_family(sibling_script)
         sibling_proof = _extract_proof_sequence(sibling_script)
         sibling_ending = _classify_ending_family(sibling_script)
+        sibling_structure_signature = _explicit_structure_signature(sibling_script)
+        if (
+            routed_structure
+            and structure_signature
+            and sibling_structure_signature
+            and structure_signature != sibling_structure_signature
+        ):
+            continue
 
         same_entry = entry_family == sibling_entry
         same_proof = bool(proof_sequence) and proof_sequence == sibling_proof
         same_ending = ending_family == sibling_ending
 
-        if strategy_id == "S4" and sibling_id == "S1":
+        if strategy_id == "S4" and not routed_structure and sibling_id == "S1":
             if same_entry and same_proof:
                 return "S4 与 S1 的开场触发和前段 proof 展开同构，惊艳型没有真正拉开"
             if same_proof and same_ending:

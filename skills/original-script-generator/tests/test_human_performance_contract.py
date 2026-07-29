@@ -380,6 +380,60 @@ class HumanPerformanceContractTest(unittest.TestCase):
         self.assertTrue(major)
         self.assertFalse(minor)
 
+    def test_scene_seed_liveliness_respects_static_product_structure_contract(self) -> None:
+        pipeline = OriginalScriptPipeline.__new__(OriginalScriptPipeline)
+        pack = _persona_pack()
+        script = {
+            "structure_execution_plan": {
+                "contract_applied": True,
+                "content_carrier": "STATIC_PRODUCT",
+            },
+            "scene_seed": {
+                "moment": "出门前看搭配",
+                "small_tension": "基础搭配略显单调",
+                "micro_behavior": "轻看整体比例",
+                "payoff_feeling": "确认搭配更完整",
+            },
+            "storyboard": [
+                {
+                    "shot_no": 1,
+                    "carrier_mode": "STATIC_PRODUCT",
+                    "shot_content": "静物外套主体，镜头轻微推进",
+                    "person_action": "无人物",
+                },
+                {
+                    "shot_no": 2,
+                    "carrier_mode": "STATIC_PRODUCT",
+                    "shot_content": "镜头侧移看清肩线与短下摆",
+                    "person_action": "无人物表情，无人物身体动作",
+                },
+                {
+                    "shot_no": 3,
+                    "carrier_mode": "STATIC_PRODUCT",
+                    "shot_content": "扫拍拉链与袖部细节",
+                    "person_action": "人物不入镜",
+                },
+                {
+                    "shot_no": 4,
+                    "carrier_mode": "STATIC_PRODUCT",
+                    "shot_content": "整体搭配定格后镜头轻微后移",
+                    "person_action": "人物不入镜",
+                },
+            ],
+        }
+
+        check, major, minor = pipeline._precheck_scene_seed_liveliness(
+            anchor_card=_hair_anchor_card(),
+            persona_style_emotion_pack=pack,
+            script_json=script,
+        )
+
+        self.assertEqual(check["evaluation_mode"], "OBJECT_VISUAL_MOTION")
+        self.assertFalse(check["static_or_pose_heavy"])
+        self.assertFalse(check["object_visual_motion_missing"])
+        self.assertFalse(major)
+        self.assertFalse(minor)
+
     def test_script_validator_backfills_and_accepts_performance_field(self) -> None:
         storyboard = []
         for index, task in enumerate(["hook", "proof", "proof", "decision"], 1):

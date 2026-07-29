@@ -9,6 +9,7 @@
 import base64
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -57,6 +58,7 @@ PRIMARY_LLM_REASONING_EFFORT = os.environ.get("ORIGINAL_SCRIPT_PRIMARY_REASONING
 PRIMARY_LLM_STREAM_RETURN_ON_TEXT_DONE = (
     os.environ.get("ORIGINAL_SCRIPT_STREAM_RETURN_ON_TEXT_DONE", "1") != "0"
 )
+CODEX_CLI_BINARY = "/Users/likeu3/.codex/packages/standalone/current/codex"
 OPENCLAW_CONFIG_PATH = Path(
     os.environ.get("OPENCLAW_CONFIG_PATH", str(Path.home() / ".openclaw" / "openclaw.json"))
 )
@@ -161,6 +163,7 @@ class OriginalScriptLLMClient:
         primary_api_url: Optional[str] = None,
         primary_api_key: Optional[str] = None,
         primary_model: Optional[str] = None,
+        primary_reasoning_effort: Optional[str] = None,
         timeout: int = 120,
         max_retries: int = 2,
         route_order: Optional[List[str]] = None,
@@ -173,6 +176,9 @@ class OriginalScriptLLMClient:
         self.primary_api_url = self._resolve_primary_api_url(primary_api_url)
         self.primary_api_key = self._resolve_primary_api_key(primary_api_key)
         self.primary_model = self._resolve_primary_model(primary_model)
+        self.primary_reasoning_effort = self._resolve_primary_reasoning_effort(
+            primary_reasoning_effort
+        )
         self.primary_proxy_url = self._resolve_primary_proxy_url()
         self.route_order = normalize_route_order(route_order)
 
@@ -205,6 +211,7 @@ class OriginalScriptLLMClient:
         max_attempts: int = 3,
         rate_limit_max_attempts: int = 4,
         validator: Optional[Callable[[Any], None]] = None,
+        repair_json_on_failure: bool = True,
     ) -> Any:
         last_error: Optional[Exception] = None
         last_text: str = ""
@@ -234,7 +241,7 @@ class OriginalScriptLLMClient:
                     print(f"    ⚠️ JSON 解析失败，准备进行修复重试 ({attempt + 1}/{max_attempts - 1})...")
                     time.sleep(1)
                     continue
-                if last_text.strip():
+                if repair_json_on_failure and last_text.strip():
                     repaired = self._repair_json_output(
                         prompt=prompt,
                         raw_text=last_text,
@@ -299,6 +306,11 @@ class OriginalScriptLLMClient:
         image_paths: List[str],
         max_tokens: int,
     ) -> Dict[str, Any]:
+        if str(os.environ.get("ORIGINAL_SCRIPT_USE_CODEX_CLI", "") or "").strip() == "1":
+            return self._call_primary_via_codex_cli(
+                prompt=prompt,
+                image_paths=image_paths,
+            )
         client = self._get_primary_client()
         input_content: List[Dict[str, Any]] = [{"type": "input_text", "text": prompt}]
         for image_path in image_paths:
@@ -311,7 +323,7 @@ class OriginalScriptLLMClient:
         if str(os.environ.get("ORIGINAL_SCRIPT_USE_NONSTREAM", "") or "").strip() == "1":
             response = client.responses.create(
                 model=self.primary_model,
-                reasoning={"effort": PRIMARY_LLM_REASONING_EFFORT},
+                reasoning={"effort": self.primary_reasoning_effort},
                 instructions=(
                     "You are a multimodal content generation worker for original short-video scripting. "
                     "Follow the user prompt exactly. "
@@ -338,7 +350,7 @@ class OriginalScriptLLMClient:
         saw_text_done = False
         with client.responses.stream(
             model=self.primary_model,
-            reasoning={"effort": PRIMARY_LLM_REASONING_EFFORT},
+            reasoning={"effort": self.primary_reasoning_effort},
             instructions=(
                 "You are a multimodal content generation worker for original short-video scripting. "
                 "Follow the user prompt exactly. "
@@ -390,6 +402,65 @@ class OriginalScriptLLMClient:
             "_raw_response": dumped,
         }
 
+    def _call_primary_via_codex_cli(
+        self,
+        *,
+        prompt: str,
+        image_paths: List[str],
+    ) -> Dict[str, Any]:
+        """Use the logged-in Codex CLI when the streaming SDK transport breaks.
+
+        This is an opt-in transport fallback only: model, reasoning effort and
+        prompt remain identical to the primary route.  The CLI writes JSONL,
+        so extract the final agent message rather than treating event metadata
+        as model text.
+        """
+
+        command = [
+            CODEX_CLI_BINARY,
+            "exec",
+            "-m",
+            self.primary_model,
+            "--json",
+            "--skip-git-repo-check",
+            "-c",
+            f"model_reasoning_effort={self.primary_reasoning_effort}",
+        ]
+        for image_path in image_paths:
+            command.extend(["-i", image_path])
+        command.append(prompt)
+        print(f"    🛣️ 使用 Codex CLI 线路: {PRIMARY_ROUTE}")
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError("Codex CLI model request timed out") from exc
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip()[-1200:]
+            raise RuntimeError(f"Codex CLI model request failed ({completed.returncode}): {detail}")
+
+        messages: List[str] = []
+        for line in (completed.stdout or "").splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            item = event.get("item") if isinstance(event, dict) else None
+            if not isinstance(item, dict) or item.get("type") != "agent_message":
+                continue
+            text = str(item.get("text") or "").strip()
+            if text:
+                messages.append(text)
+        content = "\n".join(messages).strip()
+        if not content:
+            raise RuntimeError("Codex CLI model request returned no agent message")
+        return {"choices": [{"message": {"content": content}}], "_raw_response": {}}
+
     def _call_primary_text(self, prompt: str, max_tokens: int) -> Dict[str, Any]:
         return self._call_primary(prompt=prompt, image_paths=[], max_tokens=max_tokens)
 
@@ -438,6 +509,14 @@ class OriginalScriptLLMClient:
         if openclaw_model:
             return openclaw_model
         return PRIMARY_LLM_DEFAULT_MODEL
+
+    @staticmethod
+    def _resolve_primary_reasoning_effort(override: Optional[str]) -> str:
+        value = str(override or PRIMARY_LLM_REASONING_EFFORT).strip().lower()
+        allowed = {"low", "medium", "high", "xhigh", "max", "ultra"}
+        if value not in allowed:
+            raise ValueError(f"不支持的 primary reasoning effort: {value}")
+        return value
 
     @staticmethod
     def _resolve_primary_api_key(override: Optional[str]) -> str:

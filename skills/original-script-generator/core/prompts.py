@@ -308,11 +308,39 @@ def _compact_script_brief_for_p7(script_brief_json: Dict[str, Any]) -> Dict[str,
     )
     ai_profile = brief.get("ai_shot_risk_profile") if isinstance(brief.get("ai_shot_risk_profile"), dict) else {}
     proof_path = final_strategy.get("proof_path") or brief.get("proof_path") or "A_result_detail_only"
+    structure_execution_plan = (
+        brief.get("structure_execution_plan")
+        if isinstance(brief.get("structure_execution_plan"), dict)
+        else {}
+    )
+    contract_plan_applied = bool(structure_execution_plan.get("contract_applied"))
+    if contract_plan_applied:
+        plan_shots = [
+            item for item in (structure_execution_plan.get("shot_plan") or []) if isinstance(item, dict)
+        ]
+        first_plan_shot = plan_shots[0] if plan_shots else {}
+        last_plan_shot = plan_shots[-1] if plan_shots else {}
+        scene_seed_strategy = {
+            "seed_mode": structure_execution_plan.get("macro_family_key", ""),
+            "moment_bias": first_plan_shot.get("visual_task", ""),
+            "tension_bias": "围绕当前结构 Beat 需要证明的问题建立轻微生活动机，不套用 S1-S4 旧角色",
+            "camera_gaze_bias": (
+                f"承载={structure_execution_plan.get('content_carrier', '')}；"
+                f"连续性={structure_execution_plan.get('continuity_mode', '')}"
+            ),
+            "payoff_bias": last_plan_shot.get("visual_task", ""),
+        }
     compact = {
+        "structure_contract": brief.get("structure_contract", {}),
+        "structure_execution_plan": structure_execution_plan,
         "product_type": brief.get("product_type", ""),
         "product_positioning_one_liner": _short_text(brief.get("product_positioning_one_liner"), 120),
         "category_execution_contract": contract,
-        "p7_execution_template": _operation_policy_template(contract.get("operation_policy", ""), str(proof_path)),
+        "p7_execution_template": (
+            {}
+            if contract_plan_applied
+            else _operation_policy_template(contract.get("operation_policy", ""), str(proof_path))
+        ),
         "key_visual_constraints": _short_list(brief.get("key_visual_constraints"), 3, 130),
         "parameter_anchors": _short_list(brief.get("parameter_anchors"), 4, 100),
         "selected_primary_selling_point": brief.get("selected_primary_selling_point", {}),
@@ -944,13 +972,10 @@ P7 必须遵守：
 - 不得引入 category_execution_contract.forbidden_actions。
 
 【performance_strategy 规则】
-P7 在生成 storyboard 前，必须根据 script_role / S1-S4 生成 performance_strategy，并让它影响 gaze 分布、micro reaction 强度、camera gaze 频率、decision 表情位置。
-- S1 强停留原生型：更像随手记录；gaze 更偏 mirror / product_position；camera gaze 少，只在中后段短暂出现；micro reaction 更轻，偏观察、抿嘴、轻微满意；不强调强决策表情；
-- S2 平衡型：观察与分享平衡；前半段 mirror / product_position；中后段至少一次 camera gaze；至少一次嘴角自然上扬或轻点头；结尾有轻分享感；
-- S3 强购买承接型：更强调确认问题被解决；decision 反应提前；micro reaction 可以更明确，例如轻点头、眼神放松；gaze 从问题位置转向整体确认；但不得硬推销；
-- S4 高惊艳首镜型：0-3s 首镜表情反应更明显；允许一次眼神轻微变亮；但不能夸张惊喜或主播式表演；后续快速回到自然观察和轻分享。
-
-验收要求：S1-S4 不得只在卖点上不同；人物 gaze 分布、micro reaction 强度、camera gaze 频率、decision 表情位置也要有轻微差异。"""
+P7 在生成 storyboard 前，必须根据当前 structure_execution_plan、script_role 和 performance_strategy_hint 生成 performance_strategy，并让它影响 gaze、micro reaction 与 decision 表情位置。
+- S1-S4 只是输出槽位，不对应固定人物表演类型；不得因为槽位编号套用“原生型 / 平衡型 / 强购买 / 高惊艳”等旧角色。
+- 人物表演必须服从逐镜头 carrier_mode：STATIC_PRODUCT 不加人物，HAND_ONLY 不扩成完整人物，WEARER_ACTIVE 才执行完整 gaze 与微反应。
+- 不同方向的表演差异应来自承载方式、开场机制、连续性与当前策略提示，而不是槽位编号。"""
 P7_CATEGORY_EXECUTION_CONTRACT_RULE = """【category_execution_contract P7 精简执行规则】
 - 先读 script_brief.category_execution_contract；它是商品硬约束，冲突时高于人物表演和创意。
 - 字段优先级：primary_visual_result > result_priority > operation_policy > use_case > placement_zone > hold_scope > orientation > safe_shot_templates > forbidden_actions > audio_policy。
@@ -966,22 +991,24 @@ P7_HUMAN_PERFORMANCE_SCRIPT_RULE = """【human_performance_contract P7 精简执
 - human_performance_contract 是人物表演软增强，不得覆盖 category_execution_contract。
 - 如果 script_brief.scene_seed_brief.enabled=true，必须先临时生成 scene_seed，再生成 storyboard。
 - scene_seed 必须包含 moment / small_tension / micro_behavior / payoff_feeling；moment_hints 与 small_tension_hints 只是灵感，不得逐字复用成固定模板。
-- 生成 scene_seed 时必须先读取 scene_seed_brief.current_script_strategy，并让 moment / small_tension / micro_behavior / payoff_feeling 分别体现 moment_bias / tension_bias / camera_gaze_bias / payoff_bias。
-- S1-S4 的 scene_seed 差异至少体现在 2 项：生活片刻不同、小 tension 不同、观察路径不同、camera gaze 出现位置不同、payoff 情绪不同。
+- 生成 scene_seed 时必须先读取 scene_seed_brief.current_script_strategy，并让 moment / small_tension / micro_behavior / payoff_feeling 分别体现当前结构的 moment_bias / tension_bias / camera_gaze_bias / payoff_bias。
+- S1-S4 只是槽位；scene_seed 差异至少体现在 2 项，并由当前结构的承载、开场和连续性决定。
 - micro_behavior 必须落在 safe_behavior_hints 的安全方向内，并避开 risk_boundary；scene_seed 必须服务 category_execution_contract.primary_visual_result，不得改变 use_case / placement_zone / operation_policy。
-- S1-S4 的 scene_seed 不得只是同一句换词；storyboard 必须体现 scene_seed 的连续反应，而不是把 scene_seed 当背景设定。
+- 不同槽位的 scene_seed 不得只是同一句换词；storyboard 必须体现 scene_seed 的连续反应，而不是把 scene_seed 当背景设定。
 - 如果 avoid_same_as_existing_scripts 中已有前序脚本摘要，当前 scene_seed 的 moment / small_tension / micro_behavior 不能复用同一路径。
-- Step 1：生成 shot_skeleton 时优先继承 p7_execution_template；Step 2 再填充 visual / action / performance / voiceover / audio。
+- Step 1：生成 shot_skeleton 时，结构合同生效则优先继承 structure_execution_plan；仅无结构合同时才使用 p7_execution_template。Step 2 再填充 visual / action / performance / voiceover / audio。
 - 每个 storyboard 镜头都必须有 performance；performance 必须是对象，包含 gaze / expression_or_micro_reaction / body_language / product_interaction。
+- carrier_mode=STATIC_PRODUCT 时仍保留 performance 对象，但 gaze 写“静物镜头不适用，镜头焦点锁定商品”，其余人物表演字段允许为空，禁止补入人物。
 - gaze 每镜头必须有；全片至少使用 gaze_plan 中 3 个 gaze point；最后一个 gaze point 落在 gaze_rule.final_point_options 之一。
 - expression_or_micro_reaction 至少覆盖 50% 镜头；active micro reaction 不得超过 active_micro_reaction_limit。
 - product_interaction 必须低风险，不得引入 forbidden_actions 或复杂佩戴过程。
 - 禁止 performance 写成“自然微笑 / 亲和展示 / 开心看镜头 / 人物自然展示商品 / 女生对镜微笑”。
-- S1：更生活化，camera gaze 少，微反应轻；S2：观察和分享平衡；S3：更强调确认问题解决但不硬推销；S4：首镜反应更明显但不夸张。
-- S1-S4 不得只在卖点上不同，gaze 分布、微反应强度、camera gaze 频率、decision 表情位置也要有差异。"""
+- S1-S4 不代表固定表演档位；表演差异由 structure_execution_plan 与 performance_strategy_hint 决定。
+- 不同结构方向的 gaze 分布、微反应强度与 decision 位置应随承载和连续性产生差异。"""
 HUMAN_STIFFNESS_QC_RULE = """【human_stiffness_check】
 Q1 必须逐镜头检查最终 storyboard.performance，不要只看全局【情绪】字段。
 如果镜头没有 performance 字段，视为 human_performance_contract 未落地。
+carrier_mode=STATIC_PRODUCT 的镜头不做人类 gaze / 表情覆盖检查；只检查商品是否保持静物承载和机位变化是否自然，不得为了通过人物质检加入模特。
 
 【timing_consistency_check】
 - 若镜头时间总和不等于 15 秒，进入 major_issues；
@@ -2235,10 +2262,7 @@ PROMPT_P6 = """你是一个资深的短视频表达策略专家、内容血肉�
 1. 表达必须更有原生感，不要像“正式介绍商品”；
 2. 不能改变主卖点；
 3. 不能让表达层喧宾夺主；
-4. 对于 S4：
-   - 表达层不要抢首镜画面；
-   - 开头允许先画面打人，再让语言快速进入；
-   - 中段必须更快把首镜接实，避免空钩子；
+4. S1-S4 只是输出槽位；表达层必须服从本槽位结构合同的开场机制与 Beat 顺序，不得默认把 S4 当成高惊艳首镜；
 5. 如果 target_country 属于东南亚市场，请优先保留家中自然分享语境；
 6. opening_expression_task / middle_expression_task / ending_expression_task 只能写中文执行任务，不得嵌入完整目标语言口播句子；
 7. 不要在中文控制字段里写越南语/泰语/英语完整台词；目标语言口播只写成 voiceover_intent 的意图；
@@ -2312,10 +2336,10 @@ PROMPT_P7 = """你是一个资深的跨境电商短视频脚本策划专家、AI
 27. key_visual_constraints 是视频还原防错约束，不是新增卖点，不要求逐条口播，但必须在镜头内容、人物动作、执行约束中不冲突。
 28. 不要输出大段“为什么这样设计”的解释。
 29. script_brief 已经是 P7 精简执行版；不得抱怨字段不足，不得要求上游完整 JSON。
-30. 必须优先使用 script_brief.p7_execution_template.shot_skeleton_template 作为 shot_skeleton 基线，只允许在不违反 category_execution_contract 时微调 shot_purpose，不要重新设计时间线。
+30. 如果 script_brief.structure_execution_plan.contract_applied=true，必须逐镜头继承其中 shot_plan；此时不得再使用统一六镜头模板。只有没有有效结构合同时，才使用 p7_execution_template 作为降级基线。
 31. 为了降低超时风险，不要输出 full_15s_flow / execution_constraints / rhythm_checkpoints / audio_layer / negative_constraints；这些字段由代码侧根据 storyboard 和 contract 本地补齐。
 32. 如果某个镜头没有 voiceover_text_target_language，spoken_line_task 必须写 "none"，不要写 hook/proof/decision；视觉 proof 可以无口播，但有任务标签的镜头必须有目标语言口播。
-33. storyboard 与 shot_skeleton 数量必须一致；默认直接输出 6 个镜头；不要输出 schema 以外字段。
+33. storyboard 与 shot_skeleton 数量必须一致；有结构执行计划时镜头数必须等于 plan.shot_count，无结构计划时默认 6 镜；不要输出 schema 以外字段。
 
 【script_role 执行规则】
 - 你必须先根据 script_role 判断整条脚本职责，而不是只看 opening_mode；
@@ -2346,12 +2370,15 @@ PROMPT_P7 = """你是一个资深的跨境电商短视频脚本策划专家、AI
 - 如果 script_role = risk_resolution，decision 信号必须在总时长 60% 节点前出现，即 15 秒视频要在 9 秒前出现；
 - 时间类规则冲突时，取更早者；该规则不适用于结构类、镜头类、字段类规则。
 
-【p7_execution_template 使用规则】
-- Step 1：生成 shot_skeleton 时，直接继承 script_brief.p7_execution_template.shot_skeleton_template；
-- 保持 6 镜头 time_range 连续，总时长 15 秒；
-- shot_purpose 可以结合 primary_focus 微调，但不得改变 role / time_range / proof_path 的大结构；
-- operation_policy 已经在模板中体现，不要因为 orientation 或创意差异加入完整过程；
-- Step 2：再基于 shot_skeleton 填充 storyboard / performance / voiceover / audio。
+【结构执行计划使用规则】
+- 若 structure_execution_plan.contract_applied=true：shot_skeleton 必须按 shot_plan 原顺序逐项展开，严格继承 shot_index / time_range / structure_beat / carrier_mode / continuity_group / opening_mechanism / visual_task；不得用旧的 hook-proof-proof-proof-decision-decision 模板覆盖。
+- carrier_mode 是该镜头的画面承载硬约束；STATIC_PRODUCT 镜头不得出现人物，WEARER_ACTIVE 必须由穿戴者/使用者承载，HAND_ONLY 只允许手部承载，MIXED 已在逐镜头计划中拆成具体 carrier_mode。
+- STATIC_PRODUCT 镜头的 person_action 写“无人物，商品通过机位/光线/角度形成轻微连续变化”；performance.gaze 写“静物镜头不适用，镜头焦点锁定商品”，其它人物表演字段可留空，不得为了满足人物表演模板而临时加入模特。
+- CONTINUOUS_LOW_CUT 的同一 continuity_group 要保持同场景、同人物状态和连续动作关系；MULTI_CUT 的不同 group 要形成可感知的切镜变化。
+- structure_beat 负责视觉叙事，spoken_line_task 只负责口播功能；二者不得互相替代。USE_PROCESS 可以使用 proof 或 proof+decision 口播，但画面必须真有低风险使用动作。
+- 如果 structure_execution_plan.blocking_conflicts 非空，不得自行抹掉冲突或改写 Beat，应在 contract_conflict_warning 中原样报告。
+- 只有 structure_execution_plan 为空时，才按 p7_execution_template 生成旧流程降级脚本。
+- Step 2：在结构骨架不变的前提下填充 visual / action / performance / voiceover / audio。
 
 {{ai_video_rhythm_rule}}
 
@@ -2379,6 +2406,10 @@ PROMPT_P7 = """你是一个资深的跨境电商短视频脚本策划专家、AI
       "shot_index": 1,
       "time_range": "",
       "role": "hook|proof|decision|transition",
+      "structure_beat": "HOOK|PROOF|USE_PROCESS|ENDING",
+      "carrier_mode": "HAND_ONLY|STATIC_PRODUCT|WEARER_ACTIVE|UNAVAILABLE",
+      "continuity_group": "",
+      "opening_mechanism": "",
       "shot_purpose": "",
       "proof_path": ""
     }
@@ -2415,6 +2446,10 @@ PROMPT_P7 = """你是一个资深的跨境电商短视频脚本策划专家、AI
       "style_note": "",
       "anchor_reference": "",
       "task_type": "attention|proof|bridge",
+      "structure_beat": "HOOK|PROOF|USE_PROCESS|ENDING",
+      "carrier_mode": "HAND_ONLY|STATIC_PRODUCT|WEARER_ACTIVE|UNAVAILABLE",
+      "continuity_group": "",
+      "opening_mechanism": "",
       "ai_shot_risk": "low|medium|high|forbidden",
       "replacement_template_id": ""
     }
@@ -2434,8 +2469,11 @@ PROMPT_Q1 = """你是一个资深的短视频脚本质检与修正专家。
 - Q1 精简上下文：{{q1_context_json}}
 
 【scene_seed_liveliness_check】
-如果 q1_context_json 中包含 scene_seed_liveliness_check，只做轻量一致性判断：scene_seed 应服务 primary_visual_result，不能违反 risk_boundary / forbidden_actions；storyboard 应体现 moment → small_tension → micro_behavior → payoff_feeling 的连续反应，不能退回静物展示或固定摆拍。修正时只改 scene_seed、performance、口播衔接，不改商品 proof 主线。
-如果 q1_context_json 中包含 scene_seed_brief.current_script_strategy，修正时还要让 scene_seed 贴合当前 S1-S4 的 moment_bias / tension_bias / camera_gaze_bias / payoff_bias；不要把 S2/S3/S4 修回 S1 的随手自检路径。
+如果 q1_context_json 中包含 scene_seed_liveliness_check，只做与 evaluation_mode 一致的轻量判断：
+- HUMAN_SCENE_SEED：scene_seed 应服务 primary_visual_result，不能违反 risk_boundary / forbidden_actions；有人物承载的 storyboard 应体现 moment → small_tension → micro_behavior → payoff_feeling 的连续反应，不能退回无反应的固定摆拍；
+- OBJECT_VISUAL_MOTION：结构合同已明确使用 STATIC_PRODUCT 或 HAND_ONLY，不得为了“生动”补入完整人物、表情或人物生活反应；只检查商品/手部是否通过机位、角度、光线或低风险动作形成可感知变化。
+修正时只改 scene_seed、performance、口播衔接或静物机位变化，不改商品 proof 主线，不得覆盖 structure_contract 的 carrier_mode。
+如果 q1_context_json 中包含 scene_seed_brief.current_script_strategy，修正时要贴合其中的 moment_bias / tension_bias / camera_gaze_bias / payoff_bias；S1-S4 只是槽位，不得按旧槽位角色互相修正。
 - 当前正式脚本：{{script_json}}
 - 目标国家：{{target_country}}
 - 目标语言：{{target_language}}
@@ -2496,7 +2534,7 @@ PROMPT_Q1 = """你是一个资深的短视频脚本质检与修正专家。
 2. 只有重大问题才明显修；
 3. 轻微问题记 minor_issues，不阻断；
 4. 修正必须遵守“最小改动原则”；
-5. repaired_script 必须返回修正后的完整脚本 JSON；若无需修正，则返回原脚本。
+5. 若无需修正，repaired_script 必须返回空对象 `{}`，代码侧会沿用原脚本；只有确实发生修正时，才返回修正后的完整脚本 JSON。
 6. 人物视觉感 / 穿搭完成度 / 情绪推进这些项当前阶段默认作为 warning，不阻断流程；
 7. 只有在人物明显抢商品、穿搭明显跑偏、完全无气质差异可感知、styling_key_anchor 完全没有执行、emotion_arc_tag 完全没有执行导致整条视频情绪像死水时，才提升为 major issue。
 8. parameter_anchors 当前默认也是轻质检项；只有出现明显参数改写、关键参数被反向表达、或脚本内容与可见参数事实直接冲突时，才提升为 major issue。
@@ -2547,6 +2585,7 @@ PROMPT_P7_VIDEO = """你是最终视频提示词生成器。
 - 不要输出“为什么这样设计”
 - 除口播字段外，其它所有字段一律使用中文描述
 - 最终喂视频模型的分镜层不要输出 `shot_purpose`、`anchor_reference`、`task_type`、字幕字段
+- 必须逐镜头保留 `structure_beat / carrier_mode / continuity_group / opening_mechanism`，这些是结构合同执行字段，不得在压缩时删除
 - 分镜层只保留：镜头编号、时长、镜头内容、人物动作、口播、口播任务、必要风格提醒
 - 必须保留 P7 中的核心人物表现细节：眼神路径、微反应、身体姿态、低风险商品互动、表情变化
 - 必须保留 P7 performance 中的核心信息：gaze / expression_or_micro_reaction / body_language / product_interaction
@@ -2587,6 +2626,10 @@ JSON 结构如下：
       "voiceover_text_target_language": "",
       "voiceover_text_zh": "",
       "spoken_line_task": "hook|proof|decision|proof+decision|none",
+      "structure_beat": "HOOK|PROOF|USE_PROCESS|ENDING",
+      "carrier_mode": "HAND_ONLY|STATIC_PRODUCT|WEARER_ACTIVE|UNAVAILABLE",
+      "continuity_group": "",
+      "opening_mechanism": "",
       "person_action": "",
       "performance": {
         "gaze": "",
@@ -2650,13 +2693,13 @@ PROMPT_P8 = """你是一个资深的短视频脚本变体设计专家。
 7. 如果 target_country 属于东南亚市场，家中自然分享场景高权重原则不能被破坏。
 
 【必须满足】
-1. 每条变体都必须覆盖 hook / proof / decision；
-2. 每条变体默认使用 4–6 个镜头推进；
+1. 无 structure_contract 时，每条变体覆盖 hook / proof / decision；存在 structure_contract 时，以母体 structure_execution_plan 的 structure_beat 为唯一视觉叙事顺序，不得为了补 decision 增加 ENDING；
+2. 无 structure_execution_plan 时默认使用 4–6 个镜头；存在时必须与母体 shot_plan 镜头数和顺序完全一致；
 3. 单镜头默认 1–3 秒，尽量不超过 4 秒；
 4. 中段不能只写情绪陪衬；
 5. 结尾不能只写泛安利；
 6. 不允许所有变体只是开头不同，中后段逻辑完全一样；
-7. S4 即使做变体，也不得滑向广告片；首镜后必须尽快进入 proof，不得空钩子。
+7. S1-S4 只是兼容槽位；无 structure_contract 的历史 S4 仍不得滑向广告片，有合同则完全服从合同，不得套回固定 S4 首镜模板。
 8. `source_strategy_id` 必须严格等于输入里的 `source_strategy_id`；`strategy_id` 必须严格等于输入里的 `canonical_strategy_id`。
 9. 不要把 `strategy_id` 写成 `source_strategy_id`，不要写成 `Final_S1/Final_S2/Final_S3/Final_S4`，也不要写成 `S1_V1/S4_V2` 这类变体化命名。
 10. 如果 target_country 属于东南亚市场，`final_video_script_prompt.video_setup.scene_final` 必须明确写出家中自然分享子场景，例如“家中穿衣区/镜前”“家中衣柜/穿衣区”“家中梳妆台/桌边”“家中窗边自然光”“家中床边/坐姿分享”“家中玄关镜前”，不要只写“生活化真实场景”“真实场景”“日常场景”这类泛标签。
@@ -2701,6 +2744,10 @@ PROMPT_P8 = """你是一个资深的短视频脚本变体设计专家。
             "visual": "",
             "person_action": "",
             "product_focus": "",
+            "structure_beat": "HOOK|PROOF|USE_PROCESS|ENDING",
+            "carrier_mode": "HAND_ONLY|STATIC_PRODUCT|WEARER_ACTIVE|UNAVAILABLE",
+            "continuity_group": "",
+            "opening_mechanism": "",
             "voiceover": ""
           }
         ],
@@ -2869,6 +2916,7 @@ def build_strategy_prompt(
     hair_clip_mode: bool = False,
     clip_expression_mode: str = "",
     type_guard_json: Optional[Dict[str, Any]] = None,
+    structure_direction_packages_json: Optional[Dict[str, Any]] = None,
 ) -> str:
     del hair_accessory_mode, hair_clip_mode, clip_expression_mode
     repair_block = f"\n附加修正要求：\n{repair_instruction.strip()}\n" if repair_instruction.strip() else ""
@@ -2891,7 +2939,16 @@ def build_strategy_prompt(
         },
     )
     prompt = _with_prompt_cache_prefix("P4_strategy_candidates", prompt)
-    return _append_type_guard_block(prompt, type_guard_json)
+    prompt = _append_type_guard_block(prompt, type_guard_json)
+    if structure_direction_packages_json:
+        prompt += (
+            "\n\n【结构方向合同｜优先级高于 S1-S4 旧方向印象】\n"
+            f"{_compact_json(structure_direction_packages_json)}\n"
+            "执行规则：S1-S4 只是四个输出槽位；每个槽位必须服从同名 output_slot 的结构合同。"
+            "script_role、卖点和口播负责怎么说，不得把不同结构重新压成同一套镜头骨架。"
+            "hard_constraints 必须执行；soft_preferences 可结合商品调整；UNAVAILABLE 不得自行补造。"
+        )
+    return prompt
 
 
 def build_final_strategy_prompt(
@@ -2908,6 +2965,7 @@ def build_final_strategy_prompt(
     hair_clip_mode: bool = False,
     clip_expression_mode: str = "",
     type_guard_json: Optional[Dict[str, Any]] = None,
+    structure_direction_packages_json: Optional[Dict[str, Any]] = None,
 ) -> str:
     del product_selling_note, hair_accessory_mode, hair_clip_mode, clip_expression_mode
     prompt = _fill_template(
@@ -2926,6 +2984,13 @@ def build_final_strategy_prompt(
     )
     prompt = _with_prompt_cache_prefix("P5_strategy_cards", prompt)
     prompt = _append_type_guard_block(prompt, type_guard_json)
+    if structure_direction_packages_json:
+        prompt += (
+            "\n\n【结构方向合同】\n"
+            f"{_compact_json(structure_direction_packages_json)}\n"
+            "定稿时不得交换 output_slot 与合同的对应关系；S1-S4 是槽位，不是固定叙事方向。"
+            "请让 opening_angle、proof_path、承载方式和节奏显式适配各自合同。"
+        )
     return prompt + (f"\n\n附加修正要求：\n{repair_instruction.strip()}" if repair_instruction.strip() else "")
 
 
@@ -2938,6 +3003,7 @@ def build_expression_plan_prompt(
     product_selling_note: str = "",
     persona_style_emotion_pack_json: Optional[Dict[str, Any]] = None,
     type_guard_json: Optional[Dict[str, Any]] = None,
+    structure_contract_json: Optional[Dict[str, Any]] = None,
 ) -> str:
     del product_selling_note
     prompt = _fill_template(
@@ -2953,7 +3019,14 @@ def build_expression_plan_prompt(
             "hair_accessory_rules": _hair_accessory_expression_rules(product_type),
         },
     )
-    return _append_type_guard_block(prompt, type_guard_json)
+    prompt = _append_type_guard_block(prompt, type_guard_json)
+    if structure_contract_json:
+        prompt += (
+            "\n\n【本方向结构合同】\n"
+            f"{_compact_json(structure_contract_json)}\n"
+            "表达计划只补充口播意图，不得改变合同的 Beat 顺序、画面承载和连续性。"
+        )
+    return prompt
 
 
 def build_script_prompt(
@@ -2988,6 +3061,17 @@ def build_script_prompt(
     prompt = _with_prompt_cache_prefix("P7_script", prompt)
     prompt = _append_type_guard_block(prompt, type_guard_json)
     extras: List[str] = []
+    structure_contract = (
+        script_brief_json.get("structure_contract")
+        if isinstance(script_brief_json, dict) and isinstance(script_brief_json.get("structure_contract"), dict)
+        else {}
+    )
+    if structure_contract:
+        extras.append(
+            "结构合同是本条母体脚本的镜头框架。hard_constraints 必须体现在 storyboard，"
+            "soft_preferences 可按商品锚点调整，UNAVAILABLE 不得补造。"
+            "不要因为系统仍用 S1-S4 字段，就套回固定四方向或统一六镜头骨架。"
+        )
     if isinstance(current_script_json, dict) and current_script_json:
         extras.append(
             "当前待修脚本 JSON：\n"
@@ -3012,7 +3096,11 @@ def build_script_review_prompt(
     target_language: str = "",
     type_guard_json: Optional[Dict[str, Any]] = None,
     pre_qc_result: Optional[Dict[str, Any]] = None,
+    structure_contract_json: Optional[Dict[str, Any]] = None,
 ) -> str:
+    review_script_json = dict(script_json) if isinstance(script_json, dict) else {}
+    review_script_json.pop("structure_execution_plan", None)
+    review_script_json.pop("structure_contract_validation", None)
     q1_context = _compact_q1_context(
         anchor_card_json=anchor_card_json,
         final_strategy_json=final_strategy_json,
@@ -3027,7 +3115,7 @@ def build_script_review_prompt(
             "target_language": target_language,
             "product_family": _product_family_from_type_guard(product_type, type_guard_json),
             "q1_context_json": _compact_json(q1_context),
-            "script_json": _compact_json(script_json),
+            "script_json": _compact_json(review_script_json),
             "category_execution_contract_rules": CATEGORY_EXECUTION_CONTRACT_QC_RULE,
             "human_stiffness_qc_rule": HUMAN_STIFFNESS_QC_RULE,
             "hair_accessory_rules": _hair_accessory_qc_rules(product_type),
@@ -3045,7 +3133,15 @@ def build_script_review_prompt(
             "- 如果 precheck 只是 warnings，不要强拦；\n"
             "- repaired_script 必须同时满足 precheck 和语义质检。"
         )
-    return _append_type_guard_block(prompt, type_guard_json)
+    prompt = _append_type_guard_block(prompt, type_guard_json)
+    if structure_contract_json:
+        prompt += (
+            "\n\n【结构合同质检】\n"
+            f"{_compact_json(structure_contract_json)}\n"
+            "同时检查脚本是否保留指定 Beat 顺序、承载方式、连续性和实测镜头边界。"
+            "未知字段不作为失败理由。"
+        )
+    return prompt
 
 
 def build_script_revision_prompt(
@@ -3074,6 +3170,7 @@ def build_final_video_prompt_prompt(
     final_strategy_json: Dict[str, Any],
     script_json: Dict[str, Any],
     type_guard_json: Optional[Dict[str, Any]] = None,
+    structure_contract_json: Optional[Dict[str, Any]] = None,
 ) -> str:
     prompt = _fill_template(
         PROMPT_P7_VIDEO,
@@ -3088,7 +3185,15 @@ def build_final_video_prompt_prompt(
             "ai_video_rhythm_rule": AI_VIDEO_RHYTHM_RULE,
         },
     )
-    return _append_type_guard_block(prompt, type_guard_json)
+    prompt = _append_type_guard_block(prompt, type_guard_json)
+    if structure_contract_json:
+        prompt += (
+            "\n\n【最终视频结构合同】\n"
+            f"{_compact_json(structure_contract_json)}\n"
+            "最终提示词必须保持合同中的画面承载、切镜连续性和 Beat 顺序，"
+            "不得在压缩时回到统一模板。"
+        )
+    return prompt
 
 
 def build_variant_prompt(
@@ -3145,7 +3250,22 @@ def build_variant_prompt(
             "ai_video_rhythm_rule": AI_VIDEO_RHYTHM_RULE,
         },
     )
-    return _append_type_guard_block(prompt, type_guard_json)
+    prompt = _append_type_guard_block(prompt, type_guard_json)
+    structure_contract = (
+        final_strategy_json.get("structure_contract")
+        if isinstance(final_strategy_json, dict) and isinstance(final_strategy_json.get("structure_contract"), dict)
+        else {}
+    )
+    if structure_contract:
+        prompt += (
+            "\n\n【母体结构继承规则】\n"
+            "变体只能在钩子表达、口播、场景表面和轻微动作上变化；"
+            "必须逐镜头继承 original_script_json.structure_execution_plan 的 shot_count、structure_beat、"
+            "carrier_mode、continuity_group、opening_mechanism，不得把变体改成另一个宏观结构。"
+            "STATIC_PRODUCT 镜头不得出现人物、手部或穿戴动作；HAND_ONLY 不得扩成完整人物承载；"
+            "CONTINUOUS_LOW_CUT 的同一 continuity_group 必须保持连续场景和动作关系。"
+        )
+    return prompt
 
 
 def build_p2_opening_prompt(

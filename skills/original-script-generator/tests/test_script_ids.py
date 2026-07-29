@@ -124,6 +124,37 @@ class ScriptIdsTest(unittest.TestCase):
         self.assertIn("【禁止】", rendered)
         self.assertNotIn("【脚本ID】", rendered)
 
+    def test_reality_script_renders_compact_video_brief_instead_of_internal_shots(self) -> None:
+        rendered = render_script(
+            {
+                "video_generation_brief": {
+                    "character": {"identity": "日常穿搭创作者"},
+                    "scene": {"location": "客厅窗边"},
+                    "outfit": "浅色内搭和黑色外套",
+                    "opening_observation": "从正在扣衣服的动作中途开始",
+                    "natural_behavior_mainline": "扣好衣服后自然准备出门",
+                    "macro_visual_passages": [
+                        {
+                            "visible_process": "扣好外套后拿包",
+                            "observable_action": "走向门口",
+                            "camera_observation": "固定中景",
+                        }
+                    ],
+                    "render_focus": "开头准备动作保持简短，尽快进入完整上身画面。",
+                    "continuous_voiceover": "ข้อความ",
+                },
+                "storyboard": [
+                    {"duration": "3s", "person_action": "逐颗指向扣子"}
+                ],
+            }
+        )
+        self.assertTrue(rendered.startswith("【视频生成主说明】"))
+        self.assertIn("生活事件：扣好衣服后自然准备出门", rendered)
+        self.assertIn("三段画面：", rendered)
+        self.assertIn("执行重点：开头准备动作保持简短", rendered)
+        self.assertNotIn("被动可见细节：", rendered)
+        self.assertNotIn("逐颗指向扣子", rendered)
+
     def test_render_script_separates_global_local_and_product_constraints(self) -> None:
         rendered = render_script(
             {

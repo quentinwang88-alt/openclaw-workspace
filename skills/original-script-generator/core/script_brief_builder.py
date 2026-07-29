@@ -9,6 +9,8 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from core.structure_execution_compiler import compile_structure_execution_plan
+
 
 _AI_SHOT_RISK_REGISTRY_CACHE: Optional[Dict[str, Any]] = None
 _AI_SHOT_RISK_REGISTRY_PATH = Path(__file__).resolve().parent.parent / "config" / "ai_shot_risk_registry.json"
@@ -555,6 +557,7 @@ def build_script_brief(
     expression_plan: Dict[str, Any],
     existing_scripts: Optional[Dict[str, Dict[str, Any]]] = None,
     type_guard_json: Optional[Dict[str, Any]] = None,
+    structure_contract: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     primary_selling_point = _non_empty_text(final_strategy.get("primary_selling_point"))
     styling_completion_tag = _first_non_empty_text(
@@ -575,6 +578,7 @@ def build_script_brief(
     )
     ai_shot_risk_profile = _build_ai_shot_risk_profile(product_type)
     script_brief = {
+        "structure_contract": structure_contract if isinstance(structure_contract, dict) else {},
         "product_type": _non_empty_text(product_type),
         "product_positioning_one_liner": _non_empty_text(anchor_card.get("product_positioning_one_liner")),
         "hard_anchors": _take_dict_items(anchor_card.get("hard_anchors"), 3, ["anchor", "reason_not_changeable", "confidence"]),
@@ -697,5 +701,9 @@ def build_script_brief(
         },
         "avoid_same_as_existing_scripts": _summarize_existing_scripts(existing_scripts),
     }
+    script_brief["structure_execution_plan"] = compile_structure_execution_plan(
+        script_brief.get("structure_contract", {}),
+        script_brief.get("category_execution_contract", {}),
+    )
     _log_control_layer_language_warnings(script_brief)
     return script_brief

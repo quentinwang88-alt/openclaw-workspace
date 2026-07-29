@@ -1926,6 +1926,7 @@ def _performance_to_text(value: Any) -> str:
 
 def _normalize_shot_skeleton_item(value: Any, index: int, default_proof_path: str) -> Dict[str, Any]:
     item = value if isinstance(value, dict) else {}
+    legacy_text = str(value or "").strip() if isinstance(value, str) else ""
     shot_index = item.get("shot_index") or item.get("shot") or item.get("shot_no") or index
     if not isinstance(shot_index, int):
         shot_index_text = str(shot_index or "").strip()
@@ -1933,17 +1934,27 @@ def _normalize_shot_skeleton_item(value: Any, index: int, default_proof_path: st
     proof_path = str(item.get("proof_path") or default_proof_path or "A_result_detail_only").strip()
     if proof_path not in PROOF_PATH_OPTIONS:
         proof_path = "A_result_detail_only"
-    return {
+    normalized = {
         "shot_index": shot_index,
         "time_range": str(item.get("time_range") or item.get("duration") or "").strip(),
         "role": str(item.get("role") or item.get("task") or "").strip(),
         "shot_purpose": _prefer_localized_descriptive_text(
             item.get("shot_purpose"),
             item.get("purpose"),
+            legacy_text,
             default="服务 hook / proof / decision 的分镜骨架",
         ),
         "proof_path": proof_path,
     }
+    for structural_key in (
+        "structure_beat",
+        "carrier_mode",
+        "continuity_group",
+        "opening_mechanism",
+    ):
+        if structural_key in item:
+            normalized[structural_key] = str(item.get(structural_key, "") or "").strip()
+    return normalized
 
 
 def _normalize_scene_seed(value: Any) -> Dict[str, str]:
@@ -2001,6 +2012,35 @@ def _normalize_script_payload(payload: Any) -> Dict[str, Any]:
         script.get("performance_strategy"),
         default="根据脚本角色分配眼神路径、微反应强度和轻分享位置",
     )
+    # Reality-reference V21+ may attach a deterministic compact hand-off for
+    # the video model.  Keep it optional and normalize only its container
+    # types; it must never create a new hard parse gate for legacy scripts.
+    video_brief = script.get("video_generation_brief")
+    if isinstance(video_brief, dict):
+        normalized_brief = dict(video_brief)
+        for field in (
+            "outfit",
+            "opening_observation",
+            "natural_behavior_mainline",
+            "core_result_moment",
+            "ending_state",
+            "core_result_to_prove",
+            "render_focus",
+            "continuous_voiceover",
+            "internal_structure_note",
+        ):
+            normalized_brief[field] = _coerce_scalar_text(normalized_brief.get(field))
+        for field in ("camera_guidance", "passive_visible_facts", "visible_product_anchors", "rendering_boundary"):
+            value = normalized_brief.get(field)
+            normalized_brief[field] = list(value) if isinstance(value, list) else []
+        passages = normalized_brief.get("macro_visual_passages")
+        normalized_brief["macro_visual_passages"] = [
+            dict(item) for item in passages if isinstance(item, dict)
+        ] if isinstance(passages, list) else []
+        for field in ("character", "scene"):
+            value = normalized_brief.get(field)
+            normalized_brief[field] = dict(value) if isinstance(value, dict) else {}
+        script["video_generation_brief"] = normalized_brief
 
     storyboard = script.get("storyboard")
     if isinstance(storyboard, list):
@@ -2041,6 +2081,20 @@ def _normalize_script_payload(payload: Any) -> Dict[str, Any]:
             }
             if compact_task_type in task_type_aliases:
                 item["task_type"] = task_type_aliases[compact_task_type]
+            elif any(token in compact_task_type for token in ("decision", "ending", "bridge", "transition", "收束", "结尾")):
+                item["task_type"] = "bridge"
+            elif any(token in compact_task_type for token in ("proof", "process", "demonstration", "证明", "过程", "中段")):
+                item["task_type"] = "proof"
+            elif any(token in compact_task_type for token in ("hook", "opening", "attention", "开头", "吸引")):
+                item["task_type"] = "attention"
+            for structural_key in (
+                "structure_beat",
+                "carrier_mode",
+                "continuity_group",
+                "opening_mechanism",
+            ):
+                if structural_key in item:
+                    item[structural_key] = str(item.get(structural_key, "") or "").strip()
             spoken_line_task = str(item.get("spoken_line_task", "") or "").strip()
             voiceover_text = _coerce_scalar_text(
                 item.get("voiceover_text_target_language")
@@ -2150,6 +2204,20 @@ def _normalize_script_payload(payload: Any) -> Dict[str, Any]:
     return script
 
 
+def normalize_script_payload(script_json: Any) -> Dict[str, Any]:
+    """Normalize a script without enforcing the final schema.
+
+    The structure compiler uses this boundary before materializing authoritative
+    per-shot contract fields. Keeping normalization and validation separate
+    prevents legacy payload cleanup from deleting newly injected structure data.
+    """
+    script = _normalize_script_payload(script_json)
+    if isinstance(script_json, dict):
+        script_json.clear()
+        script_json.update(script)
+    return script
+
+
 def _validate_script_positioning(positioning: Any, label: str) -> None:
     obj = _require_dict(positioning, label)
     _require_fields(obj, ["script_title", "direction_type", "core_primary_selling_point"], label)
@@ -2253,10 +2321,7 @@ def _validate_rhythm_checkpoints(rhythm_checkpoints: Any) -> None:
 
 
 def validate_script_schema_v2(script_json: Any, target_language: Optional[str] = None) -> None:
-    script = _normalize_script_payload(script_json)
-    if isinstance(script_json, dict):
-        script_json.clear()
-        script_json.update(script)
+    script = normalize_script_payload(script_json)
     script = _require_dict(script, "脚本输出")
     _require_fields(
         script,
@@ -2279,6 +2344,11 @@ def validate_script_schema_v2(script_json: Any, target_language: Optional[str] =
         raise JSONParseError("proof_path 必须为 A_result_detail_only|B_result_with_light_compare|C_result_with_short_process|D_result_with_light_compare_and_short_process")
     _ensure_chinese_descriptive_field(script, "performance_strategy", "脚本输出", allow_empty=True)
     shot_skeleton = _ensure_list_field(script, "shot_skeleton", "脚本输出", allow_empty=True)
+    structure_plan = script.get("structure_execution_plan") if isinstance(script.get("structure_execution_plan"), dict) else {}
+    structure_plan_applied = bool(structure_plan.get("contract_applied"))
+    planned_shots = [item for item in (structure_plan.get("shot_plan") or []) if isinstance(item, dict)]
+    if structure_plan_applied and len(planned_shots) != len(script.get("storyboard") or []):
+        raise JSONParseError("structure_execution_plan.shot_plan 数量必须与 storyboard 一致")
     if shot_skeleton and len(shot_skeleton) != len(script.get("storyboard") or []):
         raise JSONParseError("shot_skeleton 数量必须与 storyboard 一致")
     for index, skeleton_value in enumerate(shot_skeleton, 1):
@@ -2293,6 +2363,14 @@ def validate_script_schema_v2(script_json: Any, target_language: Optional[str] =
                     raise JSONParseError(f"shot_skeleton 第 {index} 项 proof_path 不在允许范围内")
             else:
                 _ensure_chinese_descriptive_field(skeleton, key, f"shot_skeleton 第 {index} 项")
+        if structure_plan_applied:
+            _require_fields(
+                skeleton,
+                ["structure_beat", "carrier_mode", "continuity_group", "opening_mechanism"],
+                f"shot_skeleton 第 {index} 项",
+            )
+            for key in ("structure_beat", "carrier_mode", "continuity_group", "opening_mechanism"):
+                _ensure_string_field(skeleton, key, f"shot_skeleton 第 {index} 项", allow_empty=(key == "opening_mechanism"))
 
     _validate_script_positioning(script.get("script_positioning"), "script_positioning")
     _validate_rhythm_checkpoints(script.get("rhythm_checkpoints"))
@@ -2355,6 +2433,10 @@ def validate_script_schema_v2(script_json: Any, target_language: Optional[str] =
         "ai_shot_risk",
         "replacement_template_id",
     ]
+    if structure_plan_applied:
+        required_shot_fields.extend(
+            ["structure_beat", "carrier_mode", "continuity_group", "opening_mechanism"]
+        )
 
     for index, shot_value in enumerate(storyboard, 1):
         shot = _require_dict(shot_value, f"storyboard 第 {index} 个镜头")
@@ -2401,6 +2483,18 @@ def validate_script_schema_v2(script_json: Any, target_language: Optional[str] =
         _ensure_string_field(shot, "spoken_line_task", f"storyboard 第 {index} 个镜头")
         for optional_key in ("person_state", "styling_base_role", "scene_function", "current_emotion"):
             _ensure_optional_string_field(shot, optional_key, f"storyboard 第 {index} 个镜头")
+        if structure_plan_applied:
+            for structural_key in ("structure_beat", "carrier_mode", "continuity_group", "opening_mechanism"):
+                _ensure_string_field(
+                    shot,
+                    structural_key,
+                    f"storyboard 第 {index} 个镜头",
+                    allow_empty=(structural_key == "opening_mechanism"),
+                )
+            if shot.get("structure_beat") not in {"HOOK", "PROOF", "USE_PROCESS", "ENDING"}:
+                raise JSONParseError(f"storyboard 第 {index} 个镜头 structure_beat 不受支持")
+            if shot.get("carrier_mode") not in {"HAND_ONLY", "STATIC_PRODUCT", "WEARER_ACTIVE", "UNAVAILABLE"}:
+                raise JSONParseError(f"storyboard 第 {index} 个镜头 carrier_mode 不受支持")
 
         if shot.get("task_type") not in {"attention", "proof", "bridge"}:
             raise JSONParseError(
@@ -2450,7 +2544,13 @@ def validate_review_payload(payload: Any, target_language: Optional[str] = None)
         if not isinstance(check.get("hit_count"), int):
             raise JSONParseError("质检输出.human_stiffness_check.hit_count 必须为整数")
         _ensure_string_field(check, "summary", "质检输出.human_stiffness_check", allow_empty=True)
-    validate_script_payload(review.get("repaired_script"), target_language=target_language)
+    repaired_script = review.get("repaired_script")
+    if not isinstance(repaired_script, dict):
+        raise JSONParseError("质检输出.repaired_script 必须为对象")
+    if repaired_script:
+        validate_script_payload(repaired_script, target_language=target_language)
+    elif not review.get("pass"):
+        raise JSONParseError("质检未通过时 repaired_script 不得为空")
 
 
 def _normalize_video_prompt_payload(payload: Any) -> Dict[str, Any]:
@@ -2526,6 +2626,7 @@ def _normalize_video_prompt_payload(payload: Any) -> Dict[str, Any]:
     for index, shot_value in enumerate(shot_execution_raw, 1):
         if not isinstance(shot_value, dict):
             continue
+        carrier_mode = str(shot_value.get("carrier_mode", "") or "").strip()
         shot_no_raw = shot_value.get("shot_no")
         if isinstance(shot_no_raw, int):
             shot_no = shot_no_raw
@@ -2565,10 +2666,18 @@ def _normalize_video_prompt_payload(payload: Any) -> Dict[str, Any]:
                 or _coerce_scalar_text(shot_value.get("voiceover_text")),
                 "voiceover_text_zh": _coerce_scalar_text(shot_value.get("voiceover_text_zh")),
                 "spoken_line_task": spoken_line_task,
+                "structure_beat": str(shot_value.get("structure_beat", "") or "").strip(),
+                "carrier_mode": str(shot_value.get("carrier_mode", "") or "").strip(),
+                "continuity_group": str(shot_value.get("continuity_group", "") or "").strip(),
+                "opening_mechanism": str(shot_value.get("opening_mechanism", "") or "").strip(),
                 "person_action": _prefer_localized_descriptive_text(
                     shot_value.get("person_action"),
                     shot_value.get("action"),
-                    default="人物自然完成动作",
+                    default=(
+                        "无人物，商品通过机位或角度形成轻微连续变化"
+                        if carrier_mode == "STATIC_PRODUCT"
+                        else "人物自然完成动作"
+                    ),
                 ),
                 "performance": _normalize_performance_payload(
                     shot_value.get("performance"),
@@ -2651,6 +2760,14 @@ def validate_video_prompt_payload(payload: Any) -> None:
             raise JSONParseError(
                 f"shot_execution 第 {index} 项 spoken_line_task 必须为 hook|proof|decision|proof+decision|none"
             )
+        for structural_key in ("structure_beat", "carrier_mode", "continuity_group", "opening_mechanism"):
+            if structural_key in shot:
+                _ensure_string_field(
+                    shot,
+                    structural_key,
+                    f"shot_execution 第 {index} 项",
+                    allow_empty=True,
+                )
         if "style_note" not in shot or not isinstance(shot.get("style_note"), str):
             shot["style_note"] = str(shot.get("style_note", "") or "")
         _ensure_chinese_descriptive_field(shot, "style_note", f"shot_execution 第 {index} 项", allow_empty=True)

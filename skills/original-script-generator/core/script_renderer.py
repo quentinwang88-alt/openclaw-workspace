@@ -971,7 +971,41 @@ def _render_seedance_script_pass(script_json: Dict[str, Any], limits: Dict[str, 
     return "\n\n".join(section for section in sections if section).strip()
 
 
+def _render_reality_video_generation_brief(script_json: Dict[str, Any]) -> str:
+    brief = script_json.get("video_generation_brief")
+    if not isinstance(brief, dict) or not brief:
+        return ""
+    character = brief.get("character") if isinstance(brief.get("character"), dict) else {}
+    scene = brief.get("scene") if isinstance(brief.get("scene"), dict) else {}
+    passages = [
+        item for item in brief.get("macro_visual_passages", []) if isinstance(item, dict)
+    ]
+    passage_lines = [
+        f"{index}. "
+        + _merge_brief_parts(
+            item.get("visible_process", ""),
+            item.get("observable_action", ""),
+            item.get("camera_observation", ""),
+        )
+        for index, item in enumerate(passages, 1)
+    ]
+    lines = [
+        "【视频生成主说明】",
+        f"人物：{_merge_brief_parts(character.get('identity', ''), character.get('appearance', ''), character.get('hair_makeup', ''))}",
+        f"场景：{_merge_brief_parts(scene.get('location', ''), scene.get('moment', ''), scene.get('lighting', ''), scene.get('background', ''))}",
+        f"穿搭：{_compact_text(brief.get('outfit', ''))}",
+        f"生活事件：{_compact_text(brief.get('natural_behavior_mainline', ''))}",
+        "三段画面：" + ("\n" + "\n".join(passage_lines) if passage_lines else ""),
+        f"执行重点：{_compact_text(brief.get('render_focus', ''))}",
+        f"连续口播：{_compact_text(brief.get('continuous_voiceover', ''))}",
+    ]
+    return "\n".join(line for line in lines if not line.endswith("：")).strip()
+
+
 def _render_seedance_script(script_json: Dict[str, Any]) -> str:
+    compact_reality_brief = _render_reality_video_generation_brief(script_json)
+    if compact_reality_brief:
+        return compact_reality_brief
     passes = [
         {
             "scene": 56,
@@ -1169,7 +1203,12 @@ def _compress_video_prompt_pass(prompt_json: Dict[str, Any], second_pass: bool =
 def _hard_trim_video_prompt(prompt_json: Dict[str, Any], hard_max_chars: int) -> Dict[str, Any]:
     prompt = _normalize_video_prompt_payload(prompt_json)
     trimmed = dict(prompt)
-    shots = _merge_proof_shots(prompt.get("shot_execution", []) or [])
+    raw_shots = prompt.get("shot_execution", []) or []
+    has_structure_plan = any(
+        isinstance(shot, dict) and str(shot.get("structure_beat") or "").strip()
+        for shot in raw_shots
+    )
+    shots = list(raw_shots) if has_structure_plan else _merge_proof_shots(raw_shots)
     aggressively_trimmed: List[Dict[str, Any]] = []
     for shot in shots:
         aggressively_trimmed.append(

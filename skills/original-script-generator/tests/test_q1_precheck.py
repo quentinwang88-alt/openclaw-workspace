@@ -15,6 +15,7 @@ if str(SKILL_DIR) not in sys.path:
 
 from core.pipeline import OriginalScriptPipeline  # noqa: E402
 from core.prompts import build_script_review_prompt  # noqa: E402
+from core.json_parser import validate_review_payload  # noqa: E402
 
 
 def _anchor_card() -> dict:
@@ -262,6 +263,16 @@ class Q1PrecheckTest(unittest.TestCase):
 
         self.assertIn("代码侧 Q1 precheck 结果", prompt)
         self.assertIn("不要重新辩论", prompt)
+
+    def test_review_can_pass_without_repeating_full_script(self) -> None:
+        payload = {
+            "pass": True,
+            "major_issues": [],
+            "minor_issues": [],
+            "repair_actions": [],
+            "repaired_script": {},
+        }
+        validate_review_payload(payload, target_language="English")
 
     def test_review_prompt_uses_compact_q1_context(self) -> None:
         prompt = build_script_review_prompt(

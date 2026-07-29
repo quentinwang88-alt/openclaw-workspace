@@ -158,6 +158,22 @@ class FinalVideoPromptAnchorsTest(unittest.TestCase):
         self.assertIn("口播是信息主线", rendered)
         self.assertIn("BGM 在口播出现时自动压低", rendered)
 
+    def test_structure_fields_survive_validation_and_compression(self) -> None:
+        prompt = self._base_prompt()
+        for index, shot in enumerate(prompt["shot_execution"]):
+            shot["structure_beat"] = "HOOK" if index == 0 else "PROOF"
+            shot["carrier_mode"] = "WEARER_ACTIVE"
+            shot["continuity_group"] = f"C{index + 1}"
+            shot["opening_mechanism"] = "PERSON_REVEAL" if index == 0 else ""
+
+        validate_video_prompt_payload(prompt)
+        compressed = compress_final_video_prompt_payload(prompt, preferred_max_chars=220, hard_max_chars=300)
+
+        self.assertEqual(len(compressed["shot_execution"]), 4)
+        self.assertEqual(compressed["shot_execution"][0]["structure_beat"], "HOOK")
+        self.assertEqual(compressed["shot_execution"][0]["opening_mechanism"], "PERSON_REVEAL")
+        self.assertEqual(compressed["shot_execution"][3]["continuity_group"], "C4")
+
     def test_template_video_prompt_includes_sound_design(self) -> None:
         pipeline = self._build_pipeline()
         script_json = {
