@@ -1,0 +1,4 @@
+interface:
+  display_name: "人工上传视频配口播"
+  short_description: "通过自然语言执行人工上传视频的中央口播和表格回写流程"
+  default_prompt: "Use $manual-upload-voiceover to process pending manually uploaded videos and write the localized copy and Chinese translation back to Feishu."
