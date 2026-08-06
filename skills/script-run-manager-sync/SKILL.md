@@ -5,6 +5,7 @@ description: |
   每条脚本单独新增一条目标记录，默认把产品编码和脚本槽位写入任务名（例如 `产品编码.S1`、`产品编码.S1V1`）、把详细脚本写入提示词、把产品图片写入参考图。
   支持正式脚本和 20 个变体脚本，总计最多 24 条脚本；同步成功后自动取消源表勾选，并回写同步状态与同步时间。
   同时支持“人工短视频脚本库”：用户可在飞书勾选 `立即同步` 让 OpenClaw 在一分钟内触发单条同步，或在对话中说“立即同步人工脚本库”。
+  对新“原创视频生产脚本”表，用户说“同步勾选原创脚本”“把勾选脚本送生产”“检查进入生产的脚本”“同步产品 173... 的原创生产脚本”时，必须使用 `scripts/openclaw_original_batch_sync.py`；只同步勾选`进入生产`的一行一条脚本。
 ---
 
 # Script Run Manager Sync
@@ -48,6 +49,43 @@ python3 /Users/likeu3/.openclaw/workspace/skills/script-run-manager-sync/run_pip
 ```bash
 python3 /Users/likeu3/.openclaw/workspace/skills/script-run-manager-sync/run_pipeline.py --mode scheduled
 ```
+
+新的“一行一条脚本”原创生产表使用独立兼容入口：
+
+```bash
+python3 /Users/likeu3/.openclaw/workspace/skills/script-run-manager-sync/run_pipeline.py \
+  --source-kind original-batch --dry-run
+
+python3 /Users/likeu3/.openclaw/workspace/skills/script-run-manager-sync/run_pipeline.py \
+  --source-kind original-batch
+```
+
+该入口只读取 `原创视频生产脚本` 中勾选了 `进入生产` 的行，一行直接对应一个运行管理任务。它使用上游 `脚本ID` 幂等同步，把 `视频生成提示词` 写入运行表 `提示词`，同步成功后取消勾选并回写 `处理状态=已送生产`、同步结果、同步时间和运行任务ID。旧 `production` 来源的 S1-S4/变体拆分逻辑保持不变。
+
+### OpenClaw 原创生产脚本命令路由
+
+唯一入口：
+
+```bash
+python3 /Users/likeu3/.openclaw/workspace/skills/script-run-manager-sync/scripts/openclaw_original_batch_sync.py <check|sync> [白名单参数]
+```
+
+| 用户表达示例 | 执行方式 |
+| --- | --- |
+| “检查勾选进入生产的原创脚本” | `check --limit 20`，只预览，不写表 |
+| “同步勾选的原创脚本到运行管理表” | `sync --limit 20` |
+| “同步产品 1734482585843304442 的勾选原创脚本” | `sync --product-code 1734482585843304442` |
+| “把 recXXXX 这条原创生产脚本送生产” | `sync --record-id recXXXX --limit 1` |
+
+只接受 `record_id`（`rec`开头）、`product_code`（8–30位数字）和 1–20 的脚本处理上限。不得把自然语言拼进 shell，也不得处理未勾选`进入生产`的记录。同步进程本身有文件锁；重复运行按`脚本ID`更新/跳过，不能重复创建运行任务。
+
+OpenClaw 自动巡检应使用**命令型**任务、每两分钟执行一次：
+
+```bash
+python3 /Users/likeu3/.openclaw/workspace/skills/script-run-manager-sync/scripts/openclaw_original_batch_sync.py sync --limit 20
+```
+
+它只负责把勾选脚本送进运行管理表，不生成视频、不改写原创内容、也不调用模型。
 
 ## 常用参数
 

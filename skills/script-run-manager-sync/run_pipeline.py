@@ -26,6 +26,10 @@ from core.manual_source import (  # noqa: E402
     resolve_manual_field_mapping,
     upsert_manual_metadata,
 )
+from core.original_batch_source import (  # noqa: E402
+    build_original_batch_sync_tasks,
+    resolve_original_batch_field_mapping,
+)
 from core.sync import (  # noqa: E402
     RUN_MANAGER_SCRIPT_TYPE_OPTIONS,
     SOURCE_FIELD_ALIASES,
@@ -55,6 +59,10 @@ DEFAULT_TARGET_FEISHU_URL = (
 DEFAULT_MANUAL_SOURCE_FEISHU_URL = (
     "https://gcngopvfvo0q.feishu.cn/wiki/"
     "LUfYwCLiTidK26kwTFBcrIignuI?table=tblyaHzECcsu4hyo&view=vewayNJu3z"
+)
+DEFAULT_ORIGINAL_BATCH_SOURCE_FEISHU_URL = (
+    "https://gcngopvfvo0q.feishu.cn/wiki/"
+    "KsX7w8Y8ZiJfnsk2Mtvc7xLun1f?table=tblIvHJ0nsn9WCwi&view=vewKfXc8lj"
 )
 DEFAULT_METADATA_DB_PATH = os.environ.get(
     "SHORT_VIDEO_AUTO_PUBLISH_DB_PATH",
@@ -337,7 +345,12 @@ def transfer_reference_images(
 def main() -> None:
     parser = argparse.ArgumentParser(description="原创视频脚本 -> 运行管理表 同步任务")
     parser.add_argument("--mode", choices=["manual", "scheduled"], default="manual", help="触发模式")
-    parser.add_argument("--source-kind", choices=["production", "manual"], default="production", help="源表类型")
+    parser.add_argument(
+        "--source-kind",
+        choices=["production", "manual", "original-batch"],
+        default="production",
+        help="源表类型；original-batch 为一行一条的原创视频生产脚本表",
+    )
     parser.add_argument("--source-feishu-url", help="源表飞书 URL；未传时按源表类型使用默认表")
     parser.add_argument("--target-feishu-url", default=DEFAULT_TARGET_FEISHU_URL, help="目标表飞书 URL")
     parser.add_argument("--limit", type=int, help="限制同步脚本条数")
@@ -362,9 +375,12 @@ def _main_with_lock(args: argparse.Namespace) -> None:
 
     print(f"🚀 开始执行同步任务 | mode={args.mode} | source_kind={args.source_kind}")
 
-    source_feishu_url = args.source_feishu_url or (
-        DEFAULT_MANUAL_SOURCE_FEISHU_URL if args.source_kind == "manual" else DEFAULT_SOURCE_FEISHU_URL
-    )
+    default_source_urls = {
+        "manual": DEFAULT_MANUAL_SOURCE_FEISHU_URL,
+        "original-batch": DEFAULT_ORIGINAL_BATCH_SOURCE_FEISHU_URL,
+        "production": DEFAULT_SOURCE_FEISHU_URL,
+    }
+    source_feishu_url = args.source_feishu_url or default_source_urls[args.source_kind]
     source_app_token, source_table_id = resolve_feishu_config(source_feishu_url)
     target_app_token, target_table_id = resolve_feishu_config(args.target_feishu_url)
 
@@ -373,15 +389,21 @@ def _main_with_lock(args: argparse.Namespace) -> None:
 
     source_field_names = source_client.list_field_names()
     target_field_names = ensure_target_default_fields(target_client, target_client.list_field_names())
-    source_mapping = (
-        resolve_manual_field_mapping(source_field_names)
-        if args.source_kind == "manual"
-        else resolve_field_mapping(source_field_names, SOURCE_FIELD_ALIASES)
-    )
+    if args.source_kind == "manual":
+        source_mapping = resolve_manual_field_mapping(source_field_names)
+    elif args.source_kind == "original-batch":
+        source_mapping = resolve_original_batch_field_mapping(source_field_names)
+    else:
+        source_mapping = resolve_field_mapping(source_field_names, SOURCE_FIELD_ALIASES)
     target_mapping = resolve_field_mapping(target_field_names, TARGET_FIELD_ALIASES)
 
     if args.source_kind == "manual":
         validate_required_fields(source_mapping, ["script_id", "script", "purpose", "store_id", "sync_enabled"])
+    elif args.source_kind == "original-batch":
+        validate_required_fields(
+            source_mapping,
+            ["script_id", "product_code", "product_images", "video_prompt", "sync_enabled"],
+        )
     else:
         validate_required_fields(
             source_mapping,
@@ -412,6 +434,14 @@ def _main_with_lock(args: argparse.Namespace) -> None:
         sync_tasks = manual_result.tasks
         manual_script_ids = manual_result.script_ids
         preflight_errors = manual_result.errors
+    elif args.source_kind == "original-batch":
+        sync_tasks = build_original_batch_sync_tasks(
+            source_records,
+            source_mapping,
+            product_code=args.product_code,
+            record_id=args.record_id,
+            limit=args.limit,
+        )
     else:
         sync_tasks = build_sync_tasks(
             source_records,
@@ -501,7 +531,7 @@ def _main_with_lock(args: argparse.Namespace) -> None:
                         print(f"   ⚠️ {conflict_reason} | task={task.task_name}")
                         continue
                     allow_full_patch = (
-                        existing_reason != "脚本ID" or args.source_kind == "manual"
+                    existing_reason != "脚本ID" or args.source_kind == "manual"
                     ) and can_update_existing_target(existing_target, target_mapping)
                     existing_updates = build_existing_target_updates(
                         existing_target,
@@ -510,7 +540,7 @@ def _main_with_lock(args: argparse.Namespace) -> None:
                         allow_full_patch=allow_full_patch,
                     )
                     if (
-                        args.source_kind == "manual"
+                        args.source_kind in {"manual", "original-batch"}
                         and allow_full_patch
                         and task.reference_images
                         and target_mapping.get("reference_images")
@@ -544,10 +574,11 @@ def _main_with_lock(args: argparse.Namespace) -> None:
             if unresolved_tasks:
                 raise RuntimeError("；".join(unresolved_tasks[:5]))
 
+            created_target_ids = []
             for batch in batch_records(prepared_creates, batch_size=args.batch_size):
                 if not batch:
                     continue
-                target_client.batch_create_records(batch)
+                created_target_ids.extend(target_client.batch_create_records(batch))
                 created += len(batch)
                 print(f"   ✅ source_record_id={source_record_id} 已创建 {len(batch)} 条")
 
@@ -566,6 +597,13 @@ def _main_with_lock(args: argparse.Namespace) -> None:
                 cleared_master=master_enabled,
                 cleared_variant=variant_enabled,
             )
+            if args.source_kind == "original-batch":
+                if source_mapping.get("processing_status"):
+                    success_fields[source_mapping["processing_status"]] = "已送生产"
+                if source_mapping.get("sync_time"):
+                    success_fields[source_mapping["sync_time"]] = int(time.time() * 1000)
+                if source_mapping.get("run_task_id") and created_target_ids:
+                    success_fields[source_mapping["run_task_id"]] = created_target_ids[0]
             script_id_field = source_mapping.get("script_id")
             if args.source_kind == "manual" and script_id_field and manual_script_ids.get(source_record_id):
                 success_fields[script_id_field] = manual_script_ids[source_record_id]
@@ -580,6 +618,10 @@ def _main_with_lock(args: argparse.Namespace) -> None:
                 synced_at=synced_at,
                 sync_scope="人工脚本" if args.source_kind == "manual" else summarize_sync_scope(source_tasks),
             )
+            if args.source_kind == "original-batch" and source_mapping.get("processing_status"):
+                failure_fields[source_mapping["processing_status"]] = "同步失败"
+            if args.source_kind == "original-batch" and source_mapping.get("sync_time"):
+                failure_fields[source_mapping["sync_time"]] = int(time.time() * 1000)
             script_id_field = source_mapping.get("script_id")
             if args.source_kind == "manual" and script_id_field and manual_script_ids.get(source_record_id):
                 failure_fields[script_id_field] = manual_script_ids[source_record_id]
