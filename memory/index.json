@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-05-29T10:13:00+08:00",
+  "updatedAt": "2026-07-05T09:28:27+08:00",
   "policy": {
     "purpose": "Deduplicate and update recurring memory events before appending to daily memory or promoting to MEMORY.md.",
     "dailyMemory": "Allow progress updates for the same task, but use the same fingerprint when the task identity is the same.",
@@ -611,6 +611,32 @@
       "summary": "Indexed the May 29 video-remake-lite sync review and verified memory/MEMORY.md contained no raw transcript or auth patterns.",
       "firstSeenAt": "2026-05-29T10:13:00+08:00",
       "lastSeenAt": "2026-05-29T10:13:00+08:00",
+      "count": 1
+    },
+    "feishu:short-video-ops:create-lightweight-video-tables:2026-07-05:done": {
+      "fingerprint": "feishu:short-video-ops:create-lightweight-video-tables:2026-07-05:done",
+      "category": "feishu",
+      "project": "short-video-ops",
+      "subject": "create-lightweight-video-tables",
+      "date": "2026-07-05",
+      "status": "done",
+      "dailyPath": "memory/2026-07-05.md",
+      "summary": "创建飞书多维表：当地爆款视频拆解表、短视频选题会前准备表。字段验收：拆解表15列，选题准备表16列；想验证的视频方向为文本，AI可补素材为多选。视图名称已创建；日期类动态筛选/表格说明受 Feishu OpenAPI 限制需前端确认。新增脚本 scripts/create_short_video_ops_tables.py，支持从本周重点产品池同步已采纳/待短视频运营准备记录，本次同步新增0条。",
+      "firstSeenAt": "2026-07-05T09:27:30+08:00",
+      "lastSeenAt": "2026-07-05T09:27:30+08:00",
+      "count": 1
+    },
+    "cron:short-video-ops:topic-prep-sync-cron:2026-07-05:enabled": {
+      "fingerprint": "cron:short-video-ops:topic-prep-sync-cron:2026-07-05:enabled",
+      "category": "cron",
+      "project": "short-video-ops",
+      "subject": "topic-prep-sync-cron",
+      "date": "2026-07-05",
+      "status": "enabled",
+      "dailyPath": "memory/2026-07-05.md",
+      "summary": "新增 OpenClaw cron：short-video-topic-prep-sync-every-30m，每30分钟尝试运行 scripts/create_short_video_ops_tables.py --sync-only，将本周重点产品池中处理状态为已采纳/待短视频运营准备且未创建过的产品同步到短视频选题会前准备表。",
+      "firstSeenAt": "2026-07-05T09:28:27+08:00",
+      "lastSeenAt": "2026-07-05T09:28:27+08:00",
       "count": 1
     }
   }
