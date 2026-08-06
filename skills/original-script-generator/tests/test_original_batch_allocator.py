@@ -23,7 +23,6 @@ from core.original_batch_allocator import (
     build_content_bundle_candidates,
     _eligible_hooks_for_bundle,
     _relationship_schedule,
-    _relationship_device_for_item,
 )
 
 # ── Helpers ────────────────────────────────────────────────────────────
@@ -238,20 +237,50 @@ class BatchStorageTest(unittest.TestCase):
 # ── Allocator tests ────────────────────────────────────────────────────
 
 class BatchAllocatorTest(unittest.TestCase):
-    def test_relationship_schedule_is_deterministic_and_keeps_small_mix_light(self):
+    def test_wearable_five_script_batch_targets_four_creator_directions(self):
+        directions = [
+            _fake_direction("DA_W1", "S1", cluster_id=1, carrier="WEARER_ACTIVE"),
+            _fake_direction("DA_W2", "S2", cluster_id=2, carrier="WEARER_ACTIVE"),
+            _fake_direction("DA_H", "S3", cluster_id=3, carrier="HAND_ONLY"),
+            _fake_direction("DA_S", "S4", cluster_id=4, carrier="STATIC_PRODUCT"),
+        ]
+
+        items, summary = allocate_batch_items(
+            product_code="P1",
+            requested_count=5,
+            directions=directions,
+            anchor_card=_fake_anchor_card(),
+            active_hook_ids=[
+                "DETAIL_SURPRISE", "AUDIENCE_NEED_CALLOUT",
+                "DISCOVERY_RESULT_PROMISE", "GENERAL_PRODUCT_SHARE",
+            ],
+            creative_policy_version="test-v1",
+            random_seed=42,
+            selling_point_catalog=_fake_selling_catalog(),
+            product_type="外套",
+            top_category="女装",
+            scene_reference_contexts={},
+        )
+
+        person_count = sum(
+            item.carrier_mode in {"WEARER_ACTIVE", "MIXED", "PERSON_ON_CAMERA"}
+            for item in items
+        )
+        self.assertEqual(len(items), 5)
+        self.assertEqual(person_count, 4)
+        self.assertEqual(
+            summary["capture_mode_distribution"],
+            {"CREATOR_SELF_SHOT": 4, "HANDS_PRODUCT_SHARE": 1},
+        )
+
+    def test_relationship_schedule_delegates_surface_language_to_hook(self):
         first = _relationship_schedule(10, __import__("random").Random(17))
         second = _relationship_schedule(10, __import__("random").Random(17))
         self.assertEqual(first, second)
-        self.assertEqual(first.count("AUDIENCE_ADDRESS"), 3)
-        self.assertEqual(first.count("VIEWER_REFERENCE"), 2)
+        self.assertEqual(first, ["HOOK_DECIDES"] * 10)
 
         small = _relationship_schedule(3, __import__("random").Random(17))
-        self.assertEqual(small.count("AUDIENCE_ADDRESS"), 1)
-        self.assertEqual(small.count("VIEWER_REFERENCE"), 1)
-        self.assertEqual(
-            _relationship_device_for_item("DETAIL_SURPRISE", "AUDIENCE_ADDRESS"),
-            "VIEWER_INVITATION",
-        )
+        self.assertEqual(small, ["HOOK_DECIDES"] * 3)
 
     def test_allocate_two_items_returns_two_structure_mothers(self):
         items, summary = allocate_batch_items(
@@ -270,7 +299,11 @@ class BatchAllocatorTest(unittest.TestCase):
         frozen = json.loads(items[0].frozen_direction_package_json)
         self.assertEqual(
             frozen["simplified_creative_seed"]["schema_version"],
-            "simplified-creative-seed-v6-audience-relation",
+            "simplified-creative-seed-v11-outfit-contract",
+        )
+        self.assertIn(
+            frozen["simplified_creative_seed"]["creative_direction"]["opening_visual_job"]["job"],
+            {"SHOW_RESULT", "SHOW_DETAIL", "SHOW_USE_SCENE", "PRODUCT_FIRST"},
         )
         self.assertIn(
             frozen["simplified_creative_seed"]["voiceover_surface_contract"]["relationship_device"],
@@ -407,6 +440,48 @@ class BatchAllocatorTest(unittest.TestCase):
             for entry in summary["deferred_content"]
         ))
 
+    def test_explicit_product_variant_mismatch_is_deferred_before_generation(self):
+        anchor = _fake_anchor_card()
+        anchor["identity_anchors"] = ["当前参考商品为米白色短款外套"]
+        items, summary = allocate_batch_items(
+            product_code="P1",
+            requested_count=1,
+            directions=[_fake_direction("DA1", "S1")],
+            anchor_card=anchor,
+            active_hook_ids=["GENERAL_PRODUCT_SHARE"],
+            creative_policy_version="test-v1",
+            random_seed=42,
+            selling_point_catalog=[{
+                "value_id": "ARG_BLACK_STYLE",
+                "primary_selling_point": "黑色款有酷感和机车感",
+                "operator_expression": "黑色款有酷感和机车感",
+                "argument_kind": "SELLING_ARGUMENT",
+            }],
+        )
+        self.assertEqual(items, [])
+        self.assertTrue(any(
+            entry.get("downgrade_reason") == "VARIANT_MISMATCH"
+            for entry in summary["deferred_content"]
+        ))
+
+    def test_unknown_variant_does_not_block_operator_argument(self):
+        items, _summary = allocate_batch_items(
+            product_code="P1",
+            requested_count=1,
+            directions=[_fake_direction("DA1", "S1")],
+            anchor_card=_fake_anchor_card(),
+            active_hook_ids=["GENERAL_PRODUCT_SHARE"],
+            creative_policy_version="test-v1",
+            random_seed=42,
+            selling_point_catalog=[{
+                "value_id": "ARG_BLACK_STYLE",
+                "primary_selling_point": "黑色款有酷感和机车感",
+                "operator_expression": "黑色款有酷感和机车感",
+                "argument_kind": "SELLING_ARGUMENT",
+            }],
+        )
+        self.assertEqual(len(items), 1)
+
     def test_two_arguments_fill_four_distinct_compatible_structures(self):
         catalog = [
             {
@@ -450,7 +525,7 @@ class BatchAllocatorTest(unittest.TestCase):
         self.assertEqual(sorted(argument_counts.values()), [2, 2])
         self.assertEqual(summary["allocation_status"], "COMPLETE")
 
-    def test_one_argument_is_capped_at_two_even_with_four_structures(self):
+    def test_one_argument_can_rotate_across_four_distinct_structures(self):
         catalog = [{
             "value_id": "ARG_ONLY",
             "primary_selling_point": "版型对身形有视觉包容感",
@@ -472,9 +547,56 @@ class BatchAllocatorTest(unittest.TestCase):
             random_seed=42,
             selling_point_catalog=catalog,
         )
-        self.assertEqual(len(items), 2)
-        self.assertEqual(len({item.cluster_id for item in items}), 2)
-        self.assertEqual(summary["allocation_status"], "PARTIAL_CONTENT_CAPACITY")
+        self.assertEqual(len(items), 4)
+        self.assertEqual(len({item.cluster_id for item in items}), 4)
+        self.assertEqual(summary["allocation_status"], "COMPLETE")
+
+    def test_five_arguments_are_balanced_across_twelve_plans(self):
+        catalog = [
+            {
+                "value_id": f"OPERATOR_S{index}",
+                "source_argument_id": f"S{index}",
+                "primary_selling_point": f"人工确认卖点{index}",
+                "argument_kind": "SELLING_ARGUMENT",
+                "source": "FEISHU_OPERATOR_CONFIRMED_ARGUMENT",
+                "authority": "FEISHU_OPERATOR_CONFIRMED",
+                "verification_status": "OPERATOR_CONFIRMED",
+                "mapping_status": "UNMAPPED" if index > 2 else "MAPPED",
+                "allowed_strength": "soft_only",
+                "visual_dependency": "FLEXIBLE",
+                "compatible_carriers": [],
+            }
+            for index in range(1, 6)
+        ]
+        directions = [
+            _fake_direction(
+                f"DA{index}", f"S{index}", cluster_id=index,
+                carrier=("STATIC_PRODUCT" if index == 4 else "WEARER_ACTIVE"),
+                macro_family=f"HOOK>PROOF>{index}",
+            )
+            for index in range(1, 5)
+        ]
+        items, summary = allocate_batch_items(
+            product_code="P1",
+            requested_count=12,
+            directions=directions,
+            anchor_card=_fake_anchor_card(),
+            active_hook_ids=[
+                "DETAIL_SURPRISE", "AUDIENCE_NEED_CALLOUT",
+                "DISCOVERY_RESULT_PROMISE", "GENERAL_PRODUCT_SHARE",
+                "USER_ADVOCACY_STANCE", "VISUAL_RESULT_DIRECT",
+            ],
+            creative_policy_version="test-v1",
+            random_seed=42,
+            selling_point_catalog=catalog,
+        )
+        counts = sorted(summary["selling_argument_distribution"].values())
+        self.assertEqual(len(items), 12)
+        self.assertEqual(summary["allocation_status"], "COMPLETE")
+        self.assertEqual(summary["used_selling_argument_count"], 5)
+        self.assertEqual(summary["selling_argument_usage_spread"], 1)
+        self.assertEqual(counts, [2, 2, 2, 3, 3])
+        self.assertEqual(len({item.allocation_signature for item in items}), 12)
 
     def test_flexible_benefit_remains_available_for_static_structure(self):
         items, summary = allocate_batch_items(
@@ -583,14 +705,26 @@ class BatchAllocatorTest(unittest.TestCase):
                 it.creative_contract_id,
             )
 
-    def test_eligible_hooks_exclude_pain_reframe_no_tension(self):
+    def test_eligible_hooks_exclude_tension_dependent_archetypes_without_tension(self):
         bundle = {
-            "eligible_hook_ids": ["AUDIENCE_NEED_CALLOUT", "PAIN_REFRAME", "DETAIL_SURPRISE"],
+            "eligible_hook_ids": [
+                "AUDIENCE_NEED_CALLOUT", "PAIN_REFRAME",
+                "USER_ADVOCACY_STANCE", "DETAIL_SURPRISE",
+            ],
             "audience_tension_status": "UNAVAILABLE",
         }
-        eligible, suppressed = _eligible_hooks_for_bundle(bundle, ["AUDIENCE_NEED_CALLOUT", "PAIN_REFRAME", "DETAIL_SURPRISE"])
-        self.assertNotIn("PAIN_REFRAME", eligible)
-        self.assertIn("PAIN_REFRAME", suppressed)
+        eligible, suppressed = _eligible_hooks_for_bundle(
+            bundle,
+            [
+                "AUDIENCE_NEED_CALLOUT", "PAIN_REFRAME",
+                "USER_ADVOCACY_STANCE", "DETAIL_SURPRISE",
+            ],
+        )
+        self.assertEqual(eligible, ["DETAIL_SURPRISE"])
+        self.assertEqual(
+            suppressed,
+            ["AUDIENCE_NEED_CALLOUT", "PAIN_REFRAME", "USER_ADVOCACY_STANCE"],
+        )
 
     def test_eligible_hooks_allows_pain_reframe_with_tension(self):
         bundle = {

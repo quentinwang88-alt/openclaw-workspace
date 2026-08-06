@@ -21,11 +21,12 @@ from core.original_batch_models import (
 from core.original_batch_storage import POLICY_VERSION
 from core.original_batch_storage import BatchStorage
 from core.original_batch_allocator import allocate_batch_items, build_content_bundle_candidates
+from core.complete_script_v3 import CREATIVE_DIVERSITY_POLICY_VERSION
 
 
 STAGE_CHECKPOINT_SCHEMA_VERSION = "original-batch-stage-checkpoint-v1"
 VISUAL_PROJECTION_CHECKPOINT_VERSION = "event-projection-v2"
-VOICEOVER_CHECKPOINT_VERSION = "central-complete-voiceover-v5-audience-relation"
+VOICEOVER_CHECKPOINT_VERSION = "central-complete-voiceover-v7-governed-hook-path"
 BLUEPRINT_PRIMARY_TRANSIENT_ATTEMPTS = max(
     1, int(os.environ.get("ORIGINAL_SCRIPT_BLUEPRINT_PRIMARY_TRANSIENT_ATTEMPTS", "2"))
 )
@@ -289,7 +290,10 @@ def load_product_context(
     *,
     target_country: str = "",
     target_language: str = "",
+    top_category: str = "",
+    product_type: str = "",
     voiceover_root: str = "",
+    allow_missing_structure_route: bool = False,
 ) -> Dict[str, Any]:
     """Load the authoritative product context from the most recent successful run."""
     from core.storage import PipelineStorage
@@ -299,20 +303,58 @@ def load_product_context(
     if not runs:
         raise RuntimeError(f"找不到产品 {product_code} 的原创脚本历史运行记录")
 
+    found_non_stage0 = False
+    found_anchor = False
+    found_route = False
     for row in runs:
         record_id = str(row["record_id"] or "")
         if record_id.startswith("stage0-reality:"):
             continue
+        found_non_stage0 = True
 
         anchor = storage.get_latest_stage_output_json(record_id, "anchor_card", product_code)
         route = storage.get_latest_stage_output_json(record_id, "structure_route", product_code)
-        if anchor and route:
+        found_anchor = found_anchor or bool(anchor)
+        found_route = found_route or bool(route)
+        if anchor and (route or allow_missing_structure_route):
+            route = route or {
+                "status": "REBUILD_REQUIRED",
+                "request": {},
+                "assignments": [],
+                "source": "legacy_formal_anchor_without_structure_route",
+            }
             strategy = storage.get_latest_stage_output_json(record_id, "strategy_cards", product_code) or {}
 
-            country = target_country or _text(anchor.get("target_country") or route.get("request", {}).get("target_country", "泰国"))
-            language = target_language or _text(anchor.get("target_language") or route.get("request", {}).get("target_language", "泰语"))
-            product_type = _text(anchor.get("product_type") or route.get("request", {}).get("product_type", "外套"))
-            top_category = _text(anchor.get("top_category") or route.get("request", {}).get("category", "女装"))
+            def _run_value(key: str) -> str:
+                try:
+                    return _text(row[key])
+                except (KeyError, IndexError, TypeError):
+                    return ""
+
+            country = target_country or _text(
+                anchor.get("target_country")
+                or route.get("request", {}).get("target_country")
+                or _run_value("target_country")
+                or "泰国"
+            )
+            language = target_language or _text(
+                anchor.get("target_language")
+                or route.get("request", {}).get("target_language")
+                or _run_value("target_language")
+                or "泰语"
+            )
+            resolved_product_type = product_type or _text(
+                anchor.get("product_type")
+                or route.get("request", {}).get("product_type")
+                or _run_value("product_type")
+                or "外套"
+            )
+            resolved_top_category = top_category or _text(
+                anchor.get("top_category")
+                or route.get("request", {}).get("category")
+                or _run_value("top_category")
+                or "女装"
+            )
 
             # The central engine is the governance authority for reviewed
             # selling claims.  Legacy strategy cards remain a fallback, not a
@@ -328,7 +370,10 @@ def load_product_context(
             )
             central_catalog = list(central_snapshot.get("catalog") or [])
             legacy_catalog = list(strategy.get("selling_point_catalog", []) or [])
-            combined_catalog = [*central_catalog, *legacy_catalog]
+            # Operator-confirmed central arguments are the current semantic
+            # authority.  Legacy strategy rows are a fallback only; appending
+            # both would reintroduce stale or duplicate value directions.
+            combined_catalog = central_catalog or legacy_catalog
 
             return {
                 "source_run_id": row["run_id"],
@@ -337,20 +382,45 @@ def load_product_context(
                 "product_code": product_code,
                 "target_country": country,
                 "target_language": language,
-                "product_type": product_type,
-                "top_category": top_category,
+                "product_type": resolved_product_type,
+                "top_category": resolved_top_category,
                 "anchor_card": anchor,
                 "structure_route": route,
                 "selling_point_catalog": combined_catalog,
                 "selling_point_catalog_snapshot": central_snapshot,
                 "selling_point_catalog_sources": {
-                    "central_verified_count": len(central_catalog),
+                    "central_confirmed_count": int(
+                        central_snapshot.get("confirmed_argument_count") or 0
+                    ),
+                    "central_available_count": int(
+                        central_snapshot.get("available_argument_count") or len(central_catalog)
+                    ),
+                    "central_mapped_count": int(
+                        central_snapshot.get("mapped_argument_count") or 0
+                    ),
+                    "central_unmapped_count": int(
+                        central_snapshot.get("unmapped_argument_count") or 0
+                    ),
                     "legacy_strategy_count": len(legacy_catalog),
+                    "selected_source": "central_operator" if central_catalog else "legacy_strategy",
                 },
                 "product_selling_note": _text(anchor.get("product_selling_note") or strategy.get("product_selling_note", "")),
             }
 
-    raise RuntimeError(f"产品 {product_code} 只有 stage0 测试记录，没有正式生产 run，无法确定产品权威上下文")
+    if not found_non_stage0:
+        raise RuntimeError(
+            f"产品 {product_code} 只有 stage0 测试记录，没有正式生产 run，无法确定产品权威上下文"
+        )
+    if not found_anchor:
+        raise RuntimeError(
+            f"产品 {product_code} 存在正式生产 run，但缺少 anchor_card；需要先完成产品锚点生成"
+        )
+    if not found_route:
+        raise RuntimeError(
+            f"产品 {product_code} 的旧正式 run 有 anchor_card 但没有 structure_route；"
+            "legacy 路径不能继续，simplified_v1 应重新选择当前结构"
+        )
+    raise RuntimeError(f"产品 {product_code} 没有可兼容的正式产品上下文")
 
 
 def _allowed_structure_carriers(
@@ -496,8 +566,32 @@ def run_plan_only(
         request.product_code,
         target_country=request.target_country,
         target_language=request.target_language,
+        top_category=request.top_category,
+        product_type=request.product_type,
         voiceover_root=voiceover_root,
+        allow_missing_structure_route=request.script_mode == "simplified_v1",
     )
+    from core.category_execution import (
+        compile_category_execution_extension,
+        reconcile_anchor_category_contract,
+    )
+
+    ctx["anchor_card"] = reconcile_anchor_category_contract(
+        ctx["anchor_card"],
+        product_type=ctx["product_type"],
+        top_category=ctx["top_category"],
+    )
+    category_execution_extension = compile_category_execution_extension(
+        product_type=ctx["product_type"],
+        top_category=ctx["top_category"],
+        anchor_card=ctx["anchor_card"],
+    )
+    if request.script_mode == "simplified_v1" and not ctx.get("selling_point_catalog"):
+        snapshot = ctx.get("selling_point_catalog_snapshot") or {}
+        raise RuntimeError(
+            "CENTRAL_SELLING_ARGUMENT_UNAVAILABLE: 中央卖点库没有该产品可用于原创的"
+            f" VERIFIED benefit/visual_result；catalog_status={snapshot.get('status', 'UNAVAILABLE')}"
+        )
     from core.storage import PipelineStorage
 
     creative_storage: Any = None
@@ -548,6 +642,7 @@ def run_plan_only(
                 ctx["selling_point_catalog"]
             ),
             recent_cluster_usage=recent_cluster_usage,
+            category_execution_extension=category_execution_extension,
         )
 
     # Build direction packages
@@ -557,6 +652,7 @@ def run_plan_only(
         anchor_card=ctx["anchor_card"],
         product_type=ctx["product_type"],
         top_category=ctx["top_category"],
+        category_execution_extension=category_execution_extension,
         direction_limit=min(request.requested_count, 4),
         recent_execution_card_ids=[],
         recent_source_video_ids=[],
@@ -578,22 +674,50 @@ def run_plan_only(
         directions=directions,
         anchor_card=ctx["anchor_card"],
         active_hook_ids=active_hooks,
-        creative_policy_version="creative-diversity-v1",
+        creative_policy_version=CREATIVE_DIVERSITY_POLICY_VERSION,
         random_seed=request.random_seed,
         recent_creative_usage=recent_creative_usage,
         selling_point_catalog=ctx["selling_point_catalog"],
         product_selling_note=ctx["product_selling_note"],
         product_type=ctx["product_type"],
         top_category=ctx["top_category"],
+        category_execution_extension=category_execution_extension,
     )
 
     # Persist batch
     input_snapshot = build_input_snapshot(
         ctx, planning_selection, active_hooks,
-        "creative-diversity-v1", POLICY_VERSION,
+        CREATIVE_DIVERSITY_POLICY_VERSION, POLICY_VERSION,
     )
     input_snapshot["script_mode"] = request.script_mode
     input_snapshot["recent_cluster_usage"] = recent_cluster_usage
+    if category_execution_extension:
+        input_snapshot["category_execution_extension"] = (
+            category_execution_extension
+        )
+    # Allocation has already frozen the selected scene reference into each
+    # item.  Recording that compact contract makes a PLAN_ONLY batch
+    # reproducible without a SCRIPT_ONLY RDS read.
+    input_snapshot["scene_reference_snapshot"] = [
+        {
+            "direction_assignment_id": item.direction_assignment_id,
+            "scene_reference_contract": (
+                (json.loads(item.frozen_direction_package_json or "{}").get("scene_reference_contract") or {})
+            ),
+        }
+        for item in items
+    ]
+    input_snapshot["outfit_template_snapshot"] = [
+        {
+            "direction_assignment_id": item.direction_assignment_id,
+            "outfit_selection_contract": (
+                (json.loads(item.frozen_direction_package_json or "{}")
+                 .get("creative_diversity_contract", {})
+                 .get("outfit_selection_contract") or {})
+            ),
+        }
+        for item in items
+    ]
     data_hash = build_data_snapshot_hash(input_snapshot)
 
     batch = BatchRecord(
@@ -778,7 +902,10 @@ def _execute_simplified_single_item(
 ) -> Dict[str, Any]:
     """Execute the thin one-pass visual script + central voiceover path."""
 
-    from core.complete_voiceover_direct import run_central_complete_voiceover
+    from core.complete_voiceover_direct import (
+        hook_knowledge_snapshot_hash,
+        run_central_complete_voiceover,
+    )
     from core.llm_client import OriginalScriptLLMClient
     from core.simplified_complete_script import (
         CREATIVE_SEED_SCHEMA_VERSION,
@@ -817,6 +944,9 @@ def _execute_simplified_single_item(
             item.product_code,
             target_country=batch.target_country,
             target_language=batch.target_language,
+            top_category=batch.top_category,
+            product_type=batch.product_type,
+            allow_missing_structure_route=True,
         )
         seed = build_simplified_creative_seed(
             anchor_card=ctx.get("anchor_card") or {},
@@ -922,6 +1052,7 @@ def _execute_simplified_single_item(
         "voiceover_visual_plan": visual_plan,
         "requested_hook_id": item.requested_hook_id,
         "voiceover_surface_contract": voiceover_surface_contract,
+        "hook_knowledge_snapshot_hash": hook_knowledge_snapshot_hash(),
         "model_command_hash": _stable_hash(voiceover_model_command),
     })
     voice_stage = checkpoint.setdefault("stages", {}).setdefault("voiceover", {})
@@ -949,7 +1080,12 @@ def _execute_simplified_single_item(
                 relationship_device=relationship_device,
             )
         except Exception as exc:
-            voice_stage["dependency_hash"] = voice_dependency_hash
+            # Never stamp a new dependency onto the previous successful plan.
+            # Otherwise a transient failure makes resume treat stale copy as a
+            # valid cache hit for the new hook/model/snapshot contract.
+            voice_stage.pop("plan", None)
+            voice_stage.pop("dependency_hash", None)
+            voice_stage["failed_dependency_hash"] = voice_dependency_hash
             _record_checkpoint_error(storage, item, checkpoint, "voiceover", exc)
             raise
         voice_stage.update({
@@ -1016,6 +1152,9 @@ def _execute_simplified_single_item(
                 "content_angle_key": item.content_angle_key,
                 "requested_hook_id": item.requested_hook_id,
                 "actual_hook_id": voiceover.get("hook_id", item.requested_hook_id),
+                "hook_knowledge_provenance": voiceover.get(
+                    "hook_knowledge_provenance", {}
+                ),
                 "preferred_presentation": seed.get("creative_direction", {}).get("preferred_presentation"),
             },
         ) or ""
@@ -1030,6 +1169,9 @@ def _execute_simplified_single_item(
         "content_id": content_id,
         "video_prompt_id": video_prompt_id,
         "actual_hook_id": voiceover.get("hook_id", item.requested_hook_id),
+        "hook_knowledge_provenance": voiceover.get(
+            "hook_knowledge_provenance", {}
+        ),
         "structure_binding_id": binding_id,
         "frozen_direction_package_schema_version": frozen.get("schema_version"),
         "creative_seed_id": seed.get("creative_seed_id"),
@@ -1076,7 +1218,10 @@ def _execute_single_item(
         validate_visual_adaptation,
         validate_voiceover_visual_grounding,
     )
-    from core.complete_voiceover_direct import run_central_complete_voiceover
+    from core.complete_voiceover_direct import (
+        hook_knowledge_snapshot_hash,
+        run_central_complete_voiceover,
+    )
     from core.structure_execution_compiler import compile_structure_execution_plan
     from core.structure_router_adapter import bind_structure_application
     from core.reality_reference_prompts import build_complete_script_blueprint_prompt
@@ -1257,6 +1402,7 @@ def _execute_single_item(
         "visual_plan": visual_plan,
         "requested_hook_id": item.requested_hook_id,
         "content_bundle": bundle,
+        "hook_knowledge_snapshot_hash": hook_knowledge_snapshot_hash(),
         "model_command_hash": _stable_hash(voiceover_model_command),
         "voiceover_qc_model_command_hash": _stable_hash(voiceover_qc_model_command),
     })
@@ -1284,7 +1430,9 @@ def _execute_single_item(
                 candidate_hook_id=item.requested_hook_id,
             )
         except Exception as exc:
-            voiceover_stage["dependency_hash"] = voiceover_dependency_hash
+            voiceover_stage.pop("plan", None)
+            voiceover_stage.pop("dependency_hash", None)
+            voiceover_stage["failed_dependency_hash"] = voiceover_dependency_hash
             _record_checkpoint_error(
                 storage, item, checkpoint, "voiceover", exc
             )
@@ -1346,6 +1494,9 @@ def _execute_single_item(
                 "audience_tension_status": item.audience_tension_status,
                 "requested_hook_id": item.requested_hook_id,
                 "actual_hook_id": actual_hook,
+                "hook_knowledge_provenance": voiceover.get(
+                    "hook_knowledge_provenance", {}
+                ),
                 "visual_signature": creative.get("visual_signature", ""),
             },
         ) or ""
@@ -1359,6 +1510,9 @@ def _execute_single_item(
         "content_id": _stable_id("CONTENT_", bundle),
         "video_prompt_id": _stable_id("VP_", script.get("storyboard", [])),
         "actual_hook_id": actual_hook,
+        "hook_knowledge_provenance": voiceover.get(
+            "hook_knowledge_provenance", {}
+        ),
         "structure_binding_id": binding_id,
         "frozen_direction_package_schema_version": frozen.get("schema_version"),
         "stage_cache": stage_cache,

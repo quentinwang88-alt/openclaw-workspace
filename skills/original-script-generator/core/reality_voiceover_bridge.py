@@ -552,6 +552,46 @@ def build_voiceover_variant_id(
     return "OSG_REAL_" + hashlib.sha256(source_key.encode("utf-8")).hexdigest()[:16].upper()
 
 
+def _creative_lived_moment_binding(
+    direction: Dict[str, Any], blueprint: Dict[str, Any]
+) -> Dict[str, Any]:
+    diversity = (
+        direction.get("creative_diversity_contract")
+        if isinstance(direction.get("creative_diversity_contract"), dict)
+        else {}
+    )
+    family_id = _text(diversity.get("moment_family_id"))
+    if not family_id:
+        return {}
+    scene = blueprint.get("scene") if isinstance(blueprint.get("scene"), dict) else {}
+    event = (
+        blueprint.get("event_design")
+        if isinstance(blueprint.get("event_design"), dict)
+        else {}
+    )
+    anchor = _text(event.get("natural_event") or scene.get("moment"))
+    if not anchor:
+        return {}
+    return {
+        "schema_version": "visual-lived-moment-v1",
+        "mapping_status": "FAMILY",
+        "moment_family_id": family_id,
+        "moment_signature": family_id,
+        "evidence_level": "UPSTREAM_BOUND",
+        "carrier": _text(diversity.get("required_presentation_mode")),
+        "raw_scene_signal": _text(
+            scene.get("location") or diversity.get("scene_motif")
+        ),
+        "raw_action_signal": _text(
+            event.get("natural_event") or diversity.get("opening_action")
+        ),
+        "speech_anchor_zh": anchor,
+        "source_slot_ids": [],
+        "confidence": 0.8,
+        "authority": "CREATIVE_DESIGN",
+    }
+
+
 def build_voiceover_expression_contract(
     direction: Dict[str, Any],
     visual_plan: Dict[str, Any],
@@ -628,6 +668,7 @@ def build_voiceover_expression_contract(
     event = blueprint.get("event_design") if isinstance(blueprint.get("event_design"), dict) else {}
     voice_identity = blueprint.get("voice_identity") if isinstance(blueprint.get("voice_identity"), dict) else {}
     retention_hook = blueprint.get("retention_hook") if isinstance(blueprint.get("retention_hook"), dict) else {}
+    lived_moment_binding = _creative_lived_moment_binding(direction, blueprint)
     audio_constraints = [
         {
             "shot_no": index,
@@ -730,6 +771,10 @@ def build_voiceover_expression_contract(
             "core_result_moment": _text(event.get("core_result_moment")),
             "opening_event": _text(retention_hook.get("opening_event")),
             "delayed_answer": _text(retention_hook.get("delayed_answer")),
+            **(
+                {"lived_moment_binding": lived_moment_binding}
+                if lived_moment_binding else {}
+            ),
         },
         # The original flow owns the argument, not the Thai hook wording.
         # An empty map deliberately delegates the hook surface to the central
@@ -767,6 +812,7 @@ def build_voiceover_argument_contract(
     value = bundle.get("value_proposition") if isinstance(bundle.get("value_proposition"), dict) else {}
     tension = bundle.get("audience_tension") if isinstance(bundle.get("audience_tension"), dict) else {}
     selling_argument = bundle.get("selling_argument") if isinstance(bundle.get("selling_argument"), dict) else {}
+    lived_moment_binding = _creative_lived_moment_binding(direction, blueprint)
     tension_available = (
         _text(bundle.get("content_mode")) == "SELLING_ARGUMENT"
         and _text(tension.get("status")) == "AVAILABLE"
@@ -851,6 +897,14 @@ def build_voiceover_argument_contract(
                 "status": _text(selling_argument.get("status")) or "UNAVAILABLE",
                 "source": _text(selling_argument.get("source")) or "UNAVAILABLE",
                 "source_claim_ids": list(selling_argument.get("source_claim_ids") or []),
+                "source_argument_id": _text(selling_argument.get("source_argument_id")),
+                "authorization_source": _text(selling_argument.get("authorization_source")),
+                "mapping_status": _text(selling_argument.get("mapping_status")),
+                "operator_expression": _text(selling_argument.get("operator_expression")),
+                "expression_policy": _text(selling_argument.get("expression_policy")),
+                "respectful_reframe_required": bool(
+                    selling_argument.get("respectful_reframe_required")
+                ),
                 "core_value": _text(selling_argument.get("core_value")),
                 "target_need": _text(selling_argument.get("target_need")),
                 "proof_thesis": _text(selling_argument.get("proof_thesis")),
@@ -872,6 +926,10 @@ def build_voiceover_argument_contract(
             "scene_moment": _text(scene.get("moment")),
             "event_context": _text(event.get("natural_event")),
             "core_result_moment": _text(event.get("core_result_moment")),
+            **(
+                {"lived_moment_binding": lived_moment_binding}
+                if lived_moment_binding else {}
+            ),
         },
         "expression_policy": {
             "preferred_hook_angles": [
@@ -883,7 +941,17 @@ def build_voiceover_argument_contract(
             "candidate_count": 3,
             "generic_cta_required": False,
             "fixed_choice_question_required": False,
-            "selling_point_authority": "GOVERNED_LIBRARY",
+            "selling_point_authority": (
+                _text(selling_argument.get("authorization_source"))
+                or "GOVERNED_LIBRARY"
+            ),
+            "operator_expression_policy": (
+                _text(selling_argument.get("expression_policy"))
+                or "SEMANTIC_AUTHORITY_NOT_VERBATIM"
+            ),
+            "respectful_reframe_required": bool(
+                selling_argument.get("respectful_reframe_required")
+            ),
             "visual_proof_match_is_blocking": False,
             # This is soft expression guidance, not a QC gate.  Without an
             # authorised audience tension, the model should open from a

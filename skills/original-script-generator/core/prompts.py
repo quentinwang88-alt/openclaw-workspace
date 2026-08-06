@@ -614,7 +614,7 @@ P7 不需要输出 audio_layer；代码侧会本地补齐低存在感 BGM、voic
 画面和口播不得暗示 category_execution_contract.audio_policy 禁止的动作或音效；没有明确夹合动作时，不写 click 类表达。"""
 CATEGORY_EXECUTION_CONTRACT_ANCHOR_RULE = """【category_execution_contract 生成要求】
 请基于产品图片和 product_type，在产品锚点卡中新增 category_execution_contract。
-P1 是唯一的类目使用契约推断层，负责根据产品图和 product_type 生成 category_execution_contract；后续阶段只继承，不二次推断类目逻辑。
+product_type 注册表是商品子类型权威。P1 不得把已经明确的 product_type 重新分类；P1 只根据产品图补充可观察的佩戴区域、外观锚点和低风险展示建议。后续如果存在 category_execution_extension，则它是物理执行权威，P1 contract 只作为兼容字段和观察补充，冲突时不得覆盖 extension。
 
 该 contract 用于统一约束后续 P4/P5/P7/Q1：
 1. 商品应该怎么用；
@@ -626,11 +626,11 @@ P1 是唯一的类目使用契约推断层，负责根据产品图和 product_ty
 
 字段要求：
 - display_family：ear_accessory / hair_accessory / apparel / apparel_accessory / general_accessory；
-- product_subtype：发饰类优先使用 scrunchie / small_side_clip / claw_clip / headband / hair_tie / hair_band / styling_tool / other_hair_accessory / unknown；冬季服饰配件首期只使用 scarf / hat / scarf_hat_set / unknown；
-- use_case：发饰可用 low_ponytail / low_bun / loose_bun / half_up / bun_area / face_side_fix / back_head_fix / top_head_wear / ponytail_or_bun_uncertain / unknown；冬季围巾帽子可用 winter_outing / winter_commute / winter_travel / cold_weather_outfit / photo_outfit / before_going_out / daily_commute / unknown；
-- placement_zone：发饰可用 face_side / back_head / top_head / low_ponytail / half_up / bun_area / full_head / unknown；冬季围巾帽子可用 neck_shoulder / head / head_face / upper_body / scarf_hat_combo / unknown；
-- hold_scope：发饰可用 flyaway_hair / small_hair_section / half_hair / low_ponytail / bun / decorative_only / unknown；冬季围巾帽子可用 upper_body_styling / face_frame / warmth_visual_coverage / winter_outfit_completion / decorative_outfit / unknown，其中 warmth_visual_coverage 只表示视觉覆盖感，不是功效承诺；
-- orientation：发饰可用 horizontal_clip / vertical_clip / wrap_around / tie_up / insert_fix / wear_on_head / unknown；冬季围巾帽子可用 wrapped_neck / draped_shoulder / worn_on_head / front_brim / full_set_wear / unknown；
+- product_subtype：发饰类优先使用 scrunchie / small_side_clip / claw_clip / headband / hair_tie / hair_band / styling_tool / other_hair_accessory / unknown；服饰配饰必须按已登记 product_type 使用 scarf / winter_scarf / silk_scarf / headscarf / hat / scarf_hat_set / unknown，不得把丝巾或头巾回写成冬季围巾；
+- use_case：发饰可用 low_ponytail / low_bun / loose_bun / half_up / bun_area / face_side_fix / back_head_fix / top_head_wear / ponytail_or_bun_uncertain / unknown；服饰配饰只从 winter_outing / winter_commute / winter_travel / cold_weather_outfit / photo_outfit / before_going_out / daily_commute / unknown 中选择与运营卖点或图片明确相符的一项，不得因为 display_family 自动补冬季场景；
+- placement_zone：发饰可用 face_side / back_head / top_head / low_ponytail / half_up / bun_area / full_head / unknown；围巾和丝巾优先 neck_shoulder / upper_body，头巾优先 head / head_face / full_head，帽子优先 head / head_face；
+- hold_scope：发饰沿用既有枚举；秋冬围巾可用 upper_body_styling / warmth_visual_coverage / winter_outfit_completion / decorative_outfit，丝巾优先 face_frame / decorative_outfit / upper_body_styling，头巾优先 face_frame / decorative_outfit；warmth_visual_coverage 只表示视觉覆盖感，不是功效承诺；
+- orientation：围巾和丝巾可用 wrapped_neck / draped_shoulder，头巾使用 worn_on_head，只有套装才使用 full_set_wear；orientation 只描述完成状态，不授权完整系结或包裹过程；
 - operation_policy：result_first_process_avoid / process_allowed_once / process_forbidden / static_result_only；
 - primary_visual_result 必须用中文写清“这款商品最应该被视频证明的视觉结果”，不要只写更好看/更精致/更有气质；
 - safe_shot_templates 输出 3-4 个低风险镜头模板；
@@ -640,16 +640,18 @@ P1 是唯一的类目使用契约推断层，负责根据产品图和 product_ty
 - field_confidence 必须为 product_subtype / use_case / placement_zone / hold_scope / orientation / primary_visual_result / operation_policy 输出 high / medium / low；不确定时允许 low，不得为了完整性硬猜。
 - 如果 display_family = apparel_accessory，必须额外输出 season_context / hat_risk_tier / set_relationship / co_styling_hint。
 
-【apparel_accessory 冬季围巾 / 帽子 contract 规则】
-- 首期只在 product_type 明确为围巾 / 帽子 / 围巾帽子套装时启用 apparel_accessory，不影响发饰、耳环、女装；
+【apparel_accessory 围巾 / 丝巾 / 头巾 / 帽子 contract 规则】
+- 只在 product_type 注册表明确属于服饰配饰时启用 apparel_accessory，不影响发饰、耳环、女装；
 - season_context.primary_season 可为 winter / summer / shoulder_season / year_round / unknown，weather_signal 可为 cold / hot / mild / rainy / sunny / unknown；
-- 冬季围巾、冬季帽子、围巾帽子套装默认优先 season_context = winter + cold；如果产品图明显不是冬季款，允许 unknown / summer / shoulder_season，不得硬猜；
+- 只有 winter_scarf、冬季帽子或围巾帽子套装可优先 season_context = winter + cold；silk_scarf、headscarf 和泛 scarf 不得默认冬季或寒冷场景；
 - hat_risk_tier：low_risk 适合棒球帽、针织帽等结构清楚基础帽；medium_risk 适合渔夫帽、软檐帽；high_risk 适合宽檐帽、贝雷帽、护耳帽、复杂绒边或耳罩帽型；非帽子输出 unknown；
 - set_relationship：same_color / matching_color / mix_match / unknown，仅 scarf_hat_set 重点填写；
-- co_styling_hint.pair_with 首期优先 winter_coat / knit_sweater，必要时可补 wool_coat / basic_turtleneck，但不要把围巾帽子孤立展示；
-- primary_visual_result 必须围绕冬季出门 / 冬季旅行 / 冬季穿搭完整度 / 围巾帽子与外套协同；
+- co_styling_hint.pair_with：winter_scarf 可使用 winter_coat / knit_sweater / basic_turtleneck；silk_scarf 只写简洁基础上衣或清楚领口；headscarf 只写日常上装与已完成头部造型；
+- primary_visual_result 必须按子类型分别描述：winter_scarf 看肩颈与秋冬上装关系；silk_scarf 看颈部、领口和上半身点缀关系；headscarf 看完成造型后的头部、头发与穿搭关系；
 - 禁止编造材质、保暖等级、防晒等级、防风、防水、极寒适用等功效承诺；
-- 围巾 proof 重点是脖颈、肩部、上半身和外套/针织衫关系更完整，不是复杂围法教程；
+- 围巾 proof 重点是脖颈、肩部、上半身和穿搭关系，不是复杂围法教程；
+- 丝巾 proof 重点是图案、边缘、领口和上半身点缀关系；类型名称不授权真丝材质，不拍复杂系法；
+- 头巾 proof 从已经完成的日常头部造型开始，重点看位置、轮廓和穿搭关系；不得推断宗教、民族或文化身份，不拍完整包裹教程；
 - 帽子 proof 重点是帽型、脸部轮廓、头肩比例和冬季穿搭关系，不是强功能测试；
 - 围巾帽子套装 proof 重点是套装让冬季上半身更完整，不分别做两个单品功能测试。
 
@@ -692,10 +694,10 @@ P4 / P5 是策略分配层，只能继承 contract 来生成 script_role / prima
 - 一小束头发
 - 低马尾根部
 
-如果 category_execution_contract 与 P4/P5 生成内容冲突，以 category_execution_contract 为准。
+如果存在 category_execution_extension，商品类型、佩戴位置、过程边界和必要结果以 extension 为准；category_execution_contract 只补充不冲突的观察信息。没有 extension 时才完整继承 category_execution_contract。
 如果 contract 指向 low_bun / loose_bun / bun_area，则脚本主线不得写成“低马尾根部更集中”，应围绕“低髻 / 松散盘发更柔和、更完整”展开。
-如果 contract 指向 display_family = apparel_accessory，则策略主线必须围绕冬季出门 / 冬季旅行 / 冬季穿搭完整度 / 围巾帽子与外套或针织衫协同；不得退化成普通美女戴帽或围巾微笑展示。
-如果 product_subtype = scarf / hat / scarf_hat_set，则 primary_focus 必须动态体现围巾、帽型或套装搭配关系，不得把围巾帽子当成普通首饰或发饰。
+如果 contract 指向 display_family = apparel_accessory，策略主线必须按 product_subtype 区分：winter_scarf 看肩颈与秋冬上装关系；silk_scarf 看领口、图案和上半身点缀；headscarf 看完成后的头部、头发和穿搭关系；scarf 使用保守的肩颈穿搭关系；hat / scarf_hat_set 沿用帽型或套装关系。不得把所有服饰配饰压成冬季出门模板。
+如果 product_subtype = scarf / winter_scarf / silk_scarf / headscarf / hat / scarf_hat_set，则 primary_focus 必须动态体现相应佩戴关系，不得当成普通首饰或发饰。
 不得无视 contract 把 scrunchie 写成低马尾，把发箍写成发夹，把大抓夹写成小边夹。
 如果发现 contract 可能不合理，只能输出 contract_conflict_warning，不得擅自改写 contract。"""
 CATEGORY_EXECUTION_CONTRACT_SCRIPT_RULE = """【category_execution_contract 使用规则】
@@ -758,32 +760,25 @@ P7 是脚本执行层，必须执行 contract；不得重新发明使用场景�
 不要使用：
 结果先给 → 回到未戴 → 完整套入 → 戴好结果
 
-【apparel_accessory_winter_outfit_check_mode】
-启用条件：script_brief.category_execution_contract.display_family = apparel_accessory 且 season_context.primary_season = winter。
+【apparel_accessory_result_first_mode】
+启用条件：script_brief.category_execution_contract.display_family = apparel_accessory。
 核心规则：
-1. 前 3 秒优先展示已佩戴结果；
-2. 镜头必须看到配饰和上半身 / 头肩 / 脸部比例关系；
-3. 优先使用 co_styling_hint.pair_with 中的 winter_coat / knit_sweater；
-4. 不展示复杂围法、复杂戴帽教程；
-5. 人物状态是镜前冬季出门自检，不是主播讲解；
-6. 场景优先：玄关镜前、卧室镜前、衣柜旁、出门前门口；
-7. 不默认生成夸张雪景大片、强风户外、棚拍广告感；
-8. 不得承诺强保暖 / 防寒 / 防风 / 防晒 / 防水 / 极寒适用。
+1. 真人或混合方向优先从已经佩戴完成的结果开始；静物方向只证明商品外观和结构；
+2. 镜头必须看到与子类型匹配的关系：围巾看肩颈和上半身，丝巾看颈部和领口，头巾看头部、头发与穿搭；
+3. 不展示完整围法、复杂系结、完整包裹或长时间手物交互；一次简单调整只能作为可选动作，不能成为固定镜头模板；
+4. 人物、场景和生活事件服从冻结创意合同，不强制镜前自检、半步后退、转身或整理边缘；
+5. 保持普通手机分享质感，不默认雪景、强风户外、棚拍广告或多机位大片；
+6. 中央卖点是内容权威。不得根据类目名称补充材质、保暖、防风、防晒、防水、宗教或文化身份；
+7. category_execution_extension 存在时，物理执行边界和必要结果以 extension 为准；本规则不覆盖结构合同、卖点或中央口播。
 
-默认结构：
-- scarf：0-3s 已围好结果，胸口以上或上半身中近景，围巾和肩颈 / 外套关系清楚；3-6s 手轻整理围巾边缘；6-10s 半步后退看镜中上半身整体；10-12s 局部细节 proof；12-15s 出门前确认，轻分享收尾。
-- hat：0-3s 已戴好结果，帽型、脸部比例和头肩关系清楚；3-6s 手轻压帽檐或整理帽边；6-10s 侧脸或轻转头展示帽型；10-12s 半步后退看帽子和冬季外套 / 针织衫整体关系；12-15s 冬季出门 / 旅行 / 通勤场景轻收尾。
-- scarf_hat_set：0-3s 围巾帽子已一起佩戴，上半身冬季穿搭完整；3-6s 轻整理围巾边缘或帽檐，避免复杂过程；6-10s 半步后退看镜中整体；10-12s 局部细节 proof，带到围巾质感和帽型；12-15s 冬季旅行 / 出门 / 拍照场景轻收尾。
+子类型执行：
+- winter_scarf：已围好或披好，清楚看到肩颈、上半身与简洁外套/针织上装关系；不拍完整围法；
+- silk_scarf：已搭配完成，清楚看到图案、边缘、领口和上半身点缀关系；不把“丝巾”解释成真实真丝；
+- headscarf：已完成日常头部造型，清楚看到头巾位置、轮廓、头发状态和穿搭关系；不推断宗教、民族或文化身份；
+- scarf：信息不足时按保守肩颈穿搭关系处理，不默认冬季或材质功效；
+- hat / scarf_hat_set：沿用已戴好结果和当前套装关系，不把过程拍成教程。
 
-proof_path 推荐：
-- scarf：优先 A_result_detail_only / B_result_with_light_compare；避免 C / D，除非只是非常轻的整理围巾边缘。
-- hat：hat_risk_tier = low_risk 可用 C_result_with_short_process；medium_risk 优先 A / B；high_risk 只用 A 或 static_result_only。
-- scarf_hat_set：首期优先 A_result_detail_only；same_color / matching_color 可增加轻微搭配细节 proof；mix_match 只展示当前这一套组合成立，不做多色托盘镜。
-
-set_relationship 处理：
-- same_color：重点拍同色一体感，围巾和帽子的颜色、材质、冬季氛围一致；
-- matching_color：重点拍配色搭配，围巾、帽子、外套或针织衫之间颜色协调；
-- mix_match：只展示当前组合成立，不做多个颜色快速切换，不让脚本变成组合教程。"""
+proof_path 推荐：优先 result-first、detail-to-result、outfit-relation；结构包含 USE_PROCESS 时只允许与当前商品和AI能力兼容的短促简单动作。"""
 CATEGORY_EXECUTION_CONTRACT_QC_RULE = """【category_execution_contract 检查】
 Q1 不新增复杂检查项，只检查脚本是否违反 category_execution_contract。
 Q1 是契约一致性检查层，只检查脚本是否违反 contract，不重新推断类目逻辑。

@@ -1322,6 +1322,13 @@ class OriginalScriptPipeline:
                     anchor_card,
                     context.get("product_params", ""),
                 )
+                from core.category_execution import reconcile_anchor_category_contract
+
+                anchor_card = reconcile_anchor_category_contract(
+                    anchor_card,
+                    product_type=context.get("product_type", ""),
+                    top_category=context.get("top_category", ""),
+                )
                 self._store_contract_registry_anchor_card(
                     contract_key=contract_registry_key,
                     product_image_hash=product_image_hash,

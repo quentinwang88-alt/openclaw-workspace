@@ -4,10 +4,12 @@
 """
 
 import json
+import mimetypes
 import time
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -244,12 +246,101 @@ class FeishuBitableClient:
         raise FeishuAPIError(f"飞书 API 请求失败: {last_error}")
 
     def list_field_names(self) -> List[str]:
+        return [item.get("field_name", "") for item in self.list_fields() if item.get("field_name")]
+
+    def list_fields(self) -> List[Dict[str, Any]]:
         url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/fields"
         response = self._request("GET", url, headers=self._headers(), params={"page_size": 500})
         result = response.json()
         if result.get("code") != 0:
             raise FeishuAPIError(f"获取字段定义失败: {result.get('msg')}")
-        return [item["field_name"] for item in result.get("data", {}).get("items", []) if item.get("field_name")]
+        return list(result.get("data", {}).get("items", []) or [])
+
+    def create_field(
+        self,
+        field_name: str,
+        *,
+        field_type: int = 1,
+        ui_type: str = "Text",
+        property: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/fields"
+        payload: Dict[str, Any] = {
+            "field_name": field_name,
+            "type": field_type,
+            "ui_type": ui_type,
+        }
+        if property is not None:
+            payload["property"] = property
+        response = self._request("POST", url, headers=self._headers(), json=payload)
+        result = response.json()
+        if result.get("code") != 0:
+            raise FeishuAPIError(f"创建字段失败【{field_name}】: {result.get('msg')}")
+        return result.get("data", {}) or {}
+
+    def update_field_name(
+        self,
+        field_id: str,
+        field_name: str,
+        *,
+        field_type: int = 1,
+        property: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        url = (
+            f"https://open.feishu.cn/open-apis/bitable/v1/apps/"
+            f"{self.app_token}/tables/{self.table_id}/fields/{field_id}"
+        )
+        payload: Dict[str, Any] = {"field_name": field_name, "type": field_type}
+        if property is not None:
+            payload["property"] = property
+        response = self._request(
+            "PUT",
+            url,
+            headers=self._headers(),
+            # Feishu validates the field category even for a rename. Preserve
+            # the existing type so number/select/attachment fields can also be
+            # renamed without being recreated.
+            json=payload,
+        )
+        result = response.json()
+        if result.get("code") != 0:
+            raise FeishuAPIError(f"重命名字段失败【{field_name}】: {result.get('msg')}")
+        return result.get("data", {}) or {}
+
+    def batch_create_records(self, records: List[Dict[str, Any]]) -> List[str]:
+        if not records:
+            return []
+        url = (
+            f"https://open.feishu.cn/open-apis/bitable/v1/apps/"
+            f"{self.app_token}/tables/{self.table_id}/records/batch_create"
+        )
+        response = self._request(
+            "POST", url, headers=self._headers(), json={"records": records}
+        )
+        result = response.json()
+        if result.get("code") != 0:
+            raise FeishuAPIError(f"批量创建记录失败: {result.get('msg')}")
+        created = result.get("data", {}).get("records", []) or result.get("data", {}).get("items", [])
+        return [str(item.get("record_id")) for item in created if item.get("record_id")]
+
+    def batch_delete_records(self, record_ids: List[str]) -> int:
+        """Delete exact record IDs in bounded Feishu batches."""
+        ids = [str(record_id).strip() for record_id in record_ids if str(record_id).strip()]
+        deleted = 0
+        for start in range(0, len(ids), 500):
+            chunk = ids[start : start + 500]
+            url = (
+                f"https://open.feishu.cn/open-apis/bitable/v1/apps/"
+                f"{self.app_token}/tables/{self.table_id}/records/batch_delete"
+            )
+            response = self._request(
+                "POST", url, headers=self._headers(), json={"records": chunk}
+            )
+            result = response.json()
+            if result.get("code") != 0:
+                raise FeishuAPIError(f"批量删除记录失败: {result.get('msg')}")
+            deleted += len(chunk)
+        return deleted
 
     def list_records(self, page_size: int = 100) -> List[TaskRecord]:
         url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/records"
@@ -333,6 +424,56 @@ class FeishuBitableClient:
         with open(target, "wb") as handle:
             handle.write(response.content)
         return target
+
+    def download_attachment_bytes(self, attachment: Dict[str, Any]) -> Tuple[bytes, str, str, int]:
+        file_token = str(attachment.get("file_token", "")).strip()
+        if not file_token:
+            raise FeishuAPIError("附件缺少 file_token")
+        response = requests.get(self.get_tmp_download_url(file_token), timeout=60)
+        response.raise_for_status()
+        content = response.content
+        file_name = str(attachment.get("name") or f"{file_token}.bin")
+        content_type = str(
+            attachment.get("type")
+            or mimetypes.guess_type(file_name)[0]
+            or "application/octet-stream"
+        )
+        return content, file_name, content_type, int(attachment.get("size") or len(content))
+
+    def upload_attachment(
+        self,
+        *,
+        content: bytes,
+        file_name: str,
+        content_type: str,
+        size: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        payload = {
+            "file_name": file_name,
+            "parent_type": "bitable_image",
+            "parent_node": self.app_token,
+            "size": str(size or len(content)),
+        }
+        files = {"file": (file_name, BytesIO(content), content_type)}
+        response = self._request(
+            "POST",
+            "https://open.feishu.cn/open-apis/drive/v1/medias/upload_all",
+            headers={"Authorization": f"Bearer {self._get_access_token()}"},
+            data=payload,
+            files=files,
+        )
+        result = response.json()
+        if result.get("code") != 0:
+            raise FeishuAPIError(f"上传附件失败: {result.get('msg')}")
+        token = result.get("data", {}).get("file_token")
+        if not token:
+            raise FeishuAPIError("飞书未返回上传后的 file_token")
+        return {
+            "file_token": token,
+            "name": file_name,
+            "size": int(size or len(content)),
+            "type": content_type,
+        }
 
 
 def resolve_field_mapping(field_names: List[str]) -> Dict[str, Optional[str]]:

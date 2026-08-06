@@ -18,61 +18,24 @@ from core.original_batch_models import (
 )
 from core.original_batch_storage import POLICY_VERSION as MODEL_POLICY_VERSION
 from core.reality_reference import build_content_bundle_brief
-
-
-# This is deliberately a small surface rotation, not another creative layer.
-# The hook still determines whether a relational opening is appropriate; the
-# batch only prevents every item from collapsing to the same first-person
-# entry point.
-_RELATIONSHIP_COMPATIBILITY = {
-    "AUDIENCE_NEED_CALLOUT": {"AUDIENCE_ADDRESS", "VIEWER_REFERENCE", "VIEWER_INVITATION"},
-    "PAIN_REFRAME": {"AUDIENCE_ADDRESS", "VIEWER_REFERENCE", "VIEWER_INVITATION"},
-    "USER_ADVOCACY_STANCE": {"AUDIENCE_ADDRESS", "PERSONAL_STANCE"},
-    "VISUAL_RESULT_DIRECT": {"AUDIENCE_ADDRESS", "VIEWER_INVITATION", "PERSONAL_STANCE"},
-    "DISCOVERY_RESULT_PROMISE": {"AUDIENCE_ADDRESS", "VIEWER_INVITATION", "PERSONAL_STANCE"},
-    "GENERAL_PRODUCT_SHARE": {"AUDIENCE_ADDRESS", "PERSONAL_STANCE"},
-    "DETAIL_SURPRISE": {"VIEWER_INVITATION", "NO_ADDRESS"},
-}
-
-_RELATIONSHIP_DEFAULTS = {
-    "AUDIENCE_NEED_CALLOUT": "VIEWER_REFERENCE",
-    "PAIN_REFRAME": "VIEWER_REFERENCE",
-    "USER_ADVOCACY_STANCE": "PERSONAL_STANCE",
-    "VISUAL_RESULT_DIRECT": "VIEWER_INVITATION",
-    "DISCOVERY_RESULT_PROMISE": "PERSONAL_STANCE",
-    "GENERAL_PRODUCT_SHARE": "PERSONAL_STANCE",
-    "DETAIL_SURPRISE": "VIEWER_INVITATION",
-}
+from core.product_selling_argument_adapter import (
+    compatible_structure_carriers,
+    normalized_carrier_requirement,
+    normalized_proof_subject,
+)
+from core.outfit_template_provider import get_outfit_template_provider_snapshot
 
 
 def _relationship_schedule(requested_count: int, rng: random.Random) -> List[str]:
-    """Return a deterministic, shuffled soft surface mix for a batch.
+    """Delegate relationship language to the allocated central hook.
 
-    Count 1 delegates to the hook.  Small batches carry one direct audience
-    address; a 10-item batch targets three addresses and two viewer references.
-    The schedule is advisory: an incompatible hook falls back naturally.
+    Kept as a compatibility helper for frozen reports/tests.  The allocator no
+    longer injects a batch quota for ``姐妹们``/viewer references; the hook
+    archetype and its governed samples decide whether an address is natural.
     """
+    del rng
     count = max(0, int(requested_count))
-    if count <= 1:
-        return ["HOOK_DECIDES"] * count
-    address_count = 1 if count <= 4 else min(3, max(1, round(count * 0.3)))
-    reference_count = 0 if count == 2 else (1 if count <= 7 else 2)
-    reference_count = min(reference_count, max(0, count - address_count))
-    schedule = (
-        ["AUDIENCE_ADDRESS"] * address_count
-        + ["VIEWER_REFERENCE"] * reference_count
-        + ["HOOK_DECIDES"] * (count - address_count - reference_count)
-    )
-    rng.shuffle(schedule)
-    return schedule
-
-
-def _relationship_device_for_item(hook_id: str, scheduled_device: str) -> str:
-    allowed = _RELATIONSHIP_COMPATIBILITY.get(_text(hook_id), set())
-    if scheduled_device in allowed:
-        return scheduled_device
-    default = _RELATIONSHIP_DEFAULTS.get(_text(hook_id), "HOOK_DECIDES")
-    return default if default in allowed else "HOOK_DECIDES"
+    return ["HOOK_DECIDES"] * count
 
 
 def _text(value: Any) -> str:
@@ -94,6 +57,116 @@ def _direction_carrier(direction: Dict[str, Any]) -> str:
     return _text(hard.get("content_carrier")).upper()
 
 
+_COLOR_TOKEN_GROUPS = {
+    "BLACK": ("黑色", "近黑", "纯黑", "black", "สีดำ"),
+    "WHITE": ("纯白", "正白", "white", "สีขาว"),
+    "LIGHT_NEUTRAL": ("白色", "米白", "奶白", "象牙白", "米色", "杏色", "卡其", "ivory", "cream", "beige", "khaki", "สีครีม", "สีเบจ", "สีกากี"),
+    "PINK": ("粉色", "粉红", "pink", "สีชมพู"),
+    "GREEN": ("绿色", "抹茶", "green", "matcha", "สีเขียว"),
+    "BROWN": ("棕色", "咖色", "褐色", "brown", "สีน้ำตาล"),
+    "BLUE": ("蓝色", "牛仔蓝", "blue", "สีน้ำเงิน"),
+    "RED": ("红色", "酒红", "red", "สีแดง"),
+    "GREY": ("灰色", "灰白", "grey", "gray", "สีเทา"),
+}
+
+
+def _semantic_text(value: Any) -> str:
+    if isinstance(value, dict):
+        return " ".join(_semantic_text(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(_semantic_text(item) for item in value)
+    return _text(value)
+
+
+def _explicit_color_tokens(value: Any) -> set[str]:
+    material = _semantic_text(value).lower()
+    return {
+        color for color, tokens in _COLOR_TOKEN_GROUPS.items()
+        if any(token.lower() in material for token in tokens)
+    }
+
+
+def _annotate_variant_fit(bundle: Dict[str, Any], *, anchor_card: Dict[str, Any]) -> Dict[str, Any]:
+    """Defer only an explicit, provable variant conflict; unknown stays usable."""
+
+    result = copy.deepcopy(bundle)
+    argument = result.get("selling_argument") if isinstance(result.get("selling_argument"), dict) else {}
+    argument_colors = _explicit_color_tokens({
+        "operator_expression": argument.get("operator_expression"),
+        "core_value": argument.get("core_value"),
+        "creative_core_value": argument.get("creative_core_value"),
+    })
+    product_colors = _explicit_color_tokens({
+        "product_name": anchor_card.get("product_name"),
+        "product_positioning": anchor_card.get("product_positioning_one_liner"),
+        "identity_anchors": anchor_card.get("identity_anchors"),
+        "hard_anchors": anchor_card.get("hard_anchors"),
+        "display_anchors": anchor_card.get("display_anchors"),
+    })
+    mismatch = bool(argument_colors and product_colors and argument_colors.isdisjoint(product_colors))
+    result["variant_fit_status"] = "DEFERRED" if mismatch else "MATCHED"
+    result["variant_fit_reason"] = "VARIANT_MISMATCH" if mismatch else "NOT_APPLICABLE"
+    result["argument_variant_tokens"] = sorted(argument_colors)
+    result["product_variant_tokens"] = sorted(product_colors)
+    return result
+
+
+def _is_creator_wearable_batch(top_category: str, product_type: str) -> bool:
+    """Whether person-led creator sharing should be the default production mix."""
+
+    category = _text(top_category).lower()
+    product = _text(product_type).lower()
+    if "女装" in category or "apparel" in category:
+        return True
+    hand_first = ("戒指", "手链", "手镯", "发饰", "ring", "bracelet", "hair")
+    wearable = (
+        "围巾", "帽", "耳", "项链", "包", "鞋", "配饰",
+        "scarf", "hat", "ear", "necklace", "bag", "shoe", "accessory",
+    )
+    return not any(term in product for term in hand_first) and (
+        "配饰" in category or any(term in product for term in wearable)
+    )
+
+
+def _is_creator_direction(direction: Dict[str, Any]) -> bool:
+    return _direction_carrier(direction) in {
+        "WEARER_ACTIVE", "MIXED", "PERSON_ON_CAMERA"
+    }
+
+
+def _creator_weighted_directions(
+    directions: List[Dict[str, Any]],
+    *,
+    requested_count: int,
+    top_category: str,
+    product_type: str,
+) -> List[Dict[str, Any]]:
+    """Keep structure diversity while limiting non-person mothers.
+
+    The router still chooses evidence-backed structures.  This projection only
+    prevents a five-script wearable batch from spending two or more mother
+    slots on static/product-only carriers.  It creates no new structure and
+    leaves hand-first accessories untouched.
+    """
+
+    if not _is_creator_wearable_batch(top_category, product_type):
+        return list(directions)
+    creator = [item for item in directions if _is_creator_direction(item)]
+    support = [item for item in directions if not _is_creator_direction(item)]
+    if not creator:
+        return list(directions)
+    max_support = 0 if requested_count <= 1 else max(1, (requested_count + 4) // 5)
+    selected_support_ids = {
+        _text(item.get("direction_assignment_id"))
+        for item in support[:max_support]
+    }
+    return [
+        item for item in directions
+        if _is_creator_direction(item)
+        or _text(item.get("direction_assignment_id")) in selected_support_ids
+    ]
+
+
 def _annotate_carrier_fit(
     bundle: Dict[str, Any],
     *,
@@ -109,19 +182,32 @@ def _annotate_carrier_fit(
 
     result = copy.deepcopy(bundle)
     argument = result.get("selling_argument") if isinstance(result.get("selling_argument"), dict) else {}
-    dependency = _text(argument.get("visual_dependency")).upper() or "FLEXIBLE"
+    dependency = normalized_carrier_requirement(argument)
+    proof_subject = normalized_proof_subject(argument)
     carrier = _direction_carrier(direction)
-    is_mismatch = (
-        dependency == "WEARER_REQUIRED"
-        and carrier not in {"WEARER_ACTIVE", "MIXED"}
-    )
+    compatible = compatible_structure_carriers(argument)
+    proof_carriers = {
+        "ON_BODY_RESULT": {"WEARER_ACTIVE", "PERSON_ON_CAMERA", "MIXED"},
+        "SCENE_USAGE": {"WEARER_ACTIVE", "PERSON_ON_CAMERA", "MIXED"},
+        "PRODUCT_DETAIL": {"WEARER_ACTIVE", "PERSON_ON_CAMERA", "MIXED", "HAND_ONLY", "HANDS_ONLY", "STATIC_PRODUCT"},
+        "GENERAL_EXPRESSION": set(),
+    }.get(proof_subject, set())
+    if not compatible and proof_carriers:
+        compatible = sorted(proof_carriers)
+    is_mismatch = bool(compatible) and carrier not in set(compatible)
     result["carrier_fit_status"] = "DEFERRED" if is_mismatch else "MATCHED"
     result["carrier_fit_reason"] = (
-        "WEARER_VISUAL_REQUIRED" if is_mismatch else "NOT_APPLICABLE"
+        "WEARER_VISUAL_REQUIRED"
+        if is_mismatch and (
+            dependency == "WEARER_REQUIRED"
+            or proof_subject in {"ON_BODY_RESULT", "SCENE_USAGE"}
+        )
+        else f"{dependency}_STRUCTURE_MISMATCH"
+        if is_mismatch
+        else "NOT_APPLICABLE"
     )
-    result["recommended_carriers"] = (
-        ["WEARER_ACTIVE", "MIXED"] if dependency == "WEARER_REQUIRED" else []
-    )
+    result["recommended_carriers"] = compatible
+    result["proof_subject"] = proof_subject
     return result
 
 
@@ -312,18 +398,32 @@ def allocate_batch_items(
     product_selling_note: str = "",
     product_type: str = "",
     top_category: str = "",
+    scene_reference_contexts: Optional[Dict[str, Dict[str, Any]]] = None,
+    category_execution_extension: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[PlanItem], Dict[str, Any]]:
     """Three-round deterministic allocation returning items and allocation summary."""
     recent = list(recent_creative_usage or [])
     rng = random.Random(random_seed)
     items: List[PlanItem] = []
     reserved_visual_signatures: List[str] = []
+    reserved_creative_contracts: List[Dict[str, Any]] = []
     deferred_content: List[Dict[str, Any]] = []
+    if scene_reference_contexts is None:
+        # Best-effort and read-only.  The adapter returns an empty mapping when
+        # disabled, so normal planning stays fully offline by default.
+        from core.scene_reference_adapter import load_scene_reference_contexts
+        scene_reference_contexts = load_scene_reference_contexts(directions)
 
     # ── Prepare candidate pools ────────────────────────────────────────
+    planning_directions = _creator_weighted_directions(
+        directions,
+        requested_count=requested_count,
+        top_category=top_category,
+        product_type=product_type,
+    )
     structure_pool: List[Dict[str, Any]] = []
     content_pools: Dict[int, List[Dict[str, Any]]] = {}
-    for idx, d in enumerate(directions):
+    for idx, d in enumerate(planning_directions):
         ref = d.get("execution_reference", {}) or {}
         # The source reference can have a different carrier from the routed
         # production direction.  Candidate selling arguments must respect the
@@ -349,11 +449,29 @@ def allocate_batch_items(
             max_candidates=max(3, requested_count),
         )
         all_candidates = [
-            _annotate_carrier_fit(bundle, direction=d)
+            _annotate_carrier_fit(
+                _annotate_variant_fit(bundle, anchor_card=anchor_card),
+                direction=d,
+            )
             for bundle in raw_candidates
         ]
         candidates: List[Dict[str, Any]] = []
         for bundle in all_candidates:
+            if bundle.get("variant_fit_status") == "DEFERRED":
+                deferred_content.append(
+                    {
+                        "direction_assignment_id": d.get("direction_assignment_id", ""),
+                        "output_slot": d.get("output_slot", ""),
+                        "content_bundle_id": bundle.get("content_bundle_id", ""),
+                        "content_mode": bundle.get("content_mode", "FACTUAL_OBSERVATION"),
+                        "argument_readiness": bundle.get("argument_readiness", "NOT_APPLICABLE"),
+                        "downgrade_reason": "VARIANT_MISMATCH",
+                        "argument_variant_tokens": bundle.get("argument_variant_tokens", []),
+                        "product_variant_tokens": bundle.get("product_variant_tokens", []),
+                        "recommended_flow": "MATCHING_PRODUCT_VARIANT",
+                    }
+                )
+                continue
             if bundle.get("carrier_fit_status") == "DEFERRED":
                 deferred_content.append(
                     {
@@ -400,7 +518,6 @@ def allocate_batch_items(
         eligible_pairs = [
             (bundle_index, bundle)
             for bundle_index, bundle in enumerate(content_pools[struct_idx])
-            if argument_usage[_bundle_argument_key(bundle)] < 2
         ]
         if not eligible_pairs:
             continue
@@ -416,17 +533,25 @@ def allocate_batch_items(
         if not eligible_hooks:
             continue
         hook_id = _pick_least_used(eligible_hooks, hook_usage, rng)
-        relationship_device = _relationship_device_for_item(
-            hook_id,
-            relationship_schedule[len(items)] if len(items) < len(relationship_schedule) else "HOOK_DECIDES",
+        relationship_device = (
+            relationship_schedule[len(items)]
+            if len(items) < len(relationship_schedule)
+            else "HOOK_DECIDES"
         )
 
         creative = _allocate_creative(
             product_code=product_code, direction=direction,
             bundle=bundle, recent_usage=recent,
             reserved_signatures=reserved_visual_signatures,
+            reserved_creatives=reserved_creative_contracts,
             creative_policy_version=creative_policy_version,
             rng=rng,
+            scene_reference_context=scene_reference_contexts.get(
+                _text(direction.get("direction_assignment_id"))
+            ),
+            product_type=product_type,
+            top_category=top_category,
+            category_execution_extension=category_execution_extension,
         )
         if not creative:
             continue
@@ -442,10 +567,12 @@ def allocate_batch_items(
             anchor_card=anchor_card, product_type=product_type,
             top_category=top_category,
             relationship_device=relationship_device,
+            category_execution_extension=category_execution_extension,
         )
         if item:
             items.append(item)
             reserved_visual_signatures.append(visual_sig)
+            reserved_creative_contracts.append(creative)
             used_signatures.add(item.allocation_signature)
             struct_usage[struct_idx] += 1
             angle_usage[angle_key] += 1
@@ -467,21 +594,29 @@ def allocate_batch_items(
         for struct_idx, direction in enumerate(structure_pool)
         for bundle_index, bundle in enumerate(content_pools[struct_idx])
         if bundle_index != mother_bundle_indices.get(struct_idx)
-        and argument_usage[_bundle_argument_key(bundle)] < 2
     ]
     while pending and len(items) < requested_count:
-        pending = [
-            entry
-            for entry in pending
-            if argument_usage[_bundle_argument_key(entry[3])] < 2
-        ]
-        if not pending:
-            break
         # Prefer a selling argument not yet represented in the batch, then the
-        # less-used structure. This is breadth-first allocation, not a new
-        # creative rule: all candidates were already authorised and frozen.
+        # less-used structure. There is no fixed per-argument cap: the finite
+        # structure × argument pool and allocation signature still prevent
+        # duplicate plans, while least-used-first keeps quotas balanced.
         pending.sort(
             key=lambda entry: (
+                (
+                    0
+                    if (
+                        _is_creator_wearable_batch(top_category, product_type)
+                        and sum(
+                            1
+                            for existing in items
+                            if _text(existing.carrier_mode).upper()
+                            in {"WEARER_ACTIVE", "MIXED", "PERSON_ON_CAMERA"}
+                        )
+                        < max(1, requested_count - max(1, (requested_count + 4) // 5))
+                        and _is_creator_direction(entry[2])
+                    )
+                    else 1
+                ),
                 angle_usage[_text(entry[3].get("content_angle_key", "FACT_DISCOVERY"))],
                 struct_usage[entry[0]],
                 entry[1],
@@ -494,17 +629,25 @@ def allocate_batch_items(
         if not eligible_hooks:
             continue
         hook_id = _pick_least_used(eligible_hooks, hook_usage, rng)
-        relationship_device = _relationship_device_for_item(
-            hook_id,
-            relationship_schedule[len(items)] if len(items) < len(relationship_schedule) else "HOOK_DECIDES",
+        relationship_device = (
+            relationship_schedule[len(items)]
+            if len(items) < len(relationship_schedule)
+            else "HOOK_DECIDES"
         )
 
         creative = _allocate_creative(
             product_code=product_code, direction=direction,
             bundle=bundle, recent_usage=recent,
             reserved_signatures=reserved_visual_signatures,
+            reserved_creatives=reserved_creative_contracts,
             creative_policy_version=creative_policy_version,
             rng=rng,
+            scene_reference_context=scene_reference_contexts.get(
+                _text(direction.get("direction_assignment_id"))
+            ),
+            product_type=product_type,
+            top_category=top_category,
+            category_execution_extension=category_execution_extension,
         )
         if not creative:
             continue
@@ -520,10 +663,12 @@ def allocate_batch_items(
             anchor_card=anchor_card, product_type=product_type,
             top_category=top_category,
             relationship_device=relationship_device,
+            category_execution_extension=category_execution_extension,
         )
         if item:
             items.append(item)
             reserved_visual_signatures.append(visual_sig)
+            reserved_creative_contracts.append(creative)
             used_signatures.add(item.allocation_signature)
             struct_usage[struct_idx] += 1
             angle_usage[angle_key] += 1
@@ -562,8 +707,13 @@ def _allocate_creative(
     bundle: Dict[str, Any],
     recent_usage: List[Dict[str, Any]],
     reserved_signatures: List[str],
+    reserved_creatives: Optional[List[Dict[str, Any]]],
     creative_policy_version: str,
     rng: random.Random,
+    scene_reference_context: Optional[Dict[str, Any]] = None,
+    product_type: str = "",
+    top_category: str = "",
+    category_execution_extension: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Call build_creative_diversity_contract, incorporating batch-reserved patterns."""
     from core.complete_script_v3 import build_creative_diversity_contract
@@ -575,31 +725,49 @@ def _allocate_creative(
     contract_country = _text(direction.get("country") or "泰国")
     contract_category = _text(direction.get("category") or "女装")
 
-    augmented = list(recent_usage)
-    for sig in reserved_signatures:
-        if sig:
-            augmented.append({
-                "product_code": product_code,
-                "status": "RESERVED",
-                "visual_signature": sig,
-                "scene_motif": sig.split("|")[1] if "|" in sig else "",
-                "opening_action": sig.split("|")[2] if "|" in sig else "",
-                "persona_role": sig.split("|")[0] if "|" in sig else "",
-                "direction_id": direction.get("direction_assignment_id", ""),
-            })
+    augmented = [
+        *recent_usage,
+        *[
+            {**contract, "_batch_reserved": True}
+            for contract in (reserved_creatives or [])
+        ],
+    ]
+    # Legacy callers may only provide visual signatures. New batch planning
+    # carries the full frozen creative contract so outfit and scene histories
+    # both participate in same-batch rotation without extra storage writes.
+    if not reserved_creatives:
+        for sig in reserved_signatures:
+            if sig:
+                augmented.append({
+                    "product_code": product_code,
+                    "status": "RESERVED",
+                    "visual_signature": sig,
+                    "scene_motif": sig.split("|")[1] if "|" in sig else "",
+                    "opening_action": sig.split("|")[2] if "|" in sig else "",
+                    "persona_role": sig.split("|")[0] if "|" in sig else "",
+                    "direction_id": direction.get("direction_assignment_id", ""),
+                })
 
     # Add carrier-aware creative direction
     enriched = dict(direction)
     enriched["_carrier_hint"] = carrier
-
+    # Scene diversity remains owned by the existing creative allocator, but
+    # the already-selected selling argument may softly influence which scene
+    # candidate ranks first.  No content authority is created here.
+    enriched["content_bundle_brief"] = bundle
+    if category_execution_extension:
+        enriched["category_execution_extension"] = dict(
+            category_execution_extension
+        )
     try:
         creative = build_creative_diversity_contract(
             product_code=product_code,
             country=contract_country,
-            category=contract_category,
-            product_type=_text(bundle.get("product_type") or "外套"),
+            category=_text(top_category or contract_category),
+            product_type=_text(product_type or bundle.get("product_type") or "外套"),
             direction=enriched,
             recent_usage=augmented,
+            scene_reference_context=scene_reference_context,
         )
         return creative
     except Exception:
@@ -625,6 +793,7 @@ def _make_item(
     product_type: str = "",
     top_category: str = "",
     relationship_device: str = "HOOK_DECIDES",
+    category_execution_extension: Optional[Dict[str, Any]] = None,
 ) -> Optional[PlanItem]:
     da_id = direction.get("direction_assignment_id", "")
     atoms = bundle.get("claim_atoms", [])
@@ -660,10 +829,25 @@ def _make_item(
         "content_bundle_brief": bundle,
         "p2_lite": direction.get("p2_lite", {}),
         "creative_diversity_contract": creative,
+        "scene_reference_contract": creative.get("scene_reference_contract", {}),
         "requested_hook_id": hook_id,
         "content_angle_key": angle_key,
         "selling_argument_id": selling_argument_id,
     }
+    from core.category_execution import compile_category_execution_extension
+
+    if category_execution_extension is None:
+        category_execution_extension = compile_category_execution_extension(
+            product_type=product_type,
+            top_category=top_category,
+            anchor_card=dict(anchor_card or {}),
+        )
+    else:
+        category_execution_extension = dict(category_execution_extension or {})
+    if category_execution_extension:
+        frozen_package["category_execution_extension"] = (
+            category_execution_extension
+        )
     # The simplified path consumes the same frozen plan without changing the
     # allocator or adding another database.  It is a compact input contract,
     # not a second creative decision layer.
@@ -679,6 +863,7 @@ def _make_item(
         relationship_device=relationship_device,
         product_type=product_type,
         top_category=top_category,
+        category_execution_extension=category_execution_extension,
     )
 
     item_snapshot = {
@@ -744,14 +929,73 @@ def _build_summary(
     angles = list(set(it.content_angle_key for it in items if it.content_angle_key))
 
     struct_counts: Counter = Counter()
+    argument_counts: Counter = Counter()
+    capture_counts: Counter = Counter()
+    scene_family_counts: Counter = Counter()
+    surface_profile_counts: Counter = Counter()
+    outfit_silhouette_counts: Counter = Counter()
+    outfit_source_counts: Counter = Counter()
+    outfit_template_counts: Counter = Counter()
     for it in items:
         struct_counts[it.direction_assignment_id] += 1
+        try:
+            bundle = json.loads(it.content_bundle_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            bundle = {}
+        argument = (
+            bundle.get("selling_argument")
+            if isinstance(bundle.get("selling_argument"), dict)
+            else {}
+        )
+        argument_id = _text(argument.get("argument_id"))
+        if argument_id:
+            argument_counts[argument_id] += 1
+        try:
+            frozen = json.loads(it.frozen_direction_package_json or "{}")
+        except (TypeError, json.JSONDecodeError):
+            frozen = {}
+        capture_mode = _text(
+            frozen.get("simplified_creative_seed", {})
+            .get("creative_direction", {})
+            .get("capture_mode")
+        )
+        if capture_mode:
+            capture_counts[capture_mode] += 1
+        creative = frozen.get("creative_diversity_contract", {})
+        if isinstance(creative, dict):
+            scene_family = _text(creative.get("scene_family_key"))
+            outfit_contract = (
+                creative.get("outfit_selection_contract")
+                if isinstance(creative.get("outfit_selection_contract"), dict)
+                else {}
+            )
+            surface_key = _text(
+                (creative.get("surface_profile") or {}).get("surface_profile_key")
+                if isinstance(creative.get("surface_profile"), dict)
+                else ""
+            )
+            silhouette_key = _text(
+                outfit_contract.get("silhouette_key") or surface_key
+            )
+            outfit_source = _text(outfit_contract.get("source_type"))
+            outfit_template = _text(outfit_contract.get("template_id"))
+            if scene_family:
+                scene_family_counts[scene_family] += 1
+            if surface_key and surface_key != "PRODUCT_LED":
+                surface_profile_counts[surface_key] += 1
+            if silhouette_key and silhouette_key != "PRODUCT_LED":
+                outfit_silhouette_counts[silhouette_key] += 1
+            if outfit_source:
+                outfit_source_counts[outfit_source] += 1
+            if outfit_template:
+                outfit_template_counts[outfit_template] += 1
 
     requested = int(requested_count) if requested_count is not None else len(items)
     planned = len(items)
     allocation_status = (
         "COMPLETE" if planned >= requested else "PARTIAL_CONTENT_CAPACITY"
     )
+    outfit_provider_snapshot = get_outfit_template_provider_snapshot()
     return {
         "policy_version": MODEL_POLICY_VERSION,
         "allocation_round": round_label,
@@ -766,6 +1010,32 @@ def _build_summary(
         "unique_hooks": len(hooks),
         "unique_angles": len(angles),
         "structure_distribution": dict(struct_counts),
+        "selling_argument_distribution": dict(argument_counts),
+        "used_selling_argument_count": len(argument_counts),
+        "selling_argument_usage_spread": (
+            max(argument_counts.values()) - min(argument_counts.values())
+            if argument_counts else 0
+        ),
+        "capture_mode_distribution": dict(capture_counts),
+        "scene_family_distribution": dict(scene_family_counts),
+        "surface_profile_distribution": dict(surface_profile_counts),
+        "outfit_silhouette_distribution": dict(outfit_silhouette_counts),
+        "outfit_source_distribution": dict(outfit_source_counts),
+        "outfit_template_distribution": dict(outfit_template_counts),
+        "outfit_template_provider_snapshot": outfit_provider_snapshot,
+        "soft_warnings": list(outfit_provider_snapshot.get("soft_warnings") or []),
+        "scene_family_diversity_target_met": (
+            len(scene_family_counts) >= min(3, planned) if planned else False
+        ),
+        "surface_profile_diversity_target_met": (
+            len(surface_profile_counts) >= min(3, sum(surface_profile_counts.values()))
+            if surface_profile_counts else False
+        ),
+        "outfit_silhouette_target_met": (
+            len(outfit_silhouette_counts)
+            >= min(3, sum(outfit_silhouette_counts.values()))
+            if outfit_silhouette_counts else False
+        ),
         "families": families,
         "carriers": carriers,
         "hooks": hooks,

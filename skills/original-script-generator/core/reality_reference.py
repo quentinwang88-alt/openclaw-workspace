@@ -391,7 +391,7 @@ def _product_family(product_type: str, top_category: str = "") -> str:
     if any(
         token in value
         for token in (
-            "围巾", "丝巾", "披肩", "帽", "耳环", "耳饰", "耳线", "项链", "项圈",
+            "围巾", "丝巾", "头巾", "披肩", "帽", "耳环", "耳饰", "耳线", "项链", "项圈",
             "包", "墨镜", "太阳镜", "眼镜", "scarf", "hat", "earring", "necklace", "bag",
         )
     ):
@@ -855,7 +855,10 @@ def _select_value_proposition(
             )
         )
         score = 100.0 - index
-        if _text(item.get("source")) == "CENTRAL_VOICEOVER_VERIFIED_CLAIM":
+        if _text(item.get("source")) in {
+            "CENTRAL_VOICEOVER_VERIFIED_CLAIM",
+            "FEISHU_OPERATOR_CONFIRMED_ARGUMENT",
+        }:
             score += 60.0
         if _text(item.get("claim_type")).lower() == "benefit":
             score += 16.0
@@ -896,8 +899,23 @@ def _select_value_proposition(
             "decision_thesis": _text(selected.get("decision_thesis")),
             "manual_note": _text(product_selling_note),
             "source_claim_ids": list(selected.get("source_claim_ids") or []),
+            "source_argument_id": _text(selected.get("source_argument_id")),
+            "authorization_source": _text(selected.get("authority")),
+            "mapping_status": _text(selected.get("mapping_status")),
+            "operator_expression": _text(selected.get("operator_expression")),
+            # This normalized label is safe for visual planning.  The reviewed
+            # operator sentence remains available to the central voiceover but
+            # must not be reused as character or scene biography.
+            "creative_core_value": _text(selected.get("canonical_selling_point")),
+            "claim_type": _text(selected.get("claim_type")),
+            "claim_theme": _text(selected.get("claim_theme")),
+            "expression_policy": _text(selected.get("expression_policy")),
+            "respectful_reframe_required": bool(
+                selected.get("respectful_reframe_required")
+            ),
             "visual_dependency": _text(selected.get("visual_dependency")) or "FLEXIBLE",
             "compatible_carriers": list(selected.get("compatible_carriers") or []),
+            "proof_subject": _text(selected.get("proof_subject")) or "GENERAL_EXPRESSION",
             "claim_type": _text(selected.get("claim_type")),
             "verification_status": _text(selected.get("verification_status")),
             "evidence_requirement": _text(selected.get("evidence_requirement")),
@@ -1091,6 +1109,15 @@ def build_content_bundle_brief(
         "status": "AVAILABLE" if selling_argument_available else "UNAVAILABLE",
         "source": (_text(value_proposition.get("source")) or "UNAVAILABLE") if selling_argument_available else "UNAVAILABLE",
         "source_claim_ids": list(value_proposition.get("source_claim_ids") or []) if selling_argument_available else [],
+        "source_argument_id": _text(value_proposition.get("source_argument_id")) if selling_argument_available else "",
+        "authorization_source": _text(value_proposition.get("authorization_source")) if selling_argument_available else "",
+        "mapping_status": _text(value_proposition.get("mapping_status")) if selling_argument_available else "",
+        "operator_expression": _text(value_proposition.get("operator_expression")) if selling_argument_available else "",
+        "creative_core_value": _text(value_proposition.get("creative_core_value")) if selling_argument_available else "",
+        "claim_type": _text(value_proposition.get("claim_type")) if selling_argument_available else "",
+        "claim_theme": _text(value_proposition.get("claim_theme")) if selling_argument_available else "",
+        "expression_policy": _text(value_proposition.get("expression_policy")) if selling_argument_available else "",
+        "respectful_reframe_required": bool(value_proposition.get("respectful_reframe_required")) if selling_argument_available else False,
         "core_value": _text(value_proposition.get("text")) if selling_argument_available else "",
         "target_need": _text(audience_tension.get("text")) if selling_argument_available else "",
         "proof_thesis": _text(value_proposition.get("proof_thesis")) if selling_argument_available else "",
@@ -1101,6 +1128,7 @@ def build_content_bundle_brief(
         "operator_priority": _text(value_proposition.get("operator_priority")) if selling_argument_available else "",
         "visual_dependency": _text(value_proposition.get("visual_dependency")) if selling_argument_available else "FLEXIBLE",
         "compatible_carriers": list(value_proposition.get("compatible_carriers") or []) if selling_argument_available else [],
+        "proof_subject": _text(value_proposition.get("proof_subject")) if selling_argument_available else "GENERAL_EXPRESSION",
         # These keys rank the most direct proof for backward-compatible
         # consumers.  They no longer grant the visual layer authority to decide
         # what the central voiceover must say.
@@ -2188,11 +2216,14 @@ def assemble_reality_script(
         },
         "video_generation_brief": video_generation_brief,
         # This is the canonical hand-off to the finished-video voiceover
-        # worker.  Preserve the approved words and visual anchors instead of
-        # making a downstream worker reconstruct a generic copy from a prompt.
+        # worker.  The original words remain audit context for the generated
+        # video, while the downstream worker writes new copy from the actual
+        # analyzed picture, verified facts and this expression contract.
         "voiceover_execution_plan": {
             "schema_version": "voiceover-execution-plan-v1",
-            "mode": "REUSE_APPROVED_COPY",
+            "mode": "GENERATE_FROM_SOURCE_CONTRACT",
+            "generation_policy": "central_engine_must_generate_fresh_copy",
+            "source_copy_audit_present": True,
             "source_kind": (
                 "central_creative_full_script"
                 if _text(voiceover_plan.get("copy_generation_mode")) == "CREATIVE_FULL_SCRIPT"

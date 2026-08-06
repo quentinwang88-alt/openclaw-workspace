@@ -1,0 +1,421 @@
+import json
+import os
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from core.category_execution import (
+    ACCESSORY_PROFILE_ENV,
+    build_category_video_brief,
+    compile_category_execution_extension,
+    reconcile_anchor_category_contract,
+    resolve_category_carrier_execution,
+    validate_category_execution_identity,
+)
+from core.original_batch_allocator import _make_item
+from core.production_script_renderer import render_video_generation_prompt
+from core.simplified_complete_script import (
+    assemble_simplified_complete_script,
+    build_simplified_creative_seed,
+    build_simplified_script_prompt,
+    build_simplified_voiceover_inputs,
+    normalize_simplified_visual_script,
+    validate_simplified_complete_script,
+    validate_simplified_visual_script,
+)
+
+
+def _contract(carrier="WEARER_ACTIVE"):
+    return {
+        "direction_identity": {"macro_family_key": "HOOK>PROOF>ENDING"},
+        "hard_constraints": {
+            "content_carrier": carrier,
+            "beat_sequence": ["HOOK", "PROOF", "ENDING"],
+        },
+    }
+
+
+def _bundle(fact="耳饰已经佩戴后的耳侧效果", key="C1"):
+    return {
+        "content_mainline": fact,
+        "claim_atoms": [
+            {"claim_key": key, "fact_text": fact, "role": "core_result"}
+        ],
+    }
+
+
+def _anchor(product_name="金色水滴形耳饰"):
+    return {
+        "product_positioning_one_liner": product_name,
+        "hard_anchors": [{"anchor": product_name}],
+        "display_anchors": [{"anchor": "水滴吊坠结构"}],
+        "category_execution_contract": {"display_family": "jewelry"},
+    }
+
+
+class CategoryExecutionAdapterTest(unittest.TestCase):
+    def test_feature_gate_defaults_to_disabled(self):
+        with patch.dict(os.environ, {ACCESSORY_PROFILE_ENV: "0"}, clear=False):
+            extension = compile_category_execution_extension(
+                product_type="耳环", top_category="配饰", anchor_card=_anchor()
+            )
+        self.assertEqual(extension, {})
+
+    def test_apparel_is_omitted_even_when_accessory_feature_is_enabled(self):
+        extension = compile_category_execution_extension(
+            product_type="外套",
+            top_category="女装",
+            anchor_card={"category_execution_contract": {"display_family": "apparel"}},
+            enabled=True,
+        )
+        self.assertEqual(extension, {})
+
+    def test_three_supported_categories_compile_distinct_physical_profiles(self):
+        cases = (
+            ("耳环", "EAR", "ALREADY_WORN_EAR_VISIBLE"),
+            ("发夹", "HAIR", "ALREADY_STYLED_HAIR_RESULT"),
+            ("围巾", "NECK_SHOULDER", "ALREADY_WORN_UPPER_BODY_RESULT"),
+        )
+        for product_type, zone, result_view in cases:
+            with self.subTest(product_type=product_type):
+                extension = compile_category_execution_extension(
+                    product_type=product_type,
+                    top_category="配饰",
+                    anchor_card=_anchor(product_type),
+                    enabled=True,
+                )
+                self.assertEqual(extension["domain"], "ACCESSORY")
+                self.assertEqual(extension["profile"]["wearing_zone"], zone)
+                self.assertEqual(
+                    extension["profile"]["required_result_view"], result_view
+                )
+                self.assertTrue(extension["profile"]["interaction_boundary"])
+
+    def test_scarf_subtypes_are_distinct_and_generic_scarf_remains_compatible(self):
+        cases = {
+            "围巾": ("scarf", "NECK_SHOULDER", "ALREADY_WORN_UPPER_BODY_RESULT"),
+            "秋冬围巾": ("winter_scarf", "NECK_SHOULDER", "ALREADY_WORN_UPPER_BODY_RESULT"),
+            "丝巾": ("silk_scarf", "NECK_UPPER_BODY", "ALREADY_STYLED_NECK_RESULT"),
+            "头巾": ("headscarf", "HEAD_HAIR", "ALREADY_STYLED_HEAD_RESULT"),
+        }
+        for product_type, expected in cases.items():
+            with self.subTest(product_type=product_type):
+                extension = compile_category_execution_extension(
+                    product_type=product_type,
+                    top_category="配饰",
+                    anchor_card=_anchor(product_type),
+                    enabled=True,
+                )
+                profile = extension["profile"]
+                self.assertEqual(
+                    extension["schema_version"],
+                    "accessory-execution-profile-v3-scarf",
+                )
+                self.assertEqual(profile["product_subtype"], expected[0])
+                self.assertEqual(profile["wearing_zone"], expected[1])
+                self.assertEqual(profile["required_result_view"], expected[2])
+                self.assertTrue(profile["preferred_carriers"])
+                self.assertTrue(profile["compatible_proof_subjects"])
+                self.assertTrue(profile["outfit_context"])
+                self.assertTrue(profile["scene_preferences"])
+
+    def test_silk_scarf_and_headscarf_boundaries_do_not_infer_material_or_identity(self):
+        silk = compile_category_execution_extension(
+            product_type="丝巾", top_category="配饰", anchor_card=_anchor("印花方巾"), enabled=True
+        )
+        head = compile_category_execution_extension(
+            product_type="头巾", top_category="配饰", anchor_card=_anchor("几何图案头巾"), enabled=True
+        )
+        self.assertIn("真丝", silk["profile"]["interaction_boundary"])
+        self.assertIn("冰凉", silk["profile"]["interaction_boundary"])
+        self.assertIn("宗教身份", head["profile"]["interaction_boundary"])
+        self.assertIn("文化身份", head["profile"]["interaction_boundary"])
+
+    def test_registered_scarf_type_reconciles_legacy_winter_contract(self):
+        legacy = {
+            "product_positioning_one_liner": "印花方巾",
+            "category_execution_contract": {
+                "display_family": "winter_scarf",
+                "product_subtype": "winter_scarf",
+                "operation_policy": "process_required",
+                "season_context": {
+                    "primary_season": "winter",
+                    "weather_signal": "cold",
+                },
+                "co_styling_hint": {
+                    "pair_with": ["winter_coat", "basic_turtleneck", "plain_shirt"]
+                },
+            },
+        }
+        reconciled = reconcile_anchor_category_contract(
+            legacy,
+            product_type="丝巾",
+            top_category="配饰",
+        )
+        contract = reconciled["category_execution_contract"]
+        self.assertEqual("silk_scarf", contract["product_subtype"])
+        self.assertEqual("result_first_process_avoid", contract["operation_policy"])
+        self.assertEqual("unknown", contract["season_context"]["primary_season"])
+        self.assertEqual(["plain_shirt"], contract["co_styling_hint"]["pair_with"])
+        self.assertEqual("winter_scarf", legacy["category_execution_contract"]["product_subtype"])
+
+    def test_reconcile_is_noop_for_apparel(self):
+        anchor = {"category_execution_contract": {"display_family": "apparel"}}
+        self.assertIs(
+            anchor,
+            reconcile_anchor_category_contract(
+                anchor,
+                product_type="外套",
+                top_category="女装",
+            ),
+        )
+
+    def test_mixed_carrier_keeps_scarf_wearer_result(self):
+        extension = compile_category_execution_extension(
+            product_type="丝巾",
+            top_category="配饰",
+            anchor_card=_anchor("印花方巾"),
+            enabled=True,
+        )
+        mixed = resolve_category_carrier_execution(
+            extension,
+            presentation_mode="MIXED",
+        )
+        self.assertEqual("ALREADY_STYLED_NECK_RESULT", mixed["required_view"])
+        self.assertIn("已经佩戴后的关系", mixed["claim_boundary"])
+
+    def test_earring_pairing_authority_is_anchor_only(self):
+        unknown = compile_category_execution_extension(
+            product_type="耳环", top_category="配饰", anchor_card=_anchor(), enabled=True
+        )
+        pair = compile_category_execution_extension(
+            product_type="耳环", top_category="配饰", anchor_card=_anchor("一对金色水滴耳饰"), enabled=True
+        )
+        single = compile_category_execution_extension(
+            product_type="耳环", top_category="配饰", anchor_card=_anchor("单只金色水滴耳饰"), enabled=True
+        )
+        self.assertEqual(unknown["profile"]["identity_authority"]["pairing_mode"], "UNAVAILABLE")
+        self.assertEqual(pair["profile"]["identity_authority"]["pairing_mode"], "PAIR")
+        self.assertEqual(single["profile"]["identity_authority"]["pairing_mode"], "SINGLE")
+        self.assertTrue(validate_category_execution_identity(unknown, script={"script_concept": {"one_sentence_idea": "看这对耳饰"}}))
+        self.assertFalse(validate_category_execution_identity(unknown, script={"script_concept": {"one_sentence_idea": "看这款耳饰"}}))
+        self.assertFalse(validate_category_execution_identity(pair, script={"script_concept": {"one_sentence_idea": "看这对耳饰"}}))
+        self.assertFalse(validate_category_execution_identity(single, script={"script_concept": {"one_sentence_idea": "看这只耳饰"}}))
+
+    def test_earring_display_suggestion_cannot_authorize_pairing(self):
+        anchor = _anchor()
+        anchor["display_anchors"] = [{"anchor": "手持近距离展示成对耳饰"}]
+        extension = compile_category_execution_extension(
+            product_type="耳环", top_category="配饰", anchor_card=anchor, enabled=True
+        )
+        self.assertEqual(
+            extension["profile"]["identity_authority"]["pairing_mode"],
+            "UNAVAILABLE",
+        )
+
+    def test_carrier_authority_changes_execution_not_the_routed_carrier(self):
+        extension = compile_category_execution_extension(
+            product_type="发夹",
+            top_category="配饰",
+            anchor_card=_anchor("发夹"),
+            enabled=True,
+        )
+        person = resolve_category_carrier_execution(
+            extension, presentation_mode="PERSON_ON_CAMERA"
+        )
+        static = resolve_category_carrier_execution(
+            extension, presentation_mode="STATIC_PRODUCT"
+        )
+        self.assertEqual(person["required_view"], "ALREADY_STYLED_HAIR_RESULT")
+        self.assertEqual(static["required_view"], "PRODUCT_DETAIL_ONLY")
+        self.assertIn("不把静物或手持画面写成佩戴结果证明", static["claim_boundary"])
+
+    def test_apparel_seed_and_prompt_are_identical_with_feature_off_or_on(self):
+        kwargs = dict(
+            anchor_card={
+                "product_positioning_one_liner": "米白短款外套",
+                "hard_anchors": [{"anchor": "米白短款外套"}],
+                "display_anchors": [{"anchor": "单列前襟扣"}],
+                "category_execution_contract": {"display_family": "apparel"},
+            },
+            structure_contract=_contract(),
+            content_bundle=_bundle("短款衣长", "C1"),
+            creative_contract={},
+            execution_reference={"content_carrier": "WEARER_ACTIVE"},
+            requested_hook_id="AUDIENCE_NEED_CALLOUT",
+            content_angle_key="FACT_DISCOVERY",
+            product_type="外套",
+            top_category="女装",
+        )
+        with patch.dict(os.environ, {ACCESSORY_PROFILE_ENV: "0"}, clear=False):
+            baseline_seed = build_simplified_creative_seed(**kwargs)
+        with patch.dict(os.environ, {ACCESSORY_PROFILE_ENV: "1"}, clear=False):
+            enabled_seed = build_simplified_creative_seed(**kwargs)
+        self.assertEqual(baseline_seed, enabled_seed)
+        self.assertNotIn("category_execution_extension", enabled_seed)
+        self.assertEqual(
+            build_simplified_script_prompt(
+                baseline_seed,
+                target_country="泰国",
+                target_language="泰语",
+                duration_seconds=15,
+            ),
+            build_simplified_script_prompt(
+                enabled_seed,
+                target_country="泰国",
+                target_language="泰语",
+                duration_seconds=15,
+            ),
+        )
+
+    def test_accessory_extension_flows_from_plan_to_video_brief(self):
+        with patch.dict(os.environ, {ACCESSORY_PROFILE_ENV: "1"}, clear=False):
+            item = _make_item(
+                product_code="P_EAR",
+                batch_id="B1",
+                item_index=1,
+                item_role="INITIAL_DIRECTION",
+                direction={
+                    "direction_assignment_id": "DA1",
+                    "selection_run_id": "SR1",
+                    "output_slot": "S1",
+                    "structure_contract": _contract(),
+                    "execution_reference": {"content_carrier": "WEARER_ACTIVE"},
+                },
+                bundle=_bundle(),
+                angle_key="FACT_DISCOVERY",
+                hook_id="AUDIENCE_NEED_CALLOUT",
+                eligible_hooks=["AUDIENCE_NEED_CALLOUT"],
+                creative={},
+                visual_signature="人|房间|已佩戴|单耳",
+                policy_version="test",
+                used_signatures=set(),
+                anchor_card=_anchor(),
+                product_type="耳环",
+                top_category="配饰",
+            )
+        self.assertIsNotNone(item)
+        frozen = json.loads(item.frozen_direction_package_json)
+        self.assertIn("category_execution_extension", frozen)
+        seed = frozen["simplified_creative_seed"]
+        self.assertEqual(
+            seed["carrier_specific_execution"]["required_view"],
+            "ALREADY_WORN_EAR_VISIBLE",
+        )
+        prompt = build_simplified_script_prompt(
+            seed, target_country="泰国", target_language="泰语", duration_seconds=15
+        )
+        self.assertIn("类目执行补充", prompt)
+        self.assertIn("已经佩戴好的状态", prompt)
+        self.assertIn("戴耳环动作", prompt)
+
+        raw = {
+            "script_concept": {
+                "one_sentence_idea": "已经佩戴好的耳侧分享",
+                "viewer_need": "看清耳饰上耳比例",
+                "hook_intent": "先给结果",
+            },
+            "production_design": {
+                "presentation_mode": "PERSON_ON_CAMERA",
+                "character": {
+                    "identity": "日常分享者",
+                    "appearance": "二十多岁自然气质",
+                    "hair_makeup": "头发已在耳后，淡妆",
+                    "speaking_personality": "朋友式分享",
+                },
+                "outfit": {
+                    "base_outfit": "简洁圆领上衣",
+                    "product_role": "耳饰作为脸侧细节点",
+                    "accessories": "无其他抢眼首饰",
+                },
+                "scene": {
+                    "location": "公寓窗边",
+                    "moment": "出门前",
+                    "lighting": "自然光",
+                    "background": "普通房间",
+                },
+                "emotion": {
+                    "starting_state": "自然",
+                    "natural_change": "轻微满意",
+                    "ending_state": "保持放松",
+                },
+            },
+            "product_usage": {
+                "identity_anchors_preserved": ["金色水滴形耳饰"],
+                "selling_points_used": ["C1"],
+            },
+            "storyboard": [
+                {
+                    "shot_no": index,
+                    "time_range": f"{(index - 1) * 3}-{index * 3}s",
+                    "visual_content": "耳饰已经佩戴，耳侧和半脸清楚可见",
+                    "character_action": "保持自然小幅呼吸",
+                    "natural_emotion": "放松",
+                    "camera": "手机固定近景",
+                    "product_anchors_visible": ["金色水滴形耳饰"],
+                    "supported_claim_keys": ["C1"],
+                    "narrative_role": role,
+                }
+                for index, role in enumerate(
+                    ("HOOK", "PROOF", "PROOF", "ENDING"), 1
+                )
+            ],
+            "voiceover_context": {
+                "viewer_relationship": "朋友分享",
+                "speaking_intent": "展示佩戴效果",
+                "desired_tone": "自然",
+            },
+        }
+        normalized = normalize_simplified_visual_script(
+            raw, seed, generation_provenance={"model": "test"}
+        )
+        self.assertEqual(
+            normalized["production_design"]["accessory_execution"]["wearing_zone"],
+            "EAR",
+        )
+        assembled = assemble_simplified_complete_script(
+            normalized,
+            seed,
+            {
+                "hook_id": "AUDIENCE_NEED_CALLOUT",
+                "lines": [
+                    {
+                        "voiceover_text_target_language": "ดูต่างหูชิ้นนี้ก่อนนะ",
+                        "voiceover_text_zh": "先看这款耳饰。",
+                    }
+                ],
+            },
+        )
+        brief = assembled["video_generation_brief"]
+        self.assertIn("category_execution_extension", brief)
+        self.assertEqual(
+            brief["accessory_execution_brief"]["schema_version"],
+            "accessory-video-handoff-v2",
+        )
+
+        direction, _ = build_simplified_voiceover_inputs(
+            normalized,
+            seed,
+            frozen,
+        )
+        self.assertEqual(
+            direction["category_execution_extension"]["profile"]["identity_authority"]["pairing_mode"],
+            "UNAVAILABLE",
+        )
+        visual_validation = validate_simplified_visual_script(normalized, seed)
+        self.assertTrue(visual_validation["valid"], visual_validation)
+        self.assertTrue(validate_simplified_complete_script(assembled)["valid"])
+
+        rendered_item = SimpleNamespace(
+            result_json=json.dumps({"script": assembled}, ensure_ascii=False)
+        )
+        rendered = render_video_generation_prompt(
+            item=rendered_item, duration_seconds=15
+        )
+        self.assertIn("【配饰佩戴与展示关系】", rendered)
+        self.assertIn("商品已经正确佩戴在耳部", rendered)
+        self.assertIn("戴耳环动作", rendered)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -120,7 +120,7 @@ def build_payload(product: Dict[str, Any]) -> Dict[str, Any]:
         product_category.get("display_family")
     )
     if not display_family:
-        if any(token in product_type.lower() for token in ("围巾", "丝巾", "披肩", "帽", "scarf", "hat")):
+        if any(token in product_type.lower() for token in ("围巾", "丝巾", "头巾", "披肩", "帽", "scarf", "hat")):
             display_family = "apparel_accessory"
         elif product_profile in {"WORN_ACCESSORY", "HAND_STATIC_ACCESSORY"}:
             display_family = "accessory"

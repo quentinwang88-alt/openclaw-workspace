@@ -93,6 +93,9 @@ CATEGORY_CONTRACT_FIELD_OPTIONS = {
         "styling_tool",
         "other_hair_accessory",
         "scarf",
+        "winter_scarf",
+        "silk_scarf",
+        "headscarf",
         "hat",
         "scarf_hat_set",
         "unknown",
@@ -2018,6 +2021,15 @@ def _normalize_script_payload(payload: Any) -> Dict[str, Any]:
     video_brief = script.get("video_generation_brief")
     if isinstance(video_brief, dict):
         normalized_brief = dict(video_brief)
+        normalized_brief["schema_version"] = _coerce_scalar_text(
+            normalized_brief.get("schema_version")
+        )
+        normalized_brief["render_profile"] = _coerce_scalar_text(
+            normalized_brief.get("render_profile")
+        )
+        normalized_brief["capture_mode"] = _coerce_scalar_text(
+            normalized_brief.get("capture_mode")
+        )
         for field in (
             "outfit",
             "opening_observation",
@@ -2040,6 +2052,28 @@ def _normalize_script_payload(payload: Any) -> Dict[str, Any]:
         for field in ("character", "scene"):
             value = normalized_brief.get(field)
             normalized_brief[field] = dict(value) if isinstance(value, dict) else {}
+        for field in ("production_design", "product_truth", "voiceover"):
+            value = normalized_brief.get(field)
+            normalized_brief[field] = dict(value) if isinstance(value, dict) else {}
+        if normalized_brief["production_design"]:
+            normalized_brief["production_design"]["capture_mode"] = (
+                _coerce_scalar_text(
+                    normalized_brief["production_design"].get("capture_mode")
+                )
+            )
+        storyboard = normalized_brief.get("storyboard")
+        normalized_brief["storyboard"] = [
+            dict(item) for item in storyboard if isinstance(item, dict)
+        ] if isinstance(storyboard, list) else []
+        identity_lock = normalized_brief.get("product_identity_lock")
+        if isinstance(identity_lock, dict):
+            normalized_lock = dict(identity_lock)
+            for field in ("must_preserve", "critical_visible_details", "must_not_change"):
+                value = normalized_lock.get(field)
+                normalized_lock[field] = list(value) if isinstance(value, list) else []
+            normalized_brief["product_identity_lock"] = normalized_lock
+        else:
+            normalized_brief["product_identity_lock"] = {}
         script["video_generation_brief"] = normalized_brief
 
     storyboard = script.get("storyboard")

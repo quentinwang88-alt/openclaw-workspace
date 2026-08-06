@@ -164,6 +164,47 @@ class RealityReferenceTests(unittest.TestCase):
         )
         self.assertTrue(contract["expression_policy"]["rhetorical_conflict_allowed"])
 
+    def test_operator_confirmed_argument_keeps_authority_and_reframe_policy(self):
+        visual = {"shots": [{"shot_no": 1, "supported_claim_keys": ["C1"]}]}
+        bundle = {
+            "content_bundle_id": "CB_OPERATOR",
+            "content_mode": "SELLING_ARGUMENT",
+            "value_proposition": {
+                "text": "普通基础穿搭也能呈现更精致的感觉",
+                "status": "AVAILABLE",
+            },
+            "selling_argument": {
+                "argument_id": "OPERATOR_S1",
+                "status": "AVAILABLE",
+                "source": "FEISHU_OPERATOR_CONFIRMED_ARGUMENT",
+                "source_argument_id": "S1",
+                "authorization_source": "FEISHU_OPERATOR_CONFIRMED",
+                "mapping_status": "UNMAPPED",
+                "operator_expression": "运营维护的原始卖点",
+                "expression_policy": "SEMANTIC_AUTHORITY_NOT_VERBATIM",
+                "respectful_reframe_required": True,
+                "script_readiness": "READY",
+                "core_proof_claim_keys": ["C1"],
+            },
+            "audience_tension": {"status": "UNAVAILABLE", "text": ""},
+            "claim_atoms": [{"claim_key": "C1", "fact_text": "直筒版型"}],
+        }
+        contract = build_voiceover_argument_contract(
+            {"content_bundle_brief": bundle, "creative_blueprint": {}}, visual
+        )
+        selling = contract["content"]["selling_argument"]
+        self.assertEqual(selling["source_argument_id"], "S1")
+        self.assertEqual(selling["mapping_status"], "UNMAPPED")
+        self.assertTrue(selling["respectful_reframe_required"])
+        self.assertEqual(
+            contract["expression_policy"]["selling_point_authority"],
+            "FEISHU_OPERATOR_CONFIRMED",
+        )
+        self.assertEqual(
+            contract["expression_policy"]["operator_expression_policy"],
+            "SEMANTIC_AUTHORITY_NOT_VERBATIM",
+        )
+
     def test_worn_accessory_prefers_wearer_or_mixed_reference(self):
         self.assertEqual("WORN_ACCESSORY", _product_family("围巾", "配饰"))
         wearer = ExecutionCard.__new__(ExecutionCard)
@@ -414,6 +455,37 @@ class RealityReferenceTests(unittest.TestCase):
             "central-voiceover-v32-relational-language",
             contract["speech_policy"]["voiceover_policy_version"],
         )
+
+    def test_expression_contract_passes_lived_moment_family_to_central_engine(self):
+        direction = {
+            "creative_diversity_contract": {
+                "moment_family_id": "QUICK_ERRAND",
+                "scene_motif": "公寓大堂快递柜旁",
+                "opening_action": "人物关上快递柜门后走向出口",
+                "required_presentation_mode": "WEARER_ACTIVE",
+            },
+            "creative_blueprint": {
+                "scene": {
+                    "location": "公寓大堂快递柜旁",
+                    "moment": "临时下楼取件",
+                },
+                "event_design": {
+                    "natural_event": "人物取完快递准备离开",
+                },
+            },
+            "content_bundle_brief": {"claim_atoms": []},
+            "structure_execution_plan": {"shot_plan": []},
+        }
+
+        contract = build_voiceover_expression_contract(direction, {"shots": []})
+
+        top_level = contract["creative_voice_context"]["lived_moment_binding"]
+        nested = contract["argument_contract"]["creative_voice_context"][
+            "lived_moment_binding"
+        ]
+        self.assertEqual("QUICK_ERRAND", top_level["moment_family_id"])
+        self.assertEqual("人物取完快递准备离开", top_level["speech_anchor_zh"])
+        self.assertEqual(top_level, nested)
 
     def test_hook_delivery_status_keeps_structure_and_surface_separate(self):
         qc = {"warnings": [{"code": "HOOK_DELIVERY_TOO_FLAT"}]}
@@ -1237,7 +1309,12 @@ class RealityReferenceTests(unittest.TestCase):
         )
         execution_plan = script["voiceover_execution_plan"]
         self.assertEqual(execution_plan["schema_version"], "voiceover-execution-plan-v1")
-        self.assertEqual(execution_plan["mode"], "REUSE_APPROVED_COPY")
+        self.assertEqual(execution_plan["mode"], "GENERATE_FROM_SOURCE_CONTRACT")
+        self.assertEqual(
+            execution_plan["generation_policy"],
+            "central_engine_must_generate_fresh_copy",
+        )
+        self.assertTrue(execution_plan["source_copy_audit_present"])
         self.assertEqual(execution_plan["target_text"], "ข้อความต่อเนื่อง")
         self.assertEqual(execution_plan["lines"][0]["end_shot_no"], 2)
 

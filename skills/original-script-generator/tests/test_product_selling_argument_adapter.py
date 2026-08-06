@@ -4,10 +4,98 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from core.product_selling_argument_adapter import load_verified_selling_point_catalog
+from core.product_selling_argument_adapter import (
+    compatible_structure_carriers,
+    load_verified_selling_point_catalog,
+    normalized_carrier_requirement,
+)
 
 
 class ProductSellingArgumentAdapterTest(unittest.TestCase):
+    def test_carrier_requirement_uses_structured_semantics_only(self):
+        argument = {
+            "operator_expression": "穿上很显瘦",
+            "visual_dependency": "WEARER_REQUIRED",
+        }
+        self.assertEqual("WEARER_REQUIRED", normalized_carrier_requirement(argument))
+        self.assertEqual(
+            ["WEARER_ACTIVE", "MIXED"],
+            compatible_structure_carriers(argument),
+        )
+        self.assertEqual(
+            "FLEXIBLE",
+            normalized_carrier_requirement({"operator_expression": "穿上很显瘦"}),
+        )
+    def test_all_confirmed_feishu_segments_remain_available_without_concept_mapping(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "voiceover.sqlite"
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """CREATE TABLE product_claim_sources (
+                        claim_source_id TEXT, product_id TEXT, raw_text TEXT,
+                        source_type TEXT, source_ref TEXT,
+                        operator_priority TEXT, created_at TEXT
+                    )"""
+                )
+                conn.execute(
+                    """CREATE TABLE product_claims (
+                        product_id TEXT, verification_status TEXT, claim_id TEXT,
+                        claim_source_id TEXT, concept_id TEXT, source_span TEXT,
+                        canonical_claim_zh TEXT, claim_type TEXT, claim_theme TEXT,
+                        evidence_requirement TEXT, allowed_strength TEXT,
+                        operator_priority TEXT, updated_at TEXT, created_at TEXT,
+                        normalizer_confidence REAL
+                    )"""
+                )
+                source_rows = []
+                claim_rows = []
+                for index in range(1, 6):
+                    source_rows.append((
+                        f"S{index}", "P1", f"{index}、人工确认卖点{index}",
+                        "operator_input", f"feishu-product-claims:rec#segment-{index}",
+                        "core", str(index),
+                    ))
+                    mapped = index in {2, 3}
+                    claim_rows.append((
+                        "P1", "VERIFIED" if mapped else "UNRESOLVED", f"C{index}",
+                        f"S{index}", "SHARED_STYLE" if mapped else None,
+                        f"{index}、人工确认卖点{index}",
+                        "风格表达" if mapped else f"人工确认卖点{index}",
+                        "benefit" if mapped else "feature", "style",
+                        "source_plus_video" if mapped else "source_only",
+                        "factual" if mapped else "soft_only", "core", "", str(index),
+                        0.93 if mapped else 0.0,
+                    ))
+                conn.executemany(
+                    "INSERT INTO product_claim_sources VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    source_rows,
+                )
+                conn.executemany(
+                    "INSERT INTO product_claims VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    claim_rows,
+                )
+            with patch.dict("os.environ", {"ORIGINAL_SCRIPT_CLAIMS_DB_PATH": str(db_path)}):
+                result = load_verified_selling_point_catalog("P1")
+
+            self.assertEqual(result["status"], "AVAILABLE")
+            self.assertEqual(result["confirmed_argument_count"], 5)
+            self.assertEqual(result["available_argument_count"], 5)
+            self.assertEqual(result["mapped_argument_count"], 2)
+            self.assertEqual(result["unmapped_argument_count"], 3)
+            self.assertEqual(
+                [item["source_argument_id"] for item in result["catalog"]],
+                ["S1", "S2", "S3", "S4", "S5"],
+            )
+            self.assertEqual(
+                [item["verification_status"] for item in result["catalog"]],
+                ["OPERATOR_CONFIRMED"] * 5,
+            )
+            self.assertEqual(
+                [item["mapping_status"] for item in result["catalog"]],
+                ["UNMAPPED", "MAPPED", "MAPPED", "UNMAPPED", "UNMAPPED"],
+            )
+            self.assertEqual(result["catalog"][0]["source_claim_ids"], [])
+
     def test_only_verified_benefits_and_results_become_arguments(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "voiceover.sqlite"

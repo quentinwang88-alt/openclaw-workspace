@@ -31,7 +31,14 @@ CONTENT_ANGLE_KEYS = frozenset({
     "VALUE_"  # prefix for value-direction keys
 })
 
-HOOK_ID_BLACKLIST_FOR_NO_TENSION = frozenset({"PAIN_REFRAME"})
+# These archetypes need a governed user tension/opposition to execute their
+# central-library rhetorical path.  Without it they flatten into generic
+# first-person praise, which is not a truthful realization of the hook.
+HOOK_ID_BLACKLIST_FOR_NO_TENSION = frozenset({
+    "PAIN_REFRAME",
+    "AUDIENCE_NEED_CALLOUT",
+    "USER_ADVOCACY_STANCE",
+})
 
 
 # ── ID / hash generators ──────────────────────────────────────────────

@@ -1,0 +1,113 @@
+{
+  "schema_version": "scene-routing-policy-v1",
+  "scene_run_id": "scene_v2",
+  "policy_version": "scene-routing-policy-v1",
+  "families": {
+    "HOME_ROUTINE": {
+      "routing_status": "SOFT_ONLY",
+      "affinity_tags": ["HOME_SHARE", "DAILY_ROUTINE"],
+      "approved_realism_anchors": ["保留一个日常收纳或随身物品", "以自然窗光和普通生活背景为主"]
+    },
+    "VANITY_TRYON": {
+      "routing_status": "ACTIVE",
+      "affinity_tags": ["BODY_RESULT_CLEAR", "DETAIL_OBSERVATION"],
+      "approved_realism_anchors": ["梳妆台或镜前区域只保留日常使用物", "人物不是为镜头摆拍，而是在完成出门前的普通整理"]
+    },
+    "MIRROR_FITTING": {
+      "routing_status": "ACTIVE",
+      "affinity_tags": ["BODY_RESULT_CLEAR", "OUTFIT_CHECK"],
+      "approved_realism_anchors": ["镜面只作为生活空间的一部分", "完整轮廓在自然移动中出现，不要求镜前摆拍"]
+    },
+    "STREET_OUTING": {
+      "routing_status": "ACTIVE",
+      "affinity_tags": ["ON_THE_GO", "MULTI_OCCASION", "OUTFIT_CHECK"],
+      "approved_realism_anchors": ["保留真实街边纵深或行走方向", "人物处于出门途中，不额外安排展示动作"]
+    },
+    "RETAIL_DISCOVERY": {
+      "routing_status": "ACTIVE",
+      "affinity_tags": ["SHOPPING_DISCOVERY", "DETAIL_OBSERVATION"],
+      "approved_realism_anchors": ["保留货架或陈列作为环境背景", "避免出现可识别品牌与价格标签"]
+    },
+    "UNBOXING": {
+      "routing_status": "ACTIVE",
+      "affinity_tags": ["UNBOXING", "DETAIL_OBSERVATION"],
+      "approved_realism_anchors": ["包装与桌面只作为收到物品后的生活背景", "不把开箱过程写成夸张惊喜表演"]
+    },
+    "PLAIN_DISPLAY": {
+      "routing_status": "ACTIVE",
+      "affinity_tags": ["BODY_RESULT_CLEAR", "DETAIL_OBSERVATION"],
+      "approved_realism_anchors": ["使用干净但非影棚化的单色墙面", "保留自然光和真实空间比例"]
+    },
+    "OFFICE_WORKBREAK": {
+      "routing_status": "ACTIVE",
+      "affinity_tags": ["COMMUTE", "WORK_BREAK", "MULTI_OCCASION"],
+      "approved_realism_anchors": ["办公物品只作为背景，不要求人物刻意操作", "保留工作日公共空间的自然动线"]
+    },
+    "CAFE_DINING": {
+      "routing_status": "ACTIVE",
+      "affinity_tags": ["PHOTO_FRIENDLY", "PREMIUM_AMBIENCE", "SOCIAL_MOMENT"],
+      "approved_realism_anchors": ["靠窗座位与自然侧光", "桌面保留少量真实使用痕迹"]
+    },
+    "CAR_TRANSIT": {
+      "routing_status": "ACTIVE",
+      "affinity_tags": ["ON_THE_GO", "COMMUTE"],
+      "approved_realism_anchors": ["车内或等候区只服务出行状态", "不强制人物在狭小空间展示完整穿搭"]
+    },
+    "STATIC_DISPLAY": {
+      "routing_status": "ACTIVE",
+      "affinity_tags": ["STATIC_OBSERVATION", "DETAIL_OBSERVATION"],
+      "approved_realism_anchors": ["商品承载保持单一、稳定和可核对", "环境只提供比例与日常陈列感"]
+    },
+    "GENERIC_INDOOR": {
+      "routing_status": "SOFT_ONLY",
+      "affinity_tags": ["HOME_SHARE"],
+      "approved_realism_anchors": []
+    },
+    "UNKNOWN_GENERIC": {
+      "routing_status": "HOLDOUT",
+      "affinity_tags": [],
+      "approved_realism_anchors": []
+    }
+  },
+  "clusters": {
+    "0": "RETAIL_DISCOVERY",
+    "1": "UNBOXING",
+    "2": "STREET_OUTING",
+    "3": "VANITY_TRYON",
+    "4": "CAFE_DINING",
+    "5": "CAR_TRANSIT",
+    "6": "MIRROR_FITTING",
+    "7": "HOME_ROUTINE",
+    "8": "UNKNOWN_GENERIC",
+    "9": "VANITY_TRYON",
+    "10": "HOME_ROUTINE",
+    "11": "GENERIC_INDOOR",
+    "12": "GENERIC_INDOOR",
+    "13": "PLAIN_DISPLAY",
+    "14": "VANITY_TRYON",
+    "15": "HOME_ROUTINE",
+    "16": "GENERIC_INDOOR",
+    "17": "HOME_ROUTINE",
+    "18": "MIRROR_FITTING",
+    "19": "PLAIN_DISPLAY",
+    "20": "VANITY_TRYON",
+    "21": "CAFE_DINING",
+    "22": "HOME_ROUTINE",
+    "23": "HOME_ROUTINE",
+    "24": "VANITY_TRYON",
+    "25": "HOME_ROUTINE",
+    "26": "STATIC_DISPLAY",
+    "27": "HOME_ROUTINE",
+    "28": "UNKNOWN_GENERIC",
+    "29": "STATIC_DISPLAY",
+    "30": "UNKNOWN_GENERIC",
+    "31": "UNBOXING",
+    "32": "OFFICE_WORKBREAK",
+    "33": "UNKNOWN_GENERIC",
+    "34": "PLAIN_DISPLAY",
+    "35": "UNBOXING",
+    "36": "STREET_OUTING",
+    "37": "UNKNOWN_GENERIC",
+    "38": "UNKNOWN_GENERIC"
+  }
+}

@@ -255,11 +255,41 @@
       "canonical_type": "scarf",
       "family": "apparel_accessory",
       "slot": "neck_shoulder",
-      "aliases": ["围巾", "冬季围巾", "披肩围巾", "头巾"],
+      "aliases": ["围巾", "披肩围巾", "披肩"],
       "display_name": "围巾",
-      "description": "脖颈和肩部搭配配饰，重点描述已围好后的上半身冬季穿搭完整度、围巾边缘和外套或针织衫关系。",
-      "required_terms": ["围巾", "上半身", "冬季穿搭"],
-      "forbidden_terms": ["强保暖", "防风", "复杂打结教程"]
+      "description": "未细分用途的通用围巾，保守按脖颈和肩部搭配配饰处理，重点描述已围好或披好后的上半身关系。",
+      "required_terms": ["围巾", "上半身", "肩颈关系"],
+      "forbidden_terms": ["强保暖", "防风", "真实丝质", "复杂打结教程"]
+    },
+    {
+      "canonical_type": "winter_scarf",
+      "family": "apparel_accessory",
+      "slot": "neck_shoulder",
+      "aliases": ["秋冬围巾", "冬季围巾", "厚围巾", "针织围巾"],
+      "display_name": "秋冬围巾",
+      "description": "秋冬脖颈和肩部搭配配饰，重点描述已经围好或披好后与外套、针织衫的层次关系。",
+      "required_terms": ["围巾", "肩颈", "秋冬穿搭"],
+      "forbidden_terms": ["强保暖", "防风", "抗寒", "复杂打结教程"]
+    },
+    {
+      "canonical_type": "silk_scarf",
+      "family": "apparel_accessory",
+      "slot": "neck_shoulder",
+      "aliases": ["丝巾", "方巾", "小方巾"],
+      "display_name": "丝巾",
+      "description": "轻量颈部造型配饰，从已经搭配好的状态展示其与领口、上衣和脸部附近的关系；类型名称不授权真实丝质。",
+      "required_terms": ["颈部", "造型点缀", "已搭配状态"],
+      "forbidden_terms": ["真丝", "桑蚕丝", "冰凉", "顺滑亲肤", "复杂系法教程"]
+    },
+    {
+      "canonical_type": "headscarf",
+      "family": "apparel_accessory",
+      "slot": "head_face",
+      "aliases": ["头巾", "包头巾", "发用头巾"],
+      "display_name": "头巾",
+      "description": "用于头部或头发造型的配饰，从已经完成的日常头部造型展示位置、轮廓和穿搭关系。",
+      "required_terms": ["头部", "头发", "已完成造型"],
+      "forbidden_terms": ["宗教身份", "民族身份", "文化身份", "复杂包裹教程"]
     },
     {
       "canonical_type": "hat",

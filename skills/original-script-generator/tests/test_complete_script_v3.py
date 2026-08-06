@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -140,6 +141,7 @@ class CompleteScriptV3Tests(unittest.TestCase):
     def test_soft_product_profiles_cover_apparel_worn_and_small_accessories(self) -> None:
         self.assertEqual("WORN_APPAREL", creative_product_profile("连衣裙", "女装"))
         self.assertEqual("WORN_ACCESSORY", creative_product_profile("围巾", "配饰"))
+        self.assertEqual("WORN_ACCESSORY", creative_product_profile("头巾", "配饰"))
         self.assertEqual("HAND_STATIC_ACCESSORY", creative_product_profile("戒指", "配饰"))
 
     def test_scarf_wearer_contract_uses_worn_accessory_life_event(self) -> None:
@@ -155,6 +157,72 @@ class CompleteScriptV3Tests(unittest.TestCase):
         self.assertEqual("WORN_ACCESSORY", contract["creative_product_profile"])
         self.assertIn("佩戴", contract["opening_action"])
         self.assertNotIn("工作台", contract["scene_motif"])
+
+    def test_scarf_subtypes_receive_distinct_scene_and_outfit_pools(self) -> None:
+        outputs = {}
+        for product_type in ("秋冬围巾", "丝巾", "头巾"):
+            outputs[product_type] = build_creative_diversity_contract(
+                product_code=f"P_{product_type}",
+                country="泰国",
+                category="配饰",
+                product_type=product_type,
+                direction=direction(),
+                recent_usage=[],
+            )
+        self.assertEqual(
+            3,
+            len({item["outfit_selection_contract"]["silhouette_key"] for item in outputs.values()}),
+        )
+        self.assertTrue(
+            all(
+                item["outfit_selection_contract"]["contract_version"]
+                == "outfit-selection-v3-worn-accessory"
+                for item in outputs.values()
+            )
+        )
+        self.assertNotEqual(
+            outputs["秋冬围巾"]["scene_motif"],
+            outputs["丝巾"]["scene_motif"],
+        )
+        self.assertNotIn("缠绕", outputs["头巾"]["opening_action"])
+
+    def test_generic_scarf_no_longer_uses_product_led_outfit_placeholder(self) -> None:
+        contract = build_creative_diversity_contract(
+            product_code="P_GENERIC_SCARF",
+            country="泰国",
+            category="配饰",
+            product_type="围巾",
+            direction=direction(),
+            recent_usage=[],
+        )
+        outfit = contract["outfit_selection_contract"]
+        self.assertNotEqual("PRODUCT_LED", outfit["silhouette_key"])
+        self.assertTrue(outfit["base_outfit_direction"])
+        self.assertTrue(outfit["visibility_requirement"])
+
+    def test_category_scene_preferences_softly_rank_existing_scarf_scenes(self) -> None:
+        scarf_direction = direction()
+        scarf_direction["category_execution_extension"] = {
+            "profile": {
+                "product_subtype": "silk_scarf",
+                "scene_preferences": ["CAFE_DINING", "OFFICE_WORKBREAK"],
+            }
+        }
+        contract = build_creative_diversity_contract(
+            product_code="P_SILK_SCENE",
+            country="泰国",
+            category="配饰",
+            product_type="丝巾",
+            direction=scarf_direction,
+            recent_usage=[],
+        )
+        self.assertEqual(
+            ["CAFE_DINING", "OFFICE_WORKBREAK"],
+            contract["category_scene_affinity_preferences"],
+        )
+        self.assertTrue(contract["scene_affinity_matches"])
+        self.assertGreater(contract["scene_affinity_score"], 0)
+        self.assertEqual("SOFT_PREFERENCE_ONLY", contract["scene_affinity_policy"])
 
     def test_small_accessory_static_contract_does_not_use_clothes_hanger(self) -> None:
         static_direction = direction()
@@ -219,12 +287,179 @@ class CompleteScriptV3Tests(unittest.TestCase):
             len({contract["scene_motif"] for contract in recent}),
             8,
         )
-        self.assertTrue(
-            any("书店" in contract["scene_motif"] for contract in recent)
+        self.assertGreaterEqual(
+            len({contract.get("scene_family_key") for contract in recent}),
+            3,
+        )
+        self.assertGreaterEqual(
+            len({contract.get("surface_profile", {}).get("surface_profile_key") for contract in recent}),
+            3,
+        )
+        self.assertGreaterEqual(
+            len({contract.get("outfit_selection_contract", {}).get("silhouette_key") for contract in recent}),
+            3,
         )
         self.assertTrue(
-            any("展览" in contract["scene_motif"] for contract in recent)
+            all(
+                contract.get("outfit_selection_contract", {}).get("source_type")
+                == "INTERNAL_PROFILE"
+                for contract in recent
+            )
         )
+        self.assertTrue(
+            all(
+                contract.get("outfit_selection_contract", {}).get("template_id") is None
+                for contract in recent
+            )
+        )
+        self.assertTrue(
+            all(
+                contract.get("moment_family_id")
+                in {
+                    "READY_TO_LEAVE",
+                    "COMMUTE_TRANSITION",
+                    "LEISURE_OUTING",
+                    "QUICK_ERRAND",
+                    "WAITING_IN_TRANSIT",
+                }
+                for contract in recent
+            )
+        )
+        self.assertGreaterEqual(
+            len({contract["moment_family_id"] for contract in recent}),
+            3,
+        )
+
+    def test_outfit_rotation_reads_persisted_metadata_json(self) -> None:
+        first = build_creative_diversity_contract(
+            product_code="P_OUTFIT_1",
+            country="泰国",
+            category="女装",
+            product_type="外套",
+            direction=direction(),
+            recent_usage=[],
+        )
+        first_key = first["outfit_selection_contract"]["silhouette_key"]
+        persisted = [{
+            "persona_role": first["persona_role"],
+            "scene_motif": first["scene_motif"],
+            "opening_action": first["opening_action"],
+            "metadata_json": json.dumps({
+                "outfit_selection_contract": first["outfit_selection_contract"],
+                "surface_profile": first["surface_profile"],
+            }, ensure_ascii=False),
+        }]
+
+        second = build_creative_diversity_contract(
+            product_code="P_OUTFIT_2",
+            country="泰国",
+            category="女装",
+            product_type="外套",
+            direction=direction(),
+            recent_usage=persisted,
+        )
+
+        self.assertNotEqual(
+            first_key,
+            second["outfit_selection_contract"]["silhouette_key"],
+        )
+        self.assertEqual(
+            "outfit-selection-v2-shared-provider",
+            second["outfit_selection_contract"]["contract_version"],
+        )
+        self.assertFalse(second["outfit_selection_contract"]["hard_required"])
+
+    def test_selling_argument_softly_prefers_a_matching_scene(self) -> None:
+        premium_direction = direction()
+        premium_direction["content_bundle_brief"] = {
+            "content_mainline": "预算有限也想穿出复古高级的质感",
+            "selling_argument": {
+                "status": "AVAILABLE",
+                "core_value": "预算有限也想穿出复古高级的质感",
+                "operator_expression": "想穿出有钱感，颜色复古",
+            },
+        }
+        contract = build_creative_diversity_contract(
+            product_code="P_PREMIUM",
+            country="泰国",
+            category="女装",
+            product_type="外套",
+            direction=premium_direction,
+            recent_usage=[],
+        )
+
+        self.assertEqual("SOFT_PREFERENCE_ONLY", contract["scene_affinity_policy"])
+        self.assertIn("PREMIUM_AMBIENCE", contract["scene_affinity_preferences"])
+        self.assertIn("PREMIUM_AMBIENCE", contract["scene_affinity_matches"])
+        self.assertGreater(contract["scene_affinity_score"], 0)
+
+    def test_photo_argument_can_reach_photo_friendly_scene_without_a_gate(self) -> None:
+        photo_direction = direction()
+        photo_direction["content_bundle_brief"] = {
+            "selling_argument": {
+                "status": "AVAILABLE",
+                "core_value": "适合拍照打卡和探店，穿上很上镜",
+            }
+        }
+        contract = build_creative_diversity_contract(
+            product_code="P_PHOTO",
+            country="泰国",
+            category="女装",
+            product_type="外套",
+            direction=photo_direction,
+            recent_usage=[],
+        )
+
+        self.assertIn("PHOTO_FRIENDLY", contract["scene_affinity_matches"])
+        self.assertTrue(
+            any(
+                token in contract["scene_motif"]
+                for token in ("咖啡", "精品", "酒店", "商场", "展览", "书店")
+            )
+        )
+
+    def test_legacy_creative_carrier_override_cannot_rewrite_structure_carrier(self) -> None:
+        hand_direction = direction()
+        hand_direction["execution_reference"]["content_carrier"] = "HAND_ONLY"
+        hand_direction["_creative_carrier_override"] = "WEARER_ACTIVE"
+        hand_direction["content_bundle_brief"] = {
+            "selling_argument": {
+                "status": "AVAILABLE",
+                "core_value": "老钱风穿搭适合多种场合",
+            }
+        }
+        contract = build_creative_diversity_contract(
+            product_code="P_OVERRIDE",
+            country="泰国",
+            category="女装",
+            product_type="外套",
+            direction=hand_direction,
+            recent_usage=[],
+        )
+
+        self.assertEqual("HANDS_ONLY", contract["required_presentation_mode"])
+
+    def test_static_premium_argument_uses_quality_hanger_scene(self) -> None:
+        static_direction = direction()
+        static_direction["execution_reference"]["content_carrier"] = "STATIC_PRODUCT"
+        static_direction["content_bundle_brief"] = {
+            "selling_argument": {
+                "status": "AVAILABLE",
+                "core_value": "预算有限也想穿出高级有质感的感觉",
+            }
+        }
+        contract = build_creative_diversity_contract(
+            product_code="P_STATIC_PREMIUM",
+            country="泰国",
+            category="女装",
+            product_type="外套",
+            direction=static_direction,
+            recent_usage=[],
+        )
+
+        self.assertEqual("STATIC_PRODUCT", contract["required_presentation_mode"])
+        self.assertIn("PREMIUM_AMBIENCE", contract["scene_affinity_matches"])
+        self.assertTrue(any(token in contract["scene_motif"] for token in ("精品", "木质", "深木")))
 
     def test_creative_usage_ledger_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -7,6 +7,7 @@ one complete utterance and code only mounts it across the whole visual plan.
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import shlex
 import subprocess
@@ -16,7 +17,6 @@ from typing import Any, Dict, List
 from core.complete_script_v3 import creative_product_profile
 from core.reality_reference import validate_voiceover_plan
 from core.reality_voiceover_bridge import (
-    HOOK_SURFACE_CONTRACTS,
     VOICEOVER_KNOWLEDGE_SNAPSHOT_PATH,
     build_voiceover_expression_contract,
     load_active_voiceover_hooks,
@@ -26,10 +26,22 @@ from core.reality_voiceover_bridge import (
 
 
 SCHEMA_VERSION = "creative-full-script-voiceover-v2-content-first"
+HOOK_EXECUTION_POLICY_VERSION = "central-voiceover-v34-governed-hook-path"
 
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def hook_knowledge_snapshot_hash() -> str:
+    """Return a compact dependency fingerprint for the governed hook snapshot."""
+
+    try:
+        return hashlib.sha256(
+            Path(VOICEOVER_KNOWLEDGE_SNAPSHOT_PATH).read_bytes()
+        ).hexdigest()[:20].upper()
+    except Exception:
+        return "UNAVAILABLE"
 
 
 def _invoke_model(model_command: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -98,8 +110,36 @@ def _expression_with_selected_claims(
     return expression, selected
 
 
-def _approved_style_references(hook_id: str, limit: int = 2) -> List[Dict[str, Any]]:
-    """Read the governed snapshot directly; examples guide rhetoric, never facts."""
+def _country_key(value: str) -> str:
+    raw = _text(value).lower()
+    if raw in {"th", "tha", "thailand", "泰国", "ประเทศไทย"}:
+        return "TH"
+    return raw.upper()
+
+
+def _category_key(value: str) -> str:
+    raw = _text(value).lower()
+    if raw in {"女装", "womenswear", "women's wear", "women apparel"}:
+        return "womenswear"
+    if raw in {"配饰", "accessory", "accessories"}:
+        return "accessories"
+    return raw
+
+
+def _approved_style_references(
+    hook_id: str,
+    *,
+    target_country: str = "",
+    top_category: str = "",
+    limit: int = 2,
+) -> List[Dict[str, Any]]:
+    """Return only governed samples assigned to this hook and market/category.
+
+    A previous fallback filled a missing hook with arbitrary approved samples
+    from other archetypes.  That made different hook IDs learn the same viewer
+    relationship and cadence.  Missing compatible evidence is now represented
+    honestly by an empty list; the full hook archetype remains sufficient.
+    """
 
     path = Path(VOICEOVER_KNOWLEDGE_SNAPSHOT_PATH)
     try:
@@ -130,12 +170,17 @@ def _approved_style_references(hook_id: str, limit: int = 2) -> List[Dict[str, A
         and _text(item.get("quality_status")) == "approved_sample"
     }
     result: List[Dict[str, Any]] = []
-    fallback_ids = [
-        example_id for example_id in examples if example_id not in matched_ids
-    ]
-    for example_id in dict.fromkeys([*matched_ids, *fallback_ids]):
+    country_key = _country_key(target_country)
+    category_key = _category_key(top_category)
+    for example_id in dict.fromkeys(matched_ids):
         example = examples.get(example_id)
         if not example:
+            continue
+        example_country = _country_key(_text(example.get("country")))
+        example_category = _category_key(_text(example.get("category")))
+        if country_key and example_country and country_key != example_country:
+            continue
+        if category_key and example_category and category_key != example_category:
             continue
         excerpt = re.sub(r"\s+", " ", _text(example.get("raw_text")))[:680]
         if not excerpt:
@@ -143,6 +188,9 @@ def _approved_style_references(hook_id: str, limit: int = 2) -> List[Dict[str, A
         result.append({
             "reference_sample_id": example_id,
             "reference_excerpt": excerpt,
+            "source_country": _text(example.get("country")),
+            "source_category": _text(example.get("category")),
+            "source_language": _text(example.get("language")),
             "usage_boundary": "只学习观众关系、节奏、衔接和信息密度；不得继承事实或原句",
         })
         if len(result) >= limit:
@@ -267,6 +315,12 @@ def run_central_complete_voiceover(
     hook_row = next(
         (item for item in hooks if _text(item.get("hook_id")) == hook_id), {}
     )
+    approved_style_references = _approved_style_references(
+        hook_id,
+        target_country=target_country,
+        top_category=top_category,
+    )
+    hook_snapshot_hash = hook_knowledge_snapshot_hash()
     expression, selected_atoms = _expression_with_selected_claims(
         direction, visual_plan
     )
@@ -295,8 +349,24 @@ def run_central_complete_voiceover(
     if not facts and not selling_argument_mode:
         raise ValueError("批次方向没有可验证且有画面支持的口播事实")
     creative = expression.get("creative_voice_context") if isinstance(expression.get("creative_voice_context"), dict) else {}
+    category_extension = (
+        direction.get("category_execution_extension")
+        if isinstance(direction.get("category_execution_extension"), dict)
+        else {}
+    )
+    category_profile = (
+        category_extension.get("profile")
+        if isinstance(category_extension.get("profile"), dict)
+        else {}
+    )
+    identity_authority = (
+        category_profile.get("identity_authority")
+        if isinstance(category_profile.get("identity_authority"), dict)
+        else {}
+    )
     payload = {
         "schema_version": "original-batch-complete-voiceover-input-v2",
+        "hook_execution_policy_version": HOOK_EXECUTION_POLICY_VERSION,
         "candidate_id": hook_id,
         "requested_hook_id": hook_id,
         "product_code": product_code,
@@ -333,20 +403,45 @@ def run_central_complete_voiceover(
             if selling_argument.get(key) not in (None, "", [])
         },
         "verified_facts": facts,
+        "category_identity_authority": {
+            "product_subtype": _text(category_profile.get("product_subtype")),
+            "pairing_mode": _text(identity_authority.get("pairing_mode")),
+            "authority_source": _text(identity_authority.get("authority_source")),
+            "must_not_assume": list(identity_authority.get("must_not_assume") or []),
+            "instruction": (
+                "pairing_mode=UNAVAILABLE 时，目标语言和中文对照都只能使用中性的耳饰/耳侧表达，不得推断单只或成对；"
+                "PAIR/SINGLE 仅按该授权值表达。"
+                if identity_authority else ""
+            ),
+        } if identity_authority else {},
+        # The central hook archetype, rather than a second local wording table,
+        # owns the whole rhetorical path.  These are canonical governed fields
+        # loaded by load_active_voiceover_hooks().
         "hook_guidance": {
-            **dict(HOOK_SURFACE_CONTRACTS.get(hook_id) or {}),
-            **{
-                key: hook_row.get(key)
-                for key in (
-                    "hook_id", "hook_name", "core_intent", "attention_mechanism",
-                    "speech_act", "surface_options", "avoid", "notes",
-                )
-                if hook_row.get(key) not in (None, "", [])
-            },
+            key: hook_row.get(key)
+            for key in (
+                "hook_id", "hook_name", "hook_type", "core_intent",
+                "attention_mechanisms", "minimal_structure", "relation_modes",
+                "risk_tags", "allowed_visual_focuses", "required_evidence",
+                "source", "source_version",
+            )
+            if hook_row.get(key) not in (None, "", [])
         },
         "creative_voice_context": creative,
         "narrative_anchor_options": _narrative_anchor_options(creative),
-        "approved_style_references": _approved_style_references(hook_id),
+        "approved_style_references": approved_style_references,
+        "hook_knowledge": {
+            "snapshot_hash": hook_snapshot_hash,
+            "sample_status": (
+                "AVAILABLE" if approved_style_references else "UNAVAILABLE"
+            ),
+            "sample_ids": [
+                item["reference_sample_id"]
+                for item in approved_style_references
+            ],
+            "selection_policy": "EXACT_HOOK_MARKET_CATEGORY_ONLY",
+            "policy_version": HOOK_EXECUTION_POLICY_VERSION,
+        },
         "relationship_language": _relationship_language_profile(
             hook_id, relationship_device
         ),
@@ -383,6 +478,9 @@ def run_central_complete_voiceover(
         raise ValueError("事实观察口播至少需要一个可验证事实引用")
     selling_argument_id = _text(selling_argument.get("argument_id"))
     selling_argument_realization = _text(generated.get("selling_argument_realization"))
+    selling_argument_realization_zh = _text(
+        generated.get("selling_argument_realization_zh")
+    )
     if selling_argument_mode:
         if _text(generated.get("used_selling_argument_id")) != selling_argument_id:
             raise ValueError("中央完整口播没有确认已使用当前授权卖点")
@@ -418,6 +516,11 @@ def run_central_complete_voiceover(
             selling_argument_id if selling_argument_mode else ""
         ),
         "selling_argument_realization": selling_argument_realization,
+        # This is a compact, respectful Chinese display projection authored
+        # with the utterance.  It is optional during the rollout so an older
+        # model response cannot block production; Feishu will safely degrade
+        # rather than reveal the reviewed operator wording.
+        "selling_argument_realization_zh": selling_argument_realization_zh,
         "expression_contract": expression,
         "copy_plan": {
             "schema_version": "creative-full-script-direct-v1",
@@ -441,6 +544,20 @@ def run_central_complete_voiceover(
             "contract_name": "creative_full_single_v1",
             "downstream_rewritten": False,
             "model": model_provenance,
+            "hook_knowledge_snapshot_hash": hook_snapshot_hash,
+            "hook_execution_policy_version": HOOK_EXECUTION_POLICY_VERSION,
+        },
+        "hook_knowledge_provenance": {
+            "snapshot_hash": hook_snapshot_hash,
+            "sample_status": (
+                "AVAILABLE" if approved_style_references else "UNAVAILABLE"
+            ),
+            "sample_ids": [
+                item["reference_sample_id"]
+                for item in approved_style_references
+            ],
+            "selection_policy": "EXACT_HOOK_MARKET_CATEGORY_ONLY",
+            "policy_version": HOOK_EXECUTION_POLICY_VERSION,
         },
         "relationship_surface": {
             "requested": _text(relationship_device) or "HOOK_DECIDES",

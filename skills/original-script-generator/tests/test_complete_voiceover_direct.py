@@ -1,4 +1,6 @@
 """The batch bridge must keep one complete utterance and exact lineage."""
+import json
+import tempfile
 import unittest
 from pathlib import Path
 import sys
@@ -9,6 +11,7 @@ if str(SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILL_ROOT))
 
 from core.complete_voiceover_direct import (
+    _approved_style_references,
     _expression_with_selected_claims,
     _narrative_anchor_options,
     run_central_complete_voiceover,
@@ -16,6 +19,51 @@ from core.complete_voiceover_direct import (
 
 
 class CompleteVoiceoverDirectTest(unittest.TestCase):
+    def test_style_references_never_fall_back_across_hook_archetypes(self):
+        snapshot = {
+            "examples": [
+                {
+                    "example_id": "E_MATCHED",
+                    "raw_text": "matched rhetoric",
+                    "source_authorized": 1,
+                    "quality_status": "approved_sample",
+                    "country": "TH",
+                    "category": "womenswear",
+                    "language": "zh",
+                },
+                {
+                    "example_id": "E_OTHER",
+                    "raw_text": "other rhetoric",
+                    "source_authorized": 1,
+                    "quality_status": "approved_sample",
+                    "country": "TH",
+                    "category": "womenswear",
+                    "language": "zh",
+                },
+            ],
+            "assignments": [
+                {"example_id": "E_MATCHED", "archetype_id": "DETAIL_SURPRISE"},
+                {"example_id": "E_OTHER", "archetype_id": "GENERAL_PRODUCT_SHARE"},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "snapshot.json"
+            path.write_text(json.dumps(snapshot), encoding="utf-8")
+            with patch(
+                "core.complete_voiceover_direct.VOICEOVER_KNOWLEDGE_SNAPSHOT_PATH",
+                path,
+            ):
+                matched = _approved_style_references(
+                    "DETAIL_SURPRISE", target_country="泰国", top_category="女装"
+                )
+                unavailable = _approved_style_references(
+                    "VISUAL_RESULT_DIRECT", target_country="泰国", top_category="女装"
+                )
+        self.assertEqual(
+            [item["reference_sample_id"] for item in matched], ["E_MATCHED"]
+        )
+        self.assertEqual(unavailable, [])
+
     def test_claim_selection_uses_whole_video_evidence_not_visual_spoken_choice(self):
         direction = {"content_bundle_brief": {}}
         visual = {"shots": []}
@@ -187,6 +235,17 @@ class CompleteVoiceoverDirectTest(unittest.TestCase):
         direction = {
             "content_bundle_brief": {"eligible_hook_ids": ["DETAIL_SURPRISE"]},
             "creative_blueprint": {},
+            "category_execution_extension": {
+                "domain": "ACCESSORY",
+                "profile": {
+                    "product_subtype": "earring",
+                    "identity_authority": {
+                        "pairing_mode": "UNAVAILABLE",
+                        "authority_source": "UNAVAILABLE",
+                        "must_not_assume": ["耳饰为单只还是成对"],
+                    },
+                },
+            },
         }
         visual = {
             "shots": [
@@ -225,7 +284,14 @@ class CompleteVoiceoverDirectTest(unittest.TestCase):
 
         with patch(
             "core.complete_voiceover_direct.load_active_voiceover_hooks",
-            return_value=[{"hook_id": "DETAIL_SURPRISE"}],
+            return_value=[{
+                "hook_id": "DETAIL_SURPRISE",
+                "hook_name": "细节惊喜型",
+                "core_intent": "放大容易忽略但有价值的细节",
+                "attention_mechanisms": ["information_gap"],
+                "minimal_structure": ["reveal_detail", "offer_proof", "state_feature"],
+                "relation_modes": ["reveal"],
+            }],
         ), patch(
             "core.complete_voiceover_direct._expression_with_selected_claims",
             return_value=(expression, expression["claim_atoms"]),
@@ -234,8 +300,8 @@ class CompleteVoiceoverDirectTest(unittest.TestCase):
                 product_code="P1",
                 target_country="泰国",
                 target_language="泰语",
-                top_category="女装",
-                product_type="外套",
+                top_category="配饰",
+                product_type="耳饰",
                 direction=direction,
                 visual_plan=visual,
                 model_command="mock-command",
@@ -250,8 +316,16 @@ class CompleteVoiceoverDirectTest(unittest.TestCase):
         )
         self.assertFalse(result["engine_provenance"]["downstream_rewritten"])
         self.assertEqual(captured["content_mode"], "FACTUAL_OBSERVATION")
+        self.assertEqual(
+            captured["category_identity_authority"]["pairing_mode"],
+            "UNAVAILABLE",
+        )
         self.assertEqual(captured["spoken_duration_preference_seconds"], [7, 11])
         self.assertIn("personal_preference", captured["expression_freedom"]["allowed_without_claim_ref"])
+        self.assertEqual(
+            captured["hook_guidance"]["minimal_structure"],
+            ["reveal_detail", "offer_proof", "state_feature"],
+        )
 
     def test_relationship_device_is_passed_as_soft_voiceover_surface_metadata(self):
         direction = {"content_bundle_brief": {"eligible_hook_ids": ["AUDIENCE_NEED_CALLOUT"]}}

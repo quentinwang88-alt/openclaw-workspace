@@ -38,16 +38,47 @@ def select_original_structure_directions(
     random_seed: Optional[int] = None,
     allowed_carriers: Optional[List[str]] = None,
     recent_cluster_usage: Optional[Dict[str, int]] = None,
+    category_execution_extension: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     category_contract = (
         anchor_card.get("category_execution_contract")
         if isinstance(anchor_card.get("category_execution_contract"), dict)
         else {}
     )
-    operation_policy = str(category_contract.get("operation_policy") or "").strip()
+    if category_execution_extension is None:
+        from core.category_execution import compile_category_execution_extension
+
+        category_execution_extension = compile_category_execution_extension(
+            product_type=str(context.get("product_type") or ""),
+            top_category=str(context.get("top_category") or ""),
+            anchor_card=anchor_card,
+        )
+    extension = (
+        dict(category_execution_extension)
+        if isinstance(category_execution_extension, dict)
+        else {}
+    )
+    profile = extension.get("profile") if isinstance(extension.get("profile"), dict) else {}
+    extension_process_policy = str(profile.get("process_policy") or "").strip()
+    operation_policy = (
+        extension_process_policy
+        or str(category_contract.get("operation_policy") or "").strip()
+    )
     forbidden_beats = (
         ["USE_PROCESS"]
-        if operation_policy in {"process_forbidden", "static_result_only"}
+        if operation_policy in {
+            "process_forbidden",
+            "static_result_only",
+            "RESULT_FIRST_NO_WRAPPING_TUTORIAL",
+        }
+        else []
+    )
+    discouraged_beats = (
+        ["USE_PROCESS"]
+        if operation_policy in {
+            "result_first_process_avoid",
+            "RESULT_FIRST_SIMPLE_ADJUSTMENT_ONLY",
+        }
         else []
     )
     request = RouteRequest(
@@ -77,6 +108,12 @@ def select_original_structure_directions(
             # 当前原创脚本 Schema 仍是 4-6 个分镜，不能忠实承载 SINGLE_SHOT。
             "allowed_continuity_modes": ["MULTI_CUT", "CONTINUOUS_LOW_CUT"],
             "forbidden_beats": forbidden_beats,
+            "preferred_carriers": list(profile.get("preferred_carriers") or []),
+            "preferred_beats": ["HOOK", "PROOF"] if profile else [],
+            "discouraged_beats": discouraged_beats,
+            "preferred_proof_mechanisms": list(
+                profile.get("preferred_proof_mechanisms") or []
+            ),
             "min_shots": 4,
             "max_shots": 6,
             # Planning history only affects exploratory directions.  The
@@ -85,6 +122,7 @@ def select_original_structure_directions(
         },
         product_context={
             "category_execution_contract": category_contract,
+            "category_execution_extension": extension,
             "operation_anchors": anchor_card.get("operation_anchors", []),
             "display_anchors": anchor_card.get("display_anchors", []),
         },

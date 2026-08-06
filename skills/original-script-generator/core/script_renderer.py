@@ -975,6 +975,86 @@ def _render_reality_video_generation_brief(script_json: Dict[str, Any]) -> str:
     brief = script_json.get("video_generation_brief")
     if not isinstance(brief, dict) or not brief:
         return ""
+    production = (
+        brief.get("production_design")
+        if isinstance(brief.get("production_design"), dict)
+        else {}
+    )
+    identity_lock = (
+        brief.get("product_identity_lock")
+        if isinstance(brief.get("product_identity_lock"), dict)
+        else {}
+    )
+    if production or identity_lock:
+        character = production.get("character") if isinstance(production.get("character"), dict) else {}
+        outfit = production.get("outfit") if isinstance(production.get("outfit"), dict) else {}
+        scene = production.get("scene") if isinstance(production.get("scene"), dict) else {}
+        voiceover = brief.get("voiceover") if isinstance(brief.get("voiceover"), dict) else {}
+        must_preserve = [
+            _compact_text(item)
+            for item in identity_lock.get("must_preserve", [])
+            if _compact_text(item)
+        ]
+        critical_details = [
+            _compact_text(item)
+            for item in identity_lock.get("critical_visible_details", [])
+            if _compact_text(item)
+        ]
+        must_not_change = [
+            _compact_text(item)
+            for item in identity_lock.get("must_not_change", [])
+            if _compact_text(item)
+        ]
+        capture_mode = _compact_text(
+            brief.get("capture_mode") or production.get("capture_mode")
+        ).upper()
+        lines = [
+            "【视频生成主说明】",
+            "商品外观以参考图为唯一准则；商品一致性优先于人物美感、场景氛围和镜头效果。",
+            f"必须保持：{'；'.join(must_preserve)}" if must_preserve else "",
+            f"关键细节：{'；'.join(critical_details[:4])}" if critical_details else "",
+            "拍摄方式：普通用户用手机竖屏随手记录，使用现场已有光线，保留自然环境和轻微手持感。",
+            (
+                "风格负向：不要广告片、影棚布光、电影运镜、强景深虚化、精修磨皮和稳定器滑轨感。"
+                if capture_mode != "CREATOR_SELF_SHOT"
+                else ""
+            ),
+            (
+                "拍摄关系：创作者本人面对自己的一台手机镜头直接分享；同一地点、同一主要手机视角，结构段不等于多机位切换。"
+                if capture_mode == "CREATOR_SELF_SHOT"
+                else ""
+            ),
+            (
+                "拍摄关系边界：不要广告片、摄影团队、第三人跟拍、正反打、多机位覆盖、影棚布光、精修磨皮、稳定器推拉横移、广告定格和跨空间调度。"
+                if capture_mode == "CREATOR_SELF_SHOT"
+                else ""
+            ),
+            f"人物：{_merge_brief_parts(character.get('identity', ''), character.get('appearance', ''), character.get('hair_makeup', ''))}",
+            f"穿搭：{_merge_brief_parts(outfit.get('base_outfit', ''), outfit.get('product_role', ''), outfit.get('accessories', ''))}",
+            f"场景：{_merge_brief_parts(scene.get('location', ''), scene.get('moment', ''), scene.get('background', ''))}",
+        ]
+        storyboard = [
+            item for item in brief.get("storyboard", []) if isinstance(item, dict)
+        ]
+        for index, item in enumerate(storyboard, 1):
+            anchors = "；".join(
+                _compact_text(anchor)
+                for anchor in item.get("product_anchors_visible", [])
+                if _compact_text(anchor)
+            )
+            passage = _merge_brief_parts(
+                item.get("visual_content", ""),
+                item.get("character_action", ""),
+                f"商品：{anchors}" if anchors else "",
+            )
+            if passage:
+                lines.append(f"片段{index}：{passage}")
+        target_voiceover = _compact_text(voiceover.get("target_text", ""))
+        if target_voiceover:
+            lines.append(f"连续口播：{target_voiceover}")
+        if must_not_change:
+            lines.append(f"商品负向：{'；'.join(must_not_change)}")
+        return "\n".join(line for line in lines if line).strip()
     character = brief.get("character") if isinstance(brief.get("character"), dict) else {}
     scene = brief.get("scene") if isinstance(brief.get("scene"), dict) else {}
     passages = [
