@@ -10,9 +10,9 @@ from typing import Any, Dict, Iterable, List, Sequence, Tuple
 from .models import RouteRequest, StructureCandidate
 
 
-POLICY_VERSION = "structure-router-v1.1-exploration-rotation"
+POLICY_VERSION = "structure-router-v1.2-capability-preference"
 FAMILY_POLICY_VERSION = "exact-coarse-beat-v1"
-COMPATIBILITY_POLICY_VERSION = "original-flow-capability-v1"
+COMPATIBILITY_POLICY_VERSION = "original-flow-capability-v2-soft-preference"
 FEEDBACK_POLICY = {
     "display_only_below_videos": 8,
     "directional_min_videos": 8,
@@ -150,6 +150,53 @@ def base_score(candidate: StructureCandidate, request: RouteRequest) -> float:
     if candidate.duration_median is not None and request.duration_seconds > 0:
         relative_gap = abs(candidate.duration_median - request.duration_seconds) / request.duration_seconds
         score += max(-0.08, 0.05 - relative_gap * 0.08)
+    return score + capability_preference_score(candidate, request)
+
+
+def capability_preference_score(
+    candidate: StructureCandidate,
+    request: RouteRequest,
+) -> float:
+    """Apply optional, small production-capability preferences.
+
+    These fields are generic router capabilities, not scarf-specific policy.
+    Missing fields preserve the previous score exactly; incompatibility still
+    belongs to ``candidate_is_compatible``.
+    """
+
+    capabilities = request.capabilities or {}
+    score = 0.0
+    preferred_carriers = {
+        str(item) for item in capabilities.get("preferred_carriers", []) if str(item)
+    }
+    if preferred_carriers and candidate.content_carrier in preferred_carriers:
+        score += 0.10
+    preferred_beats = {
+        str(item) for item in capabilities.get("preferred_beats", []) if str(item)
+    }
+    score += min(
+        0.06,
+        0.03 * len(preferred_beats.intersection(candidate.beat_sequence)),
+    )
+    discouraged_beats = {
+        str(item) for item in capabilities.get("discouraged_beats", []) if str(item)
+    }
+    score -= min(
+        0.12,
+        0.08 * len(discouraged_beats.intersection(candidate.beat_sequence)),
+    )
+    preferred_proof = {
+        str(item).strip().lower()
+        for item in capabilities.get("preferred_proof_mechanisms", [])
+        if str(item).strip()
+    }
+    candidate_proof = {
+        str(item).strip().lower()
+        for item in candidate.proof_mechanisms
+        if str(item).strip()
+    }
+    if preferred_proof and candidate_proof:
+        score += min(0.06, 0.03 * len(preferred_proof.intersection(candidate_proof)))
     return score
 
 

@@ -51,6 +51,18 @@ class StructureRouterService:
                 "allowed_carriers": list(
                     (request.capabilities or {}).get("allowed_carriers") or []
                 ),
+                "preferred_carriers": list(
+                    (request.capabilities or {}).get("preferred_carriers") or []
+                ),
+                "preferred_beats": list(
+                    (request.capabilities or {}).get("preferred_beats") or []
+                ),
+                "discouraged_beats": list(
+                    (request.capabilities or {}).get("discouraged_beats") or []
+                ),
+                "preferred_proof_mechanisms": list(
+                    (request.capabilities or {}).get("preferred_proof_mechanisms") or []
+                ),
                 "recent_cluster_usage": dict(
                     (request.capabilities or {}).get("recent_cluster_usage") or {}
                 ),

@@ -2,6 +2,7 @@ import unittest
 from dataclasses import replace
 
 from video_structure_router.models import RouteRequest, StructureCandidate
+from video_structure_router.policy import base_score
 from video_structure_router.service import StructureRouterService
 from video_structure_router.validator import validate_script_against_contract
 
@@ -116,6 +117,33 @@ class RouterTest(unittest.TestCase):
         second = service.select(second_request).to_dict()
         self.assertEqual(second["assignments"][0]["cluster_id"], baseline)
         self.assertNotEqual(second["assignments"][1]["cluster_id"], explored)
+
+    def test_capability_preferences_are_soft_score_only(self):
+        base_request = replace(self.request(), capabilities={**self.request().capabilities})
+        preferred_request = replace(
+            self.request(),
+            capabilities={
+                **self.request().capabilities,
+                "preferred_carriers": ["WEARER_ACTIVE"],
+                "discouraged_beats": ["USE_PROCESS"],
+            },
+        )
+        wearer = candidate(
+            "c2", ["HOOK", "USE_PROCESS", "PROOF"],
+            "WEARER_ACTIVE", "CONTINUOUS_LOW_CUT", "LOW", "PERSON_REVEAL",
+        )
+        static = candidate(
+            "c0", ["HOOK", "PROOF"],
+            "STATIC_PRODUCT", "MULTI_CUT", "MEDIUM", "PRODUCT_REVEAL",
+        )
+        self.assertAlmostEqual(
+            0.02,
+            base_score(wearer, preferred_request) - base_score(wearer, base_request),
+        )
+        self.assertEqual(
+            base_score(static, preferred_request),
+            base_score(static, base_request),
+        )
 
     def test_prompt_only_shot_count_stays_unavailable(self):
         result = StructureRouterService(repository=FakeRepository()).select(self.request()).to_dict()
