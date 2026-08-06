@@ -15,6 +15,7 @@ from typing import Any
 from .database import LightTryonDB, TEMPLATE_TABLES
 from .diversity import assess_product_asset_capacity, evaluate_product_diversity
 from .feishu_client import load_feishu_config, make_client, resolve_endpoints, resolve_run_manager_endpoint, resolve_source_endpoint
+from .feishu_mappings import TABLE_MAPPINGS
 from .feishu_sync import (
     build_clients,
     cleanup_review_duplicates,
@@ -664,7 +665,12 @@ def cmd_feishu_inspect(args: argparse.Namespace) -> dict[str, Any]:
 
 def cmd_feishu_ensure_schema(args: argparse.Namespace) -> dict[str, Any]:
     config, clients = _feishu(args)
-    return {"config": config.get("_config_path"), **ensure_schema(clients, dry_run=args.dry_run)}
+    selected = (
+        {role: clients[role] for role in args.role if role in clients}
+        if getattr(args, "role", None)
+        else clients
+    )
+    return {"config": config.get("_config_path"), **ensure_schema(selected, dry_run=args.dry_run)}
 
 
 def cmd_feishu_init_records(args: argparse.Namespace) -> dict[str, Any]:
@@ -1291,6 +1297,7 @@ def build_parser() -> argparse.ArgumentParser:
     feishu_inspect.set_defaults(func=cmd_feishu_inspect)
     feishu_schema = feishu_sub.add_parser("ensure-schema", help="幂等建立字段、表名和视图")
     feishu_schema.add_argument("--dry-run", action="store_true")
+    feishu_schema.add_argument("--role", action="append", choices=list(TABLE_MAPPINGS), help="只检查或更新指定表，可重复传入")
     feishu_schema.set_defaults(func=cmd_feishu_ensure_schema)
     feishu_init = feishu_sub.add_parser("init-records", help="将本地默认模板初始化到飞书")
     feishu_init.add_argument("--role", action="append", choices=["persona", "scene", "action", "shot_plan", "styling", "subtitle"])

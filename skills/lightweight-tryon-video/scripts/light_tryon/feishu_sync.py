@@ -31,7 +31,7 @@ READ_ONLY_TYPES = {1001, 1002}
 LIST_BACKENDS = {
     "account_ids", "markets", "reference_images", "fixed_accessories", "applicable_categories",
     "required_anchors", "optional_anchors", "forbidden_elements", "applicable_scenes", "applicable_shot_profiles", "action_steps",
-    "free_hand_action", "applicable_product_type", "product_fit", "bottom_color", "bottom_fit", "vibe_tag",
+    "free_hand_action", "applicable_product_codes", "applicable_product_type", "product_fit", "bottom_color", "bottom_fit", "vibe_tag",
     "selling_point_angle", "applicable_category", "product_images", "abnormal_types", "background_type_pool", "edge_decor_pool",
 }
 
@@ -220,6 +220,8 @@ def _to_feishu_value(backend: str, value: Any, spec: dict[str, Any]) -> Any:
         return f"{text}秒" if text in {"8", "10"} else None
     if backend == "run_manager_sync_status":
         return RUN_MANAGER_STATUS_TO_FEISHU.get(str(value), str(value))
+    if backend == "applicable_product_codes":
+        return "\n".join(normalized_list(value)) or None
     if backend == "markets":
         return [MARKET_TO_FEISHU.get(str(item).upper(), str(item)) for item in normalized_list(value)]
     if backend == "applicable_shot_profiles":

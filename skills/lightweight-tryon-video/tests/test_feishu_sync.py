@@ -148,6 +148,15 @@ class FeishuSyncTestCase(unittest.TestCase):
             self.assertEqual(len(names), len(set(names)), role)
             self.assertEqual(len(backends), len(set(backends)), role)
             self.assertEqual(names[0], mapping.primary_field)
+        styling = TABLE_MAPPINGS["styling"]
+        self.assertEqual(
+            "applicable_product_codes",
+            styling.backend_by_field["适配产品编码"],
+        )
+
+    def test_styling_product_codes_are_structured_and_generic_defaults_are_explicit(self):
+        row = self.db.get_template("styling", "STYLE_001")
+        self.assertEqual(["*"], row["applicable_product_codes"])
 
     def test_voiceover_run_is_excluded_from_bgm(self):
         self.assertTrue(run_record_uses_voiceover({"是否配口播": True}))

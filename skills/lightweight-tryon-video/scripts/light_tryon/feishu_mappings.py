@@ -194,6 +194,7 @@ STYLING_FIELDS = (
     field("搭配模板ID", "styling_id"),
     field("搭配名称", "styling_name"),
     single("启用状态", "status", STATUS_OPTIONS),
+    field("适配产品编码", "applicable_product_codes"),
     multi("适用商品类型", "applicable_product_type", CATEGORIES + ["短上衣", "宽松上衣"]),
     multi("商品版型要求", "product_fit", ["修身", "合体", "短款", "宽松", "不限"]),
     single("下装类型", "bottom_type", ["高腰阔腿裤", "直筒牛仔裤", "白色短裤", "休闲短裤", "半裙", "同色套装下装"]),

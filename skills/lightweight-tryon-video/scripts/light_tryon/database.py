@@ -40,7 +40,7 @@ ID_COLUMNS = {
 JSON_COLUMNS = {
     "scene_templates": {"required_anchors", "optional_anchors", "forbidden_elements", "applicable_categories", "reference_images", "background_type_pool", "edge_decor_pool", "source_payload"},
     "action_templates": {"applicable_categories", "action_steps", "applicable_scenes", "applicable_shot_profiles", "free_hand_action", "source_payload"},
-    "styling_templates": {"applicable_top_type", "applicable_product_type", "product_fit", "bottom_color", "bottom_fit", "vibe_tag", "source_payload"},
+    "styling_templates": {"applicable_product_codes", "applicable_top_type", "applicable_product_type", "product_fit", "bottom_color", "bottom_fit", "vibe_tag", "source_payload"},
     "subtitle_templates": {"applicable_category", "markets", "selling_point_angle", "source_payload"},
     "persona_templates": {"account_ids", "markets", "reference_images", "brand_logo_images", "fixed_accessories", "vibe", "source_payload"},
     "products_for_light_video": {
@@ -163,6 +163,7 @@ CREATE TABLE IF NOT EXISTS styling_templates (
     styling_id TEXT PRIMARY KEY,
     styling_name TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('enabled','disabled','testing')),
+    applicable_product_codes TEXT NOT NULL DEFAULT '[]',
     applicable_top_type TEXT NOT NULL DEFAULT '[]',
     applicable_product_type TEXT NOT NULL DEFAULT '[]',
     top_fit TEXT,
@@ -588,6 +589,7 @@ MIGRATION_COLUMNS: dict[str, dict[str, str]] = {
     },
     "styling_templates": {
         "priority": "INTEGER NOT NULL DEFAULT 0",
+        "applicable_product_codes": "TEXT NOT NULL DEFAULT '[]'",
         "product_fit": "TEXT NOT NULL DEFAULT '[]'",
         "inner_type": "TEXT NOT NULL DEFAULT ''",
         "inner_color": "TEXT NOT NULL DEFAULT ''",
