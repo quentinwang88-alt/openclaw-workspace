@@ -222,6 +222,17 @@ class Settings:
     timeout_seconds: int = field(
         default_factory=lambda: int(os.environ.get("OPENAI_IMAGE_TIMEOUT", "120").strip() or "120")
     )
+    stream_first_event_timeout_seconds: int = field(
+        default_factory=lambda: int(
+            os.environ.get("OPENAI_IMAGE_FIRST_EVENT_TIMEOUT", "60").strip() or "60"
+        )
+    )
+    stream_total_timeout_seconds: int = field(
+        default_factory=lambda: int(
+            os.environ.get("OPENAI_IMAGE_TOTAL_TIMEOUT", os.environ.get("OPENAI_IMAGE_TIMEOUT", "120")).strip()
+            or "120"
+        )
+    )
     max_retries: int = field(
         default_factory=lambda: int(os.environ.get("OPENAI_IMAGE_MAX_RETRIES", "3").strip() or "3")
     )

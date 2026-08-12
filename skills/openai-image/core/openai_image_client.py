@@ -12,12 +12,45 @@ from __future__ import annotations
 import base64
 import io
 import json
+import signal
+import threading
 import time
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from app.config import Settings
+
+
+class CodexStreamTimeout(TimeoutError):
+    """Raised when a streamed Codex image request exceeds a wall-clock deadline."""
+
+
+@contextmanager
+def _wall_clock_timeout(seconds: float, phase: str):
+    """Interrupt a blocked synchronous SSE read in the main process thread.
+
+    httpx read timeouts restart whenever the proxy forwards a keepalive, so they
+    cannot bound an otherwise stalled stream.  A process-level timer provides a
+    real deadline for the normal CLI execution path.  Worker threads retain the
+    regular httpx timeout as a safe fallback.
+    """
+    timeout = max(float(seconds), 0.0)
+    if timeout <= 0 or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def _raise_timeout(_signum: int, _frame: Any) -> None:
+        raise CodexStreamTimeout(f"Codex image stream {phase} timed out after {timeout:.0f}s")
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, timeout)
+    signal.signal(signal.SIGALRM, _raise_timeout)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+        signal.signal(signal.SIGALRM, previous_handler)
 
 
 class OpenAIImageClient:
@@ -363,26 +396,46 @@ class OpenAIImageClient:
         We accumulate the response from the ``response.completed`` event which
         contains the full output including image data.
         """
-        with client.stream("POST", url, json=body, headers=headers) as resp:
-            if resp.status_code != 200:
-                # Read the error body for a useful message
-                error_body = resp.read().decode("utf-8", errors="replace")
-                raise RuntimeError(
-                    f"Codex API returned {resp.status_code}: {error_body[:500]}"
-                )
+        started_at = time.monotonic()
+        first_event_timeout = min(
+            self.settings.stream_first_event_timeout_seconds,
+            self.settings.stream_total_timeout_seconds,
+        )
+        stream_context = client.stream("POST", url, json=body, headers=headers)
+        stream_entered = False
+        try:
+            # The first deadline covers both proxy connection setup and the first
+            # actual SSE line.  A response header alone is not enough evidence
+            # that image generation has started.
+            with _wall_clock_timeout(first_event_timeout, "first event"):
+                resp = stream_context.__enter__()
+                stream_entered = True
+                if resp.status_code != 200:
+                    # Read the error body for a useful message
+                    error_body = resp.read().decode("utf-8", errors="replace")
+                    raise RuntimeError(
+                        f"Codex API returned {resp.status_code}: {error_body[:500]}"
+                    )
+                line_iterator = iter(resp.iter_lines())
+                first_line = ""
+                while not first_line:
+                    first_line = next(line_iterator)
+
             completed_event: Optional[Dict[str, Any]] = None
             image_item: Optional[Dict[str, Any]] = None
             partial_image_b64 = ""
-            for line in resp.iter_lines():
+
+            def consume_line(line: str) -> bool:
+                nonlocal completed_event, image_item, partial_image_b64
                 if not line or not line.startswith("data: "):
-                    continue
+                    return False
                 data_str = line[6:]
                 if data_str.strip() == "[DONE]":
-                    break
+                    return True
                 try:
                     event = json.loads(data_str)
                 except json.JSONDecodeError:
-                    continue
+                    return False
                 event_type = str(event.get("type") or "")
                 if event_type == "response.completed":
                     completed_event = event
@@ -395,6 +448,19 @@ class OpenAIImageClient:
                     candidate = str(event.get("partial_image_b64") or "").strip()
                     if candidate:
                         partial_image_b64 = candidate
+                return False
+
+            elapsed = time.monotonic() - started_at
+            remaining = max(self.settings.stream_total_timeout_seconds - elapsed, 0.001)
+            with _wall_clock_timeout(remaining, "total request"):
+                done = consume_line(first_line)
+                if not done:
+                    for line in line_iterator:
+                        if consume_line(line):
+                            break
+        finally:
+            if stream_entered:
+                stream_context.__exit__(None, None, None)
 
         if completed_event is None:
             raise RuntimeError(
