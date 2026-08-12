@@ -15,8 +15,8 @@ sys.path.insert(0, str(WORKSPACE / "skills" / "script-run-manager-sync"))
 from core.bitable import FeishuBitableClient  # type: ignore  # noqa: E402
 
 
-APP_TOKEN = "UvErb5HRWaGESXsBs18cvB3FnEe"
-TABLE_ID = "tbl4eKSVgHw8IyDh"
+APP_TOKEN = "Bbi4bD4Hxa9cWms2GO2cDZ9wnBc"
+TABLE_ID = "tbljUInlUld4MnOw"
 TABLES = {
     "run-manager": (APP_TOKEN, TABLE_ID),
     "light-review": ("ZukCb6jNya0pUMsqb33cc4Ujnmb", "tblOzefH1pgI7K9U"),

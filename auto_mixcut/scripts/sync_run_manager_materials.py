@@ -25,8 +25,8 @@ from auto_mixcut.skills.rds_repository_skill import RDSRepositorySkill  # noqa: 
 from auto_mixcut.skills.run_manager_material_import_skill import RunManagerMaterialImportSkill  # noqa: E402
 
 
-APP_TOKEN = "UvErb5HRWaGESXsBs18cvB3FnEe"
-TABLE_ID = "tbl4eKSVgHw8IyDh"
+APP_TOKEN = "Bbi4bD4Hxa9cWms2GO2cDZ9wnBc"
+TABLE_ID = "tbljUInlUld4MnOw"
 
 
 def main() -> int:

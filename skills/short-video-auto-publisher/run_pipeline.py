@@ -78,7 +78,7 @@ DEFAULT_SCRIPT_FEISHU_URL = (
 )
 DEFAULT_RUN_MANAGER_FEISHU_URL = (
     "https://gcngopvfvo0q.feishu.cn/base/"
-    "UvErb5HRWaGESXsBs18cvB3FnEe?table=tbl4eKSVgHw8IyDh&view=vewo6WdFGb"
+    "Bbi4bD4Hxa9cWms2GO2cDZ9wnBc?table=tbljUInlUld4MnOw&view=vewo6WdFGb"
 )
 DEFAULT_ACCOUNT_FEISHU_URL = (
     "https://gcngopvfvo0q.feishu.cn/wiki/"
