@@ -117,6 +117,85 @@ class ProductionScriptRendererTest(unittest.TestCase):
         self.assertIn("窗边自然光和普通顶灯混合", text)
         self.assertIn("随手放在矮台上的帆布包", text)
 
+    def test_ugc_prompt_separates_persona_and_product_reference_authority(self):
+        result = json.loads(self.item.result_json)
+        script = result["script"]
+        script["video_generation_brief"] = {
+            "production_design": script["production_design"],
+            "storyboard": script["storyboard"],
+            "product_truth": {"identity_anchors": ["米白短款外套"]},
+            "voiceover": script["continuous_voiceover"],
+            "persona_selection_contract": {
+                "availability": "AVAILABLE",
+                "persona_id": "TH_PERSONA_001",
+                "persona_name": "泰国咖啡店自然分享女生",
+                "reference_strategy": "PERSONA_PRODUCT_COMPOSITE_PREFERRED",
+                "script_projection": {
+                    "identity": "泰国日常创作者",
+                    "appearance": "自然未精修肤质",
+                    "hair_makeup": "黑色长发和轻妆",
+                },
+            },
+            "outfit_selection_contract": {
+                "template_id": "STYLE_CAFE_001",
+                "template_display_name": "都市咖啡通勤穿搭",
+                "accessory_items": ["棕色小号肩包", "细金属耳环"],
+                "preferred_persona_ids": ["TH_PERSONA_001"],
+            },
+            "outfit_scene_affinity_contract": {
+                "policy_version": "outfit-scene-affinity-v2-exact-soft-boost",
+                "template_id": "STYLE_CAFE_001",
+                "selected_scene_family": "CAFE_DINING",
+                "match_status": "MATCHED",
+                "ranking_bonus": 30,
+                "authority": "SOFT_PREFERENCE",
+                "hard_required": False,
+            },
+            "outfit_persona_affinity_contract": {
+                "policy_version": "outfit-persona-affinity-v1-soft",
+                "outfit_template_id": "STYLE_CAFE_001",
+                "selected_persona_id": "TH_PERSONA_001",
+                "match_status": "MATCHED",
+                "authority": "SOFT_PREFERENCE",
+                "hard_required": False,
+            },
+        }
+        self.item.result_json = json.dumps(result, ensure_ascii=False)
+        text = render_video_generation_prompt(item=self.item, duration_seconds=15)
+        self.assertIn("【人物身份锁｜与商品参考分权】", text)
+        self.assertIn("TH_PERSONA_001", text)
+        self.assertIn("商品参考图只决定商品外观", text)
+        projection = build_production_projection(batch=self.batch, item=self.item)
+        self.assertEqual(projection["persona_id"], "TH_PERSONA_001")
+        self.assertEqual(
+            projection["persona_name"], "泰国咖啡店自然分享女生"
+        )
+        self.assertEqual(projection["outfit_template_id"], "STYLE_CAFE_001")
+        self.assertEqual(projection["outfit_template_name"], "都市咖啡通勤穿搭")
+        self.assertEqual(projection["outfit_accessories"], "棕色小号肩包；细金属耳环")
+        self.assertEqual(projection["outfit_scene_match"], "已匹配")
+        self.assertIn(
+            "outfit-scene-affinity-v2-exact-soft-boost",
+            projection["outfit_scene_contract_json"],
+        )
+        self.assertEqual(projection["outfit_persona_match"], "MATCHED")
+        self.assertIn(
+            "outfit-persona-affinity-v1-soft",
+            projection["outfit_persona_contract_json"],
+        )
+        self.assertEqual(
+            projection["reference_strategy"],
+            "PERSONA_PRODUCT_COMPOSITE_PREFERRED",
+        )
+        complete = render_complete_production_script(
+            item=self.item, duration_seconds=15
+        )
+        self.assertIn("人物模板：泰国咖啡店自然分享女生", complete)
+        self.assertIn("穿搭模板：都市咖啡通勤穿搭", complete)
+        self.assertIn("穿搭×场景：已匹配", complete)
+        self.assertIn("配饰道具：棕色小号肩包；细金属耳环", complete)
+        self.assertIn("人物×穿搭：MATCHED", complete)
+
     def test_video_prompt_excludes_internal_lineage_and_translation(self):
         text = render_video_generation_prompt(item=self.item, duration_seconds=15)
         self.assertIn("สาวๆ", text)
@@ -156,6 +235,89 @@ class ProductionScriptRendererTest(unittest.TestCase):
         self.assertNotIn("背景车辆保持静置虚化", text)
         self.assertNotIn("虚化", text.split("【人物、穿搭与生活场景】", 1)[1])
         self.assertIn("商品一致性优先于场景美感和镜头效果", text)
+
+    def test_old_scarf_brief_rebuilds_accessory_identity_lock_on_render(self):
+        result = json.loads(self.item.result_json)
+        script = result["script"]
+        script["video_generation_brief"] = {
+            "production_design": script["production_design"],
+            "storyboard": script["storyboard"],
+            "product_truth": {
+                "product_identity": "深蓝条纹波点丝巾",
+                "identity_anchors": ["深蓝底色", "条纹与波点图案"],
+                "visible_detail_anchors": ["方形轮廓与图案布局"],
+            },
+            "product_identity_lock": {
+                "compiler_version": "product-identity-lock-v2",
+                "must_preserve": ["深蓝条纹波点丝巾"],
+                "negative_constraints": ["禁止改变衣长、领型、前襟和袖口"],
+            },
+            "category_execution_extension": {
+                "domain": "ACCESSORY",
+                "profile": {
+                    "product_subtype": "silk_scarf",
+                    "wearing_zone": "NECK_UPPER_BODY",
+                },
+            },
+            "accessory_execution_brief": {"product_relation": "已经搭配在颈部"},
+            "voiceover": script["continuous_voiceover"],
+        }
+        self.item.result_json = json.dumps(result, ensure_ascii=False)
+
+        text = render_video_generation_prompt(item=self.item, duration_seconds=15)
+
+        self.assertIn("禁止改变参考图和已批准锚点中的颜色、图案布局", text)
+        self.assertNotIn("衣长、领型、前襟和袖口", text)
+        self.assertIn("可选轻互动：最多自然采用一个，也可以不用", text)
+
+    def test_frozen_action_design_is_rendered_once_as_the_action_mainline(self):
+        result = json.loads(self.item.result_json)
+        script = result["script"]
+        action = {
+            "primary_action_mode": "SIMPLE_WEAR_PROCESS",
+            "start_state": "丝巾已经绕过颈部并形成一个松结",
+            "core_action": "把短端穿过已有松结并轻轻收好",
+            "end_state": "停留展示领口与上半身搭配结果",
+            "supporting_scene_action": "拿起桌边小包→自然准备离开",
+        }
+        script["video_generation_brief"] = {
+            "production_design": script["production_design"],
+            "storyboard": script["storyboard"],
+            "product_truth": {
+                "canonical_product_type": "silk_scarf",
+                "product_identity": "深蓝条纹波点丝巾",
+                "identity_anchors": ["深蓝底色", "条纹与波点图案"],
+            },
+            "category_execution_extension": {
+                "domain": "ACCESSORY",
+                "profile": {"product_subtype": "silk_scarf"},
+            },
+            "accessory_execution_brief": {
+                "product_relation": "已经搭配在颈部",
+                "selected_action_design": action,
+                "optional_simple_interactions": ["轻托垂端", "拨开头发"],
+                "wear_state_contract": {
+                    "initial_state": "IN_PROGRESS",
+                    "continuity_rule_zh": "开场保持未完成状态，只完成冻结的一个简单步骤；不得先展示完整佩戴结果后再重新系结",
+                },
+                "hand_anatomy_guard": {
+                    "guidance_zh": "画面中最多出现同一人物自然生长的两只手，不出现第三只手或助手手臂",
+                },
+            },
+            "action_design": action,
+            "voiceover": script["continuous_voiceover"],
+        }
+        self.item.result_json = json.dumps(result, ensure_ascii=False)
+
+        text = render_video_generation_prompt(item=self.item, duration_seconds=15)
+
+        self.assertIn("【本条动作主线｜只执行这一条】", text)
+        self.assertIn("把短端穿过已有松结并轻轻收好", text)
+        self.assertIn("辅助生活衔接：拿起桌边小包→自然准备离开", text)
+        self.assertNotIn("可选轻互动：", text)
+        self.assertNotIn("商品关系：已经搭配在颈部", text)
+        self.assertIn("佩戴连续性：开场保持未完成状态", text)
+        self.assertIn("不出现第三只手或助手手臂", text)
 
     def test_hidden_snaps_render_as_one_visible_row_and_product_negative_is_up_front(self):
         result = json.loads(self.item.result_json)
@@ -237,6 +399,60 @@ class ProductionScriptRendererTest(unittest.TestCase):
         self.assertNotIn("侧前方约四十五度", text)
         self.assertNotIn("浅景深推近", text)
 
+    def test_native_multiclip_prompt_renders_real_capture_units_and_direct_cuts(self):
+        result = json.loads(self.item.result_json)
+        script = result["script"]
+        base = script["storyboard"][0]
+        script["storyboard"] = [
+            {
+                **base,
+                "shot_no": index,
+                "time_range": time_range,
+                "narrative_role": role,
+                "visual_content": visual,
+                "character_action": action,
+            }
+            for index, (time_range, role, visual, action) in enumerate(
+                [
+                    ("0-2.5s", "HOOK", "人物穿好外套看向手机", "开始分享"),
+                    ("2.5-6s", "PROOF", "外套前襟和衣长清楚", "自然站立"),
+                    ("6-10s", "PROOF", "人物侧身展示版型", "轻微转身"),
+                    ("10-15s", "ENDING", "人物拿包准备离开", "拿起随身包"),
+                ],
+                1,
+            )
+        ]
+        script["capture_rhythm_contract"] = {
+            "schema_version": "capture-rhythm-contract-v1",
+            "profile": "NATIVE_MULTI_CLIP_V1",
+            "capture_unit_count": 3,
+            "capture_grammar": "OPENING_TO_PROOF_TO_CONTEXT",
+            "edit_style": "NATIVE_HARD_CUT",
+        }
+        script["video_generation_brief"] = {
+            "schema_version": "production-video-brief-v7-native-multiclip",
+            "render_profile": "UGC_NATIVE_V2_MULTICLIP",
+            "capture_mode": "CREATOR_SELF_SHOT",
+            "capture_rhythm_contract": script["capture_rhythm_contract"],
+            "production_design": script["production_design"],
+            "storyboard": script["storyboard"],
+            "product_truth": {
+                "product_identity": "米白短款外套",
+                "identity_anchors": ["米白短款外套"],
+            },
+            "voiceover": script["continuous_voiceover"],
+        }
+        self.item.result_json = json.dumps(result, ensure_ascii=False)
+
+        text = render_video_generation_prompt(item=self.item, duration_seconds=15)
+
+        self.assertIn("【拍摄方式｜UGC_NATIVE_V2_MULTICLIP】", text)
+        self.assertEqual(3, text.count("【拍摄片段"))
+        self.assertEqual(2, text.count("【直接剪切｜开始另一段独立手机素材】"))
+        self.assertIn("不锁死手机位置与景别", text)
+        self.assertNotIn("结构只控制内容推进，不代表切换摄影机位", text)
+        self.assertNotIn("保持同一创作者、商品、穿搭、场景和手机视角", text)
+
     def test_legacy_profile_remains_available_for_rollback(self):
         with patch.dict("os.environ", {"ORIGINAL_SCRIPT_VIDEO_PROMPT_PROFILE": "legacy"}):
             text = render_video_generation_prompt(item=self.item, duration_seconds=15)
@@ -244,12 +460,123 @@ class ProductionScriptRendererTest(unittest.TestCase):
         self.assertIn("人物状态：", text)
         self.assertNotIn("【拍摄方式｜UGC_NATIVE_V1】", text)
 
+    def test_capture_rhythm_environment_can_upgrade_an_old_stored_script(self):
+        with patch.dict(
+            "os.environ",
+            {"ORIGINAL_SCRIPT_CAPTURE_RHYTHM_PROFILE": "native_multiclip_v1"},
+        ):
+            text = render_video_generation_prompt(item=self.item, duration_seconds=15)
+        self.assertIn("【拍摄方式｜UGC_NATIVE_V2_MULTICLIP】", text)
+        self.assertIn("【拍摄节奏｜NATIVE_MULTI_CLIP_V1】", text)
+
+    def test_visual_execution_v2_keeps_native_texture_and_styling_completion(self):
+        result = json.loads(self.item.result_json)
+        script = result["script"]
+        script["production_design"]["life_event"] = {
+            "continuous_event": "在同一窗边座位拿起随身包准备离开"
+        }
+        contract = {
+            "schema_version": "visual-execution-contract-v2",
+            "visual_finish_profile": "NATIVE_STYLED",
+            "styling_context": {
+                "finish_direction": "城市休闲造型完整但保留真实穿着质感",
+                "supporting_elements": "一只日常肩包",
+                "grooming_direction": "自然有气色的妆发",
+            },
+            "scene_context": {
+                "situation_tags": ["WORK_BREAK"],
+                "aesthetic_anchors": ["暖木与窗边自然侧光"],
+                "visual_scene_recipe": {
+                    "space_relationship": "咖啡厅靠窗座位与局部桌面纵深",
+                    "material_palette": "暖木桌面与透明玻璃杯",
+                    "lighting_texture": "柔和窗边自然光",
+                    "lived_in_detail": "桌边随手放下的小包",
+                },
+                "instruction": "同一真实场景来源，不混拼布景",
+            },
+        }
+        script["video_generation_brief"]["visual_execution_contract"] = contract
+        script["video_generation_brief"]["production_design"] = script["production_design"]
+        self.item.result_json = json.dumps(result, ensure_ascii=False)
+
+        text = render_video_generation_prompt(item=self.item, duration_seconds=15)
+
+        self.assertIn("【视觉完成度｜NATIVE_STYLED】", text)
+        self.assertIn("城市休闲造型完整", text)
+        self.assertIn("暖木与窗边自然侧光", text)
+        self.assertIn("场景来源配方（软参考）", text)
+        self.assertIn("材质与色调：暖木桌面与透明玻璃杯", text)
+        self.assertNotIn("WORK_BREAK", text)
+        self.assertIn("连续生活事件：在同一窗边座位拿起随身包准备离开", text)
+        self.assertIn("人物造型、真实场景和手机原生质感同时完整成立", text)
+        self.assertNotIn("商品一致性优先于人物美感", text)
+
+    def test_visual_execution_v3_renders_compact_saliency_guidance(self):
+        result = json.loads(self.item.result_json)
+        script = result["script"]
+        contract = {
+            "schema_version": "visual-execution-contract-v3-saliency",
+            "visual_finish_profile": "NATIVE_STYLED",
+            "styling_context": {"finish_direction": "真实但完成度清楚的出门造型"},
+            "scene_context": {"visual_scene_recipe": {}},
+            "visual_saliency": {
+                "exposure": {
+                    "profile": "BRIGHT_NATIVE",
+                    "guidance": "人物脸部与商品处于画面主要亮部，画面不欠曝、不蒙灰。",
+                },
+                "separation": {
+                    "outfit_guidance": "内搭与深色商品保持清楚明度边界。",
+                    "background_guidance": "背景与商品保持明暗分离。",
+                },
+                "opening_focus": {
+                    "guidance": "首镜让丝巾成为第一色彩焦点。",
+                    "natural_change": "人物轻微转向主要亮部，不重新系结。",
+                },
+            },
+        }
+        script["video_generation_brief"] = {
+            "production_design": script["production_design"],
+            "storyboard": script["storyboard"],
+            "product_truth": {
+                "canonical_product_type": "silk_scarf",
+                "identity_anchors": ["深蓝底色与方形轮廓"],
+            },
+            "visual_execution_contract": contract,
+            "voiceover": script["continuous_voiceover"],
+        }
+        self.item.result_json = json.dumps(result, ensure_ascii=False)
+
+        text = render_video_generation_prompt(item=self.item, duration_seconds=15)
+
+        self.assertIn("【画面优先级｜明亮原生与商品分离】", text)
+        self.assertIn("画面不欠曝、不蒙灰", text)
+        self.assertIn("内搭与深色商品保持清楚明度边界", text)
+        self.assertIn("首镜让丝巾成为第一色彩焦点", text)
+        self.assertIn("不重新系结", text)
+        self.assertIn("参考图的整体曝光、滤镜、背景色调", text)
+        self.assertEqual(text.count("【画面优先级｜明亮原生与商品分离】"), 1)
+
     def test_projection_contains_readable_and_lineage_fields(self):
         row = build_production_projection(batch=self.batch, item=self.item)
         self.assertEqual(row["script_id"], "SCSCRIPT_1")
         self.assertEqual(row["core_selling_point"], "腿部线条视觉更修长")
         self.assertEqual(row["cluster_id"], 2)
         self.assertIn("【人物设定】", row["complete_script"])
+
+    def test_projection_creative_signature_includes_frozen_action_signature(self):
+        result = json.loads(self.item.result_json)
+        result["script"]["video_generation_brief"]["action_design"] = {
+            "action_signature": "ACT_TEST123",
+            "primary_action_mode": "DETAIL_SHOW",
+        }
+        self.item.result_json = json.dumps(result, ensure_ascii=False)
+
+        row = build_production_projection(batch=self.batch, item=self.item)
+
+        self.assertEqual(
+            row["creative_signature"],
+            "人|展览|走入|前行|ACT_TEST123",
+        )
 
     def test_respectful_argument_uses_safe_voiceover_summary_everywhere(self):
         result = json.loads(self.item.result_json)

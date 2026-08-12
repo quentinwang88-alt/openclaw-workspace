@@ -1,9 +1,9 @@
 """Read-only adapter for structured outfit templates shared by video flows.
 
-The adapter intentionally does not select or read the template title, free-form
-body, prompt core, notes, scene, persona, or action fields.  It exposes a small
-normalized contract; the original-script allocator remains the selection
-authority and always keeps its internal profiles as a fallback.
+The adapter intentionally never sends the template title, free-form body,
+prompt core, notes, or action fields to a model.  The title may be carried as
+display-only metadata for the human workbench; it is excluded from the
+structured snapshot and model-visible creative seed.
 """
 
 from __future__ import annotations
@@ -14,10 +14,10 @@ import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 
-PROVIDER_VERSION = "shared-outfit-provider-v1-structured-only"
+PROVIDER_VERSION = "shared-outfit-provider-v6-display-metadata"
 DEFAULT_DB_PATH = (
     Path(__file__).resolve().parents[2]
     / "lightweight-tryon-video"
@@ -26,7 +26,7 @@ DEFAULT_DB_PATH = (
 )
 
 # Deliberately exhaustive: a future column cannot silently enter the contract.
-STRUCTURED_COLUMNS = (
+BASE_STRUCTURED_COLUMNS = (
     "styling_id",
     "status",
     "applicable_product_codes",
@@ -44,6 +44,27 @@ STRUCTURED_COLUMNS = (
     "config_version",
     "priority",
 )
+OPTIONAL_STRUCTURED_COLUMNS = (
+    "target_role",
+    "supported_demonstration_modes",
+    "scene_families",
+    "preferred_persona_ids",
+    "style_intensity",
+    "climate_profile",
+    "silhouette_key",
+    "outfit_recipe",
+    "base_outfit_direction",
+    "hair_direction",
+    "neckline_direction",
+    "outer_layer_direction",
+    "palette_relation",
+    "visibility_zones",
+    "visibility_requirement",
+    "finish_direction",
+)
+STRUCTURED_COLUMNS = (*BASE_STRUCTURED_COLUMNS, *OPTIONAL_STRUCTURED_COLUMNS)
+DISPLAY_ONLY_COLUMNS = ("styling_name",)
+DISPLAY_ONLY_CONTRACT_FIELDS = frozenset({"template_display_name"})
 IGNORED_UNSTRUCTURED_FIELDS = (
     "styling_name",
     "prompt_core",
@@ -69,6 +90,11 @@ _TYPE_ALIASES = {
     "裤装": "pants",
     "裙装": "skirt",
     "家居服": "homewear",
+    "丝巾": "silk_scarf",
+    "围巾": "scarf",
+    "秋冬围巾": "winter_scarf",
+    "头巾": "headscarf",
+    "发饰": "hair_accessory",
 }
 
 _BOTTOM_LABELS = {
@@ -95,10 +121,57 @@ _FOOTWEAR_LABELS = {
     "可以入镜": "鞋子可自然入镜",
     "必须入镜": "鞋子需要完整入镜",
 }
+_SCENE_FAMILY_CODES = {
+    "居家日常": "HOME_ROUTINE",
+    "咖啡/品质室内": "CAFE_DINING",
+    "街头/外出": "STREET_OUTING",
+    "镜前/试穿": "VANITY_TRYON",
+    "办公/通勤": "OFFICE_WORKBREAK",
+    "乘车/等候": "CAR_TRANSIT",
+}
+_ONE_PIECE_TOKENS = ("连衣裙", "连体", "jumpsuit", "romper", "dress")
 
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def without_outfit_display_metadata(value: Any) -> Any:
+    """Return a stable generation payload without human-only labels.
+
+    Display names stay on the persisted contract for reports and Feishu, but
+    renaming a template must not invalidate creative IDs, checkpoints, cache
+    keys, script IDs, or first-frame assets.
+    """
+
+    if isinstance(value, Mapping):
+        return {
+            key: without_outfit_display_metadata(item)
+            for key, item in value.items()
+            if key not in DISPLAY_ONLY_CONTRACT_FIELDS
+        }
+    if isinstance(value, list):
+        return [without_outfit_display_metadata(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(without_outfit_display_metadata(item) for item in value)
+    return value
+
+
+def _is_one_piece(value: Any) -> bool:
+    text = _text(value).lower()
+    return bool(text and any(token in text for token in _ONE_PIECE_TOKENS))
+
+
+def _accessory_contract(value: Any) -> tuple[str, List[str], str]:
+    raw = _text(value)
+    label = _ACCESSORY_LABELS.get(raw, raw)
+    if not raw or raw.lower() in {"none", "无配饰"}:
+        return "NONE", [], label or "不额外增加配饰"
+    if raw.lower() in {"minimal", "轻量配饰"} or "极简配饰" in raw:
+        return "MINIMAL", [], label
+    if raw.lower() in {"normal", "正常配饰"}:
+        return "NORMAL", [], label
+    return "SPECIFIED", [raw], raw
 
 
 def _list(value: Any) -> List[str]:
@@ -121,6 +194,14 @@ def _list(value: Any) -> List[str]:
 def _canonical_product_type(value: Any) -> str:
     text = _text(value).lower()
     return _TYPE_ALIASES.get(text, text)
+
+
+def _scene_family_codes(value: Any) -> List[str]:
+    return list(dict.fromkeys(
+        _SCENE_FAMILY_CODES.get(item, item.upper())
+        for item in _list(value)
+        if item
+    ))
 
 
 def _provider_enabled() -> bool:
@@ -243,6 +324,20 @@ def _normalized_bottom_fit(bottom_type: str, values: List[str]) -> tuple[List[st
     """Resolve only obvious structural contradictions, without model judgment."""
     warnings: List[str] = []
     result = list(values)
+    mutually_exclusive_axes = (
+        ({"高腰", "中腰", "低腰", "high_waist", "mid_waist", "low_waist"}, "waist"),
+        ({"直筒", "阔腿", "宽松", "修身", "straight", "wide_leg", "loose", "slim"}, "leg_fit"),
+    )
+    for axis_values, axis_name in mutually_exclusive_axes:
+        matches = [item for item in result if item.lower() in axis_values or item in axis_values]
+        if len(matches) > 1:
+            keep = matches[0]
+            removed = matches[1:]
+            result = [item for item in result if item not in removed]
+            warnings.append(
+                f"bottom_fit_{axis_name}_conflict_removed:" + ",".join(removed)
+                + f";kept:{keep}"
+            )
     if bottom_type == "wide_leg_pants":
         conflicts = {"直筒", "修身", "straight", "slim"}
         removed = [item for item in result if item.lower() in conflicts or item in conflicts]
@@ -258,7 +353,19 @@ def _base_outfit_direction(row: Dict[str, Any]) -> tuple[str, List[str]]:
     inner_type = _text(row.get("inner_type"))
     inner_color = _text(row.get("inner_color"))
     inner_requirements = _text(row.get("inner_requirements"))
-    if inner_type or inner_color:
+    one_piece = _is_one_piece(inner_type) or _is_one_piece(row.get("bottom_type"))
+    if one_piece:
+        one_piece_text = (
+            "".join(part for part in (inner_color, inner_type) if part)
+            if _is_one_piece(inner_type)
+            else "".join([
+                *(_list(row.get("bottom_color")) or ([inner_color] if inner_color else [])),
+                _text(row.get("bottom_type")),
+            ])
+        )
+        if one_piece_text:
+            pieces.append(f"连体单品使用{one_piece_text}")
+    elif inner_type or inner_color:
         inner = "".join(part for part in (inner_color, inner_type) if part)
         pieces.append(f"内搭使用{inner}")
     if inner_requirements:
@@ -269,7 +376,7 @@ def _base_outfit_direction(row: Dict[str, Any]) -> tuple[str, List[str]]:
     bottom_colors = _list(row.get("bottom_color"))
     bottom_fits, fit_warnings = _normalized_bottom_fit(bottom_type, _list(row.get("bottom_fit")))
     warnings.extend(fit_warnings)
-    if bottom_label:
+    if bottom_label and not one_piece:
         # The structured type may already contain a fit word (for example
         # “高腰阔腿裤”).  Avoid mechanically repeating the same slot value.
         non_repeating_fits = [item for item in bottom_fits if item not in bottom_label]
@@ -290,8 +397,53 @@ def _base_outfit_direction(row: Dict[str, Any]) -> tuple[str, List[str]]:
 
 
 def _silhouette_key(row: Dict[str, Any]) -> str:
+    explicit = _text(row.get("silhouette_key"))
+    if explicit:
+        return explicit
     bottom_type = _text(row.get("bottom_type")) or "PRODUCT_LED"
     return "TEMPLATE_" + bottom_type.upper()
+
+
+def _outfit_recipe(row: Dict[str, Any]) -> Dict[str, str]:
+    explicit = row.get("outfit_recipe")
+    if isinstance(explicit, dict) and any(_text(value) for value in explicit.values()):
+        return {str(key): _text(value) for key, value in explicit.items()}
+    if isinstance(explicit, str) and explicit.strip():
+        try:
+            parsed = json.loads(explicit)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict) and any(_text(value) for value in parsed.values()):
+            return {str(key): _text(value) for key, value in parsed.items()}
+    inner = "".join(
+        part for part in (_text(row.get("inner_color")), _text(row.get("inner_type")))
+        if part
+    )
+    bottom_type = _text(row.get("bottom_type"))
+    bottom_label = _BOTTOM_LABELS.get(bottom_type, bottom_type)
+    bottom_parts = [*_list(row.get("bottom_color")), *_list(row.get("bottom_fit"))]
+    bottom = "、".join([*bottom_parts, bottom_label] if bottom_label else bottom_parts)
+    one_piece = _is_one_piece(row.get("inner_type")) or _is_one_piece(bottom_label)
+    one_piece_text = (
+        inner
+        if _is_one_piece(row.get("inner_type"))
+        else "".join([
+            *(_list(row.get("bottom_color")) or ([_text(row.get("inner_color"))] if _text(row.get("inner_color")) else [])),
+            bottom_label,
+        ])
+    )
+    _, _, accessory_text = _accessory_contract(row.get("accessory_level"))
+    return {
+        "top": "" if one_piece else inner,
+        "bottom": "" if one_piece else bottom,
+        "one_piece": one_piece_text if one_piece else "",
+        "footwear": _FOOTWEAR_LABELS.get(
+            _text(row.get("footwear_visibility")),
+            _text(row.get("footwear_visibility")),
+        ),
+        "bag": "",
+        "other_accessories": accessory_text,
+    }
 
 
 def load_structured_outfit_templates(
@@ -319,11 +471,16 @@ def load_structured_outfit_templates(
         existing = {
             _text(row[1]) for row in conn.execute("PRAGMA table_info(styling_templates)").fetchall()
         }
-        if not set(STRUCTURED_COLUMNS).issubset(existing):
+        if not set(BASE_STRUCTURED_COLUMNS).issubset(existing):
             conn.close()
             return []
+        structured_columns = [name for name in STRUCTURED_COLUMNS if name in existing]
+        selected_columns = [
+            *structured_columns,
+            *(name for name in DISPLAY_ONLY_COLUMNS if name in existing),
+        ]
         sql = (
-            "SELECT " + ", ".join(STRUCTURED_COLUMNS)
+            "SELECT " + ", ".join(selected_columns)
             + " FROM styling_templates WHERE status = ? ORDER BY priority DESC, styling_id ASC"
         )
         rows = [dict(row) for row in conn.execute(sql, ("enabled",)).fetchall()]
@@ -348,17 +505,33 @@ def load_structured_outfit_templates(
             continue
 
         base_direction, warnings = _base_outfit_direction(row)
+        target_role = _text(row.get("target_role") or "TARGET_GARMENT").upper()
+        supported_roles = [target_role] if target_role else ["TARGET_GARMENT"]
+        if _text(row.get("base_outfit_direction")):
+            base_direction = _text(row.get("base_outfit_direction"))
         structured_payload = {
             key: (_list(row.get(key)) if key in {
                 "applicable_product_codes", "applicable_product_type", "product_fit",
                 "bottom_color", "bottom_fit", "vibe_tag",
+                "supported_demonstration_modes", "scene_families",
+                "preferred_persona_ids", "visibility_zones",
             } else row.get(key))
-            for key in STRUCTURED_COLUMNS
+            for key in structured_columns
         }
+        style_family = (_list(row.get("vibe_tag")) or ["STRUCTURED_TEMPLATE"])[0]
+        outfit_structure = (
+            "ONE_PIECE"
+            if _is_one_piece(row.get("inner_type")) or _is_one_piece(row.get("bottom_type"))
+            else "SEPARATES"
+        )
+        accessory_policy, accessory_items, _ = _accessory_contract(
+            row.get("accessory_level")
+        )
         candidates.append({
             "provider_version": PROVIDER_VERSION,
             "source_type": "LIGHTWEIGHT_TEMPLATE",
             "template_id": _text(row.get("styling_id")),
+            "template_display_name": _text(row.get("styling_name")),
             "template_version": _text(row.get("config_version")) or "UNVERSIONED",
             "match_scope": match_scope,
             "match_rank": match_rank,
@@ -373,15 +546,38 @@ def load_structured_outfit_templates(
             "inner_color": _text(row.get("inner_color")),
             "inner_requirements": _text(row.get("inner_requirements")),
             "accessory_level": _text(row.get("accessory_level")),
+            "accessory_policy": accessory_policy,
+            "accessory_items": accessory_items,
             "footwear_visibility": _text(row.get("footwear_visibility")),
             "vibe_tag": _list(row.get("vibe_tag")),
             "silhouette_key": _silhouette_key(row),
-            "style_family": (_list(row.get("vibe_tag")) or ["STRUCTURED_TEMPLATE"])[0],
-            "hair_direction": "不由穿搭模板决定",
+            "style_family": style_family,
+            "target_role": target_role,
+            "supported_target_roles": supported_roles,
+            "supported_demonstration_modes": [
+                item.upper() for item in _list(row.get("supported_demonstration_modes"))
+            ],
+            "scene_families": [
+                item for item in _scene_family_codes(row.get("scene_families"))
+            ],
+            "preferred_persona_ids": list(dict.fromkeys(
+                _list(row.get("preferred_persona_ids"))
+            )),
+            "style_intensity": _text(row.get("style_intensity") or "DAILY").upper(),
+            "climate_profile": _text(row.get("climate_profile")).upper(),
+            "outfit_recipe": _outfit_recipe(row),
+            "outfit_structure": outfit_structure,
+            "hair_direction": _text(row.get("hair_direction")) or "不由穿搭模板决定",
             "base_outfit_direction": base_direction,
+            "neckline_direction": _text(row.get("neckline_direction")),
+            "outer_layer_direction": _text(row.get("outer_layer_direction")),
+            "palette_relation": _text(row.get("palette_relation")),
+            "visibility_requirement": _text(row.get("visibility_requirement")),
+            "visibility_zones": _list(row.get("visibility_zones")),
+            "finish_direction": _text(row.get("finish_direction")),
             "normalization_warnings": warnings,
             "structured_snapshot_hash": _structured_hash(structured_payload),
-            "structured_fields_used": list(STRUCTURED_COLUMNS),
+            "structured_fields_used": list(structured_columns),
             "ignored_unstructured_fields": list(IGNORED_UNSTRUCTURED_FIELDS),
         })
     return candidates

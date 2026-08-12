@@ -21,7 +21,9 @@ from core.original_batch_storage import BatchStorage, POLICY_VERSION
 from core.original_batch_allocator import (
     allocate_batch_items,
     build_content_bundle_candidates,
+    _creator_weighted_directions,
     _eligible_hooks_for_bundle,
+    _relationship_device_for_hook,
     _relationship_schedule,
 )
 
@@ -282,6 +284,23 @@ class BatchAllocatorTest(unittest.TestCase):
         small = _relationship_schedule(3, __import__("random").Random(17))
         self.assertEqual(small, ["HOOK_DECIDES"] * 3)
 
+    def test_relationship_device_is_hook_compatible_without_batch_address_spam(self):
+        assigned = []
+        for hook_id in (
+            "USER_ADVOCACY_STANCE",
+            "AUDIENCE_NEED_CALLOUT",
+            "DETAIL_SURPRISE",
+            "DISCOVERY_RESULT_PROMISE",
+            "USER_ADVOCACY_STANCE",
+        ):
+            assigned.append(_relationship_device_for_hook(hook_id, assigned))
+        self.assertEqual(assigned.count("AUDIENCE_ADDRESS"), 1)
+        self.assertEqual(assigned[1], "VIEWER_REFERENCE")
+        self.assertEqual(assigned[2], "VIEWER_INVITATION")
+        self.assertFalse(any(
+            left == right for left, right in zip(assigned, assigned[1:])
+        ))
+
     def test_allocate_two_items_returns_two_structure_mothers(self):
         items, summary = allocate_batch_items(
             product_code="P1",
@@ -299,7 +318,7 @@ class BatchAllocatorTest(unittest.TestCase):
         frozen = json.loads(items[0].frozen_direction_package_json)
         self.assertEqual(
             frozen["simplified_creative_seed"]["schema_version"],
-            "simplified-creative-seed-v11-outfit-contract",
+            "simplified-creative-seed-v17-wearable-visual",
         )
         self.assertIn(
             frozen["simplified_creative_seed"]["creative_direction"]["opening_visual_job"]["job"],
@@ -437,6 +456,41 @@ class BatchAllocatorTest(unittest.TestCase):
         self.assertTrue(any(
             entry.get("downgrade_reason") == "WEARER_VISUAL_REQUIRED"
             and entry.get("output_slot") == "S4"
+            for entry in summary["deferred_content"]
+        ))
+
+    def test_scarf_worn_usage_is_not_allocated_to_static_product_structure(self):
+        items, summary = allocate_batch_items(
+            product_code="P-SCARF",
+            requested_count=2,
+            directions=[
+                _fake_direction("DA_W", "S1", carrier="WEARER_ACTIVE"),
+                _fake_direction("DA_S", "S4", cluster_id=2, carrier="STATIC_PRODUCT"),
+            ],
+            anchor_card=_fake_anchor_card(),
+            active_hook_ids=["AUDIENCE_NEED_CALLOUT", "GENERAL_PRODUCT_SHARE"],
+            creative_policy_version="test-v1",
+            random_seed=42,
+            selling_point_catalog=[{
+                "value_id": "ARG_SUN_SHADE",
+                "primary_selling_point": "外出时作为头部遮阳造型",
+                "argument_kind": "SELLING_ARGUMENT",
+                "source": "FEISHU_OPERATOR_CONFIRMED_ARGUMENT",
+                "argument_theme": "SUN_SHADE",
+                "primary_demonstration_mode": "HEAD_WORN",
+                "visual_dependency": "WEARER_REQUIRED",
+                "proof_subject": "SCENE_USAGE",
+                "compatible_carriers": [
+                    "WEARER_ACTIVE", "PERSON_ON_CAMERA", "MIXED",
+                ],
+            }],
+        )
+        self.assertEqual(1, len(items))
+        self.assertEqual("WEARER_ACTIVE", items[0].carrier_mode)
+        self.assertEqual("PARTIAL_CONTENT_CAPACITY", summary["allocation_status"])
+        self.assertTrue(any(
+            entry.get("output_slot") == "S4"
+            and entry.get("downgrade_reason") == "WEARER_VISUAL_REQUIRED"
             for entry in summary["deferred_content"]
         ))
 
@@ -748,6 +802,47 @@ class BatchAllocatorTest(unittest.TestCase):
         )
         self.assertIn("AUDIENCE_NEED_CALLOUT", eligible)
         self.assertIn("PAIN_REFRAME", eligible)
+
+    def test_eligible_hooks_accepts_governed_central_concept_authority(self):
+        bundle = {
+            "preferred_hook_angles": [
+                "PAIN_REFRAME", "AUDIENCE_NEED_CALLOUT", "GENERAL_PRODUCT_SHARE",
+            ],
+            "audience_tension_status": "UNAVAILABLE",
+            "hook_tension_authority": "CENTRAL_CONCEPT",
+        }
+        eligible, suppressed = _eligible_hooks_for_bundle(
+            bundle,
+            ["PAIN_REFRAME", "AUDIENCE_NEED_CALLOUT", "GENERAL_PRODUCT_SHARE"],
+        )
+        self.assertIn("PAIN_REFRAME", eligible)
+        self.assertIn("AUDIENCE_NEED_CALLOUT", eligible)
+        self.assertEqual([], suppressed)
+
+    def test_scarf_support_prefers_hand_over_static_without_changing_apparel(self):
+        directions = [
+            _fake_direction("DA_W", "S1", carrier="WEARER_ACTIVE"),
+            _fake_direction("DA_S", "S4", carrier="STATIC_PRODUCT"),
+            _fake_direction("DA_H", "S3", carrier="HAND_ONLY"),
+        ]
+        scarf = _creator_weighted_directions(
+            directions,
+            requested_count=5,
+            product_type="丝巾",
+            top_category="配饰",
+        )
+        apparel = _creator_weighted_directions(
+            directions,
+            requested_count=5,
+            product_type="外套",
+            top_category="女装",
+        )
+        scarf_ids = [item["direction_assignment_id"] for item in scarf]
+        apparel_ids = [item["direction_assignment_id"] for item in apparel]
+        self.assertIn("DA_H", scarf_ids)
+        self.assertNotIn("DA_S", scarf_ids)
+        self.assertIn("DA_S", apparel_ids)
+        self.assertNotIn("DA_H", apparel_ids)
 
     def test_static_direction_may_use_authorised_wearer_preferred_argument(self):
         items, summary = allocate_batch_items(

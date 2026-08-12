@@ -140,6 +140,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--script-url", default=DEFAULT_SCRIPT_URL)
     parser.add_argument("--db-path", required=True)
     parser.add_argument("--delete-batch-id", action="append", required=True)
+    parser.add_argument(
+        "--delete-script-id",
+        action="append",
+        default=[],
+        help="可选：只替换指定旧脚本ID；仍必须同时命中 --delete-batch-id",
+    )
     parser.add_argument("--include-batch-id", action="append", required=True)
     parser.add_argument("--exclude-item-id", action="append", default=[])
     parser.add_argument("--expected-count", type=int, required=True)
@@ -151,6 +157,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     db_path = str(Path(args.db_path).expanduser().resolve())
     os.environ["ORIGINAL_SCRIPT_GENERATOR_DB_PATH"] = db_path
     delete_batch_ids = _clean(args.delete_batch_id)
+    delete_script_ids = _clean(args.delete_script_id)
     include_batch_ids = _clean(args.include_batch_id)
     excluded_item_ids = _clean(args.exclude_item_id)
     expected_products = _parse_expected_product_counts(args.expected_product_count)
@@ -171,7 +178,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         for record in all_records
         if str(record.fields.get(PRODUCTION_SCRIPT_FIELD_NAMES["batch_id"]) or "").strip()
         in set(delete_batch_ids)
+        and (
+            not delete_script_ids
+            or str(
+                record.fields.get(PRODUCTION_SCRIPT_FIELD_NAMES["script_id"]) or ""
+            ).strip()
+            in set(delete_script_ids)
+        )
     ]
+    if delete_script_ids:
+        matched_script_ids = {
+            str(
+                record.fields.get(PRODUCTION_SCRIPT_FIELD_NAMES["script_id"]) or ""
+            ).strip()
+            for record in old_records
+        }
+        if matched_script_ids != set(delete_script_ids):
+            raise RuntimeError(
+                "待删除脚本ID未完整命中指定批次: "
+                f"matched={sorted(matched_script_ids)}, "
+                f"expected={sorted(set(delete_script_ids))}"
+            )
     if len(old_records) != args.expected_count:
         raise RuntimeError(
             f"待删除记录数量不符: {len(old_records)} != {args.expected_count}"
@@ -208,6 +235,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     preflight = {
         "mode": "APPLY" if args.apply else "DRY_RUN",
         "delete_batch_ids": delete_batch_ids,
+        "delete_script_ids": delete_script_ids,
         "include_batch_ids": include_batch_ids,
         "excluded_item_ids": excluded_item_ids,
         "old_record_count": len(old_records),

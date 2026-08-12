@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import signal
 import subprocess
 import sys
 import traceback
@@ -16,9 +18,14 @@ if str(SKILL_ROOT) not in sys.path:
 
 from core.bitable import FeishuBitableClient, resolve_wiki_bitable_app_token  # noqa: E402
 from core.feishu_url_parser import parse_feishu_bitable_url  # noqa: E402
-from core.original_batch_executor import run_plan_only, run_script_only  # noqa: E402
+from core.original_batch_executor import (  # noqa: E402
+    load_product_context,
+    run_plan_only,
+    run_script_only,
+)
 from core.original_batch_models import BatchRequest  # noqa: E402
 from core.original_batch_storage import BatchStorage  # noqa: E402
+from core.operation_product_bootstrap import build_operation_product_context  # noqa: E402
 from core.production_script_feishu import (  # noqa: E402
     OPERATION_TASK_FIELD_RENAMES,
     OPERATION_TASK_FIELD_NAMES,
@@ -47,6 +54,46 @@ DEFAULT_SCRIPT_URL = (
 )
 
 
+class RunInterrupted(RuntimeError):
+    """Raised when the scheduler asks the active task to stop gracefully."""
+
+
+def _install_interrupt_handler() -> None:
+    """Turn scheduler shutdown signals into a recoverable task interruption.
+
+    The caller catches :class:`RunInterrupted` around the active Feishu record
+    and returns it to ``待执行``.  This keeps a gateway restart from leaving a
+    row permanently labelled as executing when no worker remains alive.
+    """
+
+    def _handle_interrupt(signum: int, _frame: object) -> None:
+        try:
+            signal_name = signal.Signals(signum).name
+        except ValueError:
+            signal_name = f"signal {signum}"
+        raise RunInterrupted(f"收到 {signal_name}")
+
+    for signal_number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signal_number, _handle_interrupt)
+
+
+def _interruption_error(exc: BaseException) -> str:
+    detail = str(exc).strip() or "调度器提前终止"
+    return f"运行被中断，可重试：{detail}"[:1800]
+
+
+def _enable_production_category_extensions() -> None:
+    """Enable registered accessory adapters on the official workbench path.
+
+    Unsupported products, including apparel, still compile an empty extension;
+    this only prevents a recognised scarf/headscarf task from silently losing
+    its physical execution contract because a shell-level feature flag was not
+    exported.
+    """
+
+    os.environ.setdefault("ORIGINAL_SCRIPT_ACCESSORY_PROFILE_ENABLED", "1")
+
+
 def _client(url: str) -> FeishuBitableClient:
     info = parse_feishu_bitable_url(url)
     if not info:
@@ -57,17 +104,23 @@ def _client(url: str) -> FeishuBitableClient:
     return FeishuBitableClient(token, info.table_id)
 
 
-def _request_id(record_id: str, task: dict) -> str:
-    material = "|".join(
-        [
-            record_id,
-            str(task.get("task_id") or ""),
-            str(task.get("product_code") or ""),
-            str(task.get("random_seed") or 0),
-            str(task.get("test_phase") or "INITIAL"),
-            "simplified_v1",
-        ]
-    )
+def _request_id(record_id: str, task: dict, *, replan: bool = False) -> str:
+    parts = [
+        record_id,
+        str(task.get("task_id") or ""),
+        str(task.get("product_code") or ""),
+        str(task.get("random_seed") or 0),
+        str(task.get("test_phase") or "INITIAL"),
+        "simplified_v1",
+    ]
+    if replan:
+        parts.extend(
+            [
+                "replan-v2-selling-snapshot",
+                str(task.get("batch_id") or "NO_PREVIOUS_BATCH"),
+            ]
+        )
+    material = "|".join(parts)
     return "OP_FEISHU_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:20].upper()
 
 
@@ -94,6 +147,81 @@ def _validate_task(task: dict) -> None:
         raise ValueError("一级类目必须从飞书枚举中选择：女装 / 配饰")
     if task.get("product_type") not in PRODUCT_TYPE_OPTIONS:
         raise ValueError("产品类型未命中系统枚举，请从飞书下拉框选择")
+
+
+def _batch_summary_text(batch, export_summary: dict) -> str:
+    try:
+        input_snapshot = json.loads(batch.input_snapshot_json or "{}")
+    except (TypeError, json.JSONDecodeError):
+        input_snapshot = {}
+    try:
+        allocation_summary = json.loads(batch.allocation_summary_json or "{}")
+    except (TypeError, json.JSONDecodeError):
+        allocation_summary = {}
+    selling_sources = input_snapshot.get("selling_point_catalog_sources") or {}
+    selling_distribution = allocation_summary.get("selling_argument_distribution") or {}
+    return (
+        f"请求{batch.requested_count}条；计划{batch.planned_count}条；"
+        f"完成{batch.ready_count}条；失败{batch.failed_count}条；"
+        f"人工确认卖点{selling_sources.get('central_confirmed_count', 0)}个；"
+        f"可用{selling_sources.get('central_available_count', 0)}个；"
+        f"已映射{selling_sources.get('central_mapped_count', 0)}个；"
+        f"未映射{selling_sources.get('central_unmapped_count', 0)}个；"
+        f"本批次使用{len(selling_distribution)}个；"
+        f"脚本表新增{export_summary.get('created', 0)}条、"
+        f"更新{export_summary.get('updated', 0)}条、"
+        f"跳过{export_summary.get('skipped', 0)}条"
+    )
+
+
+def _operation_status_for_batch(batch) -> str:
+    if int(batch.ready_count or 0) >= int(batch.planned_count or 0) and int(batch.planned_count or 0) > 0:
+        return "已完成"
+    if int(batch.ready_count or 0) > 0:
+        return "部分完成"
+    return "失败"
+
+
+def _export_ready_and_update_operation(
+    *,
+    operation_client: FeishuBitableClient,
+    script_client: FeishuBitableClient,
+    record_id: str,
+    task: dict,
+    batch,
+    items,
+) -> dict:
+    transferred_images = transfer_attachments(
+        operation_client,
+        script_client,
+        task["product_images"],
+    ) if task["product_images"] else []
+    export_summary = export_ready_batch(
+        batch=batch,
+        items=items,
+        target_client=script_client,
+        product_images=transferred_images,
+        store_id=task["store_id"],
+    )
+    final_status = _operation_status_for_batch(batch)
+    summary = _batch_summary_text(batch, export_summary)
+    error = "" if final_status == "已完成" else (
+        f"部分完成：ready={batch.ready_count}, failed={batch.failed_count}, "
+        f"planned={batch.planned_count}"
+    )
+    _update(
+        operation_client,
+        record_id,
+        status=final_status,
+        batch_id=batch.batch_id,
+        planned_count=batch.planned_count,
+        ready_count=batch.ready_count,
+        failed_count=batch.failed_count,
+        summary=summary,
+        error=error,
+        last_run_at=now_millis(),
+    )
+    return export_summary
 
 
 def _sync_confirmed_selling_points(
@@ -146,6 +274,7 @@ def _sync_confirmed_selling_points(
 
 
 def main() -> int:
+    _enable_production_category_extensions()
     parser = argparse.ArgumentParser(description="短视频运营任务表 -> 原创视频生产脚本")
     parser.add_argument("--operation-url", default=DEFAULT_OPERATION_URL)
     parser.add_argument("--script-url", default=DEFAULT_SCRIPT_URL)
@@ -163,7 +292,18 @@ def main() -> int:
         action="store_true",
         help="仅配合 --record-id，重新同步卖点并生成新策略版本批次",
     )
+    parser.add_argument(
+        "--export-ready-only",
+        action="store_true",
+        help="仅配合 --record-id，不生成不规划，只导出当前批次中已SCRIPT_READY的脚本",
+    )
     parser.add_argument("--delay-between-items", type=int, default=2)
+    parser.add_argument(
+        "--item-timeout-seconds",
+        type=int,
+        default=420,
+        help="单条脚本最大等待秒数；0 表示关闭 item 级超时",
+    )
     parser.add_argument("--voiceover-root", default="/Users/likeu3/voiceover_copy_engine")
     parser.add_argument(
         "--voiceover-model-command",
@@ -176,6 +316,10 @@ def main() -> int:
         parser.error("--resume-failed 必须与 --record-id 一起使用")
     if args.replan and not args.record_id:
         parser.error("--replan 必须与 --record-id 一起使用")
+    if args.export_ready_only and not args.record_id:
+        parser.error("--export-ready-only 必须与 --record-id 一起使用")
+
+    _install_interrupt_handler()
 
     operation_client = _client(args.operation_url)
     script_client = _client(args.script_url)
@@ -207,7 +351,13 @@ def main() -> int:
             and bool(args.record_id)
             and task["status"] in {"失败", "部分完成", "已完成"}
         )
-        if task["status"] != "待执行" and not can_resume_failed and not can_replan:
+        can_export_ready = args.export_ready_only and bool(args.record_id) and bool(task["batch_id"])
+        if (
+            task["status"] != "待执行"
+            and not can_resume_failed
+            and not can_replan
+            and not can_export_ready
+        ):
             continue
         candidates.append((record, task))
         if args.limit and len(candidates) >= args.limit:
@@ -215,6 +365,7 @@ def main() -> int:
 
     print(f"待执行运营任务: {len(candidates)}")
     had_failures = False
+    interrupted = False
     for record, task in candidates:
         print(
             f"- {record.record_id} | {task['product_code']} × {task['requested_count']} "
@@ -243,6 +394,26 @@ def main() -> int:
             )
             if batch:
                 items = storage.get_items(batch.batch_id)
+                if args.export_ready_only:
+                    export_summary = _export_ready_and_update_operation(
+                        operation_client=operation_client,
+                        script_client=script_client,
+                        record_id=record.record_id,
+                        task=task,
+                        batch=batch,
+                        items=items,
+                    )
+                    print(
+                        f"导出已完成脚本: {task_id} | batch={batch.batch_id} | "
+                        f"created={export_summary.get('created', 0)} | "
+                        f"updated={export_summary.get('updated', 0)} | "
+                        f"skipped={export_summary.get('skipped', 0)}"
+                    )
+                    continue
+            elif args.export_ready_only:
+                raise RuntimeError(
+                    f"当前任务没有可导出的批次或本地批次不存在: {task.get('batch_id')}"
+                )
             else:
                 _update(
                     operation_client,
@@ -256,7 +427,11 @@ def main() -> int:
                     voiceover_root=args.voiceover_root,
                 )
                 request = BatchRequest(
-                    request_id=_request_id(record.record_id, task),
+                    request_id=_request_id(
+                        record.record_id,
+                        task,
+                        replan=bool(args.replan),
+                    ),
                     product_code=task["product_code"],
                     requested_count=task["requested_count"],
                     test_phase=task["test_phase"],
@@ -270,11 +445,39 @@ def main() -> int:
                     source_record_id=record.record_id,
                     script_mode="simplified_v1",
                 )
+                product_context_override = None
+                try:
+                    load_product_context(
+                        task["product_code"],
+                        target_country=task["target_country"],
+                        target_language=task["target_language"],
+                        top_category=task["top_category"],
+                        product_type=task["product_type"],
+                        voiceover_root=args.voiceover_root,
+                        allow_missing_structure_route=True,
+                    )
+                except RuntimeError as exc:
+                    missing_context_markers = (
+                        "找不到产品",
+                        "只有 stage0 测试记录",
+                        "存在正式生产 run，但缺少 anchor_card",
+                    )
+                    if not any(marker in str(exc) for marker in missing_context_markers):
+                        raise
+                    print("新 SKU 无历史锚点，使用运营任务产品图建立 P1 锚点卡")
+                    product_context_override = build_operation_product_context(
+                        operation_client=operation_client,
+                        task=task,
+                        record_id=record.record_id,
+                        output_dir=output_dir,
+                        voiceover_root=args.voiceover_root,
+                    )
                 batch, items, _ = run_plan_only(
                     request,
                     output_dir=str(output_dir),
                     voiceover_root=args.voiceover_root,
                     voiceover_db_path=voiceover_db,
+                    product_context_override=product_context_override,
                 )
                 _update(
                     operation_client,
@@ -305,56 +508,43 @@ def main() -> int:
                 voiceover_model_command=args.voiceover_model_command,
                 blueprint_model=args.blueprint_model,
                 blueprint_reasoning=args.blueprint_reasoning,
+                item_timeout_seconds=args.item_timeout_seconds,
             )
 
-            transferred_images = transfer_attachments(
-                operation_client,
-                script_client,
-                task["product_images"],
-            ) if task["product_images"] else []
-            export_summary = export_ready_batch(
+            export_summary = _export_ready_and_update_operation(
+                operation_client=operation_client,
+                script_client=script_client,
+                record_id=record.record_id,
+                task=task,
                 batch=batch,
                 items=items,
-                target_client=script_client,
-                product_images=transferred_images,
-                store_id=task["store_id"],
             )
-            final_status = "已完成"
-            if batch.ready_count < batch.planned_count or batch.planned_count < batch.requested_count:
-                final_status = "部分完成"
+            print(
+                f"完成: {task_id} | "
+                f"created={export_summary.get('created', 0)} | "
+                f"updated={export_summary.get('updated', 0)} | "
+                f"skipped={export_summary.get('skipped', 0)}"
+            )
+        except RunInterrupted as exc:
+            interrupted = True
+            # A completed plan is safely resumable from its saved batch.  Do
+            # not classify a scheduler restart as a business failure or leave
+            # the row stranded in an executing status.
             try:
-                input_snapshot = json.loads(batch.input_snapshot_json or "{}")
-            except (TypeError, json.JSONDecodeError):
-                input_snapshot = {}
-            try:
-                allocation_summary = json.loads(batch.allocation_summary_json or "{}")
-            except (TypeError, json.JSONDecodeError):
-                allocation_summary = {}
-            selling_sources = input_snapshot.get("selling_point_catalog_sources") or {}
-            selling_distribution = allocation_summary.get("selling_argument_distribution") or {}
-            summary = (
-                f"请求{batch.requested_count}条；计划{batch.planned_count}条；"
-                f"完成{batch.ready_count}条；失败{batch.failed_count}条；"
-                f"人工确认卖点{selling_sources.get('central_confirmed_count', 0)}个；"
-                f"可用{selling_sources.get('central_available_count', 0)}个；"
-                f"已映射{selling_sources.get('central_mapped_count', 0)}个；"
-                f"未映射{selling_sources.get('central_unmapped_count', 0)}个；"
-                f"本批次使用{len(selling_distribution)}个；"
-                f"脚本表新增{export_summary['created']}条、更新{export_summary['updated']}条"
-            )
-            _update(
-                operation_client,
-                record.record_id,
-                status=final_status,
-                batch_id=batch.batch_id,
-                planned_count=batch.planned_count,
-                ready_count=batch.ready_count,
-                failed_count=batch.failed_count,
-                summary=summary,
-                error="",
-                last_run_at=now_millis(),
-            )
-            print(f"完成: {task_id} | {summary}")
+                _update(
+                    operation_client,
+                    record.record_id,
+                    status="待执行",
+                    error=_interruption_error(exc),
+                    last_run_at=now_millis(),
+                )
+            except Exception as update_exc:  # noqa: BLE001 - preserve signal exit.
+                print(
+                    f"WARN: 中断后回写待执行失败: {record.record_id}: {update_exc}",
+                    file=sys.stderr,
+                )
+            print(f"中断: {record.record_id}: {exc}", file=sys.stderr)
+            break
         except Exception as exc:
             had_failures = True
             _update(
@@ -366,7 +556,7 @@ def main() -> int:
             )
             print(f"失败: {record.record_id}: {exc}", file=sys.stderr)
             traceback.print_exc()
-    return 1 if had_failures else 0
+    return 130 if interrupted else (1 if had_failures else 0)
 
 
 if __name__ == "__main__":

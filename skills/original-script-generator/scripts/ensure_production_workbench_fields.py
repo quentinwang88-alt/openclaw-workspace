@@ -16,8 +16,10 @@ from core.production_script_feishu import (  # noqa: E402
     OPERATION_TASK_FIELD_RENAMES,
     OPERATION_TASK_FIELDS,
     OPERATION_TASK_STATUS_OPTIONS,
+    OUTFIT_SCENE_MATCH_OPTIONS,
     PRODUCT_TYPE_OPTIONS,
     PRODUCTION_SCRIPT_FIELDS,
+    FIRST_FRAME_STATUS_OPTIONS,
     TEST_PHASE_OPTIONS,
     TOP_CATEGORY_OPTIONS,
     ensure_fields,
@@ -77,6 +79,15 @@ def main() -> int:
         primary_field_name="脚本ID",
         specs=PRODUCTION_SCRIPT_FIELDS,
     )
+    script_enum_updated = ensure_single_select_options(
+        script_client,
+        {
+            "首帧准备状态（系统）": FIRST_FRAME_STATUS_OPTIONS,
+            "穿搭场景匹配（系统）": OUTFIT_SCENE_MATCH_OPTIONS,
+        },
+    )
+    if script_enum_updated:
+        print("原创生产脚本表单选枚举已更新: " + ", ".join(script_enum_updated))
     print(f"短视频运营任务表字段数: {len(operation_fields)}")
     print(f"原创视频生产脚本字段数: {len(script_fields)}")
     return 0

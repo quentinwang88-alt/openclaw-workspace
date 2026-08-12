@@ -6,9 +6,11 @@ from unittest.mock import patch
 
 from core.category_execution import (
     ACCESSORY_PROFILE_ENV,
+    build_category_blueprint_guidance,
     build_category_video_brief,
     compile_category_execution_extension,
     reconcile_anchor_category_contract,
+    resolve_category_argument_execution,
     resolve_category_carrier_execution,
     validate_category_execution_identity,
 )
@@ -91,6 +93,88 @@ class CategoryExecutionAdapterTest(unittest.TestCase):
                 )
                 self.assertTrue(extension["profile"]["interaction_boundary"])
 
+    def test_wrist_accessory_compiles_worn_result_and_wrist_outfit_role(self):
+        extension = compile_category_execution_extension(
+            product_type="手镯",
+            top_category="配饰",
+            anchor_card=_anchor("金色细手镯"),
+            enabled=True,
+        )
+        profile = extension["profile"]
+        self.assertEqual("WRIST_FOREARM", profile["wearing_zone"])
+        self.assertEqual("ALREADY_WORN_WRIST_RESULT", profile["required_result_view"])
+        self.assertEqual(
+            "SUPPORTING_OUTFIT_WRIST",
+            profile["outfit_context"]["target_role"],
+        )
+        carrier = resolve_category_carrier_execution(
+            extension, presentation_mode="PERSON_ON_CAMERA"
+        )
+        self.assertEqual("WRIST_WORN", carrier["primary_demonstration_mode"])
+        self.assertTrue(
+            all("领口" not in item for item in carrier["optional_simple_interactions"])
+        )
+        self.assertIn("手腕", carrier["product_relation_zh"])
+        prominence = carrier["product_prominence_contract"]
+        self.assertEqual("WRIST_FOREARM_CLOSE", prominence["primary_framing"])
+        self.assertFalse(prominence["hard_required"])
+        self.assertFalse(prominence["may_trigger_retry"])
+
+    def test_wrist_put_on_argument_exposes_one_matching_process_action(self):
+        extension = compile_category_execution_extension(
+            product_type="手镯",
+            top_category="配饰",
+            anchor_card=_anchor("金色细手镯"),
+            enabled=True,
+        )
+        resolved = resolve_category_argument_execution(
+            extension,
+            selling_argument={"preferred_action_mode": "SIMPLE_WEAR_PROCESS"},
+        )
+        carrier = resolve_category_carrier_execution(
+            resolved, presentation_mode="HANDS_ONLY"
+        )
+        self.assertEqual("SIMPLE_WEAR_PROCESS", carrier["preferred_action_mode"])
+        self.assertEqual(1, len(carrier["interaction_capabilities"]))
+        self.assertEqual(
+            "WRIST_SIMPLE_PUT_ON",
+            carrier["interaction_capabilities"][0]["interaction_id"],
+        )
+
+    def test_hair_accessory_uses_hair_actions_and_rear_capture_relationship(self):
+        extension = compile_category_execution_extension(
+            product_type="抓夹",
+            top_category="发饰",
+            anchor_card=_anchor("棕色抓夹"),
+            enabled=True,
+        )
+        profile = extension["profile"]
+        self.assertEqual(
+            "SUPPORTING_OUTFIT_HAIR",
+            profile["outfit_context"]["target_role"],
+        )
+        carrier = resolve_category_carrier_execution(
+            extension, presentation_mode="PERSON_ON_CAMERA"
+        )
+        self.assertEqual("HAIR_WORN", carrier["primary_demonstration_mode"])
+        self.assertIn("侧后方", carrier["capture_relationship"])
+        self.assertTrue(
+            all("垂端" not in item and "领口" not in item
+                for item in carrier["optional_simple_interactions"])
+        )
+        brief = build_category_video_brief(
+            extension, carrier_execution=carrier
+        )
+        self.assertIn("侧后方", brief["capture_relationship"])
+        prominence = brief["product_prominence_contract"]
+        self.assertEqual("HAIR_REGION_CLOSE", prominence["primary_framing"])
+        self.assertIn("头肩范围", prominence["context_guidance"])
+        guidance = build_category_blueprint_guidance(
+            extension, carrier_execution=carrier
+        )
+        self.assertIn("小商品观察尺度", guidance)
+        self.assertIn("中远景不能承担发饰证明", guidance)
+
     def test_scarf_subtypes_are_distinct_and_generic_scarf_remains_compatible(self):
         cases = {
             "围巾": ("scarf", "NECK_SHOULDER", "ALREADY_WORN_UPPER_BODY_RESULT"),
@@ -118,6 +202,7 @@ class CategoryExecutionAdapterTest(unittest.TestCase):
                 self.assertTrue(profile["compatible_proof_subjects"])
                 self.assertTrue(profile["outfit_context"])
                 self.assertTrue(profile["scene_preferences"])
+                self.assertNotIn("product_prominence", profile)
 
     def test_silk_scarf_and_headscarf_boundaries_do_not_infer_material_or_identity(self):
         silk = compile_category_execution_extension(
@@ -183,6 +268,124 @@ class CategoryExecutionAdapterTest(unittest.TestCase):
         )
         self.assertEqual("ALREADY_STYLED_NECK_RESULT", mixed["required_view"])
         self.assertIn("已经佩戴后的关系", mixed["claim_boundary"])
+        self.assertTrue(mixed["optional_simple_interactions"])
+        self.assertTrue(mixed["interaction_capabilities"])
+        self.assertTrue(
+            any(
+                item["primary_action_mode"] == "SIMPLE_WEAR_PROCESS"
+                for item in mixed["interaction_capabilities"]
+            )
+        )
+
+        hand = resolve_category_carrier_execution(
+            extension,
+            presentation_mode="HAND_ONLY",
+        )
+        self.assertIn("自然展开一次商品", hand["optional_simple_interactions"])
+        self.assertEqual(
+            {"HANDHELD_PRODUCT", "DETAIL_SHOW"},
+            {item["primary_action_mode"] for item in hand["interaction_capabilities"]},
+        )
+
+        static = resolve_category_carrier_execution(
+            extension,
+            presentation_mode="STATIC_PRODUCT",
+        )
+        self.assertEqual([], static["optional_simple_interactions"])
+        self.assertEqual([], static["interaction_capabilities"])
+
+    def test_selected_scarf_action_replaces_optional_action_list_in_guidance(self):
+        extension = compile_category_execution_extension(
+            product_type="丝巾",
+            top_category="配饰",
+            anchor_card=_anchor("印花方巾"),
+            enabled=True,
+        )
+        carrier = resolve_category_carrier_execution(
+            extension, presentation_mode="WEARER_ACTIVE"
+        )
+        carrier["selected_action_design"] = dict(
+            carrier["interaction_capabilities"][-1]
+        )
+        guidance = build_category_blueprint_guidance(
+            extension, carrier_execution=carrier
+        )
+        self.assertIn("本条核心商品互动", guidance)
+        self.assertNotIn("最多自然采用其中一个，也可以不用", guidance)
+        brief = build_category_video_brief(extension, carrier_execution=carrier)
+        self.assertEqual(
+            "accessory-video-handoff-v5-state-aware",
+            brief["schema_version"],
+        )
+        self.assertTrue(brief["selected_action_design"])
+        self.assertEqual(
+            "IN_PROGRESS",
+            brief["wear_state_contract"]["initial_state"],
+        )
+        self.assertIn("完成上述简单动作后", brief["required_visible_result"])
+        self.assertEqual(2, brief["hand_anatomy_guard"]["max_visible_hands"])
+        self.assertEqual(
+            "SINGLE_PERSON", brief["hand_anatomy_guard"]["hand_owner"]
+        )
+
+    def test_scarf_argument_freezes_one_demonstration_mode_per_script(self):
+        extension = compile_category_execution_extension(
+            product_type="丝巾",
+            top_category="配饰",
+            anchor_card=_anchor("印花方巾"),
+            enabled=True,
+        )
+        resolved = resolve_category_argument_execution(
+            extension,
+            selling_argument={
+                "argument_theme": "HAIR_RESCUE",
+                "primary_demonstration_mode": "HAIR_TIE",
+                "supported_demonstration_modes": ["HAIR_TIE", "NECK_WORN", "BAG_ACCENT"],
+                "evidence_mode": "VISUAL_RESULT_WITH_AUTHORIZED_VOICEOVER",
+            },
+        )
+        profile = resolved["profile"]
+        self.assertEqual("HAIR_TIE", profile["primary_demonstration_mode"])
+        self.assertEqual("HEAD_HAIR", profile["wearing_zone"])
+        self.assertEqual("ALREADY_STYLED_HAIR_RESULT", profile["required_result_view"])
+        self.assertEqual("ONE_PRIMARY_MODE_PER_15S", profile["demonstration_policy"])
+        self.assertEqual("NECK_UPPER_BODY", extension["profile"]["wearing_zone"])
+        carrier = resolve_category_carrier_execution(
+            resolved,
+            presentation_mode="WEARER_ACTIVE",
+        )
+        self.assertIn("轻托一次已经系好的马尾或发尾", carrier["optional_simple_interactions"])
+        guidance = build_category_blueprint_guidance(
+            resolved,
+            carrier_execution=carrier,
+        )
+        self.assertIn("最多自然采用其中一个，也可以不用", guidance)
+        self.assertIn("不得扩写成完整佩戴教程", guidance)
+
+    def test_headscarf_process_is_soft_but_full_wrapping_remains_forbidden(self):
+        anchor = _anchor("几何图案头巾")
+        extension = compile_category_execution_extension(
+            product_type="头巾",
+            top_category="配饰",
+            anchor_card=anchor,
+            enabled=True,
+        )
+        reconciled = reconcile_anchor_category_contract(
+            anchor,
+            product_type="头巾",
+            top_category="配饰",
+        )
+        self.assertEqual(
+            "RESULT_FIRST_SIMPLE_ADJUSTMENT_ONLY",
+            extension["profile"]["process_policy"],
+        )
+        self.assertEqual(
+            "result_first_process_avoid",
+            reconciled["category_execution_contract"]["operation_policy"],
+        )
+        boundary = "；".join(extension["profile"]["interaction_boundary"])
+        self.assertIn("完整包裹", boundary)
+        self.assertIn("复杂系结", boundary)
 
     def test_earring_pairing_authority_is_anchor_only(self):
         unknown = compile_category_execution_extension(
@@ -229,6 +432,10 @@ class CategoryExecutionAdapterTest(unittest.TestCase):
         self.assertEqual(person["required_view"], "ALREADY_STYLED_HAIR_RESULT")
         self.assertEqual(static["required_view"], "PRODUCT_DETAIL_ONLY")
         self.assertIn("不把静物或手持画面写成佩戴结果证明", static["claim_boundary"])
+        self.assertEqual(
+            "PRODUCT_DOMINANT_CLOSE",
+            static["product_prominence_contract"]["primary_framing"],
+        )
 
     def test_apparel_seed_and_prompt_are_identical_with_feature_off_or_on(self):
         kwargs = dict(
@@ -390,8 +597,12 @@ class CategoryExecutionAdapterTest(unittest.TestCase):
         self.assertIn("category_execution_extension", brief)
         self.assertEqual(
             brief["accessory_execution_brief"]["schema_version"],
-            "accessory-video-handoff-v2",
+            "accessory-video-handoff-v4-small-prominence",
         )
+        prominence = brief["accessory_execution_brief"][
+            "product_prominence_contract"
+        ]
+        self.assertEqual("EAR_HALF_FACE_CLOSE", prominence["primary_framing"])
 
         direction, _ = build_simplified_voiceover_inputs(
             normalized,
@@ -415,6 +626,8 @@ class CategoryExecutionAdapterTest(unittest.TestCase):
         self.assertIn("【配饰佩戴与展示关系】", rendered)
         self.assertIn("商品已经正确佩戴在耳部", rendered)
         self.assertIn("戴耳环动作", rendered)
+        self.assertIn("商品观察尺度", rendered)
+        self.assertIn("半脸与耳侧近景", rendered)
 
 
 if __name__ == "__main__":

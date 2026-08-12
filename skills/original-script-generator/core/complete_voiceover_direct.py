@@ -25,12 +25,75 @@ from core.reality_voiceover_bridge import (
 )
 
 
-SCHEMA_VERSION = "creative-full-script-voiceover-v2-content-first"
-HOOK_EXECUTION_POLICY_VERSION = "central-voiceover-v34-governed-hook-path"
+SCHEMA_VERSION = "creative-full-script-voiceover-v5-multilingual"
+HOOK_EXECUTION_POLICY_VERSION = "central-voiceover-v36-target-language-safe"
 
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _target_language_key(value: str) -> str:
+    normalized = _text(value).lower().replace("_", "-")
+    if any(token in normalized for token in ("泰语", "thai", "th-th")) or normalized == "th":
+        return "th"
+    if any(token in normalized for token in ("越南语", "vietnamese", "vi-vn")) or normalized == "vi":
+        return "vi"
+    if any(token in normalized for token in ("马来语", "马来西亚语", "malay", "ms-my")) or normalized == "ms":
+        return "ms"
+    if any(token in normalized for token in ("中文", "汉语", "chinese", "zh-cn")) or normalized == "zh":
+        return "zh"
+    return "unknown"
+
+
+def _target_language_error(text: str, target_language: str) -> str:
+    """Reject a mislabeled target-language field before it reaches Feishu.
+
+    This is deliberately a script-family check, not a fluency score.  It catches
+    the production regression where the Thai-only model wrapper returned Thai
+    while a batch was frozen as Malay or Vietnamese.
+    """
+
+    value = _text(text)
+    if not value:
+        return "目标语言口播为空"
+    key = _target_language_key(target_language)
+    thai_count = len(re.findall(r"[\u0E00-\u0E7F]", value))
+    cjk_count = len(re.findall(r"[\u3400-\u9FFF]", value))
+    latin_count = len(re.findall(r"[A-Za-zÀ-ỹĐđ]", value))
+    compact_count = len(re.sub(r"\s+", "", value))
+    if key == "th":
+        if cjk_count or thai_count < max(4, int(compact_count * 0.35)):
+            return "任务目标语言为泰语，但口播正文不是泰语"
+    elif key == "vi":
+        vietnamese_marks = len(re.findall(
+            r"[ăâđêôơưĂÂĐÊÔƠƯáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệ"
+            r"íìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ"
+            r"ÁÀẢÃẠẤẦẨẪẬẮẰẲẴẶÉÈẺẼẸẾỀỂỄỆÍÌỈĨỊÓÒỎÕỌ"
+            r"ỐỒỔỖỘỚỜỞỠỢÚÙỦŨỤỨỪỬỮỰÝỲỶỸỴ]",
+            value,
+        ))
+        if thai_count or cjk_count or latin_count < 8 or vietnamese_marks < 2:
+            return "任务目标语言为越南语，但口播正文不是越南语"
+    elif key == "ms":
+        malay_markers = re.findall(
+            r"\b(?:yang|untuk|ini|itu|kalau|dengan|nampak|saya|aku|kita|korang|"
+            r"bila|memang|boleh|tak|dekat|pada|dari|tengok|baru)\b",
+            value.lower(),
+        )
+        if thai_count or cjk_count or latin_count < 8 or len(malay_markers) < 2:
+            return "任务目标语言为马来语，但口播正文不是马来语"
+    elif key == "zh":
+        if cjk_count < 2:
+            return "任务目标语言为中文，但口播正文不是中文"
+    return ""
+
+
+def _estimated_spoken_seconds(text: str, target_language: str) -> float:
+    if _target_language_key(target_language) in {"vi", "ms"}:
+        words = re.findall(r"[A-Za-zÀ-ỹĐđ]+", _text(text))
+        return round(len(words) / 2.7, 2)
+    return round(len(re.sub(r"\s+", "", _text(text))) / 13.0, 2)
 
 
 def hook_knowledge_snapshot_hash() -> str:
@@ -89,9 +152,19 @@ def _expression_with_selected_claims(
         if isinstance(direction.get("content_bundle_brief"), dict)
         else {}
     )
-    preferred_count = (
-        2 if _text(bundle.get("content_mode")).upper() == "SELLING_ARGUMENT" else 1
+    selling_argument_mode = (
+        _text(bundle.get("content_mode")).upper() == "SELLING_ARGUMENT"
     )
+    if selling_argument_mode:
+        # The governed selling argument already owns the utterance.  Give the
+        # model at most one visual fact, preferring a fact explicitly linked to
+        # that argument, rather than turning a 15s share into a feature list.
+        direct_support = [
+            item for item in atoms
+            if _text(item.get("argument_relation")).upper() == "DIRECT_SUPPORT"
+        ]
+        atoms = direct_support or atoms
+    preferred_count = 1
     selected, _ = select_voiceover_claim_atoms(
         atoms, preferred_count=preferred_count
     )
@@ -119,11 +192,37 @@ def _country_key(value: str) -> str:
 
 def _category_key(value: str) -> str:
     raw = _text(value).lower()
-    if raw in {"女装", "womenswear", "women's wear", "women apparel"}:
+    if raw in {"女装", "womenswear", "women's wear", "women apparel"} or "女装" in raw:
         return "womenswear"
-    if raw in {"配饰", "accessory", "accessories"}:
+    if raw in {"配饰", "accessory", "accessories"} or "配饰" in raw:
         return "accessories"
     return raw
+
+
+def _expression_family(category: str, product_type: str = "") -> str:
+    """Return a rhetoric-only family; it never grants product facts.
+
+    The approved sample library was originally curated under womenswear.  A
+    wearable female-fashion accessory can safely learn its viewer relationship
+    and cadence, while its product facts still come exclusively from the
+    current selling-argument contract.
+    """
+
+    category_key = _category_key(category)
+    material = f"{category_key} {_text(product_type).lower()}"
+    if category_key == "womenswear":
+        return "FEMALE_FASHION_WEARABLE"
+    if category_key == "accessories" and any(
+        token in material
+        for token in (
+            "丝巾", "围巾", "头巾", "耳饰", "耳环", "发饰", "发夹",
+            "手链", "手镯", "手环", "手串",
+            "silk_scarf", "scarf", "headscarf", "earring", "hair",
+            "bracelet", "bangle",
+        )
+    ):
+        return "FEMALE_FASHION_WEARABLE"
+    return ""
 
 
 def _approved_style_references(
@@ -131,14 +230,14 @@ def _approved_style_references(
     *,
     target_country: str = "",
     top_category: str = "",
+    product_type: str = "",
     limit: int = 2,
 ) -> List[Dict[str, Any]]:
-    """Return only governed samples assigned to this hook and market/category.
+    """Return governed same-hook samples using an explicit compatibility tier.
 
-    A previous fallback filled a missing hook with arbitrary approved samples
-    from other archetypes.  That made different hook IDs learn the same viewer
-    relationship and cadence.  Missing compatible evidence is now represented
-    honestly by an empty list; the full hook archetype remains sufficient.
+    Exact category evidence wins.  A same-hook, same-country sample from the
+    shared female-fashion wearable family may teach rhetoric only.  There is
+    deliberately no cross-hook fallback.
     """
 
     path = Path(VOICEOVER_KNOWLEDGE_SNAPSHOT_PATH)
@@ -172,6 +271,7 @@ def _approved_style_references(
     result: List[Dict[str, Any]] = []
     country_key = _country_key(target_country)
     category_key = _category_key(top_category)
+    requested_family = _expression_family(top_category, product_type)
     for example_id in dict.fromkeys(matched_ids):
         example = examples.get(example_id)
         if not example:
@@ -180,7 +280,16 @@ def _approved_style_references(
         example_category = _category_key(_text(example.get("category")))
         if country_key and example_country and country_key != example_country:
             continue
-        if category_key and example_category and category_key != example_category:
+        match_tier = ""
+        if category_key and example_category and category_key == example_category:
+            match_tier = "EXACT_CATEGORY"
+        elif (
+            requested_family
+            and requested_family
+            == _expression_family(example_category, _text(example.get("product_type")))
+        ):
+            match_tier = "EXPRESSION_FAMILY"
+        if not match_tier:
             continue
         excerpt = re.sub(r"\s+", " ", _text(example.get("raw_text")))[:680]
         if not excerpt:
@@ -191,11 +300,26 @@ def _approved_style_references(
             "source_country": _text(example.get("country")),
             "source_category": _text(example.get("category")),
             "source_language": _text(example.get("language")),
-            "usage_boundary": "只学习观众关系、节奏、衔接和信息密度；不得继承事实或原句",
+            "match_tier": match_tier,
+            "expression_family": requested_family,
+            "usage_boundary": "只学习观众关系、节奏、衔接和信息密度；不得继承事实、材质、功效、CTA或原句",
         })
-        if len(result) >= limit:
-            break
-    return result
+    result.sort(
+        key=lambda item: (
+            0 if item.get("match_tier") == "EXACT_CATEGORY" else 1,
+            matched_ids.index(item["reference_sample_id"]),
+        )
+    )
+    return result[:limit]
+
+
+def _style_reference_selection_policy(references: List[Dict[str, Any]]) -> str:
+    tiers = {_text(item.get("match_tier")) for item in references}
+    if "EXACT_CATEGORY" in tiers:
+        return "EXACT_HOOK_COUNTRY_CATEGORY"
+    if "EXPRESSION_FAMILY" in tiers:
+        return "EXACT_HOOK_COUNTRY_EXPRESSION_FAMILY"
+    return "HOOK_ARCHETYPE_ONLY"
 
 
 def _narrative_anchor_options(creative: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -241,6 +365,7 @@ def _narrative_anchor_options(creative: Dict[str, Any]) -> List[Dict[str, str]]:
 def _relationship_language_profile(
     hook_id: str,
     requested_device: str = "",
+    target_language: str = "泰语",
 ) -> Dict[str, Any]:
     requested = _text(requested_device).upper()
     default_device = (
@@ -248,16 +373,37 @@ def _relationship_language_profile(
         if hook_id in {"AUDIENCE_NEED_CALLOUT", "PAIN_REFRAME", "USER_ADVOCACY_STANCE"}
         else "REACTION_OR_VIEWER_INVITATION"
     )
+    language_key = _target_language_key(target_language)
+    language_surfaces = {
+        "th": {
+            "audience_addresses": ["สาวๆ"],
+            "viewer_reference_forms": ["ใครอยาก", "ใครที่กำลัง", "คนไหนชอบ"],
+            "reaction_openers": ["เอาจริงนะ", "เพิ่งสังเกตว่า", "ดูนี่ก่อน"],
+            "natural_particles": ["นะ", "ค่ะ", "แหละ", "เลย"],
+        },
+        "vi": {
+            "audience_addresses": ["các bạn", "chị em"],
+            "viewer_reference_forms": ["ai đang", "ai thích", "nếu bạn đang"],
+            "reaction_openers": ["nói thật nhé", "mình vừa để ý", "nhìn này"],
+            "natural_particles": ["nhé", "nè", "đấy", "luôn"],
+        },
+        "ms": {
+            "audience_addresses": ["korang"],
+            "viewer_reference_forms": ["siapa yang tengah", "kalau korang suka", "yang sedang cari"],
+            "reaction_openers": ["jujur cakap", "baru perasan", "tengok ni"],
+            "natural_particles": ["ya", "lah", "tau", "memang"],
+        },
+    }.get(language_key, {
+        "audience_addresses": [],
+        "viewer_reference_forms": [],
+        "reaction_openers": [],
+        "natural_particles": [],
+    })
     return {
         "assigned_device": requested or "HOOK_DECIDES",
         "preferred_device": default_device,
-        # Keep the existing friendly Thai register, but do not make ทุกคน or
-        # พวกเธอ the default surface.  Those expressions read as translated
-        # “大家/你们” in this creator voice.
-        "audience_addresses": ["สาวๆ"],
-        "viewer_reference_forms": ["ใครอยาก", "ใครที่กำลัง", "คนไหนชอบ"],
-        "reaction_openers": ["เอาจริงนะ", "เพิ่งสังเกตว่า", "ดูนี่ก่อน"],
-        "natural_particles": ["นะ", "ค่ะ", "แหละ", "เลย"],
+        "target_language": target_language,
+        **language_surfaces,
         "instruction": "这是软表达偏好，不是事实或质检约束。一次只自然使用一种关系装置，并立即进入具体需求、发现或事实；不要堆叠称呼、反问和语气词。",
         "hard_required": False,
     }
@@ -287,6 +433,31 @@ def _relationship_surface_text(target_text: str) -> str:
         if marker in text:
             return marker
     return ""
+
+
+def _hook_surface_status(hook_id: str, target_text: str) -> str:
+    """Provide a conservative soft observation, never a quality gate."""
+
+    text = _text(target_text)
+    if not text:
+        return "UNKNOWN"
+    marker_groups = {
+        "AUDIENCE_NEED_CALLOUT": (
+            "ใครอยาก", "ใครที่กำลัง", "สาวๆ", "ไหม", "?",
+        ),
+        "PAIN_REFRAME": ("ไหม", "เคย", "กังวล", "ปัญหา", "?"),
+        "DISCOVERY_RESULT_PROMISE": (
+            "เพิ่งสังเกต", "พอลอง", "พอใส่", "เพิ่งเห็น",
+        ),
+        "DETAIL_SURPRISE": ("ดูนี่", "ลองดู", "ตรงนี้", "รายละเอียด", "สังเกต"),
+        "VISUAL_RESULT_DIRECT": ("พอใส่", "ดู", "เห็น", "ลุค"),
+        "USER_ADVOCACY_STANCE": ("สาวๆ", "ใคร", "สำหรับเรา", "เราว่า"),
+        "GENERAL_PRODUCT_SHARE": ("สำหรับเรา", "เอาจริงนะ", "วันนี้", "ตัวนี้"),
+    }
+    markers = marker_groups.get(_text(hook_id).upper())
+    if not markers:
+        return "UNKNOWN"
+    return "REALIZED" if any(marker in text for marker in markers) else "WEAK"
 
 
 def run_central_complete_voiceover(
@@ -319,6 +490,10 @@ def run_central_complete_voiceover(
         hook_id,
         target_country=target_country,
         top_category=top_category,
+        product_type=product_type,
+    )
+    style_selection_policy = _style_reference_selection_policy(
+        approved_style_references
     )
     hook_snapshot_hash = hook_knowledge_snapshot_hash()
     expression, selected_atoms = _expression_with_selected_claims(
@@ -399,10 +574,42 @@ def run_central_complete_voiceover(
                 "proof_thesis", "decision_thesis", "allowed_strength",
                 "verification_status", "evidence_requirement",
                 "operator_priority", "proof_match_status",
+                "claim_theme", "argument_theme", "concept_ids",
+                "primary_demonstration_mode", "demonstration_policy",
+                "voiceover_scope_policy",
             )
             if selling_argument.get(key) not in (None, "", [])
         },
         "verified_facts": facts,
+        "expression_density_contract": {
+            "preferred_information_units": 2 if selling_argument_mode else 1,
+            "max_usage_scenarios": 1,
+            "max_supporting_facts": 1 if selling_argument_mode else len(facts),
+            "second_selling_argument_allowed": False,
+            "unlinked_visual_facts_policy": "OMIT",
+            "instruction": (
+                "用一个核心卖点加一个同主题信息完成自然论证；"
+                "同主题信息可以是人工确认的使用情境、直接相关机理/结果、"
+                "或一个直接相关可见细节；不得引入第二卖点。"
+                if selling_argument_mode else
+                "只完成当前可见事实的自然观察，不补字数。"
+            ),
+        },
+        "mainline_scope": {
+            "policy": "ONE_CORE_ARGUMENT_WITH_SAME_THEME_SUPPORT",
+            "instruction": (
+                "整条15秒口播只围绕当前 selling_argument.core_value 展开；"
+                "verified_facts 最多作为同一主线的一个可见补充，不得并列引入其他用途、功效或材质主题。"
+                + (
+                    " 当前卖点已按 primary_demonstration_mode 收束，本条只说这一种主要用法，不枚举其他佩戴方式。"
+                    if _text(selling_argument.get("voiceover_scope_policy"))
+                    == "PRIMARY_DEMONSTRATION_MODE_ONLY"
+                    else ""
+                )
+                if selling_argument_mode else
+                "围绕当前可见事实完成一条自然观察。"
+            ),
+        },
         "category_identity_authority": {
             "product_subtype": _text(category_profile.get("product_subtype")),
             "pairing_mode": _text(identity_authority.get("pairing_mode")),
@@ -439,11 +646,11 @@ def run_central_complete_voiceover(
                 item["reference_sample_id"]
                 for item in approved_style_references
             ],
-            "selection_policy": "EXACT_HOOK_MARKET_CATEGORY_ONLY",
+            "selection_policy": style_selection_policy,
             "policy_version": HOOK_EXECUTION_POLICY_VERSION,
         },
         "relationship_language": _relationship_language_profile(
-            hook_id, relationship_device
+            hook_id, relationship_device, target_language
         ),
         "expression_freedom": {
             "allowed_without_claim_ref": [
@@ -471,7 +678,10 @@ def run_central_complete_voiceover(
     ]
     valid_refs = {_text(item.get("claim_key")) for item in facts}
     if not target or not translation:
-        raise ValueError("中央完整口播缺少泰语正文或中文对照")
+        raise ValueError("中央完整口播缺少目标语言正文或中文对照")
+    language_error = _target_language_error(target, target_language)
+    if language_error:
+        raise ValueError(language_error)
     if not set(used_refs).issubset(valid_refs):
         raise ValueError("中央完整口播的used_claim_refs不属于当前事实合同")
     if not used_refs and not selling_argument_mode:
@@ -494,17 +704,29 @@ def run_central_complete_voiceover(
     )
     if not shot_count:
         raise ValueError("视觉方案没有可装配镜头")
-    estimated_sec = round(len(re.sub(r"\s+", "", target)) / 13.0, 2)
+    estimated_sec = _estimated_spoken_seconds(target, target_language)
     minimum_ready_sec = 9.5 if content_mode == "SELLING_ARGUMENT" else 6.5
     plan = {
         "voiceover_plan_schema_version": SCHEMA_VERSION,
-        "bridge_version": "original-batch-complete-voiceover-v2-content-first",
+        "bridge_version": "original-batch-complete-voiceover-v4-rhetoric-recovery",
         "copy_generation_mode": "CREATIVE_FULL_SCRIPT",
         "candidate_id": hook_id,
         "source": "CENTRAL_VOICEOVER_CREATIVE_FULL_SCRIPT",
         "hook_id": hook_id,
         "selected_hook_id": hook_id,
-        "hook_structure_status": "MATCHED",
+        "target_language": target_language,
+        "target_language_key": _target_language_key(target_language),
+        "language_validation": "PASSED",
+        # Lineage and surface realization are intentionally separate.  The
+        # command wrapper pins hook_id for reproducibility, so ID equality is
+        # not evidence that the generated rhetoric actually realized the hook.
+        "hook_structure_status": "PINNED",
+        "hook_lineage_status": "PINNED",
+        "hook_surface_status": (
+            _hook_surface_status(hook_id, target)
+            if _target_language_key(target_language) == "th"
+            else "UNKNOWN"
+        ),
         "selection_readiness": {
             "status": "READY_FOR_SELECTION" if minimum_ready_sec <= estimated_sec <= 15.0 else "DURATION_WARNING",
             "estimated_sec": estimated_sec,
@@ -556,7 +778,7 @@ def run_central_complete_voiceover(
                 item["reference_sample_id"]
                 for item in approved_style_references
             ],
-            "selection_policy": "EXACT_HOOK_MARKET_CATEGORY_ONLY",
+            "selection_policy": style_selection_policy,
             "policy_version": HOOK_EXECUTION_POLICY_VERSION,
         },
         "relationship_surface": {

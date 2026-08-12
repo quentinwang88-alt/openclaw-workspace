@@ -1,12 +1,19 @@
 import unittest
+from unittest.mock import patch
 
+import core.production_script_feishu as production_feishu
 from core.bitable import TaskRecord
 from core.production_script_feishu import (
     OPERATION_TASK_STATUS_OPTIONS,
+    OUTFIT_SCENE_MATCH_OPTIONS,
+    FIRST_FRAME_STATUS_OPTIONS,
     PRODUCT_TYPE_OPTIONS,
     TEST_PHASE_OPTIONS,
     TOP_CATEGORY_OPTIONS,
+    _records_by_batch_item_id,
+    export_ready_batch,
     operation_record_values,
+    projection_to_feishu_fields,
 )
 
 
@@ -16,6 +23,12 @@ class ProductionScriptFeishuTest(unittest.TestCase):
         self.assertEqual(("初测", "复测", "终测", "放大观察"), TEST_PHASE_OPTIONS)
         self.assertEqual("待执行", OPERATION_TASK_STATUS_OPTIONS[0])
         self.assertIn("已完成", OPERATION_TASK_STATUS_OPTIONS)
+        self.assertEqual("用户未选择", FIRST_FRAME_STATUS_OPTIONS[0])
+        self.assertIn("已就绪", FIRST_FRAME_STATUS_OPTIONS)
+        self.assertEqual(
+            ("已匹配", "未配置偏好", "已回退", "不适用"),
+            OUTFIT_SCENE_MATCH_OPTIONS,
+        )
         for value in (
             "外套", "上衣", "连衣裙", "耳饰", "发饰", "围巾",
             "秋冬围巾", "丝巾", "头巾", "帽子",
@@ -56,6 +69,94 @@ class ProductionScriptFeishuTest(unittest.TestCase):
         task = operation_record_values(record)
         self.assertEqual("配饰", task["top_category"])
         self.assertEqual("耳饰", task["product_type"])
+
+    def test_batch_item_identity_uses_first_row_as_canonical(self):
+        first = TaskRecord(
+            record_id="rec-first",
+            fields={"批次ID": "BATCH_1", "批次ItemID": "ITEM_1"},
+        )
+        duplicate = TaskRecord(
+            record_id="rec-duplicate",
+            fields={"批次ID": "BATCH_1", "批次ItemID": "ITEM_1"},
+        )
+        indexed = _records_by_batch_item_id([first, duplicate])
+        self.assertEqual("rec-first", indexed[("BATCH_1", "ITEM_1")].record_id)
+
+    def test_projection_exports_human_readable_outfit_metadata(self):
+        fields = projection_to_feishu_fields(
+            {
+                "script_id": "S1",
+                "outfit_template_id": "STYLE_001",
+                "outfit_template_name": "城市轻通勤穿搭",
+                "outfit_accessories": "小号肩包；细金属耳环",
+                "outfit_scene_match": "已匹配",
+                "outfit_scene_contract_json": '{"match_status":"MATCHED"}',
+            },
+            include_workflow_defaults=False,
+        )
+        self.assertEqual(fields["穿搭模板名称（系统）"], "城市轻通勤穿搭")
+        self.assertEqual(fields["实际配饰（系统）"], "小号肩包；细金属耳环")
+        self.assertEqual(fields["穿搭场景匹配（系统）"], "已匹配")
+        self.assertIn("MATCHED", fields["穿搭场景关联合同_JSON（系统）"])
+
+    def test_export_updates_frozen_batch_item_when_script_id_changes(self):
+        class FakeClient:
+            def __init__(self):
+                self.updated = []
+                self.created = []
+
+            def list_records(self, *, page_size):
+                self.page_size = page_size
+                return [
+                    TaskRecord(
+                        record_id="rec-existing",
+                        fields={
+                            "脚本ID": "OLD_SCRIPT_ID",
+                            "批次ID": "BATCH_1",
+                            "批次ItemID": "ITEM_1",
+                            "处理状态": "已审核",
+                            "进入生产": True,
+                        },
+                    )
+                ]
+
+            def update_record_fields(self, record_id, fields):
+                self.updated.append((record_id, fields))
+
+            def batch_create_records(self, records):
+                self.created.extend(records)
+                return ["new-record"] * len(records)
+
+        projection = {
+            "script_id": "NEW_SCRIPT_ID",
+            "product_code": "1730000000000000000",
+            "batch_id": "BATCH_1",
+            "batch_item_id": "ITEM_1",
+            "item_index": 1,
+            "script_title": "test",
+            "duration_seconds": 15,
+            "processing_status": "待审核",
+        }
+        item = type("Item", (), {"status": "SCRIPT_READY"})()
+        client = FakeClient()
+        with patch.object(
+            production_feishu,
+            "build_production_projection",
+            return_value=projection,
+        ):
+            result = export_ready_batch(
+                batch=object(),
+                items=[item],
+                target_client=client,
+            )
+
+        self.assertEqual({"created": 0, "updated": 1, "skipped": 0}, result)
+        self.assertEqual([], client.created)
+        self.assertEqual("rec-existing", client.updated[0][0])
+        fields = client.updated[0][1]
+        self.assertEqual("NEW_SCRIPT_ID", fields["脚本ID"])
+        self.assertNotIn("处理状态", fields)
+        self.assertNotIn("进入生产", fields)
 
 
 if __name__ == "__main__":

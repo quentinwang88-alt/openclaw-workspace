@@ -12,19 +12,31 @@ import json
 import re
 import time
 from collections import Counter
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from core.scene_reference_adapter import (
     scene_family_for_motif,
     scene_reference_contract_for_family,
 )
-from core.outfit_template_provider import load_structured_outfit_templates
+from core.outfit_template_provider import (
+    load_structured_outfit_templates,
+    without_outfit_display_metadata,
+)
+from core.outfit_selection import (
+    OUTFIT_SELECTION_CONTRACT_VERSION,
+    demonstration_mode_from_direction,
+    normalize_outfit_candidate,
+    select_outfit_candidate,
+    target_role_for,
+)
 from core.product_type_resolution import normalize_product_type
 
 
-CREATIVE_DIVERSITY_POLICY_VERSION = "creative-diversity-v7-shared-outfit-template"
-OUTFIT_SELECTION_CONTRACT_VERSION = "outfit-selection-v2-shared-provider"
-ACCESSORY_OUTFIT_SELECTION_CONTRACT_VERSION = "outfit-selection-v3-worn-accessory"
+CREATIVE_DIVERSITY_POLICY_VERSION = "creative-diversity-v12-exact-outfit-scene"
+OUTFIT_SCENE_AFFINITY_POLICY_VERSION = "outfit-scene-affinity-v2-exact-soft-boost"
+OUTFIT_SCENE_MATCH_BONUS = 24
+EXACT_PRODUCT_OUTFIT_SCENE_MATCH_BONUS = 30
+ACCESSORY_OUTFIT_SELECTION_CONTRACT_VERSION = OUTFIT_SELECTION_CONTRACT_VERSION
 COMPLETE_BLUEPRINT_SCHEMA_VERSION = "complete-script-blueprint-v4-carrier"
 COMPLETE_SCRIPT_POLICY_VERSION = "complete-script-qc-v22-event-driven-light"
 
@@ -54,6 +66,7 @@ def _text(value: Any) -> str:
 
 
 def _stable_id(prefix: str, value: Any, length: int = 24) -> str:
+    value = without_outfit_display_metadata(value)
     material = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
     return prefix + hashlib.sha256(material.encode("utf-8")).hexdigest()[:length].upper()
 
@@ -136,11 +149,12 @@ def creative_product_profile(product_type: str, category: str = "") -> str:
     value = f"{_text(product_type)} {_text(category)}".lower()
     worn_accessory_tokens = (
         "围巾", "丝巾", "头巾", "披肩", "帽", "耳环", "耳饰", "耳线", "项链", "项圈",
+        "手链", "手镯", "手环", "手串", "发饰", "发夹", "抓夹", "发圈",
         "包", "墨镜", "太阳镜", "眼镜", "scarf", "hat", "earring", "necklace", "bag",
+        "bracelet", "bangle", "hair clip", "hair accessory",
     )
     hand_static_tokens = (
-        "戒指", "手链", "手镯", "手环", "手串", "发饰", "发夹", "抓夹", "发圈",
-        "ring", "bracelet", "hair clip", "hair accessory",
+        "戒指", "ring",
     )
     apparel_tokens = (
         "女装", "服装", "外套", "上装", "夹克", "衬衫", "毛衣", "卫衣", "裙", "裤",
@@ -212,6 +226,10 @@ def _selling_argument_scene_preferences(direction: Dict[str, Any]) -> List[str]:
             "百搭", "多场景", "多种场合", "什么场合", "旅行", "使用率",
             "versatile", "occasion", "travel",
         ),
+        "DAYTIME_USE": (
+            "防晒", "遮阳", "阳光直射", "直射阳光", "烈日", "太阳", "sun",
+            "shade",
+        ),
     }
     return [
         tag
@@ -240,6 +258,10 @@ def _scene_affinity_tags(scene_motif: Any) -> List[str]:
         ),
         "MULTI_OCCASION": (
             "玄关", "商场", "等候", "出口", "连廊", "车道",
+        ),
+        "DAYTIME_USE": (
+            "户外", "街", "街边", "入口", "门廊", "遮檐", "室外",
+            "外侧", "步道",
         ),
     }
     return [
@@ -294,6 +316,99 @@ def _category_scene_affinity_tags(candidate: Dict[str, Any]) -> List[str]:
     ):
         tags.append("CAR_TRANSIT")
     return list(dict.fromkeys(tags))
+
+
+def _scene_request_affinity_tags(scene_request: Mapping[str, Any]) -> List[str]:
+    """Small bridge from a compiled scene request to existing candidate tags."""
+
+    tags: List[str] = []
+    scene_intent = _text(scene_request.get("scene_intent")).upper()
+    light_need = _text(scene_request.get("time_light_need")).upper()
+    if scene_intent == "DAYTIME_USE" or light_need == "DAYLIGHT":
+        tags.append("DAYTIME_USE")
+    if scene_intent == "PHOTO_FRIENDLY":
+        tags.append("PHOTO_FRIENDLY")
+    if scene_intent == "BODY_RESULT":
+        tags.append("BODY_RESULT_CLEAR")
+    if scene_intent == "SCENE_USAGE":
+        tags.append("MULTI_OCCASION")
+    return tags
+
+
+def _scene_request_proof_environment_score(
+    scene_request: Mapping[str, Any], candidate: Mapping[str, Any]
+) -> int:
+    """Prefer a scene that can naturally carry the authorised use occasion.
+
+    This is deliberately a positive planning signal, not a validator.  It
+    solves cases such as a SUN_SHADE angle drifting into a generic apartment
+    simply because that apartment combination had been used less recently.
+    """
+
+    intent = _text(scene_request.get("scene_intent")).upper()
+    theme = _text(scene_request.get("argument_theme")).upper()
+    scene = _text(candidate.get("scene_motif"))
+    if intent != "DAYTIME_USE" and theme != "SUN_SHADE":
+        return 0
+    outdoor_tokens = (
+        "户外", "室外", "街边", "临街", "步道", "楼下", "门廊", "遮檐", "外侧",
+    )
+    if any(token in scene for token in outdoor_tokens):
+        return 48
+    return 16 if "DAYTIME_USE" in _scene_affinity_tags(scene) else 0
+
+
+def _scene_request_contract(
+    *, product_type: str, category: str, direction: Dict[str, Any],
+    carrier_contract: Dict[str, str], country: str,
+) -> Dict[str, Any]:
+    """Compile one small semantic request; no seller-copy keyword rules here."""
+
+    bundle = (
+        direction.get("content_bundle_brief")
+        if isinstance(direction.get("content_bundle_brief"), dict)
+        else {}
+    )
+    argument = (
+        bundle.get("selling_argument")
+        if isinstance(bundle.get("selling_argument"), dict)
+        else {}
+    )
+    argument_theme = _text(argument.get("argument_theme")).upper()
+    proof_subject = _text(argument.get("proof_subject")).upper()
+    scene_intent_by_theme = {
+        "SUN_SHADE": "DAYTIME_USE",
+        "HAIR_RESCUE": "GET_READY",
+        "COLOR_MOOD": "PHOTO_FRIENDLY",
+        "SURFACE_GLOSS": "DETAIL_DISCOVERY",
+        "MULTI_USE": "MULTI_OCCASION",
+    }
+    scene_intent = scene_intent_by_theme.get(argument_theme, "")
+    if not scene_intent and proof_subject == "ON_BODY_RESULT":
+        scene_intent = "BODY_RESULT"
+    if not scene_intent and proof_subject == "SCENE_USAGE":
+        scene_intent = "SCENE_USAGE"
+    scene_intent = scene_intent or "GENERAL_USE"
+
+    carrier = _text(carrier_contract.get("required_carrier")).upper()
+    capture_mode = {
+        "WEARER_ACTIVE": "CREATOR_SELF_SHOT",
+        "HAND_ONLY": "HANDS_PRODUCT_SHARE",
+        "STATIC_PRODUCT": "STATIC_PRODUCT_RECORD",
+    }.get(carrier, "CREATOR_SELF_SHOT" if carrier == "MIXED" else "UNAVAILABLE")
+    canonical_type = normalize_product_type(product_type, category).canonical_type
+    return {
+        "schema_version": "scene-request-v1",
+        "canonical_product_type": canonical_type,
+        "presentation_mode": _text(
+            carrier_contract.get("required_presentation_mode")
+        ),
+        "scene_intent": scene_intent,
+        "time_light_need": "DAYLIGHT" if argument_theme == "SUN_SHADE" else "FLEXIBLE",
+        "capture_mode": capture_mode,
+        "country": _text(country),
+        "argument_theme": argument_theme,
+    }
 
 
 def _creative_combinations(
@@ -524,6 +639,15 @@ def _creative_combinations(
             ],
             "headscarf": [
                 {
+                    "moment_family_id": "DAYTIME_OUTING",
+                    "persona_role": "白天准备步行去附近地点的城市日常使用者",
+                    "viewer_relationship": "像朋友分享白天外出时头巾与整套穿搭的真实状态",
+                    "scene_motif": "公寓楼下临街步道的白天自然光区域",
+                    "opening_action": "头巾已经佩戴完成，人物从楼下入口自然走到临街步道",
+                    "action_grammar": "头部和半身结果建立→短距离自然步行→停在普通等候位置",
+                    "visual_tone": "手机随手记录的白天城市生活",
+                },
+                {
                     "moment_family_id": "READY_TO_LEAVE",
                     "persona_role": "已经完成日常头巾造型的外出使用者",
                     "viewer_relationship": "像朋友分享头巾和当天穿搭放在一起的真实样子",
@@ -753,31 +877,40 @@ _ACCESSORY_OUTFIT_PROFILES = {
             "silhouette_key": "SCARF_PLAIN_NECKLINE",
             "style_family": "DAILY_NECK_ACCENT",
             "hair_direction": "自然披发放到肩后、耳后别发或简单束发，避免遮住商品主体",
-            "base_outfit_direction": "纯色基础上衣配普通日常下装，肩颈和上半身关系保持清楚",
+            "base_outfit_direction": "轮廓清楚的纯色上衣配高腰长裤或利落半裙，肩颈与整体比例完整，不用空白基础款敷衍",
             "outer_layer_direction": "不强制外套；如有外层，以不遮挡商品为先",
             "neckline_direction": "领口与商品之间保留清楚边界，不展示复杂系法",
             "palette_relation": "基础服装使用能衬托商品现有颜色或图案的克制配色",
             "visibility_requirement": "至少一段清楚看到商品主体、佩戴位置与上半身搭配关系",
+            "finish_direction": "真实日常造型已有清楚轮廓和配色层次，同时保留自然穿着质感",
+            "supporting_elements": "可自然保留日常包、腕表或眼镜中一项，不遮挡商品",
+            "grooming_direction": "妆发自然有气色，不做精修广告妆",
         },
         {
             "silhouette_key": "SCARF_SIMPLE_SHIRT",
             "style_family": "LIGHT_DAILY_LAYERING",
             "hair_direction": "自然短发、耳后别发或低存在感束发",
-            "base_outfit_direction": "简洁衬衫或轻薄上装配日常长裤或半裙，不堆叠抢眼配饰",
+            "base_outfit_direction": "有版型的衬衫或轻薄上装配垂感长裤或中长半裙，不堆叠抢眼配饰",
             "outer_layer_direction": "可无外层或使用简洁开衫，不遮挡商品主体",
             "neckline_direction": "肩颈、领口与商品搭配状态完整可见",
             "palette_relation": "使用基础中性色或邻近色，避免凭空改写商品颜色",
             "visibility_requirement": "商品形状、边缘和半身穿搭关系稳定可见",
+            "finish_direction": "轻通勤或城市休闲完成度，精致来自衣服轮廓和配色，不来自布光",
+            "supporting_elements": "允许结构简洁的小包或腕表一项作为真实出门线索",
+            "grooming_direction": "整理完成但保留碎发和皮肤纹理的自然妆发",
         },
         {
             "silhouette_key": "SCARF_TONAL_BASE",
             "style_family": "TONAL_DAILY_ACCENT",
             "hair_direction": "简单束发或自然披发放到肩后",
-            "base_outfit_direction": "上下装保持低图案密度和普通日常轮廓，让商品成为上半身重点",
+            "base_outfit_direction": "上下装保持低图案密度，以明暗层次或清楚腰线形成完整日常轮廓，让商品成为上半身重点",
             "outer_layer_direction": "外层保持简洁，不根据商品名称补充季节或材质效果",
             "neckline_direction": "商品与领口、肩部的层次清楚但不过度造型",
             "palette_relation": "以商品现有主色或图案为中心做自然协调，不要求完全同色",
             "visibility_requirement": "商品整体形状和上半身搭配关系至少有一段完整呈现",
+            "finish_direction": "同色或邻近色有层次而不寡淡，保持真实衣料与自然褶皱",
+            "supporting_elements": "可保留一个低冲突日常配饰，不机械凑齐",
+            "grooming_direction": "自然有气色、像真实账号已经准备好出门的妆发",
         },
     ),
     "winter_scarf": (
@@ -785,98 +918,398 @@ _ACCESSORY_OUTFIT_PROFILES = {
             "silhouette_key": "SCARF_KNIT_BASE",
             "style_family": "WINTER_DAILY_LAYERING",
             "hair_direction": "自然披发、耳后别发或简单束发，不遮住围巾主体",
-            "base_outfit_direction": "简洁针织上衣配日常长裤或半裙，保持肩颈和上半身轮廓清楚",
+            "base_outfit_direction": "有肌理或清楚版型的针织上衣配垂感长裤或中长半裙，保持肩颈和半身比例清楚",
             "outer_layer_direction": "基础外套或针织层，不根据类型名称补充保暖功效",
             "neckline_direction": "肩颈区域无遮挡，围巾与上装关系完整可见",
             "palette_relation": "与围巾主色或图案自然协调，不要求完全同色",
             "visibility_requirement": "至少一段清楚看到围巾与脖颈、肩部及上半身关系",
+            "finish_direction": "秋冬日常造型完整但不过度层叠，人物像真实通勤或外出状态",
+            "supporting_elements": "可使用一只日常包或手表补足生活状态，不添加抢眼颈部配饰",
+            "grooming_direction": "自然妆发有气色，头发不遮挡围巾主体",
         },
         {
             "silhouette_key": "SCARF_SIMPLE_COAT",
             "style_family": "COMMUTE_OUTER_LAYER",
             "hair_direction": "自然短发、耳后别发或低存在感束发",
-            "base_outfit_direction": "纯色基础上衣配简洁下装，外层轮廓克制",
+            "base_outfit_direction": "纯色合身上衣配高腰直筒下装，外层有清楚肩线和长度层次",
             "outer_layer_direction": "普通通勤外层，避免夸张大翻领遮住围巾",
             "neckline_direction": "围巾边缘和肩部垂落关系保持清楚",
             "palette_relation": "使用邻近色或基础中性色衬托商品，不增加复杂配饰",
             "visibility_requirement": "围巾主体、边缘与外层搭配同时可见",
+            "finish_direction": "通勤外层造型有完整比例和配色关系，但保持真实穿着纹理",
+            "supporting_elements": "允许日常通勤包或腕表一项，不堆叠围巾附近的装饰",
+            "grooming_direction": "清爽自然妆发，不使用广告式精修",
         },
         {
             "silhouette_key": "SCARF_TURTLENECK_LAYER",
             "style_family": "TONAL_WINTER_BASE",
             "hair_direction": "简单束发或自然披发放到肩后",
-            "base_outfit_direction": "基础高领或圆领针织配日常下装，不做棚拍式层叠",
+            "base_outfit_direction": "有细微肌理的高领或圆领针织配垂感日常下装，用明暗层次完成造型，不做棚拍式层叠",
             "outer_layer_direction": "可无外套或使用简洁外层，以商品可见为先",
             "neckline_direction": "围巾与领口保持层次但不互相遮挡",
             "palette_relation": "基础服装色彩克制，让围巾图案或主色成为上半身重点",
             "visibility_requirement": "围巾与领口、肩部和整体上半身关系清楚",
+            "finish_direction": "柔和秋冬造型不等于全身朴素，保留清楚轮廓、色阶与自然质感",
+            "supporting_elements": "可加入一个低冲突的包或腕表作为真实外出线索",
+            "grooming_direction": "妆发整理完成但自然，头发不遮挡商品",
         },
     ),
     "silk_scarf": (
         {
-            "silhouette_key": "SILK_SCARF_PLAIN_SHIRT",
+            "silhouette_key": "SILK_SCARF_CAMISOLE_WIDELEG",
+            "style_family": "TH_WARM_CITY_FEMININE",
+            "style_intensity": "FASHION_FORWARD",
+            "climate_profile": "TH_WARM",
+            "hair_direction": "自然披发放到肩后、耳后别发或松散束发，避免遮住丝巾主体",
+            "base_outfit_direction": "合身纯色吊带或方领无袖上衣配高腰垂感阔腿裤，腰线和肩颈清楚，像真实创作者在暖天气已经搭好的出门造型",
+            "outer_layer_direction": "不增加外套，保留轻盈的暖天气轮廓",
+            "neckline_direction": "开放领口与丝巾之间保留清楚边界",
+            "palette_relation": "基础服装用商品现有主色的邻近色、中性色或自然对比色，不把全身压成制服式同色",
+            "visibility_requirement": "丝巾图案、边缘、领口和上半身搭配关系稳定可见",
+            "finish_direction": "轻松但有造型的城市日常感，精致来自轮廓、配色与真实妆发",
+            "supporting_elements": "可自然保留一只小号肩包或手表，不增加项链",
+            "grooming_direction": "自然有气色的妆面与真实发丝，发型保持松弛日常，不做广告精修",
+            "supported_demonstration_modes": ["NECK_WORN", "HEAD_WORN", "HAIR_TIE", "BAG_ACCENT"],
+            "scene_families": ["CAFE_DINING", "STREET_OUTING", "HOME_ROUTINE"],
+            "visibility_zones": ["NECK", "SHOULDER", "UPPER_BODY", "WAISTLINE"],
+            "outfit_recipe": {
+                "top": "合身纯色吊带或方领无袖上衣",
+                "bottom": "高腰垂感阔腿裤",
+                "footwear": "简洁凉鞋或日常平底鞋",
+                "bag": "小号肩包",
+                "other_accessories": "不增加项链，其他配饰保持低存在感",
+            },
+        },
+        {
+            "silhouette_key": "SILK_SCARF_CAMISOLE_SHORTS",
+            "style_family": "TH_WARM_CASUAL_CHIC",
+            "style_intensity": "FASHION_FORWARD",
+            "climate_profile": "TH_WARM",
+            "hair_direction": "齐肩发、自然披发或简单半扎，脸侧与颈部保持清楚",
+            "base_outfit_direction": "合身吊带或简洁无袖上衣配高腰利落短裤，保留真实暖天气出门穿搭的轻盈比例",
+            "outer_layer_direction": "不强制外层；如现场需要，只允许不遮挡丝巾的轻薄敞开层",
+            "neckline_direction": "肩颈和领口完整露出，不增加项链",
+            "palette_relation": "用一组低图案密度但有明暗层次的颜色衬托丝巾",
+            "visibility_requirement": "丝巾、领口、腰线与完整半身穿搭至少有一段同时成立",
+            "finish_direction": "像去咖啡厅、逛街或见朋友前已经搭好的轻盈暖天气造型",
+            "supporting_elements": "小号腋下包、腕表或日常耳钉中至多一项",
+            "grooming_direction": "自然底妆、清楚眉眼和有气色唇色，保留真实皮肤纹理",
+            "supported_demonstration_modes": ["NECK_WORN", "HEAD_WORN", "HAIR_TIE", "BAG_ACCENT"],
+            "scene_families": ["CAFE_DINING", "STREET_OUTING", "VANITY_TRYON"],
+            "visibility_zones": ["NECK", "SHOULDER", "UPPER_BODY", "WAISTLINE"],
+            "outfit_recipe": {
+                "top": "合身吊带或简洁无袖上衣",
+                "bottom": "高腰利落短裤",
+                "footwear": "凉鞋、平底鞋或普通运动鞋",
+                "bag": "小号腋下包",
+                "other_accessories": "无项链，至多一项低存在感配饰",
+            },
+        },
+        {
+            "silhouette_key": "SILK_SCARF_SLEEVELESS_JUMPSUIT",
+            "style_family": "RESORT_CITY_CHIC",
+            "style_intensity": "FASHION_FORWARD",
+            "climate_profile": "TH_WARM",
+            "hair_direction": "自然短发、蓬松披发或松散束发，头发不压住商品",
+            "base_outfit_direction": "纯色吊带式或无袖阔腿连体裤形成干净纵向轮廓，丝巾作为上半身唯一图案重点",
+            "outer_layer_direction": "无外层，保持连体裤完整轮廓",
+            "neckline_direction": "领口清楚，不增加颈部装饰",
+            "palette_relation": "连体裤使用与商品自然协调的纯色，不要求同色",
+            "visibility_requirement": "丝巾与脸部、领口和整套纵向轮廓关系清楚",
+            "finish_direction": "度假感与城市日常之间的真实穿搭，不做礼服化或商业大片化处理",
+            "supporting_elements": "允许一只日常小包和简单鞋履，不堆叠首饰",
+            "grooming_direction": "轻松但整理完成的头发与自然妆面",
+            "supported_demonstration_modes": ["NECK_WORN", "HEAD_WORN", "HAIR_TIE", "BAG_ACCENT"],
+            "scene_families": ["CAFE_DINING", "STREET_OUTING", "HOME_ROUTINE"],
+            "visibility_zones": ["NECK", "UPPER_BODY", "FULL_SILHOUETTE"],
+            "outfit_recipe": {
+                "top": "纯色吊带式或无袖连体上身",
+                "bottom": "同一件阔腿连体裤下身",
+                "footwear": "简洁凉鞋或平底鞋",
+                "bag": "日常小包",
+                "other_accessories": "不叠加颈部首饰",
+            },
+        },
+        {
+            "silhouette_key": "SILK_SCARF_SQUARE_NECK_DENIM",
+            "style_family": "EVERYDAY_DENIM_FEMININE",
+            "style_intensity": "DAILY_STYLED",
+            "climate_profile": "TH_WARM",
+            "hair_direction": "自然披发放到肩后或简单半扎，避免遮住丝巾",
+            "base_outfit_direction": "合身方领无袖上衣配直筒牛仔裤或牛仔短裤，保持清楚腰线与轻松日常比例",
+            "outer_layer_direction": "不强制外层",
+            "neckline_direction": "方领与丝巾之间有清楚留白",
+            "palette_relation": "牛仔色与纯色上衣衬托商品现有图案，不增加第二种抢眼图案",
+            "visibility_requirement": "商品主体、开放领口和半身牛仔轮廓清楚可见",
+            "finish_direction": "真实日常账号可直接穿出门的轻松造型",
+            "supporting_elements": "可搭普通帆布包或小肩包，不增加项链",
+            "grooming_direction": "自然有气色的日常妆发",
+            "supported_demonstration_modes": ["NECK_WORN", "HEAD_WORN", "HAIR_TIE", "BAG_ACCENT"],
+            "scene_families": ["HOME_ROUTINE", "STREET_OUTING", "CAFE_DINING"],
+            "visibility_zones": ["NECK", "SHOULDER", "UPPER_BODY", "WAISTLINE"],
+            "outfit_recipe": {
+                "top": "合身方领无袖上衣",
+                "bottom": "直筒牛仔裤或牛仔短裤",
+                "footwear": "普通运动鞋或平底鞋",
+                "bag": "帆布包或小肩包",
+                "other_accessories": "无项链",
+            },
+        },
+        {
+            "silhouette_key": "SILK_SCARF_LIGHT_COMMUTE",
             "style_family": "LIGHT_COMMUTE_ACCENT",
-            "hair_direction": "耳后别发、自然短发或简单束发，避免遮住丝巾",
-            "base_outfit_direction": "纯色简洁衬衫配日常下装，领口和上半身保持清楚",
-            "outer_layer_direction": "不强制外套，避免复杂领型与丝巾竞争",
-            "neckline_direction": "丝巾与衬衫领口关系完整可见",
-            "palette_relation": "基础上衣使用能衬托商品图案的克制配色，不猜测材质",
-            "visibility_requirement": "至少一段清楚看到丝巾图案、边缘、领口与半身关系",
-        },
-        {
-            "silhouette_key": "SILK_SCARF_CREW_NECK",
-            "style_family": "EVERYDAY_NECK_ACCENT",
-            "hair_direction": "自然短发、耳后别发或低存在感束发",
-            "base_outfit_direction": "纯色圆领基础上衣配日常长裤或半裙，不堆叠首饰",
-            "outer_layer_direction": "无外层或只保留极简开衫，不遮挡颈部",
-            "neckline_direction": "圆领与丝巾之间保留清楚边界",
-            "palette_relation": "基础服装保持低图案密度，让商品主色或图案成为视觉重点",
-            "visibility_requirement": "丝巾主体和领口在正面半身镜中保持清楚",
-        },
-        {
-            "silhouette_key": "SILK_SCARF_LIGHT_KNIT",
-            "style_family": "SOFT_DAILY_ACCENT",
-            "hair_direction": "简单束发或披发放到肩后",
-            "base_outfit_direction": "轻薄纯色针织上装配简洁下装，整体保持日常",
-            "outer_layer_direction": "不使用抢眼外套或复杂项链",
-            "neckline_direction": "颈部与丝巾搭配状态完整，不拍复杂系法",
-            "palette_relation": "用邻近色或基础中性色衬托现有商品颜色",
-            "visibility_requirement": "图案、包边和颈部搭配关系至少有一段稳定可见",
+            "style_intensity": "DAILY",
+            "climate_profile": "TH_WARM",
+            "hair_direction": "耳后别发、自然短发或松散束发，保持日常发丝质感",
+            "base_outfit_direction": "轻薄短袖衬衫或利落无袖上衣配高腰直筒裤，保持轻通勤但不使用成套制服式半裙",
+            "outer_layer_direction": "不强制外套",
+            "neckline_direction": "丝巾与领口关系完整可见",
+            "palette_relation": "用商品主色的邻近色或自然中性色建立层次",
+            "visibility_requirement": "丝巾图案、领口和半身关系稳定可见",
+            "finish_direction": "保留一套轻通勤对照，以短袖、长裤和自然妆发保持轻松城市感",
+            "supporting_elements": "允许结构简洁的通勤包或腕表一项",
+            "grooming_direction": "自然底妆、清楚眉眼与真实发丝",
+            "supported_demonstration_modes": ["NECK_WORN", "HEAD_WORN", "HAIR_TIE", "BAG_ACCENT"],
+            "scene_families": ["OFFICE_WORKBREAK", "CAFE_DINING"],
+            "visibility_zones": ["NECK", "SHOULDER", "UPPER_BODY"],
+            "outfit_recipe": {
+                "top": "轻薄短袖衬衫或利落无袖上衣",
+                "bottom": "高腰直筒裤",
+                "footwear": "普通通勤平底鞋",
+                "bag": "结构简洁的通勤包",
+                "other_accessories": "腕表或无其他配饰",
+            },
         },
     ),
     "headscarf": (
         {
-            "silhouette_key": "HEADSCARF_PLAIN_TOP",
-            "style_family": "DAILY_HEAD_STYLE",
+            "silhouette_key": "HEADSCARF_Y2K_BOLD",
+            "style_family": "Y2K_BOLD_FEMININE",
+            "style_intensity": "FASHION_FORWARD",
+            "climate_profile": "TH_WARM",
             "hair_direction": "明确已经完成的日常发型或覆盖状态，不展示包裹过程",
-            "base_outfit_direction": "纯色简洁上装配日常下装，避免复杂图案与头巾竞争",
-            "outer_layer_direction": "按日常场景自然搭配，不增加宗教或文化身份暗示",
-            "neckline_direction": "上半身轮廓保持清楚，服务头巾与穿搭整体关系",
-            "palette_relation": "与头巾主色或图案自然协调，不根据场景推断身份",
-            "visibility_requirement": "头巾位置、轮廓、头发状态和半身穿搭同时可见",
+            "base_outfit_direction": "合身吊带或短款上衣配中腰宽松工装裤或阔腿牛仔裤，用清楚腰线和上窄下松轮廓形成轻辣妹、Y2K日常感",
+            "outer_layer_direction": "不强制外层，不增加帽子或厚重外套",
+            "neckline_direction": "头肩和上半身轮廓清楚，服务头巾成为造型重点",
+            "palette_relation": "服装使用纯色、牛仔色或低图案密度配色衬托头巾，不根据场景推断身份",
+            "visibility_requirement": "头巾位置、轮廓、头发状态、上半身和腰线关系清楚可见",
+            "finish_direction": "真实社交账号已经搭好的轻辣妹/Y2K出门造型，保留手机原生质感，不做棚拍",
+            "supporting_elements": "可用小号腋下包或细框眼镜一项，不叠加帽子和夸张耳饰",
+            "grooming_direction": "清楚眉眼与有气色唇色，妆面自然但不寡淡，保留真实皮肤纹理",
+            "supported_demonstration_modes": ["HEAD_WORN"],
+            "scene_families": ["VANITY_TRYON", "CAFE_DINING", "STREET_OUTING"],
+            "visibility_zones": ["HEAD", "HAIR", "UPPER_BODY", "WAISTLINE"],
+            "outfit_recipe": {
+                "top": "合身吊带或短款上衣",
+                "bottom": "中腰宽松工装裤或阔腿牛仔裤",
+                "footwear": "日常厚底运动鞋",
+                "bag": "小号腋下包",
+                "other_accessories": "不增加帽子和夸张耳饰",
+            },
         },
         {
-            "silhouette_key": "HEADSCARF_SHIRT_BASE",
-            "style_family": "CITY_DAILY_HEAD_STYLE",
+            "silhouette_key": "HEADSCARF_STREET_FEMININE",
+            "style_family": "STREET_FEMININE",
+            "style_intensity": "FASHION_FORWARD",
+            "climate_profile": "TH_WARM",
             "hair_direction": "头巾已经佩戴完成，发际或覆盖边界按当前设计保持稳定",
-            "base_outfit_direction": "简洁衬衫或轻上装配普通日常下装",
-            "outer_layer_direction": "不强制外层，避免帽子、夸张耳饰等竞争元素",
-            "neckline_direction": "领口和肩部保持简洁，让头部造型成为重点",
-            "palette_relation": "基础上装保持纯色或低图案密度",
-            "visibility_requirement": "正面或轻侧面能看清头巾轮廓及与上半身关系",
+            "base_outfit_direction": "合身无袖短上衣配牛仔短裤或简洁工装短裙，保持真实街头日常比例，不做舞台造型",
+            "outer_layer_direction": "无外层或只保留不遮挡头肩关系的轻薄敞开层",
+            "neckline_direction": "头肩轮廓完整，让头巾与脸部关系清楚",
+            "palette_relation": "用牛仔色和一件纯色上衣衬托头巾现有图案",
+            "visibility_requirement": "正面或轻侧面能看清头巾轮廓、头发状态和整套街头穿搭",
+            "finish_direction": "像逛街或见朋友时随手拍的真实街头女性造型",
+            "supporting_elements": "可保留小肩包或腕表一项，避免帽子与夸张耳饰",
+            "grooming_direction": "自然底妆、清楚眉眼与有气色唇色，保留发丝和皮肤纹理",
+            "supported_demonstration_modes": ["HEAD_WORN"],
+            "scene_families": ["STREET_OUTING", "CAFE_DINING", "VANITY_TRYON"],
+            "visibility_zones": ["HEAD", "HAIR", "UPPER_BODY", "WAISTLINE"],
+            "outfit_recipe": {
+                "top": "合身无袖短上衣",
+                "bottom": "牛仔短裤或简洁工装短裙",
+                "footwear": "普通运动鞋或日常短靴",
+                "bag": "小号肩包",
+                "other_accessories": "无帽子、无夸张耳饰",
+            },
         },
         {
-            "silhouette_key": "HEADSCARF_TONAL_BASE",
-            "style_family": "TONAL_HEAD_ACCENT",
+            "silhouette_key": "HEADSCARF_RESORT_CHIC",
+            "style_family": "RESORT_CHIC",
+            "style_intensity": "FASHION_FORWARD",
+            "climate_profile": "TH_WARM",
             "hair_direction": "已完成头部造型，从稳定结果开始拍摄",
-            "base_outfit_direction": "上下装使用克制相近色阶，造型保持普通日常",
-            "outer_layer_direction": "可使用简洁轻外层，但不得遮挡头肩关系",
+            "base_outfit_direction": "挂脖或合身吊带上衣配垂感阔腿裤或轻盈长裙，形成真实暖天气度假与城市休闲之间的完整轮廓",
+            "outer_layer_direction": "不增加遮挡头肩关系的外层",
+            "neckline_direction": "上半身线条简洁，头巾成为头部重点",
+            "palette_relation": "用纯色服装衬托头巾现有主色或图案，不要求完全同色",
+            "visibility_requirement": "头巾、头发状态、肩颈与整套纵向轮廓稳定可见",
+            "finish_direction": "具有时尚感但仍像真实旅行或周末出门穿搭，不做杂志大片",
+            "supporting_elements": "可使用藤编小包或日常肩包一项，不堆叠头部配饰",
+            "grooming_direction": "有气色的自然妆面，头部造型整理完成但保留真实发丝",
+            "supported_demonstration_modes": ["HEAD_WORN"],
+            "scene_families": ["STREET_OUTING", "CAFE_DINING", "HOME_ROUTINE"],
+            "visibility_zones": ["HEAD", "HAIR", "UPPER_BODY", "FULL_SILHOUETTE"],
+            "outfit_recipe": {
+                "top": "挂脖或合身吊带上衣",
+                "bottom": "垂感阔腿裤或轻盈长裙",
+                "footwear": "简洁凉鞋",
+                "bag": "小号度假感手袋或日常肩包",
+                "other_accessories": "不增加帽子和头部配饰",
+            },
+        },
+        {
+            "silhouette_key": "HEADSCARF_CITY_MINIMAL",
+            "style_family": "CITY_MINIMAL_HEAD_STYLE",
+            "style_intensity": "DAILY_STYLED",
+            "climate_profile": "TH_WARM",
+            "hair_direction": "头巾已经佩戴完成，头发边界保持自然稳定",
+            "base_outfit_direction": "合身纯色无袖或短袖上衣配垂感宽松长裤，用清楚腰线与轻松比例完成城市日常造型",
+            "outer_layer_direction": "不强制外层，避免帽子和抢眼肩部装饰",
             "neckline_direction": "头肩比例与上半身线条清楚",
-            "palette_relation": "用基础色衬托商品现有图案，不擅自改变颜色关系",
-            "visibility_requirement": "头巾整体形状、覆盖位置与穿搭关系稳定可见",
+            "palette_relation": "用基础色和明暗层次衬托商品图案，不把全身压成灰暗素装",
+            "visibility_requirement": "头巾整体形状、覆盖位置与半身穿搭关系稳定可见",
+            "finish_direction": "相对克制的城市日常方向，但妆发、腰线和配色已经完整",
+            "supporting_elements": "可加入小号肩包或腕表一项",
+            "grooming_direction": "自然底妆、清楚眉眼与适度唇色",
+            "supported_demonstration_modes": ["HEAD_WORN"],
+            "scene_families": ["CAFE_DINING", "OFFICE_WORKBREAK", "HOME_ROUTINE"],
+            "visibility_zones": ["HEAD", "HAIR", "UPPER_BODY", "WAISTLINE"],
+            "outfit_recipe": {
+                "top": "合身纯色无袖或短袖上衣",
+                "bottom": "垂感宽松长裤",
+                "footwear": "普通平底鞋或运动鞋",
+                "bag": "小号肩包",
+                "other_accessories": "腕表或无其他配饰",
+            },
         },
     ),
 }
+
+# Wrist and hair accessories reuse the same outfit-selection authority as
+# apparel/scarves.  These are soft internal fallbacks: structured Feishu
+# templates with the same roles still take priority when operators add them.
+_ACCESSORY_OUTFIT_PROFILES.update({
+    canonical: (
+        {
+            "silhouette_key": "WRIST_SLEEVE_BALANCE",
+            "style_family": "DAILY_WRIST_ACCENT",
+            "style_intensity": "DAILY_STYLED",
+            "climate_profile": "TH_WARM",
+            "hair_direction": "自然披发、耳后别发或简单束发，保持真实日常妆发",
+            "base_outfit_direction": "有清楚轮廓的纯色无袖、短袖或袖口不过腕的上衣，配高腰长裤或利落半裙；腕部自然露出，不用素色空壳造型敷衍",
+            "outer_layer_direction": "如有外层，袖口不得遮住目标腕饰",
+            "neckline_direction": "领口保持日常简洁，不与腕部商品争抢视觉重点",
+            "palette_relation": "服装使用能衬托商品现有金属色、颜色或结构的中性色、邻近色或自然对比色，避免商品与袖口融成一片",
+            "visibility_requirement": "腕饰、手腕、前臂和至少一段上半身穿搭关系清楚可见",
+            "finish_direction": "像真实创作者已经搭好后顺手分享的城市日常造型，精致来自轮廓和配色，不来自商业布光",
+            "supporting_elements": "同一手腕不叠戴手表或竞争性腕饰；可保留日常包或普通手机",
+            "grooming_direction": "自然有气色、保留真实皮肤和发丝，不使用首饰广告式精修",
+            "target_role": "SUPPORTING_OUTFIT_WRIST",
+            "supported_target_roles": ["SUPPORTING_OUTFIT_WRIST"],
+            "supported_demonstration_modes": ["WRIST_WORN"],
+            "scene_families": ["HOME_ROUTINE", "CAFE_DINING", "OFFICE_WORKBREAK", "STREET_OUTING"],
+            "visibility_zones": ["WRIST", "FOREARM", "UPPER_BODY"],
+            "outfit_recipe": {
+                "top": "纯色无袖、短袖或袖口不过腕的上衣",
+                "bottom": "高腰直筒长裤或利落半裙",
+                "footwear": "普通平底鞋、凉鞋或运动鞋",
+                "bag": "日常小包",
+                "other_accessories": "目标手腕不叠戴手表或其他腕饰",
+            },
+        },
+        {
+            "silhouette_key": "WRIST_CITY_CASUAL",
+            "style_family": "CITY_WRIST_DETAIL",
+            "style_intensity": "DAILY",
+            "climate_profile": "TH_WARM",
+            "hair_direction": "自然短发、松散束发或披发，不做广告式造型",
+            "base_outfit_direction": "简洁背心或合身短袖配牛仔裤、阔腿裤或日常短裤，保留真实暖天气比例和清楚腕部",
+            "outer_layer_direction": "不强制外层；如有薄衬衫，袖口自然卷到前臂且不遮挡商品",
+            "neckline_direction": "不堆叠抢眼首饰",
+            "palette_relation": "基础服装不与商品完全同色，保持腕饰能从袖口和背景中自然分离",
+            "visibility_requirement": "至少一段日常动作中仍能看清目标腕饰整体轮廓与佩戴比例",
+            "finish_direction": "周末、咖啡或出门前的普通个人账号状态，穿搭完整但不摆拍",
+            "supporting_elements": "可用杯子、包带、书页中一项承接自然腕部动作，不强制出现",
+            "grooming_direction": "自然底妆和真实肤质，不强化滤镜",
+            "target_role": "SUPPORTING_OUTFIT_WRIST",
+            "supported_target_roles": ["SUPPORTING_OUTFIT_WRIST"],
+            "supported_demonstration_modes": ["WRIST_WORN"],
+            "scene_families": ["CAFE_DINING", "HOME_ROUTINE", "STREET_OUTING"],
+            "visibility_zones": ["WRIST", "FOREARM", "UPPER_BODY"],
+            "outfit_recipe": {
+                "top": "简洁背心、合身短袖或卷袖轻衬衫",
+                "bottom": "牛仔裤、阔腿裤或日常短裤",
+                "footwear": "普通凉鞋、平底鞋或运动鞋",
+                "bag": "日常小包",
+                "other_accessories": "目标腕部无竞争性首饰",
+            },
+        },
+    )
+    for canonical in ("bracelet", "bangle", "slim_bangle")
+})
+
+_ACCESSORY_OUTFIT_PROFILES.update({
+    canonical: (
+        {
+            "silhouette_key": "HAIR_RESULT_CLEAN_SHOULDER",
+            "style_family": "DAILY_HAIR_RESULT",
+            "style_intensity": "DAILY_STYLED",
+            "climate_profile": "TH_WARM",
+            "hair_direction": "商品已经固定在与类型匹配的日常发型中，从完成结果开始；发束边界清楚，不反复夹发",
+            "base_outfit_direction": "有清楚肩颈轮廓的纯色吊带、方领无袖或简洁短袖上衣，配高腰日常下装，让侧后方发型与上半身穿搭同时成立",
+            "outer_layer_direction": "不增加遮挡肩颈与后脑关系的帽子、头巾或厚重外层",
+            "neckline_direction": "领口简洁，肩颈线条清楚，不堆叠夸张耳饰",
+            "palette_relation": "上衣和背景与商品现有颜色保持自然明暗或冷暖分离，不把发饰融进头发和墙面",
+            "visibility_requirement": "发饰位置、相对大小、发束固定关系、肩颈和上半身穿搭至少有一段同时清楚",
+            "finish_direction": "像真实创作者出门前已经整理好的发型与穿搭，保留碎发和皮肤纹理，不做美发广告精修",
+            "supporting_elements": "可保留日常小包或普通耳钉一项，不增加竞争性头部配饰",
+            "grooming_direction": "自然有气色，保留真实发丝、发际线和皮肤纹理，避免重滤镜改变五官",
+            "target_role": "SUPPORTING_OUTFIT_HAIR",
+            "supported_target_roles": ["SUPPORTING_OUTFIT_HAIR"],
+            "supported_demonstration_modes": ["HAIR_WORN"],
+            "scene_families": ["VANITY_TRYON", "HOME_ROUTINE", "CAFE_DINING", "STREET_OUTING"],
+            "visibility_zones": ["HEAD", "HAIR", "SHOULDER", "UPPER_BODY"],
+            "outfit_recipe": {
+                "top": "纯色吊带、方领无袖或简洁短袖上衣",
+                "bottom": "高腰牛仔裤、阔腿裤或日常短裤",
+                "footwear": "普通凉鞋、平底鞋或运动鞋",
+                "bag": "日常小包",
+                "other_accessories": "无帽子、头巾和竞争性发饰",
+            },
+        },
+        {
+            "silhouette_key": "HAIR_CITY_FEMININE",
+            "style_family": "CITY_HAIR_ACCENT",
+            "style_intensity": "FASHION_FORWARD",
+            "climate_profile": "TH_WARM",
+            "hair_direction": "从已完成的半扎、低束或盘发结果开始，具体发型服从商品类型和参考图，不展示复杂造型过程",
+            "base_outfit_direction": "合身短款上衣或利落无袖上衣配宽松长裤、牛仔短裤或简洁半裙，形成真实城市女性的完整轮廓",
+            "outer_layer_direction": "可无外层或使用不遮挡头肩关系的轻薄敞开层",
+            "neckline_direction": "头肩与领口关系完整，避免夸张耳饰抢走商品重点",
+            "palette_relation": "用一组有明暗层次但不过度同色的服装衬托商品，头发、发饰和背景三者必须可分辨",
+            "visibility_requirement": "侧后方或镜面视角能看清商品与发型结果，同时保留至少半身穿搭语境",
+            "finish_direction": "时尚感来自真实妆发、轮廓和配色，仍像个人账号手机记录，不变成沙龙广告大片",
+            "supporting_elements": "允许小号肩包或普通耳钉一项，不叠加帽子和头巾",
+            "grooming_direction": "眉眼和唇色有气色但不过度精修，真实发丝与发际线必须保留",
+            "target_role": "SUPPORTING_OUTFIT_HAIR",
+            "supported_target_roles": ["SUPPORTING_OUTFIT_HAIR"],
+            "supported_demonstration_modes": ["HAIR_WORN"],
+            "scene_families": ["VANITY_TRYON", "CAFE_DINING", "STREET_OUTING"],
+            "visibility_zones": ["HEAD", "HAIR", "SHOULDER", "UPPER_BODY", "WAISTLINE"],
+            "outfit_recipe": {
+                "top": "合身短款上衣或利落无袖上衣",
+                "bottom": "宽松长裤、牛仔短裤或简洁半裙",
+                "footwear": "日常运动鞋、平底鞋或短靴",
+                "bag": "小号肩包",
+                "other_accessories": "无帽子、头巾和竞争性发饰",
+            },
+        },
+    )
+    for canonical in (
+        "hair_accessory_generic", "claw_clip", "hair_clip", "headband",
+        "scrunchie", "hair_tie", "ribbon", "hair_pin",
+    )
+})
 
 
 def _usage_metadata(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -944,6 +1377,9 @@ def _select_outfit_contract(
     top_category: str,
     product_profile: str,
     direction_carrier: str,
+    country: str,
+    scene_family: str,
+    direction: Dict[str, Any],
 ) -> Tuple[Dict[str, Any], int, int]:
     is_wearer_apparel = (
         product_profile == "WORN_APPAREL"
@@ -952,6 +1388,14 @@ def _select_outfit_contract(
     canonical_type = normalize_product_type(
         product_type, top_category
     ).canonical_type
+    demonstration_mode = demonstration_mode_from_direction(
+        direction, canonical_type
+    )
+    target_role = target_role_for(
+        product_profile=product_profile,
+        canonical_type=canonical_type,
+        demonstration_mode=demonstration_mode,
+    )
     is_wearer_accessory = (
         product_profile == "WORN_ACCESSORY"
         and canonical_type in _ACCESSORY_OUTFIT_PROFILES
@@ -965,6 +1409,12 @@ def _select_outfit_contract(
             "template_version": None,
             "silhouette_key": "PRODUCT_LED",
             "style_family": "PRODUCT_LED",
+            "style_intensity": "DAILY",
+            "target_role": target_role,
+            "product_type": canonical_type,
+            "demonstration_mode": demonstration_mode,
+            "visibility_zones": [],
+            "outfit_recipe": {},
             "hair_direction": "不适用",
             "base_outfit_direction": "不适用",
             "palette_relation": "不适用",
@@ -972,17 +1422,8 @@ def _select_outfit_contract(
             "hard_required": False,
         }, 0, 0)
 
-    historical_counts: Counter = Counter()
-    batch_counts: Counter = Counter()
-    for usage_row in recent_usage:
-        key = _usage_outfit_selection_key(usage_row)
-        if not key or key.endswith(":PRODUCT_LED"):
-            continue
-        target = batch_counts if usage_row.get("_batch_reserved") else historical_counts
-        target[key] += 1
-
     candidates: List[Dict[str, Any]] = []
-    if is_wearer_apparel:
+    if is_wearer_apparel or is_wearer_accessory:
         for template in load_structured_outfit_templates(
             product_code=product_code,
             product_type=product_type,
@@ -990,19 +1431,18 @@ def _select_outfit_contract(
             candidates.append({
                 **template,
                 "contract_version": OUTFIT_SELECTION_CONTRACT_VERSION,
-                "palette_relation": "由模板结构化颜色字段决定；不得读取模板标题或正文补充",
+                "palette_relation": _text(template.get("palette_relation")),
                 "selection_policy": "EXPLICIT_PRODUCT_CODE_THEN_LEAST_USED",
                 "hard_required": False,
                 "source_preference": int(template.get("match_rank") or 0),
             })
+    if is_wearer_apparel:
         internal_profiles = _APPAREL_SURFACE_PROFILES
-        contract_version = OUTFIT_SELECTION_CONTRACT_VERSION
     else:
         internal_profiles = _ACCESSORY_OUTFIT_PROFILES[canonical_type]
-        contract_version = ACCESSORY_OUTFIT_SELECTION_CONTRACT_VERSION
     for profile in internal_profiles:
         candidates.append({
-            "contract_version": contract_version,
+            "contract_version": OUTFIT_SELECTION_CONTRACT_VERSION,
             "source_type": "INTERNAL_PROFILE",
             "template_id": None,
             "template_version": None,
@@ -1020,33 +1460,95 @@ def _select_outfit_contract(
             "visibility_requirement": _text(
                 profile.get("visibility_requirement")
             ),
+            "finish_direction": _text(profile.get("finish_direction")),
+            "supporting_elements": _text(profile.get("supporting_elements")),
+            "grooming_direction": _text(profile.get("grooming_direction")),
+            "target_role": _text(profile.get("target_role") or target_role),
+            "supported_target_roles": list(
+                profile.get("supported_target_roles") or [target_role]
+            ),
+            "style_intensity": _text(
+                profile.get("style_intensity") or "DAILY"
+            ),
+            "climate_profile": _text(profile.get("climate_profile")),
+            "supported_demonstration_modes": list(
+                profile.get("supported_demonstration_modes") or []
+            ),
+            "scene_families": list(profile.get("scene_families") or []),
+            "visibility_zones": list(profile.get("visibility_zones") or []),
+            "outfit_recipe": dict(profile.get("outfit_recipe") or {}),
             "selection_policy": "LEAST_RECENTLY_USED_SOFT",
             "hard_required": False,
             "source_preference": 2,
+            "style_preference_rank": int(
+                profile.get("style_preference_rank") or 0
+            ),
         })
-
-    ranked: List[Tuple[int, int, int, int, int, Dict[str, Any]]] = []
-    for index, candidate in enumerate(candidates):
-        source = _text(candidate.get("source_type")) or "INTERNAL_PROFILE"
-        template_id = _text(candidate.get("template_id"))
-        silhouette = _text(candidate.get("silhouette_key"))
-        key = f"{source}:{template_id or silhouette}"
-        tie_break = (seed + index * 6151) % 1000
-        ranked.append((
-            batch_counts[key],
-            int(candidate.get("source_preference") or 0),
-            historical_counts[key],
-            -int(candidate.get("priority") or 0),
-            tie_break,
+    normalized_candidates = [
+        normalize_outfit_candidate(
             candidate,
-        ))
-    batch_count, _, historical_count, _, _, selected = min(
-        ranked, key=lambda row: (row[0], row[1], row[2], row[3], row[4])
+            target_role=target_role,
+            canonical_type=canonical_type,
+            country=country,
+            scene_family=scene_family,
+            demonstration_mode=demonstration_mode,
+        )
+        for candidate in candidates
+    ]
+    return select_outfit_candidate(
+        candidates=normalized_candidates,
+        recent_usage=recent_usage,
+        seed=seed,
+        target_role=target_role,
+        demonstration_mode=demonstration_mode,
+        scene_family=scene_family,
     )
-    contract = dict(selected)
-    contract.pop("source_preference", None)
-    contract.pop("match_rank", None)
-    return (contract, historical_count, batch_count)
+
+
+def _outfit_scene_affinity_contract(
+    outfit_contract: Mapping[str, Any], scene_family: Any
+) -> Dict[str, Any]:
+    """Describe one outfit/scene pairing without creating a hard gate."""
+
+    selected_family = _text(scene_family).upper() or "GENERIC_INDOOR"
+    preferred = list(dict.fromkeys(
+        _text(item).upper()
+        for item in outfit_contract.get("scene_families") or []
+        if _text(item)
+    ))
+    if not preferred:
+        status = "NO_PREFERENCE"
+        bonus = 0
+        fallback_reason = ""
+    elif selected_family in preferred:
+        status = "MATCHED"
+        bonus = (
+            EXACT_PRODUCT_OUTFIT_SCENE_MATCH_BONUS
+            if _text(outfit_contract.get("source_tier")) == "EXACT_PRODUCT_TEMPLATE"
+            or _text(outfit_contract.get("match_scope")) == "EXACT_PRODUCT_CODE"
+            else OUTFIT_SCENE_MATCH_BONUS
+        )
+        fallback_reason = ""
+    else:
+        status = "FALLBACK"
+        bonus = 0
+        fallback_reason = "NO_COMPATIBLE_PREFERRED_SCENE_SELECTED"
+    return {
+        "policy_version": OUTFIT_SCENE_AFFINITY_POLICY_VERSION,
+        "template_id": _text(outfit_contract.get("template_id")),
+        "template_display_name": _text(
+            outfit_contract.get("template_display_name")
+        ),
+        "template_version": _text(outfit_contract.get("template_version")),
+        "outfit_source_type": _text(outfit_contract.get("source_type")),
+        "preferred_scene_families": preferred,
+        "selected_scene_family": selected_family,
+        "match_status": status,
+        "ranking_bonus": bonus,
+        "fallback_reason": fallback_reason,
+        "authority": "SOFT_PREFERENCE",
+        "hard_required": False,
+    }
 
 
 def build_creative_diversity_contract(
@@ -1083,9 +1585,18 @@ def build_creative_diversity_contract(
     persona_counts = Counter(_text(row.get("persona_role")) for row in recent_usage)
     selling_scene_preferences = _selling_argument_scene_preferences(direction)
     category_scene_preferences = _category_scene_preferences(direction)
+    carrier_contract = _carrier_contract(direction_carrier)
+    scene_request = _scene_request_contract(
+        product_type=product_type,
+        category=category,
+        direction=direction,
+        carrier_contract=carrier_contract,
+        country=country,
+    )
     scene_preferences = list(dict.fromkeys([
         *selling_scene_preferences,
         *category_scene_preferences,
+        *_scene_request_affinity_tags(scene_request),
     ]))
     seed_material = f"{product_code}|{_direction_id(direction)}|{direction.get('cluster_id')}"
     seed = int(hashlib.sha256(seed_material.encode("utf-8")).hexdigest()[:12], 16)
@@ -1116,9 +1627,38 @@ def build_creative_diversity_contract(
         # Soft preference only.  One exact recent combination still costs 100,
         # so semantic fit cannot collapse a batch back into one repeated scene.
         affinity_bonus = min(30, 18 * len(affinity_matches))
+        proof_environment_score = _scene_request_proof_environment_score(
+            scene_request, item
+        )
+        outfit_contract, outfit_recent_count, outfit_batch_count = (
+            _select_outfit_contract(
+                seed=seed,
+                recent_usage=recent_usage,
+                product_code=product_code,
+                product_type=product_type,
+                top_category=category,
+                product_profile=product_profile,
+                direction_carrier=direction_carrier,
+                country=country,
+                scene_family=family_key,
+                direction=direction,
+            )
+        )
+        outfit_scene_affinity = _outfit_scene_affinity_contract(
+            outfit_contract, family_key
+        )
+        outfit_scene_bonus = int(
+            outfit_scene_affinity.get("ranking_bonus") or 0
+        )
         scene_reference = scene_reference_contract_for_family(
             scene_reference_context,
             family_key,
+            scene_motif=_text(item.get("scene_motif")),
+            presentation=_text(carrier_contract.get("required_presentation_mode")),
+            country=country,
+            category=category,
+            product_type=product_type,
+            scene_request=scene_request,
         )
         matrix_bonus = int(scene_reference.get("matrix_bonus") or 0)
         tie_break = (seed + index * 7919) % 1000
@@ -1127,31 +1667,60 @@ def build_creative_diversity_contract(
             "scene_affinity_tags": candidate_tags,
             "scene_affinity_matches": affinity_matches,
             "scene_affinity_score": affinity_bonus,
+            "scene_proof_environment_score": proof_environment_score,
             "scene_reference_contract": scene_reference,
             "scene_reference_bonus": matrix_bonus,
+            "_joint_outfit_contract": outfit_contract,
+            "_joint_outfit_recent_count": outfit_recent_count,
+            "_joint_outfit_batch_count": outfit_batch_count,
+            "_joint_outfit_scene_affinity": outfit_scene_affinity,
         }
         scored.append((
-            reuse_penalty + axis_penalty + family_repeat_penalty - affinity_bonus - matrix_bonus,
+            reuse_penalty + axis_penalty + family_repeat_penalty
+            - affinity_bonus - proof_environment_score - matrix_bonus
+            - outfit_scene_bonus,
             tie_break,
             enriched_item,
         ))
     _, _, selected = min(scored, key=lambda row: (row[0], row[1]))
     structure = direction.get("structure_execution_plan") if isinstance(direction.get("structure_execution_plan"), dict) else {}
-    carrier_contract = _carrier_contract(authoritative_carrier(direction))
-    outfit_contract, outfit_recent_count, outfit_batch_count = _select_outfit_contract(
-        seed=seed,
-        recent_usage=recent_usage,
-        product_code=product_code,
+    outfit_contract = dict(selected.pop("_joint_outfit_contract", {}) or {})
+    outfit_recent_count = int(selected.pop("_joint_outfit_recent_count", 0) or 0)
+    outfit_batch_count = int(selected.pop("_joint_outfit_batch_count", 0) or 0)
+    outfit_scene_affinity = dict(
+        selected.pop("_joint_outfit_scene_affinity", {}) or {}
+    )
+    from core.persona_selection import (
+        build_outfit_persona_affinity_contract,
+        select_persona_contract,
+    )
+
+    canonical_type = normalize_product_type(product_type, category).canonical_type
+    demonstration_mode = demonstration_mode_from_direction(direction, canonical_type)
+    persona_contract, persona_recent_count, persona_batch_count = select_persona_contract(
         product_type=product_type,
         top_category=category,
-        product_profile=product_profile,
-        direction_carrier=direction_carrier,
+        country=country,
+        presentation_mode=_text(carrier_contract.get("required_presentation_mode")),
+        capture_mode=_text(scene_request.get("capture_mode")),
+        demonstration_mode=demonstration_mode,
+        seed=seed,
+        recent_usage=recent_usage,
+        preferred_persona_ids=list(
+            outfit_contract.get("preferred_persona_ids") or []
+        ),
+    )
+    outfit_persona_affinity = build_outfit_persona_affinity_contract(
+        outfit_contract, persona_contract
     )
     selected.update({
         "surface_profile_key": outfit_contract.get("silhouette_key"),
         "hair_direction": outfit_contract.get("hair_direction"),
         "base_outfit_direction": outfit_contract.get("base_outfit_direction"),
         "outfit_selection_contract": outfit_contract,
+        "outfit_scene_affinity_contract": outfit_scene_affinity,
+        "persona_selection_contract": persona_contract,
+        "outfit_persona_affinity_contract": outfit_persona_affinity,
     })
     # Candidate scoring only needs the compact matrix signal.  Once the
     # creative combination and carrier are frozen, compile a scene execution
@@ -1164,7 +1733,10 @@ def build_creative_diversity_contract(
         presentation=_text(carrier_contract.get("required_presentation_mode")),
         country=country,
         category=category,
+        product_type=product_type,
+        scene_request=scene_request,
     )
+    selected["scene_request_contract"] = scene_request
     snapshot = {
         "recent_usage_count": len(recent_usage),
         "recent_exact_signature_count": exact_counts[_usage_signature(selected)],
@@ -1178,9 +1750,27 @@ def build_creative_diversity_contract(
         "category_scene_affinity_preferences": category_scene_preferences,
         "scene_affinity_matches": list(selected.get("scene_affinity_matches") or []),
         "scene_affinity_score": int(selected.get("scene_affinity_score") or 0),
+        "scene_proof_environment_score": int(
+            selected.get("scene_proof_environment_score") or 0
+        ),
         "scene_reference_bonus": int(selected.get("scene_reference_bonus") or 0),
+        "scene_request_contract": scene_request,
         "outfit_silhouette_recent_count": outfit_recent_count,
         "outfit_silhouette_batch_count": outfit_batch_count,
+        "outfit_scene_match_status": _text(
+            outfit_scene_affinity.get("match_status")
+        ),
+        "outfit_scene_affinity_score": int(
+            outfit_scene_affinity.get("ranking_bonus") or 0
+        ),
+        "outfit_preferred_scene_families": list(
+            outfit_scene_affinity.get("preferred_scene_families") or []
+        ),
+        "persona_template_recent_count": persona_recent_count,
+        "persona_template_batch_count": persona_batch_count,
+        "outfit_persona_match_status": _text(
+            outfit_persona_affinity.get("match_status")
+        ),
         "reused_same_product_direction": False,
     }
     material = {
@@ -1201,6 +1791,7 @@ def build_creative_diversity_contract(
         [
             selected["persona_role"], selected["scene_motif"], selected["opening_action"],
             selected["action_grammar"], outfit_signature,
+            _text(persona_contract.get("persona_id")) or "PERSONA_UNAVAILABLE",
         ]
     )
     return {
@@ -1226,6 +1817,9 @@ def build_creative_diversity_contract(
             "hard_required": False,
         },
         "outfit_selection_contract": outfit_contract,
+        "outfit_scene_affinity_contract": outfit_scene_affinity,
+        "persona_selection_contract": persona_contract,
+        "outfit_persona_affinity_contract": outfit_persona_affinity,
         "scene_reference_contract": selected.get("scene_reference_contract") or {},
         # These are failed *combinations*, not permanent bans on bedrooms,
         # mirrors, turns or any single creative axis. A future allocator may
@@ -1277,6 +1871,9 @@ def creative_usage_row(
             "scene_family_key": contract.get("scene_family_key"),
             "surface_profile": contract.get("surface_profile") or {},
             "outfit_selection_contract": contract.get("outfit_selection_contract") or {},
+            "outfit_scene_affinity_contract": contract.get("outfit_scene_affinity_contract") or {},
+            "persona_selection_contract": contract.get("persona_selection_contract") or {},
+            "outfit_persona_affinity_contract": contract.get("outfit_persona_affinity_contract") or {},
         },
     }
 

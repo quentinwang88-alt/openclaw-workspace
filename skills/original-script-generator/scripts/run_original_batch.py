@@ -27,6 +27,12 @@ def main() -> int:
     parser.add_argument("--resume", action="store_true", help="断点续跑")
     parser.add_argument("--limit", type=int, default=0, help="script-only 模式最多执行N条")
     parser.add_argument("--delay-between-items", type=int, default=0, help="每两条之间等待秒数")
+    parser.add_argument(
+        "--item-timeout-seconds",
+        type=int,
+        default=420,
+        help="单条脚本最大等待秒数；0 表示关闭 item 级超时",
+    )
     parser.add_argument("--replan", action="store_true", help="重新规划（覆盖旧批次）")
     parser.add_argument("--voiceover-root", default="/Users/likeu3/voiceover_copy_engine")
     parser.add_argument(
@@ -109,6 +115,7 @@ def main() -> int:
             voiceover_qc_model_command=args.voiceover_qc_model_command,
             blueprint_model=args.blueprint_model,
             blueprint_reasoning=args.blueprint_reasoning,
+            item_timeout_seconds=args.item_timeout_seconds,
         )
         _print_batch(batch, items)
         _save_report(output_dir, batch, items, batch.allocation_summary_json)
@@ -152,10 +159,23 @@ def _save_report(output_dir, batch, items, summary):
         contract = seed.get("voiceover_surface_contract") if isinstance(seed, dict) else {}
         return contract if isinstance(contract, dict) else {}
 
+    def _creative_contract(item):
+        try:
+            frozen = json.loads(item.frozen_direction_package_json or "{}")
+        except Exception:
+            frozen = {}
+        contract = (
+            frozen.get("creative_diversity_contract")
+            if isinstance(frozen, dict) else {}
+        )
+        return contract if isinstance(contract, dict) else {}
+
     report = {
         "batch_id": batch.batch_id,
         "request_id": batch.request_id,
         "product_code": batch.product_code,
+        "target_country": batch.target_country,
+        "target_language": batch.target_language,
         "status": batch.status,
         "requested_count": batch.requested_count,
         "planned_count": batch.planned_count,
@@ -191,6 +211,17 @@ def _save_report(output_dir, batch, items, summary):
                     "creative_contract_id": it.creative_contract_id,
                     "visual_signature": it.visual_signature,
                     "frozen_direction_package": bool(it.frozen_direction_package_json),
+                    "scene_family_key": _creative_contract(it).get("scene_family_key", ""),
+                    "scene_motif": _creative_contract(it).get("scene_motif", ""),
+                    "outfit_selection_contract": _creative_contract(it).get(
+                        "outfit_selection_contract", {}
+                    ),
+                    "persona_selection_contract": _creative_contract(it).get(
+                        "persona_selection_contract", {}
+                    ),
+                    "outfit_persona_affinity_contract": _creative_contract(it).get(
+                        "outfit_persona_affinity_contract", {}
+                    ),
                 },
                 "status": it.status,
                 "script_mode": _result(it).get("script_mode", ""),
@@ -236,6 +267,42 @@ def _render_complete_scripts_markdown(report) -> str:
         structure = item.get("structure") if isinstance(item.get("structure"), dict) else {}
         expression = item.get("expression") if isinstance(item.get("expression"), dict) else {}
         creative = item.get("creative") if isinstance(item.get("creative"), dict) else {}
+        outfit_contract = (
+            creative.get("outfit_selection_contract")
+            if isinstance(creative.get("outfit_selection_contract"), dict)
+            else {}
+        )
+        persona_contract = (
+            creative.get("persona_selection_contract")
+            if isinstance(creative.get("persona_selection_contract"), dict)
+            else {}
+        )
+        affinity_contract = (
+            creative.get("outfit_persona_affinity_contract")
+            if isinstance(creative.get("outfit_persona_affinity_contract"), dict)
+            else {}
+        )
+        scene_affinity_contract = (
+            creative.get("outfit_scene_affinity_contract")
+            if isinstance(creative.get("outfit_scene_affinity_contract"), dict)
+            else {}
+        )
+        outfit_recipe = (
+            outfit_contract.get("outfit_recipe")
+            if isinstance(outfit_contract.get("outfit_recipe"), dict)
+            else {}
+        )
+        accessory_items = [
+            str(value).strip()
+            for value in (outfit_contract.get("accessory_items") or [])
+            if str(value or "").strip()
+        ]
+        scene_match_label = {
+            "MATCHED": "已匹配",
+            "NO_PREFERENCE": "未配置偏好",
+            "FALLBACK": "已回退",
+            "NOT_APPLICABLE": "不适用",
+        }.get(str(scene_affinity_contract.get("match_status") or "").upper(), "不适用")
         lines.extend(
             [
                 f"## [{int(item.get('item_index') or 0):02d}] {_md(item.get('compatibility_slot'))}",
@@ -250,6 +317,12 @@ def _render_complete_scripts_markdown(report) -> str:
                 f"| 观众关系偏好 | {_md((expression.get('voiceover_surface_contract') or {}).get('relationship_device'))} |",
                 f"| 内容角度 | {_md((item.get('content') or {}).get('content_angle_key'))} |",
                 f"| 视觉签名 | {_md(creative.get('visual_signature'))} |",
+                f"| 人物模板 | {_md(persona_contract.get('persona_name') or persona_contract.get('persona_id'))} |",
+                f"| 穿搭模板 | {_md(outfit_contract.get('template_display_name') or outfit_contract.get('template_id') or outfit_contract.get('silhouette_key'))} |",
+                f"| 实际配饰 | {_md('；'.join(accessory_items) or outfit_recipe.get('other_accessories') or '不适用')} |",
+                f"| 场景 | {_md(creative.get('scene_motif') or creative.get('scene_family_key'))} |",
+                f"| 穿搭×场景匹配 | {_md(scene_match_label)} |",
+                f"| 人物×穿搭匹配 | {_md(affinity_contract.get('match_status'))} |",
                 "",
             ]
         )
@@ -314,24 +387,27 @@ def _render_complete_scripts_markdown(report) -> str:
                 "",
                 "### 连续口播",
                 "",
-                f"- 泰语：{_md(voice.get('target_text'))}",
+                f"- {_md(voice.get('target_language') or report.get('target_language') or '目标语言')}：{_md(voice.get('target_text'))}",
                 f"- 中文：{_md(voice.get('chinese_translation'))}",
                 f"- 卖点实际表达：{_md(voice.get('selling_argument_realization'))}",
                 "",
                 "### 完整分镜",
                 "",
-                "| 镜头 | 时间 | 叙事角色 | 画面 | 动作 | 情绪 | 机位 | 商品锚点 |",
-                "|---:|---|---|---|---|---|---|---|",
+                "| 镜头 | 时间 | 叙事角色 | 拍摄单元/剪辑 | 画面 | 动作 | 情绪 | 机位 | 商品锚点 |",
+                "|---:|---|---|---|---|---|---|---|---|",
             ]
         )
         for index, shot in enumerate(script.get("storyboard") or [], 1):
             if not isinstance(shot, dict):
                 continue
             lines.append(
-                "| {shot_no} | {time} | {role} | {visual} | {action} | {emotion} | {camera} | {anchors} |".format(
+                "| {shot_no} | {time} | {role} | {capture} | {visual} | {action} | {emotion} | {camera} | {anchors} |".format(
                     shot_no=int(shot.get("shot_no") or index),
                     time=_md(shot.get("time_range")),
                     role=_md(shot.get("narrative_role")),
+                    capture=_md(
+                        f"{shot.get('capture_unit_id') or 'UNAVAILABLE'} / {shot.get('edit_before') or 'UNAVAILABLE'}"
+                    ),
                     visual=_md(shot.get("visual_content")),
                     action=_md(shot.get("character_action")),
                     emotion=_md(shot.get("natural_emotion")),

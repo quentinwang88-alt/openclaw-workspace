@@ -1,6 +1,8 @@
 import unittest
 
+from core.category_execution import compile_category_execution_extension
 from core.simplified_complete_script import (
+    CAPTURE_RHYTHM_MULTICLIP,
     CAPTURE_MODE_CREATOR_SELF_SHOT,
     SCRIPT_MODE_SIMPLIFIED,
     assemble_simplified_complete_script,
@@ -8,6 +10,7 @@ from core.simplified_complete_script import (
     build_simplified_creative_seed,
     build_simplified_script_prompt,
     build_simplified_voiceover_inputs,
+    compile_capture_units,
     normalize_simplified_visual_script,
     validate_simplified_complete_script,
     validate_simplified_visual_script,
@@ -115,6 +118,104 @@ def _person_script():
 
 
 class SimplifiedCompleteScriptTest(unittest.TestCase):
+    def test_blueprint_prompt_hides_unselected_outfit_alternatives(self):
+        seed = build_simplified_creative_seed(
+            anchor_card=_anchor(),
+            structure_contract=_contract("WEARER_ACTIVE"),
+            content_bundle=_bundle(),
+            creative_contract={
+                "outfit_selection_contract": {
+                    "source_type": "LIGHTWEIGHT_TEMPLATE",
+                    "template_id": "STYLE_EXACT",
+                    "template_display_name": "运营可见穿搭标题",
+                    "target_role": "TARGET_GARMENT",
+                    "style_family": "日常干净",
+                    "outfit_recipe": {
+                        "top": "黑色吊带",
+                        "bottom": "高腰阔腿裤",
+                        "footwear": "平底鞋",
+                    },
+                    "source_outfit_recipe": {
+                        "top": "黑色吊带或短袖T恤",
+                        "bottom": "高腰阔腿裤或牛仔短裤",
+                    },
+                    "source_accessory_items": ["小号肩包或细金属耳环"],
+                    "accessory_items": ["细金属耳环"],
+                    "inner_type": "黑色吊带或短袖T恤",
+                    "base_outfit_direction": "黑色吊带或短袖T恤配高腰阔腿裤或牛仔短裤",
+                },
+                "surface_profile": {
+                    "base_outfit_direction": "黑色吊带或短袖T恤配高腰阔腿裤或牛仔短裤",
+                },
+                "outfit_scene_affinity_contract": {
+                    "match_status": "MATCHED",
+                    "template_display_name": "运营可见穿搭标题",
+                    "ranking_bonus": 30,
+                },
+            },
+            execution_reference={"content_carrier": "WEARER_ACTIVE"},
+            requested_hook_id="DETAIL_SURPRISE",
+            content_angle_key="FACT_DISCOVERY",
+            product_type="外套",
+            top_category="女装",
+        )
+        prompt = build_simplified_script_prompt(
+            seed,
+            target_country="泰国",
+            target_language="泰语",
+            duration_seconds=15,
+        )
+        self.assertIn("上装：黑色吊带", prompt)
+        self.assertIn("下装：高腰阔腿裤", prompt)
+        self.assertNotIn("source_outfit_recipe", prompt)
+        self.assertNotIn("source_accessory_items", prompt)
+        self.assertNotIn("小号肩包或细金属耳环", prompt)
+        self.assertNotIn("运营可见穿搭标题", prompt)
+        self.assertNotIn("outfit_scene_affinity_contract", prompt)
+        self.assertNotIn("吊带或短袖", prompt)
+        self.assertNotIn("阔腿裤或牛仔短裤", prompt)
+
+    def test_normalization_freezes_one_piece_and_specific_accessory(self):
+        seed = build_simplified_creative_seed(
+            anchor_card=_anchor(),
+            structure_contract=_contract("WEARER_ACTIVE"),
+            content_bundle=_bundle(),
+            creative_contract={
+                "outfit_selection_contract": {
+                    "source_type": "LIGHTWEIGHT_TEMPLATE",
+                    "template_id": "STYLE_DRESS",
+                    "target_role": "TARGET_GARMENT",
+                    "outfit_structure": "ONE_PIECE",
+                    "outfit_recipe": {
+                        "one_piece": "深蓝条纹波点连衣裙",
+                        "top": "",
+                        "bottom": "",
+                        "other_accessories": "深咖色鸭舌帽",
+                    },
+                    "accessory_policy": "SPECIFIED",
+                    "accessory_items": ["深咖色鸭舌帽"],
+                },
+            },
+            execution_reference={"content_carrier": "WEARER_ACTIVE"},
+            requested_hook_id="DETAIL_SURPRISE",
+            content_angle_key="FACT_DISCOVERY",
+            product_type="外套",
+            top_category="女装",
+        )
+        raw = _person_script()
+        raw["production_design"]["outfit"] = {
+            "base_outfit": "模型随机写的上衣和长裤",
+            "product_role": "目标外套",
+            "accessories": "无",
+        }
+        normalized = normalize_simplified_visual_script(
+            raw, seed, generation_provenance={"model": "test"}
+        )
+        outfit = normalized["production_design"]["outfit"]
+        self.assertIn("连体单品：深蓝条纹波点连衣裙", outfit["base_outfit"])
+        self.assertNotIn("下装", outfit["base_outfit"])
+        self.assertEqual("深咖色鸭舌帽", outfit["accessories"])
+
     def test_scarf_identity_lock_uses_only_approved_identity_anchors(self):
         lock = build_product_identity_lock(
             {
@@ -155,9 +256,63 @@ class SimplifiedCompleteScriptTest(unittest.TestCase):
         prompt = build_simplified_script_prompt(
             seed, target_country="泰国", target_language="泰语", duration_seconds=15
         )
-        self.assertIn("创作者自己使用手机前置镜头", prompt)
-        self.assertIn("结构 Beat 是同一次分享中的内容推进", prompt)
-        self.assertIn("不得设计第三人跟拍", prompt)
+        self.assertIn("创作者自己完成的手机分享", prompt)
+        self.assertIn("分别录制3段简短素材", prompt)
+        self.assertIn("片段间使用普通直接剪切或自然跳剪", prompt)
+        self.assertIn("不得扩写成摄影团队", prompt)
+        self.assertEqual(
+            CAPTURE_RHYTHM_MULTICLIP,
+            seed["capture_rhythm_contract"]["profile"],
+        )
+
+    def test_capture_units_compile_four_storyboard_passages_into_three_phone_clips(self):
+        contract = {
+            "profile": CAPTURE_RHYTHM_MULTICLIP,
+            "capture_unit_count": 3,
+        }
+        storyboard, units = compile_capture_units(
+            _person_script()["storyboard"], contract
+        )
+
+        self.assertEqual(3, len(units))
+        self.assertEqual(
+            ["CU_01", "CU_02", "CU_02", "CU_03"],
+            [item["capture_unit_id"] for item in storyboard],
+        )
+        self.assertEqual(
+            [True, True, False, True],
+            [item["starts_new_take"] for item in storyboard],
+        )
+        self.assertEqual("DIRECT_CUT", storyboard[-1]["edit_before"])
+
+    def test_capture_units_preserve_valid_semantic_boundaries_from_visual_script(self):
+        contract = {
+            "profile": CAPTURE_RHYTHM_MULTICLIP,
+            "capture_unit_count": 3,
+        }
+        source = []
+        for index, unit_id in enumerate(
+            ["CU_01", "CU_01", "CU_02", "CU_02", "CU_03"], 1
+        ):
+            source.append({
+                "shot_no": index,
+                "narrative_role": "HOOK" if index == 1 else "PROOF",
+                "capture_unit_id": unit_id,
+                "starts_new_take": index in {1, 3, 5},
+            })
+
+        storyboard, units = compile_capture_units(source, contract)
+
+        self.assertEqual(
+            ["CU_01", "CU_01", "CU_02", "CU_02", "CU_03"],
+            [item["capture_unit_id"] for item in storyboard],
+        )
+        self.assertEqual(
+            "MODEL_BOUNDARIES_VALIDATED", units[0]["grouping_source"]
+        )
+        self.assertEqual([1, 2], units[0]["shot_numbers"])
+        self.assertEqual([3, 4], units[1]["shot_numbers"])
+        self.assertEqual([5], units[2]["shot_numbers"])
 
     def test_capture_mode_is_normalized_from_frozen_seed_without_repair_loop(self):
         seed = build_simplified_creative_seed(
@@ -206,6 +361,65 @@ class SimplifiedCompleteScriptTest(unittest.TestCase):
             lock["visible_closure_contract"]["layout"],
         )
         self.assertEqual("四", lock["visible_closure_contract"]["visible_button_count"])
+
+    def test_wrist_accessory_identity_lock_does_not_inherit_garment_terms(self):
+        lock = build_product_identity_lock(
+            {
+                "canonical_product_type": "bangle",
+                "product_identity": "金色细手镯",
+                "identity_anchors": ["单圈细环；开放式缺口；金色"],
+                "visible_detail_anchors": ["两端圆点结构"],
+            }
+        )
+        self.assertEqual(
+            "product-identity-lock-v4-explicit-quantity", lock["compiler_version"]
+        )
+        self.assertEqual("NOT_APPLICABLE", lock["visible_closure_contract"]["status"])
+        self.assertEqual(
+            "SINGLE_PRODUCT_DEFAULT",
+            lock["display_quantity_contract"]["status"],
+        )
+        material = "；".join(lock["must_not_change"])
+        self.assertIn("手腕位置", material)
+        self.assertIn("禁止新增第二只同款商品", material)
+        self.assertNotIn("衣长", material)
+        self.assertNotIn("袖口结构", material)
+
+    def test_wrist_identity_lock_allows_only_explicit_authorized_stack_count(self):
+        lock = build_product_identity_lock(
+            {
+                "canonical_product_type": "bangle",
+                "product_identity": "金色细手镯",
+                "identity_anchors": ["单圈细环；金色"],
+                "display_quantity_contract": {
+                    "status": "AUTHORIZED",
+                    "mode": "SAME_SKU_STACK",
+                    "min_display_count": 2,
+                    "max_display_count": 3,
+                    "required_display_count": 3,
+                    "continuity": "SAME_COUNT_THROUGHOUT_VIDEO",
+                    "authority": "EXPLICIT_OPERATOR_QUANTITY",
+                },
+            }
+        )
+        self.assertEqual(3, lock["display_quantity_contract"]["required_display_count"])
+        material = "；".join(lock["must_not_change"])
+        self.assertIn("始终佩戴3只同款商品", material)
+        self.assertIn("不得中途增加、减少", material)
+        self.assertNotIn("禁止新增第二只同款商品", material)
+
+    def test_claw_clip_identity_lock_prevents_type_and_duplicate_drift(self):
+        lock = build_product_identity_lock(
+            {
+                "canonical_product_type": "claw_clip",
+                "product_identity": "棕色弧形抓夹",
+                "identity_anchors": ["弧形夹体；两列齿梳；棕色"],
+            }
+        )
+        material = "；".join(lock["must_not_change"])
+        self.assertIn("抓夹", material)
+        self.assertIn("第二个同款商品", material)
+        self.assertNotIn("衣长", material)
 
     def test_hidden_snaps_are_compiled_as_one_visible_row_not_double_breasted(self):
         lock = build_product_identity_lock(
@@ -742,7 +956,15 @@ class SimplifiedCompleteScriptTest(unittest.TestCase):
         )
         self.assertEqual(
             assembled["video_generation_brief"]["render_profile"],
-            "UGC_NATIVE_V1",
+            "UGC_NATIVE_V2_MULTICLIP",
+        )
+        self.assertEqual(
+            CAPTURE_RHYTHM_MULTICLIP,
+            assembled["video_generation_brief"]["capture_rhythm_contract"]["profile"],
+        )
+        self.assertEqual(3, len(assembled["video_generation_brief"]["capture_units"]))
+        self.assertEqual(
+            {}, assembled["video_generation_brief"]["outfit_prompt_projection"]
         )
         self.assertTrue(
             assembled["video_generation_brief"]["product_identity_lock"][
@@ -855,6 +1077,14 @@ class SimplifiedCompleteScriptTest(unittest.TestCase):
             creative_contract={
                 "scene_reference_contract": {
                     "status": "SOFT_ONLY",
+                    "scene_request": {
+                        "canonical_product_type": "headscarf",
+                        "presentation_mode": "PERSON_ON_CAMERA",
+                        "scene_intent": "DAYTIME_USE",
+                        "time_light_need": "DAYLIGHT",
+                        "capture_mode": "CREATOR_SELF_SHOT",
+                        "country": "泰国",
+                    },
                     "scene_execution_card": {
                         "status": "AVAILABLE",
                         "source_quality": "STRUCTURE_SCENE_PROTOTYPE",
@@ -866,6 +1096,14 @@ class SimplifiedCompleteScriptTest(unittest.TestCase):
                             "background_depth": "局部桌面与座位纵深",
                         },
                         "background_anchors": ["木桌", "咖啡杯", "第三项忽略"],
+                        "situation_tags": ["WORK_BREAK"],
+                        "aesthetic_anchors": ["暖木与自然侧光"],
+                        "visual_scene_recipe": {
+                            "space_relationship": "咖啡厅靠窗座位；局部桌面与座位纵深",
+                            "material_palette": "暖木桌面与透明玻璃杯",
+                            "lighting_texture": "柔和窗边自然光",
+                            "lived_in_detail": "随手放下的帆布包",
+                        },
                         "lived_in_trace": "随手放下的帆布包",
                         "lighting": "窗边自然光",
                         "representative_video_ids": ["must-not-reach-prompt"],
@@ -882,6 +1120,15 @@ class SimplifiedCompleteScriptTest(unittest.TestCase):
         self.assertEqual(card["status"], "AVAILABLE")
         self.assertEqual(card["background_anchors"], ["木桌", "咖啡杯"])
         self.assertEqual(card["space"]["phone_placement"], "手机靠在桌边")
+        self.assertEqual(card["situation_tags"], ["WORK_BREAK"])
+        self.assertEqual(
+            seed["diversity_context"]["scene_reference"]["scene_request"]["time_light_need"],
+            "DAYLIGHT",
+        )
+        self.assertEqual(
+            card["visual_scene_recipe"]["material_palette"],
+            "暖木桌面与透明玻璃杯",
+        )
         self.assertNotIn("representative_video_ids", card)
 
     def test_normalization_removes_unsourced_exact_scene_measurements(self):
@@ -907,6 +1154,147 @@ class SimplifiedCompleteScriptTest(unittest.TestCase):
         scene = normalized["production_design"]["scene"]
         self.assertNotIn("1.3米", scene["phone_placement"])
         self.assertNotIn("55厘米", scene["subject_position"])
+
+    def test_scarf_visual_execution_v2_is_soft_and_apparel_stays_unchanged(self):
+        scarf_anchor = {
+            "product_positioning_one_liner": "深蓝条纹波点丝巾",
+            "hard_anchors": [{"anchor": "深蓝底色与方形轮廓"}],
+            "display_anchors": [{"anchor": "条纹与波点图案"}],
+        }
+        extension = compile_category_execution_extension(
+            product_type="丝巾",
+            top_category="配饰",
+            anchor_card=scarf_anchor,
+            enabled=True,
+        )
+        seed = build_simplified_creative_seed(
+            anchor_card=scarf_anchor,
+            structure_contract=_contract("WEARER_ACTIVE"),
+            content_bundle=_bundle("条纹与波点图案清楚可见"),
+            creative_contract={
+                "opening_action": "人物已经搭好丝巾，拿起桌边的小包",
+                "action_grammar": "半身结果建立→拿起小包→自然准备离开",
+                "outfit_selection_contract": {
+                    "silhouette_key": "SILK_SCARF_CREW_NECK",
+                    "base_outfit_direction": "合身圆领上衣配高腰半裙",
+                    "finish_direction": "城市休闲完成度",
+                    "supporting_elements": "一只小包",
+                    "grooming_direction": "自然有气色",
+                },
+                "scene_reference_contract": {
+                    "status": "SOFT_ONLY",
+                    "scene_execution_card": {
+                        "status": "AVAILABLE",
+                        "source_quality": "STRUCTURE_SCENE_PROTOTYPE",
+                        "scene_family_key": "CAFE_DINING",
+                        "situation_tags": ["WORK_BREAK"],
+                        "aesthetic_anchors": ["暖木与自然侧光"],
+                        "visual_scene_recipe": {
+                            "space_relationship": "咖啡厅靠窗座位与局部桌面纵深",
+                            "material_palette": "暖木桌面与透明玻璃杯",
+                            "lighting_texture": "柔和窗边自然光",
+                            "lived_in_detail": "桌边随手放下的小包",
+                        },
+                        "lived_in_trace": "桌边随手放下的小包",
+                        "coherence_key": "PROTOTYPE:scene_v2:21",
+                    },
+                },
+            },
+            execution_reference={"content_carrier": "WEARER_ACTIVE"},
+            requested_hook_id="AUDIENCE_NEED_CALLOUT",
+            content_angle_key="FACT_DISCOVERY",
+            product_type="丝巾",
+            top_category="配饰",
+            category_execution_extension=extension,
+        )
+        visual = seed["visual_execution_contract"]
+        self.assertEqual(
+            visual["schema_version"], "visual-execution-contract-v4-wearable-saliency"
+        )
+        self.assertEqual(visual["visual_finish_profile"], "NATIVE_STYLED")
+        self.assertEqual(visual["authorities"]["styling_context"], "SOFT")
+        self.assertEqual(
+            visual["authorities"]["visual_saliency"], "SOFT_FINAL_COMPOSITION"
+        )
+        self.assertFalse(visual["diagnostics_policy"]["may_block_generation"])
+        self.assertEqual(visual["scene_context"]["situation_tags"], ["WORK_BREAK"])
+        self.assertEqual(
+            visual["scene_context"]["visual_scene_recipe"]["material_palette"],
+            "暖木桌面与透明玻璃杯",
+        )
+        self.assertEqual(
+            visual["event_progression"]["suggested_event_flow"],
+            "半身结果建立→拿起小包→自然准备离开",
+        )
+        saliency = visual["visual_saliency"]
+        self.assertEqual(saliency["exposure"]["profile"], "BRIGHT_NATIVE")
+        self.assertEqual(
+            saliency["separation"]["palette_class"],
+            "PATTERNED_OR_MULTICOLOR",
+        )
+        self.assertEqual(
+            saliency["opening_focus"]["framing"], "FACE_NECK_UPPER_BODY"
+        )
+        self.assertIn(
+            "不重新系结", saliency["opening_focus"]["natural_change"]
+        )
+        self.assertFalse(saliency["policy"]["may_block_generation"])
+        self.assertEqual("CATEGORY_CAPABILITY", seed["action_design"]["source"])
+        self.assertTrue(seed["action_design"]["action_signature"])
+        self.assertEqual(
+            seed["action_design"],
+            seed["carrier_specific_execution"]["selected_action_design"],
+        )
+
+        raw = _person_script()
+        raw["production_design"].pop("life_event", None)
+        raw["product_usage"]["identity_anchors_preserved"] = [
+            "深蓝底色与方形轮廓"
+        ]
+        for shot in raw["storyboard"]:
+            shot["product_anchors_visible"] = ["深蓝底色与方形轮廓"]
+        normalized = normalize_simplified_visual_script(
+            raw, seed, generation_provenance={"model": "test"}
+        )
+        self.assertEqual(
+            normalized["production_design"]["life_event"]["continuous_event"],
+            "半身结果建立→拿起小包→自然准备离开",
+        )
+        self.assertEqual(
+            seed["action_design"],
+            normalized["production_design"]["action_execution"],
+        )
+        self.assertEqual(
+            seed["action_design"],
+            normalized["production_design"]["accessory_execution"]["selected_action_design"],
+        )
+        self.assertEqual(normalized["visual_execution_diagnostics"]["mode"], "SOFT_ONLY")
+        validation = validate_simplified_visual_script(normalized, seed)
+        self.assertTrue(validation["valid"], validation)
+        self.assertTrue(
+            any("动作主线未明显落到分镜" in item for item in validation["warnings"]),
+            validation,
+        )
+
+        apparel_seed = build_simplified_creative_seed(
+            anchor_card=_anchor(),
+            structure_contract=_contract("WEARER_ACTIVE"),
+            content_bundle=_bundle(),
+            creative_contract={},
+            execution_reference={"content_carrier": "WEARER_ACTIVE"},
+            requested_hook_id="AUDIENCE_NEED_CALLOUT",
+            content_angle_key="FACT_DISCOVERY",
+            product_type="外套",
+            top_category="女装",
+        )
+        self.assertEqual(
+            "WEARABLE_VISUAL_SALIENCY",
+            apparel_seed["visual_execution_contract"]["feature_scope"],
+        )
+        self.assertEqual(
+            "outerwear",
+            apparel_seed["product_truth"]["canonical_product_type"],
+        )
 
 
 if __name__ == "__main__":

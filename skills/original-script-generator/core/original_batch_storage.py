@@ -27,7 +27,7 @@ _BATCH_TABLE_NAMES = {
     "original_content_item",
 }
 
-POLICY_VERSION = "original-batch-allocation-v19-shared-outfit-template"
+POLICY_VERSION = "original-batch-allocation-v20-action-design"
 
 
 def _now() -> str:

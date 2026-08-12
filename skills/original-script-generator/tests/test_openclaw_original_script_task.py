@@ -47,6 +47,28 @@ class OpenClawOriginalScriptTaskTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "不接受"):
             adapter.build_runner_command(action="refresh-outfits", limit=1)
 
+    def test_refresh_personas_is_a_fixed_standalone_command(self):
+        command = adapter.build_runner_command(action="refresh-personas")
+        self.assertIn("ensure_persona_template_workbench.py", command[1])
+        self.assertIn("--pull-to-db", command)
+        self.assertIn("--no-seed", command)
+        with self.assertRaisesRegex(ValueError, "不接受"):
+            adapter.build_runner_command(action="refresh-personas", limit=1)
+
+    def test_first_frame_actions_use_fixed_runner(self):
+        check = adapter.build_runner_command(action="first-frame-check", limit=5)
+        self.assertIn("run_first_frame_tasks.py", check[1])
+        self.assertIn("--dry-run", check)
+        retry = adapter.build_runner_command(
+            action="first-frame-retry", record_id="recAbc123", limit=1
+        )
+        self.assertIn("--force", retry)
+        self.assertEqual(retry[-2:], ["--limit", "1"])
+
+    def test_first_frame_limit_is_script_row_limit(self):
+        with self.assertRaisesRegex(ValueError, "最多处理 20"):
+            adapter.build_runner_command(action="first-frame-run", limit=21)
+
     def test_product_resolution_requires_exactly_one_eligible_row(self):
         records = [SimpleNamespace(record_id="recOne"), SimpleNamespace(record_id="recTwo")]
         client = SimpleNamespace(list_records=lambda page_size: records)

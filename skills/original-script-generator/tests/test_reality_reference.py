@@ -183,6 +183,9 @@ class RealityReferenceTests(unittest.TestCase):
                 "operator_expression": "运营维护的原始卖点",
                 "expression_policy": "SEMANTIC_AUTHORITY_NOT_VERBATIM",
                 "respectful_reframe_required": True,
+                "primary_demonstration_mode": "NECK_WORN",
+                "demonstration_policy": "ONE_PRIMARY_MODE_PER_15S",
+                "voiceover_scope_policy": "PRIMARY_DEMONSTRATION_MODE_ONLY",
                 "script_readiness": "READY",
                 "core_proof_claim_keys": ["C1"],
             },
@@ -196,6 +199,11 @@ class RealityReferenceTests(unittest.TestCase):
         self.assertEqual(selling["source_argument_id"], "S1")
         self.assertEqual(selling["mapping_status"], "UNMAPPED")
         self.assertTrue(selling["respectful_reframe_required"])
+        self.assertEqual(selling["primary_demonstration_mode"], "NECK_WORN")
+        self.assertEqual(
+            selling["voiceover_scope_policy"],
+            "PRIMARY_DEMONSTRATION_MODE_ONLY",
+        )
         self.assertEqual(
             contract["expression_policy"]["selling_point_authority"],
             "FEISHU_OPERATOR_CONFIRMED",
@@ -752,6 +760,123 @@ class RealityReferenceTests(unittest.TestCase):
         )
         self.assertEqual(bundle["proof_atoms"], bundle["claim_atoms"])
         self.assertIn("PAIN_REFRAME", bundle["preferred_hook_angles"])
+
+    def test_voiceover_hook_policy_accepts_governed_concept_without_raw_tension(self):
+        direction = {
+            "content_bundle_brief": {
+                "preferred_hook_angles": [
+                    "PAIN_REFRAME", "AUDIENCE_NEED_CALLOUT",
+                    "GENERAL_PRODUCT_SHARE",
+                ],
+                "audience_tension": {"status": "UNAVAILABLE", "text": ""},
+                "hook_tension_authority": "CENTRAL_CONCEPT",
+            }
+        }
+        policy = resolve_voiceover_hook_policy(
+            direction,
+            {"PAIN_REFRAME", "AUDIENCE_NEED_CALLOUT", "GENERAL_PRODUCT_SHARE"},
+            requested_hook_id="PAIN_REFRAME",
+        )
+        self.assertEqual("PAIN_REFRAME", policy["selected_hook_id"])
+        self.assertTrue(policy["tension_available"])
+        self.assertEqual("CENTRAL_CONCEPT", policy["hook_tension_authority"])
+
+    def test_scarf_central_concept_drives_hooks_without_raw_tension_text(self):
+        anchor = {
+            "display_anchors": [
+                {"anchor": "深蓝条纹波点图案"},
+                {"anchor": "方形丝巾轮廓"},
+            ]
+        }
+        card = compile_execution_card(
+            observed_row(), cluster_run_id="prompt_only_full", cluster_id=5, cluster_version="v1"
+        )
+        assert card is not None
+        bundle = build_content_bundle_brief(
+            anchor,
+            card.to_dict(),
+            product_type="丝巾",
+            selling_point_catalog=[{
+                "value_id": "CENTRAL_HAIR_RESCUE",
+                "primary_selling_point": "头发状态不理想时可以快速完成造型",
+                "argument_kind": "SELLING_ARGUMENT",
+                "source": "CENTRAL_VOICEOVER_VERIFIED_CLAIM",
+                "argument_theme": "HAIR_RESCUE",
+                "preferred_hook_ids": [
+                    "PAIN_REFRAME", "AUDIENCE_NEED_CALLOUT",
+                    "DISCOVERY_RESULT_PROMISE", "GENERAL_PRODUCT_SHARE",
+                ],
+                "hook_tension_authority": "CENTRAL_CONCEPT",
+            }],
+        )
+        self.assertEqual("CENTRAL_CONCEPT", bundle["hook_tension_authority"])
+        self.assertEqual("PAIN_REFRAME", bundle["preferred_hook_angles"][0])
+        self.assertIn("AUDIENCE_NEED_CALLOUT", bundle["eligible_hook_ids"])
+
+    def test_color_mood_central_hook_mapping_does_not_invent_pain(self):
+        anchor = {"display_anchors": [{"anchor": "深蓝条纹波点图案"}]}
+        card = compile_execution_card(
+            observed_row(), cluster_run_id="prompt_only_full", cluster_id=5, cluster_version="v1"
+        )
+        assert card is not None
+        bundle = build_content_bundle_brief(
+            anchor,
+            card.to_dict(),
+            product_type="丝巾",
+            selling_point_catalog=[{
+                "value_id": "CENTRAL_COLOR_MOOD",
+                "primary_selling_point": "深蓝色能带出海边氛围",
+                "argument_kind": "SELLING_ARGUMENT",
+                "source": "CENTRAL_VOICEOVER_VERIFIED_CLAIM",
+                "argument_theme": "COLOR_MOOD",
+                "preferred_hook_ids": [
+                    "VISUAL_RESULT_DIRECT", "DETAIL_SURPRISE",
+                    "GENERAL_PRODUCT_SHARE",
+                ],
+            }],
+        )
+        self.assertEqual("VISUAL_RESULT_DIRECT", bundle["preferred_hook_angles"][0])
+        self.assertNotIn("PAIN_REFRAME", bundle["eligible_hook_ids"])
+
+    def test_multi_use_bundle_consumes_single_demonstration_scope(self):
+        anchor = {"display_anchors": [{"anchor": "深蓝条纹波点图案"}]}
+        card = compile_execution_card(
+            observed_row(content_carrier="WEARER_ACTIVE"),
+            cluster_run_id="prompt_only_full",
+            cluster_id=5,
+            cluster_version="v1",
+        )
+        assert card is not None
+        scoped_value = "一条丝巾可以灵活变化用法，这次用作颈部点缀"
+        bundle = build_content_bundle_brief(
+            anchor,
+            card.to_dict(),
+            product_type="丝巾",
+            selling_point_catalog=[{
+                "value_id": "CENTRAL_MULTI_USE",
+                "primary_selling_point": "可以系在颈部、头发或包袋上",
+                "voiceover_core_value": scoped_value,
+                "scoped_creative_core_value": scoped_value,
+                "argument_kind": "SELLING_ARGUMENT",
+                "source": "CENTRAL_VOICEOVER_VERIFIED_CLAIM",
+                "argument_theme": "MULTI_USE",
+                "primary_demonstration_mode": "NECK_WORN",
+                "supported_demonstration_modes": [
+                    "NECK_WORN", "HAIR_TIE", "BAG_ACCENT",
+                ],
+                "demonstration_policy": "ONE_PRIMARY_MODE_PER_15S",
+                "voiceover_scope_policy": "PRIMARY_DEMONSTRATION_MODE_ONLY",
+                "visual_dependency": "WEARER_REQUIRED",
+                "compatible_carriers": ["WEARER_ACTIVE", "MIXED"],
+            }],
+        )
+        self.assertEqual(scoped_value, bundle["content_mainline"])
+        self.assertEqual(scoped_value, bundle["selling_argument"]["core_value"])
+        self.assertEqual(
+            "PRIMARY_DEMONSTRATION_MODE_ONLY",
+            bundle["selling_argument"]["voiceover_scope_policy"],
+        )
+        self.assertNotIn("包袋", bundle["selling_argument"]["core_value"])
 
     def test_content_bundle_keeps_generation_risk_out_of_consumer_tension(self):
         anchor = {

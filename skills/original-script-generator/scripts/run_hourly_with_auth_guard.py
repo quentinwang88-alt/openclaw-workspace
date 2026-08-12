@@ -160,7 +160,15 @@ def run() -> int:
     if str(os.environ.get("ORIGINAL_SCRIPT_AUTH_GUARD_ONLY", "") or "").strip() == "1":
         return 0
 
-    command: List[str] = [sys.executable, str(SKILL_DIR / "run_pipeline.py"), *sys.argv[1:]]
+    # The old ``run_pipeline.py`` scans the retired one-row script table.  The
+    # scheduled workflow must use the current operation workbench so status,
+    # batch checkpoints and production-script exports all describe the same
+    # task.
+    command: List[str] = [
+        sys.executable,
+        str(SKILL_DIR / "scripts" / "run_feishu_operation_tasks.py"),
+        *sys.argv[1:],
+    ]
     print("RUN: " + " ".join(command))
     return subprocess.run(command, cwd=str(SKILL_DIR), check=False).returncode
 

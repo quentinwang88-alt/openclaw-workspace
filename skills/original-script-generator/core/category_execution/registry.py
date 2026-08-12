@@ -94,11 +94,7 @@ def reconcile_anchor_category_contract(
         "placement_zone": (
             "head_face" if canonical == "headscarf" else "neck_shoulder"
         ),
-        "operation_policy": (
-            "process_forbidden"
-            if canonical == "headscarf"
-            else "result_first_process_avoid"
-        ),
+        "operation_policy": "result_first_process_avoid",
         "category_authority_source": "PRODUCT_TYPE_REGISTRY_AND_CATEGORY_EXTENSION",
         "primary_visual_result": result_guidance,
         "result_priority": result_guidance,
@@ -152,6 +148,20 @@ def resolve_category_carrier_execution(
     return adapter.resolve_carrier_execution(
         extension, presentation_mode=presentation_mode
     )
+
+
+def resolve_category_argument_execution(
+    extension: Dict[str, Any],
+    *,
+    selling_argument: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Freeze category execution against the selected selling argument."""
+
+    adapter = _adapter_for_extension(extension)
+    resolver = getattr(adapter, "resolve_argument_execution", None) if adapter else None
+    if not callable(resolver):
+        return copy.deepcopy(extension)
+    return resolver(extension, selling_argument=selling_argument)
 
 
 def build_category_blueprint_guidance(

@@ -12,13 +12,92 @@ if str(SKILL_ROOT) not in sys.path:
 
 from core.complete_voiceover_direct import (
     _approved_style_references,
+    _estimated_spoken_seconds,
     _expression_with_selected_claims,
+    _hook_surface_status,
     _narrative_anchor_options,
+    _relationship_language_profile,
+    _target_language_error,
     run_central_complete_voiceover,
 )
 
 
 class CompleteVoiceoverDirectTest(unittest.TestCase):
+    def test_target_language_guard_rejects_thai_for_vietnamese_and_malay(self):
+        thai = "ดูนี่ก่อนนะ ตัวนี้สวยมากค่ะ"
+        self.assertIn("越南语", _target_language_error(thai, "越南语"))
+        self.assertIn("马来语", _target_language_error(thai, "马来语"))
+
+    def test_target_language_guard_accepts_native_vietnamese_and_malay(self):
+        self.assertEqual(
+            "",
+            _target_language_error(
+                "Mình vừa để ý chiếc kẹp này giữ tóc gọn mà nhìn vẫn nhẹ nhàng nhé.",
+                "越南语",
+            ),
+        )
+        self.assertEqual(
+            "",
+            _target_language_error(
+                "Tengok ni, gelang ini nampak cantik bila kena cahaya.",
+                "马来语",
+            ),
+        )
+
+    def test_relationship_surfaces_follow_frozen_target_language(self):
+        vietnamese = _relationship_language_profile(
+            "AUDIENCE_NEED_CALLOUT", target_language="越南语"
+        )
+        malay = _relationship_language_profile(
+            "DETAIL_SURPRISE", target_language="马来语"
+        )
+        self.assertIn("chị em", vietnamese["audience_addresses"])
+        self.assertIn("korang", malay["audience_addresses"])
+        self.assertNotRegex(json.dumps(vietnamese, ensure_ascii=False), r"[\u0E00-\u0E7F]")
+        self.assertNotRegex(json.dumps(malay, ensure_ascii=False), r"[\u0E00-\u0E7F]")
+
+    def test_duration_estimate_uses_word_rate_for_space_delimited_languages(self):
+        text = "Tengok ni gelang ini nampak cantik bila kena cahaya"
+        self.assertEqual(_estimated_spoken_seconds(text, "马来语"), 3.33)
+
+    def test_generation_rejects_wrong_language_before_assembly(self):
+        expression = {
+            "claim_atoms": [{
+                "claim_key": "C1", "fact_text": "发夹固定头发", "supported_shot_nos": [1]
+            }],
+            "argument_contract": {"content": {"value_proposition": {"text": "固定头发"}}},
+            "creative_voice_context": {},
+            "forbidden_leaps": [],
+        }
+        with patch(
+            "core.complete_voiceover_direct.load_active_voiceover_hooks",
+            return_value=[{"hook_id": "DETAIL_SURPRISE"}],
+        ), patch(
+            "core.complete_voiceover_direct._expression_with_selected_claims",
+            return_value=(expression, expression["claim_atoms"]),
+        ), patch(
+            "core.complete_voiceover_direct._invoke_model",
+            return_value={
+                "candidate_id": "DETAIL_SURPRISE",
+                "hook_id": "DETAIL_SURPRISE",
+                "target_text": "ดูนี่ก่อนนะ กิ๊บตัวนี้เก็บผมได้ค่ะ",
+                "chinese_translation": "先看这里，这只发夹可以固定头发。",
+                "used_claim_refs": ["C1"],
+            },
+        ):
+            with self.assertRaisesRegex(ValueError, "目标语言为越南语"):
+                run_central_complete_voiceover(
+                    product_code="P1",
+                    target_country="越南",
+                    target_language="越南语",
+                    top_category="配饰",
+                    product_type="抓夹",
+                    direction={"content_bundle_brief": {}},
+                    visual_plan={"shots": [{"supported_claim_keys": ["C1"]}]},
+                    model_command="mock-command",
+                    candidate_hook_id="DETAIL_SURPRISE",
+                )
+
     def test_style_references_never_fall_back_across_hook_archetypes(self):
         snapshot = {
             "examples": [
@@ -64,6 +143,54 @@ class CompleteVoiceoverDirectTest(unittest.TestCase):
         )
         self.assertEqual(unavailable, [])
 
+    def test_style_references_allow_same_hook_fashion_family_without_cross_hook(self):
+        snapshot = {
+            "examples": [{
+                "example_id": "E_WOMENSWEAR",
+                "raw_text": "authorised viewer relationship sample",
+                "source_authorized": 1,
+                "quality_status": "approved_sample",
+                "country": "TH",
+                "category": "womenswear",
+                "language": "zh",
+            }],
+            "assignments": [{
+                "example_id": "E_WOMENSWEAR",
+                "archetype_id": "AUDIENCE_NEED_CALLOUT",
+            }],
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "snapshot.json"
+            path.write_text(json.dumps(snapshot), encoding="utf-8")
+            with patch(
+                "core.complete_voiceover_direct.VOICEOVER_KNOWLEDGE_SNAPSHOT_PATH",
+                path,
+            ):
+                matched = _approved_style_references(
+                    "AUDIENCE_NEED_CALLOUT",
+                    target_country="泰国",
+                    top_category="配饰",
+                    product_type="丝巾",
+                )
+                wrong_hook = _approved_style_references(
+                    "DETAIL_SURPRISE",
+                    target_country="泰国",
+                    top_category="配饰",
+                    product_type="丝巾",
+                )
+        self.assertEqual(matched[0]["match_tier"], "EXPRESSION_FAMILY")
+        self.assertEqual(wrong_hook, [])
+
+    def test_hook_surface_status_is_observed_separately_from_lineage(self):
+        self.assertEqual(
+            _hook_surface_status("AUDIENCE_NEED_CALLOUT", "ใครอยากได้ลุคนี้ไหม?"),
+            "REALIZED",
+        )
+        self.assertEqual(
+            _hook_surface_status("AUDIENCE_NEED_CALLOUT", "ตัวนี้สีสวยค่ะ"),
+            "WEAK",
+        )
+
     def test_claim_selection_uses_whole_video_evidence_not_visual_spoken_choice(self):
         direction = {"content_bundle_brief": {}}
         visual = {"shots": []}
@@ -81,7 +208,7 @@ class CompleteVoiceoverDirectTest(unittest.TestCase):
             _, selected = _expression_with_selected_claims(direction, visual)
         self.assertEqual([item["claim_key"] for item in selected], ["C1"])
 
-    def test_selling_argument_may_use_two_related_evidence_facts(self):
+    def test_selling_argument_keeps_one_supporting_fact(self):
         direction = {
             "content_bundle_brief": {"content_mode": "SELLING_ARGUMENT"}
         }
@@ -97,7 +224,35 @@ class CompleteVoiceoverDirectTest(unittest.TestCase):
             return_value=expression,
         ):
             _, selected = _expression_with_selected_claims(direction, {"shots": []})
-        self.assertEqual([item["claim_key"] for item in selected], ["C1", "C2"])
+        self.assertEqual([item["claim_key"] for item in selected], ["C1"])
+
+    def test_selling_argument_prefers_direct_support_over_unrelated_detail(self):
+        direction = {
+            "content_bundle_brief": {"content_mode": "SELLING_ARGUMENT"}
+        }
+        expression = {
+            "claim_atoms": [
+                {
+                    "claim_key": "DETAIL",
+                    "fact_text": "表面有光泽",
+                    "argument_relation": "OPTIONAL_PRODUCT_DETAIL",
+                    "supported_shot_nos": [1],
+                },
+                {
+                    "claim_key": "HAIR",
+                    "fact_text": "头巾已佩戴完成",
+                    "argument_relation": "DIRECT_SUPPORT",
+                    "supported_shot_nos": [2],
+                },
+            ],
+            "argument_contract": {"content": {"proof_atoms": []}},
+        }
+        with patch(
+            "core.complete_voiceover_direct.build_voiceover_expression_contract",
+            return_value=expression,
+        ):
+            _, selected = _expression_with_selected_claims(direction, {"shots": []})
+        self.assertEqual([item["claim_key"] for item in selected], ["HAIR"])
 
     def test_content_first_context_restores_speaker_position_without_action_plot(self):
         anchors = _narrative_anchor_options({
@@ -133,6 +288,9 @@ class CompleteVoiceoverDirectTest(unittest.TestCase):
                         "target_need": "频繁进出空调房时需要一层外搭",
                         "allowed_strength": "soft_only",
                         "proof_match_status": "UNMATCHED",
+                        "primary_demonstration_mode": "NECK_WORN",
+                        "demonstration_policy": "ONE_PRIMARY_MODE_PER_15S",
+                        "voiceover_scope_policy": "PRIMARY_DEMONSTRATION_MODE_ONLY",
                     },
                 }
             },
@@ -175,6 +333,25 @@ class CompleteVoiceoverDirectTest(unittest.TestCase):
         self.assertEqual(
             captured["selling_argument"]["core_value"],
             "适合作为降温环境的外搭",
+        )
+        self.assertEqual(
+            captured["mainline_scope"]["policy"],
+            "ONE_CORE_ARGUMENT_WITH_SAME_THEME_SUPPORT",
+        )
+        self.assertEqual(
+            captured["expression_density_contract"]["preferred_information_units"],
+            2,
+        )
+        self.assertFalse(
+            captured["expression_density_contract"]["second_selling_argument_allowed"]
+        )
+        self.assertEqual(
+            captured["selling_argument"]["primary_demonstration_mode"],
+            "NECK_WORN",
+        )
+        self.assertIn(
+            "不枚举其他佩戴方式",
+            captured["mainline_scope"]["instruction"],
         )
 
     def test_selling_argument_may_generate_without_a_visible_fact(self):
@@ -366,6 +543,8 @@ class CompleteVoiceoverDirectTest(unittest.TestCase):
             "realized": "AUDIENCE_ADDRESS",
             "surface_text": "สาวๆ",
         })
+        self.assertEqual(result["hook_lineage_status"], "PINNED")
+        self.assertEqual(result["hook_surface_status"], "REALIZED")
 
 
 if __name__ == "__main__":

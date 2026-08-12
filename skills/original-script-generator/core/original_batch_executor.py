@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing as _mp
 import os
+import queue as _queue
 import time
+import copy
+import traceback as _traceback
 from typing import Any, Dict, List, Optional, Tuple
 
 from core.original_batch_models import (
@@ -26,13 +30,50 @@ from core.complete_script_v3 import CREATIVE_DIVERSITY_POLICY_VERSION
 
 STAGE_CHECKPOINT_SCHEMA_VERSION = "original-batch-stage-checkpoint-v1"
 VISUAL_PROJECTION_CHECKPOINT_VERSION = "event-projection-v2"
-VOICEOVER_CHECKPOINT_VERSION = "central-complete-voiceover-v7-governed-hook-path"
+VOICEOVER_CHECKPOINT_VERSION = "central-complete-voiceover-v10-target-language-safe"
 BLUEPRINT_PRIMARY_TRANSIENT_ATTEMPTS = max(
     1, int(os.environ.get("ORIGINAL_SCRIPT_BLUEPRINT_PRIMARY_TRANSIENT_ATTEMPTS", "2"))
 )
 BLUEPRINT_FALLBACK_MODEL = str(
     os.environ.get("ORIGINAL_SCRIPT_BLUEPRINT_FALLBACK_MODEL", "gpt-5.6-terra") or ""
 ).strip()
+DEFAULT_ITEM_TIMEOUT_SECONDS = int(
+    os.environ.get("ORIGINAL_SCRIPT_ITEM_TIMEOUT_SECONDS", "420") or "420"
+)
+
+
+class ItemExecutionTimeout(RuntimeError):
+    """Raised when one frozen batch item exceeds the wall-clock timeout."""
+
+
+def _execute_single_item_worker(
+    result_queue: "_mp.Queue[Dict[str, Any]]",
+    kwargs: Dict[str, Any],
+) -> None:
+    """Run one item in an isolated process so parent can kill long hangs."""
+    try:
+        child_storage = BatchStorage()
+        child_storage.ensure_schema()
+        result = _execute_single_item(
+            item=kwargs["item"],
+            batch=kwargs["batch"],
+            storage=child_storage,
+            voiceover_root=kwargs.get("voiceover_root", ""),
+            voiceover_db_path=kwargs.get("voiceover_db_path", ""),
+            voiceover_model_command=kwargs.get("voiceover_model_command", ""),
+            voiceover_qc_model_command=kwargs.get("voiceover_qc_model_command", ""),
+            blueprint_model=kwargs.get("blueprint_model", "gpt-5.6-sol"),
+            blueprint_reasoning=kwargs.get("blueprint_reasoning", "high"),
+            script_mode=kwargs.get("script_mode", ""),
+        )
+        result_queue.put({"ok": True, "result": result})
+    except BaseException as exc:  # noqa: BLE001 - serialize child failure.
+        result_queue.put({
+            "ok": False,
+            "error_type": type(exc).__name__,
+            "message": str(exc),
+            "traceback": _traceback.format_exc(),
+        })
 
 
 def _text(value: Any) -> str:
@@ -40,11 +81,17 @@ def _text(value: Any) -> str:
 
 
 def _stable_id(prefix: str, material: Any) -> str:
+    from core.outfit_template_provider import without_outfit_display_metadata
+
+    material = without_outfit_display_metadata(material)
     raw = json.dumps(material, ensure_ascii=False, sort_keys=True, default=str)
     return prefix + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20].upper()
 
 
 def _stable_hash(material: Any) -> str:
+    from core.outfit_template_provider import without_outfit_display_metadata
+
+    material = without_outfit_display_metadata(material)
     raw = json.dumps(material, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
@@ -367,6 +414,7 @@ def load_product_context(
             central_snapshot = load_verified_selling_point_catalog(
                 product_code,
                 voiceover_root=voiceover_root,
+                product_type=resolved_product_type,
             )
             central_catalog = list(central_snapshot.get("catalog") or [])
             legacy_catalog = list(strategy.get("selling_point_catalog", []) or [])
@@ -528,6 +576,7 @@ def run_plan_only(
     output_dir: str = "",
     voiceover_root: str = "",
     voiceover_db_path: str = "",
+    product_context_override: Optional[Dict[str, Any]] = None,
 ) -> Tuple[BatchRecord, List[PlanItem], Dict[str, Any]]:
     """Plan a batch without calling any generative models. Idempotent: same request returns cached plan."""
     storage = BatchStorage()
@@ -562,14 +611,18 @@ def run_plan_only(
             return upgraded, items, summary
 
     # Load product context
-    ctx = load_product_context(
-        request.product_code,
-        target_country=request.target_country,
-        target_language=request.target_language,
-        top_category=request.top_category,
-        product_type=request.product_type,
-        voiceover_root=voiceover_root,
-        allow_missing_structure_route=request.script_mode == "simplified_v1",
+    ctx = (
+        copy.deepcopy(product_context_override)
+        if isinstance(product_context_override, dict) and product_context_override
+        else load_product_context(
+            request.product_code,
+            target_country=request.target_country,
+            target_language=request.target_language,
+            top_category=request.top_category,
+            product_type=request.product_type,
+            voiceover_root=voiceover_root,
+            allow_missing_structure_route=request.script_mode == "simplified_v1",
+        )
     )
     from core.category_execution import (
         compile_category_execution_extension,
@@ -652,7 +705,6 @@ def run_plan_only(
         anchor_card=ctx["anchor_card"],
         product_type=ctx["product_type"],
         top_category=ctx["top_category"],
-        category_execution_extension=category_execution_extension,
         direction_limit=min(request.requested_count, 4),
         recent_execution_card_ids=[],
         recent_source_video_ids=[],
@@ -783,6 +835,7 @@ def run_script_only(
     blueprint_reasoning: str = "high",
     script_mode: str = "",
     delay_between_items: int = 0,
+    item_timeout_seconds: int = 0,
 ) -> Tuple[BatchRecord, List[PlanItem]]:
     """Execute frozen batch items that are PLANNED or SCRIPT_FAILED."""
     storage = BatchStorage()
@@ -808,9 +861,31 @@ def run_script_only(
     completed = 0
     failed = 0
     for item in executable:
-        print(f"\n  🧩 处理 {item.batch_item_id} [{item.item_index}/{batch.requested_count}] | {item.item_role} | {item.requested_hook_id}")
+        print(
+            f"\n  🧩 处理 {item.batch_item_id} "
+            f"[{item.item_index}/{batch.requested_count}] | "
+            f"{item.item_role} | {item.requested_hook_id} | "
+            f"timeout={int(item_timeout_seconds or 0)}s"
+        )
+        storage.update_item_status(
+            item.batch_item_id,
+            "SCRIPT_RUNNING",
+            error_code="",
+            error_message="",
+        )
+        _checkpoint_runtime_event(
+            storage,
+            item.batch_item_id,
+            stage="item_execution",
+            status="RUNNING",
+            message="item execution started",
+            extra={
+                "timeout_seconds": int(item_timeout_seconds or 0),
+                "item_index": item.item_index,
+            },
+        )
         try:
-            result = _execute_single_item(
+            result = _execute_single_item_with_timeout(
                 item=item,
                 batch=batch,
                 storage=storage,
@@ -821,6 +896,7 @@ def run_script_only(
                 blueprint_model=blueprint_model,
                 blueprint_reasoning=blueprint_reasoning,
                 script_mode=selected_script_mode,
+                item_timeout_seconds=item_timeout_seconds,
             )
             if result.get("status") == "SUCCESS":
                 storage.update_item_status(
@@ -836,8 +912,16 @@ def run_script_only(
                     attempt_count=item.attempt_count + 1,
                     result_json=json.dumps(result, ensure_ascii=False, default=str),
                 )
+                _checkpoint_runtime_event(
+                    storage,
+                    item.batch_item_id,
+                    stage="item_execution",
+                    status="SCRIPT_READY",
+                    message="item execution completed",
+                )
                 _update_batch_creative_usage(item, "MACHINE_SCREENED")
                 completed += 1
+                print(f"  ✅ SCRIPT_READY {item.batch_item_id}")
             else:
                 storage.update_item_status(
                     item.batch_item_id, "SCRIPT_FAILED",
@@ -846,7 +930,35 @@ def run_script_only(
                     attempt_count=item.attempt_count + 1,
                     result_json=json.dumps(result, ensure_ascii=False, default=str),
                 )
+                _checkpoint_runtime_event(
+                    storage,
+                    item.batch_item_id,
+                    stage="item_execution",
+                    status="SCRIPT_FAILED",
+                    message=result.get("error_message", ""),
+                    extra={"error_code": result.get("error_code", "SCRIPT_FAILED")},
+                )
                 failed += 1
+                print(f"  ❌ SCRIPT_FAILED {item.batch_item_id}: {result.get('error_code', 'SCRIPT_FAILED')}")
+        except ItemExecutionTimeout as exc:
+            storage.update_item_status(
+                item.batch_item_id,
+                "SCRIPT_FAILED",
+                error_code="ITEM_TIMEOUT",
+                error_message=str(exc),
+                attempt_count=item.attempt_count + 1,
+            )
+            _checkpoint_runtime_event(
+                storage,
+                item.batch_item_id,
+                stage="item_execution",
+                status="TIMEOUT",
+                message=str(exc),
+                extra={"error_code": "ITEM_TIMEOUT"},
+            )
+            _update_batch_creative_usage(item, "RELEASED")
+            failed += 1
+            print(f"  ⏱️ ITEM_TIMEOUT {item.batch_item_id}: {exc}")
         except Exception as exc:
             storage.update_item_status(
                 item.batch_item_id, "SCRIPT_FAILED",
@@ -854,39 +966,37 @@ def run_script_only(
                 error_message=str(exc),
                 attempt_count=item.attempt_count + 1,
             )
+            _checkpoint_runtime_event(
+                storage,
+                item.batch_item_id,
+                stage="item_execution",
+                status="SCRIPT_FAILED",
+                message=str(exc),
+                extra={"error_code": "RUNTIME_ERROR"},
+            )
+            _update_batch_creative_usage(item, "RELEASED")
             failed += 1
+            print(f"  ❌ RUNTIME_ERROR {item.batch_item_id}: {exc}")
+
+        batch = _refresh_batch_totals(storage, batch_id)
+        print(
+            f"  📌 批次进度 ready={batch.ready_count}/{batch.planned_count} "
+            f"failed={batch.failed_count} status={batch.status}"
+        )
 
         if delay_between_items > 0 and (completed + failed) < len(executable):
             import time as _time
             _time.sleep(delay_between_items)
 
-    # Update batch totals against the number that was actually planned.  A
-    # content-capacity shortfall is already recorded by PLAN_ONLY and must not
-    # leave an otherwise complete partial batch stuck in DISPATCHING forever.
+    latest_batch = batch if executable else _refresh_batch_totals(storage, batch_id)
     latest_items = storage.get_items(batch_id)
-    ready = sum(1 for item in latest_items if item.status == "SCRIPT_READY")
-    failed_total = sum(1 for item in latest_items if item.status == "SCRIPT_FAILED")
-    pending_total = sum(
-        1 for item in latest_items if item.status in {"PLANNED", "SCRIPT_RUNNING"}
-    )
-    if batch.planned_count > 0 and ready >= batch.planned_count:
-        batch_status = "SCRIPT_READY"
-    elif failed_total > 0 and pending_total == 0:
-        batch_status = "PARTIAL_FAILED" if ready > 0 else "FAILED"
-    else:
-        batch_status = "DISPATCHING"
-    storage.update_batch_status(
-        batch_id,
-        status=batch_status,
-        ready_count=ready,
-        failed_count=failed_total,
-    )
+    batch_status = latest_batch.status
     if batch_status in {"FAILED", "PARTIAL_FAILED"}:
         for failed_item in latest_items:
             if failed_item.status == "SCRIPT_FAILED":
                 _update_batch_creative_usage(failed_item, "RELEASED")
 
-    return storage.get_batch(batch_id), storage.get_items(batch_id)
+    return latest_batch, latest_items
 
 
 def _execute_simplified_single_item(
@@ -1047,6 +1157,10 @@ def _execute_simplified_single_item(
     )
     voice_dependency_hash = _stable_hash({
         "checkpoint_version": VOICEOVER_CHECKPOINT_VERSION,
+        "target_country": batch.target_country or ctx.get("target_country", ""),
+        "target_language": batch.target_language or ctx.get("target_language", ""),
+        "top_category": batch.top_category or ctx.get("top_category", ""),
+        "product_type": batch.product_type or ctx.get("product_type", ""),
         "simplified_script_id": visual_script.get("simplified_script_id"),
         "voiceover_direction": direction,
         "voiceover_visual_plan": visual_plan,
@@ -1182,6 +1296,195 @@ def _execute_simplified_single_item(
         },
         "script": script,
     }
+
+
+def _checkpoint_runtime_event(
+    storage: BatchStorage,
+    batch_item_id: str,
+    *,
+    stage: str,
+    status: str,
+    message: str = "",
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Persist lightweight runtime heartbeat without changing script content."""
+    item = storage.get_item(batch_item_id)
+    if not item:
+        return
+    raw_checkpoint = item.stage_checkpoint_json
+    if not isinstance(raw_checkpoint, (str, bytes, bytearray)):
+        raw_checkpoint = "{}"
+    try:
+        checkpoint = json.loads(raw_checkpoint or "{}")
+        if not isinstance(checkpoint, dict):
+            checkpoint = {}
+    except json.JSONDecodeError:
+        checkpoint = {}
+    now = _checkpoint_now()
+    checkpoint.setdefault("schema_version", STAGE_CHECKPOINT_SCHEMA_VERSION)
+    checkpoint["current_stage"] = stage
+    checkpoint["last_heartbeat_at"] = now
+    runtime_stage = checkpoint.setdefault("stages", {}).setdefault(stage, {})
+    runtime_stage.update({
+        "status": status,
+        "updated_at": now,
+    })
+    if status == "RUNNING":
+        runtime_stage.setdefault("started_at", now)
+    if message:
+        runtime_stage["message"] = message
+    if extra:
+        runtime_stage.update(extra)
+    storage.update_item_checkpoint(batch_item_id, checkpoint)
+
+
+def _refresh_batch_totals(storage: BatchStorage, batch_id: str) -> BatchRecord:
+    """Recalculate batch status after every item-level state transition."""
+    batch = storage.get_batch(batch_id)
+    if not batch:
+        raise RuntimeError(f"批次不存在: {batch_id}")
+    latest_items = storage.get_items(batch_id)
+    ready = sum(1 for item in latest_items if item.status == "SCRIPT_READY")
+    failed_total = sum(1 for item in latest_items if item.status == "SCRIPT_FAILED")
+    pending_total = sum(
+        1 for item in latest_items if item.status in {"PLANNED", "SCRIPT_RUNNING"}
+    )
+    planned_count = int(batch.planned_count or len(latest_items))
+    if planned_count > 0 and ready >= planned_count:
+        batch_status = "SCRIPT_READY"
+    elif pending_total > 0:
+        batch_status = "DISPATCHING"
+    elif failed_total > 0:
+        batch_status = "PARTIAL_FAILED" if ready > 0 else "FAILED"
+    elif ready > 0:
+        batch_status = "SCRIPT_READY"
+    else:
+        batch_status = "PLANNED"
+    storage.update_batch_status(
+        batch_id,
+        status=batch_status,
+        ready_count=ready,
+        failed_count=failed_total,
+    )
+    batch.status = batch_status
+    batch.ready_count = ready
+    batch.failed_count = failed_total
+    return batch
+
+
+def _execute_single_item_with_timeout(
+    *,
+    item: PlanItem,
+    batch: BatchRecord,
+    storage: BatchStorage,
+    voiceover_root: str = "",
+    voiceover_db_path: str = "",
+    voiceover_model_command: str = "",
+    voiceover_qc_model_command: str = "",
+    blueprint_model: str = "gpt-5.6-sol",
+    blueprint_reasoning: str = "high",
+    script_mode: str = "",
+    item_timeout_seconds: int = DEFAULT_ITEM_TIMEOUT_SECONDS,
+) -> Dict[str, Any]:
+    timeout = int(item_timeout_seconds or 0)
+    if timeout <= 0:
+        return _execute_single_item(
+            item=item,
+            batch=batch,
+            storage=storage,
+            voiceover_root=voiceover_root,
+            voiceover_db_path=voiceover_db_path,
+            voiceover_model_command=voiceover_model_command,
+            voiceover_qc_model_command=voiceover_qc_model_command,
+            blueprint_model=blueprint_model,
+            blueprint_reasoning=blueprint_reasoning,
+            script_mode=script_mode,
+        )
+
+    ctx = _mp.get_context("spawn")
+    result_queue = ctx.Queue(maxsize=1)
+    kwargs = {
+        "item": item,
+        "batch": batch,
+        "voiceover_root": voiceover_root,
+        "voiceover_db_path": voiceover_db_path,
+        "voiceover_model_command": voiceover_model_command,
+        "voiceover_qc_model_command": voiceover_qc_model_command,
+        "blueprint_model": blueprint_model,
+        "blueprint_reasoning": blueprint_reasoning,
+        "script_mode": script_mode,
+    }
+    process = ctx.Process(
+        target=_execute_single_item_worker,
+        args=(result_queue, kwargs),
+        name=f"original-item-{item.batch_item_id}",
+    )
+    process.start()
+    # Do not join before consuming the result queue.  A completed item can carry
+    # a large script/checkpoint payload; joining first can deadlock because the
+    # child waits for its Queue feeder to flush while the parent waits for child
+    # exit.  Consume first, then reap the child.
+    deadline = time.monotonic() + timeout
+    payload: Optional[Dict[str, Any]] = None
+    try:
+        while payload is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                candidate = result_queue.get(timeout=min(1.0, remaining))
+                if isinstance(candidate, dict):
+                    payload = candidate
+                else:
+                    raise RuntimeError("ITEM_PROCESS_RESULT_PAYLOAD_INVALID")
+            except _queue.Empty:
+                if not process.is_alive():
+                    # Allow the queue feeder one short grace period after child
+                    # exit; get_nowait used to race with that final handoff.
+                    try:
+                        candidate = result_queue.get(timeout=0.5)
+                        if isinstance(candidate, dict):
+                            payload = candidate
+                        else:
+                            raise RuntimeError("ITEM_PROCESS_RESULT_PAYLOAD_INVALID")
+                    except _queue.Empty:
+                        break
+
+        if payload is None:
+            if process.is_alive():
+                process.terminate()
+                process.join(8)
+                if process.is_alive():
+                    process.kill()
+                    process.join(2)
+                raise ItemExecutionTimeout(
+                    f"ITEM_TIMEOUT: {item.batch_item_id} 超过 {timeout}s 无完成结果"
+                )
+            raise RuntimeError(
+                f"ITEM_PROCESS_EXITED_WITHOUT_RESULT: exitcode={process.exitcode}"
+            )
+
+        # Queue has been drained, so a normal child can now exit.  Keep the
+        # existing per-item isolation even if its cleanup thread lingers.
+        process.join(8)
+        if process.is_alive():
+            process.terminate()
+            process.join(2)
+            if process.is_alive():
+                process.kill()
+                process.join(2)
+    finally:
+        result_queue.close()
+        result_queue.join_thread()
+
+    if payload.get("ok"):
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError("ITEM_PROCESS_RESULT_INVALID")
+        return result
+    message = payload.get("message") or payload.get("error_type") or "unknown child error"
+    detail = payload.get("traceback") or ""
+    raise RuntimeError(f"{payload.get('error_type', 'ItemError')}: {message}\n{detail}"[:4000])
 
 
 def _execute_single_item(
@@ -1399,6 +1702,10 @@ def _execute_single_item(
     # 3. Voiceover
     voiceover_dependency_hash = _stable_hash({
         "checkpoint_version": VOICEOVER_CHECKPOINT_VERSION,
+        "target_country": batch.target_country,
+        "target_language": batch.target_language,
+        "top_category": batch.top_category,
+        "product_type": batch.product_type,
         "visual_plan": visual_plan,
         "requested_hook_id": item.requested_hook_id,
         "content_bundle": bundle,

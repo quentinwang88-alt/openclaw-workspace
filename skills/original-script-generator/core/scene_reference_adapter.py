@@ -14,8 +14,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 from urllib.parse import unquote, urlparse
 
+from core.product_type_resolution import normalize_product_type
 
-SCENE_REFERENCE_SCHEMA_VERSION = "scene-reference-contract-v2"
+
+SCENE_REFERENCE_SCHEMA_VERSION = "scene-reference-contract-v6-subtype-coherence"
 SCENE_REFERENCE_POLICY_VERSION = "scene-routing-policy-v1"
 _SKILL_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_POLICY_PATH = _SKILL_ROOT / "config" / "scene_routing_policy_v1.json"
@@ -65,6 +67,18 @@ def _mapping(value: Any) -> Dict[str, Any]:
     return {}
 
 
+def _representative_case_ids(value: Any) -> List[str]:
+    cases = _list(value)
+    return _unique_texts(
+        (
+            case.get("video_id")
+            for case in cases
+            if isinstance(case, Mapping)
+        ),
+        limit=3,
+    )
+
+
 def _unique_texts(values: Iterable[Any], *, limit: int) -> List[str]:
     result: List[str] = []
     for value in values:
@@ -74,6 +88,111 @@ def _unique_texts(values: Iterable[Any], *, limit: int) -> List[str]:
         if len(result) >= limit:
             break
     return result
+
+
+def _named_texts(values: Iterable[Any], *, limit: int) -> List[str]:
+    normalized: List[Any] = []
+    for value in values:
+        if isinstance(value, Mapping):
+            normalized.append(
+                value.get("name")
+                or value.get("value")
+                or value.get("prop")
+                or value.get("text")
+                or value.get("anchor")
+            )
+        else:
+            normalized.append(value)
+    return _unique_texts(normalized, limit=limit)
+
+
+_UNKNOWN_SCENE_VALUES = {"", "UNKNOWN", "UNAVAILABLE", "NONE", "NULL", "N/A"}
+_VISUAL_CUE_TOKENS = (
+    "木", "金属", "玻璃", "石", "水泥", "砖", "布", "皮", "藤", "陶", "纸",
+    "暖色", "冷色", "浅色", "深色", "明亮", "昏暗", "米白", "灰色", "棕色",
+    "蓝色", "绿色", "红色", "橙色", "粉色", "透明", "哑光", "纹理", "肌理",
+    "质感", "白墙", "浅木", "深木",
+)
+_LIGHTING_TEXTURES = {
+    "NATURAL_DAY": "现场白天自然光，保留窗边明暗差和手机自动曝光质感",
+    "WARM_INDOOR": "现场已有暖色室内光，保留普通生活空间的轻微色温差",
+    "NIGHT_AMBIENT": "夜间现场环境光混合普通室内灯光，不额外设计商业补光",
+    "RING_LIGHT": "人物正面有轻微均匀补光痕迹，同时保留现场背景亮度差",
+    "COOL_WHITE": "现场已有偏冷白色室内光，保留普通空间的真实亮度",
+}
+
+
+def _is_taxonomy_value(value: Any) -> bool:
+    """Separate operational scene labels from executable visual language."""
+
+    text = _text(value)
+    upper = text.upper()
+    if upper in _UNKNOWN_SCENE_VALUES or upper == "OTHER":
+        return True
+    return bool(text) and all(char.isupper() or char.isdigit() or char in "_-" for char in text)
+
+
+def _descriptive_ambience(value: Any) -> List[str]:
+    text = _text(value)
+    if not text or _is_taxonomy_value(text):
+        return []
+    return [text]
+
+
+def _situation_tags(value: Any) -> List[str]:
+    text = _text(value)
+    if not text or text.upper() in _UNKNOWN_SCENE_VALUES:
+        return []
+    return [text] if _is_taxonomy_value(text) else []
+
+
+def _material_palette_summary(
+    *, ambience: Any, background_anchors: Sequence[Any]
+) -> str:
+    """Use only observed/prototype visual words; never invent a decor style."""
+
+    candidates: List[str] = []
+    candidates.extend(_descriptive_ambience(ambience))
+    for value in background_anchors:
+        text = _text(
+            value.get("name") or value.get("value") or value.get("prop")
+            if isinstance(value, Mapping)
+            else value
+        )
+        if any(token in text for token in _VISUAL_CUE_TOKENS):
+            candidates.append(text)
+    return "；".join(_unique_texts(candidates, limit=2))
+
+
+def _visual_scene_recipe(
+    *,
+    space: Mapping[str, Any],
+    ambience: Any,
+    background_anchors: Sequence[Any],
+    lighting: Any,
+    lived_in_trace: Any,
+) -> Dict[str, str]:
+    """Compile the four soft, directly renderable scene dimensions."""
+
+    relationship = "；".join(
+        _unique_texts(
+            (
+                space.get("location"),
+                space.get("subspace"),
+                space.get("background_depth"),
+            ),
+            limit=3,
+        )
+    )
+    return {
+        "space_relationship": relationship,
+        "material_palette": _material_palette_summary(
+            ambience=ambience,
+            background_anchors=[space.get("location"), *background_anchors],
+        ),
+        "lighting_texture": _text(lighting),
+        "lived_in_detail": _text(lived_in_trace),
+    }
 
 
 def _same_country(left: Any, right: Any) -> bool:
@@ -94,6 +213,96 @@ def _category_matches(observation: Mapping[str, Any], category: Any) -> bool:
         _text(observation.get(key)).lower() for key in ("cat1", "cat2")
     )
     return target in observed or observed in target
+
+
+def _product_type_match_score(
+    observation: Mapping[str, Any], product_type: Any, category: Any
+) -> int:
+    """Prefer exact registered subtypes without excluding coarse old data."""
+
+    requested = normalize_product_type(_text(product_type), _text(category))
+    observed = normalize_product_type(
+        _text(observation.get("cat2")), _text(observation.get("cat1"))
+    )
+    if not requested.recognized_by_registry or not observed.recognized_by_registry:
+        return 0
+    if requested.canonical_type == observed.canonical_type:
+        return 2
+    if requested.canonical_family == observed.canonical_family:
+        return 1
+    return 0
+
+
+def _product_type_observation_is_compatible(
+    observation: Mapping[str, Any], product_type: Any, category: Any
+) -> bool:
+    """Keep unknown historical labels usable, but reject a known wrong subtype.
+
+    A category-level row with no recognised cat2 remains a legitimate weak
+    observation.  Once both sides are known to the registry, however, an
+    earring/hair-clip scene must not be presented as a silk-scarf/headscarf
+    observation merely because both happened to be stored under 配饰.
+    """
+
+    requested = normalize_product_type(_text(product_type), _text(category))
+    observed = normalize_product_type(
+        _text(observation.get("cat2")), _text(observation.get("cat1"))
+    )
+    if not requested.recognized_by_registry or not observed.recognized_by_registry:
+        return True
+    return _product_type_match_score(observation, product_type, category) > 0
+
+
+def _lighting_period(value: Any) -> str:
+    normalized = _text(value).upper()
+    if normalized in {"NATURAL_DAY", "DAYLIGHT", "DAY", "SUNLIGHT"}:
+        return "DAYLIGHT"
+    if normalized in {"NIGHT_AMBIENT", "NIGHT", "EVENING"}:
+        return "NIGHT"
+    lowered = _text(value).lower()
+    if any(token in lowered for token in ("白天", "日光", "自然光", "daylight", "sunlight")):
+        return "DAYLIGHT"
+    if any(token in lowered for token in ("夜间", "夜晚", "夜景", "night", "evening")):
+        return "NIGHT"
+    return "UNAVAILABLE"
+
+
+def _normalized_scene_request(value: Any) -> Dict[str, str]:
+    source = value if isinstance(value, Mapping) else {}
+    return {
+        "schema_version": _text(source.get("schema_version")) or "scene-request-v1",
+        "canonical_product_type": _text(source.get("canonical_product_type")),
+        "presentation_mode": _text(source.get("presentation_mode")),
+        "scene_intent": _text(source.get("scene_intent")).upper() or "GENERAL_USE",
+        "time_light_need": _text(source.get("time_light_need")).upper() or "FLEXIBLE",
+        "capture_mode": _text(source.get("capture_mode")).upper() or "UNAVAILABLE",
+        "country": _text(source.get("country")),
+        "argument_theme": _text(source.get("argument_theme")).upper(),
+    }
+
+
+def _observation_contradiction(
+    observation: Mapping[str, Any], *, family: Any, scene_request: Mapping[str, Any]
+) -> str:
+    """Reject only explicit contradictions; unknown metadata stays usable."""
+
+    requested_light = _text(scene_request.get("time_light_need")).upper()
+    observed_light = _lighting_period(observation.get("lighting"))
+    if requested_light == "DAYLIGHT" and observed_light == "NIGHT":
+        return "TIME_LIGHT_CONFLICT"
+    if requested_light == "NIGHT" and observed_light == "DAYLIGHT":
+        return "TIME_LIGHT_CONFLICT"
+
+    location = _text(observation.get("location"))
+    observed_family = scene_family_for_motif(location) if location else "GENERIC_INDOOR"
+    requested_family = _text(family) or "GENERIC_INDOOR"
+    if (
+        observed_family != "GENERIC_INDOOR"
+        and requested_family != "GENERIC_INDOOR"
+        and observed_family != requested_family
+    ):
+        return "SCENE_FAMILY_CONFLICT"
+    return ""
 
 
 def scene_reference_enabled() -> bool:
@@ -257,7 +466,7 @@ def _scene_layout_for_motif(scene_motif: Any, presentation: Any) -> Dict[str, st
         }
     return {
         "subspace": "日常空间靠墙的一小段可见区域，不扩展为布景",
-        "phone_placement": "手机放在稳定平面或随手支撑处，保持固定手机视角",
+        "phone_placement": "第一段将手机放在稳定平面或随手支撑处；补录片段可在同一小片区域重新放置",
         "subject_position": "人物与手机保持自然交谈距离，不做摄影棚式走位",
         "background_depth": "保留近处一件生活物品和远处普通环境，避免空白影棚",
     }
@@ -285,9 +494,12 @@ def _global_family_records(
             (
                 video_id
                 for row in ranked
-                for video_id in _list(row.get("sample_video_ids"))
+                for video_id in (
+                    _representative_case_ids(row.get("representative_cases"))
+                    + _list(row.get("sample_video_ids"))
+                )
             ),
-            limit=3,
+            limit=6,
         )
         family_policy = families_policy.get(family, {}) if isinstance(families_policy, Mapping) else {}
         result[family] = {
@@ -300,6 +512,7 @@ def _global_family_records(
             "supporting_scene_cluster_ids": [_int(row.get("scene_cluster")) for row in ranked],
             "primary_scene_cluster_id": _int(primary.get("scene_cluster")),
             "prototype_name": _text(primary.get("scene_name")),
+            "scene_description": _text(primary.get("scene_description")),
             "dominant_location": _text(primary.get("dominant_location")),
             "dominant_ambience": _text(primary.get("dominant_ambience")),
             "top_props": _list(primary.get("top_props")),
@@ -319,20 +532,33 @@ def _global_family_records(
 def _curated_scene_execution_card(
     family: str, *, scene_motif: str, presentation: str
 ) -> Dict[str, Any]:
+    space = {
+        "location": _text(scene_motif) or "普通日常室内的一小段可见区域",
+        **_scene_layout_for_motif(scene_motif, presentation),
+    }
+    lighting = "现场已有自然光或普通室内光"
+    lived_in_trace = "保留一件自然出现的随身物品或使用痕迹"
     return {
-        "schema_version": "scene-execution-card-v1",
+        "schema_version": "scene-execution-card-v3",
         "status": "AVAILABLE",
         "source_quality": "CURATED_MOTIF_FALLBACK",
         "scene_family_key": family,
         "prototype_name": "",
-        "space": {
-            "location": _text(scene_motif) or "普通日常室内的一小段可见区域",
-            **_scene_layout_for_motif(scene_motif, presentation),
-        },
+        "space": space,
         "background_anchors": [],
-        "lived_in_trace": "保留一件自然出现的随身物品或使用痕迹",
-        "lighting": "现场已有自然光或普通室内光",
-        "avoid_overdesign": "保留普通手机记录感；不添加商业布光、品牌陈列、花束、样板间式整洁或过度虚化。",
+        "situation_tags": [family],
+        "aesthetic_anchors": [],
+        "lived_in_trace": lived_in_trace,
+        "lighting": lighting,
+        "visual_scene_recipe": _visual_scene_recipe(
+            space=space,
+            ambience="",
+            background_anchors=[],
+            lighting=lighting,
+            lived_in_trace=lived_in_trace,
+        ),
+        "avoid_overdesign": "保留手机记录质感；空间可以有审美完成度，但不添加商业布光、品牌陈列或影棚式精修。",
+        "coherence_key": f"CURATED:{family}:{_text(scene_motif)}",
         "provenance": {
             "scene_run_id": "",
             "primary_scene_cluster_id": 0,
@@ -343,55 +569,58 @@ def _curated_scene_execution_card(
     }
 
 
-def _prototype_anchors(record: Mapping[str, Any], family_policy: Mapping[str, Any]) -> List[str]:
-    """Select at most two non-product background cues from a scene prototype."""
-
-    rejected = ("首饰", "耳环", "发夹", "发饰", "玩偶", "商品", "服装", "衣服", "鞋")
-    values: List[Any] = []
-    for item in _list(record.get("top_props")):
-        if isinstance(item, Mapping):
-            values.append(item.get("name") or item.get("value") or item.get("prop"))
-        else:
-            values.append(item)
-    values.extend(family_policy.get("approved_realism_anchors") or [])
-    return _unique_texts(
-        (value for value in values if not any(token in _text(value) for token in rejected)),
-        limit=2,
-    )
-
-
-def _prototype_lighting(record: Mapping[str, Any]) -> str:
-    distribution = _mapping(record.get("lighting_distribution"))
-    ranked = sorted(
-        ((_text(key), _int(value)) for key, value in distribution.items()),
-        key=lambda item: (-item[1], item[0]),
-    )
-    for lighting, _count in ranked:
-        if lighting and lighting.upper() not in {"UNKNOWN", "UNAVAILABLE", "OTHER"}:
-            return lighting
-    return "现场已有自然光与普通室内光的真实混合"
+def _observed_lighting(value: Any) -> str:
+    text = _text(value)
+    upper = text.upper()
+    if upper in {"", "UNKNOWN", "UNAVAILABLE", "OTHER"}:
+        return "现场已有自然光或普通室内光"
+    return _LIGHTING_TEXTURES.get(upper, text)
 
 
 def _select_scene_observation(
-    record: Mapping[str, Any], *, country: Any, category: Any
+    record: Mapping[str, Any], *, country: Any, category: Any,
+    product_type: Any = "", family: Any = "", scene_request: Any = None,
 ) -> Dict[str, Any]:
     """Prefer one observed tag in the target market/category, when present.
 
-    The prototype remains the fallback because historical samples can be
-    cross-category.  This is a soft precision improvement, never a gate.
+    A full curated scene is the fallback because historical samples can be
+    cross-category. This is a soft precision improvement, never a gate.
     """
 
+    request = _normalized_scene_request(scene_request)
     observations = [
         item for item in record.get("representative_scene_observations") or []
         if isinstance(item, Mapping)
     ]
     if not observations:
         return {}
+
+    def evidence_richness(item: Mapping[str, Any]) -> int:
+        lighting = _text(item.get("lighting")).upper()
+        return sum(
+            (
+                int(bool(_list(item.get("props_normalized")))),
+                int(bool(_list(item.get("realism_anchors")))),
+                int(lighting not in {"", "UNKNOWN", "UNAVAILABLE", "OTHER"}),
+                int(bool(_descriptive_ambience(item.get("ambience")))),
+            )
+        )
+
+    compatible = [
+        item for item in observations
+        if _product_type_observation_is_compatible(item, product_type, category)
+        and not _observation_contradiction(item, family=family, scene_request=request)
+    ]
+    if not compatible:
+        return {}
+
     ranked = sorted(
-        observations,
+        compatible,
         key=lambda item: (
             -int(_same_country(item.get("country"), country)),
+            -_product_type_match_score(item, product_type, category),
             -int(_category_matches(item, category)),
+            -evidence_richness(item),
             -_float(item.get("confidence")),
         ),
     )
@@ -403,12 +632,13 @@ def _select_scene_observation(
 
 def _build_scene_execution_card(
     record: Mapping[str, Any],
-    family_policy: Mapping[str, Any],
     *,
     scene_motif: Any,
     presentation: Any,
     country: Any = "",
     category: Any = "",
+    product_type: Any = "",
+    scene_request: Any = None,
 ) -> Dict[str, Any]:
     """A small advisory card consumed by the visual-script and video prompt.
 
@@ -418,8 +648,38 @@ def _build_scene_execution_card(
     """
 
     prototype_name = _text(record.get("prototype_name"))
-    observation = _select_scene_observation(record, country=country, category=category)
-    raw_traces = _list(observation.get("realism_anchors")) or _list(record.get("realism_anchor_pool"))
+    request = _normalized_scene_request(scene_request)
+    observation = _select_scene_observation(
+        record,
+        country=country,
+        category=category,
+        product_type=product_type,
+        family=record.get("scene_family_key"),
+        scene_request=request,
+    )
+    if not observation:
+        # Aggregate prototypes are useful for family routing but their props,
+        # ambience and lighting may come from different videos.  A final
+        # execution card therefore falls back as one complete curated scene
+        # instead of splicing aggregate evidence into the selected motif.
+        fallback = _curated_scene_execution_card(
+            _text(record.get("scene_family_key")),
+            scene_motif=_text(scene_motif),
+            presentation=_text(presentation),
+        )
+        fallback["scene_request"] = request
+        fallback["provenance"].update({
+            "scene_run_id": _text(record.get("scene_run_id")),
+            "primary_scene_cluster_id": _int(record.get("primary_scene_cluster_id")),
+            "support_level": _text(record.get("support_level")),
+            "support_count": _int(record.get("support_count")),
+            "target_observation_used": False,
+            "fallback_reason": "NO_COMPATIBLE_SINGLE_OBSERVATION",
+        })
+        return fallback
+    # A scene card must describe one coherent source.  Do not combine props
+    # from one observed video with ambience/anchors from the cluster prototype.
+    raw_traces = _list(observation.get("realism_anchors"))
     trace_values = []
     for item in raw_traces:
         if isinstance(item, Mapping):
@@ -427,37 +687,57 @@ def _build_scene_execution_card(
         else:
             trace_values.append(item)
     trace = _unique_texts(trace_values, limit=1)
+    background_anchors = _named_texts(
+        _list(observation.get("props_normalized")), limit=2
+    )
+    ambience = _text(observation.get("ambience"))
+    aesthetic_anchors = _unique_texts(_descriptive_ambience(ambience), limit=2)
+    situation_tags = _unique_texts(_situation_tags(ambience), limit=2)
+    subtype_score = _product_type_match_score(observation, product_type, category)
+    source_quality = (
+        "TARGET_MARKET_PRODUCT_TYPE_SCENE_TAG"
+        if subtype_score == 2
+        else "TARGET_MARKET_CATEGORY_SCENE_TAG"
+    )
+    source_key = f"OBSERVED:{_text(observation.get('video_id'))}"
+    observed_location = _text(observation.get("location"))
+    space = {
+        "location": observed_location or _text(scene_motif),
+        **_scene_layout_for_motif(observed_location or scene_motif, presentation),
+    }
+    # Never borrow prototype lighting for an observed card. Unknown stays a
+    # neutral on-location instruction rather than an invented evidence claim.
+    lighting = _observed_lighting(observation.get("lighting"))
+    lived_in_trace = trace[0] if trace else ""
     return {
-        "schema_version": "scene-execution-card-v1",
+        "schema_version": "scene-execution-card-v3",
         "status": "AVAILABLE",
-        "source_quality": (
-            "TARGET_MARKET_CATEGORY_SCENE_TAG"
-            if observation
-            else "SCENE_FAMILY_PROTOTYPE"
-            if _text(record.get("support_level")) == "GLOBAL_PROTOTYPE"
-            else "STRUCTURE_SCENE_PROTOTYPE"
-        ),
+        "source_quality": source_quality,
         "scene_family_key": _text(record.get("scene_family_key")),
         "prototype_name": prototype_name,
-        "space": {
-            "location": _text(scene_motif) or _text(record.get("dominant_location")) or prototype_name,
-            **_scene_layout_for_motif(scene_motif, presentation),
-        },
-        "background_anchors": _unique_texts(
-            [*_list(observation.get("props_normalized")), *_prototype_anchors(record, family_policy)],
-            limit=2,
+        "space": space,
+        "background_anchors": background_anchors,
+        "situation_tags": situation_tags,
+        "aesthetic_anchors": aesthetic_anchors,
+        "lived_in_trace": lived_in_trace,
+        "lighting": lighting,
+        "visual_scene_recipe": _visual_scene_recipe(
+            space=space,
+            ambience=ambience,
+            background_anchors=background_anchors,
+            lighting=lighting,
+            lived_in_trace=lived_in_trace,
         ),
-        "lived_in_trace": trace[0] if trace else "保留一件自然出现的随身物品或使用痕迹",
-        "lighting": _text(observation.get("lighting"))
-        if _text(observation.get("lighting")).upper() not in {"", "UNKNOWN", "UNAVAILABLE", "OTHER"}
-        else _prototype_lighting(record),
-        "avoid_overdesign": "保留普通手机记录感；不添加商业布光、品牌陈列、花束、样板间式整洁或过度虚化。",
+        "avoid_overdesign": "保留手机记录质感；空间可以有清楚的材质、色调和氛围，但不添加商业布光、品牌陈列或影棚式精修。",
+        "coherence_key": source_key,
+        "scene_request": request,
         "provenance": {
             "scene_run_id": _text(record.get("scene_run_id")),
             "primary_scene_cluster_id": _int(record.get("primary_scene_cluster_id")),
             "support_level": _text(record.get("support_level")),
             "support_count": _int(record.get("support_count")),
-            "target_observation_used": bool(observation),
+            "target_observation_used": True,
+            "product_type_match_score": subtype_score,
         },
     }
 
@@ -544,19 +824,17 @@ def build_contexts_from_matrix_rows(
             ranked = sorted(members, key=lambda row: (-_int(row.get("count")), _int(row.get("scene_cluster"))))
             representative_ids: List[str] = []
             for item in ranked:
-                raw_ids = item.get("sample_video_ids") or []
-                if isinstance(raw_ids, str):
-                    try:
-                        raw_ids = json.loads(raw_ids)
-                    except (TypeError, ValueError, json.JSONDecodeError):
-                        raw_ids = []
-                for video_id in raw_ids if isinstance(raw_ids, list) else []:
+                raw_ids = (
+                    _representative_case_ids(item.get("representative_cases"))
+                    + _list(item.get("sample_video_ids"))
+                )
+                for video_id in raw_ids:
                     text = _text(video_id)
                     if text and text not in representative_ids:
                         representative_ids.append(text)
-                    if len(representative_ids) >= 3:
+                    if len(representative_ids) >= 6:
                         break
-                if len(representative_ids) >= 3:
+                if len(representative_ids) >= 6:
                     break
             primary = ranked[0]
             support_level = "STRONG" if member_count >= 5 else "MEDIUM" if member_count >= 3 else "WEAK"
@@ -579,6 +857,7 @@ def build_contexts_from_matrix_rows(
                 ],
                 "primary_scene_cluster_id": _int(primary.get("scene_cluster")),
                 "prototype_name": _text(primary.get("scene_name")),
+                "scene_description": _text(primary.get("scene_description")),
                 "dominant_location": _text(primary.get("dominant_location")),
                 "dominant_ambience": _text(primary.get("dominant_ambience")),
                 "top_props": _list(primary.get("top_props")),
@@ -640,7 +919,8 @@ def load_scene_reference_contexts(
                 cursor.execute(
                     """
                     SELECT m.structure_run, m.structure_cluster, m.scene_cluster, m.count,
-                           m.sample_video_ids, p.scene_name, p.dominant_location,
+                           m.sample_video_ids, p.scene_name, p.scene_description,
+                           p.representative_cases, p.dominant_location,
                            p.dominant_ambience, p.top_props, p.realism_anchor_pool,
                            p.lighting_distribution, sp.dominant_beat_sequence
                     FROM sd_structure_scene_matrix m
@@ -657,7 +937,10 @@ def load_scene_reference_contexts(
                     (
                         video_id
                         for row in rows
-                        for video_id in _list(row.get("sample_video_ids"))
+                        for video_id in (
+                            _representative_case_ids(row.get("representative_cases"))
+                            + _list(row.get("sample_video_ids"))
+                        )
                     ),
                     limit=5000,
                 )
@@ -697,11 +980,14 @@ def scene_reference_contract_for_family(
     presentation: str = "",
     country: str = "",
     category: str = "",
+    product_type: str = "",
+    scene_request: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Return a compact, frozen contract; unavailable data never becomes a gate."""
 
     context = context if isinstance(context, Mapping) else {}
     family = _text(scene_family_key) or "GENERIC_INDOOR"
+    request = _normalized_scene_request(scene_request)
     record = context.get("families", {}).get(family) if isinstance(context.get("families"), Mapping) else None
     fallback_level = ""
     if not isinstance(record, Mapping):
@@ -713,6 +999,10 @@ def scene_reference_contract_for_family(
         if isinstance(record, Mapping):
             fallback_level = "SCENE_FAMILY_PROTOTYPE_FALLBACK"
     if not isinstance(record, Mapping):
+        fallback_card = _curated_scene_execution_card(
+            family, scene_motif=scene_motif, presentation=presentation
+        )
+        fallback_card["scene_request"] = request
         return {
             "schema_version": SCENE_REFERENCE_SCHEMA_VERSION,
             "status": "SOFT_ONLY",
@@ -721,9 +1011,8 @@ def scene_reference_contract_for_family(
             "reason": _text(context.get("reason")) or "NO_FAMILY_MATCH",
             "approved_realism_anchors": [],
             "matrix_bonus": 0,
-            "scene_execution_card": _curated_scene_execution_card(
-                family, scene_motif=scene_motif, presentation=presentation
-            ),
+            "scene_request": request,
+            "scene_execution_card": fallback_card,
         }
     status = _text(record.get("routing_status"))
     matrix_bonus = _int(record.get("matrix_bonus"))
@@ -756,22 +1045,18 @@ def scene_reference_contract_for_family(
         "approved_realism_anchors": list(record.get("approved_realism_anchors") or [])[:2]
         if eligible_for_prompt
         else [],
+        "scene_request": request,
     }
-    # The old compact realism anchors remain gated by support/lift.  The
-    # execution card is different: it is advisory scene-layout context from a
-    # named prototype and is safe even when the pair is only SOFT_ONLY.
-    family_policy = {}
-    # ``approved_realism_anchors`` has already been copied into the record;
-    # preserve it as the policy source for the card without exposing matrix
-    # data to model prompts.
-    if isinstance(record.get("approved_realism_anchors"), list):
-        family_policy["approved_realism_anchors"] = record.get("approved_realism_anchors")
+    # The old compact realism anchors remain gated by support/lift. The final
+    # card uses either one compatible observation or one complete curated
+    # motif; aggregate prototype fields never become a mixed execution scene.
     contract["scene_execution_card"] = _build_scene_execution_card(
         record,
-        family_policy,
         scene_motif=scene_motif,
         presentation=presentation,
         country=country,
         category=category,
+        product_type=product_type,
+        scene_request=request,
     )
     return contract

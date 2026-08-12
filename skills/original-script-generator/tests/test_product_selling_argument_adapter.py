@@ -5,6 +5,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from core.product_selling_argument_adapter import (
+    _accessory_operator_execution_semantics,
+    _requires_respectful_reframe,
+    _scarf_execution_semantics,
     compatible_structure_carriers,
     load_verified_selling_point_catalog,
     normalized_carrier_requirement,
@@ -12,6 +15,58 @@ from core.product_selling_argument_adapter import (
 
 
 class ProductSellingArgumentAdapterTest(unittest.TestCase):
+    def test_wrist_operator_wording_only_controls_execution_semantics(self):
+        stacked = _accessory_operator_execution_semantics(
+            "手镯", "2毫米细圈，单戴秀气，两个叠戴更有层次"
+        )
+        self.assertEqual("HAND_REQUIRED", stacked["visual_dependency"])
+        self.assertEqual("RESULT_SHOW", stacked["preferred_action_mode"])
+        self.assertNotIn("STATIC_PRODUCT", stacked["compatible_carriers"])
+        self.assertEqual(
+            {
+                "status": "AUTHORIZED",
+                "mode": "SAME_SKU_STACK",
+                "min_display_count": 2,
+                "max_display_count": 2,
+                "required_display_count": 2,
+                "continuity": "SAME_COUNT_THROUGHOUT_VIDEO",
+                "authority": "EXPLICIT_OPERATOR_QUANTITY",
+            },
+            stacked["display_quantity_contract"],
+        )
+
+        ranged = _accessory_operator_execution_semantics(
+            "手镯", "2毫米细圈，单戴秀气，两三个叠戴更有层次"
+        )
+        self.assertEqual(
+            3, ranged["display_quantity_contract"]["required_display_count"]
+        )
+
+        uncounted = _accessory_operator_execution_semantics(
+            "手镯", "这个细圈可以叠戴，风格更丰富"
+        )
+        self.assertNotIn("display_quantity_contract", uncounted)
+
+        process = _accessory_operator_execution_semantics(
+            "手镯", "62毫米圈口，一滑就进去了，佩戴很方便"
+        )
+        self.assertEqual("SIMPLE_WEAR_PROCESS", process["preferred_action_mode"])
+        self.assertEqual(
+            ["HAND_ONLY", "HANDS_ONLY", "MIXED"],
+            process["compatible_carriers"],
+        )
+
+        detail = _accessory_operator_execution_semantics(
+            "手镯", "表面有特殊切割，在自然光下有细小反光"
+        )
+        self.assertEqual({}, detail)
+
+    def test_respectful_reframe_is_conditional_not_blanket_cooling(self):
+        self.assertTrue(_requires_respectful_reframe("像农村妇女的土气穿搭"))
+        self.assertTrue(_requires_respectful_reframe("和我一样虚荣心强的姐妹"))
+        self.assertFalse(_requires_respectful_reframe("空调房、降温环境外搭"))
+        self.assertFalse(_requires_respectful_reframe("遮肉显瘦，版型好"))
+
     def test_carrier_requirement_uses_structured_semantics_only(self):
         argument = {
             "operator_expression": "穿上很显瘦",
@@ -149,6 +204,96 @@ class ProductSellingArgumentAdapterTest(unittest.TestCase):
             self.assertEqual(visual_result["compatible_carriers"], ["WEARER_ACTIVE", "MIXED"])
             self.assertEqual(result["evidence_claims"][0]["claim_id"], "F1")
 
+    def test_scarf_concepts_become_single_usage_execution_semantics(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "voiceover.sqlite"
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """CREATE TABLE product_claim_sources (
+                        claim_source_id TEXT, product_id TEXT, raw_text TEXT,
+                        source_type TEXT, source_ref TEXT,
+                        operator_priority TEXT, created_at TEXT
+                    )"""
+                )
+                conn.execute(
+                    """CREATE TABLE product_claims (
+                        product_id TEXT, verification_status TEXT, claim_id TEXT,
+                        claim_source_id TEXT, concept_id TEXT, source_span TEXT,
+                        canonical_claim_zh TEXT, claim_type TEXT, claim_theme TEXT,
+                        evidence_requirement TEXT, allowed_strength TEXT,
+                        operator_priority TEXT, updated_at TEXT, created_at TEXT,
+                        normalizer_confidence REAL
+                    )"""
+                )
+                conn.execute(
+                    "INSERT INTO product_claim_sources VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "S1", "P-SCARF", "头发容易扁塌，适合局部点缀",
+                        "operator_input", "feishu-product-claims:rec#segment-1",
+                        "core", "1",
+                    ),
+                )
+                conn.executemany(
+                    "INSERT INTO product_claims VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        ("P-SCARF", "VERIFIED", "C1", "S1", "CCP_SCARF_HAIR_RESCUE", "头发容易扁塌", "快速完成头部造型", "benefit", "scarf_hair_use", "source_plus_video", "moderate", "core", "", "1", 0.93),
+                        ("P-SCARF", "VERIFIED", "C2", "S1", "CCP_SCARF_MULTI_USE", "适合局部点缀", "多种点缀用途", "benefit", "scarf_multi_use", "source_plus_video", "factual", "core", "", "2", 0.93),
+                    ],
+                )
+            with patch.dict("os.environ", {"ORIGINAL_SCRIPT_CLAIMS_DB_PATH": str(db_path)}):
+                result = load_verified_selling_point_catalog(
+                    "P-SCARF", product_type="丝巾"
+                )
+
+            argument = result["catalog"][0]
+            self.assertEqual("HAIR_RESCUE", argument["argument_theme"])
+            self.assertEqual("HAIR_TIE", argument["primary_demonstration_mode"])
+            self.assertEqual("ONE_PRIMARY_MODE_PER_15S", argument["demonstration_policy"])
+            self.assertIn("NECK_WORN", argument["supported_demonstration_modes"])
+            self.assertEqual("CENTRAL_CONCEPT", argument["hook_tension_authority"])
+            self.assertEqual("PAIN_REFRAME", argument["preferred_hook_ids"][0])
+
+            with patch.dict("os.environ", {"ORIGINAL_SCRIPT_CLAIMS_DB_PATH": str(db_path)}):
+                head_result = load_verified_selling_point_catalog(
+                    "P-SCARF", product_type="头巾"
+                )
+            self.assertEqual(
+                "HEAD_WORN",
+                head_result["catalog"][0]["primary_demonstration_mode"],
+            )
+
+    def test_scarf_worn_usage_semantics_control_carrier_and_multi_use_scope(self):
+        sun_shade = _scarf_execution_semantics(
+            "头巾", ["CCP_HEADSCARF_SUN_SHADE"]
+        )
+        self.assertEqual("HEAD_WORN", sun_shade["primary_demonstration_mode"])
+        self.assertEqual("WEARER_REQUIRED", sun_shade["visual_dependency"])
+        self.assertNotIn("STATIC_PRODUCT", sun_shade["compatible_carriers"])
+
+        summer_comfort = _scarf_execution_semantics(
+            "丝巾", ["CCP_SCARF_SUMMER_COMFORT"]
+        )
+        self.assertEqual("NECK_WORN", summer_comfort["primary_demonstration_mode"])
+        self.assertEqual("WEARER_REQUIRED", summer_comfort["visual_dependency"])
+
+        multi_use = _scarf_execution_semantics(
+            "丝巾", ["CCP_SCARF_MULTI_USE"]
+        )
+        self.assertEqual(
+            "PRIMARY_DEMONSTRATION_MODE_ONLY",
+            multi_use["voiceover_scope_policy"],
+        )
+        self.assertIn("颈部点缀", multi_use["voiceover_core_value"])
+        self.assertNotIn("头发", multi_use["voiceover_core_value"])
+        self.assertNotIn("包袋", multi_use["voiceover_core_value"])
+
+        product_detail = _scarf_execution_semantics(
+            "丝巾", ["CCP_SCARF_SURFACE_GLOSS"]
+        )
+        self.assertNotEqual(
+            "WEARER_REQUIRED", product_detail.get("visual_dependency")
+        )
+
     def test_operator_claim_wins_duplicate_concept(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "voiceover.sqlite"
@@ -183,6 +328,65 @@ class ProductSellingArgumentAdapterTest(unittest.TestCase):
             self.assertEqual(
                 result["catalog"][0]["primary_selling_point"],
                 "旅行带一件，上班和休闲都能穿",
+            )
+
+    def test_multi_concept_operator_segment_splits_into_narrow_arguments(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "voiceover.sqlite"
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """CREATE TABLE product_claim_sources (
+                        claim_source_id TEXT, product_id TEXT, raw_text TEXT,
+                        source_type TEXT, source_ref TEXT,
+                        operator_priority TEXT, created_at TEXT
+                    )"""
+                )
+                conn.execute(
+                    """CREATE TABLE product_claims (
+                        product_id TEXT, verification_status TEXT, claim_id TEXT,
+                        claim_source_id TEXT, concept_id TEXT, source_span TEXT,
+                        canonical_claim_zh TEXT, claim_type TEXT, claim_theme TEXT,
+                        evidence_requirement TEXT, allowed_strength TEXT,
+                        operator_priority TEXT, updated_at TEXT, created_at TEXT,
+                        normalizer_confidence REAL
+                    )"""
+                )
+                conn.execute(
+                    "INSERT INTO product_claim_sources VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "S4", "P-HEAD",
+                        "4.面料有光泽度阳光下很漂亮 夏天头发出油佩戴不容易有静电 能一秒出门 拯救没洗头",
+                        "operator_input", "feishu-product-claims:rec#segment-4",
+                        "normal", "4",
+                    ),
+                )
+                conn.executemany(
+                    "INSERT INTO product_claims VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        ("P-HEAD", "VERIFIED", "C_HAIR", "S4", "CCP_SCARF_HAIR_RESCUE", "4.原文", "可用于整理头发状态并快速完成头部造型", "benefit", "scarf_hair_use", "source_plus_video", "soft_only", "normal", "", "1", 0.92),
+                        ("P-HEAD", "VERIFIED", "C_STATIC", "S4", "CCP_SCARF_LOW_STATIC", "4.原文", "佩戴时不易产生明显静电困扰", "benefit", "scarf_comfort", "source_plus_video", "soft_only", "normal", "", "2", 0.91),
+                        ("P-HEAD", "VERIFIED", "C_GLOSS", "S4", "CCP_SCARF_SURFACE_GLOSS", "4.原文", "表面在自然光下呈现可见光泽", "feature", "scarf_material", "source_plus_video", "soft_only", "normal", "", "3", 0.90),
+                    ],
+                )
+            with patch.dict("os.environ", {"ORIGINAL_SCRIPT_CLAIMS_DB_PATH": str(db_path)}):
+                result = load_verified_selling_point_catalog(
+                    "P-HEAD", product_type="头巾"
+                )
+
+            self.assertEqual(
+                [
+                    "可用于整理头发状态并快速完成头部造型",
+                    "佩戴时不易产生明显静电困扰",
+                ],
+                [item["operator_expression"] for item in result["catalog"]],
+            )
+            self.assertEqual(
+                ["OPERATOR_S4_C_HAIR", "OPERATOR_S4_C_STATIC"],
+                [item["value_id"] for item in result["catalog"]],
+            )
+            self.assertNotIn(
+                "阳光下很漂亮",
+                " ".join(item["operator_expression"] for item in result["catalog"]),
             )
 
 

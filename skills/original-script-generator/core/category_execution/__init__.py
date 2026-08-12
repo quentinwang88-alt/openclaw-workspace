@@ -12,6 +12,7 @@ from .registry import (
     build_category_video_brief,
     compile_category_execution_extension,
     reconcile_anchor_category_contract,
+    resolve_category_argument_execution,
     resolve_category_carrier_execution,
     validate_category_execution_identity,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "build_category_video_brief",
     "compile_category_execution_extension",
     "reconcile_anchor_category_contract",
+    "resolve_category_argument_execution",
     "resolve_category_carrier_execution",
     "validate_category_execution_identity",
 ]

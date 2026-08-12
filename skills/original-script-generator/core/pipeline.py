@@ -755,7 +755,7 @@ def _latest_local_activity_for_record(record: TaskRecord, storage: PipelineStora
                 JOIN pipeline_runs pr ON pr.run_id = sr.run_id
                 WHERE pr.record_id = ?
                   AND pr.completed_at IS NULL
-            )
+            ) AS activity_events
             """,
             (record.record_id, record.record_id, record.record_id, record.record_id),
         ).fetchone()

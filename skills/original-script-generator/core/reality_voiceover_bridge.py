@@ -24,7 +24,7 @@ from light_tryon.voiceover_engine_bridge import (  # noqa: E402
 VOICEOVER_BRIDGE_VERSION = (
     "original-central-voiceover-bridge-v33-core-proof-first"
 )
-VOICEOVER_ARGUMENT_CONTRACT_VERSION = "voiceover-argument-contract-v5-selling-point-authority"
+VOICEOVER_ARGUMENT_CONTRACT_VERSION = "voiceover-argument-contract-v6-single-theme"
 VOICEOVER_KNOWLEDGE_SNAPSHOT_PATH = (
     Path.home()
     / ".openclaw"
@@ -134,14 +134,18 @@ def resolve_voiceover_hook_policy(
             eligible.append(hook_id)
 
     tension_text = _text(bundle.get("audience_tension", {}).get("text")).lower()
+    governed_concept_tension = (
+        _text(bundle.get("hook_tension_authority")).upper()
+        == "CENTRAL_CONCEPT"
+    )
     pain_terms = (
         "身材", "版型", "贴身", "比例", "腰线", "显瘦", "显高", "อ้วน", "หุ่น"
     )
-    if "PAIN_REFRAME" in eligible and not any(
+    if "PAIN_REFRAME" in eligible and not governed_concept_tension and not any(
         token in tension_text for token in pain_terms
     ):
         eligible = [item for item in eligible if item != "PAIN_REFRAME"]
-    if not tension_text:
+    if not tension_text and not governed_concept_tension:
         eligible = [
             item for item in eligible
             if item not in {"PAIN_REFRAME", "AUDIENCE_NEED_CALLOUT"}
@@ -170,7 +174,10 @@ def resolve_voiceover_hook_policy(
         "eligible_hook_ids": eligible,
         "selected_hook_id": selected,
         "requested_hook_id": requested,
-        "tension_available": bool(tension_text),
+        "tension_available": bool(tension_text) or governed_concept_tension,
+        "hook_tension_authority": (
+            "CENTRAL_CONCEPT" if governed_concept_tension else ""
+        ),
     }
 
 
@@ -914,6 +921,18 @@ def build_voiceover_argument_contract(
                 "evidence_requirement": _text(selling_argument.get("evidence_requirement")),
                 "operator_priority": _text(selling_argument.get("operator_priority")),
                 "proof_match_status": _text(selling_argument.get("proof_match_status")) or "NOT_APPLICABLE",
+                "claim_theme": _text(selling_argument.get("claim_theme")),
+                "argument_theme": _text(selling_argument.get("argument_theme")),
+                "concept_ids": list(selling_argument.get("concept_ids") or []),
+                "primary_demonstration_mode": _text(
+                    selling_argument.get("primary_demonstration_mode")
+                ),
+                "demonstration_policy": _text(
+                    selling_argument.get("demonstration_policy")
+                ),
+                "voiceover_scope_policy": _text(
+                    selling_argument.get("voiceover_scope_policy")
+                ),
                 "core_proof_claim_keys": sorted(core_proof_keys),
                 "optional_visual_claim_keys": sorted(optional_visual_keys),
             },
@@ -952,6 +971,7 @@ def build_voiceover_argument_contract(
             "respectful_reframe_required": bool(
                 selling_argument.get("respectful_reframe_required")
             ),
+            "mainline_scope": "ONE_CORE_ARGUMENT_WITH_SAME_THEME_SUPPORT",
             "visual_proof_match_is_blocking": False,
             # This is soft expression guidance, not a QC gate.  Without an
             # authorised audience tension, the model should open from a

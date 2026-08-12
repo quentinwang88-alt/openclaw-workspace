@@ -29,6 +29,22 @@ TEST_PHASE_TO_CODE = {
     "终测": "FINAL",
     "放大观察": "SCALE_OBSERVE",
 }
+FIRST_FRAME_STATUS_OPTIONS: Tuple[str, ...] = (
+    "用户未选择",
+    "待生成",
+    "生成中",
+    "缓存复用",
+    "已就绪",
+    "生成失败",
+    "缺少人物参考图",
+    "不适用",
+)
+OUTFIT_SCENE_MATCH_OPTIONS: Tuple[str, ...] = (
+    "已匹配",
+    "未配置偏好",
+    "已回退",
+    "不适用",
+)
 
 
 OPERATION_TASK_FIELD_NAMES = {
@@ -107,6 +123,20 @@ PRODUCTION_SCRIPT_FIELD_NAMES = {
     "direction_assignment_id": "方向分配ID",
     "content_bundle_id": "内容包ID",
     "creative_contract_id": "创意合同ID",
+    "persona_id": "人物模板ID（系统）",
+    "persona_name": "人物模板名称（系统）",
+    "persona_contract_json": "人物模板合同_JSON（系统）",
+    "outfit_template_id": "穿搭模板ID（系统）",
+    "outfit_template_name": "穿搭模板名称（系统）",
+    "outfit_accessories": "实际配饰（系统）",
+    "outfit_scene_match": "穿搭场景匹配（系统）",
+    "outfit_scene_contract_json": "穿搭场景关联合同_JSON（系统）",
+    "outfit_persona_match": "人物穿搭匹配（系统）",
+    "outfit_persona_contract_json": "人物穿搭关联合同_JSON（系统）",
+    "reference_strategy": "视觉参考模式（系统）",
+    "first_frame_requested": "生成首帧（需勾选）",
+    "composite_first_frame": "统一首帧（系统）",
+    "first_frame_status": "首帧准备状态（系统）",
     "input_snapshot_hash": "输入快照哈希",
     "model_version": "模型版本",
 }
@@ -287,6 +317,23 @@ PRODUCTION_SCRIPT_FIELDS: Tuple[FieldSpec, ...] = (
     FieldSpec("方向分配ID"),
     FieldSpec("内容包ID"),
     FieldSpec("创意合同ID"),
+    FieldSpec("人物模板ID（系统）"),
+    FieldSpec("人物模板名称（系统）"),
+    FieldSpec("人物模板合同_JSON（系统）"),
+    FieldSpec("穿搭模板ID（系统）"),
+    FieldSpec("穿搭模板名称（系统）"),
+    FieldSpec("实际配饰（系统）"),
+    _single(
+        "穿搭场景匹配（系统）",
+        OUTFIT_SCENE_MATCH_OPTIONS,
+    ),
+    FieldSpec("穿搭场景关联合同_JSON（系统）"),
+    FieldSpec("人物穿搭匹配（系统）"),
+    FieldSpec("人物穿搭关联合同_JSON（系统）"),
+    FieldSpec("视觉参考模式（系统）"),
+    FieldSpec("生成首帧（需勾选）", 7, "Checkbox"),
+    FieldSpec("统一首帧（系统）", 17, "Attachment"),
+    _single("首帧准备状态（系统）", FIRST_FRAME_STATUS_OPTIONS),
     FieldSpec("输入快照哈希"),
     FieldSpec("模型版本"),
 )
@@ -341,6 +388,32 @@ def _fields_by_script_id(
         script_id = str(record.fields.get(field_name) or "").strip()
         if script_id and script_id not in output:
             output[script_id] = record
+    return output
+
+
+def _records_by_batch_item_id(
+    records: Iterable[TaskRecord],
+    *,
+    batch_field_name: str = "批次ID",
+    item_field_name: str = "批次ItemID",
+) -> Dict[Tuple[str, str], TaskRecord]:
+    """Return the canonical row for each frozen batch item.
+
+    ``script_id`` is generated from the complete projection and can legitimately
+    change when an interrupted run resumes after an upstream renderer change.
+    The frozen ``batch_id + batch_item_id`` pair is the stable identity of the
+    planned slot, so it must win when exporting to the human review table.
+    Keeping the first row also makes legacy duplicate rows harmless until they
+    are explicitly archived by a maintenance action.
+    """
+
+    output: Dict[Tuple[str, str], TaskRecord] = {}
+    for record in records:
+        batch_id = str(record.fields.get(batch_field_name) or "").strip()
+        batch_item_id = str(record.fields.get(item_field_name) or "").strip()
+        if not batch_id or not batch_item_id:
+            continue
+        output.setdefault((batch_id, batch_item_id), record)
     return output
 
 
@@ -401,6 +474,21 @@ def projection_to_feishu_fields(
         f["direction_assignment_id"]: projection.get("direction_assignment_id", ""),
         f["content_bundle_id"]: projection.get("content_bundle_id", ""),
         f["creative_contract_id"]: projection.get("creative_contract_id", ""),
+        f["persona_id"]: projection.get("persona_id", ""),
+        f["persona_name"]: projection.get("persona_name", ""),
+        f["persona_contract_json"]: projection.get("persona_contract_json", ""),
+        f["outfit_template_id"]: projection.get("outfit_template_id", ""),
+        f["outfit_template_name"]: projection.get("outfit_template_name", ""),
+        f["outfit_accessories"]: projection.get("outfit_accessories", ""),
+        f["outfit_scene_match"]: projection.get("outfit_scene_match", ""),
+        f["outfit_scene_contract_json"]: projection.get(
+            "outfit_scene_contract_json", ""
+        ),
+        f["outfit_persona_match"]: projection.get("outfit_persona_match", ""),
+        f["outfit_persona_contract_json"]: projection.get(
+            "outfit_persona_contract_json", ""
+        ),
+        f["reference_strategy"]: projection.get("reference_strategy", ""),
         f["input_snapshot_hash"]: projection.get("input_snapshot_hash", ""),
         f["model_version"]: projection.get("model_version", ""),
     }
@@ -409,6 +497,8 @@ def projection_to_feishu_fields(
     if include_workflow_defaults:
         values[f["processing_status"]] = projection.get("processing_status", "待审核")
         values[f["production_enabled"]] = False
+        values[f["first_frame_requested"]] = False
+        values[f["first_frame_status"]] = "用户未选择"
     return {key: value for key, value in values.items() if value not in (None, "")}
 
 
@@ -421,7 +511,8 @@ def export_ready_batch(
     store_id: str = "",
 ) -> Dict[str, int]:
     existing_records = target_client.list_records(page_size=100)
-    existing = _fields_by_script_id(existing_records)
+    existing_by_script_id = _fields_by_script_id(existing_records)
+    existing_by_batch_item_id = _records_by_batch_item_id(existing_records)
     creates: List[Dict[str, Any]] = []
     updated = 0
     skipped = 0
@@ -429,6 +520,9 @@ def export_ready_batch(
     workflow_fields = {
         PRODUCTION_SCRIPT_FIELD_NAMES["processing_status"],
         PRODUCTION_SCRIPT_FIELD_NAMES["production_enabled"],
+        PRODUCTION_SCRIPT_FIELD_NAMES["first_frame_requested"],
+        PRODUCTION_SCRIPT_FIELD_NAMES["composite_first_frame"],
+        PRODUCTION_SCRIPT_FIELD_NAMES["first_frame_status"],
         PRODUCTION_SCRIPT_FIELD_NAMES["review_note"],
         PRODUCTION_SCRIPT_FIELD_NAMES["sync_result"],
         PRODUCTION_SCRIPT_FIELD_NAMES["sync_time"],
@@ -444,17 +538,24 @@ def export_ready_batch(
         if not script_id:
             skipped += 1
             continue
+        batch_id = str(projection.get("batch_id") or "").strip()
+        batch_item_id = str(projection.get("batch_item_id") or "").strip()
+        existing_record = (
+            existing_by_batch_item_id.get((batch_id, batch_item_id))
+            if batch_id and batch_item_id
+            else None
+        ) or existing_by_script_id.get(script_id)
         fields = projection_to_feishu_fields(
             projection,
             product_images=product_images,
             store_id=store_id,
-            include_workflow_defaults=script_id not in existing,
+            include_workflow_defaults=existing_record is None,
         )
-        if script_id in existing:
+        if existing_record is not None:
             update_fields = {
                 key: value for key, value in fields.items() if key not in workflow_fields
             }
-            target_client.update_record_fields(existing[script_id].record_id, update_fields)
+            target_client.update_record_fields(existing_record.record_id, update_fields)
             updated += 1
         else:
             creates.append({"fields": fields})

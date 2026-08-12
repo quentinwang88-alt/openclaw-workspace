@@ -755,7 +755,12 @@ def _normalize_anchor_fact_for_product(text: str, product_type: str) -> str:
     return value
 
 
-def _hook_candidates_for_bundle(reference: Dict[str, Any], claim_atoms: List[Dict[str, Any]]) -> List[str]:
+def _hook_candidates_for_bundle(
+    reference: Dict[str, Any],
+    claim_atoms: List[Dict[str, Any]],
+    selling_argument: Dict[str, Any] | None = None,
+    product_type: str = "",
+) -> List[str]:
     """Choose speech hooks from the content thesis, not the source shot grammar.
 
     ``reference`` remains in the signature for backward-compatible callers,
@@ -765,17 +770,32 @@ def _hook_candidates_for_bundle(reference: Dict[str, Any], claim_atoms: List[Dic
     """
 
     del reference
+    governed_hooks = [
+        _text(item)
+        for item in (selling_argument or {}).get("preferred_hook_ids") or []
+        if _text(item)
+    ]
     primary_atoms = [
         item
         for item in claim_atoms
         if _text(item.get("role")) in {"core_proof", "core_result"}
     ] or claim_atoms[:1]
     groups = {_text(item.get("semantic_group")) for item in primary_atoms}
-    candidates: List[str] = []
+    candidates: List[str] = list(governed_hooks)
     if "detail_structure" in groups:
         candidates.append("DETAIL_SURPRISE")
     if groups.intersection({"fit_proportion", "silhouette", "color", "material"}):
         candidates.extend(["VISUAL_RESULT_DIRECT", "DISCOVERY_RESULT_PROMISE"])
+    # A wrist accessory often has a governed lifestyle/value argument whose
+    # atom is classified as ``general``.  Keep hook authority in the central
+    # resolver, but give that family two non-pain, non-fabricating ways to open
+    # instead of collapsing every script to GENERAL_PRODUCT_SHARE.
+    product_material = _text(product_type).lower()
+    if any(
+        token in product_material
+        for token in ("手链", "手镯", "手环", "手串", "bracelet", "bangle")
+    ):
+        candidates.extend(["DISCOVERY_RESULT_PROMISE", "DETAIL_SURPRISE"])
     candidates.extend(["GENERAL_PRODUCT_SHARE", "USER_ADVOCACY_STANCE"])
     return list(dict.fromkeys(candidates))
 
@@ -885,7 +905,11 @@ def _select_value_proposition(
 
     if candidates:
         selected = max(candidates, key=lambda pair: pair[0])[1]
-        text = _text(selected.get("primary_selling_point") or selected.get("selling_point"))
+        text = _text(
+            selected.get("voiceover_core_value")
+            or selected.get("primary_selling_point")
+            or selected.get("selling_point")
+        )
         value = {
             "value_id": _text(selected.get("value_id")) or _stable_id(
                 "VAL_", {"text": text, "source": "source_script_brief_final_strategy"}
@@ -906,7 +930,10 @@ def _select_value_proposition(
             # This normalized label is safe for visual planning.  The reviewed
             # operator sentence remains available to the central voiceover but
             # must not be reused as character or scene biography.
-            "creative_core_value": _text(selected.get("canonical_selling_point")),
+            "creative_core_value": _text(
+                selected.get("scoped_creative_core_value")
+                or selected.get("canonical_selling_point")
+            ),
             "claim_type": _text(selected.get("claim_type")),
             "claim_theme": _text(selected.get("claim_theme")),
             "expression_policy": _text(selected.get("expression_policy")),
@@ -920,6 +947,23 @@ def _select_value_proposition(
             "verification_status": _text(selected.get("verification_status")),
             "evidence_requirement": _text(selected.get("evidence_requirement")),
             "operator_priority": _text(selected.get("operator_priority")),
+            "concept_ids": list(selected.get("concept_ids") or []),
+            "argument_theme": _text(selected.get("argument_theme")),
+            "primary_demonstration_mode": _text(
+                selected.get("primary_demonstration_mode")
+            ),
+            "supported_demonstration_modes": list(
+                selected.get("supported_demonstration_modes") or []
+            ),
+            "evidence_mode": _text(selected.get("evidence_mode")),
+            "demonstration_policy": _text(selected.get("demonstration_policy")),
+            "voiceover_scope_policy": _text(
+                selected.get("voiceover_scope_policy")
+            ),
+            "preferred_hook_ids": list(selected.get("preferred_hook_ids") or []),
+            "hook_tension_authority": _text(
+                selected.get("hook_tension_authority")
+            ),
         }
         tension_text = _text(selected.get("dominant_user_question"))
         # A prior fallback accidentally promoted video-generation warnings
@@ -1126,6 +1170,15 @@ def build_content_bundle_brief(
         "verification_status": _text(value_proposition.get("verification_status")) if selling_argument_available else "",
         "evidence_requirement": _text(value_proposition.get("evidence_requirement")) if selling_argument_available else "",
         "operator_priority": _text(value_proposition.get("operator_priority")) if selling_argument_available else "",
+        "concept_ids": list(value_proposition.get("concept_ids") or []) if selling_argument_available else [],
+        "argument_theme": _text(value_proposition.get("argument_theme")) if selling_argument_available else "",
+        "primary_demonstration_mode": _text(value_proposition.get("primary_demonstration_mode")) if selling_argument_available else "",
+        "supported_demonstration_modes": list(value_proposition.get("supported_demonstration_modes") or []) if selling_argument_available else [],
+        "evidence_mode": _text(value_proposition.get("evidence_mode")) if selling_argument_available else "",
+        "demonstration_policy": _text(value_proposition.get("demonstration_policy")) if selling_argument_available else "",
+        "voiceover_scope_policy": _text(value_proposition.get("voiceover_scope_policy")) if selling_argument_available else "",
+        "preferred_hook_ids": list(value_proposition.get("preferred_hook_ids") or []) if selling_argument_available else [],
+        "hook_tension_authority": _text(value_proposition.get("hook_tension_authority")) if selling_argument_available else "",
         "visual_dependency": _text(value_proposition.get("visual_dependency")) if selling_argument_available else "FLEXIBLE",
         "compatible_carriers": list(value_proposition.get("compatible_carriers") or []) if selling_argument_available else [],
         "proof_subject": _text(value_proposition.get("proof_subject")) if selling_argument_available else "GENERAL_EXPRESSION",
@@ -1140,7 +1193,16 @@ def build_content_bundle_brief(
         # explicit split above rather than treating all visual facts as copy.
         "proof_claim_keys": core_proof_claim_keys,
     }
-    preferred_hook_angles = _hook_candidates_for_bundle(reference, atoms)
+    preferred_hook_angles = _hook_candidates_for_bundle(
+        reference,
+        atoms,
+        selling_argument,
+        product_type,
+    )
+    hook_tension_authorized = (
+        _text(value_proposition.get("hook_tension_authority")).upper()
+        == "CENTRAL_CONCEPT"
+    )
     if argument_ready and audience_tension.get("status") == "AVAILABLE":
         preferred_hook_angles = list(
             dict.fromkeys(
@@ -1152,6 +1214,13 @@ def build_content_bundle_brief(
                 ]
             )
         )
+    elif argument_ready and hook_tension_authorized:
+        # The central concept is permission to use the concept's governed hook
+        # mapping, not blanket permission to turn every scarf benefit into a
+        # pain hook.  ``preferred_hook_angles`` already starts with that
+        # versioned mapping (for example HAIR_RESCUE may allow PAIN_REFRAME,
+        # while SUN_SHADE starts from AUDIENCE_NEED_CALLOUT).
+        preferred_hook_angles = list(dict.fromkeys(preferred_hook_angles))
     else:
         # An attractive value is not permission to fabricate a shopper need.
         # General friend-like sharing remains available, but a need/pain hook
@@ -1194,6 +1263,9 @@ def build_content_bundle_brief(
         "camera_reason": legacy.get("camera_reason", "UNAVAILABLE"),
         "preferred_hook_angles": preferred_hook_angles,
         "eligible_hook_ids": preferred_hook_angles,
+        "hook_tension_authority": _text(
+            value_proposition.get("hook_tension_authority")
+        ),
         # Pick the content-level hook before the blueprint is written.  The
         # central voiceover engine still owns the final wording, but visual
         # design and speech now start from the same attention intent.

@@ -23,6 +23,8 @@ LIGHTWEIGHT_ROOT = SKILL_ROOT.parent / "lightweight-tryon-video"
 OUTFIT_REFRESH_RUNNER = LIGHTWEIGHT_ROOT / "scripts" / "run_pipeline.py"
 OUTFIT_REFRESH_DB = LIGHTWEIGHT_ROOT / "var" / "light_tryon.sqlite3"
 OUTFIT_REFRESH_CONFIG = LIGHTWEIGHT_ROOT / "config" / "feishu_tables.json"
+PERSONA_REFRESH_RUNNER = SKILL_ROOT / "scripts" / "ensure_persona_template_workbench.py"
+FIRST_FRAME_RUNNER = SKILL_ROOT / "scripts" / "run_first_frame_tasks.py"
 if str(SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILL_ROOT))
 
@@ -42,8 +44,11 @@ ACTION_STATUSES = {
     "plan": {"待执行"},
     "resume": {"失败", "部分完成"},
     "replan": {"失败", "部分完成", "已完成"},
+    "export-ready": {"失败", "部分完成", "已完成", "执行中-脚本生成", "执行中-规划"},
 }
-ALL_ACTIONS = {*ACTION_STATUSES, "refresh-outfits"}
+REFRESH_ACTIONS = {"refresh-outfits", "refresh-personas"}
+FIRST_FRAME_ACTIONS = {"first-frame-check", "first-frame-run", "first-frame-retry"}
+ALL_ACTIONS = {*ACTION_STATUSES, *REFRESH_ACTIONS, *FIRST_FRAME_ACTIONS}
 
 
 def _validate_record_id(value: str) -> str:
@@ -112,6 +117,30 @@ def build_runner_command(
             "--role",
             "styling",
         ]
+    if action == "refresh-personas":
+        if record_id or limit is not None:
+            raise ValueError("refresh-personas 不接受任务记录、产品编码或任务数量")
+        return [
+            sys.executable,
+            str(PERSONA_REFRESH_RUNNER),
+            "--pull-to-db",
+            "--no-seed",
+            "--db-path",
+            str(OUTFIT_REFRESH_DB),
+        ]
+    if action in FIRST_FRAME_ACTIONS:
+        if limit is not None and not 1 <= limit <= 20:
+            raise ValueError("一次最多处理 20 条用户已勾选的首帧任务")
+        command = [sys.executable, str(FIRST_FRAME_RUNNER)]
+        if record_id:
+            command.extend(["--record-id", _validate_record_id(record_id)])
+        if action == "first-frame-check":
+            command.append("--dry-run")
+        elif action == "first-frame-retry":
+            command.append("--force")
+        if limit is not None:
+            command.extend(["--limit", str(limit)])
+        return command
     if record_id:
         record_id = _validate_record_id(record_id)
     if limit is not None and not 1 <= limit <= 5:
@@ -130,6 +159,8 @@ def build_runner_command(
         command.append("--resume-failed")
     elif action == "replan":
         command.append("--replan")
+    elif action == "export-ready":
+        command.append("--export-ready-only")
 
     if limit is not None:
         command.extend(["--limit", str(limit)])
@@ -148,7 +179,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         "--limit",
         type=int,
         default=None,
-        help="最多处理几条运营任务（1-5）；不是脚本数量",
+        help="运营任务动作处理1-5行；首帧动作处理1-20条脚本行",
     )
     return parser.parse_args(argv)
 
@@ -156,12 +187,14 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
 def main(argv: Iterable[str] | None = None) -> int:
     args = parse_args(argv)
     try:
-        if args.action == "refresh-outfits" and (args.record_id or args.product_code or args.limit is not None):
-            raise ValueError("刷新穿搭模板是独立动作，不接受任务选择参数")
+        if args.action in REFRESH_ACTIONS and (
+            args.record_id or args.product_code or args.limit is not None
+        ):
+            raise ValueError("刷新模板是独立动作，不接受任务选择参数")
         record_id = args.record_id
         if record_id:
             record_id = _validate_record_id(record_id)
-        if args.product_code:
+        if args.product_code and args.action not in FIRST_FRAME_ACTIONS:
             record_id = resolve_record_id_for_product(
                 product_code=args.product_code,
                 action=args.action,
@@ -170,13 +203,15 @@ def main(argv: Iterable[str] | None = None) -> int:
         if args.action in {"plan", "resume", "replan"} and not record_id:
             raise ValueError(f"{args.action} 必须指定 --record-id 或 --product-code")
         limit = args.limit
-        if args.action != "refresh-outfits" and not record_id and limit is None:
-            limit = 1
+        if args.action not in REFRESH_ACTIONS and not record_id and limit is None:
+            limit = 5 if args.action in FIRST_FRAME_ACTIONS else 1
         command = build_runner_command(
             action=args.action,
             record_id=record_id,
             limit=limit,
         )
+        if args.product_code and args.action in FIRST_FRAME_ACTIONS:
+            command.extend(["--product-code", _validate_product_code(args.product_code)])
     except ValueError as exc:
         print(f"参数错误: {exc}", file=sys.stderr)
         return 2

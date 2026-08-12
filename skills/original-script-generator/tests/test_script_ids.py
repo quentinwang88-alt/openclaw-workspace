@@ -155,6 +155,34 @@ class ScriptIdsTest(unittest.TestCase):
         self.assertNotIn("被动可见细节：", rendered)
         self.assertNotIn("逐颗指向扣子", rendered)
 
+    def test_prompt_ready_brief_keeps_frozen_outfit_details(self) -> None:
+        rendered = render_script(
+            {
+                "video_generation_brief": {
+                    "production_design": {
+                        "character": {"identity": "日常穿搭创作者"},
+                        "outfit": {
+                            "base_outfit": "日常出门穿搭",
+                            "product_role": "丝巾是上半身重点",
+                            "accessories": "不叠加项链",
+                        },
+                        "scene": {"location": "咖啡厅窗边"},
+                    },
+                    "outfit_prompt_projection": {
+                        "frozen_outfit": "上装：合身纯色吊带；下装：高腰阔腿裤；鞋履：平底鞋",
+                        "hair_neckline_outer": "自然披发放到肩后；开放领口保持留白；无外层",
+                        "palette_visibility_finish": "中性色衬托丝巾；丝巾与领口清楚可见",
+                    },
+                    "product_identity_lock": {},
+                    "storyboard": [],
+                    "voiceover": {},
+                }
+            }
+        )
+        self.assertIn("上装：合身纯色吊带", rendered)
+        self.assertIn("妆发与领口：自然披发放到肩后", rendered)
+        self.assertIn("配色与露出：中性色衬托丝巾", rendered)
+
     def test_render_script_separates_global_local_and_product_constraints(self) -> None:
         rendered = render_script(
             {

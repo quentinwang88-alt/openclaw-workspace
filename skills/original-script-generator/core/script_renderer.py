@@ -989,6 +989,11 @@ def _render_reality_video_generation_brief(script_json: Dict[str, Any]) -> str:
         character = production.get("character") if isinstance(production.get("character"), dict) else {}
         outfit = production.get("outfit") if isinstance(production.get("outfit"), dict) else {}
         scene = production.get("scene") if isinstance(production.get("scene"), dict) else {}
+        outfit_projection = (
+            brief.get("outfit_prompt_projection")
+            if isinstance(brief.get("outfit_prompt_projection"), dict)
+            else {}
+        )
         voiceover = brief.get("voiceover") if isinstance(brief.get("voiceover"), dict) else {}
         must_preserve = [
             _compact_text(item)
@@ -1030,7 +1035,17 @@ def _render_reality_video_generation_brief(script_json: Dict[str, Any]) -> str:
                 else ""
             ),
             f"人物：{_merge_brief_parts(character.get('identity', ''), character.get('appearance', ''), character.get('hair_makeup', ''))}",
-            f"穿搭：{_merge_brief_parts(outfit.get('base_outfit', ''), outfit.get('product_role', ''), outfit.get('accessories', ''))}",
+            f"穿搭：{_merge_brief_parts(outfit_projection.get('frozen_outfit', ''), outfit.get('base_outfit', ''), outfit.get('product_role', ''), outfit.get('accessories', ''))}",
+            (
+                f"妆发与领口：{_compact_text(outfit_projection.get('hair_neckline_outer', ''))}"
+                if _compact_text(outfit_projection.get("hair_neckline_outer", ""))
+                else ""
+            ),
+            (
+                f"配色与露出：{_compact_text(outfit_projection.get('palette_visibility_finish', ''))}"
+                if _compact_text(outfit_projection.get("palette_visibility_finish", ""))
+                else ""
+            ),
             f"场景：{_merge_brief_parts(scene.get('location', ''), scene.get('moment', ''), scene.get('background', ''))}",
         ]
         storyboard = [

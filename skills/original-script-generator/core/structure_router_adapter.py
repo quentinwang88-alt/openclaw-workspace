@@ -77,7 +77,6 @@ def select_original_structure_directions(
         ["USE_PROCESS"]
         if operation_policy in {
             "result_first_process_avoid",
-            "RESULT_FIRST_SIMPLE_ADJUSTMENT_ONLY",
         }
         else []
     )

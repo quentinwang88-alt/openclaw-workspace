@@ -23,7 +23,12 @@ from core.product_selling_argument_adapter import (
     normalized_carrier_requirement,
     normalized_proof_subject,
 )
-from core.outfit_template_provider import get_outfit_template_provider_snapshot
+from core.outfit_template_provider import (
+    get_outfit_template_provider_snapshot,
+    without_outfit_display_metadata,
+)
+from core.persona_template_provider import load_persona_templates
+from core.product_type_resolution import normalize_product_type
 
 
 def _relationship_schedule(requested_count: int, rng: random.Random) -> List[str]:
@@ -38,11 +43,51 @@ def _relationship_schedule(requested_count: int, rng: random.Random) -> List[str
     return ["HOOK_DECIDES"] * count
 
 
+_HOOK_RELATIONSHIP_PREFERENCES = {
+    "AUDIENCE_NEED_CALLOUT": ("VIEWER_REFERENCE", "AUDIENCE_ADDRESS"),
+    "PAIN_REFRAME": ("VIEWER_REFERENCE", "PERSONAL_STANCE"),
+    "USER_ADVOCACY_STANCE": ("AUDIENCE_ADDRESS", "VIEWER_REFERENCE"),
+    "DETAIL_SURPRISE": ("VIEWER_INVITATION", "PERSONAL_STANCE"),
+    "DISCOVERY_RESULT_PROMISE": ("PERSONAL_STANCE", "VIEWER_INVITATION"),
+    "VISUAL_RESULT_DIRECT": ("NO_ADDRESS", "PERSONAL_STANCE"),
+    "GENERAL_PRODUCT_SHARE": ("PERSONAL_STANCE", "VIEWER_REFERENCE"),
+}
+
+
+def _relationship_device_for_hook(
+    hook_id: str,
+    already_assigned: Sequence[str],
+) -> str:
+    """Choose one hook-compatible soft relationship surface.
+
+    This is not a copy template or pass/fail quota.  It only prevents a whole
+    batch from collapsing into ``HOOK_DECIDES`` or the same personal opener.
+    At most one explicit audience address is preferred in each block of five.
+    """
+
+    preferences = _HOOK_RELATIONSHIP_PREFERENCES.get(
+        _text(hook_id).upper(), ("HOOK_DECIDES",)
+    )
+    block_size = len(already_assigned) % 5
+    current_block = (
+        list(already_assigned)[-block_size:] if block_size else []
+    )
+    last = already_assigned[-1] if already_assigned else ""
+    for device in preferences:
+        if device == "AUDIENCE_ADDRESS" and "AUDIENCE_ADDRESS" in current_block:
+            continue
+        if device == last and len(preferences) > 1:
+            continue
+        return device
+    return preferences[0]
+
+
 def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
 def _stable_id(prefix: str, material: Any) -> str:
+    material = without_outfit_display_metadata(material)
     raw = json.dumps(material, ensure_ascii=False, sort_keys=True, default=str)
     return prefix + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20].upper()
 
@@ -156,6 +201,21 @@ def _creator_weighted_directions(
     if not creator:
         return list(directions)
     max_support = 0 if requested_count <= 1 else max(1, (requested_count + 4) // 5)
+    resolved = normalize_product_type(product_type, top_category)
+    if resolved.canonical_type in {
+        "scarf", "winter_scarf", "silk_scarf", "headscarf",
+    }:
+        # A hand-held observation is usually a more native supplementary
+        # direction for a wearable scarf than a mannequin/static display.
+        # Keep this as a stable soft sort: static remains available when the
+        # router has no compatible hand structure.
+        support.sort(
+            key=lambda item: {
+                "HAND_ONLY": 0,
+                "HANDS_ONLY": 0,
+                "STATIC_PRODUCT": 1,
+            }.get(_direction_carrier(item), 2)
+        )
     selected_support_ids = {
         _text(item.get("direction_assignment_id"))
         for item in support[:max_support]
@@ -362,6 +422,11 @@ def _eligible_hooks_for_bundle(
     tension_available = tension_status == "AVAILABLE" and bool(
         _text(tension.get("text") or bundle.get("audience_tension_text"))
     )
+    if (
+        _text(bundle.get("hook_tension_authority")).upper()
+        == "CENTRAL_CONCEPT"
+    ):
+        tension_available = True
     # Legacy tests and frozen packages may only carry the top-level status.
     if not tension and tension_status == "AVAILABLE":
         tension_available = True
@@ -510,7 +575,7 @@ def allocate_batch_items(
     hook_usage: Counter = Counter()
     visual_usage: Counter = Counter()
     used_signatures: set = set()
-    relationship_schedule = _relationship_schedule(requested_count, rng)
+    relationship_devices: List[str] = []
     mother_bundle_indices: Dict[int, int] = {}
 
     # ── Round 1: STRUCTURE_MOTHER ──────────────────────────────────────
@@ -533,10 +598,8 @@ def allocate_batch_items(
         if not eligible_hooks:
             continue
         hook_id = _pick_least_used(eligible_hooks, hook_usage, rng)
-        relationship_device = (
-            relationship_schedule[len(items)]
-            if len(items) < len(relationship_schedule)
-            else "HOOK_DECIDES"
+        relationship_device = _relationship_device_for_hook(
+            hook_id, relationship_devices
         )
 
         creative = _allocate_creative(
@@ -580,6 +643,7 @@ def allocate_batch_items(
             hook_usage[hook_id] += 1
             visual_usage[visual_sig] += 1
             mother_bundle_indices[struct_idx] = bundle_index
+            relationship_devices.append(relationship_device)
 
     if len(items) >= requested_count:
         return items, _build_summary(
@@ -629,10 +693,8 @@ def allocate_batch_items(
         if not eligible_hooks:
             continue
         hook_id = _pick_least_used(eligible_hooks, hook_usage, rng)
-        relationship_device = (
-            relationship_schedule[len(items)]
-            if len(items) < len(relationship_schedule)
-            else "HOOK_DECIDES"
+        relationship_device = _relationship_device_for_hook(
+            hook_id, relationship_devices
         )
 
         creative = _allocate_creative(
@@ -675,6 +737,7 @@ def allocate_batch_items(
             argument_usage[_bundle_argument_key(bundle)] += 1
             hook_usage[hook_id] += 1
             visual_usage[visual_sig] += 1
+            relationship_devices.append(relationship_device)
 
     if len(items) >= requested_count:
         return items, _build_summary(
@@ -829,12 +892,22 @@ def _make_item(
         "content_bundle_brief": bundle,
         "p2_lite": direction.get("p2_lite", {}),
         "creative_diversity_contract": creative,
+        "outfit_scene_affinity_contract": creative.get(
+            "outfit_scene_affinity_contract", {}
+        ),
+        "outfit_persona_affinity_contract": creative.get(
+            "outfit_persona_affinity_contract", {}
+        ),
+        "persona_selection_contract": creative.get("persona_selection_contract", {}),
         "scene_reference_contract": creative.get("scene_reference_contract", {}),
         "requested_hook_id": hook_id,
         "content_angle_key": angle_key,
         "selling_argument_id": selling_argument_id,
     }
-    from core.category_execution import compile_category_execution_extension
+    from core.category_execution import (
+        compile_category_execution_extension,
+        resolve_category_argument_execution,
+    )
 
     if category_execution_extension is None:
         category_execution_extension = compile_category_execution_extension(
@@ -844,6 +917,11 @@ def _make_item(
         )
     else:
         category_execution_extension = dict(category_execution_extension or {})
+    if category_execution_extension:
+        category_execution_extension = resolve_category_argument_execution(
+            category_execution_extension,
+            selling_argument=selling_argument,
+        )
     if category_execution_extension:
         frozen_package["category_execution_extension"] = (
             category_execution_extension
@@ -936,6 +1014,9 @@ def _build_summary(
     outfit_silhouette_counts: Counter = Counter()
     outfit_source_counts: Counter = Counter()
     outfit_template_counts: Counter = Counter()
+    persona_template_counts: Counter = Counter()
+    outfit_persona_affinity_counts: Counter = Counter()
+    reference_strategy_counts: Counter = Counter()
     for it in items:
         struct_counts[it.direction_assignment_id] += 1
         try:
@@ -979,6 +1060,20 @@ def _build_summary(
             )
             outfit_source = _text(outfit_contract.get("source_type"))
             outfit_template = _text(outfit_contract.get("template_id"))
+            persona_contract = (
+                creative.get("persona_selection_contract")
+                if isinstance(creative.get("persona_selection_contract"), dict)
+                else {}
+            )
+            outfit_persona_affinity = (
+                creative.get("outfit_persona_affinity_contract")
+                if isinstance(
+                    creative.get("outfit_persona_affinity_contract"), dict
+                )
+                else {}
+            )
+            persona_id = _text(persona_contract.get("persona_id"))
+            reference_strategy = _text(persona_contract.get("reference_strategy"))
             if scene_family:
                 scene_family_counts[scene_family] += 1
             if surface_key and surface_key != "PRODUCT_LED":
@@ -989,6 +1084,15 @@ def _build_summary(
                 outfit_source_counts[outfit_source] += 1
             if outfit_template:
                 outfit_template_counts[outfit_template] += 1
+            if persona_id:
+                persona_template_counts[persona_id] += 1
+            if reference_strategy:
+                reference_strategy_counts[reference_strategy] += 1
+            affinity_status = _text(
+                outfit_persona_affinity.get("match_status")
+            )
+            if affinity_status:
+                outfit_persona_affinity_counts[affinity_status] += 1
 
     requested = int(requested_count) if requested_count is not None else len(items)
     planned = len(items)
@@ -996,6 +1100,7 @@ def _build_summary(
         "COMPLETE" if planned >= requested else "PARTIAL_CONTENT_CAPACITY"
     )
     outfit_provider_snapshot = get_outfit_template_provider_snapshot()
+    persona_provider_snapshot = load_persona_templates()
     return {
         "policy_version": MODEL_POLICY_VERSION,
         "allocation_round": round_label,
@@ -1023,7 +1128,22 @@ def _build_summary(
         "outfit_source_distribution": dict(outfit_source_counts),
         "outfit_template_distribution": dict(outfit_template_counts),
         "outfit_template_provider_snapshot": outfit_provider_snapshot,
-        "soft_warnings": list(outfit_provider_snapshot.get("soft_warnings") or []),
+        "persona_template_distribution": dict(persona_template_counts),
+        "outfit_persona_affinity_distribution": dict(
+            outfit_persona_affinity_counts
+        ),
+        "reference_strategy_distribution": dict(reference_strategy_counts),
+        "persona_template_provider_snapshot": {
+            key: persona_provider_snapshot.get(key)
+            for key in (
+                "provider_version", "status", "enabled_count",
+                "approved_asset_count", "soft_warnings",
+            )
+        },
+        "soft_warnings": [
+            *list(outfit_provider_snapshot.get("soft_warnings") or []),
+            *list(persona_provider_snapshot.get("soft_warnings") or []),
+        ],
         "scene_family_diversity_target_met": (
             len(scene_family_counts) >= min(3, planned) if planned else False
         ),

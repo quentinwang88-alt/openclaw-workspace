@@ -158,6 +158,37 @@ class CompleteScriptV3Tests(unittest.TestCase):
         self.assertIn("佩戴", contract["opening_action"])
         self.assertNotIn("工作台", contract["scene_motif"])
 
+    def test_wrist_and_hair_accessories_receive_role_aware_outfit_contracts(self) -> None:
+        wrist = build_creative_diversity_contract(
+            product_code="WRIST_1",
+            country="泰国",
+            category="配饰",
+            product_type="手镯",
+            direction=direction(),
+            recent_usage=[],
+        )
+        hair = build_creative_diversity_contract(
+            product_code="HAIR_1",
+            country="泰国",
+            category="发饰",
+            product_type="抓夹",
+            direction=direction(),
+            recent_usage=[],
+        )
+        self.assertEqual("WORN_ACCESSORY", wrist["creative_product_profile"])
+        self.assertEqual(
+            "SUPPORTING_OUTFIT_WRIST",
+            wrist["outfit_selection_contract"]["target_role"],
+        )
+        self.assertIn("WRIST", wrist["outfit_selection_contract"]["visibility_zones"])
+        self.assertEqual("WORN_ACCESSORY", hair["creative_product_profile"])
+        self.assertEqual(
+            "SUPPORTING_OUTFIT_HAIR",
+            hair["outfit_selection_contract"]["target_role"],
+        )
+        self.assertIn("HAIR", hair["outfit_selection_contract"]["visibility_zones"])
+        self.assertNotIn("领口", hair["outfit_selection_contract"]["visibility_requirement"])
+
     def test_scarf_subtypes_receive_distinct_scene_and_outfit_pools(self) -> None:
         outputs = {}
         for product_type in ("秋冬围巾", "丝巾", "头巾"):
@@ -176,7 +207,7 @@ class CompleteScriptV3Tests(unittest.TestCase):
         self.assertTrue(
             all(
                 item["outfit_selection_contract"]["contract_version"]
-                == "outfit-selection-v3-worn-accessory"
+                == "outfit-selection-v10-persona-affinity"
                 for item in outputs.values()
             )
         )
@@ -185,6 +216,104 @@ class CompleteScriptV3Tests(unittest.TestCase):
             outputs["丝巾"]["scene_motif"],
         )
         self.assertNotIn("缠绕", outputs["头巾"]["opening_action"])
+        self.assertEqual(
+            "SUPPORTING_OUTFIT_HEAD",
+            outputs["头巾"]["outfit_selection_contract"]["target_role"],
+        )
+        self.assertIn(
+            outputs["头巾"]["outfit_selection_contract"]["style_family"],
+            {
+                "Y2K_BOLD_FEMININE",
+                "STREET_FEMININE",
+                "RESORT_CHIC",
+                "CITY_MINIMAL_HEAD_STYLE",
+            },
+        )
+        self.assertNotIn(
+            "中长半裙",
+            outputs["丝巾"]["outfit_selection_contract"]["base_outfit_direction"],
+        )
+        self.assertTrue(
+            outputs["丝巾"]["outfit_selection_contract"]["outfit_recipe"]
+        )
+
+    def test_silk_scarf_hair_mode_switches_supporting_outfit_to_head_role(self) -> None:
+        hair_direction = direction()
+        hair_direction["content_bundle_brief"] = {
+            "selling_argument": {
+                "primary_demonstration_mode": "HAIR_TIE",
+            }
+        }
+        contract = build_creative_diversity_contract(
+            product_code="P_SILK_HAIR",
+            country="泰国",
+            category="配饰",
+            product_type="丝巾",
+            direction=hair_direction,
+            recent_usage=[],
+        )
+        outfit = contract["outfit_selection_contract"]
+        self.assertEqual("HAIR_TIE", outfit["demonstration_mode"])
+        self.assertEqual("SUPPORTING_OUTFIT_HEAD", outfit["target_role"])
+        self.assertIn("HEAD", outfit["visibility_zones"])
+
+    def test_headscarf_sun_shade_compiles_daylight_scene_request(self) -> None:
+        sun_direction = direction()
+        sun_direction["content_bundle_brief"] = {
+            "selling_argument": {
+                "argument_theme": "SUN_SHADE",
+                "proof_subject": "SCENE_USAGE",
+                "primary_demonstration_mode": "HEAD_WORN",
+            }
+        }
+        contract = build_creative_diversity_contract(
+            product_code="P_HEAD_SUN",
+            country="泰国",
+            category="配饰",
+            product_type="头巾",
+            direction=sun_direction,
+            recent_usage=[],
+        )
+        request = contract["scene_request_contract"]
+        self.assertEqual(request["canonical_product_type"], "headscarf")
+        self.assertEqual(request["scene_intent"], "DAYTIME_USE")
+        self.assertEqual(request["time_light_need"], "DAYLIGHT")
+        self.assertEqual(request["capture_mode"], "CREATOR_SELF_SHOT")
+        self.assertEqual(
+            contract["scene_reference_contract"]["scene_request"], request
+        )
+        self.assertIn("DAYTIME_USE", contract["scene_affinity_preferences"])
+        self.assertIn("DAYTIME_USE", contract["scene_affinity_matches"])
+        self.assertGreater(contract["scene_affinity_score"], 0)
+        self.assertGreater(contract["scene_proof_environment_score"], 0)
+        self.assertTrue(
+            any(
+                token in contract["scene_motif"]
+                for token in ("户外", "室外", "临街", "步道", "楼下", "遮檐")
+            )
+        )
+        self.assertNotIn("客厅", contract["scene_motif"])
+        self.assertNotIn("玄关", contract["scene_motif"])
+
+    def test_silk_and_head_scarf_outfits_rotate_structured_silhouettes_in_batch(self) -> None:
+        expectations = {"丝巾": 5, "头巾": 4}
+        for product_type, minimum_unique in expectations.items():
+            recent = []
+            silhouettes = set()
+            for index in range(5):
+                contract = build_creative_diversity_contract(
+                    product_code=f"P_{product_type}_{index}",
+                    country="泰国",
+                    category="配饰",
+                    product_type=product_type,
+                    direction=direction(),
+                    recent_usage=recent,
+                )
+                outfit = contract["outfit_selection_contract"]
+                silhouettes.add(outfit["silhouette_key"])
+                self.assertTrue(outfit["outfit_recipe"])
+                recent.append({**contract, "_batch_reserved": True})
+            self.assertGreaterEqual(len(silhouettes), minimum_unique)
 
     def test_generic_scarf_no_longer_uses_product_led_outfit_placeholder(self) -> None:
         contract = build_creative_diversity_contract(
@@ -364,7 +493,7 @@ class CompleteScriptV3Tests(unittest.TestCase):
             second["outfit_selection_contract"]["silhouette_key"],
         )
         self.assertEqual(
-            "outfit-selection-v2-shared-provider",
+            "outfit-selection-v10-persona-affinity",
             second["outfit_selection_contract"]["contract_version"],
         )
         self.assertFalse(second["outfit_selection_contract"]["hard_required"])
