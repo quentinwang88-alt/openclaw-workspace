@@ -1,7 +1,7 @@
 ---
 name: hermes-product-analysis
 description: |
-  Hermes 选品与市场洞察 skill。用于从飞书标准化商品快照表消费数据，运行市场洞察 Agent、方向卡动态更新、direction_execution_brief、方向样本商品池、任务驱动选品 Agent，并支持周度“市场洞察 → brief ready → 选品评分”闭环。
+  Hermes 选品、市场洞察与1688找货 skill。用于从标准化商品快照消费数据，运行市场洞察、方向卡、任务驱动选品，并处理“给泰国发夹发簪最新一期勾选测品的商品找货”“找截至某日某类目的测品商品”等按国家、三级类目和数据期限定的工作台找货指令。
 ---
 
 # Hermes Product Analysis
@@ -20,6 +20,51 @@ Hermes 现在按三层处理：
 - 所有流程必须按 `crawl_batch_id + market_id + category_id + category_name` 隔离。
 - 市场报告通过 `direction_execution_brief` 影响选品，不直接给方向下所有商品加分。
 - 如果同批 brief 不 ready，Selection Agent 先等待/重试；超过重试后才允许 previous brief 或 fallback brief，并打风险标记。
+
+## 自然语言找货入口
+
+飞书群内执行采用静默模式：首次确认接单后不再推送单品进度、每轮进度、
+`Still working`、后台进程编号、日志路径或进程完成通知。全部勾选记录进入
+终态后只发送一次汇总。中途旧进程失败但补跑成功时，只在最终汇总中简短
+说明，不单独推送旧失败。
+
+当用户要求“给某国家、某三级类目、某一期勾选了是否测品的商品找货”时，只运行白名单适配器：
+
+```bash
+python3 /Users/likeu3/Desktop/skills/workspace-archive-20260419-131447/skills/hermes-product-analysis/scripts/run_workbench_sourcing_request.py \
+  --market-id TH \
+  --category-name "发夹发簪" \
+  --period latest \
+  --execute \
+  --headless
+```
+
+Hermes 只负责把自然语言解析成以下参数，不得自行拼 SQL 或遍历历史工作台：
+
+```text
+market-id: 必填，例如 TH / VN / MY
+category-name: 必填，可重复传入；每个三级类目独立解析批次
+period: latest / on / as-of
+date: period=on 或 as-of 时必填，格式 YYYY-MM-DD
+```
+
+语义映射：
+
+```text
+“最新一期/本期” -> --period latest
+“8月11日这一期” -> --period on --date 2026-08-11
+“截至8月11日最新一期” -> --period as-of --date 2026-08-11
+```
+
+执行约束：
+
+- 没有明确国家或三级类目时停止并请用户补充，禁止猜测或扩大范围。
+- `latest` 表示该国家、该三级类目在 RDS Layer2 中存在且已完成 Selection 的最新批次；不同类目分别选择自己的最新批次。
+- `on` 找不到该日已完成 Selection 的精确批次时直接报告无匹配，不向前回退；`as-of` 才允许选择该日以前最近一期。
+- 只处理精确批次商品集合与工作台 `是否测品/人工触发找货` 勾选记录的交集；历史期勾选不得进入。
+- 用户明确说“找货/执行找货”即授权传 `--execute`。仅询问范围、数量或预览时不传，脚本只输出计划。
+- 适配器继续复用现有 1688 护栏：每批 5 条、间隔 10-30 秒、单条回写、终态跳过、验证码暂停。
+- 本入口只做 Hermes 找货，不调用自动上品或妙手发布。
 
 ## 2026-07-18 强制流程约束
 

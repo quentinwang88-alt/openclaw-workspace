@@ -1,10 +1,58 @@
 ---
 name: hermes-product-analysis-pipeline
-description: "Run the existing Hermes product-analysis project against a Feishu table using only the project directory: locate table_config, ensure output fields, then process in small writeback batches until pending rows are empty."
+description: "Run the existing Hermes product-analysis project and route country/category/date-scoped requests for checked selection-workbench products to the dedicated 1688 sourcing adapter."
 author: Hermes Agent
 ---
 
 # Hermes Product Analysis Pipeline
+
+## Highest-priority route: checked workbench sourcing
+
+This section overrides the generic pipeline instructions below.
+
+For Feishu requests, keep the run quiet after the initial acknowledgement.
+Do not send per-product, per-round, `Still working`, terminal/process ID, log
+path, or background-process completion messages. Send exactly one user-facing
+summary after all selected rows reach a terminal status. An earlier failed
+wrapper that is later recovered must be included only as a short warning in
+that final summary, never as a separate completion push.
+
+When the user asks to find suppliers / 找货 for products that were checked as
+`是否测品` or `人工触发找货` in the selection workbench, do not import a batch,
+do not start Market Agent, and do not start Selection Agent. Run only the
+deterministic adapter:
+
+```bash
+cd /Users/likeu3/Desktop/skills/workspace-archive-20260419-131447/skills/hermes-product-analysis
+python3 scripts/run_workbench_sourcing_request.py \
+  --market-id VN \
+  --category-name "发夹发簪" \
+  --period latest \
+  --execute \
+  --headless
+```
+
+Natural-language mapping:
+
+```text
+最新一期 / 本期                 -> --period latest
+8月12日这一期                  -> --period on --date 2026-08-12
+截至8月12日最新一期            -> --period as-of --date 2026-08-12
+```
+
+Hard guards:
+
+- Require an explicit market and third-level category; never widen the scope.
+- `on` is exact. If that date has no completed Selection batch, report that
+  result and stop. Never fall back to an earlier date and never launch the
+  Market/Selection pipeline to manufacture a matching batch.
+- Only `as-of` may select the latest completed batch on or before the date.
+- The adapter alone resolves the RDS batch and intersects it with checked
+  workbench rows. Do not manually query historical workbench rows or compose
+  sourcing commands.
+- Include `--execute` only when the user explicitly asks to find/source the
+  products. For preview/count questions, omit it.
+- This route never invokes automatic listing or Miaoshou publishing.
 
 Use this when:
 - The user wants a Feishu table processed through the existing Hermes product-analysis project
