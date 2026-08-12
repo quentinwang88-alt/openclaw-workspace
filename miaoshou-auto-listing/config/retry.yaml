@@ -1,0 +1,13 @@
+retry:
+  max_attempts: 3
+  delays_seconds: [0, 3, 10]
+  retryable_codes:
+    - NETWORK_ERROR
+    - ELEMENT_TIMEOUT
+    - PRICE_FILL_FAILED
+    - STOCK_FILL_FAILED
+    - WAREHOUSE_NOT_FOUND
+    - LOGISTICS_FILL_FAILED
+    - IMAGE_TRANSLATE_FAILED
+    - SIZE_CHART_DETECTION_FAILED
+    - PAGE_STRUCTURE_CHANGED

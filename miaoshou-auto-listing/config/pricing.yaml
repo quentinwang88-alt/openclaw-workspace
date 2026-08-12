@@ -1,0 +1,19 @@
+pricing_rules:
+  TH_ACCESSORY_V1:
+    currency: THB
+    purchase_cost_multiplier: 5.5
+    fixed_cost: 0
+    min_price: 99
+    rounding: X9
+  VN_ACCESSORY_V1:
+    currency: VND
+    purchase_cost_multiplier: 3500
+    fixed_cost: 0
+    min_price: 29000
+    rounding: INTEGER
+  MY_ACCESSORY_V1:
+    currency: MYR
+    purchase_cost_multiplier: 0.75
+    fixed_cost: 0
+    min_price: 9.9
+    rounding: CENT

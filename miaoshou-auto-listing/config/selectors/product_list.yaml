@@ -1,0 +1,21 @@
+product_search_input:
+  - {kind: testid, value: product-search-input}
+  - {kind: role, role: textbox, name: "商品ID", exact: false}
+  - {kind: label, value: "商品ID", exact: false}
+  - {kind: css, value: "input[placeholder*='商品ID']"}
+product_search_button:
+  - {kind: testid, value: product-search-button}
+  - {kind: role, role: button, name: "查询", exact: true}
+  - {kind: role, role: button, name: "搜索", exact: true}
+product_result_rows:
+  - {kind: testid, value: product-row}
+  - {kind: css, value: ".pro-virtual-table__row"}
+  - {kind: css, value: "tbody tr"}
+product_row_id:
+  - {kind: testid, value: product-id}
+  - {kind: css, value: "[data-field='product-id']"}
+  - {kind: css, value: "td"}
+product_row_edit_button:
+  - {kind: testid, value: edit-product}
+  - {kind: role, role: button, name: "编辑", exact: true}
+  - {kind: text, value: "编辑", exact: true}

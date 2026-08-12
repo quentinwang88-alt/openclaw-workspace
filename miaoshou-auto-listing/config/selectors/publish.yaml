@@ -1,0 +1,23 @@
+publish_button:
+  - {kind: testid, value: save-and-publish}
+  - {kind: role, role: button, name: "保存并发布", exact: true}
+  - {kind: text, value: "保存并发布", exact: true}
+publish_dialog:
+  - {kind: role, role: dialog, name: "发布", exact: false}
+  - {kind: css, value: "[role='dialog']"}
+market_option:
+  - {kind: role, role: option, name: "{country_name}", exact: true}
+  - {kind: role, role: checkbox, name: "{country_name}", exact: true}
+  - {kind: text, value: "{country_name}", exact: true}
+publish_confirm_button:
+  - {kind: role, role: button, name: "确认", exact: true}
+  - {kind: role, role: button, name: "发布", exact: true}
+publish_success:
+  - {kind: role, role: alert, name: "发布成功", exact: false}
+  - {kind: text, value: "发布成功", exact: false}
+published_status:
+  - {kind: testid, value: publish-status}
+  - {kind: text, value: "已发布", exact: true}
+platform_product_id:
+  - {kind: testid, value: platform-product-id}
+  - {kind: css, value: "[data-field='platform-product-id']"}

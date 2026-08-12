@@ -1,0 +1,10 @@
+markets:
+  TH:
+    country_name: "泰国"
+    language: "泰语"
+  VN:
+    country_name: "越南"
+    language: "越南语"
+  MY:
+    country_name: "马来西亚"
+    language: "马来语"

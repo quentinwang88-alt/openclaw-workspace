@@ -1,0 +1,13 @@
+{
+  "task_id": "TASK_20260811_001",
+  "miaoshou_product_id": "REPLACE_WITH_PRODUCT_ID",
+  "source_url": "",
+  "target_shop": "TH_WOMEN_01",
+  "market": "TH",
+  "category_group": "ACCESSORY",
+  "pricing_rule_id": "TH_ACCESSORY_V1",
+  "fixed_sale_price": null,
+  "stock_per_sku": null,
+  "allow_republish": false,
+  "current_step": null
+}

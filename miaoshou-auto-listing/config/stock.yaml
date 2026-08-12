@@ -1,0 +1,5 @@
+stock_rules:
+  ACCESSORY:
+    default_stock: 1000
+  CLOTHING:
+    default_stock: 500

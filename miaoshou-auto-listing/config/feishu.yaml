@@ -1,0 +1,19 @@
+feishu:
+  url: "https://gcngopvfvo0q.feishu.cn/wiki/Z5CzwnzbYigY3PkON32cqREinwg?table=tblPntnaEKj9JELl&view=vew0L11Hmz"
+  fields:
+    source_url: "采购链接"
+    shop_alias: "目标店铺"
+    fixed_sale_price: "定价"
+    pricing_mode: "定价方式"
+    stock_per_sku: "每SKU库存"
+    size_chart: "尺码图"
+    status: "执行状态"
+    result: "执行结果"
+    platform_product_id: "TikTok产品ID"
+  statuses:
+    pending: "待执行"
+    running: "执行中"
+    success: "成功"
+    error: "异常"
+  verified_size_chart_sources:
+    "973612079768": "https://cbu01.alicdn.com/img/ibank/O1CN01JvAWlq2Iye7bxn9dK_!!2208467079355-0-cib.jpg"

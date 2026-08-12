@@ -1,0 +1,29 @@
+browser:
+  # Dedicated profile only. Do not point this at a user's everyday Chrome profile.
+  profile_dir: ../runtime/miaoshou_browser_profile
+  # Verified against the TikTok quick-listing collection box on 2026-08-11.
+  base_url: "https://erp.91miaoshou.com"
+  # Dedicated Miaoshou Chrome only. Port 9222 belongs to the NeoBund profile
+  # and must never be used by this workflow.
+  cdp_url: "http://127.0.0.1:9333"
+  cdp_connect_timeout_ms: 30000
+  # Dedicated-profile fallback uses the installed Chrome without downloading a
+  # second Playwright browser binary.
+  channel: "chrome"
+  product_list_path: "/tiktok/collect_box/items"
+  collect_input_path: "/common_collect_box/index?fetchType=linkCopy"
+  public_collect_box_path: "/common_collect_box/items"
+  publish_history_path: "/tiktok/move_collect/history?status=success"
+  headless: false
+  slow_mo_ms: 50
+  timeout_ms: 15000
+  navigation_timeout_ms: 45000
+  # Miaoshou can return the publish receipts several minutes before TikTok's
+  # product ID becomes visible. Keep the Feishu row running for one bounded
+  # verification pass instead of ending early and forcing a risky retry.
+  publish_verify_timeout_ms: 600000
+  # Back off while Miaoshou and TikTok asynchronously create the product.
+  publish_verify_poll_intervals_seconds: [2, 5, 10, 30]
+  # Miaoshou image translation is asynchronous and opens a result-preview dialog.
+  image_translation_timeout_ms: 240000
+  locale: "zh-CN"

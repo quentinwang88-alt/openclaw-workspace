@@ -1,0 +1,15 @@
+login_form:
+  - {kind: testid, value: login-form}
+  - {kind: css, value: "form[action*='login']"}
+  - {kind: css, value: "input[type='password']"}
+login_text:
+  - {kind: text, value: "登录", exact: true}
+loading_mask:
+  - {kind: css, value: ".el-loading-mask"}
+  - {kind: css, value: "[aria-busy='true']"}
+success_toast:
+  - {kind: role, role: alert, name: "成功", exact: false}
+  - {kind: css, value: ".el-message--success"}
+error_toast:
+  - {kind: role, role: alert, name: "失败", exact: false}
+  - {kind: css, value: ".el-message--error"}

@@ -1,0 +1,49 @@
+shops:
+  LIKEU_SHOP:
+    market: TH
+    platform: TIKTOK
+    display_name: "LikeU shop"
+    shop_id: "5159032"
+    task_alias: "LikeU shop"
+  YOURS_BEAUTY_1:
+    market: MY
+    platform: TIKTOK
+    display_name: "Yours.beauty"
+    shop_id: "5982421"
+    task_alias: "yours.beauty-1"
+  YOURS_BEAUTY_2:
+    market: VN
+    platform: TIKTOK
+    display_name: "Yours.beauty"
+    shop_id: "6006941"
+    task_alias: "yours.beauty-2"
+  LUNARA_1:
+    market: VN
+    platform: TIKTOK
+    display_name: "Lunara"
+    shop_id: "14814300"
+    task_alias: "lunara-1"
+  LUNARA_2:
+    market: TH
+    platform: TIKTOK
+    display_name: "Lunara"
+    shop_id: "15597647"
+    task_alias: "lunara-2"
+  TOWU123:
+    market: TH
+    platform: TIKTOK
+    display_name: "TOWU123"
+    shop_id: "17317174"
+    task_alias: "TOWU123"
+  TH_WOMEN_01:
+    market: TH
+    platform: TIKTOK
+    display_name: "REPLACE_WITH_MIAOSHOU_SHOP_NAME"
+  VN_ACCESSORY_01:
+    market: VN
+    platform: TIKTOK
+    display_name: "REPLACE_WITH_MIAOSHOU_SHOP_NAME"
+  MY_ACCESSORY_01:
+    market: MY
+    platform: TIKTOK
+    display_name: "REPLACE_WITH_MIAOSHOU_SHOP_NAME"

@@ -1,0 +1,11 @@
+logistics_profiles:
+  ACCESSORY:
+    weight_g: 20
+    length_cm: 5
+    width_cm: 2
+    height_cm: 2
+  CLOTHING:
+    weight_g: 200
+    length_cm: 10
+    width_cm: 4
+    height_cm: 5

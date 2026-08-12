@@ -1,0 +1,73 @@
+editor_ready:
+  - {kind: testid, value: product-editor}
+  - {kind: text, value: "保存并发布", exact: true}
+  - {kind: role, role: heading, name: "编辑商品", exact: false}
+selected_shop_chips:
+  - {kind: testid, value: selected-shop}
+  - {kind: css, value: "[data-field='selected-shop']"}
+shop_selector:
+  - {kind: testid, value: shop-selector}
+  - {kind: label, value: "发布店铺", exact: false}
+  - {kind: css, value: "[data-field='shop'] input"}
+shop_option:
+  - {kind: role, role: option, name: "{shop_name}", exact: true}
+  - {kind: text, value: "{shop_name}", exact: true}
+shop_apply_button:
+  - {kind: role, role: button, name: "确定", exact: true}
+  - {kind: role, role: button, name: "应用", exact: true}
+sku_rows:
+  - {kind: testid, value: sku-row}
+  - {kind: css, value: "[data-field='sku-table'] tbody tr"}
+  - {kind: css, value: ".sku-table tbody tr"}
+sku_purchase_price:
+  - {kind: testid, value: purchase-price}
+  - {kind: css, value: "input[data-field='purchase-price']"}
+  - {kind: css, value: "[data-field='purchase-price']"}
+sku_sale_price:
+  - {kind: testid, value: sale-price}
+  - {kind: css, value: "input[data-field='sale-price']"}
+  - {kind: css, value: "input[placeholder*='售价']"}
+stock_by_warehouse:
+  - {kind: testid, value: stock-by-warehouse}
+  - {kind: role, role: radio, name: "按仓库设置", exact: true}
+  - {kind: text, value: "按仓库设置", exact: true}
+stock_inputs:
+  - {kind: testid, value: stock-input}
+  - {kind: css, value: "input[data-field='stock']"}
+  - {kind: css, value: "input[placeholder*='库存']"}
+warehouse_selector:
+  - {kind: testid, value: warehouse-selector}
+  - {kind: label, value: "仓库", exact: false}
+  - {kind: css, value: "[data-field='warehouse'] input"}
+warehouse_option:
+  - {kind: role, role: option, name: "{warehouse_name}", exact: true}
+  - {kind: text, value: "{warehouse_name}", exact: true}
+weight_input:
+  - {kind: testid, value: weight-input}
+  - {kind: label, value: "重量", exact: false}
+  - {kind: css, value: "input[data-field='weight']"}
+length_input:
+  - {kind: testid, value: length-input}
+  - {kind: label, value: "长", exact: true}
+  - {kind: css, value: "input[data-field='length']"}
+width_input:
+  - {kind: testid, value: width-input}
+  - {kind: label, value: "宽", exact: true}
+  - {kind: css, value: "input[data-field='width']"}
+height_input:
+  - {kind: testid, value: height-input}
+  - {kind: label, value: "高", exact: true}
+  - {kind: css, value: "input[data-field='height']"}
+translate_button:
+  - {kind: testid, value: translate-all}
+  - {kind: role, role: button, name: "一键翻译", exact: true}
+translation_language_selector:
+  - {kind: testid, value: translation-language}
+  - {kind: label, value: "目标语言", exact: false}
+  - {kind: css, value: "[data-field='translation-language'] input"}
+translation_language_option:
+  - {kind: role, role: option, name: "{language}", exact: true}
+  - {kind: text, value: "{language}", exact: true}
+translation_success:
+  - {kind: role, role: alert, name: "翻译成功", exact: false}
+  - {kind: text, value: "翻译完成", exact: false}
