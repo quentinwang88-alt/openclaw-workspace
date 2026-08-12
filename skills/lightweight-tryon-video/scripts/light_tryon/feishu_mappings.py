@@ -32,7 +32,14 @@ def multi(name: str, backend: str, options: list[str]) -> dict[str, Any]:
 STATUS_OPTIONS = ["启用", "测试", "停用"]
 SYNC_STATUS_OPTIONS = ["待同步", "已同步", "同步失败"]
 MARKETS = ["泰国", "越南", "马来西亚", "墨西哥", "其他"]
-CATEGORIES = ["T恤", "针织", "背心", "吊带", "衬衫", "外套", "裤装", "裙装", "连衣裙", "套装", "短上衣", "宽松上衣", "连体裤", "家居服"]
+CATEGORIES = ["T恤", "针织", "背心", "吊带", "衬衫", "外套", "裤装", "裙装", "连衣裙", "套装", "短上衣", "宽松上衣", "连体裤", "家居服", "丝巾", "围巾", "秋冬围巾", "头巾", "发饰", "发夹", "抓夹", "手链", "手镯", "细手圈"]
+INITIAL_PERSONA_TEMPLATE_NAMES = [
+    "黑长发手机遮脸日常女生",
+    "泰国甜妹",
+    "泰国自然分享女生",
+    "泰国头巾街头时尚女生",
+    "泰国丝巾度假轻熟女生",
+]
 
 
 @dataclass(frozen=True)
@@ -196,6 +203,32 @@ STYLING_FIELDS = (
     single("启用状态", "status", STATUS_OPTIONS),
     field("适配产品编码", "applicable_product_codes"),
     multi("适用商品类型", "applicable_product_type", CATEGORIES + ["短上衣", "宽松上衣"]),
+    single(
+        "目标商品角色",
+        "target_role",
+        [
+            "TARGET_GARMENT",
+            "SUPPORTING_OUTFIT_NECK",
+            "SUPPORTING_OUTFIT_HEAD",
+            "SUPPORTING_OUTFIT_WRIST",
+            "SUPPORTING_OUTFIT_HAIR",
+        ],
+    ),
+    multi("支持展示模式", "supported_demonstration_modes", ["GARMENT_WORN", "NECK_WORN", "HEAD_WORN", "HAIR_TIE", "BAG_ACCENT", "EAR_WORN", "WRIST_WORN", "HAIR_WORN"]),
+    multi("适配人物模板", "preferred_persona_ids", INITIAL_PERSONA_TEMPLATE_NAMES),
+    {
+        **multi(
+            "适配场景族",
+            "scene_families",
+            ["居家日常", "咖啡/品质室内", "街头/外出", "镜前/试穿", "办公/通勤", "乘车/等候"],
+        ),
+        # This is an operator-facing localized enum.  Unlike open-ended
+        # template fields, legacy machine codes must not stay selectable.
+        "authoritative_options": True,
+    },
+    single("风格强度", "style_intensity", ["DAILY", "DAILY_STYLED", "FASHION_FORWARD"]),
+    single("气候档", "climate_profile", ["TH_WARM", "ALL_SEASON", "COOL_WEATHER"]),
+    field("轮廓键（系统）", "silhouette_key"),
     multi("商品版型要求", "product_fit", ["修身", "合体", "短款", "宽松", "不限"]),
     single("下装类型", "bottom_type", ["高腰阔腿裤", "直筒牛仔裤", "白色短裤", "休闲短裤", "半裙", "同色套装下装"]),
     multi("下装颜色", "bottom_color", ["白色", "黑色", "浅灰", "米色", "卡其色", "蓝色牛仔", "同色系"]),
@@ -203,6 +236,15 @@ STYLING_FIELDS = (
     field("内搭类型", "inner_type"),
     field("内搭颜色", "inner_color"),
     field("内搭补充要求", "inner_requirements"),
+    field("完整穿搭配方_JSON", "outfit_recipe"),
+    field("基础穿搭方向", "base_outfit_direction"),
+    field("发型要求", "hair_direction"),
+    field("领口/头肩要求", "neckline_direction"),
+    field("外层要求", "outer_layer_direction"),
+    field("配色关系", "palette_relation"),
+    field("可见区域要求", "visibility_zones"),
+    field("可见性要求", "visibility_requirement"),
+    field("完成效果方向", "finish_direction"),
     multi("穿搭风格", "vibe_tag", ["日常干净", "轻通勤", "温柔", "夏日休闲", "居家轻松", "少女感"]),
     single("配饰程度", "accessory_level", ["无配饰", "轻量配饰", "正常配饰"]),
     single("鞋子展示要求", "footwear_visibility", ["不要求入镜", "可以入镜", "必须入镜"]),
@@ -411,7 +453,14 @@ SCENE_TYPE_TO_BACKEND = {"环境模板": "environment", "主场景全身": "main
 ACTION_TYPE_TO_BACKEND = {"基础站立": "basic_stand", "整理衣摆": "adjust_hem", "轻侧身": "side_turn", "触碰领口袖口": "touch_collar", "扶腰插兜": "hand_in_pocket", "半步前移": "half_step_forward", "上装复合微动作": "upper_detail_combo", "外套复合微动作": "outerwear_detail_combo", "轮廓复合微动作": "silhouette_combo", "自定义动作": "custom"}
 CAMERA_MOTION_TO_BACKEND = {"固定": "fixed", "缓慢推近": "push_in"}
 RISK_TO_BACKEND = {"低": "low", "中": "medium", "高": "high"}
-CATEGORY_TO_BACKEND = {"T恤": "tshirt", "针织": "knit_top", "背心": "tank_top", "吊带": "tank_top", "衬衫": "shirt", "外套": "outerwear", "裤装": "pants", "裙装": "skirt", "连衣裙": "dress", "套装": "set", "短上衣": "top", "宽松上衣": "top", "连体裤": "jumpsuit", "家居服": "homewear"}
+CATEGORY_TO_BACKEND = {
+    "T恤": "tshirt", "针织": "knit_top", "背心": "tank_top", "吊带": "tank_top",
+    "衬衫": "shirt", "外套": "outerwear", "裤装": "pants", "裙装": "skirt",
+    "连衣裙": "dress", "套装": "set", "短上衣": "top", "宽松上衣": "top",
+    "连体裤": "jumpsuit", "家居服": "homewear", "丝巾": "silk_scarf",
+    "围巾": "scarf", "秋冬围巾": "winter_scarf", "头巾": "headscarf",
+    "发饰": "hair_accessory",
+}
 
 
 ENUM_MAPS_TO_BACKEND: dict[str, dict[str, str]] = {

@@ -4,6 +4,12 @@ set -euo pipefail
 SKILL_DIR="${0:A:h:h}"
 LOCK_DIR="${TMPDIR:-/tmp}/light-tryon-feishu-sync.lock"
 LOG_DIR="$SKILL_DIR/var"
+PAUSE_FILE="$LOG_DIR/run-manager-sync.paused"
+
+if [[ "$*" == *"sync-run-manager"* ]] && [[ -f "$PAUSE_FILE" ]]; then
+  print -r -- "light-tryon run-manager sync paused: $PAUSE_FILE"
+  exit 0
+fi
 
 # launchd opens the current log before invoking this wrapper. Renaming an
 # oversized log here lets the next scheduled run start a fresh file while

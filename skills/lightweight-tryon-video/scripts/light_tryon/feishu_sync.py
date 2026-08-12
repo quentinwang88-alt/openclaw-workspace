@@ -31,7 +31,9 @@ READ_ONLY_TYPES = {1001, 1002}
 LIST_BACKENDS = {
     "account_ids", "markets", "reference_images", "fixed_accessories", "applicable_categories",
     "required_anchors", "optional_anchors", "forbidden_elements", "applicable_scenes", "applicable_shot_profiles", "action_steps",
-    "free_hand_action", "applicable_product_codes", "applicable_product_type", "product_fit", "bottom_color", "bottom_fit", "vibe_tag",
+    "free_hand_action", "applicable_product_codes", "applicable_product_type", "product_fit",
+    "bottom_color", "bottom_fit", "vibe_tag", "supported_demonstration_modes",
+    "scene_families", "preferred_persona_ids", "visibility_zones",
     "selling_point_angle", "applicable_category", "product_images", "abnormal_types", "background_type_pool", "edge_decor_pool",
 }
 
@@ -47,6 +49,22 @@ RUN_MANAGER_STATUS_TO_FEISHU = {
     "not_submitted": "未提交", "pending": "待入队", "queued": "已入队", "generating": "生成中",
     "returned": "已回流", "failed": "失败", "blocked": "阻塞",
 }
+
+SCENE_FAMILY_TO_FEISHU = {
+    "HOME_ROUTINE": "居家日常",
+    "CAFE_DINING": "咖啡/品质室内",
+    "STREET_OUTING": "街头/外出",
+    "VANITY_TRYON": "镜前/试穿",
+    "MIRROR_FITTING": "镜前/试穿",
+    "OFFICE_WORKBREAK": "办公/通勤",
+    "CAR_TRANSIT": "乘车/等候",
+}
+SCENE_FAMILY_TO_BACKEND = {
+    value: key for key, value in SCENE_FAMILY_TO_FEISHU.items()
+}
+# The Chinese field deliberately merges the two legacy mirror-family codes.
+# New operator input uses VANITY_TRYON; old MIRROR_FITTING remains readable.
+SCENE_FAMILY_TO_BACKEND["镜前/试穿"] = "VANITY_TRYON"
 
 GENERATION_TO_FEISHU = {
     "pending": "待生成", "generating": "生成中", "success": "生成成功", "failed": "生成失败", "retrying": "重试中",
@@ -222,6 +240,11 @@ def _to_feishu_value(backend: str, value: Any, spec: dict[str, Any]) -> Any:
         return RUN_MANAGER_STATUS_TO_FEISHU.get(str(value), str(value))
     if backend == "applicable_product_codes":
         return "\n".join(normalized_list(value)) or None
+    if backend == "scene_families":
+        return [
+            SCENE_FAMILY_TO_FEISHU.get(str(item).upper(), str(item))
+            for item in normalized_list(value)
+        ] or None
     if backend == "markets":
         return [MARKET_TO_FEISHU.get(str(item).upper(), str(item)) for item in normalized_list(value)]
     if backend == "applicable_shot_profiles":
@@ -267,6 +290,11 @@ def _from_feishu_value(backend: str, value: Any, spec: dict[str, Any]) -> Any:
     if backend == "markets":
         mapping = ENUM_MAPS_TO_BACKEND["market"]
         return [mapping.get(str(item), str(item)) for item in normalized_list(value)]
+    if backend == "scene_families":
+        return [
+            SCENE_FAMILY_TO_BACKEND.get(str(item), str(item).upper())
+            for item in normalized_list(value)
+        ]
     if backend == "applicable_shot_profiles":
         return [SHOT_PROFILE_TO_BACKEND.get(str(item), str(item)) for item in normalized_list(value)]
     if backend in {"single_sequence", "shot_1", "shot_2", "shot_3", "shot_4", "shot_5"}:
@@ -296,6 +324,11 @@ def _business_payload(role: str, fields: dict[str, Any]) -> dict[str, Any]:
         if role == "styling" and backend in CLEARABLE_TEMPLATE_BACKENDS:
             payload[backend] = str(fields.get(name) or "").strip()
             continue
+        if role == "styling" and backend == "preferred_persona_ids":
+            # Unlike most optional template fields, clearing this multiselect
+            # is a real operator action and must clear the stored preference.
+            payload[backend] = normalized_list(fields.get(name))
+            continue
         if role == "scene" and backend in CLEARABLE_SCENE_BACKENDS:
             raw = fields.get(name)
             payload[backend] = normalized_list(raw) if backend in {"background_type_pool", "edge_decor_pool"} else str(raw or "").strip()
@@ -319,7 +352,69 @@ def _business_payload(role: str, fields: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def _template_to_fields(role: str, row: dict[str, Any], *, include_sync: bool = True) -> dict[str, Any]:
+def _persona_identity_maps(
+    db: LightTryonDB,
+) -> tuple[dict[str, str], dict[str, str], set[str]]:
+    """Return id/name lookup maps and duplicate display names."""
+
+    name_to_ids: dict[str, list[str]] = {}
+    id_to_name: dict[str, str] = {}
+    for row in db.list_templates("persona"):
+        persona_id = str(row.get("persona_id") or "").strip()
+        persona_name = str(row.get("persona_name") or "").strip()
+        if not persona_id:
+            continue
+        id_to_name[persona_id] = persona_name or persona_id
+        if persona_name:
+            name_to_ids.setdefault(persona_name, []).append(persona_id)
+    duplicate_names = {
+        name for name, ids in name_to_ids.items() if len(set(ids)) > 1
+    }
+    name_to_id = {
+        name: ids[0]
+        for name, ids in name_to_ids.items()
+        if name not in duplicate_names
+    }
+    return id_to_name, name_to_id, duplicate_names
+
+
+def _resolve_preferred_persona_ids(
+    values: Any,
+    *,
+    id_to_name: dict[str, str],
+    name_to_id: dict[str, str],
+    duplicate_names: set[str],
+) -> tuple[list[str], list[str]]:
+    """Translate operator-facing persona names back to stable ids."""
+
+    resolved: list[str] = []
+    errors: list[str] = []
+    for raw in normalized_list(values):
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        if value in id_to_name:  # legacy Feishu rows remain readable
+            persona_id = value
+        elif value in duplicate_names:
+            errors.append(f"人物模板名称不唯一: {value}")
+            continue
+        else:
+            persona_id = name_to_id.get(value, "")
+        if not persona_id:
+            errors.append(f"找不到人物模板名称: {value}")
+            continue
+        if persona_id not in resolved:
+            resolved.append(persona_id)
+    return resolved, errors
+
+
+def _template_to_fields(
+    role: str,
+    row: dict[str, Any],
+    *,
+    include_sync: bool = True,
+    persona_names_by_id: dict[str, str] | None = None,
+) -> dict[str, Any]:
     mapping = TABLE_MAPPINGS[role]
     result: dict[str, Any] = {}
     for spec in mapping.fields:
@@ -327,6 +422,11 @@ def _template_to_fields(role: str, row: dict[str, Any], *, include_sync: bool = 
         if backend in {"created_at", "feishu_updated_at"}:
             continue
         value = row.get(backend)
+        if role == "styling" and backend == "preferred_persona_ids":
+            value = [
+                (persona_names_by_id or {}).get(str(persona_id), str(persona_id))
+                for persona_id in normalized_list(value)
+            ]
         if role == "shot_plan" and backend.startswith("shot_") and backend[5:].isdigit():
             sequence = _ordered_sequence(row.get("five_sequence"))
             index = int(backend[5:]) - 1
@@ -403,6 +503,42 @@ def ensure_schema(clients: dict[str, Any], *, dry_run: bool = False) -> dict[str
                 wanted_options = list((spec.get("property") or {}).get("options") or [])
                 current_options = list((_field_attr(current, "property", {}) or {}).get("options") or [])
                 current_names = {str(item.get("name") or "") for item in current_options}
+                wanted_names = {
+                    str(item.get("name") or "") for item in wanted_options
+                }
+                if (
+                    spec.get("authoritative_options")
+                    and int(spec.get("type") or 0) in {3, 4}
+                    and current_names != wanted_names
+                ):
+                    current_by_name = {
+                        str(item.get("name") or ""): item
+                        for item in current_options
+                        if item.get("name")
+                    }
+                    authoritative_options = [
+                        current_by_name.get(str(item.get("name") or ""), item)
+                        for item in wanted_options
+                    ]
+                    update_spec = {
+                        key: value
+                        for key, value in spec.items()
+                        if key != "authoritative_options"
+                    }
+                    update_spec["property"] = {
+                        "options": authoritative_options
+                    }
+                    actions.append({
+                        "operation": "replace_field_options",
+                        "field": spec["name"],
+                        "options": [item["name"] for item in wanted_options],
+                        "removed_options": sorted(current_names - wanted_names),
+                    })
+                    if not dry_run:
+                        client.update_field(
+                            _field_attr(current, "field_id"), update_spec
+                        )
+                    continue
                 missing_options = [item for item in wanted_options if str(item.get("name") or "") not in current_names]
                 if missing_options and int(spec.get("type") or 0) in {3, 4}:
                     merged_spec = {**spec, "property": {"options": [*current_options, *missing_options]}}
@@ -448,6 +584,7 @@ def initialize_template_records(
     if unknown_roles:
         raise ValueError(f"不支持的模板类型: {', '.join(unknown_roles)}")
     selected_ids = {str(item).strip() for item in (business_ids or []) if str(item).strip()}
+    persona_names_by_id, _, _ = _persona_identity_maps(db)
     for role in selected_roles:
         client = clients[role]
         mapping = TABLE_MAPPINGS[role]
@@ -467,7 +604,11 @@ def initialize_template_records(
         created = updated = 0
         for row in local_rows:
             business_id = str(row[mapping.primary_backend])
-            fields = _template_to_fields(role, row)
+            fields = _template_to_fields(
+                role,
+                row,
+                persona_names_by_id=persona_names_by_id,
+            )
             if business_id in by_id:
                 client.update_record_fields(by_id[business_id][0]["record_id"], fields)
                 updated += 1
@@ -516,6 +657,9 @@ def pull_templates(
     selected_ids = {str(item).strip() for item in (business_ids or []) if str(item).strip()}
     filtered = 0
     errors: list[str] = []
+    persona_names_by_id, persona_ids_by_name, duplicate_persona_names = (
+        _persona_identity_maps(db)
+    )
     try:
         for role in selected_roles:
             mapping = TABLE_MAPPINGS[role]
@@ -523,6 +667,17 @@ def pull_templates(
             seen: set[str] = set()
             for record in _records(client):
                 payload = _business_payload(role, record["fields"])
+                persona_resolution_errors: list[str] = []
+                if role == "styling":
+                    resolved_ids, persona_resolution_errors = (
+                        _resolve_preferred_persona_ids(
+                            payload.get("preferred_persona_ids") or [],
+                            id_to_name=persona_names_by_id,
+                            name_to_id=persona_ids_by_name,
+                            duplicate_names=duplicate_persona_names,
+                        )
+                    )
+                    payload["preferred_persona_ids"] = resolved_ids
                 business_id = str(payload.get(mapping.primary_backend) or "").strip()
                 if (selected_ids and business_id not in selected_ids) or not _changed_after(record["fields"], changed_after):
                     filtered += 1
@@ -544,8 +699,12 @@ def pull_templates(
                 missing = [name for name in required if not payload.get(name)]
                 existing = db.get_template(role, business_id)
                 source_hash = stable_hash(_stable_template_source_payload(payload), length=24)
-                if missing:
-                    message = f"缺少必填字段: {', '.join(missing)}"
+                if missing or persona_resolution_errors:
+                    message = (
+                        "；".join(persona_resolution_errors)
+                        if persona_resolution_errors
+                        else f"缺少必填字段: {', '.join(missing)}"
+                    )
                     client.update_record_fields(record["record_id"], {"同步状态": "同步失败", "同步错误信息": message})
                     db.log_sync_item(batch_id, role, record["record_id"], business_id, "validate", "failed", message)
                     counts["failed"] += 1

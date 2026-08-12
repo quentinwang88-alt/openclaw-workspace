@@ -13,6 +13,10 @@ sys.path.insert(0, str(SKILL_DIR / "scripts"))
 from light_tryon.database import LightTryonDB
 from light_tryon.feishu_mappings import TABLE_MAPPINGS
 from light_tryon.feishu_sync import (
+    _from_feishu_value,
+    _persona_identity_maps,
+    _resolve_preferred_persona_ids,
+    _to_feishu_value,
     cleanup_review_duplicates,
     ensure_schema,
     initialize_template_records,
@@ -153,10 +157,72 @@ class FeishuSyncTestCase(unittest.TestCase):
             "applicable_product_codes",
             styling.backend_by_field["适配产品编码"],
         )
+        self.assertEqual(
+            "preferred_persona_ids",
+            styling.backend_by_field["适配人物模板"],
+        )
+
+    def test_styling_persona_preferences_roundtrip_as_display_names(self):
+        spec = next(
+            item
+            for item in TABLE_MAPPINGS["styling"].fields
+            if item["name"] == "适配人物模板"
+        )
+        selected = ["泰国甜妹", "泰国自然分享女生"]
+        self.assertEqual(
+            selected,
+            _from_feishu_value("preferred_persona_ids", selected, spec),
+        )
+        self.assertEqual(
+            selected,
+            _to_feishu_value("preferred_persona_ids", selected, spec),
+        )
+
+    def test_styling_persona_names_resolve_to_stable_ids(self):
+        id_to_name, name_to_id, duplicates = _persona_identity_maps(self.db)
+        persona_id = next(iter(id_to_name))
+        persona_name = id_to_name[persona_id]
+        resolved, errors = _resolve_preferred_persona_ids(
+            [persona_name],
+            id_to_name=id_to_name,
+            name_to_id=name_to_id,
+            duplicate_names=duplicates,
+        )
+        self.assertEqual([persona_id], resolved)
+        self.assertEqual([], errors)
+        # Legacy machine-id values remain readable during migration.
+        legacy, legacy_errors = _resolve_preferred_persona_ids(
+            [persona_id],
+            id_to_name=id_to_name,
+            name_to_id=name_to_id,
+            duplicate_names=duplicates,
+        )
+        self.assertEqual([persona_id], legacy)
+        self.assertEqual([], legacy_errors)
 
     def test_styling_product_codes_are_structured_and_generic_defaults_are_explicit(self):
         row = self.db.get_template("styling", "STYLE_001")
         self.assertEqual(["*"], row["applicable_product_codes"])
+
+    def test_styling_scene_families_are_chinese_in_feishu_and_internal_in_db(self):
+        spec = next(
+            item
+            for item in TABLE_MAPPINGS["styling"].fields
+            if item["name"] == "适配场景族"
+        )
+        feishu_value = _to_feishu_value(
+            "scene_families", ["CAFE_DINING", "STREET_OUTING"], spec
+        )
+        self.assertEqual(["咖啡/品质室内", "街头/外出"], feishu_value)
+        self.assertEqual(
+            ["CAFE_DINING", "STREET_OUTING"],
+            _from_feishu_value("scene_families", feishu_value, spec),
+        )
+        # Legacy English options remain readable during the one-time migration.
+        self.assertEqual(
+            ["HOME_ROUTINE"],
+            _from_feishu_value("scene_families", ["HOME_ROUTINE"], spec),
+        )
 
     def test_voiceover_run_is_excluded_from_bgm(self):
         self.assertTrue(run_record_uses_voiceover({"是否配口播": True}))
@@ -191,6 +257,33 @@ class FeishuSyncTestCase(unittest.TestCase):
             if item["operation"] == "add_field_options" and item["field"] == "场景类型"
         )
         self.assertIn("缓慢推近", action["options"])
+
+    def test_styling_scene_family_options_replace_legacy_machine_codes(self):
+        clients = {role: FakeClient() for role in TABLE_MAPPINGS}
+        ensure_schema(clients)
+        scene_family = next(
+            item
+            for item in clients["styling"].fields
+            if item.field_name == "适配场景族"
+        )
+        scene_family.property = {
+            "options": [
+                {"id": "opt_legacy", "name": "CAFE_DINING", "color": 1},
+                {"id": "opt_cn", "name": "咖啡/品质室内", "color": 2},
+            ]
+        }
+        report = ensure_schema({"styling": clients["styling"]})
+        names = [item["name"] for item in scene_family.property["options"]]
+        self.assertEqual(
+            ["居家日常", "咖啡/品质室内", "街头/外出", "镜前/试穿", "办公/通勤", "乘车/等候"],
+            names,
+        )
+        action = next(
+            item
+            for item in report["tables"]["styling"]["actions"]
+            if item["operation"] == "replace_field_options"
+        )
+        self.assertEqual(["CAFE_DINING"], action["removed_options"])
 
     def test_review_duration_field_is_renamed_without_duplicate(self):
         legacy = SimpleNamespace(field_id="fld_duration", field_name="目标时长", field_type=2, ui_type="Number", property=None)
@@ -276,6 +369,18 @@ class FeishuSyncTestCase(unittest.TestCase):
         self.assertEqual(run.uploads[0]["parent_type"], "bitable_image")
         self.assertIn("product", run.uploads[0]["name"])
         self.assertNotEqual(run.uploads[0]["name"], outfit.name)
+        cutover_run = FakeClient(fields=[])
+        ensure_run_manager_schema(cutover_run)
+        cutover_guard = sync_jobs_to_run_manager(
+            self.db, review, cutover_run, job_ids=[job["job_id"]],
+        )
+        self.assertEqual(cutover_guard["created"], 0)
+        self.assertEqual(cutover_guard["skipped"], 1)
+        self.assertEqual(
+            cutover_guard["items"][0]["reason"],
+            "bound_run_record_missing_after_cutover",
+        )
+        self.assertEqual(len(cutover_run.records), 0)
         pull_run_manager_results(self.db, review, run, job_ids=[job["job_id"]])
         writes_after_first_generating_pull = len(review.update_calls)
         pull_run_manager_results(self.db, review, run, job_ids=[job["job_id"]])

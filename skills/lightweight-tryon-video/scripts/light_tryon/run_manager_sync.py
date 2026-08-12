@@ -64,7 +64,8 @@ RUN_MANAGER_FIELDS: tuple[dict[str, Any], ...] = (
 ACTIVE_STATUSES = {"待处理", "部分提交", "已提交", "生成中", "提交中", "处理中"}
 PATCHABLE_STATUSES = {"", "失败", "阻塞", "已完成", "完成", "生成完成"}
 TERMINAL_RESULT_FAILURE_MARKERS = (
-    "failed", "failure", "missing_asset", "rejected", "审核失败", "复核失败", "缺素材",
+    "failed", "failure", "missing_asset", "rejected", "timed_out", "timeout",
+    "审核失败", "复核失败", "缺素材",
 )
 
 
@@ -720,6 +721,7 @@ def sync_jobs_to_run_manager(
         job_id = job["job_id"]
         review: dict[str, Any] | None = None
         try:
+            rerun = bool(job.get("generation_rerun"))
             review = _resolve_review_record(job, review_groups)
             if not review:
                 raise ValueError("轻视频复核表不存在该任务，请先执行 push-review")
@@ -745,7 +747,36 @@ def sync_jobs_to_run_manager(
                 existing = _resolve_run_record(job, live_groups)
             elif existing is None and live_groups_refreshed:
                 existing = _resolve_run_record(job, run_groups)
-            rerun = bool(job.get("generation_rerun"))
+            if existing is None and str(job.get("run_manager_record_id") or "").strip() and not rerun:
+                summary["skipped"] += 1
+                summary["items"].append({
+                    "job_id": job_id,
+                    "status": "skipped",
+                    "reason": "bound_run_record_missing_after_cutover",
+                })
+                continue
+            local_result_status = str(job.get("run_manager_result_status") or "").strip().lower()
+            if (
+                existing is None
+                and not rerun
+                and local_result_status == "uploaded"
+                and str(job.get("run_manager_result_sha256") or "").strip()
+            ):
+                summary["skipped"] += 1
+                summary["items"].append({
+                    "job_id": job_id,
+                    "status": "skipped",
+                    "reason": "local_result_already_uploaded",
+                })
+                continue
+            if existing is None and not rerun and _result_status_is_terminal_failure(local_result_status):
+                summary["skipped"] += 1
+                summary["items"].append({
+                    "job_id": job_id,
+                    "status": "skipped",
+                    "reason": "local_terminal_result_failure",
+                })
+                continue
             if (
                 existing
                 and not rerun
