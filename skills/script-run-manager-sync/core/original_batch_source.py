@@ -34,11 +34,55 @@ ORIGINAL_BATCH_SOURCE_FIELD_ALIASES: Dict[str, List[str]] = {
     "sync_time": ["同步时间"],
     "processing_status": ["处理状态"],
     "run_task_id": ["运行任务ID"],
+    "persona_id": ["人物模板ID（系统）", "人物模板ID"],
+    "persona_contract": ["人物模板合同_JSON（系统）", "人物模板合同"],
+    "first_frame_strategy": ["视觉参考模式（系统）", "视觉参考模式", "首帧策略"],
+    "first_frame_requested": ["生成首帧（需勾选）", "生成首帧"],
+    "composite_first_frame": ["统一首帧（系统）", "统一首帧", "AI统一首帧"],
+    "first_frame_status": ["首帧准备状态（系统）", "首帧准备状态", "首帧状态"],
 }
 
 
 def resolve_original_batch_field_mapping(field_names: Sequence[str]) -> Dict[str, Optional[str]]:
     return resolve_field_mapping(field_names, ORIGINAL_BATCH_SOURCE_FIELD_ALIASES)
+
+
+def _reference_handoff(
+    fields: Dict[str, Any], mapping: Dict[str, Optional[str]]
+) -> tuple[List[Dict[str, Any]], str]:
+    product_images = (
+        extract_attachments(fields.get(mapping.get("product_images")))
+        if mapping.get("product_images") else []
+    )
+    composite = (
+        extract_attachments(fields.get(mapping.get("composite_first_frame")))
+        if mapping.get("composite_first_frame") else []
+    )
+    strategy = (
+        normalize_text(fields.get(mapping.get("first_frame_strategy")))
+        if mapping.get("first_frame_strategy") else ""
+    )
+    status = (
+        normalize_text(fields.get(mapping.get("first_frame_status"))).upper()
+        if mapping.get("first_frame_status") else ""
+    )
+    requested = (
+        normalize_checkbox(fields.get(mapping.get("first_frame_requested")))
+        if mapping.get("first_frame_requested") else False
+    )
+    ready = bool(composite) and status in {
+        "已确认", "CONFIRMED", "READY", "已就绪", "缓存复用"
+    }
+    # The operator owns this decision.  A REQUIRED/PREFERRED strategy is
+    # informative until the user explicitly selects first-frame generation.
+    if not requested:
+        return product_images, ""
+    if ready:
+        return composite, ""
+    return product_images, (
+        "WAITING_USER_SELECTED_FIRST_FRAME:本条已勾选生成首帧，但统一首帧尚未就绪；"
+        "请先运行首帧任务或取消生成首帧勾选。"
+    )
 
 
 def build_original_batch_sync_tasks(
@@ -74,6 +118,9 @@ def build_original_batch_sync_tasks(
         slot = f"D{item_index:02d}"
         batch_item_id = normalize_text(fields.get(mapping.get("batch_item_id"))) if mapping.get("batch_item_id") else ""
         title = normalize_text(fields.get(mapping.get("script_title"))) if mapping.get("script_title") else ""
+        reference_images, reference_preparation_error = _reference_handoff(
+            fields, mapping
+        )
         tasks.append(
             ScriptSyncTask(
                 source_record_id=record.record_id,
@@ -81,7 +128,7 @@ def build_original_batch_sync_tasks(
                 script_slot=slot,
                 task_name=f"{code}.{script_id}",
                 prompt_text=prompt,
-                reference_images=extract_attachments(fields.get(mapping.get("product_images"))) if mapping.get("product_images") else [],
+                reference_images=reference_images,
                 internal_script_key=batch_item_id or f"{record.record_id}:{script_id}",
                 product_type=normalize_text(fields.get(mapping.get("product_type"))) if mapping.get("product_type") else "",
                 target_language=normalize_text(fields.get(mapping.get("target_language"))) if mapping.get("target_language") else "",
@@ -96,6 +143,10 @@ def build_original_batch_sync_tasks(
                 script_source="原创脚本",
                 source_script_type="原创脚本",
                 video_duration=normalize_video_duration(fields.get(mapping.get("video_duration")) if mapping.get("video_duration") else None),
+                persona_id=normalize_text(fields.get(mapping.get("persona_id"))) if mapping.get("persona_id") else "",
+                persona_contract=normalize_text(fields.get(mapping.get("persona_contract"))) if mapping.get("persona_contract") else "",
+                first_frame_strategy=normalize_text(fields.get(mapping.get("first_frame_strategy"))) if mapping.get("first_frame_strategy") else "",
+                reference_preparation_error=reference_preparation_error,
             )
         )
         if limit is not None and len(tasks) >= limit:

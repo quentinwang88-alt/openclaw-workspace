@@ -54,7 +54,7 @@ DEFAULT_SOURCE_FEISHU_URL = (
 )
 DEFAULT_TARGET_FEISHU_URL = (
     "https://gcngopvfvo0q.feishu.cn/base/"
-    "UvErb5HRWaGESXsBs18cvB3FnEe?table=tbl4eKSVgHw8IyDh&view=vewo6WdFGb"
+    "Bbi4bD4Hxa9cWms2GO2cDZ9wnBc?table=tbljUInlUld4MnOw&view=vewo6WdFGb"
 )
 DEFAULT_MANUAL_SOURCE_FEISHU_URL = (
     "https://gcngopvfvo0q.feishu.cn/wiki/"
@@ -70,6 +70,10 @@ DEFAULT_METADATA_DB_PATH = os.environ.get(
 )
 DEFAULT_LOCK_FILE = os.environ.get("SCRIPT_RUN_MANAGER_SYNC_LOCK_FILE", "/tmp/script_run_manager_sync.pid")
 PATCHABLE_TARGET_STATUSES = {"", "待处理", "待开始", "未开始", "失败", "阻塞"}
+
+
+class ReferencePreparationPending(RuntimeError):
+    """The operator selected a first frame, but its asset is not ready yet."""
 
 
 def resolve_feishu_config(feishu_url: str) -> Tuple[str, str]:
@@ -91,7 +95,9 @@ def print_field_mapping(title: str, mapping: dict) -> None:
 
 def ensure_target_default_fields(client: FeishuBitableClient, field_names: List[str]) -> List[str]:
     changed = False
-    for field_name in ("产品ID", "全球产品ID", "任务来源"):
+    for field_name in (
+        "产品ID", "全球产品ID", "任务来源", "人物模板ID", "人物模板合同",
+    ):
         if field_name in field_names:
             continue
         print(f"🧩 目标运行表缺少字段【{field_name}】，正在创建...")
@@ -132,6 +138,10 @@ def ensure_target_default_fields(client: FeishuBitableClient, field_names: List[
             continue
         print(f"🧩 目标运行表缺少字段【{field_name}】，正在创建...")
         client.create_field(field_name, field_type=1, ui_type="Text")
+        changed = True
+    if "视觉参考模式" not in field_names:
+        print("🧩 目标运行表缺少字段【视觉参考模式】，正在创建...")
+        client.create_field("视觉参考模式", field_type=1, ui_type="Text")
         changed = True
     return client.list_field_names() if changed else field_names
 
@@ -514,6 +524,15 @@ def _main_with_lock(args: argparse.Namespace) -> None:
             existing_for_source = 0
             unresolved_tasks = []
             for task in source_tasks:
+                if task.reference_preparation_error:
+                    unresolved_tasks.append(
+                        f"{task.script_id}: {task.reference_preparation_error}"
+                    )
+                    print(
+                        f"   ⏸️ 视觉参考尚未就绪 | task={task.task_name} | "
+                        f"{task.reference_preparation_error}"
+                    )
+                    continue
                 fields = build_target_fields(
                     task,
                     target_mapping,
@@ -531,7 +550,8 @@ def _main_with_lock(args: argparse.Namespace) -> None:
                         print(f"   ⚠️ {conflict_reason} | task={task.task_name}")
                         continue
                     allow_full_patch = (
-                    existing_reason != "脚本ID" or args.source_kind == "manual"
+                    existing_reason != "脚本ID"
+                    or args.source_kind in {"manual", "original-batch"}
                     ) and can_update_existing_target(existing_target, target_mapping)
                     existing_updates = build_existing_target_updates(
                         existing_target,
@@ -572,7 +592,10 @@ def _main_with_lock(args: argparse.Namespace) -> None:
                 remember_target_fields(target_indexes, None, fields, target_mapping)
 
             if unresolved_tasks:
-                raise RuntimeError("；".join(unresolved_tasks[:5]))
+                message = "；".join(unresolved_tasks[:5])
+                if all("WAITING_USER_SELECTED_FIRST_FRAME" in item for item in unresolved_tasks):
+                    raise ReferencePreparationPending(message)
+                raise RuntimeError(message)
 
             created_target_ids = []
             for batch in batch_records(prepared_creates, batch_size=args.batch_size):
@@ -609,6 +632,18 @@ def _main_with_lock(args: argparse.Namespace) -> None:
                 success_fields[script_id_field] = manual_script_ids[source_record_id]
             source_client.update_record_fields(source_record_id, success_fields)
             print(f"   ✅ source_record_id={source_record_id} 已回写同步状态")
+        except ReferencePreparationPending as exc:
+            # This is an expected wait state, not a production failure.  Keep
+            # `进入生产` checked so the next patrol can continue after the
+            # first-frame runner writes an asset.
+            waiting_fields = {}
+            if source_mapping.get("sync_status"):
+                waiting_fields[source_mapping["sync_status"]] = f"等待首帧：{exc}"
+            if source_mapping.get("sync_time"):
+                waiting_fields[source_mapping["sync_time"]] = int(time.time() * 1000)
+            if waiting_fields:
+                source_client.update_record_fields(source_record_id, waiting_fields)
+            print(f"   ⏸️ source_record_id={source_record_id} 等待用户已选择的首帧就绪")
         except Exception as exc:
             failed_records += 1
             synced_at = now_text()

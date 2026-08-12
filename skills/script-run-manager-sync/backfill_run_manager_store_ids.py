@@ -23,7 +23,7 @@ from core.sync import TARGET_FIELD_ALIASES, resolve_field_mapping  # noqa: E402
 
 DEFAULT_TARGET_FEISHU_URL = (
     "https://gcngopvfvo0q.feishu.cn/base/"
-    "UvErb5HRWaGESXsBs18cvB3FnEe?table=tbl4eKSVgHw8IyDh&view=vewo6WdFGb"
+    "Bbi4bD4Hxa9cWms2GO2cDZ9wnBc?table=tbljUInlUld4MnOw&view=vewo6WdFGb"
 )
 DEFAULT_METADATA_DB_PATH = os.environ.get(
     "SHORT_VIDEO_AUTO_PUBLISH_DB_PATH",

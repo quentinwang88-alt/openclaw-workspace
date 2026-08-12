@@ -100,6 +100,9 @@ TARGET_FIELD_ALIASES: Dict[str, List[str]] = {
     "video_duration": ["视频时长", "短视频时长", "时长", "视频秒数", "duration", "video_duration"],
     "voiceover_expression_contract": ["口播表达合同"],
     "voiceover_execution_plan": ["口播执行计划"],
+    "persona_id": ["人物模板ID", "人物模板ID（系统）"],
+    "persona_contract": ["人物模板合同", "人物模板合同_JSON（系统）"],
+    "first_frame_strategy": ["视觉参考模式", "视觉参考模式（系统）", "首帧策略"],
     "task_status": ["任务状态", "状态"],
 }
 
@@ -148,6 +151,10 @@ class ScriptSyncTask:
     video_duration: int = 15
     voiceover_expression_contract: str = ""
     voiceover_execution_plan: str = ""
+    persona_id: str = ""
+    persona_contract: str = ""
+    first_frame_strategy: str = ""
+    reference_preparation_error: str = ""
 
 
 def is_variant_slot(task_suffix: str) -> bool:
@@ -618,6 +625,12 @@ def build_target_fields(
         fields[mapping["voiceover_expression_contract"]] = task.voiceover_expression_contract
     if mapping.get("voiceover_execution_plan") and task.voiceover_execution_plan:
         fields[mapping["voiceover_execution_plan"]] = task.voiceover_execution_plan
+    if mapping.get("persona_id") and task.persona_id:
+        fields[mapping["persona_id"]] = task.persona_id
+    if mapping.get("persona_contract") and task.persona_contract:
+        fields[mapping["persona_contract"]] = task.persona_contract
+    if mapping.get("first_frame_strategy") and task.first_frame_strategy:
+        fields[mapping["first_frame_strategy"]] = task.first_frame_strategy
     if mapping.get("reference_free") and is_nurture_task(task):
         fields[mapping["reference_free"]] = "否" if task.reference_images else "是"
     return fields
