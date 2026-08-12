@@ -49,7 +49,7 @@ class VisionJSONClient:
         api_key: Optional[str] = None,
         timeout: int = 180,
     ):
-        self.model = model or os.environ.get("LIKEU_VISION_MODEL", "gpt-5.5")
+        self.model = model or os.environ.get("LIKEU_VISION_MODEL", "gpt-5.6-terra")
         self.base_url = (base_url or resolve_codex_base_url()).rstrip("/")
         self.api_key = api_key or resolve_codex_access_token()
         self.timeout = timeout
@@ -71,7 +71,7 @@ class VisionJSONClient:
         try:
             with client.responses.stream(
                 model=self.model,
-                reasoning={"effort": os.environ.get("LIKEU_VISION_REASONING_EFFORT", "medium")},
+                reasoning={"effort": os.environ.get("LIKEU_VISION_REASONING_EFFORT", "high")},
                 instructions=(
                     "You are a precise ecommerce product-image analyst. "
                     "When asked for JSON, return only valid JSON and no markdown."
