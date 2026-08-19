@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import html
 import re
 import time
 from dataclasses import dataclass
@@ -56,6 +57,38 @@ def extract_1688_offer_id(source_url: str) -> str:
     if re.fullmatch(r"\d+", query_id):
         return query_id
     raise FeishuTaskError("采购链接不是可识别的 1688 商品链接")
+
+
+def normalize_1688_source_url(source_text: str, *, timeout: int = 30) -> str:
+    """Normalize pasted 1688 links, including QR short links with trailing notes."""
+    match = re.search(r"https?://[^\s]+", source_text.strip())
+    if not match:
+        raise FeishuTaskError("采购链接不是可识别的 1688 商品链接")
+    source_url = match.group(0).rstrip("，,。；;")
+    parsed = urlparse(source_url)
+    if parsed.hostname != "qr.1688.com":
+        extract_1688_offer_id(source_url)
+        return source_url
+
+    try:
+        response = requests.get(source_url, timeout=timeout)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise FeishuTaskError(f"解析 1688 短链接失败：{exc}") from exc
+    target = html.unescape(f"{response.url}\n{response.text}")
+    offer_id = ""
+    for pattern in (
+        r"/offer/(\d+)\.html",
+        r"[?&](?:offerId|id)=(\d+)",
+        r"[\"']?(?:offerId|offer_id|objectId|itemId)[\"']?\s*[:=]\s*[\"']?(\d+)",
+    ):
+        offer_match = re.search(pattern, target, flags=re.IGNORECASE)
+        if offer_match:
+            offer_id = offer_match.group(1)
+            break
+    if not offer_id:
+        raise FeishuTaskError("1688 短链接没有返回可识别的商品 ID")
+    return f"https://detail.1688.com/offer/{offer_id}.html"
 
 
 def attachment_metadata(value: Any) -> Dict[str, str]:
@@ -296,13 +329,16 @@ class FeishuTaskTable:
                 continue
             record_id = _plain_text(record.get("record_id"))
             try:
+                record = self._normalize_record_source(record)
                 claimed = task_from_record(record, self.config)
                 self._hydrate_size_chart_attachment(claimed)
             except Exception as exc:
                 self._update_record(
                     record_id,
                     {
-                        fields_config["status"]: statuses["error"],
+                        fields_config["status"]: statuses.get(
+                            "needs_input", statuses["error"]
+                        ),
                         fields_config["result"]: f"任务校验失败：{exc}"[:500],
                     },
                 )
@@ -323,8 +359,22 @@ class FeishuTaskTable:
         statuses = self.settings["statuses"]
         return self._claim_record(
             record_id,
-            allowed={"", statuses["pending"], statuses["error"]},
+            allowed={
+                "",
+                statuses["pending"],
+                statuses["error"],
+                statuses.get("needs_input", ""),
+            },
             action="线性上架",
+        )
+
+    def claim_for_verification(self, record_id: str) -> ClaimedTask:
+        """Claim a submitted row for VERIFY only; never authorize publishing."""
+        statuses = self.settings["statuses"]
+        return self._claim_record(
+            record_id,
+            allowed={statuses.get("pending_verification", "待核验")},
+            action="发布结果核验",
         )
 
     def _claim_record(
@@ -338,6 +388,7 @@ class FeishuTaskTable:
             raise FeishuTaskError(
                 f"记录当前状态为{current or '空'}，不能执行{action}"
             )
+        record = self._normalize_record_source(record)
         claimed = task_from_record(record, self.config)
         self._hydrate_size_chart_attachment(claimed)
         self._update_record(
@@ -349,6 +400,24 @@ class FeishuTaskTable:
             },
         )
         return claimed
+
+    def _normalize_record_source(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        fields_config = self.settings["fields"]
+        source_field = fields_config["source_url"]
+        fields = dict(record.get("fields") or {})
+        original = _plain_text(fields.get(source_field))
+        normalized = normalize_1688_source_url(
+            original, timeout=self.request_timeout
+        )
+        if normalized == original:
+            return record
+        record_id = _plain_text(record.get("record_id"))
+        if record_id:
+            self._update_record(record_id, {source_field: normalized})
+        updated = dict(record)
+        fields[source_field] = normalized
+        updated["fields"] = fields
+        return updated
 
     def _hydrate_size_chart_attachment(self, claimed: ClaimedTask) -> None:
         task = claimed.task
@@ -393,9 +462,22 @@ class FeishuTaskTable:
         records = self._list_records()
         pending = 0
         actionable = 0
+        pending_verification = 0
+        needs_input = 0
+        errors = 0
         for record in records:
             fields = record.get("fields") or {}
-            if _plain_text(fields.get(fields_config["status"])) not in {
+            status = _plain_text(fields.get(fields_config["status"]))
+            if status == statuses.get("pending_verification", "待核验"):
+                pending_verification += 1
+                continue
+            if status == statuses.get("needs_input", "待补资料"):
+                needs_input += 1
+                continue
+            if status == statuses["error"]:
+                errors += 1
+                continue
+            if status not in {
                 "",
                 statuses["pending"],
             }:
@@ -407,16 +489,41 @@ class FeishuTaskTable:
             "records": len(records),
             "pending": pending,
             "actionable": actionable,
+            "pending_verification": pending_verification,
+            "needs_input": needs_input,
+            "errors": errors,
         }
+
+    def verification_pending_record_ids(self, limit: int = 50) -> List[str]:
+        statuses = self.settings["statuses"]
+        fields = self.settings["fields"]
+        expected = statuses.get("pending_verification", "待核验")
+        record_ids: List[str] = []
+        for record in self._list_records():
+            values = record.get("fields") or {}
+            if _plain_text(values.get(fields["status"])) != expected:
+                continue
+            if not _plain_text(values.get(fields["source_url"])):
+                continue
+            record_id = _plain_text(record.get("record_id"))
+            if record_id:
+                record_ids.append(record_id)
+            if len(record_ids) >= limit:
+                break
+        return record_ids
 
     def retry_error(self, record_id: str) -> None:
         fields = self.settings["fields"]
         statuses = self.settings["statuses"]
         record = self._get_record(record_id)
         current = _plain_text((record.get("fields") or {}).get(fields["status"]))
-        if current != statuses["error"]:
+        if current not in {
+            statuses["error"],
+            statuses.get("needs_input", "待补资料"),
+        }:
             raise FeishuTaskError(
-                f"只能重试状态为{statuses['error']}的任务，当前状态为{current or '空'}"
+                "只能重试状态为异常或待补资料的任务，"
+                f"当前状态为{current or '空'}"
             )
         self._update_record(
             record_id,
@@ -439,14 +546,32 @@ class FeishuTaskTable:
                 fields["result"]: summary,
                 fields["platform_product_id"]: result.platform_product_id,
             }
+        elif result.published_status == "SUBMITTED_PENDING_VERIFICATION":
+            step = result.current_step.value if result.current_step else "VERIFY"
+            updates = {
+                fields["status"]: statuses.get(
+                    "pending_verification", statuses["error"]
+                ),
+                fields["result"]: (
+                    f"[{step}] 发布已提交，等待产品ID｜禁止自动重发｜"
+                    f"{result.error_message}"
+                )[:500],
+                fields["platform_product_id"]: "",
+            }
         else:
             step = result.current_step.value if result.current_step else "UNKNOWN"
             code = result.error_code.value if result.error_code else "UNKNOWN_ERROR"
             message = result.error_message
-            if result.published_status == "SUBMITTED_PENDING_VERIFICATION":
-                message = f"发布结果未确认，禁止自动重发：{message}"
+            material_error = result.error_code in {
+                ErrorCode.SIZE_CHART_REQUIRED,
+                ErrorCode.SIZE_CHART_DETECTION_FAILED,
+            }
             updates = {
-                fields["status"]: statuses["error"],
+                fields["status"]: (
+                    statuses.get("needs_input", statuses["error"])
+                    if material_error
+                    else statuses["error"]
+                ),
                 fields["result"]: f"[{step}] {code}：{message}"[:500],
                 fields["platform_product_id"]: "",
             }

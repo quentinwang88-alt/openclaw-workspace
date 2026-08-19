@@ -16,8 +16,17 @@ CLOTHING_CATEGORY_TOKENS = (
     "男装",
     "夹克",
     "外套",
+    "开衫",
+    "上衣",
+    "防晒衣",
+    "防晒服",
+    "罩衫",
     "衬衫",
     "针织衫",
+    "毛衣",
+    "背心",
+    "T恤",
+    "T-shirt",
     "连衣裙",
     "半身裙",
     "裤装",
@@ -37,16 +46,36 @@ ACCESSORY_CATEGORY_TOKENS = (
     "围巾",
     "披肩",
     "首饰",
-    "帽",
+    "饰品",
+    "耳饰",
+    "耳钉",
+    "耳环",
+    "耳坠",
+    "耳夹",
+    "耳扣",
+    "耳圈",
+    "项链",
+    "吊坠",
+    "手链",
+    "脚链",
+    "手镯",
+    "戒指",
+    "胸针",
+    "帽子",
+    "棒球帽",
+    "渔夫帽",
+    "毛线帽",
+    "针织帽",
+    "贝雷帽",
     "服饰配件",
 )
 
 
 def infer_category_group(text: str) -> str:
-    if any(token in text for token in CLOTHING_CATEGORY_TOKENS):
-        return "CLOTHING"
     if any(token in text for token in ACCESSORY_CATEGORY_TOKENS):
         return "ACCESSORY"
+    if any(token in text for token in CLOTHING_CATEGORY_TOKENS):
+        return "CLOTHING"
     return ""
 
 

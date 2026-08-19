@@ -1,0 +1,4 @@
+interface:
+  display_name: "妙手自动上架"
+  short_description: "安全串行执行飞书人工表格中的待上架商品并核验发布结果"
+  default_prompt: "使用 $miaoshou-auto-listing 串行执行人工上品表中的待执行商品。"

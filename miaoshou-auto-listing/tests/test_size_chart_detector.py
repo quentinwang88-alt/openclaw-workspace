@@ -4,6 +4,9 @@ from miaoshou_auto_listing.services.size_chart_detector import (
     SizeChartDetectionError,
     SizeChartDetector,
 )
+from miaoshou_auto_listing.services.source_size_chart import (
+    is_source_size_spec_text,
+)
 
 
 class FakeClient:
@@ -49,3 +52,25 @@ class SizeChartDetectorTest(unittest.TestCase):
         client = FakeClient({"results": [row(0, True)]})
         with self.assertRaisesRegex(SizeChartDetectionError, "cover every"):
             SizeChartDetector(client=client).detect(["0.jpg", "1.jpg"])
+
+    def test_accepts_1688_packaging_table_with_sku_sizes(self):
+        text = """
+        包装信息 商品件重尺
+        颜色 尺码 长(cm) 宽(cm) 高(cm) 体积(cm³) 重量(g)
+        灰色【薄款】 S 38 28 2 2128 240
+        灰色【薄款】 M 38 28 2 2128 240
+        """
+        self.assertTrue(is_source_size_spec_text(text))
+
+    def test_accepts_one_size_recommendation_in_packaging_table(self):
+        text = """
+        包装信息 商品件重尺
+        颜色 尺码 重量(g)
+        杏色 均码（建议85-125斤） 300
+        灰色 均码（建议85-125斤） 300
+        """
+        self.assertTrue(is_source_size_spec_text(text))
+
+    def test_rejects_packaging_data_without_size_mapping(self):
+        text = "包装信息 商品重量 300g 包裹长 38cm 宽 28cm 高 2cm"
+        self.assertFalse(is_source_size_spec_text(text))

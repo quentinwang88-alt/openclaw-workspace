@@ -13,7 +13,11 @@ feishu:
   statuses:
     pending: "待执行"
     running: "执行中"
+    pending_verification: "待核验"
+    needs_input: "待补资料"
     success: "成功"
     error: "异常"
+  initial_verify_timeout_ms: 90000
+  reconcile_verify_timeout_ms: 30000
   verified_size_chart_sources:
     "973612079768": "https://cbu01.alicdn.com/img/ibank/O1CN01JvAWlq2Iye7bxn9dK_!!2208467079355-0-cib.jpg"

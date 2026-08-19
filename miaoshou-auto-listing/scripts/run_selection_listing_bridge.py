@@ -55,7 +55,9 @@ def main() -> int:
     )
     queue = FeishuTaskTable(config)
 
-    lock_path = PROJECT_ROOT / "runtime" / "selection_listing_bridge.lock"
+    # Share one browser-operation lock with the OpenClaw batch runner. Syncing
+    # and publishing must never race against another Miaoshou session.
+    lock_path = PROJECT_ROOT / "runtime" / "miaoshou_listing.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("w", encoding="utf-8") as lock_handle:
         try:

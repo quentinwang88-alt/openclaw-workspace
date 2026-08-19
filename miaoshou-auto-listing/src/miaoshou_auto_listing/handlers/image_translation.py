@@ -15,8 +15,13 @@ from ..services.size_chart_detector import (
     SizeChartDetectionError,
     SizeChartDetector,
 )
+from ..services.size_chart_coverage import (
+    SizeChartCoverageError,
+    SizeChartCoverageValidator,
+)
+from ..services.source_size_chart import SourceSizeChartExtractor
 from .base import Handler, HandlerContext
-from .editor_dom import dismiss_dialog, editor_root
+from .editor_dom import all_sku_snapshots, dismiss_dialog, editor_root
 
 
 IMAGE_LANGUAGE_BY_MARKET = {
@@ -526,7 +531,10 @@ class SizeChartTranslationHandler(Handler):
         manual_path = str(context.task.size_chart_path or "").strip()
         source_url = str(context.task.size_chart_url or "").strip()
         if manual_path or source_url:
-            source_already_translated = False
+            # The Feishu attachment is an operator-approved, market-localized
+            # final chart. Upload it as-is; retranslating Thai/Vietnamese/Malay
+            # text can corrupt labels and ranges.
+            source_already_translated = bool(manual_path)
             _record(
                 context,
                 "size_chart",
@@ -552,34 +560,57 @@ class SizeChartTranslationHandler(Handler):
                     context, editor
                 )
             except SizeChartDetectionError as exc:
-                raise ExecutorError(
-                    ErrorCode.SIZE_CHART_REQUIRED,
-                    f"No unique trustworthy size chart was identified: {exc}",
-                    step=self.step,
-                ) from exc
+                try:
+                    capture = await SourceSizeChartExtractor().extract(
+                        context.page,
+                        context.task.source_url,
+                        context.task.miaoshou_product_id,
+                        context.config.browser.navigation_timeout_ms,
+                    )
+                except SizeChartDetectionError as source_exc:
+                    raise ExecutorError(
+                        ErrorCode.SIZE_CHART_REQUIRED,
+                        "No unique trustworthy size chart was identified in "
+                        f"detail images ({exc}) or the 1688 structured spec table "
+                        f"({source_exc})",
+                        step=self.step,
+                    ) from source_exc
+                manual_path = capture.path
+                source_url = ""
+                source_already_translated = False
+                _record(
+                    context,
+                    "size_chart",
+                    "SOURCE_IDENTIFIED",
+                    1,
+                    source="1688_structured_spec_table",
+                    cached=capture.cached,
+                    evidence=capture.evidence,
+                )
             except Exception as exc:
                 raise ExecutorError(
                     ErrorCode.SIZE_CHART_DETECTION_FAILED,
                     f"Size-chart visual detection failed: {exc}",
                     step=self.step,
                 ) from exc
-            _record(
-                context,
-                "size_chart",
-                "SOURCE_IDENTIFIED",
-                1,
-                source="detail_image",
-                source_index=selection.index,
-                confidence=selection.confidence,
-                evidence=selection.evidence,
-            )
-            detail_result = getattr(context, "image_translation", {}).get(
-                "detail", {}
-            )
-            source_already_translated = (
-                detail_result.get("status")
-                in {"TRANSLATED", "REUSED_SAVED_TRANSLATION"}
-            )
+            else:
+                _record(
+                    context,
+                    "size_chart",
+                    "SOURCE_IDENTIFIED",
+                    1,
+                    source="detail_image",
+                    source_index=selection.index,
+                    confidence=selection.confidence,
+                    evidence=selection.evidence,
+                )
+                detail_result = getattr(context, "image_translation", {}).get(
+                    "detail", {}
+                )
+                source_already_translated = (
+                    detail_result.get("status")
+                    in {"TRANSLATED", "REUSED_SAVED_TRANSLATION"}
+                )
         temporary_path = ""
         delete_temporary = False
         try:
@@ -587,6 +618,27 @@ class SizeChartTranslationHandler(Handler):
                 if not os.path.isfile(manual_path):
                     raise ValueError(f"Manual size-chart file does not exist: {manual_path}")
                 temporary_path = manual_path
+                try:
+                    snapshots = await all_sku_snapshots(context.page)
+                    await asyncio.to_thread(
+                        SizeChartCoverageValidator().validate,
+                        manual_path,
+                        [str(item.get("label") or "") for item in snapshots],
+                    )
+                except SizeChartCoverageError as exc:
+                    raise ExecutorError(
+                        ErrorCode.SIZE_CHART_REQUIRED,
+                        str(exc),
+                        step=self.step,
+                    ) from exc
+                except ExecutorError:
+                    raise
+                except Exception as exc:
+                    raise ExecutorError(
+                        ErrorCode.SIZE_CHART_DETECTION_FAILED,
+                        f"尺码图与 SKU 覆盖核对失败：{exc}",
+                        step=self.step,
+                    ) from exc
             else:
                 response = await context.page.request.get(source_url)
                 if not response.ok:

@@ -15,6 +15,7 @@ from miaoshou_auto_listing.services.feishu_task_table import (
     FeishuTaskError,
     attachment_metadata,
     extract_1688_offer_id,
+    normalize_1688_source_url,
     task_from_record,
 )
 
@@ -106,6 +107,20 @@ class FeishuTaskMappingTest(unittest.TestCase):
         self.assertEqual(
             extract_1688_offer_id("https://detail.1688.com/x?offerId=123456"),
             "123456",
+        )
+
+    @patch("miaoshou_auto_listing.services.feishu_task_table.requests.get")
+    def test_normalizes_qr_short_link_with_trailing_product_code(self, request) -> None:
+        response = Mock()
+        response.url = "https://qr.1688.com/s/example"
+        response.text = "wireless1688://ma.m.1688.com/offer?id=996541810259.html&amp;offerId=996541810259"
+        response.raise_for_status.return_value = None
+        request.return_value = response
+        self.assertEqual(
+            normalize_1688_source_url(
+                "https://qr.1688.com/s/example CZ2470"
+            ),
+            "https://detail.1688.com/offer/996541810259.html",
         )
 
     def test_maps_optional_size_chart_attachment(self) -> None:
@@ -234,6 +249,6 @@ class FeishuTaskMappingTest(unittest.TestCase):
                 error_message="not visible yet",
             ),
         )
-        self.assertEqual(table.updated[1]["执行状态"], "异常")
+        self.assertEqual(table.updated[1]["执行状态"], "待核验")
         self.assertIn("禁止自动重发", table.updated[1]["执行结果"])
         self.assertEqual(table.updated[1]["TikTok产品ID"], "")

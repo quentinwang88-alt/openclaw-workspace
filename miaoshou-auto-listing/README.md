@@ -18,7 +18,7 @@ V1 已接入精简的飞书人工任务表；仍不包含 AI Listing、订单或
 - 默认先查询发布成功记录；同一 `货源 ID + 店铺` 已发布时返回 `ALREADY_PUBLISHED`。只有任务显式设置 `allow_republish=true` 才允许有意重复发布。
 - `--execute` 会先生成结构化预检快照；任一 SKU 的价格、库存、重量、尺码图或页面校验不通过，都不会打开发布确认弹窗。
 - “发布任务已提交”不等于成功。执行器会交叉轮询发布记录和店铺产品五种状态，只有取得 TikTok 产品 ID 才返回成功。
-- 发布后的单次验证窗口为 10 分钟；期间飞书保持“执行中”，最终只写一次“成功/异常”，不因妙手异步延迟提前结束。
+- 批量发布采用 90 秒短核验；暂未取得产品 ID 时写为`待核验`并继续下一条，之后只能只读核验，绝不重复发布。
 - 点击“确认发布”后会立即写入 `runtime/submissions/` 幂等回执；唯一键为“货源 ID + 店铺 + 国家”。即使飞书记录 ID 变化、程序重启或成功弹窗超时，也只能继续只读核验，不能重复发布。
 - 采集认领后会写入 `runtime/acquisitions/`，并锁定“货源 + 店铺 + 妙手行标识”；线性任务重试会跳过采集、认领，也不会改选同货源的另一行。
 - 页面加载、弹窗残留或虚拟 SKU 表暂时未就绪时，只重试当前步骤，不重跑整条任务；业务性异常（如确实缺少尺码图）不盲目重试。
@@ -60,6 +60,41 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 ## 运行
 
+### OpenClaw 统一批量入口（推荐）
+
+OpenClaw 不应直接循环调用底层 CLI，而应使用统一批量执行器。它会获取
+`runtime/miaoshou_listing.lock` 全局锁、检查并启动妙手专用 Chrome 9333、
+逐条串行领取飞书`待执行`记录。缺尺码图等明确发生在发布前的资料异常会
+记录后跳过；登录、店铺、页面结构或发布异常会立即停止。批次汇总写入
+`runtime/batches/`：
+
+```bash
+# 只读检查，不领取、不发布
+.venv/bin/python scripts/run_openclaw_listing_batch.py --check-only
+
+# 真实执行，默认单批最多 20 条
+.venv/bin/python -u scripts/run_openclaw_listing_batch.py
+
+# 明确限制本批数量
+.venv/bin/python -u scripts/run_openclaw_listing_batch.py --max-items 5
+
+# 只核验待核验记录，绝不发布
+.venv/bin/python -u scripts/run_openclaw_listing_batch.py --verify-pending-only
+```
+
+`--max-items`只允许 1–50。批量执行器与选品工作台桥接器共用同一把锁，
+因此两个 OpenClaw 会话不能同时操作妙手。异常不会自动改回`待执行`；
+只有确认未进入发布阶段的资料异常允许继续下一条，系统性异常立即停止。
+
+OpenClaw 自然语言入口由
+`/Users/likeu3/.openclaw/workspace/skills/miaoshou-auto-listing/SKILL.md`
+约束。只有“执行、跑一下、上架”等明确用语才授权发布；“检查、看看”只允许
+运行`--check-only`。
+
+飞书中的`qr.1688.com`商品短链接会在领取时解析为标准详情链接并回写，允许
+原链接后带空格和货号备注；若短链接实际指向活动/推荐页且没有 offer ID，则
+作为资料异常保留，不猜测商品。
+
 复制并修改任务样例：
 
 ```bash
@@ -91,7 +126,7 @@ PYTHONPATH=src python3 -m miaoshou_auto_listing \
   --feishu-record recXXXXXXXX
 ```
 
-飞书只是输入和结果层，不参与浏览器工作流编排。每条任务在同一妙手标签页中按“采集 → 认领 → 编辑 → 翻译 → 预检 → 发布 → 验证”线性完成，不使用草稿恢复或两阶段审批。状态只走“待执行 → 执行中 → 成功/异常”。不可逆发布回执独立保存在 `runtime/submissions/`，即使任务异常也不会猜测性重发。
+飞书只是输入和结果层，不参与浏览器工作流编排。每条任务在同一妙手标签页中按“采集 → 认领 → 编辑 → 翻译 → 预检 → 发布 → 验证”线性完成。状态为“待执行 → 执行中 → 成功/待核验/待补资料/异常”。不可逆发布回执独立保存在 `runtime/submissions/`，即使暂时核验不到结果也不会猜测性重发。
 
 只读检查表格连接和待执行数量（不会领取或发布）：
 
@@ -99,7 +134,7 @@ PYTHONPATH=src python3 -m miaoshou_auto_listing \
 PYTHONPATH=src python3 -m miaoshou_auto_listing --feishu-check
 ```
 
-飞书模式只读取这 9 个字段：`采购链接`、`目标店铺`、`定价方式`、`定价`、`每SKU库存`、`尺码图`、`执行状态`、`执行结果`、`TikTok产品ID`。`尺码图`是可选附件：服装详情页无法唯一识别可信尺码图时才需上传，程序会优先使用它并调用妙手图片翻译。空白行不会被领取；任务只回写“执行中 → 成功/异常”。店铺别名与妙手真实店铺 ID、国家的对应关系维护在 `config/shops.yaml`。
+飞书模式只读取这 9 个字段：`采购链接`、`目标店铺`、`定价方式`、`定价`、`每SKU库存`、`尺码图`、`执行状态`、`执行结果`、`TikTok产品ID`。`尺码图`是可选附件：人工上传附件视为目标市场语言终稿，并在上传前核对其是否覆盖当前全部 SKU 尺码；缺少尺码或无法识别的链接写为`待补资料`。店铺别名与妙手真实店铺 ID、国家的对应关系维护在 `config/shops.yaml`。
 
 `定价方式` 留空或选择 `固定售价` 时，`定价` 仍表示所有 SKU 的统一人民币售价，完全复用原有批量定价流程。选择 `采购价倍数` 时，`定价` 表示倍数；执行器使用妙手原生公式 `来源原价 × 倍数 + 0 - 0`，四舍五入并保留两位小数。倍数必须大于 `0` 且不超过 `100`，发布前会逐 SKU 核对采购价、预期售价与实际售价。历史字段 `定价（按采购价倍数）` 不参与执行，可从视图隐藏。
 
@@ -119,7 +154,7 @@ PYTHONPATH=src python3 -m miaoshou_auto_listing --feishu-check
 .venv/bin/python scripts/run_selection_listing_bridge.py --ensure-fields --sync
 ```
 
-只有明确需要无人值守发布时才可加`--execute-ready`。该开关按新建任务的精确飞书记录 ID 串行调用`--feishu-record`，不会使用“领取第一条待执行”的模糊入口：
+只有明确需要无人值守发布时才可加`--execute-ready`。该开关按新建任务的精确飞书记录 ID 串行调用`--feishu-record`，不会使用“领取第一条待执行”的模糊入口。它与人工上品表批量执行器共用`runtime/miaoshou_listing.lock`，禁止同时运行：
 
 ```bash
 .venv/bin/python scripts/run_selection_listing_bridge.py --sync --execute-ready

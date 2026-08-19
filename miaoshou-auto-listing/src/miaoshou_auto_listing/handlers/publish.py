@@ -84,9 +84,21 @@ class PublishHandler(Handler):
                 checkbox = dialog.locator(
                     f"input[type='checkbox'][value='{shop_id}']"
                 )
-                if await checkbox.count() != 1 or not await checkbox.first.is_checked():
+                if await checkbox.count() != 1:
                     raise ValueError(
-                        f"Target shop checkbox {shop_id!r} is not uniquely selected"
+                        f"Target shop checkbox {shop_id!r} was not unique"
+                    )
+                if not await checkbox.first.is_checked():
+                    label = checkbox.first.locator("xpath=ancestor::label[1]")
+                    if await label.count() != 1:
+                        raise ValueError(
+                            f"Target shop checkbox {shop_id!r} has no visible label"
+                        )
+                    await label.click()
+                    await context.page.wait_for_timeout(200)
+                if not await checkbox.first.is_checked():
+                    raise ValueError(
+                        f"Target shop checkbox {shop_id!r} could not be selected"
                     )
                 checked = dialog.locator("input[type='checkbox']:checked")
                 extra_values = []
@@ -386,6 +398,13 @@ class VerifyPublishHandler(Handler):
             urljoin(base, "tiktok/item/item"), wait_until="domcontentloaded"
         )
         await context.page.wait_for_timeout(600)
+        # Store-product filters persist across sessions. Clear stale shop/name
+        # filters before applying the source ID, otherwise a valid product in
+        # another shop can be hidden for the entire verification window.
+        reset = context.page.get_by_role("button", name="重置", exact=True)
+        if await reset.count():
+            await reset.first.click()
+            await context.page.wait_for_timeout(500)
         source_label = context.page.get_by_text("货源ID", exact=True)
         if not await source_label.count():
             return False

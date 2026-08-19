@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from time import monotonic
+
 from ..browser.helpers import fill_and_verify
 from ..errors import ExecutorError
 from ..models import ErrorCode, Step
@@ -12,6 +14,12 @@ from .editor_dom import (
     real_sku_rows,
     sku_header,
 )
+
+
+def warehouse_selection_matches(warehouse_name: str, evidence: str) -> bool:
+    expected = " ".join(str(warehouse_name).split()).casefold()
+    actual = " ".join(str(evidence).split()).casefold()
+    return bool(expected and expected in actual)
 
 
 class StockHandler(Handler):
@@ -96,25 +104,39 @@ class StockHandler(Handler):
         selector = warehouse_row.locator(".jx-select:visible")
         if await selector.count() != 1:
             raise ValueError("Bulk stock warehouse selector was not unique")
-        await selector.click()
-        await context.page.wait_for_timeout(200)
-        options = context.page.locator(
-            ".jx-select-dropdown:visible [role='option'], "
-            ".jx-select-dropdown:visible .jx-select-dropdown__item, "
-            "[role='listbox']:visible [role='option']"
-        )
-        option_texts = await options.all_inner_texts()
-        matches = [
-            options.nth(index)
-            for index, text in enumerate(option_texts)
-            if text.splitlines()[0].strip() == warehouse_name
-        ]
-        if len(matches) != 1:
-            raise ValueError(
-                f"Warehouse {warehouse_name!r} matched {len(matches)} options; "
-                f"available={option_texts}"
+        selected_evidence = " ".join(
+            value
+            for value in (
+                await selector.inner_text(),
+                await selector.get_attribute("title") or "",
+                await selector.get_attribute("aria-label") or "",
             )
-        await matches[0].click()
+            if value
+        )
+        if not warehouse_selection_matches(warehouse_name, selected_evidence):
+            await selector.click()
+            options = context.page.locator(
+                ".jx-select-dropdown:visible [role='option'], "
+                ".jx-select-dropdown:visible .jx-select-dropdown__item, "
+                "[role='listbox']:visible [role='option']"
+            )
+            deadline = monotonic() + context.config.browser.timeout_ms / 1000
+            while await options.count() == 0:
+                if monotonic() >= deadline:
+                    break
+                await context.page.wait_for_timeout(200)
+            option_texts = await options.all_inner_texts()
+            matches = [
+                options.nth(index)
+                for index, text in enumerate(option_texts)
+                if text.splitlines()[0].strip() == warehouse_name
+            ]
+            if len(matches) != 1:
+                raise ValueError(
+                    f"Warehouse {warehouse_name!r} matched {len(matches)} options; "
+                    f"selected={selected_evidence!r}; available={option_texts}"
+                )
+            await matches[0].click()
         stock_inputs = warehouse_row.locator(
             "input[type='text']:not([readonly]):not([role='combobox'])"
         )

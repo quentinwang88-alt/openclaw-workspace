@@ -60,6 +60,7 @@ def image_translation_fingerprint(task: ProductTask) -> str:
         ),
         "size_chart_file_name": task.size_chart_file_name,
         "market": task.market,
+        "category_group": task.category_group,
     }
     encoded = json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")

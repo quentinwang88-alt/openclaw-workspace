@@ -66,6 +66,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Execute exactly one Feishu row in the normal single-pass workflow",
     )
     parser.add_argument(
+        "--feishu-verify-record",
+        metavar="RECORD_ID",
+        help="Verify one submitted Feishu row without publishing",
+    )
+    parser.add_argument(
         "--feishu-check",
         action="store_true",
         help="Read-only Feishu connectivity and pending-task summary",
@@ -94,22 +99,54 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use the dedicated profile without attaching to a visible Chrome window",
     )
+    parser.add_argument(
+        "--browser-check",
+        action="store_true",
+        help="Validate the dedicated browser and Miaoshou login without writes",
+    )
+    parser.add_argument(
+        "--verify-timeout-ms",
+        type=int,
+        help="Override the bounded publish-result verification timeout",
+    )
     return parser
 
 
 async def run(args: argparse.Namespace) -> int:
     config_dir = args.config_dir.resolve()
     config = load_config(config_dir)
+    if args.verify_timeout_ms is not None:
+        if args.verify_timeout_ms < 1000 or args.verify_timeout_ms > 600000:
+            raise SystemExit("--verify-timeout-ms must be between 1000 and 600000")
+        config.browser.publish_verify_timeout_ms = args.verify_timeout_ms
     if args.headless:
         config.browser.headless = True
         config.browser.cdp_url = ""
     selectors = SelectorRegistry(config_dir / "selectors")
     session = BrowserSession(config.browser, selectors)
+    if args.browser_check:
+        if any(
+            (
+                args.task is not None,
+                args.feishu_once,
+                args.feishu_record,
+                args.feishu_verify_record,
+                args.feishu_check,
+                args.feishu_retry_record,
+                args.execute,
+            )
+        ):
+            raise SystemExit("--browser-check cannot be combined with task or Feishu flags")
+        async with session.page() as page:
+            await session.assert_logged_in(page)
+            print(json.dumps({"success": True, "url": page.url}, ensure_ascii=False))
+        return 0
     if args.feishu_check:
         if (
             args.task is not None
             or args.feishu_once
             or args.feishu_record
+            or args.feishu_verify_record
             or args.execute
             or args.feishu_retry_record
         ):
@@ -122,6 +159,7 @@ async def run(args: argparse.Namespace) -> int:
             args.task is not None
             or args.feishu_once
             or args.feishu_record
+            or args.feishu_verify_record
             or args.execute
         ):
             raise SystemExit("--feishu-retry-record cannot be combined with task or execute flags")
@@ -142,6 +180,7 @@ async def run(args: argparse.Namespace) -> int:
             args.task,
             args.feishu_once,
             args.feishu_record,
+            args.feishu_verify_record,
         )
     )
     if task_sources > 1:
@@ -151,7 +190,18 @@ async def run(args: argparse.Namespace) -> int:
     task_table = None
     claimed = None
     linear_feishu = False
-    if args.feishu_record:
+    if args.feishu_verify_record:
+        if args.execute:
+            raise SystemExit("--feishu-verify-record never accepts --execute")
+        args.execute = True
+        linear_feishu = True
+        task_table = FeishuTaskTable(config)
+        claimed = await asyncio.to_thread(
+            task_table.claim_for_verification, args.feishu_verify_record
+        )
+        task = claimed.task
+        task.current_step = Step.VERIFY
+    elif args.feishu_record:
         if args.execute:
             raise SystemExit(
                 "--feishu-record is already a complete publish action"
@@ -176,7 +226,8 @@ async def run(args: argparse.Namespace) -> int:
         task = ProductTask.model_validate_json(args.task.read_text(encoding="utf-8"))
     else:
         raise SystemExit(
-            "--task, --feishu-record or --feishu-once is required unless "
+            "--task, --feishu-record, --feishu-verify-record or --feishu-once "
+            "is required unless "
             "--prepare-profile is used"
         )
     if args.resume_from:

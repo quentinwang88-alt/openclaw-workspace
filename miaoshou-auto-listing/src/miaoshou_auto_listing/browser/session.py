@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from playwright.async_api import BrowserContext, Page, async_playwright
 import requests
@@ -114,7 +114,12 @@ class BrowserSession:
                 await context.close()
 
     async def assert_logged_in(self, page: Page) -> None:
-        if await self.selectors.exists(page, "login_form"):
+        parsed = urlparse(str(page.url or ""))
+        redirected_to_home = (
+            parsed.path in {"", "/"}
+            and bool(parse_qs(parsed.query).get("redirect"))
+        )
+        if redirected_to_home or await self.selectors.exists(page, "login_form"):
             raise ExecutorError(
                 ErrorCode.LOGIN_EXPIRED,
                 "Miaoshou login page detected; refresh the dedicated browser profile manually",

@@ -30,6 +30,14 @@ def infer_miaoshou_category(text: str) -> str:
     return ""
 
 
+def is_unbound_shop_row_text(text: str) -> bool:
+    compact = "".join(str(text or "").split())
+    return (
+        "请选择预发布店铺" in compact
+        or "请先选择预发布店铺" in compact
+    )
+
+
 async def miaoshou_row_identity(row) -> str:
     """Return a stable identity only when Miaoshou exposes one on the row.
 
@@ -154,6 +162,17 @@ class LocateProductHandler(Handler):
                 shop_matches.append(row)
         if len(shop_matches) == 1:
             await self._bind(context, shop_matches[0])
+            return
+        unbound_matches = [
+            row
+            for row in candidates
+            if is_unbound_shop_row_text(await row.inner_text())
+        ]
+        if len(unbound_matches) == 1:
+            # A previous attempt may have left another copy bound to the wrong
+            # shop. The unique unbound copy is the only safe row to bind using
+            # the configured target shop ID in SET_SHOP.
+            await self._bind(context, unbound_matches[0])
             return
         if len(candidates) == 1:
             await self._bind(context, candidates[0])

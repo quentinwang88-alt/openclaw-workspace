@@ -11,9 +11,11 @@ from miaoshou_auto_listing.handlers.base import Handler
 from miaoshou_auto_listing.handlers.product import (
     LocateProductHandler,
     infer_miaoshou_category,
+    is_unbound_shop_row_text,
     miaoshou_row_identity,
 )
 from miaoshou_auto_listing.handlers.shop import infer_category_group
+from miaoshou_auto_listing.handlers.stock import warehouse_selection_matches
 from miaoshou_auto_listing.models import ErrorCode, ProductTask, Step
 from miaoshou_auto_listing.state import (
     AcquisitionReceiptStore,
@@ -99,12 +101,54 @@ def workflow(
 
 
 class WorkflowTest(unittest.IsolatedAsyncioTestCase):
+    async def test_unbound_duplicate_row_is_recognized_for_rebinding(self) -> None:
+        self.assertTrue(is_unbound_shop_row_text("请先选择预发布店铺"))
+        self.assertFalse(is_unbound_shop_row_text("+ 选择店铺"))
+        self.assertFalse(is_unbound_shop_row_text("泰/TH Lunara"))
+
+    async def test_existing_warehouse_selection_is_reused(self) -> None:
+        self.assertTrue(
+            warehouse_selection_matches(
+                "The Chinese mainland Pickup Warehouse",
+                "The Chinese mainland Pickup Warehouse 手工管理",
+            )
+        )
+        self.assertFalse(
+            warehouse_selection_matches(
+                "The Chinese mainland Pickup Warehouse", "Vietnam Warehouse"
+            )
+        )
+
     async def test_hair_clip_synonyms_use_accessory_business_group(self) -> None:
         for title in (
             "高级感小号侧边刘海鸭嘴夹",
             "彩钻前额碎发发卡",
             "法式鲨鱼抓夹",
             "古风发簪",
+            "小众法式简约花朵耳钉",
+            "天然珍珠耳环女气质耳饰",
+            "黑色爱心耳扣女新款",
+            "纯银项链吊坠",
+            "复古手链戒指套装",
+        ):
+            self.assertEqual(infer_category_group(title), "ACCESSORY")
+
+    async def test_common_clothing_titles_use_clothing_business_group(self) -> None:
+        for title in (
+            "韩版淑女风灰色设计感针织开衫2026早春新款洋气薄款长袖上衣女",
+            "夏季短款背心女修身显瘦",
+            "宽松圆领T恤女短袖",
+            "秋冬慵懒风毛衣女",
+            "美式连帽卫衣女宽松显瘦",
+            "防晒衣女夏季短款立领宽松防晒服百搭空调罩衫",
+        ):
+            self.assertEqual(infer_category_group(title), "CLOTHING")
+
+    async def test_standalone_hats_use_accessory_business_group(self) -> None:
+        for title in (
+            "复古棒球帽女春夏款",
+            "法式贝雷帽秋冬新款",
+            "保暖针织帽子",
         ):
             self.assertEqual(infer_category_group(title), "ACCESSORY")
 
@@ -169,6 +213,11 @@ class WorkflowTest(unittest.IsolatedAsyncioTestCase):
                 update={"size_chart_file_token": "new-size-chart-token"}
             )
             self.assertIsNone(store.load(new_size_chart))
+
+            reclassified_as_clothing = listing_task.model_copy(
+                update={"category_group": "CLOTHING"}
+            )
+            self.assertIsNone(store.load(reclassified_as_clothing))
 
     async def test_current_miaoshou_dom_uses_collection_time_as_row_identity(self) -> None:
         class EmptyLocator:
