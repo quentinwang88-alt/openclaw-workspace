@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wig-success-replication"
+version = "0.1.0"
+description = "V1 Lite domain services for successful wig-script replication"
+requires-python = ">=3.10"
+dependencies = ["pydantic>=2.8,<3"]
+
+[tool.setuptools]
+packages = ["wig_success_replication"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

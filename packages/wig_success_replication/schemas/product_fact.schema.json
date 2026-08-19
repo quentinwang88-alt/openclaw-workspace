@@ -1,0 +1,185 @@
+{
+  "$defs": {
+    "Appearance": {
+      "additionalProperties": false,
+      "properties": {
+        "length": {
+          "enum": [
+            "short",
+            "medium",
+            "long",
+            "unknown"
+          ],
+          "title": "Length",
+          "type": "string"
+        },
+        "texture": {
+          "enum": [
+            "straight",
+            "slight_wave",
+            "wave",
+            "curly",
+            "unknown"
+          ],
+          "title": "Texture",
+          "type": "string"
+        },
+        "color": {
+          "minLength": 1,
+          "title": "Color",
+          "type": "string"
+        },
+        "bangs": {
+          "enum": [
+            "none",
+            "straight_bangs",
+            "air_bangs",
+            "curtain_bangs",
+            "other",
+            "unknown"
+          ],
+          "title": "Bangs",
+          "type": "string"
+        },
+        "layers": {
+          "enum": [
+            "none",
+            "normal",
+            "high",
+            "unknown"
+          ],
+          "title": "Layers",
+          "type": "string"
+        },
+        "face_framing": {
+          "enum": [
+            "yes",
+            "no",
+            "unknown"
+          ],
+          "title": "Face Framing",
+          "type": "string"
+        }
+      },
+      "required": [
+        "length",
+        "texture",
+        "color",
+        "bangs",
+        "layers",
+        "face_framing"
+      ],
+      "title": "Appearance",
+      "type": "object"
+    },
+    "ProductFactCard": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "product_id": {
+          "minLength": 1,
+          "title": "Product Id",
+          "type": "string"
+        },
+        "market": {
+          "items": {
+            "const": "MX",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Market",
+          "type": "array"
+        },
+        "category": {
+          "const": "wig",
+          "default": "wig",
+          "title": "Category",
+          "type": "string"
+        },
+        "appearance": {
+          "$ref": "#/$defs/Appearance"
+        },
+        "confirmed_selling_points": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Confirmed Selling Points",
+          "type": "array"
+        },
+        "visual_proof_actions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Visual Proof Actions",
+          "type": "array"
+        },
+        "forbidden_claims": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Forbidden Claims",
+          "type": "array"
+        },
+        "uncertain_points": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Uncertain Points",
+          "type": "array"
+        },
+        "evidence_notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Notes",
+          "type": "array"
+        },
+        "human_confirmed": {
+          "default": false,
+          "title": "Human Confirmed",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "product_id",
+        "market",
+        "appearance",
+        "confirmed_selling_points",
+        "visual_proof_actions",
+        "forbidden_claims",
+        "uncertain_points",
+        "evidence_notes"
+      ],
+      "title": "ProductFactCard",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "1.0",
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "fact": {
+      "$ref": "#/$defs/ProductFactCard"
+    },
+    "human_summary": {
+      "minLength": 1,
+      "title": "Human Summary",
+      "type": "string"
+    }
+  },
+  "required": [
+    "fact",
+    "human_summary"
+  ],
+  "title": "ProductFactExtraction",
+  "type": "object"
+}

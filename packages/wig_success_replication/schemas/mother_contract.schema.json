@@ -1,0 +1,616 @@
+{
+  "$defs": {
+    "AssetContract": {
+      "additionalProperties": false,
+      "properties": {
+        "face_reference_rule": {
+          "minLength": 1,
+          "title": "Face Reference Rule",
+          "type": "string"
+        },
+        "product_image_rule": {
+          "minLength": 1,
+          "title": "Product Image Rule",
+          "type": "string"
+        },
+        "reference_video_rule": {
+          "minLength": 1,
+          "title": "Reference Video Rule",
+          "type": "string"
+        },
+        "minimum_product_images": {
+          "minimum": 1,
+          "title": "Minimum Product Images",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "face_reference_rule",
+        "product_image_rule",
+        "reference_video_rule",
+        "minimum_product_images"
+      ],
+      "title": "AssetContract",
+      "type": "object"
+    },
+    "ClaimContract": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed_claim_sources": {
+          "items": {
+            "enum": [
+              "confirmed_product_fact",
+              "human_input"
+            ],
+            "type": "string"
+          },
+          "title": "Allowed Claim Sources",
+          "type": "array"
+        },
+        "forbidden_claim_sources": {
+          "items": {
+            "enum": [
+              "visual_imagination",
+              "template_assumption"
+            ],
+            "type": "string"
+          },
+          "title": "Forbidden Claim Sources",
+          "type": "array"
+        },
+        "source_script_claim_risks": {
+          "items": {
+            "maxLength": 320,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 12,
+          "title": "Source Script Claim Risks",
+          "type": "array"
+        }
+      },
+      "required": [
+        "allowed_claim_sources",
+        "forbidden_claim_sources",
+        "source_script_claim_risks"
+      ],
+      "title": "ClaimContract",
+      "type": "object"
+    },
+    "ContinuityContract": {
+      "additionalProperties": false,
+      "properties": {
+        "product_identity_must_remain_stable": {
+          "const": true,
+          "default": true,
+          "title": "Product Identity Must Remain Stable",
+          "type": "boolean"
+        },
+        "cross_segment_requirements": {
+          "items": {
+            "maxLength": 320,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 12,
+          "title": "Cross Segment Requirements",
+          "type": "array"
+        }
+      },
+      "required": [
+        "cross_segment_requirements"
+      ],
+      "title": "ContinuityContract",
+      "type": "object"
+    },
+    "CoreMechanism": {
+      "additionalProperties": false,
+      "properties": {
+        "summary": {
+          "maxLength": 600,
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        },
+        "hook_engine": {
+          "maxLength": 600,
+          "minLength": 1,
+          "title": "Hook Engine",
+          "type": "string"
+        },
+        "reveal_engine": {
+          "maxLength": 600,
+          "minLength": 1,
+          "title": "Reveal Engine",
+          "type": "string"
+        },
+        "proof_engine": {
+          "maxLength": 600,
+          "minLength": 1,
+          "title": "Proof Engine",
+          "type": "string"
+        },
+        "conversion_engine": {
+          "maxLength": 600,
+          "minLength": 1,
+          "title": "Conversion Engine",
+          "type": "string"
+        }
+      },
+      "required": [
+        "summary",
+        "hook_engine",
+        "reveal_engine",
+        "proof_engine",
+        "conversion_engine"
+      ],
+      "title": "CoreMechanism",
+      "type": "object"
+    },
+    "GlobalRules": {
+      "additionalProperties": false,
+      "properties": {
+        "hard_locks": {
+          "items": {
+            "maxLength": 320,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Hard Locks",
+          "type": "array"
+        },
+        "conditional_locks": {
+          "items": {
+            "maxLength": 320,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "title": "Conditional Locks",
+          "type": "array"
+        },
+        "free_variables": {
+          "items": {
+            "maxLength": 320,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "title": "Free Variables",
+          "type": "array"
+        },
+        "forbidden_mutations": {
+          "items": {
+            "maxLength": 320,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "title": "Forbidden Mutations",
+          "type": "array"
+        }
+      },
+      "required": [
+        "hard_locks",
+        "conditional_locks",
+        "free_variables",
+        "forbidden_mutations"
+      ],
+      "title": "GlobalRules",
+      "type": "object"
+    },
+    "LocalizationContract": {
+      "additionalProperties": false,
+      "properties": {
+        "language": {
+          "const": "es-MX",
+          "default": "es-MX",
+          "title": "Language",
+          "type": "string"
+        },
+        "tone": {
+          "maxLength": 600,
+          "minLength": 1,
+          "title": "Tone",
+          "type": "string"
+        },
+        "timing_risks": {
+          "items": {
+            "maxLength": 320,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 12,
+          "title": "Timing Risks",
+          "type": "array"
+        },
+        "silent_optimization_forbidden": {
+          "const": true,
+          "default": true,
+          "title": "Silent Optimization Forbidden",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "tone",
+        "timing_risks"
+      ],
+      "title": "LocalizationContract",
+      "type": "object"
+    },
+    "Segment": {
+      "additionalProperties": false,
+      "properties": {
+        "segment_id": {
+          "minLength": 1,
+          "title": "Segment Id",
+          "type": "string"
+        },
+        "duration_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Duration Seconds",
+          "type": "number"
+        },
+        "slots": {
+          "items": {
+            "$ref": "#/$defs/Slot"
+          },
+          "maxItems": 12,
+          "minItems": 1,
+          "title": "Slots",
+          "type": "array"
+        },
+        "end_frame_anchor": {
+          "maxLength": 600,
+          "title": "End Frame Anchor",
+          "type": "string"
+        },
+        "next_segment_start_requirement": {
+          "maxLength": 600,
+          "title": "Next Segment Start Requirement",
+          "type": "string"
+        }
+      },
+      "required": [
+        "segment_id",
+        "duration_seconds",
+        "slots",
+        "end_frame_anchor",
+        "next_segment_start_requirement"
+      ],
+      "title": "Segment",
+      "type": "object"
+    },
+    "Slot": {
+      "additionalProperties": false,
+      "properties": {
+        "slot_id": {
+          "minLength": 1,
+          "title": "Slot Id",
+          "type": "string"
+        },
+        "segment_id": {
+          "minLength": 1,
+          "title": "Segment Id",
+          "type": "string"
+        },
+        "time_start": {
+          "minimum": 0,
+          "title": "Time Start",
+          "type": "number"
+        },
+        "time_end": {
+          "exclusiveMinimum": 0,
+          "title": "Time End",
+          "type": "number"
+        },
+        "source_content": {
+          "maxLength": 600,
+          "minLength": 1,
+          "title": "Source Content",
+          "type": "string"
+        },
+        "narrative_function": {
+          "maxLength": 600,
+          "minLength": 1,
+          "title": "Narrative Function",
+          "type": "string"
+        },
+        "traffic_role": {
+          "enum": [
+            "hook",
+            "reveal",
+            "proof",
+            "benefit",
+            "transition",
+            "cta",
+            "other"
+          ],
+          "title": "Traffic Role",
+          "type": "string"
+        },
+        "lock_level": {
+          "enum": [
+            "hard_lock",
+            "conditional_lock",
+            "free_variable"
+          ],
+          "title": "Lock Level",
+          "type": "string"
+        },
+        "product_dependency": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "title": "Product Dependency",
+          "type": "string"
+        },
+        "must_keep": {
+          "items": {
+            "maxLength": 320,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 10,
+          "title": "Must Keep",
+          "type": "array"
+        },
+        "allowed_mutations": {
+          "items": {
+            "maxLength": 320,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 10,
+          "title": "Allowed Mutations",
+          "type": "array"
+        },
+        "forbidden_mutations": {
+          "items": {
+            "maxLength": 320,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 10,
+          "title": "Forbidden Mutations",
+          "type": "array"
+        },
+        "same_product_rule": {
+          "maxLength": 600,
+          "minLength": 1,
+          "title": "Same Product Rule",
+          "type": "string"
+        },
+        "cross_product_rule": {
+          "maxLength": 600,
+          "minLength": 1,
+          "title": "Cross Product Rule",
+          "type": "string"
+        },
+        "inference_confidence": {
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ],
+          "title": "Inference Confidence",
+          "type": "string"
+        },
+        "evidence_type": {
+          "enum": [
+            "observed",
+            "script_inference",
+            "product_fact",
+            "human_input"
+          ],
+          "title": "Evidence Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "slot_id",
+        "segment_id",
+        "time_start",
+        "time_end",
+        "source_content",
+        "narrative_function",
+        "traffic_role",
+        "lock_level",
+        "product_dependency",
+        "must_keep",
+        "allowed_mutations",
+        "forbidden_mutations",
+        "same_product_rule",
+        "cross_product_rule",
+        "inference_confidence",
+        "evidence_type"
+      ],
+      "title": "Slot",
+      "type": "object"
+    },
+    "SourceIntegrity": {
+      "additionalProperties": false,
+      "properties": {
+        "source_script_hash": {
+          "minLength": 1,
+          "title": "Source Script Hash",
+          "type": "string"
+        },
+        "source_script_must_not_be_overwritten": {
+          "const": true,
+          "default": true,
+          "title": "Source Script Must Not Be Overwritten",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "source_script_hash"
+      ],
+      "title": "SourceIntegrity",
+      "type": "object"
+    },
+    "ValidationEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "maxLength": 600,
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "validation_level": {
+          "default": "candidate_validated",
+          "enum": [
+            "candidate_validated",
+            "human_validated"
+          ],
+          "title": "Validation Level",
+          "type": "string"
+        },
+        "causality_limit": {
+          "maxLength": 600,
+          "minLength": 1,
+          "title": "Causality Limit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "description",
+        "causality_limit"
+      ],
+      "title": "ValidationEvidence",
+      "type": "object"
+    },
+    "VariantPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "single_core_mutation": {
+          "const": true,
+          "default": true,
+          "title": "Single Core Mutation",
+          "type": "boolean"
+        },
+        "same_product_default_count": {
+          "default": 12,
+          "minimum": 1,
+          "title": "Same Product Default Count",
+          "type": "integer"
+        },
+        "cross_product_default_count": {
+          "default": 4,
+          "minimum": 1,
+          "title": "Cross Product Default Count",
+          "type": "integer"
+        }
+      },
+      "title": "VariantPolicy",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "1.0",
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "mother_id": {
+      "minLength": 1,
+      "title": "Mother Id",
+      "type": "string"
+    },
+    "mother_version": {
+      "minimum": 1,
+      "title": "Mother Version",
+      "type": "integer"
+    },
+    "market": {
+      "const": "MX",
+      "default": "MX",
+      "title": "Market",
+      "type": "string"
+    },
+    "category": {
+      "const": "wig",
+      "default": "wig",
+      "title": "Category",
+      "type": "string"
+    },
+    "source_integrity": {
+      "$ref": "#/$defs/SourceIntegrity"
+    },
+    "validation_evidence": {
+      "$ref": "#/$defs/ValidationEvidence"
+    },
+    "core_mechanism": {
+      "$ref": "#/$defs/CoreMechanism"
+    },
+    "segments": {
+      "items": {
+        "$ref": "#/$defs/Segment"
+      },
+      "maxItems": 8,
+      "minItems": 1,
+      "title": "Segments",
+      "type": "array"
+    },
+    "global_rules": {
+      "$ref": "#/$defs/GlobalRules"
+    },
+    "asset_contract": {
+      "$ref": "#/$defs/AssetContract"
+    },
+    "continuity_contract": {
+      "$ref": "#/$defs/ContinuityContract"
+    },
+    "claim_contract": {
+      "$ref": "#/$defs/ClaimContract"
+    },
+    "localization_contract": {
+      "$ref": "#/$defs/LocalizationContract"
+    },
+    "variant_policy": {
+      "$ref": "#/$defs/VariantPolicy"
+    },
+    "risks": {
+      "items": {
+        "maxLength": 320,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 20,
+      "title": "Risks",
+      "type": "array"
+    },
+    "human_summary": {
+      "maxLength": 1600,
+      "minLength": 1,
+      "title": "Human Summary",
+      "type": "string"
+    }
+  },
+  "required": [
+    "mother_id",
+    "mother_version",
+    "source_integrity",
+    "validation_evidence",
+    "core_mechanism",
+    "segments",
+    "global_rules",
+    "asset_contract",
+    "continuity_contract",
+    "claim_contract",
+    "localization_contract",
+    "variant_policy",
+    "risks",
+    "human_summary"
+  ],
+  "title": "MotherContract",
+  "type": "object"
+}

@@ -1,0 +1,287 @@
+{
+  "$defs": {
+    "CreativeSignature": {
+      "additionalProperties": false,
+      "properties": {
+        "core_anchors": {
+          "items": {
+            "enum": [
+              "conflict",
+              "early_product_reveal",
+              "strong_contrast",
+              "proof",
+              "cta"
+            ],
+            "type": "string"
+          },
+          "maxItems": 5,
+          "minItems": 5,
+          "title": "Core Anchors",
+          "type": "array"
+        },
+        "hook_type": {
+          "maxLength": 600,
+          "minLength": 1,
+          "title": "Hook Type",
+          "type": "string"
+        },
+        "opening_action": {
+          "maxLength": 600,
+          "minLength": 1,
+          "title": "Opening Action",
+          "type": "string"
+        },
+        "reveal_method": {
+          "maxLength": 600,
+          "minLength": 1,
+          "title": "Reveal Method",
+          "type": "string"
+        },
+        "voiceover_text": {
+          "maxLength": 1600,
+          "minLength": 1,
+          "title": "Voiceover Text",
+          "type": "string"
+        },
+        "timing_pattern": {
+          "items": {
+            "maxLength": 600,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 12,
+          "minItems": 1,
+          "title": "Timing Pattern",
+          "type": "array"
+        },
+        "proof_actions": {
+          "items": {
+            "maxLength": 600,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 8,
+          "minItems": 1,
+          "title": "Proof Actions",
+          "type": "array"
+        },
+        "proof_order": {
+          "items": {
+            "maxLength": 600,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 8,
+          "minItems": 1,
+          "title": "Proof Order",
+          "type": "array"
+        },
+        "cta_expression": {
+          "maxLength": 600,
+          "minLength": 1,
+          "title": "Cta Expression",
+          "type": "string"
+        },
+        "ending_composition": {
+          "maxLength": 600,
+          "minLength": 1,
+          "title": "Ending Composition",
+          "type": "string"
+        },
+        "changed_dimensions": {
+          "items": {
+            "enum": [
+              "baseline",
+              "visual_shell",
+              "hook",
+              "reveal",
+              "proof_selection",
+              "proof_order",
+              "timing",
+              "voiceover",
+              "cta",
+              "ending"
+            ],
+            "type": "string"
+          },
+          "maxItems": 5,
+          "minItems": 1,
+          "title": "Changed Dimensions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "core_anchors",
+        "hook_type",
+        "opening_action",
+        "reveal_method",
+        "voiceover_text",
+        "timing_pattern",
+        "proof_actions",
+        "proof_order",
+        "cta_expression",
+        "ending_composition",
+        "changed_dimensions"
+      ],
+      "title": "CreativeSignature",
+      "type": "object"
+    },
+    "PromptQA": {
+      "additionalProperties": false,
+      "properties": {
+        "passed": {
+          "title": "Passed",
+          "type": "boolean"
+        },
+        "issues": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Issues",
+          "type": "array"
+        }
+      },
+      "required": [
+        "passed",
+        "issues"
+      ],
+      "title": "PromptQA",
+      "type": "object"
+    },
+    "ReplicationPrompt": {
+      "additionalProperties": false,
+      "properties": {
+        "variant_type": {
+          "minLength": 1,
+          "title": "Variant Type",
+          "type": "string"
+        },
+        "sequence_no": {
+          "maximum": 20,
+          "minimum": 1,
+          "title": "Sequence No",
+          "type": "integer"
+        },
+        "replication_mode": {
+          "enum": [
+            "high_fidelity",
+            "general"
+          ],
+          "title": "Replication Mode",
+          "type": "string"
+        },
+        "creative_route": {
+          "enum": [
+            "H1",
+            "H2",
+            "H3",
+            "G1",
+            "G2",
+            "G3",
+            "G4",
+            "G5"
+          ],
+          "title": "Creative Route",
+          "type": "string"
+        },
+        "variant_key": {
+          "minLength": 1,
+          "title": "Variant Key",
+          "type": "string"
+        },
+        "mutation_key": {
+          "minLength": 1,
+          "title": "Mutation Key",
+          "type": "string"
+        },
+        "change_summary": {
+          "maxLength": 600,
+          "minLength": 1,
+          "title": "Change Summary",
+          "type": "string"
+        },
+        "full_prompt": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "title": "Full Prompt",
+          "type": "string"
+        },
+        "creative_signature": {
+          "$ref": "#/$defs/CreativeSignature"
+        },
+        "qa": {
+          "$ref": "#/$defs/PromptQA"
+        }
+      },
+      "required": [
+        "variant_type",
+        "sequence_no",
+        "replication_mode",
+        "creative_route",
+        "variant_key",
+        "mutation_key",
+        "change_summary",
+        "full_prompt",
+        "creative_signature",
+        "qa"
+      ],
+      "title": "ReplicationPrompt",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "1.0",
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "batch_id": {
+      "minLength": 1,
+      "title": "Batch Id",
+      "type": "string"
+    },
+    "mother_id": {
+      "minLength": 1,
+      "title": "Mother Id",
+      "type": "string"
+    },
+    "mother_version": {
+      "minimum": 1,
+      "title": "Mother Version",
+      "type": "integer"
+    },
+    "product_id": {
+      "minLength": 1,
+      "title": "Product Id",
+      "type": "string"
+    },
+    "relationship": {
+      "enum": [
+        "same_product",
+        "cross_product"
+      ],
+      "title": "Relationship",
+      "type": "string"
+    },
+    "outputs": {
+      "items": {
+        "$ref": "#/$defs/ReplicationPrompt"
+      },
+      "maxItems": 20,
+      "title": "Outputs",
+      "type": "array"
+    }
+  },
+  "required": [
+    "batch_id",
+    "mother_id",
+    "mother_version",
+    "product_id",
+    "relationship",
+    "outputs"
+  ],
+  "title": "ReplicationCompileOutput",
+  "type": "object"
+}

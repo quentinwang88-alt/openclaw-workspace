@@ -1,0 +1,7 @@
+interface:
+  display_name: "假发成功脚本复刻"
+  short_description: "按累计目标生成高保真与一般复刻提示词"
+  default_prompt: "Use $wig-success-script-replication to check and run the pending Mexico wig replication task safely."
+
+policy:
+  allow_implicit_invocation: true
