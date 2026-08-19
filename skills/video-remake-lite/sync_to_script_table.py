@@ -595,8 +595,14 @@ def sync_records(args: argparse.Namespace) -> Dict[str, int]:
     if not target_mapping.get("script_s1"):
         raise RuntimeError("现有脚本表缺少脚本字段：脚本方向一 / 脚本_S1 / 脚本S1")
 
-    source_records = source_client.list_records(page_size=100, limit=args.limit)
-    target_records = target_client.list_records(page_size=100)
+    source_records = source_client.list_records(page_size=500, limit=args.limit)
+    has_pending_source = any(
+        should_process_source_record(record.fields, source_mapping)
+        for record in source_records
+    )
+    # The target script table is large.  Idle patrols should finish after the
+    # source scan instead of repeatedly downloading the entire target table.
+    target_records = target_client.list_records(page_size=500) if has_pending_source else []
     stats = {
         "scanned": len(source_records),
         "created": 0,
@@ -653,7 +659,7 @@ def sync_records(args: argparse.Namespace) -> Dict[str, int]:
 
         try:
             print(f"➡️ 同步记录: record_id={record.record_id} script_id={script_id}", flush=True)
-            fresh_target_records = target_client.list_records(page_size=100)
+            fresh_target_records = target_client.list_records(page_size=500)
             duplicated_script_id = find_existing_script_id(
                 fresh_target_records,
                 target_mapping,

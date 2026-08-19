@@ -265,6 +265,17 @@ class FourFieldPromptContractTest(unittest.TestCase):
 
         self.assertIn("นี่คือความต่าง", output)
 
+    def test_spoken_text_validator_allows_quoted_subtitle_followed_by_shot_notes(self) -> None:
+        client = object.__new__(VideoRemakeLLMClient)
+        client._responses_text = lambda *, prompt, frames: self.fail("repair should not run")
+
+        output = client._ensure_spoken_text_no_chinese(
+            '安全区小号泰语字幕：“แค่ยิ้มเบา ๆ ก็พอ”。镜头 1：人物从右侧入场，低头微笑；负面限制：不要出现中文。',
+            {"target_language": "泰语"},
+        )
+
+        self.assertIn("แค่ยิ้มเบา ๆ ก็พอ", output)
+
     def test_spoken_text_validator_allows_subtitle_requirement_with_style_notes(self) -> None:
         client = object.__new__(VideoRemakeLLMClient)
         client._responses_text = lambda *, prompt, frames: self.fail("repair should not run")

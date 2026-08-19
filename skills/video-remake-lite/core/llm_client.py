@@ -705,6 +705,13 @@ class VideoRemakeLLMClient:
                     if "要求" in match.group(0) or "要求" in current_clause_prefix:
                         continue
                     spoken_value = QUOTED_VISIBLE_TEXT_RE.sub("", value)
+                    if spoken_value.lstrip().startswith(("。", "；", ";", "。", ".")):
+                        # A compact prompt may place the actual subtitle first,
+                        # then continue the same line with Chinese shot/action
+                        # instructions.  With a non-Chinese quoted subtitle and
+                        # a sentence boundary immediately after it, that tail is
+                        # not renderable subtitle content.
+                        continue
                 else:
                     spoken_value = value
                 first_sentence_value = re.split(r"[。；;]", spoken_value, 1)[0].strip()
