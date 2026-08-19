@@ -428,9 +428,13 @@ def _main_with_lock(args: argparse.Namespace) -> None:
     print(f"\n🗂️ 脚本主数据命中数: {len(metadata_lookup)} | metadata_db_path={args.metadata_db_path}")
     print("   说明: 运行表里的脚本ID优先来自脚本主数据库；数据库未命中时才按源表规则即时推导")
 
-    source_records = source_client.list_records(page_size=100)
-    target_records = target_client.list_records(page_size=100)
-    target_indexes = build_target_record_indexes(target_records, target_mapping)
+    # A record-scoped run must stay record-scoped.  The old implementation
+    # fetched every source row even when --record-id was supplied.
+    source_records = (
+        [source_client.get_record(args.record_id)]
+        if args.record_id
+        else source_client.list_records(page_size=500)
+    )
 
     manual_script_ids: Dict[str, str] = {}
     preflight_errors: Dict[str, str] = {}
@@ -465,6 +469,11 @@ def _main_with_lock(args: argparse.Namespace) -> None:
     for task in sync_tasks:
         tasks_by_source[task.source_record_id].append(task)
 
+    # The target table is the large table in this flow.  Do not read it during
+    # an idle poll or when the selected source record fails preflight checks.
+    target_records = target_client.list_records(page_size=500) if sync_tasks else []
+    target_indexes = build_target_record_indexes(target_records, target_mapping)
+
     print("\n📊 预检查结果:")
     print(f"   源表记录数: {len(source_records)}")
     print(f"   待同步源记录数: {len(tasks_by_source)}")
@@ -482,6 +491,10 @@ def _main_with_lock(args: argparse.Namespace) -> None:
 
     if args.dry_run:
         print("\n🔍 dry-run 模式，不执行写入。")
+        print(
+            f"📡 飞书记录接口请求: source={source_client.request_count} "
+            f"target={target_client.request_count} total={source_client.request_count + target_client.request_count}"
+        )
         return
 
     failed_records = 0
@@ -666,6 +679,10 @@ def _main_with_lock(args: argparse.Namespace) -> None:
     print("\n🎉 同步完成")
     print(f"   创建: {created}")
     print(f"   失败源记录数: {failed_records}")
+    print(
+        f"📡 飞书记录接口请求: source={source_client.request_count} "
+        f"target={target_client.request_count} total={source_client.request_count + target_client.request_count}"
+    )
 
 
 if __name__ == "__main__":

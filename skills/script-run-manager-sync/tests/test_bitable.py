@@ -110,6 +110,29 @@ class BitableClientCompatibilityTest(unittest.TestCase):
             {"field_name": "发布状态", "type": 1, "ui_type": "Text"},
         )
 
+    @patch("core.bitable.requests.request")
+    def test_get_record_reads_one_record_endpoint(self, request) -> None:
+        request.return_value = DummyResponse(
+            {
+                "code": 0,
+                "data": {
+                    "record": {
+                        "record_id": "rec_123",
+                        "fields": {"脚本ID": "S1"},
+                    }
+                },
+            }
+        )
+        client = FeishuBitableClient(app_token="app_token", table_id="tbl_token")
+        client.access_token = "test"
+        client.token_expires_at = 99999999999
+
+        record = client.get_record("rec_123")
+
+        self.assertEqual(record.record_id, "rec_123")
+        self.assertEqual(record.fields, {"脚本ID": "S1"})
+        self.assertIn("/records/rec_123", request.call_args.args[1])
+
 
 if __name__ == "__main__":
     unittest.main()

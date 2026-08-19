@@ -55,10 +55,10 @@ def main() -> int:
         if REQUEST_FIELD not in field_names:
             raise RuntimeError(f"人工脚本表缺少字段【{REQUEST_FIELD}】")
         mapping = resolve_manual_field_mapping(field_names)
-        records = client.list_records(page_size=100)
+        records = client.list_records(page_size=500)
         requested = [record for record in records if normalize_checkbox(record.fields.get(REQUEST_FIELD))]
         if not requested:
-            print("manual-sync-trigger: no requested rows")
+            print(f"manual-sync-trigger: no requested rows; feishu_requests={client.request_count}")
             return 0
 
         if OUTER_SCHEDULE_LOCK.exists():
@@ -102,9 +102,14 @@ def main() -> int:
                     detail = (result.stderr or result.stdout or "同步进程未成功启动").strip().replace("\n", " ")[:300]
                     client.update_record_fields(
                         record.record_id,
-                        {status_field: f"OpenClaw 立即同步未启动，将自动重试：{detail}"},
+                        {
+                            status_field: f"OpenClaw 立即同步失败，已停止自动重试；修正后请重新勾选：{detail}",
+                            REQUEST_FIELD: False,
+                        },
                     )
-                print(f"manual-sync-trigger deferred: record_id={record.record_id} exit={result.returncode}")
+                else:
+                    client.update_record_fields(record.record_id, {REQUEST_FIELD: False})
+                print(f"manual-sync-trigger stopped: record_id={record.record_id} exit={result.returncode}")
                 continue
 
             # The pipeline is responsible for final success/failure status.  The request
@@ -113,7 +118,10 @@ def main() -> int:
             synced += 1
             print(f"manual-sync-trigger completed: record_id={record.record_id}")
 
-        print(f"manual-sync-trigger summary: completed={synced} deferred={deferred}")
+        print(
+            f"manual-sync-trigger summary: completed={synced} deferred={deferred} "
+            f"feishu_requests={client.request_count}"
+        )
         return 0
 
 

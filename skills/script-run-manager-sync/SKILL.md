@@ -60,7 +60,7 @@ python3 /Users/likeu3/.openclaw/workspace/skills/script-run-manager-sync/run_pip
   --source-kind original-batch
 ```
 
-该入口只读取 `原创视频生产脚本` 中勾选了 `进入生产` 的行，一行直接对应一个运行管理任务。它使用上游 `脚本ID` 幂等同步，把 `视频生成提示词` 写入运行表 `提示词`，同步成功后取消勾选并回写 `处理状态=已送生产`、同步结果、同步时间和运行任务ID。旧 `production` 来源的 S1-S4/变体拆分逻辑保持不变。
+该入口只读取 `原创视频生产脚本` 中勾选了 `进入生产` 的行，一行直接对应一个运行管理任务。它使用上游 `脚本ID` 幂等同步，优先把 `短视频提示词`（迁移期兼容旧名 `视频生成提示词`）写入运行表 `提示词`；禁止回退同步 `完整生产脚本`。短视频提示词为空时该行不得送生产。同步成功后取消勾选并回写 `处理状态=已送生产`、同步结果、同步时间和运行任务ID。旧 `production` 来源的 S1-S4/变体拆分逻辑保持不变。
 
 原创生产脚本的参考图由运营选择决定：未勾选 `生成首帧（需勾选）` 时始终沿用原商品参考图，
 即使上游视觉参考模式为 `PERSONA_PRODUCT_COMPOSITE_REQUIRED/PREFERRED` 也不能自动阻塞；
@@ -84,7 +84,7 @@ python3 /Users/likeu3/.openclaw/workspace/skills/script-run-manager-sync/scripts
 
 只接受 `record_id`（`rec`开头）、`product_code`（8–30位数字）和 1–20 的脚本处理上限。不得把自然语言拼进 shell，也不得处理未勾选`进入生产`的记录。同步进程本身有文件锁；重复运行按`脚本ID`更新/跳过，不能重复创建运行任务。
 
-OpenClaw 自动巡检应使用**命令型**任务、每两分钟执行一次：
+OpenClaw 自动巡检应使用**命令型**任务、每五分钟执行一次：
 
 ```bash
 python3 /Users/likeu3/.openclaw/workspace/skills/script-run-manager-sync/scripts/openclaw_original_batch_sync.py sync --limit 20

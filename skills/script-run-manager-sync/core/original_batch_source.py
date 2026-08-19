@@ -28,7 +28,10 @@ ORIGINAL_BATCH_SOURCE_FIELD_ALIASES: Dict[str, List[str]] = {
     "business_category": ["一级类目"],
     "video_duration": ["视频时长"],
     "complete_script": ["完整生产脚本"],
-    "video_prompt": ["视频生成提示词"],
+    # The production runner must consume the short-video generation prompt,
+    # never the human-readable complete script.  Prefer the new explicit
+    # field name while retaining the historical name during migration.
+    "video_prompt": ["短视频提示词", "视频生成提示词"],
     "sync_enabled": ["进入生产"],
     "sync_status": ["同步结果"],
     "sync_time": ["同步时间"],
@@ -106,8 +109,9 @@ def build_original_batch_sync_tasks(
             continue
         script_id = normalize_text(fields.get(mapping.get("script_id"))) if mapping.get("script_id") else ""
         prompt = normalize_text(fields.get(mapping.get("video_prompt"))) if mapping.get("video_prompt") else ""
-        if not prompt and mapping.get("complete_script"):
-            prompt = normalize_text(fields.get(mapping.get("complete_script")))
+        # Deliberately do not fall back to 完整生产脚本.  A missing video
+        # prompt must keep the row out of production rather than send the
+        # wrong content to the video model.
         if not code or not script_id or not prompt:
             continue
         index_text = normalize_text(fields.get(mapping.get("item_index"))) if mapping.get("item_index") else ""

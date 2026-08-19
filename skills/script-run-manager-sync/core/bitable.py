@@ -238,6 +238,22 @@ class FeishuBitableClient:
 
         return records
 
+    def get_record(self, record_id: str) -> TableRecord:
+        """Read one record directly instead of scanning the whole table."""
+        if not record_id:
+            raise ValueError("record_id is required")
+        url = (
+            f"https://open.feishu.cn/open-apis/bitable/v1/apps/"
+            f"{self.app_token}/tables/{self.table_id}/records/{record_id}"
+        )
+        response = self._request("GET", url, headers=self._headers())
+        result = response.json()
+        if result.get("code") != 0:
+            raise FeishuAPIError(f"读取单条记录失败: {result.get('msg')}")
+        record = result.get("data", {}).get("record") or {}
+        resolved_record_id = record.get("record_id") or record_id
+        return TableRecord(record_id=resolved_record_id, fields=record.get("fields", {}))
+
     def batch_create_records(self, records: List[Dict[str, Any]]) -> List[str]:
         if not records:
             return []

@@ -8,6 +8,43 @@ from core.original_batch_source import (
 
 
 class OriginalBatchSourceTest(unittest.TestCase):
+    def test_short_video_prompt_is_preferred_when_both_fields_exist(self):
+        mapping = resolve_original_batch_field_mapping(
+            [
+                "脚本ID", "产品编码", "短视频提示词", "视频生成提示词",
+                "完整生产脚本", "进入生产",
+            ]
+        )
+        tasks = build_original_batch_sync_tasks(
+            [TableRecord("rec", {
+                "脚本ID": "S1",
+                "产品编码": "P1",
+                "短视频提示词": "正确的短视频提示词",
+                "视频生成提示词": "迁移期旧字段",
+                "完整生产脚本": "禁止同步的完整脚本",
+                "进入生产": True,
+            })],
+            mapping,
+        )
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].prompt_text, "正确的短视频提示词")
+
+    def test_missing_video_prompt_never_falls_back_to_complete_script(self):
+        mapping = resolve_original_batch_field_mapping(
+            ["脚本ID", "产品编码", "视频生成提示词", "完整生产脚本", "进入生产"]
+        )
+        tasks = build_original_batch_sync_tasks(
+            [TableRecord("rec", {
+                "脚本ID": "S1",
+                "产品编码": "P1",
+                "视频生成提示词": "",
+                "完整生产脚本": "禁止同步的完整脚本",
+                "进入生产": True,
+            })],
+            mapping,
+        )
+        self.assertEqual(tasks, [])
+
     def test_one_row_becomes_one_sync_task(self):
         fields = [
             "脚本ID", "产品编码", "产品图片", "店铺ID", "批次ItemID", "批次序号",
