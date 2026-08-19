@@ -86,7 +86,6 @@ def _script_projection(template: Dict[str, Any], country: str) -> Dict[str, str]
     appearance_parts = [
         _text(template.get("appearance_text")),
         _text(template.get("body_type")),
-        _text(template.get("body_proportion_text")),
     ]
     if not appearance_parts[0]:
         appearance_parts.extend([

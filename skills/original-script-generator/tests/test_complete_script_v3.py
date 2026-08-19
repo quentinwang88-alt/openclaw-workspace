@@ -4,10 +4,13 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from core.complete_script_v3 import (
     COMPLETE_BLUEPRINT_SCHEMA_VERSION,
+    EXACT_PRODUCT_OUTFIT_SCENE_MATCH_BONUS,
     FIELD_CONSUMERS,
+    SELLING_SCENE_SEMANTIC_MATCH_BONUS,
     assign_audio_actual,
     attach_field_consumers,
     build_creative_diversity_contract,
@@ -540,11 +543,85 @@ class CompleteScriptV3Tests(unittest.TestCase):
         )
 
         self.assertIn("PHOTO_FRIENDLY", contract["scene_affinity_matches"])
+        self.assertIn(
+            "PHOTO_FRIENDLY", contract["selling_scene_affinity_matches"]
+        )
+        self.assertEqual(
+            SELLING_SCENE_SEMANTIC_MATCH_BONUS,
+            contract["selling_scene_semantic_bonus"],
+        )
+        self.assertGreater(
+            contract["selling_scene_semantic_bonus"],
+            EXACT_PRODUCT_OUTFIT_SCENE_MATCH_BONUS,
+        )
         self.assertTrue(
             any(
                 token in contract["scene_motif"]
                 for token in ("咖啡", "精品", "酒店", "商场", "展览", "书店")
             )
+        )
+
+    def test_photo_argument_outranks_exact_outfit_office_preference(self) -> None:
+        photo_direction = direction()
+        photo_direction["content_bundle_brief"] = {
+            "selling_argument": {
+                "status": "AVAILABLE",
+                "core_value": "适合拍照打卡和探店，穿上很上镜",
+            }
+        }
+        candidates = [
+            {
+                "moment_family_id": "OFFICE_BREAK",
+                "persona_role": "通勤分享者",
+                "viewer_relationship": "像朋友分享",
+                "scene_motif": "办公室衣帽区靠窗墙面",
+                "opening_action": "人物拿起包准备离开",
+                "action_grammar": "整体→细节→整体",
+                "visual_tone": "自然记录",
+            },
+            {
+                "moment_family_id": "LEISURE_OUTING",
+                "persona_role": "日常分享者",
+                "viewer_relationship": "像朋友分享",
+                "scene_motif": "咖啡厅靠窗的普通座位区域",
+                "opening_action": "人物看向手机准备分享",
+                "action_grammar": "整体→细节→整体",
+                "visual_tone": "自然记录",
+            },
+        ]
+        exact_office_outfit = {
+            "source_type": "LIGHTWEIGHT_TEMPLATE",
+            "source_tier": "EXACT_PRODUCT_TEMPLATE",
+            "match_scope": "EXACT_PRODUCT_CODE",
+            "template_id": "STYLE_OFFICE",
+            "scene_families": ["OFFICE_WORKBREAK"],
+            "silhouette_key": "OFFICE",
+            "style_family": "OFFICE",
+            "outfit_recipe": {"top": "简洁内搭", "bottom": "高腰长裤"},
+        }
+        with patch(
+            "core.complete_script_v3._creative_combinations",
+            return_value=candidates,
+        ), patch(
+            "core.complete_script_v3._select_outfit_contract",
+            return_value=(exact_office_outfit, 0, 0),
+        ):
+            contract = build_creative_diversity_contract(
+                product_code="P_PHOTO_EXACT_OFFICE",
+                country="泰国",
+                category="女装",
+                product_type="外套",
+                direction=photo_direction,
+                recent_usage=[],
+            )
+
+        self.assertIn("咖啡", contract["scene_motif"])
+        self.assertEqual(
+            SELLING_SCENE_SEMANTIC_MATCH_BONUS,
+            contract["selling_scene_semantic_bonus"],
+        )
+        self.assertEqual(
+            "FALLBACK", contract["outfit_scene_affinity_contract"]["match_status"]
         )
 
     def test_legacy_creative_carrier_override_cannot_rewrite_structure_carrier(self) -> None:

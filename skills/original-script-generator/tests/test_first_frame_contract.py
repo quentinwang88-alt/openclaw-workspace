@@ -2,6 +2,7 @@ import tempfile
 import unittest
 import sqlite3
 from pathlib import Path
+from unittest.mock import patch
 
 from core.first_frame_contract import (
     build_first_frame_contract,
@@ -94,6 +95,9 @@ class FirstFrameContractTest(unittest.TestCase):
         self.assertIn("白色背心；直筒牛仔裤", prompt)
         self.assertIn("书店出口", prompt)
         self.assertIn("上身4下身6", prompt)
+        self.assertIn("人物参考图不控制头身比", prompt)
+        self.assertIn("至少覆盖头部至膝部", prompt)
+        self.assertIn("参考图的裁切、镜头距离与头部画面占比不代表身体比例", prompt)
         self.assertIn("书架、货架、文字和陈列只放画面侧边或远处", prompt)
         self.assertNotIn("桌边收据和待归还书籍", prompt)
 
@@ -134,6 +138,20 @@ class FirstFrameContractTest(unittest.TestCase):
         )
         self.assertNotEqual(one["asset_fingerprint"], three["asset_fingerprint"])
 
+    def test_person_first_frame_freezes_before_active_speech(self):
+        script = _script()
+        script["video_generation_brief"]["storyboard"][0][
+            "character_action"
+        ] = "人物面对手机自然开口分享"
+        contract = build_first_frame_contract(
+            script_id="S_SPEAK", product_code="1730000000000000000",
+            product_images=[{"file_token": "product_ref"}], script=script,
+        )
+        prompt = render_first_frame_prompt(contract)
+        self.assertIn("人物面对手机，刚准备开始分享", prompt)
+        self.assertIn("嘴唇自然放松或仅轻微分开", prompt)
+        self.assertNotIn("人物面对手机自然开口分享", prompt)
+
     def test_person_direction_without_reference_is_unavailable(self):
         script = _script()
         script["video_generation_brief"]["persona_selection_contract"]["availability"] = "UNAVAILABLE"
@@ -142,6 +160,77 @@ class FirstFrameContractTest(unittest.TestCase):
             product_images=[{"file_token": "product_ref"}], script=script,
         )
         self.assertEqual(contract["availability"], "PERSONA_REFERENCE_UNAVAILABLE")
+
+    def test_unbound_frozen_character_uses_text_design_without_persona_reference(self):
+        script = _script()
+        brief = script["video_generation_brief"]
+        brief.pop("persona_selection_contract")
+        brief["production_design"]["character"] = {
+            "identity": "准备出门的泰国年轻女性创作者",
+            "appearance": "自然健康肤色，身形匀称",
+            "hair_makeup": "黑色中长发低马尾，轻薄日常妆",
+            "speaking_personality": "轻松直接",
+        }
+        contract = build_first_frame_contract(
+            script_id="S_TEXT_PERSONA", product_code="1730000000000000000",
+            product_images=[{"file_token": "product_ref"}], script=script,
+        )
+        self.assertEqual(contract["availability"], "AVAILABLE")
+        self.assertEqual(
+            contract["persona_contract"]["reference_strategy"],
+            "FROZEN_SCRIPT_TEXT_ONLY",
+        )
+        prompt = render_first_frame_prompt(contract)
+        self.assertIn("准备出门的泰国年轻女性创作者", prompt)
+        self.assertIn("黑色中长发低马尾", prompt)
+        self.assertIn("未绑定人物参考图", prompt)
+        self.assertIn("不得从商品参考图复制模特的脸", prompt)
+
+    def test_missing_body_proportion_uses_natural_adult_fallback(self):
+        script = _script()
+        script["video_generation_brief"]["persona_selection_contract"][
+            "identity_lock"
+        ]["body_proportion_text"] = ""
+        contract = build_first_frame_contract(
+            script_id="S_FALLBACK", product_code="1730000000000000000",
+            product_images=[{"file_token": "product_ref"}], script=script,
+        )
+        self.assertEqual(
+            "NATURAL_ADULT_FALLBACK",
+            contract["body_proportion_authority"]["status"],
+        )
+        prompt = render_first_frame_prompt(contract)
+        self.assertIn("采用自然写实的成年人物比例", prompt)
+        self.assertNotIn("服从人物模板参考", prompt)
+
+    def test_old_script_backfills_proportion_for_same_persona_only(self):
+        script = _script()
+        script["video_generation_brief"]["persona_selection_contract"][
+            "identity_lock"
+        ]["body_proportion_text"] = ""
+        provider = {
+            "provider_version": "provider-test",
+            "templates": [
+                {"persona_id": "OTHER", "body_proportion_text": "错误人物比例"},
+                {"persona_id": "P1", "body_proportion_text": "上身4下身6，头身比约1:7.2"},
+            ],
+        }
+        with patch(
+            "core.persona_template_provider.load_persona_templates",
+            return_value=provider,
+        ):
+            contract = build_first_frame_contract(
+                script_id="S_BACKFILL", product_code="1730000000000000000",
+                product_images=[{"file_token": "product_ref"}], script=script,
+            )
+        self.assertEqual(
+            "LATEST_SAME_PERSONA_BACKFILL",
+            contract["persona_contract"]["body_proportion_source"],
+        )
+        self.assertEqual(
+            "上身4下身6，头身比约1:7.2",
+            contract["persona_contract"]["identity_lock"]["body_proportion_text"],
+        )
 
     def test_asset_cache_and_binding(self):
         with tempfile.TemporaryDirectory() as temp:

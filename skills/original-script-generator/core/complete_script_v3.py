@@ -32,10 +32,11 @@ from core.outfit_selection import (
 from core.product_type_resolution import normalize_product_type
 
 
-CREATIVE_DIVERSITY_POLICY_VERSION = "creative-diversity-v12-exact-outfit-scene"
+CREATIVE_DIVERSITY_POLICY_VERSION = "creative-diversity-v13-selling-scene-priority"
 OUTFIT_SCENE_AFFINITY_POLICY_VERSION = "outfit-scene-affinity-v2-exact-soft-boost"
 OUTFIT_SCENE_MATCH_BONUS = 24
 EXACT_PRODUCT_OUTFIT_SCENE_MATCH_BONUS = 30
+SELLING_SCENE_SEMANTIC_MATCH_BONUS = 40
 ACCESSORY_OUTFIT_SELECTION_CONTRACT_VERSION = OUTFIT_SELECTION_CONTRACT_VERSION
 COMPLETE_BLUEPRINT_SCHEMA_VERSION = "complete-script-blueprint-v4-carrier"
 COMPLETE_SCRIPT_POLICY_VERSION = "complete-script-qc-v22-event-driven-light"
@@ -1624,9 +1625,23 @@ def build_creative_diversity_contract(
         affinity_matches = [
             tag for tag in scene_preferences if tag in candidate_tags
         ]
+        selling_affinity_matches = [
+            tag for tag in selling_scene_preferences if tag in candidate_tags
+        ]
         # Soft preference only.  One exact recent combination still costs 100,
         # so semantic fit cannot collapse a batch back into one repeated scene.
-        affinity_bonus = min(30, 18 * len(affinity_matches))
+        # A scene-explicit selling argument must still outrank the 30-point
+        # exact-outfit preference, without becoming a validator or hard gate.
+        generic_affinity_bonus = min(30, 18 * len(affinity_matches))
+        selling_scene_semantic_bonus = (
+            SELLING_SCENE_SEMANTIC_MATCH_BONUS
+            if selling_affinity_matches
+            else 0
+        )
+        affinity_bonus = max(
+            generic_affinity_bonus,
+            selling_scene_semantic_bonus,
+        )
         proof_environment_score = _scene_request_proof_environment_score(
             scene_request, item
         )
@@ -1667,6 +1682,8 @@ def build_creative_diversity_contract(
             "scene_affinity_tags": candidate_tags,
             "scene_affinity_matches": affinity_matches,
             "scene_affinity_score": affinity_bonus,
+            "selling_scene_affinity_matches": selling_affinity_matches,
+            "selling_scene_semantic_bonus": selling_scene_semantic_bonus,
             "scene_proof_environment_score": proof_environment_score,
             "scene_reference_contract": scene_reference,
             "scene_reference_bonus": matrix_bonus,
@@ -1750,6 +1767,12 @@ def build_creative_diversity_contract(
         "category_scene_affinity_preferences": category_scene_preferences,
         "scene_affinity_matches": list(selected.get("scene_affinity_matches") or []),
         "scene_affinity_score": int(selected.get("scene_affinity_score") or 0),
+        "selling_scene_affinity_matches": list(
+            selected.get("selling_scene_affinity_matches") or []
+        ),
+        "selling_scene_semantic_bonus": int(
+            selected.get("selling_scene_semantic_bonus") or 0
+        ),
         "scene_proof_environment_score": int(
             selected.get("scene_proof_environment_score") or 0
         ),

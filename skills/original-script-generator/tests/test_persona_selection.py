@@ -130,7 +130,7 @@ class PersonaSelectionTest(unittest.TestCase):
             "PERSONA_PRODUCT_COMPOSITE_PREFERRED",
             contract["reference_strategy"],
         )
-        self.assertIn("上身4下身6", contract["script_projection"]["appearance"])
+        self.assertNotIn("上身4下身6", contract["script_projection"]["appearance"])
         self.assertEqual(
             "上身4下身6，头身比约1:7.2",
             contract["identity_lock"]["body_proportion_text"],

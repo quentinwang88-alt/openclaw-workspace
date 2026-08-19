@@ -11,8 +11,8 @@ import json
 from typing import Any, Dict, Mapping, Sequence
 
 
-CONTRACT_VERSION = "original-first-frame-contract-v2"
-PROMPT_VERSION = "original-first-frame-prompt-v2-compact-scene"
+CONTRACT_VERSION = "original-first-frame-contract-v4-text-persona-fallback"
+PROMPT_VERSION = "original-first-frame-prompt-v5-text-persona-fallback"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
 DEFAULT_ASPECT_RATIO = "9:16"
 
@@ -71,6 +71,50 @@ def _opening_snapshot(script: Mapping[str, Any], brief: Mapping[str, Any]) -> Di
     }
 
 
+def _backfill_same_persona_body_proportion(
+    persona_contract: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Backfill only a missing proportion field for the already frozen persona.
+
+    Old complete scripts predate the dedicated Feishu proportion field.  A
+    user-triggered first-frame retry may consume the latest approved value for
+    the same persona id, but it must never reselect a different person.
+    """
+
+    persona = _dict(persona_contract)
+    identity_lock = _dict(persona.get("identity_lock"))
+    if _text(identity_lock.get("body_proportion_text")):
+        persona["body_proportion_source"] = "FROZEN_SCRIPT_CONTRACT"
+        return persona
+    persona_id = _text(persona.get("persona_id"))
+    if not persona_id:
+        persona["body_proportion_source"] = "UNAVAILABLE"
+        return persona
+    try:
+        from core.persona_template_provider import load_persona_templates
+
+        provider = load_persona_templates()
+    except Exception:
+        provider = {}
+    for template in _list(_dict(provider).get("templates")):
+        if not isinstance(template, Mapping):
+            continue
+        if _text(template.get("persona_id")) != persona_id:
+            continue
+        proportion = _text(template.get("body_proportion_text"))
+        if proportion:
+            identity_lock["body_proportion_text"] = proportion
+            persona["identity_lock"] = identity_lock
+            persona["body_proportion_source"] = "LATEST_SAME_PERSONA_BACKFILL"
+            persona["body_proportion_provider_version"] = _text(
+                _dict(provider).get("provider_version")
+            )
+            return persona
+        break
+    persona["body_proportion_source"] = "NATURAL_ADULT_FALLBACK"
+    return persona
+
+
 def build_first_frame_contract(
     *,
     script_id: str,
@@ -86,9 +130,26 @@ def build_first_frame_contract(
     production = _dict(brief.get("production_design")) or _dict(
         script.get("production_design")
     )
-    persona = _dict(brief.get("persona_selection_contract")) or _dict(
-        production.get("persona_selection_contract")
+    persona = _backfill_same_persona_body_proportion(
+        _dict(brief.get("persona_selection_contract"))
+        or _dict(production.get("persona_selection_contract"))
     )
+    # Some directions deliberately freeze a one-off creative character rather
+    # than bind a reusable persona template.  The completed script is still a
+    # valid character authority in that case.  Keep an explicit persona
+    # binding strict, but do not misclassify an unbound text design as a
+    # missing reference asset.
+    character = _dict(production.get("character"))
+    if not _text(persona.get("persona_id")) and character:
+        persona["availability"] = "TEXT_DESIGN_AVAILABLE"
+        persona["reference_strategy"] = "FROZEN_SCRIPT_TEXT_ONLY"
+        persona["persona_source"] = "FROZEN_SCRIPT_CHARACTER"
+        persona["script_projection"] = {
+            "identity": _text(character.get("identity")),
+            "appearance": _text(character.get("appearance")),
+            "hair_makeup": _text(character.get("hair_makeup")),
+            "speaking_personality": _text(character.get("speaking_personality")),
+        }
     from core.outfit_selection import upgrade_outfit_structure_contract
     from core.visual_execution_contract import (
         build_opening_scene_projection,
@@ -123,8 +184,16 @@ def build_first_frame_contract(
         if _asset_id(item)
     ]
     presentation = _text(production.get("presentation_mode")).upper()
+    persona_id = _text(persona.get("persona_id"))
     persona_available = _text(persona.get("availability")).upper() == "AVAILABLE"
-    if presentation in {"PERSON_ON_CAMERA", "WEARER_ACTIVE", "MIXED"} and not persona_available:
+    body_proportion_text = _text(
+        _dict(persona.get("identity_lock")).get("body_proportion_text")
+    )
+    if (
+        presentation in {"PERSON_ON_CAMERA", "WEARER_ACTIVE", "MIXED"}
+        and persona_id
+        and not persona_available
+    ):
         availability = "PERSONA_REFERENCE_UNAVAILABLE"
     elif not product_refs:
         availability = "PRODUCT_REFERENCE_UNAVAILABLE"
@@ -147,6 +216,16 @@ def build_first_frame_contract(
         "product_identity_lock": identity,
         "product_truth": product_truth,
         "persona_contract": persona,
+        "body_proportion_authority": {
+            "status": "CONFIGURED" if body_proportion_text else "NATURAL_ADULT_FALLBACK",
+            "guidance": (
+                body_proportion_text
+                if body_proportion_text
+                else "采用自然写实的成年人物比例；头部、肩宽、躯干和四肢协调"
+            ),
+            "reference_image_scope": "FACE_SKIN_HAIR_ONLY",
+            "authority": "STRUCTURED_PERSONA_FIELD_OR_NATURAL_FALLBACK",
+        },
         "outfit_contract": outfit,
         "outfit_prompt_projection": outfit_projection,
         "scene_contract": scene,
@@ -158,7 +237,8 @@ def build_first_frame_contract(
         "capture_mode": _text(brief.get("capture_mode") or production.get("capture_mode")),
         "authority_order": [
             "PRODUCT_REFERENCES_CONTROL_PRODUCT_IDENTITY",
-            "PERSONA_REFERENCES_CONTROL_PERSON_IDENTITY",
+            "PERSONA_REFERENCES_CONTROL_FACE_SKIN_HAIR_IDENTITY",
+            "STRUCTURED_PERSONA_FIELD_CONTROLS_BODY_PROPORTION",
             "FROZEN_OUTFIT_CONTROLS_STYLING",
             "FROZEN_SCENE_CONTROLS_ENVIRONMENT",
             "FROZEN_OPENING_CONTROLS_START_STATE_AND_FRAMING",
@@ -171,7 +251,7 @@ def build_first_frame_contract(
         "product_code": contract["product_code"],
         "product_reference_asset_ids": contract["product_reference_asset_ids"],
         "product_identity_lock": identity,
-        "persona_id": _text(persona.get("persona_id")),
+        "persona_id": persona_id,
         "persona_version": _text(persona.get("template_version")),
         "persona_body_proportion": _text(
             _dict(persona.get("identity_lock")).get("body_proportion_text")
@@ -202,6 +282,26 @@ def _lines(title: str, values: Sequence[Any]) -> str:
     return f"{title}：" + ("；".join(cleaned) if cleaned else "无额外已批准信息")
 
 
+def _project_first_frame_opening_action(action: Any, presentation: Any) -> str:
+    """Turn video speech motion into a still-image-safe opening state."""
+
+    text = _text(action)
+    mode = _text(presentation).upper()
+    if mode not in {"PERSON_ON_CAMERA", "WEARER_ACTIVE", "MIXED"}:
+        return text
+    replacements = (
+        ("直接看向手机镜头开口分享", "看向手机镜头，刚准备开始分享"),
+        ("看向手机镜头开口分享", "看向手机镜头，刚准备开始分享"),
+        ("面对手机自然开口分享", "面对手机，刚准备开始分享"),
+        ("自然开口分享", "刚准备开始分享"),
+        ("开口分享", "准备开始分享"),
+        ("自然开口", "刚准备开口"),
+    )
+    for source, target in replacements:
+        text = text.replace(source, target)
+    return text
+
+
 def render_first_frame_prompt(contract: Mapping[str, Any]) -> str:
     """Render the exact image-edit prompt; reference roles stay explicit."""
 
@@ -219,9 +319,11 @@ def render_first_frame_prompt(contract: Mapping[str, Any]) -> str:
     must_not = _list(identity.get("must_not_change"))
     quantity = _dict(truth.get("display_quantity_contract"))
     prompt_negative = _text(persona.get("prompt_negative"))
+    body_authority = _dict(contract.get("body_proportion_authority"))
     target_role = _text(outfit.get("target_role"))
     body_proportion = _text(
-        _dict(persona.get("identity_lock")).get("body_proportion_text")
+        body_authority.get("guidance")
+        or _dict(persona.get("identity_lock")).get("body_proportion_text")
     )
     recipe = _dict(outfit.get("outfit_recipe"))
     recipe_labels = {
@@ -247,7 +349,11 @@ def render_first_frame_prompt(contract: Mapping[str, Any]) -> str:
     opening_focus = _dict(visual_saliency.get("opening_focus"))
     dense_opening = _text(opening_scene.get("source_density")).upper() == "HIGH"
     opening_visual = _text(opening.get("visual_content"))
-    opening_action = _text(opening.get("character_action"))
+    presentation = _text(contract.get("presentation_mode")).upper()
+    persona_reference_assets = _list(contract.get("persona_reference_assets"))
+    opening_action = _project_first_frame_opening_action(
+        opening.get("character_action"), presentation
+    )
     dense_prop_tokens = ("书", "货架", "陈列", "收据", "招牌", "文字牌")
     if dense_opening and any(token in opening_visual for token in dense_prop_tokens):
         opening_visual = (
@@ -276,13 +382,36 @@ def render_first_frame_prompt(contract: Mapping[str, Any]) -> str:
     elif canonical_type in {"bracelet", "bangle"}:
         category_extension = "腕饰：使用手腕前臂近景，展示数量必须与冻结数量合同一致。"
 
+    proportion_framing = "首帧人物比例构图：不适用。"
+    if (
+        presentation in {"PERSON_ON_CAMERA", "WEARER_ACTIVE", "MIXED"}
+        and (
+            canonical_type in {"outerwear", "top", "dress"}
+            or target_role == "TARGET_GARMENT"
+        )
+    ):
+        proportion_framing = (
+            "首帧人物比例构图：使用正常手机主摄与普通生活拍摄距离，至少覆盖头部至膝部，"
+            "优先膝上或近全身平视构图；保持自然肩宽、躯干长度和腿部比例。"
+            "不要贴脸广角，不要头大身小，也不要复制人物参考图的半身裁切比例。"
+        )
+
+    persona_reference_rule = (
+        "2. 后面的人物参考图只决定同一人物的脸部身份、五官特征、肤色、自然皮肤纹理和妆发；"
+        "参考图的裁切、镜头距离与头部画面占比不代表身体比例。不得把人物图中的衣服、商品或背景带入结果。"
+        if persona_reference_assets
+        else
+        "2. 本任务未绑定人物参考图，人物外貌只按冻结脚本文字设定生成；"
+        "不得从商品参考图复制模特的脸、妆容、身材比例、姿势或构图。"
+    )
+
     return "\n".join(
         [
             f"生成一张竖屏 {_text(contract.get('aspect_ratio')) or DEFAULT_ASPECT_RATIO} 短视频统一首帧，作为后续视频生成的视觉参考。",
             "",
             "【参考图角色与权威顺序】",
             "1. 前面的商品参考图只决定目标商品的颜色、图案、材质观感、形状、数量和结构；忽略商品图中的模特、脸、妆发、姿态、滤镜与背景。",
-            "2. 后面的人物参考图只决定同一人物的脸部身份、肤色、自然皮肤纹理、身材比例和妆发；不得把人物图中的衣服、商品或背景带入结果。",
+            persona_reference_rule,
             "3. 下方冻结穿搭决定人物穿什么；冻结场景决定在哪里；冻结开场决定首帧状态、动作瞬间和景别。",
             "4. 商品一致性优先于人物美感、场景氛围和构图效果。",
             "",
@@ -294,7 +423,8 @@ def render_first_frame_prompt(contract: Mapping[str, Any]) -> str:
             "【人物身份锁】",
             f"人物模板：{_text(persona.get('persona_name')) or _text(persona.get('persona_id')) or '不适用'}",
             f"人物身份与外貌：{_text(persona_projection.get('identity'))}；{_text(persona_projection.get('appearance'))}",
-            f"身材比例：{body_proportion or '服从人物模板参考，不从商品参考图复制或重新设计'}",
+            f"身体比例权威：{body_proportion or '采用自然写实的成年人物比例；人物参考图不控制头身比例'}",
+            "比例边界：人物参考图不控制头身比；不要放大头部，不要缩短躯干或四肢。",
             f"妆发：{_text(persona_projection.get('hair_makeup'))}",
             f"人物补充核心：{_text(persona.get('prompt_core'))}",
             "",
@@ -323,8 +453,15 @@ def render_first_frame_prompt(contract: Mapping[str, Any]) -> str:
             "【冻结开场状态】",
             f"首帧画面：{opening_visual}",
             f"动作瞬间：{opening_action}",
+            (
+                "首帧口型：人物刚准备开口，嘴唇自然放松或仅轻微分开；"
+                "不要定格在明显发声、夸张张嘴或不自然抿嘴的瞬间。"
+                if presentation in {"PERSON_ON_CAMERA", "WEARER_ACTIVE", "MIXED"}
+                else "首帧口型：不适用。"
+            ),
             f"自然状态：{_text(opening.get('natural_emotion'))}",
             f"景别与手机：{_text(opening.get('camera'))}",
+            proportion_framing,
             f"首帧商品可见锚点：{'；'.join(_list(opening.get('product_anchors_visible')))}",
             "",
             "【画面风格】",
