@@ -71,6 +71,20 @@ def _stored_voiceover(row: Any) -> str:
     return str(signature.get("voiceover_text") or "") or _legacy_voiceover(str(getattr(row, "full_prompt", "")))
 
 
+def creative_history_snapshot(row: Any) -> dict[str, Any]:
+    """Return model-facing history, enriching legacy rows from prompt text."""
+    signature = dict(_stored_signature(row))
+    voiceover = _stored_voiceover(row)
+    if voiceover and not signature.get("voiceover_text"):
+        signature["voiceover_text"] = voiceover
+    return signature
+
+
+def text_similarity(left: str, right: str) -> float:
+    """Public normalization-compatible similarity used by evaluation tooling."""
+    return _similarity(left, right)
+
+
 def _opening_key(signature: CreativeSignature | dict[str, Any]) -> tuple[str, str, str]:
     if isinstance(signature, CreativeSignature):
         values = (signature.hook_type, signature.opening_action, signature.reveal_method)

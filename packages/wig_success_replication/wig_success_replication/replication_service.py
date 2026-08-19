@@ -6,7 +6,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from .deterministic_qa import PromptQAResult, inspect_compile_output
+from .deterministic_qa import PromptQAResult, creative_history_snapshot, inspect_compile_output
 from .hashing import batch_signature, deterministic_id
 from .models import (
     BatchStatus,
@@ -384,7 +384,7 @@ class ReplicationBatchService:
                 "sequence_no": row.sequence_no,
                 "replication_mode": row.replication_mode,
                 "creative_route": row.creative_route,
-                "creative_signature": row.creative_signature,
+                "creative_signature": creative_history_snapshot(row),
             }
             for row in existing_prompts
             if row.sequence_no > 0
