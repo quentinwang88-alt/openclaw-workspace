@@ -42,6 +42,7 @@ DEFAULT_MIXCUT_USE_CASE = "投流混剪"
 MIXCUT_FACTORY_TIERS = {20, 40, 60, 80}
 MIXCUT_TIER_FIELDS = ("投流混剪档位", "混剪档位", "目标混剪档位", "混剪工厂档位")
 TASK_STATE_FIELDS = ("任务状态", "混剪任务状态", "混剪状态")
+SCANNER_THROTTLE_FILE = ROOT / "var" / "mixcut-task-scanner.last-attempt"
 
 
 def main() -> int:
@@ -59,8 +60,18 @@ def main() -> int:
     parser.add_argument("--no-ads-auto-continue", action="store_true", help="Run only one ADS pass even when RDS asks for RUN_GUARD_AGAIN.")
     parser.add_argument("--loop", action="store_true", help="Keep scanning forever.")
     parser.add_argument("--interval-seconds", type=int, default=_env_int("AUTO_MIXCUT_SCANNER_INTERVAL_SECONDS", 7200))
+    parser.add_argument("--force-scan", action="store_true", help="Bypass the scheduled-run throttle for a manual run.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+
+    if _scheduled_scan_throttled(args):
+        print(
+            json.dumps(
+                {"success": True, "status": "throttled", "min_interval_seconds": 21600},
+                ensure_ascii=False,
+            )
+        )
+        return 0
 
     if args.loop:
         while True:
@@ -71,6 +82,24 @@ def main() -> int:
     run = run_once(args)
     print(json.dumps(run, ensure_ascii=False, indent=2, default=str))
     return 0 if run.get("success") else 1
+
+
+def _scheduled_scan_throttled(args: argparse.Namespace) -> bool:
+    """Limit unattended cron scans while preserving explicit/manual runs."""
+    if args.force_scan or args.product_id or args.dry_run or args.loop:
+        return False
+    min_interval = _env_int("AUTO_MIXCUT_SCANNER_MIN_INTERVAL_SECONDS", 21600)
+    if min_interval <= 0:
+        return False
+    now = time.time()
+    try:
+        if now - SCANNER_THROTTLE_FILE.stat().st_mtime < min_interval:
+            return True
+    except FileNotFoundError:
+        pass
+    SCANNER_THROTTLE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SCANNER_THROTTLE_FILE.touch()
+    return False
 
 
 def run_once(args: argparse.Namespace) -> dict[str, Any]:

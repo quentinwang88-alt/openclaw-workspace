@@ -5,10 +5,21 @@ SKILL_DIR="${0:A:h:h}"
 LOCK_DIR="${TMPDIR:-/tmp}/light-tryon-feishu-sync.lock"
 LOG_DIR="$SKILL_DIR/var"
 PAUSE_FILE="$LOG_DIR/run-manager-sync.paused"
+THROTTLE_FILE="$LOG_DIR/run-manager-sync.last-attempt"
+MIN_INTERVAL_SECONDS="${LIGHT_TRYON_MIN_INTERVAL_SECONDS:-21600}"
 
 if [[ "$*" == *"sync-run-manager"* ]] && [[ -f "$PAUSE_FILE" ]]; then
   print -r -- "light-tryon run-manager sync paused: $PAUSE_FILE"
   exit 0
+fi
+
+if [[ "$*" == *"sync-run-manager"* ]] && [[ "${LIGHT_TRYON_FORCE_SYNC:-0}" != "1" ]] && [[ -f "$THROTTLE_FILE" ]]; then
+  now_epoch="$(date +%s)"
+  last_epoch="$(stat -f %m "$THROTTLE_FILE" 2>/dev/null || print 0)"
+  if (( now_epoch - last_epoch < MIN_INTERVAL_SECONDS )); then
+    print -r -- "light-tryon run-manager sync throttled: min_interval=${MIN_INTERVAL_SECONDS}s"
+    exit 0
+  fi
 fi
 
 # launchd opens the current log before invoking this wrapper. Renaming an
@@ -42,4 +53,7 @@ cleanup_lock() {
 }
 trap cleanup_lock EXIT INT TERM HUP
 
+if [[ "$*" == *"sync-run-manager"* ]]; then
+  touch "$THROTTLE_FILE"
+fi
 python3 "$SKILL_DIR/scripts/run_pipeline.py" feishu "$@"
