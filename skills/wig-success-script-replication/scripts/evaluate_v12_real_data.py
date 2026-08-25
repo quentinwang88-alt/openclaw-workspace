@@ -73,7 +73,7 @@ def _quality_report(repository: InMemoryRepository, mother_id: str, version: int
     rows = repository.list_prompts(mother_id, version, product_id)
     h1 = next((row for row in rows if row.sequence_no == 1), None)
     h1_voiceover = str((h1.creative_signature if h1 else {}).get("voiceover_text") or "")
-    generated = [row for row in rows if row.planner_version == "v1.2-fidelity-general"]
+    generated = [row for row in rows if row.planner_version.startswith("v1.2")]
     comparisons = []
     for row in generated:
         signature = row.creative_signature
@@ -209,7 +209,7 @@ def main() -> int:
                 "full_prompt": row.full_prompt,
             }
             for row in isolated.prompts.values()
-            if row.planner_version == "v1.2-fidelity-general"
+            if row.planner_version.startswith("v1.2")
         ],
     }
     output = Path(args.output) if args.output else (

@@ -109,7 +109,9 @@ class ReplicationBatchService:
         if batch.status == BatchStatus.COMPLETED and self._all_targets_satisfied(
             mother, selected, per_product_count
         ):
-            return BatchResult(batch, False, 0, tuple(), ("duplicate_batch",))
+            # Reaching an unchanged cumulative target is a successful no-op,
+            # not an operator-facing failure.
+            return BatchResult(batch, False, 0, tuple(), tuple())
 
         # A completed historical batch is deliberately reopened if durable
         # sequence rows are missing. Sequence uniqueness, not batch state, is

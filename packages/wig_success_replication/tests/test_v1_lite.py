@@ -237,6 +237,7 @@ def test_cumulative_target_only_generates_missing_tail():
     assert first.saved_prompts == 3
     assert raised.saved_prompts == 3
     assert unchanged.saved_prompts == 0
+    assert unchanged.errors == ()
     assert llm.planned_sequences == [[1, 2, 3], [4, 5, 6]]
     rows = repo.list_prompts("m", 1, "source")
     assert [row.sequence_no for row in rows] == [1, 2, 3, 4, 5, 6]

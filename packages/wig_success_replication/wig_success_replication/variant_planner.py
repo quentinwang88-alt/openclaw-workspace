@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from .models import VariantPlanItem
 
 
-PLANNER_VERSION = "v1.2-fidelity-general"
+PLANNER_VERSION = "v1.2.1-fidelity-general"
 
 
 class VariantPlanner:
@@ -39,8 +39,8 @@ class VariantPlanner:
         (
             "G3",
             "general_proof_rebuild",
-            ("proof_selection", "proof_order", "voiceover"),
-            ("重选证明动作组合", "重排证明动作顺序", "改写口播措辞"),
+            ("hook", "proof_selection", "proof_order", "voiceover"),
+            ("更换首镜冲突表达", "重选证明动作组合", "重排证明动作顺序", "改写口播措辞"),
         ),
         (
             "G4",
@@ -51,8 +51,8 @@ class VariantPlanner:
         (
             "G5",
             "general_pacing_rebuild",
-            ("timing", "proof_order", "cta"),
-            ("改变镜头节奏与数量", "重排证明动作顺序", "重写CTA表达"),
+            ("reveal", "timing", "proof_order", "cta"),
+            ("更换产品揭晓方式", "改变镜头节奏与数量", "重排证明动作顺序", "重写CTA表达"),
         ),
     )
 
