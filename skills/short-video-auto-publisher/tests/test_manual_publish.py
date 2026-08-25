@@ -206,6 +206,54 @@ class ManualPublishTest(unittest.TestCase):
         self.assertEqual(publisher.calls[0]["channel"], "NeoBund")
         self.assertEqual(client.updates[-1]["fields"]["处理状态"], "已创建")
 
+    def test_pending_create_rebuilds_confirmed_failed_remote_task(self) -> None:
+        record = self._record("rec-manual-confirmed-failed-retry")
+        record.fields.update(
+            {
+                "处理状态": "待创建",
+                "发布任务ID": "neobund:old-failed-task",
+                "错误信息": "Failed to upload the video : fail",
+                "发布渠道": "NeoBund",
+            }
+        )
+        self.db.assign_manual_slot(
+            record_id=record.record_id,
+            store_id="SHOP-01",
+            account_id="acc-1",
+            account_name="账号1",
+            scheduled_for="2026-04-14 12:00:00",
+            canonical_script_key=f"manual:{record.record_id}",
+            script_id=f"manual_{record.record_id}",
+            publish_task_id="neobund:old-failed-task",
+            title_override="Manual title",
+            channel_override="NeoBund",
+        )
+        with self.db._connect() as conn:
+            conn.execute(
+                "UPDATE publish_slots SET schedule_status='发布失败', error_message=? "
+                "WHERE manual_request_record_id=?",
+                ("Failed to upload the video : fail", record.record_id),
+            )
+        client = DummyManualClient()
+        publisher = ChannelPublisher()
+
+        stats = sync_manual_publish_requests(
+            [record],
+            self._mapping(),
+            self.db,
+            publisher,
+            client=client,
+            video_dir=Path(self.temp_dir.name) / "videos",
+        )
+
+        self.assertEqual(stats["created"], 1)
+        self.assertEqual(len(publisher.calls), 1)
+        self.assertEqual(client.updates[-1]["fields"]["处理状态"], "已创建")
+        self.assertNotEqual(
+            client.updates[-1]["fields"]["发布任务ID"],
+            "neobund:old-failed-task",
+        )
+
     def test_manual_request_uses_selected_publish_date_with_time(self) -> None:
         record = self._record("rec-manual-date")
         record.fields["发布日期"] = 1781193600000

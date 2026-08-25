@@ -421,6 +421,13 @@ def sync_manual_publish_requests(
             _text(fields.get(mapping.get("error_message")))
         )
         slot = db.get_manual_publish_slot(record.record_id)
+        retry_confirmed_failed_task = (
+            status == "待创建"
+            and bool(task_id)
+            and slot is not None
+            and _text(slot["schedule_status"]) == "发布失败"
+            and _text(slot["publish_task_id"]) == task_id
+        )
         if status == "已创建" and not task_id:
             slot_task_id = _text(slot["publish_task_id"]) if slot is not None else ""
             if slot_task_id:
@@ -454,7 +461,9 @@ def sync_manual_publish_requests(
             # A stale source status is not proof of a remote task. Recover it so
             # the normal creation path can submit exactly one new task.
             status = "待创建"
-        if (status in {"已创建", "已发布", "已取消"} or task_id) and not retry_frame_rate_failure:
+        if (
+            status in {"已创建", "已发布", "已取消"} or task_id
+        ) and not retry_frame_rate_failure and not retry_confirmed_failed_task:
             if slot is not None:
                 slot_status = _text(slot["schedule_status"])
                 slot_task_id = _text(slot["publish_task_id"]) or task_id
