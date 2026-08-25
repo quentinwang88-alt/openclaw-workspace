@@ -4,8 +4,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from core.production_script_renderer import (
+    _apply_small_accessory_capture_projection,
     build_production_projection,
     render_complete_production_script,
+    render_stage0_video_generation_prompt,
     render_video_generation_prompt,
 )
 
@@ -116,6 +118,83 @@ class ProductionScriptRendererTest(unittest.TestCase):
         self.assertIn("手机位置：手机放在入口旁矮台上", text)
         self.assertIn("窗边自然光和普通顶灯混合", text)
         self.assertIn("随手放在矮台上的帆布包", text)
+
+    def test_direct_share_prompt_removes_overlapping_behavior_controls(self):
+        result = json.loads(self.item.result_json)
+        script = result["script"]
+        base = script["storyboard"][0]
+        script["storyboard"] = [
+            {
+                **base,
+                "shot_no": index,
+                "time_range": time_range,
+                "visual_content": visual,
+                "character_action": "面对自己的手机自然分享",
+                "natural_emotion": "轻满意",
+            }
+            for index, (time_range, visual) in enumerate(
+                [
+                    ("0-4s", "人物已经穿好外套直接分享"),
+                    ("4-9s", "在身状态下看清外套细节"),
+                    ("9-15s", "人物与整套穿搭保持清楚"),
+                ],
+                1,
+            )
+        ]
+        profile = {
+            "enabled": True,
+            "recording_mode": "CREATOR_DIRECT_SHARE",
+            "capture_preset": "WORN_DIRECT_SHARE",
+            "planned_visible_clip_count": 3,
+        }
+        contract = {
+            "schema_version": "capture-rhythm-contract-v5-structure-visible-clips",
+            "profile": "NATIVE_MULTI_CLIP_V1",
+            "capture_unit_count": 3,
+            "capture_setup_mode": "FIXED_PHONE_MULTI_CLIP",
+            "capture_grammar": "WORN_DIRECT_SHARE",
+            "creator_recording_profile": profile,
+            "macro_structure": ["HOOK", "PROOF"],
+            "structure_unit_roles": ["HOOK", "PROOF", "PROOF"],
+            "edit_style": "NATIVE_HARD_CUT",
+        }
+        script["video_generation_brief"] = {
+            "schema_version": "production-video-brief-v10-structure-visible-clips",
+            "render_profile": "UGC_NATIVE_V2_MULTICLIP",
+            "capture_mode": "CREATOR_SELF_SHOT",
+            "creator_recording_profile": profile,
+            "recording_context": {
+                "recording_motivation": "主动分享外套",
+                "camera_relationship": "固定手机",
+            },
+            "capture_rhythm_contract": contract,
+            "production_design": script["production_design"],
+            "storyboard": script["storyboard"],
+            "product_truth": {
+                "product_identity": "米白短款外套",
+                "identity_anchors": ["米白短款外套"],
+            },
+            "voiceover": script["continuous_voiceover"],
+            "visual_execution_contract": {
+                "schema_version": "visual-execution-contract-v4-wearable-saliency",
+                "opening_scene_projection": {
+                    "location_identity": "展览入口",
+                    "opening_background_anchor": "导览牌",
+                },
+            },
+        }
+        self.item.result_json = json.dumps(result, ensure_ascii=False)
+
+        text = render_video_generation_prompt(item=self.item, duration_seconds=15)
+
+        self.assertIn("【拍摄方式｜达人直接分享】", text)
+        self.assertIn("人物从开头已经穿好商品并全程保持穿着", text)
+        self.assertIn("【人物、穿搭与生活场景】", text)
+        self.assertNotIn("【达人主动分享关系】", text)
+        self.assertNotIn("本段相对上一段的新信息", text)
+        self.assertNotIn("【首帧/第一拍摄单元场景投影", text)
+        self.assertNotIn("自然反应：", text)
+        self.assertNotIn("本条分享动机：", text)
 
     def test_ugc_prompt_separates_persona_and_product_reference_authority(self):
         result = json.loads(self.item.result_json)
@@ -452,6 +531,372 @@ class ProductionScriptRendererTest(unittest.TestCase):
         self.assertIn("不锁死手机位置与景别", text)
         self.assertNotIn("结构只控制内容推进，不代表切换摄影机位", text)
         self.assertNotIn("保持同一创作者、商品、穿搭、场景和手机视角", text)
+
+    def test_stage0_prompt_keeps_real_clip_framing_and_phone_relationship(self):
+        macro_passages = [
+            {
+                "visible_process": "人物已经穿好外套，完整造型从首帧清楚建立。",
+                "observable_action": "人物站在座位旁自然开始分享。",
+                "camera_observation": "固定手机从正面偏45度观察头部至膝上的完整造型。",
+            },
+            {
+                "visible_process": "肩部至腰胯侧前方近景看清宽松袖型和口袋。",
+                "observable_action": "人物维持自然说话状态，手臂放松。",
+                "camera_observation": "侧前方近景观察外套结构。",
+            },
+            {
+                "visible_process": "人物坐入窗边座位，以隔桌关系呈现整套穿搭。",
+                "observable_action": "人物自然完成分享。",
+                "camera_observation": "手机固定在对面桌边，以朋友交谈距离观察三分之二身。",
+            },
+        ]
+        unique_clips = [
+            {
+                "shot_content": "完整造型入画",
+                "observable_action": "自然开始分享",
+                "framing": "头部至膝上的中全景",
+                "recording_relation": "手机固定在窗台旁，人物正面偏45度面对手机",
+                "anchor_reference": "外套完整轮廓",
+            },
+            {
+                "shot_content": "外套结构近景",
+                "observable_action": "手臂自然放松",
+                "framing": "肩部至腰胯的侧前方近景",
+                "recording_relation": "沿用同一位置独立重录，人物从片段开始站得更近",
+                "anchor_reference": "口袋和短款下摆",
+            },
+            {
+                "shot_content": "隔桌关系呈现穿搭",
+                "observable_action": "坐下自然完成分享",
+                "framing": "普通手机三分之二身景别",
+                "recording_relation": "手机移到对面桌边固定，形成隔桌交谈关系",
+                "anchor_reference": "外套与基础穿搭关系",
+            },
+        ]
+        storyboard = []
+        units = []
+        shot_no = 1
+        for unit_index, clip in enumerate(unique_clips, 1):
+            unit_id = f"CU_{unit_index:02d}"
+            numbers = []
+            for duplicate_index in range(2):
+                numbers.append(shot_no)
+                storyboard.append(
+                    {
+                        **clip,
+                        "shot_no": shot_no,
+                        "duration": f"{shot_no - 1}-{shot_no}s",
+                        "capture_unit_id": unit_id,
+                        "structure_role": "HOOK" if unit_index == 1 else "PROOF",
+                        "starts_new_take": duplicate_index == 0,
+                        "gaze_and_reaction": "自然看向自己的手机",
+                    }
+                )
+                shot_no += 1
+            units.append(
+                {
+                    "capture_unit_id": unit_id,
+                    "shot_numbers": numbers,
+                    "structure_role": "HOOK" if unit_index == 1 else "PROOF",
+                    "framing_guidance": "通用兜底构图",
+                }
+            )
+        script = {
+            "creative_blueprint": {"macro_visual_passages": macro_passages},
+            "continuous_voiceover": {"target_language": "ข้อความภาษาไทย"},
+            "storyboard": storyboard,
+            "capture_units": units,
+            "video_generation_brief": {
+                "production_design": {
+                    "character_setting": {
+                        "identity": "曼谷日常穿搭创作者",
+                        "appearance": "自然肤质",
+                        "hair_makeup": "轻妆长发",
+                    },
+                    "outfit_setting": {"styling": "白色内搭、牛仔裤和黑色短外套"},
+                    "scene_setting": {
+                        "location": "咖啡厅窗边",
+                        "moment": "白天短暂停留",
+                        "lighting": "现场自然光",
+                        "background": "座位和过道纵深",
+                    },
+                },
+                "storyboard": storyboard,
+                "capture_units": units,
+                "capture_rhythm_contract": {"camera_setup_count": 2},
+                "product_identity_lock": {
+                    "must_preserve": ["黑色短外套", "五颗前襟扣"],
+                    "must_not_change": ["禁止双排扣"],
+                },
+                "voiceover": {"target_language": "ข้อความภาษาไทย"},
+            },
+        }
+
+        text = render_stage0_video_generation_prompt(script=script)
+
+        self.assertEqual(3, text.count("【拍摄片段"))
+        self.assertEqual(2, text.count("【直接剪切｜开始另一段独立手机素材】"))
+        self.assertIn("【拍摄片段01｜0-2s｜HOOK】", text)
+        self.assertIn("头部至膝上的中全景", text)
+        self.assertIn("肩部至腰胯的侧前方近景", text)
+        self.assertIn("手机移到对面桌边固定", text)
+        self.assertIn("隔桌关系", text)
+        self.assertIn("ข้อความภาษาไทย", text)
+        self.assertNotIn("supported_claim_keys", text)
+        self.assertNotIn("【内部结构槽位", text)
+        self.assertNotIn("通用兜底构图", text)
+
+    def test_v3_two_clip_contract_is_upgraded_without_dropping_five_routed_beats(self):
+        result = json.loads(self.item.result_json)
+        script = result["script"]
+        base = script["storyboard"][0]
+        script["storyboard"] = [
+            {
+                **base,
+                "shot_no": index,
+                "time_range": time_range,
+                "narrative_role": role,
+                "visual_content": visual,
+                "character_action": action,
+            }
+            for index, (time_range, role, visual, action) in enumerate(
+                [
+                    ("0-2s", "HOOK", "人物穿好外套进入近景", "看向手机开始分享"),
+                    ("2-5s", "PROOF", "外套前襟和衣长清楚", "手指轻触前襟"),
+                    ("5-8s", "USE_PROCESS", "人物侧身展示版型", "自然侧身半步"),
+                    ("8-11s", "PROOF", "人物看屏幕确认轮廓", "轻微整理包带"),
+                    ("11-15s", "ENDING", "商品结果回到清楚半身景", "拿起随身包准备离开"),
+                ],
+                1,
+            )
+        ]
+        old_contract = {
+            "schema_version": "capture-rhythm-contract-v3-scene-feasible-reference",
+            "profile": "NATIVE_MULTI_CLIP_V1",
+            "capture_unit_count": 2,
+            "capture_setup_mode": "ONE_PUBLIC_PHONE_POSITION_PLUS_HANDHELD_CUTAWAY",
+            "capture_grammar": "OPENING_TO_CONTEXT",
+            "edit_style": "NATIVE_HARD_CUT",
+        }
+        script["capture_rhythm_contract"] = old_contract
+        script["video_generation_brief"] = {
+            "schema_version": "production-video-brief-v8-opening-projection",
+            "render_profile": "UGC_NATIVE_V2_MULTICLIP",
+            "capture_mode": "CREATOR_SELF_SHOT",
+            "capture_rhythm_contract": old_contract,
+            "production_design": script["production_design"],
+            "storyboard": script["storyboard"],
+            "product_truth": {
+                "product_identity": "米白短款外套",
+                "identity_anchors": ["米白短款外套"],
+            },
+            "voiceover": script["continuous_voiceover"],
+        }
+        self.item.result_json = json.dumps(result, ensure_ascii=False)
+
+        text = render_video_generation_prompt(item=self.item, duration_seconds=15)
+
+        self.assertEqual(5, text.count("【拍摄片段"))
+        self.assertEqual(4, text.count("【直接剪切｜开始另一段独立手机素材】"))
+        self.assertIn("实际剪辑目标：5个独立可见片段", text)
+        self.assertIn("拿起随身包准备离开", text)
+        self.assertEqual(5, text.count("本段相对上一段的新信息："))
+        projection = build_production_projection(
+            batch=self.batch,
+            item=self.item,
+        )
+        self.assertEqual(
+            "capture-rhythm-contract-v5-structure-visible-clips",
+            projection["capture_rhythm_schema"],
+        )
+        self.assertEqual(5, projection["visible_clip_count"])
+        self.assertEqual(2, projection["camera_setup_count"])
+        self.assertEqual("PRESERVED", projection["shot_richness_status"])
+        self.assertEqual("PRESERVED", projection["structure_preservation_status"])
+        self.assertEqual(
+            ["HOOK", "PROOF", "USE_PROCESS", "PROOF", "ENDING"],
+            projection["compiled_function_sequence"],
+        )
+
+    def test_v4_flattened_contract_is_upgraded_from_allocated_macro_structure(self):
+        result = json.loads(self.item.result_json)
+        script = result["script"]
+        base = script["storyboard"][0]
+        script["allocated_direction"] = {
+            "macro_structure": ["HOOK", "PROOF", "USE_PROCESS"]
+        }
+        script["storyboard"] = [
+            {
+                **base,
+                "shot_no": index,
+                "time_range": time_range,
+                "narrative_role": role,
+                "visual_content": f"画面{index}",
+                "character_action": f"动作{index}",
+                "capture_unit_id": f"CU_{index:02d}",
+                "starts_new_take": True,
+            }
+            for index, (time_range, role) in enumerate(
+                [
+                    ("0-3s", "HOOK"),
+                    ("3-6s", "PROOF"),
+                    ("6-10s", "USE"),
+                    ("10-15s", "ENDING"),
+                ],
+                1,
+            )
+        ]
+        old_contract = {
+            "schema_version": "capture-rhythm-contract-v4-shot-richness",
+            "profile": "NATIVE_MULTI_CLIP_V1",
+            "capture_unit_count": 4,
+            "capture_setup_mode": "FIXED_PHONE_MULTI_CLIP",
+            "shot_richness_contract": {
+                "planned_visible_clips": 4,
+                "minimum_visible_clips": 3,
+            },
+        }
+        script["capture_rhythm_contract"] = old_contract
+        script["video_generation_brief"] = {
+            "schema_version": "production-video-brief-v9-shot-richness",
+            "render_profile": "UGC_NATIVE_V2_MULTICLIP",
+            "capture_mode": "CREATOR_SELF_SHOT",
+            "capture_rhythm_contract": old_contract,
+            "production_design": script["production_design"],
+            "storyboard": script["storyboard"],
+            "product_truth": {
+                "product_identity": "米白短款外套",
+                "identity_anchors": ["米白短款外套"],
+            },
+            "voiceover": script["continuous_voiceover"],
+        }
+        self.item.result_json = json.dumps(result, ensure_ascii=False)
+
+        text = render_video_generation_prompt(item=self.item, duration_seconds=15)
+        projection = build_production_projection(batch=self.batch, item=self.item)
+
+        self.assertIn("【拍摄片段04｜10-15s｜USE_PROCESS】", text)
+        self.assertNotIn("【拍摄片段04｜10-15s｜ENDING】", text)
+        self.assertEqual(
+            ["HOOK", "PROOF", "PROOF", "USE_PROCESS"],
+            projection["compiled_function_sequence"],
+        )
+        self.assertEqual("PRESERVED", projection["structure_preservation_status"])
+
+    def test_four_clip_small_accessory_owns_core_motion_only_once(self):
+        units = [
+            {"capture_unit_id": f"CU_{index:02d}"}
+            for index in range(1, 5)
+        ]
+        projected = _apply_small_accessory_capture_projection(
+            units,
+            accessory_brief={
+                "product_prominence_contract": {
+                    "sequence_policy": (
+                        "PRODUCT_OPENING_TO_MOTION_TO_PRODUCT_RETURN"
+                    )
+                }
+            },
+        )
+
+        roles = [unit["unit_role"] for unit in projected]
+        self.assertEqual(
+            [
+                "PRODUCT_RESULT_CLOSE",
+                "NATURAL_MOTION_RELATION",
+                "PRODUCT_DETAIL_RELATION",
+                "PRODUCT_REACQUISITION",
+            ],
+            roles,
+        )
+        self.assertEqual(1, roles.count("NATURAL_MOTION_RELATION"))
+        self.assertIn("不重复上一段核心动作", projected[2]["framing_guidance"])
+
+    def test_small_accessory_prompt_projects_motion_and_product_visible_ending(self):
+        result = json.loads(self.item.result_json)
+        script = result["script"]
+        base = script["storyboard"][0]
+        script["storyboard"] = [
+            {
+                **base,
+                "shot_no": index,
+                "time_range": time_range,
+                "narrative_role": role,
+                "visual_content": visual,
+                "character_action": action,
+                "natural_emotion": reaction,
+            }
+            for index, (time_range, role, visual, action, reaction) in enumerate(
+                [
+                    ("0-3s", "HOOK", "发夹已经佩戴完成", "看向手机", "刚注意到效果"),
+                    ("3-9s", "PROOF", "人物侧身展示发型", "轻微转头", "自然满意"),
+                    ("9-15s", "ENDING", "人物走向门口", "拿包离开", "准备出门"),
+                ],
+                1,
+            )
+        ]
+        script["capture_rhythm_contract"] = {
+            "schema_version": "capture-rhythm-contract-v1",
+            "profile": "NATIVE_MULTI_CLIP_V1",
+            "capture_unit_count": 3,
+            "capture_grammar": "OPENING_TO_PROOF_TO_CONTEXT",
+            "edit_style": "NATIVE_HARD_CUT",
+        }
+        category_extension = {
+            "domain": "ACCESSORY",
+            "schema_version": "accessory-execution-profile-v2",
+            "product_type_source": {
+                "canonical_type": "claw_clip",
+                "display_type": "抓夹",
+            },
+            "profile": {
+                "product_subtype": "claw_clip",
+                "wearing_zone": "HAIR",
+                "required_result_view": "ALREADY_STYLED_HAIR_RESULT",
+            },
+        }
+        script["video_generation_brief"] = {
+            "schema_version": "production-video-brief-v7-native-multiclip",
+            "render_profile": "UGC_NATIVE_V2_MULTICLIP",
+            "capture_mode": "CREATOR_SELF_SHOT",
+            "capture_rhythm_contract": script["capture_rhythm_contract"],
+            "production_design": script["production_design"],
+            "storyboard": script["storyboard"],
+            "action_design": {
+                "start_state": "发饰已经佩戴完成",
+                "core_action": "完成一次自然上半身角度变化",
+                "end_state": "回到发饰无遮挡的侧后方近景",
+                "supporting_scene_action": "拿包离开",
+                "motion_scope": "ONE_CONTINUOUS_CHANGE",
+            },
+            "category_execution_extension": category_extension,
+            "accessory_execution_brief": {
+                "schema_version": "accessory-video-handoff-v4-small-prominence",
+                "product_prominence_contract": {
+                    "primary_framing": "HAIR_REGION_CLOSE"
+                },
+            },
+            "product_truth": {
+                "product_identity": "棕色抓夹",
+                "identity_anchors": ["棕色抓夹"],
+            },
+            "voiceover": script["continuous_voiceover"],
+        }
+        self.item.result_json = json.dumps(result, ensure_ascii=False)
+
+        text = render_video_generation_prompt(item=self.item, duration_seconds=15)
+
+        self.assertIn("PRODUCT_RESULT_CLOSE", text)
+        self.assertIn("NATURAL_MOTION_RELATION", text)
+        self.assertIn("PRODUCT_REACQUISITION", text)
+        self.assertIn("视线关系：", text)
+        self.assertIn("自然反应：", text)
+        self.assertIn("发饰", text)
+        self.assertIn("人物动作：完成一次自然上半身角度变化", text)
+        self.assertIn("不先静止等待再开始", text)
+        self.assertIn("动作延续到片段末尾，只在最后一瞬自然收住", text)
+        self.assertIn("最后一段不离场，结尾服从商品回收近景", text)
+        self.assertNotIn("人物走向门口；", text)
 
     def test_legacy_profile_remains_available_for_rollback(self):
         with patch.dict("os.environ", {"ORIGINAL_SCRIPT_VIDEO_PROMPT_PROFILE": "legacy"}):

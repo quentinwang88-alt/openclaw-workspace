@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -48,6 +50,74 @@ def _checked(value: Any) -> bool:
     return _text(value).lower() in {"1", "true", "yes", "checked", "已勾选", "勾选"}
 
 
+def _load_stage0_script(script_id: str) -> Optional[Dict[str, Any]]:
+    """Resolve an explicitly exported Stage0 script from its run artifact.
+
+    Stage0 review rows are intentionally not persisted as formal
+    ``original_content_item`` records.  Their public IDs encode the immutable
+    Stage0 run and output slot, so the first-frame workbench can safely load
+    the already-generated script without re-planning it.
+    """
+
+    public_id = _text(script_id)
+    match = re.fullmatch(r"SCSCRIPT_STAGE0_(\d+)_(S\d+)", public_id, re.IGNORECASE)
+    stage0_run_id = match.group(1) if match else ""
+    output_slot = match.group(2).upper() if match else ""
+    run_root = Path.home() / ".openclaw" / "shared" / "data" / "original_production_runs"
+    candidates = sorted(
+        run_root.glob("*/stage0_result.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for path in candidates:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, json.JSONDecodeError):
+            continue
+        for product in payload.get("products", []) if isinstance(payload, dict) else []:
+            if not isinstance(product, Mapping):
+                continue
+            if match and _text(product.get("stage0_run_id")) != stage0_run_id:
+                continue
+            for direction in product.get("directions", []) or []:
+                if not isinstance(direction, Mapping):
+                    continue
+                if _text(direction.get("output_slot")).upper() != output_slot:
+                    if match:
+                        continue
+                    output_slot = _text(direction.get("output_slot")).upper()
+                    candidate_script = direction.get("script")
+                    candidate_provenance = (
+                        candidate_script.get("reality_reference_provenance", {})
+                        if isinstance(candidate_script, Mapping)
+                        else {}
+                    )
+                    blueprint_id = _text(
+                        candidate_provenance.get("creative_blueprint_id")
+                    )
+                    batch_id = "STAGE0_" + hashlib.sha256(
+                        str(path.resolve()).encode("utf-8")
+                    ).hexdigest()[:16].upper()
+                    expected_id = "SCSCRIPT_" + hashlib.sha256(
+                        json.dumps(
+                            {
+                                "batch_id": batch_id,
+                                "slot": output_slot,
+                                "blueprint_id": blueprint_id,
+                            },
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            default=str,
+                        ).encode("utf-8")
+                    ).hexdigest()[:24].upper()
+                    if expected_id != public_id:
+                        continue
+                script = direction.get("script")
+                if isinstance(script, dict) and script:
+                    return dict(script)
+    return None
+
+
 def _load_script(script_id: str, db_path: Optional[str] = None) -> Dict[str, Any]:
     storage = FirstFrameStorage(db_path)
     with sqlite3.connect(str(storage.db_path), timeout=30) as conn:
@@ -76,6 +146,9 @@ def _load_script(script_id: str, db_path: Optional[str] = None) -> Dict[str, Any
                     row = candidate
                     break
     if not row or not row[0]:
+        stage0_script = _load_stage0_script(script_id)
+        if stage0_script:
+            return stage0_script
         raise ValueError(f"找不到 SCRIPT_READY 的本地脚本结果: {script_id}")
     result = json.loads(row[0])
     script = result.get("script") if isinstance(result, dict) else None

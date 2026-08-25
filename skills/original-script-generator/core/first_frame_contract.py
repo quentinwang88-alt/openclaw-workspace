@@ -12,7 +12,7 @@ from typing import Any, Dict, Mapping, Sequence
 
 
 CONTRACT_VERSION = "original-first-frame-contract-v4-text-persona-fallback"
-PROMPT_VERSION = "original-first-frame-prompt-v5-text-persona-fallback"
+PROMPT_VERSION = "original-first-frame-prompt-v6-no-dimension-annotations"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
 DEFAULT_ASPECT_RATIO = "9:16"
 
@@ -58,16 +58,25 @@ def _opening_snapshot(script: Mapping[str, Any], brief: Mapping[str, Any]) -> Di
     shot = _first_shot(script, brief)
     allocated = _dict(script.get("allocated_direction"))
     opening_job = _dict(allocated.get("opening_visual_job"))
+    anchor_values = [
+        _text(item) for item in _list(shot.get("product_anchors_visible")) if _text(item)
+    ]
+    stage0_anchor = _text(shot.get("anchor_reference"))
+    if not anchor_values and stage0_anchor.upper() not in {"", "UNAVAILABLE"}:
+        anchor_values = [stage0_anchor]
     return {
         "opening_job": _text(opening_job.get("job")),
         "opening_guidance": _text(opening_job.get("guidance_zh")),
-        "visual_content": _text(shot.get("visual_content")),
-        "character_action": _text(shot.get("character_action")),
+        "visual_content": _text(shot.get("visual_content") or shot.get("shot_content")),
+        "character_action": _text(
+            shot.get("character_action")
+            or shot.get("observable_action")
+            or shot.get("person_action")
+        ),
         "natural_emotion": _text(shot.get("natural_emotion")),
-        "camera": _text(shot.get("camera")),
-        "product_anchors_visible": [
-            _text(item) for item in _list(shot.get("product_anchors_visible")) if _text(item)
-        ],
+        "camera": _text(shot.get("camera") or shot.get("framing") or shot.get("style_note")),
+        "carrier_mode": _text(shot.get("carrier_mode")),
+        "product_anchors_visible": anchor_values,
     }
 
 
@@ -139,11 +148,18 @@ def build_first_frame_contract(
     # valid character authority in that case.  Keep an explicit persona
     # binding strict, but do not misclassify an unbound text design as a
     # missing reference asset.
-    character = _dict(production.get("character"))
+    character = _dict(production.get("character")) or _dict(
+        production.get("character_setting")
+    )
     if not _text(persona.get("persona_id")) and character:
+        body_proportion_text = _text(character.get("body_proportion_text")) or _text(
+            character.get("age_presence")
+        )
         persona["availability"] = "TEXT_DESIGN_AVAILABLE"
         persona["reference_strategy"] = "FROZEN_SCRIPT_TEXT_ONLY"
         persona["persona_source"] = "FROZEN_SCRIPT_CHARACTER"
+        if body_proportion_text:
+            persona["identity_lock"] = {"body_proportion_text": body_proportion_text}
         persona["script_projection"] = {
             "identity": _text(character.get("identity")),
             "appearance": _text(character.get("appearance")),
@@ -156,11 +172,17 @@ def build_first_frame_contract(
         finalize_visual_execution_contract,
     )
 
+    outfit_setting = _dict(production.get("outfit_setting"))
     outfit = upgrade_outfit_structure_contract(
         _dict(brief.get("outfit_selection_contract"))
     )
     outfit_projection = _dict(brief.get("outfit_prompt_projection"))
-    scene = _dict(production.get("scene"))
+    if not outfit_projection and _text(outfit_setting.get("styling")):
+        outfit_projection = {
+            "frozen_outfit": _text(outfit_setting.get("styling")),
+            "palette_visibility_finish": _text(outfit_setting.get("visibility_note")),
+        }
+    scene = _dict(production.get("scene")) or _dict(production.get("scene_setting"))
     visual_execution = finalize_visual_execution_contract(
         _dict(brief.get("visual_execution_contract")),
         production_scene=scene,
@@ -315,6 +337,7 @@ def render_first_frame_prompt(contract: Mapping[str, Any]) -> str:
     visual_saliency = _dict(contract.get("visual_saliency"))
     opening_scene = _dict(contract.get("opening_scene_projection"))
     opening = _dict(contract.get("opening_contract"))
+    opening_carrier = _text(opening.get("carrier_mode")).upper()
     must_preserve = _list(identity.get("must_preserve")) or _list(truth.get("identity_anchors"))
     must_not = _list(identity.get("must_not_change"))
     quantity = _dict(truth.get("display_quantity_contract"))
@@ -382,8 +405,13 @@ def render_first_frame_prompt(contract: Mapping[str, Any]) -> str:
     elif canonical_type in {"bracelet", "bangle"}:
         category_extension = "腕饰：使用手腕前臂近景，展示数量必须与冻结数量合同一致。"
 
+    opening_person_visible = opening_carrier not in {
+        "STATIC_PRODUCT", "PRODUCT_ONLY", "HAND_ONLY", "HANDS_ONLY"
+    }
     proportion_framing = "首帧人物比例构图：不适用。"
     if (
+        opening_person_visible
+        and
         presentation in {"PERSON_ON_CAMERA", "WEARER_ACTIVE", "MIXED"}
         and (
             canonical_type in {"outerwear", "top", "dress"}
@@ -404,6 +432,19 @@ def render_first_frame_prompt(contract: Mapping[str, Any]) -> str:
         "2. 本任务未绑定人物参考图，人物外貌只按冻结脚本文字设定生成；"
         "不得从商品参考图复制模特的脸、妆容、身材比例、姿势或构图。"
     )
+    if opening_carrier in {"STATIC_PRODUCT", "PRODUCT_ONLY"}:
+        opening_carrier_rule = (
+            "首帧承载方式：纯商品静物。画面中不得出现人物、脸、身体、穿搭、手或手臂；"
+            "人物设定只属于后续视频片段，不得提前进入首帧。"
+        )
+    elif opening_carrier in {"HAND_ONLY", "HANDS_ONLY"}:
+        opening_carrier_rule = (
+            "首帧承载方式：仅商品与必要的手部关系。不得出现人物脸部或完整身体。"
+        )
+    else:
+        opening_carrier_rule = (
+            f"首帧承载方式：{opening_carrier or presentation or '按冻结开场'}。"
+        )
 
     return "\n".join(
         [
@@ -451,12 +492,14 @@ def render_first_frame_prompt(contract: Mapping[str, Any]) -> str:
             f"首镜焦点：{_text(opening_focus.get('guidance')) or '商品先成为第一视觉焦点。'}",
             "",
             "【冻结开场状态】",
+            opening_carrier_rule,
             f"首帧画面：{opening_visual}",
             f"动作瞬间：{opening_action}",
             (
                 "首帧口型：人物刚准备开口，嘴唇自然放松或仅轻微分开；"
                 "不要定格在明显发声、夸张张嘴或不自然抿嘴的瞬间。"
-                if presentation in {"PERSON_ON_CAMERA", "WEARER_ACTIVE", "MIXED"}
+                if opening_person_visible
+                and presentation in {"PERSON_ON_CAMERA", "WEARER_ACTIVE", "MIXED"}
                 else "首帧口型：不适用。"
             ),
             f"自然状态：{_text(opening.get('natural_emotion'))}",
@@ -470,7 +513,8 @@ def render_first_frame_prompt(contract: Mapping[str, Any]) -> str:
             category_extension,
             "",
             "【通用负向要求】",
-            "不要文字、字幕、水印、Logo 杜撰；不要多余人物、助手手臂、三只手、多余肢体、畸形手指、扭曲脸部；不要改变商品款式或创造参考图不存在的结构。",
+            "不要文字、字幕、水印、Logo 杜撰；不要尺寸数字、尺寸线、测量箭头、尺码表、规格标签或任何产品尺寸标注；不要把参考图中的尺寸说明复制到画面。",
+            "不要多余人物、助手手臂、三只手、多余肢体、畸形手指、扭曲脸部；不要改变商品款式或创造参考图不存在的结构。",
             f"人物模板负向：{prompt_negative}" if prompt_negative else "人物模板负向：避免塑料皮肤、畸形脸与夸张商业模特姿态。",
             "只输出一张可直接作为视频首帧参考的完整画面。",
         ]

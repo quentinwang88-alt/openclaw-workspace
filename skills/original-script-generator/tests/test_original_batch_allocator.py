@@ -22,6 +22,10 @@ from core.original_batch_allocator import (
     allocate_batch_items,
     build_content_bundle_candidates,
     _creator_weighted_directions,
+    _annotate_variant_fit,
+    _annotate_selling_argument_lineage,
+    _build_proof_execution_intent,
+    _build_argument_context_alignment,
     _eligible_hooks_for_bundle,
     _relationship_device_for_hook,
     _relationship_schedule,
@@ -239,6 +243,99 @@ class BatchStorageTest(unittest.TestCase):
 # ── Allocator tests ────────────────────────────────────────────────────
 
 class BatchAllocatorTest(unittest.TestCase):
+    def test_current_black_variant_defers_not_only_black_white_argument(self):
+        result = _annotate_variant_fit(
+            {
+                "selling_argument": {
+                    "operator_expression": "不只有黑白，这个颜色更有复古感",
+                }
+            },
+            anchor_card={"product_name": "近黑色短款外套"},
+        )
+
+        self.assertEqual("DEFERRED", result["variant_fit_status"])
+        self.assertEqual("VARIANT_MISMATCH", result["variant_fit_reason"])
+
+    def test_current_black_variant_defers_pure_black_white_comparison(self):
+        result = _annotate_variant_fit(
+            {
+                "selling_argument": {
+                    "source_argument_id": "PCS_HUMAN_1",
+                    "operator_expression": "区别于纯黑白，更有复古调性",
+                }
+            },
+            anchor_card={"product_name": "近黑色短款外套"},
+        )
+        self.assertEqual("DEFERRED", result["variant_fit_status"])
+
+    def test_unmapped_human_argument_keeps_authority_from_argument_id(self):
+        result = _annotate_selling_argument_lineage(
+            {
+                "content_mode": "SELLING_ARGUMENT",
+                "selling_argument": {
+                    "source_argument_id": "PCS_HUMAN_1",
+                    "source_claim_ids": [],
+                    "mapping_status": "UNMAPPED",
+                },
+            },
+            authoritative_catalog=True,
+        )
+        self.assertEqual("CONFIRMED", result["selling_argument_lineage"]["status"])
+        self.assertEqual(
+            "PCS_HUMAN_1",
+            result["selling_argument_lineage"]["source_argument_id"],
+        )
+
+    def test_scene_usage_compiles_to_use_process_proof_intent(self):
+        intent = _build_proof_execution_intent(
+            {"selling_argument": {"proof_subject": "GENERAL_EXPRESSION"}},
+            {"scene_request_contract": {"scene_intent": "SCENE_USAGE"}},
+        )
+        self.assertEqual("SCENE_USAGE", intent["proof_subject"])
+        self.assertEqual(["use_process"], intent["required_any_parts"])
+
+    def test_existing_commute_affinity_compiles_scene_usage(self):
+        intent = _build_proof_execution_intent(
+            {"selling_argument": {"proof_subject": "GENERAL_EXPRESSION"}},
+            {
+                "scene_request_contract": {"scene_intent": "GENERAL_USE"},
+                "selling_scene_affinity_preferences": ["COMMUTE"],
+            },
+        )
+        self.assertEqual("SCENE_USAGE", intent["proof_subject"])
+
+    def test_style_theme_is_soft_relation_intent(self):
+        intent = _build_proof_execution_intent(
+            {
+                "selling_argument": {
+                    "proof_subject": "GENERAL_EXPRESSION",
+                    "claim_theme": "style",
+                }
+            },
+            {},
+        )
+        self.assertEqual("STYLE_RELATION", intent["proof_subject"])
+        self.assertFalse(intent["hard_required_part_match"])
+
+    def test_unselected_shirt_example_is_generalized_not_rejected(self):
+        result = _build_argument_context_alignment(
+            {
+                "selling_argument": {
+                    "operator_expression": "换不同颜色的衬衫和领型都能搭",
+                }
+            },
+            {
+                "outfit_selection_contract": {
+                    "outfit_recipe": {"top": "白色修身短袖T恤"},
+                }
+            },
+        )
+
+        self.assertEqual(
+            "GENERALIZE_UNSELECTED_STYLING_EXAMPLE", result["status"]
+        )
+        self.assertFalse(result["hard_required"])
+
     def test_wearable_five_script_batch_targets_four_creator_directions(self):
         directions = [
             _fake_direction("DA_W1", "S1", cluster_id=1, carrier="WEARER_ACTIVE"),
@@ -318,7 +415,7 @@ class BatchAllocatorTest(unittest.TestCase):
         frozen = json.loads(items[0].frozen_direction_package_json)
         self.assertEqual(
             frozen["simplified_creative_seed"]["schema_version"],
-            "simplified-creative-seed-v17-wearable-visual",
+            "simplified-creative-seed-v21-structure-visible-clips",
         )
         self.assertIn(
             frozen["simplified_creative_seed"]["creative_direction"]["opening_visual_job"]["job"],
@@ -385,6 +482,57 @@ class BatchAllocatorTest(unittest.TestCase):
         self.assertEqual(len({item.content_angle_key for item in items}), 6)
         self.assertEqual(summary["unique_angles"], 6)
         self.assertEqual({item.carrier_mode for item in items}, {"WEARER_ACTIVE", "STATIC_PRODUCT"})
+
+    def test_verified_arguments_rotate_safe_hook_ids_and_families(self):
+        catalog = [
+            {
+                "value_id": f"ARG_{index}",
+                "primary_selling_point": f"已确认用户价值{index}",
+                "argument_kind": "SELLING_ARGUMENT",
+                "source": "FEISHU_OPERATOR_CONFIRMED_ARGUMENT",
+                "claim_type": "benefit",
+                "visual_dependency": "FLEXIBLE",
+                "compatible_carriers": [],
+            }
+            for index in range(1, 7)
+        ]
+        items, summary = allocate_batch_items(
+            product_code="P1",
+            requested_count=6,
+            directions=[
+                _fake_direction("DA1", "S1"),
+                _fake_direction(
+                    "DA2", "S4", cluster_id=2,
+                    carrier="STATIC_PRODUCT", macro_family="HOOK>PROOF>ENDING",
+                ),
+            ],
+            anchor_card=_fake_anchor_card(),
+            active_hook_ids=[
+                "DISCOVERY_RESULT_PROMISE",
+                "USER_ADVOCACY_STANCE",
+                "GENERAL_PRODUCT_SHARE",
+            ],
+            creative_policy_version="test-v1",
+            random_seed=42,
+            selling_point_catalog=catalog,
+        )
+
+        self.assertEqual(len(items), 6)
+        self.assertEqual(
+            {item.requested_hook_id for item in items},
+            {
+                "DISCOVERY_RESULT_PROMISE",
+                "USER_ADVOCACY_STANCE",
+                "GENERAL_PRODUCT_SHARE",
+            },
+        )
+        self.assertEqual(summary["unique_hooks"], 3)
+        self.assertEqual(summary["unique_hook_families"], 2)
+        for item in items:
+            frozen = json.loads(item.frozen_direction_package_json)
+            contract = frozen["hook_allocation_contract"]
+            self.assertEqual(contract["requested_hook_id"], item.requested_hook_id)
+            self.assertEqual(contract["allocation_status"], "COMPATIBLE_ROTATION")
 
     def test_no_duplicate_allocation_signatures(self):
         items, summary = allocate_batch_items(
@@ -774,10 +922,10 @@ class BatchAllocatorTest(unittest.TestCase):
                 "USER_ADVOCACY_STANCE", "DETAIL_SURPRISE",
             ],
         )
-        self.assertEqual(eligible, ["DETAIL_SURPRISE"])
+        self.assertEqual(eligible, ["USER_ADVOCACY_STANCE", "DETAIL_SURPRISE"])
         self.assertEqual(
             suppressed,
-            ["AUDIENCE_NEED_CALLOUT", "PAIN_REFRAME", "USER_ADVOCACY_STANCE"],
+            ["AUDIENCE_NEED_CALLOUT", "PAIN_REFRAME"],
         )
 
     def test_eligible_hooks_allows_pain_reframe_with_tension(self):

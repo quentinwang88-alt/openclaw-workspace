@@ -14,6 +14,7 @@ from core.category_execution import (
     resolve_category_carrier_execution,
     validate_category_execution_identity,
 )
+from core.category_execution.accessory import SMALL_ACCESSORY_MOTION_ENV
 from core.original_batch_allocator import _make_item
 from core.production_script_renderer import render_video_generation_prompt
 from core.simplified_complete_script import (
@@ -169,11 +170,88 @@ class CategoryExecutionAdapterTest(unittest.TestCase):
         prominence = brief["product_prominence_contract"]
         self.assertEqual("HAIR_REGION_CLOSE", prominence["primary_framing"])
         self.assertIn("头肩范围", prominence["context_guidance"])
+        self.assertEqual(
+            "PRODUCT_OPENING_TO_MOTION_TO_PRODUCT_RETURN",
+            prominence["sequence_policy"],
+        )
+        self.assertEqual(
+            [
+                "PRODUCT_RESULT_CLOSE",
+                "NATURAL_MOTION_RELATION",
+                "PRODUCT_REACQUISITION",
+            ],
+            prominence["capture_arc"],
+        )
+        self.assertIn(
+            "发饰",
+            prominence["terminal_visibility"]["ending_guidance"],
+        )
+        self.assertEqual(
+            {
+                "HAIR_BODY_ARC_REVEAL",
+                "HAIR_MIRROR_TO_REAR_CUT",
+                "HAIR_WEIGHT_SHIFT_REFRAME",
+            },
+            {
+                item["interaction_id"]
+                for item in carrier["interaction_capabilities"]
+            },
+        )
+        self.assertTrue(
+            all(
+                item["motion_scope"] == "ONE_CONTINUOUS_CHANGE"
+                for item in carrier["interaction_capabilities"]
+            )
+        )
+        self.assertTrue(
+            all(
+                "第一帧可见" in item["start_state"]
+                for item in carrier["interaction_capabilities"]
+            )
+        )
+        self.assertTrue(
+            all(
+                "最后一瞬" in item["end_state"]
+                for item in carrier["interaction_capabilities"]
+            )
+        )
         guidance = build_category_blueprint_guidance(
             extension, carrier_execution=carrier
         )
         self.assertIn("小商品观察尺度", guidance)
         self.assertIn("中远景不能承担发饰证明", guidance)
+
+    def test_small_accessory_motion_projection_can_be_rolled_back(self):
+        with patch.dict(
+            os.environ,
+            {SMALL_ACCESSORY_MOTION_ENV: "0"},
+            clear=False,
+        ):
+            extension = compile_category_execution_extension(
+                product_type="抓夹",
+                top_category="发饰",
+                anchor_card=_anchor("棕色抓夹"),
+                enabled=True,
+            )
+            carrier = resolve_category_carrier_execution(
+                extension, presentation_mode="PERSON_ON_CAMERA"
+            )
+
+        self.assertEqual(
+            "accessory-execution-profile-v4-small-prominence",
+            extension["schema_version"],
+        )
+        self.assertEqual(
+            "ONE_PRODUCT_DOMINANT_VIEW_THEN_CONTEXT_VIEW",
+            carrier["product_prominence_contract"]["sequence_policy"],
+        )
+        self.assertEqual(
+            {"HAIR_RESULT_REAR_THREE_QUARTER", "HAIR_RESULT_MIRROR_CONFIRM"},
+            {
+                item["interaction_id"]
+                for item in carrier["interaction_capabilities"]
+            },
+        )
 
     def test_scarf_subtypes_are_distinct_and_generic_scarf_remains_compatible(self):
         cases = {
@@ -597,12 +675,16 @@ class CategoryExecutionAdapterTest(unittest.TestCase):
         self.assertIn("category_execution_extension", brief)
         self.assertEqual(
             brief["accessory_execution_brief"]["schema_version"],
-            "accessory-video-handoff-v4-small-prominence",
+            "accessory-video-handoff-v5-small-motion-return",
         )
         prominence = brief["accessory_execution_brief"][
             "product_prominence_contract"
         ]
         self.assertEqual("EAR_HALF_FACE_CLOSE", prominence["primary_framing"])
+        self.assertEqual(
+            "PRODUCT_OPENING_TO_MOTION_TO_PRODUCT_RETURN",
+            prominence["sequence_policy"],
+        )
 
         direction, _ = build_simplified_voiceover_inputs(
             normalized,
@@ -628,6 +710,10 @@ class CategoryExecutionAdapterTest(unittest.TestCase):
         self.assertIn("戴耳环动作", rendered)
         self.assertIn("商品观察尺度", rendered)
         self.assertIn("半脸与耳侧近景", rendered)
+        self.assertIn("PRODUCT_REACQUISITION", rendered)
+        self.assertIn("视线关系：", rendered)
+        self.assertIn("自然反应：", rendered)
+        self.assertIn("补录半脸耳侧近景", rendered)
 
 
 if __name__ == "__main__":

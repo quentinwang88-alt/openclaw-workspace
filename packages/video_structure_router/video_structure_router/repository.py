@@ -128,38 +128,64 @@ class RDSStructureRepository:
 
     def load_candidates(self) -> List[StructureCandidate]:
         with self._connect() as conn:
-            prompt_candidates = self._load_prototype_candidates(conn)
-            video_candidates = self._load_video_candidates(conn)
-        return prompt_candidates + video_candidates
+            release = self._load_active_structure_release(conn)
+            candidates = self._load_prototype_candidates(
+                conn, run_id=str(release.get("run_id") or ""), release=release
+            )
+        return candidates
 
-    def _load_prototype_candidates(self, conn: Any) -> List[StructureCandidate]:
+    def _load_active_structure_release(self, conn: Any) -> Dict[str, Any]:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT *
+                FROM sd_dimension_release
+                WHERE dimension_type='structure' AND is_active=1
+                ORDER BY published_at DESC, updated_at DESC
+                LIMIT 1
+                """
+            )
+            row = cursor.fetchone()
+        if not row or not str(row.get("run_id") or "").strip():
+            raise RuntimeError("sd_dimension_release 没有 active structure run")
+        return dict(row)
+
+    def _load_prototype_candidates(
+        self, conn: Any, *, run_id: str, release: Dict[str, Any]
+    ) -> List[StructureCandidate]:
         with conn.cursor() as cursor:
             cursor.execute(
                 """
                 SELECT *
                 FROM sd_cluster_prototype
+                WHERE run_id=%s
                 ORDER BY run_id, cluster_id, prototype_id
-                """
+                """,
+                (run_id,),
             )
             rows = cursor.fetchall()
 
         candidates: List[StructureCandidate] = []
         for row in rows:
             beat_sequence = [str(item) for item in _json_value(row.get("dominant_beat_sequence"), [])]
+            independent_video_count = int(
+                row.get("independent_video_support_count") or 0
+            )
+            evidence_tier = (
+                "VIDEO_SUPPORTED"
+                if independent_video_count > 0
+                else "VIDEO_SUPPORTED_PARTIAL"
+            )
             candidates.append(
                 StructureCandidate(
                     candidate_key=f"prototype:{row['prototype_id']}",
-                    source_kind="CLUSTER_PROTOTYPE",
+                    source_kind="SCRIPT_DERIVED_CLUSTER",
                     source_run_id=str(row.get("run_id") or ""),
                     cluster_id=int(row.get("cluster_id") or 0),
                     cluster_version=str(row.get("cluster_version") or "v1"),
                     prototype_id=str(row.get("prototype_id") or ""),
                     cluster_status=str(row.get("cluster_status") or "BOOTSTRAP_CANDIDATE"),
-                    evidence_tier=evidence_tier_for(
-                        str(row.get("cluster_status") or "BOOTSTRAP_CANDIDATE"),
-                        ["PROMPT_ONLY"],
-                        ["NONE"],
-                    ),
+                    evidence_tier=evidence_tier,
                     macro_structure_name=str(row.get("macro_structure_name") or "候选结构"),
                     structure_description=str(row.get("structure_description") or ""),
                     beat_sequence=beat_sequence,
@@ -171,7 +197,8 @@ class RDSStructureRepository:
                     visual_hook_type=_dominant_distribution_value(row.get("hook_distribution")),
                     proof_mechanisms=[],
                     ending_pattern=_dominant_distribution_value(row.get("ending_distribution")),
-                    # PROMPT_ONLY 中出现的镜头数/时间戳不具备视频实测权威性。
+                    # 簇原型没有稳定的镜头数区间；具体镜头功能由后续同
+                    # video_id 的 script_execution_card_v2 提供。
                     shot_count_min=None,
                     shot_count_max=None,
                     shot_count_median=None,
@@ -187,9 +214,16 @@ class RDSStructureRepository:
                     extractor_versions=[],
                     feature_schema_versions=[],
                     compatibility_matrix_versions=[],
-                    profile_types=["PROMPT_ONLY"],
-                    independence_levels=["NONE"],
+                    profile_types=["VIDEO_DERIVED_SCRIPT"] + (
+                        ["VIDEO_INDEPENDENT"] if independent_video_count else []
+                    ),
+                    independence_levels=["FULL"] if independent_video_count else ["SCRIPT_DERIVED"],
                     metadata={
+                        "release_id": str(release.get("release_id") or ""),
+                        "schema_version": str(release.get("schema_version") or ""),
+                        "extractor_version": str(release.get("extractor_version") or ""),
+                        "semantic_source": "VIDEO_RECONSTRUCTION_ASSET",
+                        "raw_video_verified_is_sort_bonus_only": True,
                         "dominant_seq_pct": row.get("dominant_seq_pct"),
                         "carrier_distribution": _json_value(row.get("carrier_distribution"), []),
                         "continuity_distribution": _json_value(row.get("continuity_distribution"), []),

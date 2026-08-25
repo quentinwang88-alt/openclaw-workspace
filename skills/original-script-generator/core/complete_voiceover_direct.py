@@ -504,6 +504,10 @@ def run_central_complete_voiceover(
     tension = content.get("audience_tension") if isinstance(content.get("audience_tension"), dict) else {}
     value = content.get("value_proposition") if isinstance(content.get("value_proposition"), dict) else {}
     selling_argument = content.get("selling_argument") if isinstance(content.get("selling_argument"), dict) else {}
+    argument_context_alignment = (
+        content.get("argument_context_alignment")
+        if isinstance(content.get("argument_context_alignment"), dict) else {}
+    )
     selling_argument_available = _text(selling_argument.get("status")).upper() == "AVAILABLE"
     content_mode = _text(
         direction.get("content_bundle_brief", {}).get("content_mode")
@@ -539,6 +543,31 @@ def run_central_complete_voiceover(
         if isinstance(category_profile.get("identity_authority"), dict)
         else {}
     )
+    retrieval_contract = (
+        direction.get("retrieval_reference_contract")
+        if isinstance(direction.get("retrieval_reference_contract"), dict)
+        else {}
+    )
+    retrieved_speech_hook_pool = [
+        {
+            "cluster_id": _text(item.get("cluster_id")),
+            "prototype_name": _text(item.get("prototype_name")),
+            "opening_move": _text(item.get("opening_move")),
+            "relation_mode": _text(item.get("relation_mode")),
+            "argument_order": _text(item.get("argument_order")),
+            "ending_pattern": _text(item.get("ending_pattern")),
+            "target_language_examples": [
+                {
+                    "language": _text(example.get("language")),
+                    "rhetorical_example": _text(example.get("rhetorical_example")),
+                }
+                for example in item.get("target_language_examples") or []
+                if isinstance(example, dict)
+            ][:2],
+        }
+        for item in retrieval_contract.get("speech_hook_pool") or []
+        if isinstance(item, dict)
+    ][:3]
     payload = {
         "schema_version": "original-batch-complete-voiceover-input-v2",
         "hook_execution_policy_version": HOOK_EXECUTION_POLICY_VERSION,
@@ -580,6 +609,7 @@ def run_central_complete_voiceover(
             )
             if selling_argument.get(key) not in (None, "", [])
         },
+        "argument_context_alignment": argument_context_alignment,
         "verified_facts": facts,
         "expression_density_contract": {
             "preferred_information_units": 2 if selling_argument_mode else 1,
@@ -633,6 +663,16 @@ def run_central_complete_voiceover(
                 "source", "source_version",
             )
             if hook_row.get(key) not in (None, "", [])
+        },
+        "retrieved_speech_hook_pool": {
+            "status": "AVAILABLE" if retrieved_speech_hook_pool else "UNAVAILABLE",
+            "authority": "RHETORIC_ONLY",
+            "candidates": retrieved_speech_hook_pool,
+            "instruction": (
+                "这些真实口播样例只用于学习开口动作、观众关系、论证顺序、句子节奏和目标语言语感；"
+                "当前 selling_argument 与 verified_facts 仍是唯一内容权威。不得继承样例中的商品、材质、"
+                "功效、品牌、价格、具体宣称、CTA原句或逐句翻译。与当前 hook_guidance 不兼容时可以不用。"
+            ),
         },
         "creative_voice_context": creative,
         "narrative_anchor_options": _narrative_anchor_options(creative),
@@ -780,6 +820,14 @@ def run_central_complete_voiceover(
             ],
             "selection_policy": style_selection_policy,
             "policy_version": HOOK_EXECUTION_POLICY_VERSION,
+            "retrieved_speech_hook_run_id": _text(
+                (retrieval_contract.get("active_runs") or {}).get("speech_hook")
+                if isinstance(retrieval_contract.get("active_runs"), dict)
+                else ""
+            ),
+            "retrieved_speech_hook_clusters": [
+                item.get("cluster_id") for item in retrieved_speech_hook_pool
+            ],
         },
         "relationship_surface": {
             "requested": _text(relationship_device) or "HOOK_DECIDES",

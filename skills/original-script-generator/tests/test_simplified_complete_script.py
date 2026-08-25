@@ -7,6 +7,8 @@ from core.simplified_complete_script import (
     SCRIPT_MODE_SIMPLIFIED,
     assemble_simplified_complete_script,
     build_product_identity_lock,
+    build_capture_rhythm_contract,
+    build_creator_recording_profile,
     build_simplified_creative_seed,
     build_simplified_script_prompt,
     build_simplified_voiceover_inputs,
@@ -118,6 +120,179 @@ def _person_script():
 
 
 class SimplifiedCompleteScriptTest(unittest.TestCase):
+    def test_creator_recording_profile_is_narrow_and_honors_three_real_clips(self):
+        direct = build_creator_recording_profile(
+            top_category="女装",
+            product_type="外套",
+            content_carrier="WEARER_ACTIVE",
+        )
+        accessory = build_creator_recording_profile(
+            top_category="配饰",
+            product_type="发夹",
+            content_carrier="WEARER_ACTIVE",
+        )
+        self.assertTrue(direct["enabled"])
+        self.assertEqual("CREATOR_DIRECT_SHARE", direct["recording_mode"])
+        self.assertFalse(accessory["enabled"])
+
+        direct["planned_visible_clip_count"] = 3
+        contract = build_capture_rhythm_contract(
+            capture_mode=CAPTURE_MODE_CREATOR_SELF_SHOT,
+            macro_structure=["HOOK", "PROOF", "ENDING"],
+            creator_recording_profile=direct,
+        )
+        self.assertEqual(3, contract["capture_unit_count"])
+        self.assertEqual("WORN_DIRECT_SHARE", contract["capture_grammar"])
+        self.assertEqual([], contract["observable_change_jobs"])
+        self.assertNotIn("framing_guidance_by_unit", contract)
+
+        storyboard = [
+            {
+                "shot_no": index,
+                "narrative_role": "PROOF",
+                "visual_content": f"画面{index}",
+                "character_action": "自然分享",
+            }
+            for index in range(1, 4)
+        ]
+        compiled, units = compile_capture_units(storyboard, contract)
+        self.assertTrue(all(not unit.get("observable_change_job") for unit in units))
+        self.assertTrue(all(not shot.get("observable_change_job") for shot in compiled))
+    def test_public_scene_uses_one_fixed_position_plus_handheld_cutaway(self):
+        contract = build_capture_rhythm_contract(
+            capture_mode=CAPTURE_MODE_CREATOR_SELF_SHOT,
+            macro_structure=["HOOK", "PROOF", "ENDING"],
+            scene_context={"scene_motif": "商场连廊靠窗休息区"},
+            retrieval_reference={
+                "primary_real_case": {
+                    "execution_card": {
+                        "execution_card_id": "EXEC_PUBLIC",
+                        "shot_count": 5,
+                        "available_parts": ["opening", "proof", "ending"],
+                    }
+                }
+            },
+        )
+
+        self.assertEqual(4, contract["capture_unit_count"])
+        self.assertEqual(
+            "ONE_PUBLIC_PHONE_POSITION_PLUS_HANDHELD_CUTAWAY",
+            contract["capture_setup_mode"],
+        )
+        self.assertEqual("REAL_EXECUTION_CARD", contract["derivation_source"])
+        self.assertEqual(2, contract["camera_setup_count"])
+        self.assertEqual(
+            ["HOOK", "PROOF", "PROOF", "ENDING"],
+            contract["structure_unit_roles"],
+        )
+        self.assertEqual(
+            ["OPENING", "PROOF", "ENDING"],
+            contract["reference_function_sequence"],
+        )
+        self.assertEqual(
+            4,
+            contract["shot_richness_contract"]["preferred_visible_clips"],
+        )
+
+    def test_final_information_gain_review_reads_compiled_units(self):
+        profile = build_creator_recording_profile(
+            top_category="女装",
+            product_type="外套",
+            content_carrier="WEARER_ACTIVE",
+        )
+        profile["planned_visible_clip_count"] = 3
+        contract = build_capture_rhythm_contract(
+            capture_mode=CAPTURE_MODE_CREATOR_SELF_SHOT,
+            macro_structure=["HOOK", "PROOF", "ENDING"],
+            creator_recording_profile=profile,
+        )
+        stationary_storyboard = [
+            {
+                "shot_no": 1,
+                "narrative_role": "HOOK",
+                "visual_content": "人物穿着外套面对手机分享整体效果",
+                "character_action": "自然开口",
+            },
+            {
+                "shot_no": 2,
+                "narrative_role": "PROOF",
+                "visual_content": "外套前襟区域露出，口袋和下摆同时进入视野",
+                "character_action": "人物保持自然说话状态",
+            },
+            {
+                "shot_no": 3,
+                "narrative_role": "ENDING",
+                "visual_content": "人物继续站着面对手机分享外套",
+                "character_action": "保持自然站姿",
+            },
+        ]
+        _, units = compile_capture_units(stationary_storyboard, contract)
+        review = contract["final_information_gain_review"]
+        self.assertEqual("LOW_INFORMATION_GAIN", review["status"])
+        self.assertEqual(
+            [2, 3],
+            review["low_information_gain_pairs"][0]["capture_unit_pair"],
+        )
+        self.assertFalse(review["is_blocking"])
+        self.assertEqual(
+            review,
+            contract["shot_richness_contract"]["final_information_gain_review"],
+        )
+        self.assertEqual(3, len(units))
+
+        seated_contract = build_capture_rhythm_contract(
+            capture_mode=CAPTURE_MODE_CREATOR_SELF_SHOT,
+            macro_structure=["HOOK", "PROOF", "ENDING"],
+            creator_recording_profile=profile,
+        )
+        seated_storyboard = [dict(item) for item in stationary_storyboard]
+        seated_storyboard[2]["visual_content"] = (
+            "人物坐在咖啡厅窗边座位，继续展示外套与高腰裤的穿搭关系"
+        )
+        seated_storyboard[2]["character_action"] = "自然坐下后继续分享"
+        compile_capture_units(seated_storyboard, seated_contract)
+        self.assertEqual(
+            "SUFFICIENT",
+            seated_contract["final_information_gain_review"]["status"],
+        )
+
+        moving_contract = build_capture_rhythm_contract(
+            capture_mode=CAPTURE_MODE_CREATOR_SELF_SHOT,
+            macro_structure=["HOOK", "PROOF", "ENDING"],
+            creator_recording_profile=profile,
+        )
+        moving_storyboard = [dict(item) for item in stationary_storyboard]
+        moving_storyboard[2]["visual_content"] = (
+            "人物走入电梯，外套与电梯厅形成新的空间关系"
+        )
+        moving_storyboard[2]["character_action"] = "自然走入电梯"
+        compile_capture_units(moving_storyboard, moving_contract)
+        self.assertEqual(
+            "SUFFICIENT",
+            moving_contract["final_information_gain_review"]["status"],
+        )
+
+    def test_empty_execution_card_is_labeled_generic_fallback(self):
+        contract = build_capture_rhythm_contract(
+            capture_mode=CAPTURE_MODE_CREATOR_SELF_SHOT,
+            macro_structure=["HOOK", "PROOF", "ENDING"],
+            retrieval_reference={
+                "primary_real_case": {
+                    "execution_card": {
+                        "execution_card_id": "EXEC_EMPTY",
+                        "shot_count": 0,
+                        "available_parts": [],
+                    }
+                }
+            },
+        )
+        self.assertEqual("GENERIC_FALLBACK", contract["derivation_source"])
+        self.assertEqual(
+            "INSUFFICIENT",
+            contract["retrieved_execution_shape"]["evidence_status"],
+        )
+        self.assertEqual([], contract["reference_function_sequence"])
+
     def test_blueprint_prompt_hides_unselected_outfit_alternatives(self):
         seed = build_simplified_creative_seed(
             anchor_card=_anchor(),
@@ -256,10 +431,10 @@ class SimplifiedCompleteScriptTest(unittest.TestCase):
         prompt = build_simplified_script_prompt(
             seed, target_country="泰国", target_language="泰语", duration_seconds=15
         )
-        self.assertIn("创作者自己完成的手机分享", prompt)
-        self.assertIn("分别录制3段简短素材", prompt)
-        self.assertIn("片段间使用普通直接剪切或自然跳剪", prompt)
-        self.assertIn("不得扩写成摄影团队", prompt)
+        self.assertIn("对自己的手机镜头说话的创作者", prompt)
+        self.assertIn("分别录制4段简短素材", prompt)
+        self.assertIn("片段间普通直接剪切", prompt)
+        self.assertIn("不是被摄影团队拍摄的沉默模特", prompt)
         self.assertEqual(
             CAPTURE_RHYTHM_MULTICLIP,
             seed["capture_rhythm_contract"]["profile"],
@@ -284,6 +459,160 @@ class SimplifiedCompleteScriptTest(unittest.TestCase):
             [item["starts_new_take"] for item in storyboard],
         )
         self.assertEqual("DIRECT_CUT", storyboard[-1]["edit_before"])
+
+    def test_default_shot_richness_keeps_all_five_routed_beats_when_budget_allows(self):
+        contract = build_capture_rhythm_contract(
+            capture_mode=CAPTURE_MODE_CREATOR_SELF_SHOT,
+            macro_structure=["HOOK", "PROOF", "USE_PROCESS", "PROOF", "ENDING"],
+            scene_context={"scene_motif": "公寓玄关"},
+            retrieval_reference={
+                "primary_real_case": {
+                    "execution_card": {
+                        "execution_card_id": "EXEC_RICH",
+                        "shot_count": 6,
+                        "available_parts": [
+                            "opening",
+                            "proof",
+                            "use_process",
+                            "ending",
+                        ],
+                    }
+                }
+            },
+        )
+        storyboard = [
+            {
+                "shot_no": index + 1,
+                "time_range": f"{index * 2}-{(index + 1) * 2}s",
+                "narrative_role": role,
+                "visual_content": f"画面{index + 1}",
+                "character_action": f"动作{index + 1}",
+            }
+            for index, role in enumerate(
+                ["HOOK", "PROOF", "USE_PROCESS", "PROOF", "ENDING"]
+            )
+        ]
+
+        compiled_storyboard, units = compile_capture_units(storyboard, contract)
+
+        self.assertEqual(5, len(units))
+        self.assertEqual(5, len({item["capture_unit_id"] for item in compiled_storyboard}))
+        self.assertEqual([1], units[0]["shot_numbers"])
+        self.assertEqual([5], units[-1]["shot_numbers"])
+        self.assertEqual(
+            "PRESERVED",
+            contract["shot_richness_contract"]["preservation_status"],
+        )
+        self.assertEqual(
+            ["HOOK", "PROOF", "USE_PROCESS", "PROOF", "ENDING"],
+            contract["shot_richness_contract"]["compiled_function_sequence"],
+        )
+
+    def test_four_visible_clips_repeat_existing_proof_without_adding_use_or_ending(self):
+        ending_contract = build_capture_rhythm_contract(
+            capture_mode=CAPTURE_MODE_CREATOR_SELF_SHOT,
+            macro_structure=["HOOK", "PROOF", "ENDING"],
+        )
+        use_contract = build_capture_rhythm_contract(
+            capture_mode=CAPTURE_MODE_CREATOR_SELF_SHOT,
+            macro_structure=["HOOK", "PROOF", "USE_PROCESS"],
+        )
+        source = [
+            {
+                "shot_no": index,
+                "time_range": f"{(index - 1) * 3}-{index * 3}s",
+                "narrative_role": role,
+                "visual_content": f"画面{index}",
+                "character_action": f"动作{index}",
+                "capture_unit_id": f"CU_{index:02d}",
+                "starts_new_take": True,
+            }
+            for index, role in enumerate(
+                ["HOOK", "PROOF", "USE", "ENDING"], 1
+            )
+        ]
+
+        ending_storyboard, ending_units = compile_capture_units(
+            source, ending_contract
+        )
+        use_storyboard, use_units = compile_capture_units(source, use_contract)
+
+        self.assertEqual(
+            ["HOOK", "PROOF", "PROOF", "ENDING"],
+            [unit["structure_role"] for unit in ending_units],
+        )
+        self.assertEqual(
+            ["HOOK", "PROOF", "PROOF", "ENDING"],
+            [shot["narrative_role"] for shot in ending_storyboard],
+        )
+        self.assertEqual(
+            ["HOOK", "PROOF", "PROOF", "USE_PROCESS"],
+            [unit["structure_role"] for unit in use_units],
+        )
+        self.assertEqual(
+            ["HOOK", "PROOF", "PROOF", "USE_PROCESS"],
+            [shot["narrative_role"] for shot in use_storyboard],
+        )
+        self.assertNotIn(
+            "ENDING", [unit["structure_role"] for unit in use_units]
+        )
+        self.assertEqual(
+            "PRESERVED",
+            use_contract["shot_richness_contract"]["structure_preservation_status"],
+        )
+
+    def test_each_visible_clip_receives_a_distinct_observable_viewing_job(self):
+        contract = build_capture_rhythm_contract(
+            capture_mode=CAPTURE_MODE_CREATOR_SELF_SHOT,
+            macro_structure=["HOOK", "PROOF", "ENDING"],
+        )
+        storyboard = [
+            {
+                "shot_no": index,
+                "narrative_role": "PROOF",
+                "visual_content": f"画面{index}",
+                "character_action": f"动作{index}",
+            }
+            for index in range(1, 5)
+        ]
+
+        compiled, units = compile_capture_units(storyboard, contract)
+
+        jobs = [unit["observable_change_job"] for unit in units]
+        self.assertEqual(4, len(jobs))
+        self.assertEqual(4, len(set(jobs)))
+        self.assertIn("PRIMARY_PRODUCT_EVIDENCE", jobs)
+        self.assertIn("DISTINCT_PRODUCT_EVIDENCE_2", jobs)
+        self.assertTrue(
+            all(shot.get("observable_change_job") for shot in compiled)
+        )
+
+    def test_capture_units_preserve_category_owned_roles_and_framing(self):
+        contract = {
+            "profile": CAPTURE_RHYTHM_MULTICLIP,
+            "capture_unit_count": 3,
+            "unit_roles": [
+                "PRODUCT_RESULT_CLOSE",
+                "NATURAL_MOTION_RELATION",
+                "PRODUCT_REACQUISITION",
+            ],
+            "framing_guidance_by_unit": [
+                "先看清已经佩戴好的商品",
+                "一次连续的上半身变化",
+                "最后回到商品近景",
+            ],
+        }
+
+        _, units = compile_capture_units(_person_script()["storyboard"], contract)
+
+        self.assertEqual(
+            contract["unit_roles"],
+            [item["unit_role"] for item in units],
+        )
+        self.assertEqual(
+            contract["framing_guidance_by_unit"],
+            [item["framing_guidance"] for item in units],
+        )
 
     def test_capture_units_preserve_valid_semantic_boundaries_from_visual_script(self):
         contract = {
@@ -672,7 +1001,7 @@ class SimplifiedCompleteScriptTest(unittest.TestCase):
             seed, target_country="泰国", target_language="泰语", duration_seconds=15
         )
         self.assertNotIn("一个连续生活事件和4至6个分镜必须同时成立", prompt)
-        self.assertIn("默认采用观察式画面", prompt)
+        self.assertIn("不同片段不要求分别增加动作、情绪或生活事件", prompt)
         script = _person_script()
         script["production_design"].pop("life_event", None)
         result = validate_simplified_visual_script(script, seed)
@@ -704,7 +1033,9 @@ class SimplifiedCompleteScriptTest(unittest.TestCase):
         prompt = build_simplified_script_prompt(
             seed, target_country="泰国", target_language="泰语", duration_seconds=15
         )
-        self.assertIn("不得为了执行它强制设计前后对比", prompt)
+        self.assertNotIn("opening_visual_job", prompt)
+        self.assertNotIn('"source_job": "SHOW_RESULT"', prompt)
+        self.assertNotIn("opening_scene_projection", prompt)
 
     def test_photo_argument_gets_scene_first_without_forcing_action(self):
         bundle = _bundle("适合拍照打卡", "C1")
@@ -901,10 +1232,19 @@ class SimplifiedCompleteScriptTest(unittest.TestCase):
         self.assertTrue(result["valid"], result["issues"])
 
     def test_voiceover_adapter_and_assembly_preserve_full_design(self):
+        governed_bundle = {
+            **_bundle(),
+            "selling_argument_lineage": {"status": "CONFIRMED"},
+            "selling_argument": {
+                "argument_id": "ARG_1",
+                "source_argument_id": "PCS_HUMAN_1",
+                "source_claim_ids": ["C1"],
+            },
+        }
         seed = build_simplified_creative_seed(
             anchor_card=_anchor(),
             structure_contract=_contract("WEARER_ACTIVE"),
-            content_bundle=_bundle(),
+            content_bundle=governed_bundle,
             creative_contract={},
             execution_reference={"content_carrier": "WEARER_ACTIVE"},
             requested_hook_id="AUDIENCE_NEED_CALLOUT",
@@ -914,7 +1254,7 @@ class SimplifiedCompleteScriptTest(unittest.TestCase):
         )
         frozen = {
             "structure_contract": _contract("WEARER_ACTIVE"),
-            "content_bundle_brief": _bundle(),
+            "content_bundle_brief": governed_bundle,
             "execution_reference": {"content_carrier": "WEARER_ACTIVE"},
         }
         script = _person_script()
@@ -947,6 +1287,14 @@ class SimplifiedCompleteScriptTest(unittest.TestCase):
         self.assertEqual(assembled["production_design"], script["production_design"])
         self.assertEqual(assembled["assembly_provenance"]["script_mode"], SCRIPT_MODE_SIMPLIFIED)
         self.assertEqual(
+            "PCS_HUMAN_1",
+            assembled["assembly_provenance"]["selling_argument_source_argument_id"],
+        )
+        self.assertEqual(
+            "CONFIRMED",
+            assembled["assembly_provenance"]["selling_argument_lineage_status"],
+        )
+        self.assertEqual(
             assembled["continuous_voiceover"]["selling_argument_realization"],
             "ใส่คลุมเวลาอยู่ในห้องแอร์",
         )
@@ -962,7 +1310,7 @@ class SimplifiedCompleteScriptTest(unittest.TestCase):
             CAPTURE_RHYTHM_MULTICLIP,
             assembled["video_generation_brief"]["capture_rhythm_contract"]["profile"],
         )
-        self.assertEqual(3, len(assembled["video_generation_brief"]["capture_units"]))
+        self.assertEqual(4, len(assembled["video_generation_brief"]["capture_units"]))
         self.assertEqual(
             {}, assembled["video_generation_brief"]["outfit_prompt_projection"]
         )
@@ -1295,6 +1643,101 @@ class SimplifiedCompleteScriptTest(unittest.TestCase):
             "outerwear",
             apparel_seed["product_truth"]["canonical_product_type"],
         )
+
+    def test_hair_motion_actions_rotate_by_frozen_direction_without_state(self):
+        hair_anchor = {
+            "product_positioning_one_liner": "棕色抓夹",
+            "hard_anchors": [{"anchor": "棕色抓夹"}],
+            "display_anchors": [{"anchor": "抓夹固定在后脑盘发区域"}],
+        }
+        extension = compile_category_execution_extension(
+            product_type="抓夹",
+            top_category="配饰",
+            anchor_card=hair_anchor,
+            enabled=True,
+        )
+        action_ids = []
+        for contract_id in (
+            "CDV_F09E549122FEBE3AAA55DECA",
+            "CDV_7065DE0CFFC3D4CFD554C1BA",
+            "CDV_0A997758834CB16DD750B285",
+        ):
+            seed = build_simplified_creative_seed(
+                anchor_card=hair_anchor,
+                structure_contract=_contract("WEARER_ACTIVE"),
+                content_bundle=_bundle("抓夹固定后的盘发结果清楚可见"),
+                creative_contract={
+                    "contract_id": contract_id,
+                    "opening_action": "发饰已经佩戴完成",
+                    "action_grammar": "结果建立→自然观察→结束分享",
+                },
+                execution_reference={"content_carrier": "WEARER_ACTIVE"},
+                requested_hook_id="AUDIENCE_NEED_CALLOUT",
+                content_angle_key="FACT_DISCOVERY",
+                product_type="抓夹",
+                top_category="配饰",
+                category_execution_extension=extension,
+            )
+            self.assertEqual(
+                "action-variety-v2-direction-rotation",
+                seed["action_design"]["selection_policy"],
+            )
+            action_ids.append(seed["action_design"]["interaction_id"])
+
+        self.assertEqual(3, len(set(action_ids)))
+
+    def test_reference_realization_is_observability_only(self):
+        retrieval_contract = {
+            "status": "AVAILABLE",
+            "selection_mode": "CASE_FIRST_SAME_VIDEO_DIMENSIONS",
+            "scene_alignment_status": "STRUCTURE_CARRIER_MATCH_ONLY",
+            "usage_boundary": "只借鉴拍摄语法",
+            "authority_boundary": {"product_truth": "CURRENT_PRODUCT_ANCHOR_AUTHORITY"},
+            "primary_case": {
+                "reference_execution_spine": {
+                    "schema_version": "reference-execution-spine-v1",
+                    "reference_spine_id": "RSP_TEST",
+                    "available_parts": ["opening", "proof", "ending"],
+                    "parts": {
+                        "opening": {"status": "AVAILABLE", "visual_action": "商品结果近景"},
+                        "proof": {"status": "AVAILABLE", "visual_action": "人物自然走动"},
+                        "ending": {"status": "AVAILABLE", "visual_action": "回到商品结果"},
+                    },
+                },
+                "dimension_references": {},
+            },
+            "supporting_case": {},
+        }
+        seed = build_simplified_creative_seed(
+            anchor_card=_anchor(),
+            structure_contract=_contract("WEARER_ACTIVE"),
+            content_bundle=_bundle(),
+            creative_contract={},
+            execution_reference={"content_carrier": "WEARER_ACTIVE"},
+            requested_hook_id="AUDIENCE_NEED_CALLOUT",
+            content_angle_key="FACT_DISCOVERY",
+            product_type="外套",
+            top_category="女装",
+            retrieval_reference_contract=retrieval_contract,
+        )
+        raw = _person_script()
+        raw["reference_realization"] = {
+            "status": "APPLIED",
+            "adopted_parts": ["opening", "proof", "unknown"],
+            "adaptation_notes": "借用了结果开场与中段自然动作",
+        }
+        normalized = normalize_simplified_visual_script(
+            raw,
+            seed,
+            generation_provenance={"model": "test"},
+        )
+        realization = normalized["reference_realization"]
+        self.assertEqual(realization["status"], "APPLIED")
+        self.assertEqual(realization["reference_spine_id"], "RSP_TEST")
+        self.assertEqual(realization["adopted_parts"], ["opening", "proof"])
+        self.assertFalse(realization["hard_required"])
+        validation = validate_simplified_visual_script(normalized, seed)
+        self.assertTrue(validation["valid"], validation)
 
 
 if __name__ == "__main__":

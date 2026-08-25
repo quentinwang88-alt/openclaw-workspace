@@ -10,9 +10,9 @@ from typing import Any, Dict, Iterable, List, Sequence, Tuple
 from .models import RouteRequest, StructureCandidate
 
 
-POLICY_VERSION = "structure-router-v1.2-capability-preference"
+POLICY_VERSION = "structure-router-v1.3-shot-richness"
 FAMILY_POLICY_VERSION = "exact-coarse-beat-v1"
-COMPATIBILITY_POLICY_VERSION = "original-flow-capability-v2-soft-preference"
+COMPATIBILITY_POLICY_VERSION = "original-flow-capability-v3-shot-richness"
 FEEDBACK_POLICY = {
     "display_only_below_videos": 8,
     "directional_min_videos": 8,
@@ -112,6 +112,14 @@ def candidate_is_compatible(candidate: StructureCandidate, request: RouteRequest
     allowed_continuity = {str(item) for item in capabilities.get("allowed_continuity_modes", []) if str(item)}
     if allowed_continuity and candidate.continuity_mode and candidate.continuity_mode not in allowed_continuity:
         reasons.append(f"continuity={candidate.continuity_mode} 不受当前流程支持")
+    forbidden_cut_densities = {
+        str(item).strip().upper()
+        for item in capabilities.get("forbidden_cut_densities", [])
+        if str(item).strip()
+    }
+    candidate_cut_density = str(candidate.cut_density or "").strip().upper()
+    if candidate_cut_density and candidate_cut_density in forbidden_cut_densities:
+        reasons.append(f"cut_density={candidate.cut_density} 不受当前流程支持")
     forbidden_beats = {str(item) for item in capabilities.get("forbidden_beats", []) if str(item)}
     conflicting_beats = [beat for beat in candidate.beat_sequence if beat in forbidden_beats]
     if conflicting_beats:
@@ -197,6 +205,21 @@ def capability_preference_score(
     }
     if preferred_proof and candidate_proof:
         score += min(0.06, 0.03 * len(preferred_proof.intersection(candidate_proof)))
+    preferred_cut_densities = {
+        str(item).strip().upper()
+        for item in capabilities.get("preferred_cut_densities", [])
+        if str(item).strip()
+    }
+    discouraged_cut_densities = {
+        str(item).strip().upper()
+        for item in capabilities.get("discouraged_cut_densities", [])
+        if str(item).strip()
+    }
+    candidate_cut_density = str(candidate.cut_density or "").strip().upper()
+    if candidate_cut_density in preferred_cut_densities:
+        score += 0.10
+    if candidate_cut_density in discouraged_cut_densities:
+        score -= 0.08
     return score
 
 

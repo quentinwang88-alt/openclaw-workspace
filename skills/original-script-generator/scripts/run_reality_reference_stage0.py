@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -30,7 +31,10 @@ from core.complete_script_v3 import (  # noqa: E402
 from core.reality_reference import (  # noqa: E402
     assemble_reality_script,
     build_reality_direction_packages,
+    normalize_creator_wear_state_continuity,
     project_event_blueprint_to_visual_plan,
+    review_creator_clip_information_gain,
+    validate_creator_recording_blueprint,
     validate_visual_adaptation,
     validate_voiceover_plan,
     validate_voiceover_visual_grounding,
@@ -53,6 +57,14 @@ BLUEPRINT_LLM_DEFAULT_MODEL = os.environ.get(
 BLUEPRINT_LLM_DEFAULT_REASONING_EFFORT = os.environ.get(
     "ORIGINAL_SCRIPT_BLUEPRINT_REASONING_EFFORT", "high"
 )
+DEFAULT_VOICEOVER_MODEL_COMMAND = os.environ.get(
+    "ORIGINAL_SCRIPT_VOICEOVER_MODEL_COMMAND",
+    "python3 /Users/likeu3/voiceover_copy_engine/scripts/codex_model_command.py",
+)
+
+
+class VoiceoverPendingError(RuntimeError):
+    """Formal voiceover routes failed after visual work was already persisted."""
 
 
 def _json_load(value: Any) -> Dict[str, Any]:
@@ -242,10 +254,42 @@ def _blueprint_cache_matches_model(
     )
 
 
+def _cached_blueprint_projection_is_compatible(
+    direction: Dict[str, Any],
+    blueprint: Dict[str, Any],
+) -> bool:
+    """Reject cached creative text that cannot satisfy the current carrier plan.
+
+    Blueprint validation checks the three macro passages, but carrier conflicts
+    can only be observed after deterministic slot projection.  This extra local
+    check keeps old cached blueprints from reaching the expensive voiceover
+    stage; it never adds a model call and simply forces a fresh blueprint.
+    """
+
+    probe = dict(direction)
+    probe["creative_blueprint"] = blueprint
+    try:
+        projected = project_event_blueprint_to_visual_plan(direction=probe)
+        review = validate_visual_adaptation(
+            projected,
+            execution_plan=direction["structure_execution_plan"],
+            execution_reference=direction["execution_reference"],
+            content_bundle_brief=direction.get("content_bundle_brief", {}),
+            creative_blueprint=blueprint,
+            creative_diversity_contract=direction.get(
+                "creative_diversity_contract", {}
+            ),
+        )
+    except Exception:
+        return False
+    return bool(review.get("valid"))
+
+
 def _normalize_blueprint(
     payload: Dict[str, Any],
     contract: Dict[str, Any],
     generation_provenance: Optional[Dict[str, Any]] = None,
+    recording_profile: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     normalized = dict(payload)
     # These values are allocated by code before generation.  The model may
@@ -263,6 +307,16 @@ def _normalize_blueprint(
     normalized["authority"] = "CREATIVE_DESIGN"
     if generation_provenance:
         normalized["generation_provenance"] = dict(generation_provenance)
+    normalized = normalize_creator_wear_state_continuity(
+        normalized,
+        recording_profile or {},
+    )
+    normalized["clip_information_gain_review"] = (
+        review_creator_clip_information_gain(
+            normalized,
+            recording_profile or {},
+        )
+    )
     normalized = attach_field_consumers(normalized)
     material = json.dumps(normalized, ensure_ascii=False, sort_keys=True, default=str)
     normalized["creative_blueprint_id"] = "CBP_" + hashlib.sha256(
@@ -275,6 +329,7 @@ def _blueprint_validator(
     contract: Dict[str, Any],
     diagnostics: Optional[Dict[str, Any]] = None,
     generation_provenance: Optional[Dict[str, Any]] = None,
+    recording_profile: Optional[Dict[str, Any]] = None,
 ):
     def validate(payload: Any) -> None:
         if not isinstance(payload, dict):
@@ -283,8 +338,26 @@ def _blueprint_validator(
             payload,
             contract,
             generation_provenance=generation_provenance,
+            recording_profile=recording_profile,
         )
-        result = validate_complete_blueprint(normalized, contract)
+        result = _validate_blueprint_for_recording_profile(
+            normalized,
+            contract,
+            recording_profile or {},
+        )
+        recording_result = validate_creator_recording_blueprint(
+            normalized,
+            recording_profile or {},
+        )
+        if not recording_result["valid"]:
+            result = {
+                **result,
+                "valid": False,
+                "issues": [
+                    *list(result.get("issues") or []),
+                    *list(recording_result.get("issues") or []),
+                ],
+            }
         if diagnostics is not None:
             diagnostics.clear()
             diagnostics.update(
@@ -292,12 +365,41 @@ def _blueprint_validator(
                     "raw_candidate": payload,
                     "normalized_candidate": normalized,
                     "validation": result,
+                    "creator_recording_validation": recording_result,
                 }
             )
         if not result["valid"]:
             raise ValueError("；".join(result["issues"][:10]))
 
     return validate
+
+
+def _validate_blueprint_for_recording_profile(
+    blueprint: Dict[str, Any],
+    contract: Dict[str, Any],
+    recording_profile: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Keep the legacy schema gate while releasing its opening-action quota."""
+
+    validation_contract = dict(contract)
+    if recording_profile.get("enabled"):
+        # Direct sharing no longer has to turn the allocator's opening action
+        # into a literal life event.  All other fact, carrier, scene and schema
+        # checks remain unchanged.
+        validation_contract["opening_action"] = ""
+    result = validate_complete_blueprint(blueprint, validation_contract)
+    if recording_profile.get("enabled") and not result.get("valid"):
+        # macro_visual_passages are a compatibility projection in direct-share
+        # mode.  The actual video authority is clip_design, whose action text
+        # is intentionally optional.  Release only this legacy action quota;
+        # all schema, fact, carrier, scene and product checks remain active.
+        issues = [
+            issue
+            for issue in result.get("issues", [])
+            if not re.fullmatch(r"宏观画面段\d+缺少observable_action", str(issue))
+        ]
+        result = {**result, "valid": not issues, "issues": issues}
+    return result
 
 
 def _render_storyboard(script: Dict[str, Any]) -> str:
@@ -310,8 +412,96 @@ def _render_storyboard(script: Dict[str, Any]) -> str:
         else {}
     )
     if compact_brief:
+        identity_lock = (
+            compact_brief.get("product_identity_lock")
+            if isinstance(compact_brief.get("product_identity_lock"), dict)
+            else {}
+        )
+        preserve = [
+            str(value).strip()
+            for value in identity_lock.get("must_preserve", [])
+            if str(value).strip()
+        ][:3]
+        negatives = [
+            str(value).strip()
+            for value in identity_lock.get("must_not_change", [])
+            if str(value).strip()
+        ][:3]
+        identity_rows: List[str] = []
+        if preserve or negatives:
+            identity_rows = [
+                "- 商品锁：参考图商品为最高权威；必须保持："
+                + ("；".join(preserve) or "参考图可见身份特征"),
+                "- 商品负向："
+                + ("；".join(negatives) or "不得重设计或替换商品"),
+            ]
+        brief_production = (
+            compact_brief.get("production_design")
+            if isinstance(compact_brief.get("production_design"), dict)
+            else production
+        )
         character = compact_brief.get("character") if isinstance(compact_brief.get("character"), dict) else {}
+        if not character:
+            character = (
+                brief_production.get("character_setting")
+                if isinstance(brief_production.get("character_setting"), dict)
+                else {}
+            )
         scene = compact_brief.get("scene") if isinstance(compact_brief.get("scene"), dict) else {}
+        if not scene:
+            scene = (
+                brief_production.get("scene_setting")
+                if isinstance(brief_production.get("scene_setting"), dict)
+                else {}
+            )
+        outfit_setting = (
+            brief_production.get("outfit_setting")
+            if isinstance(brief_production.get("outfit_setting"), dict)
+            else {}
+        )
+        recording_profile = (
+            compact_brief.get("creator_recording_profile")
+            if isinstance(compact_brief.get("creator_recording_profile"), dict)
+            else {}
+        )
+        recording_context = (
+            compact_brief.get("recording_context")
+            if isinstance(compact_brief.get("recording_context"), dict)
+            else {}
+        )
+        direct_share = bool(recording_profile.get("enabled"))
+        capture_units = [
+            item for item in compact_brief.get("capture_units", []) if isinstance(item, dict)
+        ]
+        brief_storyboard = [
+            item for item in compact_brief.get("storyboard", []) if isinstance(item, dict)
+        ]
+        capture_rows: List[str] = []
+        for index, unit in enumerate(capture_units, 1):
+            shot_numbers = {
+                int(value) for value in unit.get("shot_numbers") or []
+                if str(value).isdigit()
+            }
+            unit_shots = [
+                item for item in brief_storyboard
+                if int(item.get("shot_no") or 0) in shot_numbers
+            ]
+            visuals = list(dict.fromkeys(
+                str(item.get("shot_content") or "").strip()
+                for item in unit_shots
+                if str(item.get("shot_content") or "").strip()
+            ))
+            actions = list(dict.fromkeys(
+                str(item.get("observable_action") or "").strip()
+                for item in unit_shots
+                if str(item.get("observable_action") or "").strip()
+            ))
+            capture_rows.append(
+                f"  {index}. {unit.get('structure_role') or unit.get('unit_role', '')}｜"
+                f"{unit.get('observable_change_job', '')}｜{unit.get('framing_guidance', '')}\n"
+                f"     画面：{'；'.join(visuals)}\n"
+                f"     动作：{'；'.join(actions)}"
+            )
         macro_passages = [
             item for item in compact_brief.get("macro_visual_passages", []) if isinstance(item, dict)
         ]
@@ -325,13 +515,23 @@ def _render_storyboard(script: Dict[str, Any]) -> str:
         rows.extend(
             [
                 "【视频模型主输入｜优先复制本段】",
+                *identity_rows,
                 f"- 人物：{character.get('identity', '')}；{character.get('appearance', '')}；{character.get('hair_makeup', '')}",
                 f"- 场景：{scene.get('location', '')}；{scene.get('moment', '')}；{scene.get('lighting', '')}；{scene.get('background', '')}",
-                f"- 穿搭：{compact_brief.get('outfit', '')}",
-                f"- 生活事件：{compact_brief.get('natural_behavior_mainline', '')}",
-                "- 三段画面：" + ("\n" + "\n".join(macro_rows) if macro_rows else ""),
-                f"- 执行重点：{compact_brief.get('render_focus', '')}",
-                f"- 连续口播：{compact_brief.get('continuous_voiceover', '')}",
+                f"- 穿搭：{compact_brief.get('outfit') or outfit_setting.get('styling', '')}",
+                (
+                    f"- 主动分享动机：{recording_context.get('recording_motivation', '')}；"
+                    f"拍摄关系：{recording_context.get('camera_relationship', '')}"
+                    if direct_share
+                    else f"- 生活事件：{compact_brief.get('natural_behavior_mainline', '')}"
+                ),
+                (
+                    "- 可见素材片段：\n" + "\n".join(capture_rows)
+                    if capture_rows
+                    else "- 三段画面：" + ("\n" + "\n".join(macro_rows) if macro_rows else "")
+                ),
+                f"- 执行重点：{compact_brief.get('instruction') or compact_brief.get('render_focus', '')}",
+                f"- 连续口播：{(compact_brief.get('voiceover') or {}).get('target_language', '') if isinstance(compact_brief.get('voiceover'), dict) else compact_brief.get('continuous_voiceover', '')}",
                 "",
                 "【制作设定与内部证据｜不要逐项改写成表演任务】",
             ]
@@ -364,7 +564,7 @@ def _render_storyboard(script: Dict[str, Any]) -> str:
             ]
         )
     if compact_brief:
-        rows.extend(["", "【内部六镜结构槽位｜仅供血缘、节奏和事实审核】"])
+        rows.extend(["", "【内部结构槽位｜仅供血缘、节奏和事实审核】"])
     for shot in script.get("storyboard", []) or []:
         if not isinstance(shot, dict):
             continue
@@ -497,6 +697,11 @@ def _build_voiceover_candidates_markdown(results: List[Dict[str, Any]]) -> str:
 
 
 def _candidate_is_auto_selectable(candidate: Dict[str, Any]) -> bool:
+    if str(candidate.get("copy_generation_mode") or "").upper() == "LOCAL_DETERMINISTIC":
+        # Old snapshots may still carry READY_FOR_SELECTION from before local
+        # copy was demoted.  Never let that stale readiness bypass the formal
+        # Sol/Terra writer requirement.
+        return False
     readiness = candidate.get("selection_readiness")
     if not isinstance(readiness, dict):
         # Backward-compatible snapshots predate the selection field.
@@ -637,7 +842,7 @@ def run_product(
     voiceover_root: str,
     voiceover_db_path: str,
     blueprint_llm: Optional[OriginalScriptLLMClient] = None,
-    voiceover_model_command: str = "",
+    voiceover_model_command: str = DEFAULT_VOICEOVER_MODEL_COMMAND,
     voiceover_qc_model_command: str = "",
     recent_execution_card_ids: Optional[List[str]] = None,
     recent_source_video_ids: Optional[List[str]] = None,
@@ -708,6 +913,19 @@ def run_product(
                 "stage": "event_blueprint_projection",
                 "source": "DETERMINISTIC_NO_MODEL_CALL",
             },
+            "voiceover_qc": {
+                "mode": (
+                    "MODEL"
+                    if voiceover_qc_model_command
+                    else "LOCAL_DETERMINISTIC"
+                ),
+                "policy": "TEXT_SCOUT_LOCAL_UNLESS_EXPLICIT_FULL_QC",
+            },
+            "voiceover_writer": {
+                "mode": "MODEL" if voiceover_model_command else "LOCAL_PREVIEW_ONLY",
+                "command": voiceover_model_command,
+                "formal_required": True,
+            },
         },
         "directions": [],
         "baselines": context["baselines"],
@@ -716,6 +934,10 @@ def run_product(
         slot = str(direction.get("output_slot") or f"S{direction_index}")
         usage_id = ""
         direction_started = time.time()
+        blueprint_cache_hit = False
+        voiceover_cache_hit = False
+        voiceover_logical_requests = 0
+        duration_compression_requests = 0
         try:
             slot = str(direction.get("output_slot") or f"S{direction_index}")
             reference = direction["execution_reference"]
@@ -800,21 +1022,72 @@ def run_product(
                 direction=direction,
             )
             blueprint_start = time.time()
-            blueprint_stage_name = f"complete_script_blueprint_v24_carrier_{slot.lower()}"
+            recording_profile = (
+                direction.get("creator_recording_profile")
+                if isinstance(direction.get("creator_recording_profile"), dict)
+                else {}
+            )
+            blueprint_namespace = (
+                # v28 invalidates cached normalized blueprints from v27. The
+                # old cache may already contain a false off-body projection,
+                # so changing the physical-state normalizer requires a fresh
+                # blueprint namespace rather than reusing that artifact.
+                "v28_direct_share_physical_state_compiled_review"
+                if recording_profile.get("enabled")
+                else "v24_carrier"
+            )
+            blueprint_stage_name = (
+                f"complete_script_blueprint_{blueprint_namespace}_{slot.lower()}"
+            )
             cached_blueprint = storage.get_latest_stage_output_json(
                 context["record_id"], blueprint_stage_name, product_code
             )
+            cached_blueprint_model_compatible = _blueprint_cache_matches_model(
+                cached_blueprint,
+                blueprint_provenance,
+            )
+            if (
+                isinstance(cached_blueprint, dict)
+                and cached_blueprint
+                and cached_blueprint_model_compatible
+            ):
+                cached_blueprint = _normalize_blueprint(
+                    cached_blueprint,
+                    diversity_contract,
+                    generation_provenance=cached_blueprint.get("generation_provenance"),
+                    recording_profile=recording_profile,
+                )
             cached_blueprint_validation = (
-                validate_complete_blueprint(cached_blueprint, diversity_contract)
+                _validate_blueprint_for_recording_profile(
+                    cached_blueprint,
+                    diversity_contract,
+                    recording_profile,
+                )
                 if isinstance(cached_blueprint, dict)
                 and cached_blueprint
-                and _blueprint_cache_matches_model(
-                    cached_blueprint,
-                    blueprint_provenance,
-                )
+                and cached_blueprint_model_compatible
                 else {"valid": False}
             )
             if cached_blueprint_validation.get("valid"):
+                recording_validation = validate_creator_recording_blueprint(
+                    cached_blueprint,
+                    recording_profile,
+                )
+                if not recording_validation.get("valid"):
+                    cached_blueprint_validation = {
+                        "valid": False,
+                        "issues": recording_validation.get("issues", []),
+                    }
+            if cached_blueprint_validation.get("valid") and not _cached_blueprint_projection_is_compatible(
+                direction,
+                cached_blueprint,
+            ):
+                cached_blueprint_validation = {
+                    "valid": False,
+                    "issues": ["缓存蓝图经过当前承载计划投影后不兼容"],
+                }
+            if cached_blueprint_validation.get("valid"):
+                blueprint_cache_hit = True
                 creative_blueprint = cached_blueprint
                 blueprint_validation = cached_blueprint_validation
                 print(f"  ♻️ 复用已通过的{blueprint_stage_name}，不重复调用模型")
@@ -829,6 +1102,7 @@ def run_product(
                             diversity_contract,
                             blueprint_diagnostics,
                             blueprint_provenance,
+                            recording_profile,
                         ),
                     )
                 except Exception as exc:
@@ -848,10 +1122,26 @@ def run_product(
                     raw_blueprint,
                     diversity_contract,
                     generation_provenance=blueprint_provenance,
+                    recording_profile=recording_profile,
                 )
-                blueprint_validation = validate_complete_blueprint(
-                    creative_blueprint, diversity_contract
+                blueprint_validation = _validate_blueprint_for_recording_profile(
+                    creative_blueprint,
+                    diversity_contract,
+                    recording_profile,
                 )
+                recording_validation = validate_creator_recording_blueprint(
+                    creative_blueprint,
+                    recording_profile,
+                )
+                if not recording_validation["valid"]:
+                    blueprint_validation = {
+                        **blueprint_validation,
+                        "valid": False,
+                        "issues": [
+                            *list(blueprint_validation.get("issues") or []),
+                            *list(recording_validation.get("issues") or []),
+                        ],
+                    }
             if not blueprint_validation["valid"]:
                 raise ValueError("完整脚本蓝图校验失败：" + "；".join(blueprint_validation["issues"]))
             direction["creative_blueprint"] = creative_blueprint
@@ -911,7 +1201,14 @@ def run_product(
                     "voiceover_root": voiceover_root,
                     "voiceover_db_path": voiceover_db_path,
                     "model_command": voiceover_model_command,
-                    "qc_model_command": voiceover_qc_model_command,
+                    # Stage-0 is a text scout.  One formal writer call plus
+                    # deterministic factual/language QC is sufficient here;
+                    # callers that explicitly request full model QC can still
+                    # pass --voiceover-qc-model-command.
+                    "qc_model_command": (
+                        voiceover_qc_model_command
+                        or ("__LOCAL_HEURISTIC__" if voiceover_model_command else "")
+                    ),
                 }
                 voiceover_candidates = _cached_voiceover_candidates(
                     voiceover_candidate_snapshot or {},
@@ -920,15 +1217,25 @@ def run_product(
                     selected_candidate_id=selected_voiceover_candidate_id,
                 )
                 if voiceover_candidates:
+                    voiceover_cache_hit = True
                     print(
                         f"  ♻️ 复用已选中央口播候选 {selected_voiceover_candidate_id}，"
                         "不重新生成三稿"
                     )
                 else:
-                    voiceover_candidates = run_central_voiceover_candidates(
-                        candidate_count=max(1, min(3, int(voiceover_candidate_count))),
-                        **voiceover_kwargs,
+                    voiceover_logical_requests += max(
+                        1, min(3, int(voiceover_candidate_count))
                     )
+                    try:
+                        voiceover_candidates = run_central_voiceover_candidates(
+                            candidate_count=max(1, min(3, int(voiceover_candidate_count))),
+                            **voiceover_kwargs,
+                        )
+                    except Exception as voiceover_exc:
+                        raise VoiceoverPendingError(
+                            "中央口播主线路与兜底线路均未完成；视觉结果已保留，可只续跑口播："
+                            + str(voiceover_exc)
+                        ) from voiceover_exc
                 selected_candidate = next(
                     (
                         item
@@ -955,7 +1262,7 @@ def run_product(
                     # compression pass.  It runs only here, never while the
                     # three candidates are first explored.
                     print(
-                        "  ⏱️ 已选候选中心估时超过15秒，"
+                        "  ⏱️ 已选候选中心估时超过18秒，"
                         "按现有一次软修订机制压缩后再组装"
                     )
                     compressed_candidate = run_central_voiceover(
@@ -968,10 +1275,11 @@ def run_product(
                         candidate_id=str(selected_candidate.get("candidate_id") or ""),
                         force_duration_compression=True,
                     )
+                    duration_compression_requests += 1
                     if not _candidate_is_auto_selectable(compressed_candidate):
                         readiness = compressed_candidate.get("selection_readiness") or {}
                         raise ValueError(
-                            "已选口播候选在一次压缩后仍超过15秒；"
+                            "已选口播候选在一次压缩后仍超过18秒；"
                             f"中心估时={readiness.get('estimated_sec')}秒，请选择其它候选"
                         )
                     voiceover_candidates = [
@@ -992,7 +1300,7 @@ def run_product(
                     voiceover_plan = _first_auto_selectable_candidate(voiceover_candidates)
                     if voiceover_plan is None:
                         raise ValueError(
-                            "全部中央口播候选中心估时超过15秒，"
+                            "全部中央口播候选中心估时超过18秒，"
                             "未自动入选；请人工选择后触发一次压缩。"
                         )
                 voiceover_validation = validate_voiceover_plan(
@@ -1114,10 +1422,62 @@ def run_product(
                         else {}
                     ),
                     "quality_result": complete_quality,
+                    "execution_metrics": {
+                        "wall_seconds": round(time.time() - direction_started, 3),
+                        "blueprint_cache_hit": blueprint_cache_hit,
+                        "voiceover_cache_hit": voiceover_cache_hit,
+                        "logical_model_requests": {
+                            "blueprint": 0 if blueprint_cache_hit else 1,
+                            "voiceover_writer": voiceover_logical_requests,
+                            "voiceover_model_qc": (
+                                voiceover_logical_requests + duration_compression_requests
+                                if voiceover_qc_model_command
+                                else 0
+                            ),
+                            "duration_compression": duration_compression_requests,
+                        },
+                        "voiceover_qc_mode": (
+                            "MODEL"
+                            if voiceover_qc_model_command
+                            else "LOCAL_DETERMINISTIC"
+                        ),
+                        "visible_clip_count": len(script.get("capture_units") or []),
+                        "camera_setup_count": int(
+                            (script.get("capture_rhythm_contract") or {}).get(
+                                "camera_setup_count"
+                            )
+                            or 0
+                        ),
+                    },
                 }
             )
             result["directions"].append(direction_result)
         except Exception as exc:
+            if isinstance(exc, VoiceoverPendingError):
+                pending = {
+                    **direction_result,
+                    "status": "VOICEOVER_PENDING",
+                    "selection_status": "VOICEOVER_PENDING",
+                    "visual_plan": visual_plan,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc)[:4000],
+                }
+                result.setdefault("pending_directions", []).append(pending)
+                try:
+                    _record_failed_stage(
+                        storage,
+                        run_id=stage0_run_id,
+                        context=context,
+                        stage_name=f"voiceover_pending_{slot.lower()}",
+                        stage_order=850 + direction_index,
+                        error=exc,
+                        diagnostic_output=pending,
+                        duration=time.time() - direction_started,
+                    )
+                except Exception:
+                    pass
+                print(f"  ⏸️ {slot} 视觉已保留，等待只续跑口播：{exc}")
+                continue
             diagnostic_persistence_errors: List[str] = []
             if usage_id:
                 try:
@@ -1161,11 +1521,15 @@ def run_product(
             print(f"  ⚠️ {slot} 失败，继续下一方向：{exc}")
             continue
     result["completed_count"] = len(result["directions"])
+    result["pending_count"] = len(result.get("pending_directions", []))
     result["failed_count"] = len(result.get("direction_errors", []))
     if int(result.get("selected_count") or 0) == 0:
         result["status"] = "REFERENCE_INSUFFICIENT"
         runtime_status = "阶段0-参考不足"
-    elif result["failed_count"] and result["completed_count"]:
+    elif result["pending_count"] and not result["completed_count"] and not result["failed_count"]:
+        result["status"] = "VOICEOVER_PENDING"
+        runtime_status = "阶段0-等待口播"
+    elif result["pending_count"] or (result["failed_count"] and result["completed_count"]):
         result["status"] = "PARTIAL"
         runtime_status = "阶段0-部分完成"
     elif result["failed_count"]:
@@ -1196,7 +1560,11 @@ def main() -> int:
     parser.add_argument("--skip-voiceover", action="store_true", help="只验证视觉脚本，全部镜头保持静默")
     parser.add_argument("--voiceover-root", default="/Users/likeu3/voiceover_copy_engine")
     parser.add_argument("--voiceover-db-path", default="", help="阶段0口播隔离库；默认写入output-dir")
-    parser.add_argument("--voiceover-model-command", default="", help="中央口播正式模型命令；留空使用确定性回归适配器")
+    parser.add_argument(
+        "--voiceover-model-command",
+        default=DEFAULT_VOICEOVER_MODEL_COMMAND,
+        help="中央口播正式模型命令；默认gpt-5.6-sol/high，瞬时失败回退gpt-5.6-terra/high",
+    )
     parser.add_argument(
         "--require-model-voiceover",
         action="store_true",

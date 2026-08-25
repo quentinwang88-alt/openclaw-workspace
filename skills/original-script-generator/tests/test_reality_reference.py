@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from core.reality_reference import (
     ExecutionCard,
@@ -12,9 +13,12 @@ from core.reality_reference import (
     build_p2_lite,
     build_reality_direction_packages,
     compile_execution_card,
+    normalize_creator_wear_state_continuity,
     project_event_blueprint_to_visual_plan,
+    review_creator_clip_information_gain,
     select_execution_reference,
     validate_visual_adaptation,
+    validate_creator_recording_blueprint,
     validate_voiceover_plan,
     validate_voiceover_visual_grounding,
 )
@@ -32,6 +36,7 @@ from core.reality_voiceover_bridge import (
     build_voiceover_argument_contract,
     build_voiceover_variant_id,
     resolve_voiceover_hook_policy,
+    run_central_voiceover,
     select_voiceover_claim_atoms,
 )
 
@@ -100,6 +105,68 @@ def assignment():
 
 
 class RealityReferenceTests(unittest.TestCase):
+    def test_local_deterministic_voiceover_is_preview_only(self):
+        direction = {
+            "direction_assignment_id": "D1",
+            "content_bundle_brief": {
+                "primary_hook_id": "GENERAL_PRODUCT_SHARE",
+                "eligible_hook_ids": ["GENERAL_PRODUCT_SHARE"],
+                "claim_atoms": [
+                    {"claim_key": "C1", "fact_text": "短款衣长", "role": "core_result"}
+                ],
+            },
+            "p2_lite": {"primary_observation": "短款衣长"},
+            "creative_blueprint": {},
+        }
+        visual = {
+            "shots": [
+                {
+                    "shot_no": 1,
+                    "duration": "0-15s",
+                    "supported_claim_keys": ["C1"],
+                }
+            ]
+        }
+        ready = {
+            "hook_id": "GENERAL_PRODUCT_SHARE",
+            "selected_claim_count": 1,
+            "selected_claim_ids": ["C1"],
+            "beats": [
+                {
+                    "suggested_start_ms": 0,
+                    "suggested_end_ms": 8000,
+                    "speech_text": "ข้อความ",
+                    "chinese_translation": "中文",
+                    "role": "HOOK",
+                }
+            ],
+            "voiceover_engine_qc": {
+                "duration_estimate": {"estimated_sec": 8, "upper_sec": 9},
+                "warnings": [],
+            },
+            "voiceover_expression_contract": {},
+            "voiceover_copy_plan": {},
+        }
+        with patch(
+            "core.reality_voiceover_bridge.load_active_voiceover_hooks",
+            return_value=[{"hook_id": "GENERAL_PRODUCT_SHARE"}],
+        ), patch(
+            "core.reality_voiceover_bridge.run_voiceover_engine_variant",
+            return_value=ready,
+        ):
+            result = run_central_voiceover(
+                product_code="P1",
+                target_country="泰国",
+                target_language="泰语",
+                direction=direction,
+                visual_plan=visual,
+                model_command="",
+            )
+        self.assertEqual("LOCAL_DETERMINISTIC", result["copy_generation_mode"])
+        self.assertFalse(result["selection_readiness"]["auto_selectable"])
+        self.assertEqual("PREVIEW_ONLY", result["hook_delivery_status"])
+        self.assertEqual("PREVIEW_ONLY", result["hook_qc_status"])
+
     def test_structure_only_direction_never_fabricates_video_reference(self):
         class EmptyRepository:
             def load_cards_for_assignment(self, _assignment):
@@ -500,11 +567,19 @@ class RealityReferenceTests(unittest.TestCase):
         self.assertEqual("FLAT_WARNING", _hook_delivery_status(qc))
         self.assertEqual("WEAK", _hook_qc_status("DETAIL_SURPRISE", "DETAIL_SURPRISE", qc))
 
-    def test_selection_readiness_keeps_long_candidate_for_human_but_not_auto_selection(self):
+    def test_selection_readiness_keeps_15_to_18_seconds_as_soft_warning(self):
         readiness = _selection_readiness(
             {"duration_estimate": {"estimated_sec": 17.38, "upper_sec": 19.99}}
         )
-        self.assertEqual("LONG_WARNING", readiness["status"])
+        self.assertEqual("READY_WITH_DURATION_WARNING", readiness["status"])
+        self.assertTrue(readiness["auto_selectable"])
+        self.assertEqual("COPY_DURATION_SOFT_WARNING", readiness["warning_code"])
+
+    def test_selection_readiness_repairs_only_after_18_seconds(self):
+        readiness = _selection_readiness(
+            {"duration_estimate": {"estimated_sec": 18.2, "upper_sec": 20.1}}
+        )
+        self.assertEqual("LONG_REPAIR_REQUIRED", readiness["status"])
         self.assertFalse(readiness["auto_selectable"])
         self.assertEqual("COPY_DURATION_ESTIMATE_WARNING", readiness["warning_code"])
 
@@ -584,6 +659,283 @@ class RealityReferenceTests(unittest.TestCase):
         self.assertIn("macro_visual_passages", prompt)
         self.assertIn("retention_hook", prompt)
         self.assertIn("不要求突然停住", prompt)
+
+    def test_direct_share_prompt_and_blueprint_require_real_clip_design(self):
+        direction = {
+            "content_bundle_brief": {"content_mainline": "短款比例"},
+            "structure_execution_plan": {"macro_family_key": "HOOK>PROOF"},
+            "execution_reference": {"content_carrier": "WEARER_ACTIVE"},
+            "creative_diversity_contract": {"contract_id": "CDV_DIRECT"},
+            "creator_recording_profile": {
+                "enabled": True,
+                "recording_mode": "CREATOR_DIRECT_SHARE",
+                "capture_preset": "WORN_DIRECT_SHARE",
+            },
+        }
+        prompt = build_complete_script_blueprint_prompt(
+            target_country="泰国",
+            product_type="外套",
+            direction=direction,
+        )
+        self.assertIn("CREATOR_DIRECT_SHARE", prompt)
+        self.assertIn("recording_context", prompt)
+        self.assertIn("clip_design", prompt)
+        self.assertIn("不要求生活剧情、自拍比例或情绪表演", prompt)
+        self.assertIn("以下不算新关系", prompt)
+        self.assertIn("中景改成稍宽中景", prompt)
+        self.assertIn("不得为了增加片段而补入原结构没有的USE或ENDING", prompt)
+        self.assertNotIn("每两个clip至少", prompt)
+
+        invalid = validate_creator_recording_blueprint(
+            {"recording_context": {}, "clip_design": []},
+            direction["creator_recording_profile"],
+        )
+        self.assertFalse(invalid["valid"])
+
+    def test_direct_share_information_gain_is_soft_and_flags_repeated_late_standing(self):
+        profile = {
+            "enabled": True,
+            "recording_mode": "CREATOR_DIRECT_SHARE",
+            "capture_preset": "WORN_DIRECT_SHARE",
+        }
+        blueprint = {
+            "clip_design": [
+                {
+                    "clip_no": 1,
+                    "recording_relation": "固定手机正面",
+                    "visible_process": "人物穿好外套正面分享整体效果",
+                },
+                {
+                    "clip_no": 2,
+                    "recording_relation": "固定手机正面",
+                    "framing": "上身近景",
+                    "visible_process": "人物站着展示口袋和袖口",
+                },
+                {
+                    "clip_no": 3,
+                    "recording_relation": "固定手机正面",
+                    "framing": "稍宽中景",
+                    "visible_process": "人物继续站着面对手机分享",
+                },
+            ]
+        }
+        review = review_creator_clip_information_gain(blueprint, profile)
+        self.assertEqual("LOW_INFORMATION_GAIN", review["status"])
+        self.assertFalse(review["is_blocking"])
+        self.assertEqual([2, 3], review["low_information_gain_pairs"][0]["clip_pair"])
+
+    def test_direct_share_information_gain_accepts_natural_relation_change(self):
+        profile = {
+            "enabled": True,
+            "recording_mode": "CREATOR_DIRECT_SHARE",
+            "capture_preset": "WORN_DIRECT_SHARE",
+        }
+        blueprint = {
+            "clip_design": [
+                {"clip_no": 1, "visible_process": "人物面对手机分享整体效果"},
+                {"clip_no": 2, "visible_process": "人物站着展示在身细节"},
+                {"clip_no": 3, "visible_process": "人物坐在窗边座位继续分享穿搭关系"},
+            ]
+        }
+        review = review_creator_clip_information_gain(blueprint, profile)
+        self.assertEqual("SUFFICIENT", review["status"])
+        self.assertEqual([], review["low_information_gain_pairs"])
+
+    def test_product_first_direction_is_not_subject_to_worn_information_gain_review(self):
+        review = review_creator_clip_information_gain(
+            {"clip_design": []},
+            {
+                "enabled": True,
+                "recording_mode": "CREATOR_DIRECT_SHARE",
+                "capture_preset": "PRODUCT_FIRST_THEN_WORN",
+            },
+        )
+        self.assertEqual("NOT_APPLICABLE", review["status"])
+
+    def test_direct_share_blocks_wear_state_regression_without_style_ratio_gate(self):
+        profile = {
+            "enabled": True,
+            "recording_mode": "CREATOR_DIRECT_SHARE",
+            "capture_preset": "PRODUCT_FIRST_THEN_WORN",
+        }
+        base = {
+            "recording_context": {
+                "recording_mode": "CREATOR_DIRECT_SHARE",
+                "recording_motivation": "直接分享当前外套",
+                "viewer_awareness": "知道正在录制",
+            },
+            "clip_design": [
+                {
+                    "clip_job": "商品开场",
+                    "framing": "商品近景",
+                    "visible_process": "外套平铺在长凳上",
+                },
+                {
+                    "clip_job": "穿着结果",
+                    "framing": "人物中景",
+                    "visible_process": "人物已经穿好外套面对手机",
+                },
+                {
+                    "clip_job": "在身细节",
+                    "framing": "上身近景",
+                    "visible_process": "外套保持穿着，镜头看清正面细节",
+                },
+            ],
+        }
+        valid = validate_creator_recording_blueprint(base, profile)
+        self.assertTrue(valid["valid"], valid["issues"])
+
+        regressed = {**base, "clip_design": [dict(item) for item in base["clip_design"]]}
+        regressed["clip_design"][2]["visible_process"] = "外套重新平铺在长凳上拍细节"
+        invalid = validate_creator_recording_blueprint(regressed, profile)
+        self.assertFalse(invalid["valid"])
+        self.assertEqual([3], invalid["wear_state_continuity"]["violating_clips"])
+
+    def test_direct_share_normalizer_projects_post_wear_flat_lay_to_on_body_detail(self):
+        profile = {
+            "enabled": True,
+            "recording_mode": "CREATOR_DIRECT_SHARE",
+            "capture_preset": "PRODUCT_FIRST_THEN_WORN",
+        }
+        blueprint = {
+            "recording_context": {
+                "recording_mode": "CREATOR_DIRECT_SHARE",
+                "recording_motivation": "直接分享当前外套",
+                "viewer_awareness": "知道正在录制",
+            },
+            "clip_design": [
+                {
+                    "clip_no": 1,
+                    "clip_job": "商品开场",
+                    "framing": "商品近景",
+                    "visible_process": "外套平铺在长凳上",
+                },
+                {
+                    "clip_no": 2,
+                    "clip_job": "穿着结果",
+                    "framing": "人物中景",
+                    "visible_process": "人物已经穿好外套面对手机",
+                },
+                {
+                    "clip_no": 3,
+                    "clip_job": "口袋细节",
+                    "framing": "商品近景",
+                    "visible_process": "外套重新平铺在长凳上拍口袋",
+                    "supported_claim_keys": ["C1"],
+                },
+            ]
+        }
+        normalized = normalize_creator_wear_state_continuity(blueprint, profile)
+        self.assertEqual(
+            ["PRODUCT_OFF_BODY", "WORN", "WORN_DETAIL"],
+            normalized["wear_state_continuity"]["states"],
+        )
+        self.assertIn("保持穿着", normalized["clip_design"][2]["visible_process"])
+        self.assertEqual(["C1"], normalized["clip_design"][2]["supported_claim_keys"])
+        validation = validate_creator_recording_blueprint(normalized, profile)
+        self.assertTrue(validation["valid"], validation["issues"])
+
+    def test_direct_share_normalizer_does_not_treat_context_phrase_as_physical_placement(self):
+        profile = {
+            "enabled": True,
+            "recording_mode": "CREATOR_DIRECT_SHARE",
+            "capture_preset": "WORN_DIRECT_SHARE",
+        }
+        rhetorical_process = (
+            "9至15秒人物自然坐在窗边座位，身体保持舒展，袖子在坐姿中仍保留宽松轮廓，"
+            "短外搭与高腰牛仔裤的比例被放回真实咖啡厅空间中观察。"
+        )
+        blueprint = {
+            "recording_context": {
+                "recording_mode": "CREATOR_DIRECT_SHARE",
+                "recording_motivation": "直接分享当前外套",
+                "viewer_awareness": "知道正在录制",
+            },
+            "clip_design": [
+                {
+                    "clip_no": 1,
+                    "clip_job": "整体开场",
+                    "framing": "人物中景",
+                    "visible_process": "人物穿着外套面对手机分享",
+                },
+                {
+                    "clip_no": 2,
+                    "clip_job": "在身证明",
+                    "framing": "上身近景",
+                    "visible_process": "人物穿着外套展示在身轮廓",
+                },
+                {
+                    "clip_no": 3,
+                    "clip_job": "场景关系",
+                    "framing": "窗边座位稍宽中景",
+                    "visible_process": rhetorical_process,
+                },
+            ],
+        }
+        normalized = normalize_creator_wear_state_continuity(blueprint, profile)
+        self.assertEqual("UNCHANGED", normalized["wear_state_continuity"]["status"])
+        self.assertEqual(
+            rhetorical_process,
+            normalized["clip_design"][2]["visible_process"],
+        )
+        validation = validate_creator_recording_blueprint(normalized, profile)
+        self.assertTrue(validation["valid"], validation["issues"])
+        self.assertEqual(
+            [], validation["wear_state_continuity"]["violating_clips"]
+        )
+
+    def test_direct_share_visual_plan_allows_natural_speaking_without_action_text(self):
+        result = validate_visual_adaptation(
+            {
+                "execution_card_id": "E1",
+                "creative_blueprint_id": "B1",
+                "creative_design_authority": "CREATIVE_DESIGN",
+                "creative_diversity_contract_id": "D1",
+                "shots": [
+                    {
+                        "shot_content": "人物穿着外套面对手机自然说话",
+                        "observable_action": "",
+                        "product_visibility": "FULL",
+                        "framing": "普通手机中景",
+                        "setting_continuity": "客厅窗边",
+                        "action_motivation": "直接分享当前外套",
+                        "gaze_and_reaction": "自然看向手机",
+                        "audio_hard_constraint": "NONE",
+                        "audio_preference": "VOICEOVER_PREFERRED",
+                        "structure_beat": "HOOK",
+                        "carrier_mode": "WEARER_ACTIVE",
+                        "continuity_group": "C1",
+                        "opening_mechanism": "DIRECT_SHARE",
+                        "reference_spine_orders": [1],
+                        "supported_claim_keys": [],
+                    }
+                ],
+            },
+            execution_plan={
+                "shot_plan": [
+                    {
+                        "structure_beat": "HOOK",
+                        "carrier_mode": "WEARER_ACTIVE",
+                        "continuity_group": "C1",
+                        "opening_mechanism": "DIRECT_SHARE",
+                    }
+                ]
+            },
+            execution_reference={
+                "execution_card_id": "E1",
+                "shot_execution_spine": [{"order": 1}],
+            },
+            creative_blueprint={
+                "creative_blueprint_id": "B1",
+                "presentation_mode": "PERSON_ON_CAMERA",
+                "recording_context": {"recording_mode": "CREATOR_DIRECT_SHARE"},
+            },
+            creative_diversity_contract={
+                "contract_id": "D1",
+                "required_presentation_mode": "PERSON_ON_CAMERA",
+            },
+        )
+        self.assertTrue(result["valid"], result["issues"])
 
     def test_voiceover_variant_id_changes_with_visual_execution(self):
         routed = {
@@ -760,6 +1112,37 @@ class RealityReferenceTests(unittest.TestCase):
         )
         self.assertEqual(bundle["proof_atoms"], bundle["claim_atoms"])
         self.assertIn("PAIN_REFRAME", bundle["preferred_hook_angles"])
+
+    def test_authorized_general_argument_gets_safe_non_tension_hook_choices(self):
+        anchor = {
+            "display_anchors": [
+                {"anchor": "黑色发饰轮廓"},
+                {"anchor": "多齿插梳结构"},
+            ]
+        }
+        card = compile_execution_card(
+            observed_row(), cluster_run_id="prompt_only_full", cluster_id=5,
+            cluster_version="v1",
+        )
+        assert card is not None
+        bundle = build_content_bundle_brief(
+            anchor,
+            card.to_dict(),
+            product_type="发饰",
+            selling_point_catalog=[{
+                "value_id": "ARG_CONFIRMED_GENERAL",
+                "primary_selling_point": "整理好发型后更适合日常出门搭配",
+                "argument_kind": "SELLING_ARGUMENT",
+                "source": "FEISHU_OPERATOR_CONFIRMED_ARGUMENT",
+                "claim_type": "benefit",
+                "visual_dependency": "FLEXIBLE",
+            }],
+        )
+
+        self.assertEqual(bundle["audience_tension"]["status"], "UNAVAILABLE")
+        self.assertIn("DISCOVERY_RESULT_PROMISE", bundle["eligible_hook_ids"])
+        self.assertIn("USER_ADVOCACY_STANCE", bundle["eligible_hook_ids"])
+        self.assertIn("GENERAL_PRODUCT_SHARE", bundle["eligible_hook_ids"])
 
     def test_voiceover_hook_policy_accepts_governed_concept_without_raw_tension(self):
         direction = {
@@ -1322,15 +1705,20 @@ class RealityReferenceTests(unittest.TestCase):
             script["video_generation_brief"]["usage"],
         )
         self.assertEqual(
-            "reality-video-generation-brief-v3-compact",
+            "production-video-brief-v10-structure-visible-clips",
             script["video_generation_brief"]["schema_version"],
         )
-        self.assertIn("开头准备动作保持简短", script["video_generation_brief"]["render_focus"])
-        self.assertNotIn("。，", script["video_generation_brief"]["render_focus"])
-        self.assertIn(
-            "不把槽位改写成独立表演任务",
-            script["video_generation_brief"]["internal_structure_note"],
+        self.assertEqual(
+            "STAGE0_SHARED_VISIBLE_CLIP_COMPILER",
+            script["video_generation_brief"]["source"],
         )
+        self.assertIn("capture_rhythm_contract", script["video_generation_brief"])
+        self.assertIn("capture_units", script["video_generation_brief"])
+        self.assertIn(
+            "final_information_gain_review", script["video_generation_brief"]
+        )
+        self.assertIn("product_identity_lock", script["video_generation_brief"])
+        self.assertNotIn("internal_structure_note", script["video_generation_brief"])
         self.assertFalse(script["execution_constraints"]["single_proof_rule"])
         self.assertEqual(script["reality_reference_provenance"]["content_bundle_id"], "CBR_1")
         self.assertEqual(script["authenticity_review"]["result"], "PASS")
@@ -1442,6 +1830,179 @@ class RealityReferenceTests(unittest.TestCase):
         self.assertTrue(execution_plan["source_copy_audit_present"])
         self.assertEqual(execution_plan["target_text"], "ข้อความต่อเนื่อง")
         self.assertEqual(execution_plan["lines"][0]["end_shot_no"], 2)
+
+    def test_stage0_six_slots_compile_to_four_visible_clips_with_two_setups(self):
+        beats = ["HOOK", "HOOK", "PROOF", "PROOF", "ENDING", "ENDING"]
+        direction = {
+            "direction_assignment_id": "SRA_V5",
+            "p2_lite": {"primary_observation": "短款衣长"},
+            "content_bundle_brief": {
+                "content_bundle_id": "CBR_V5",
+                "content_mainline": "短款比例",
+                "claim_atoms": [
+                    {"claim_key": "C1", "fact_text": "短款衣长", "role": "core_result"}
+                ],
+            },
+            "execution_reference": {
+                "execution_card_id": "EXEC_V5",
+                "shot_count": 6,
+                "available_parts": ["HOOK", "PROOF", "ENDING"],
+            },
+            "product_truth": {
+                "product_identity": "短款外套",
+                "identity_anchors": ["单排前襟"],
+                "visible_detail_anchors": ["短款衣长"],
+                "canonical_product_type": "outerwear",
+            },
+            "structure_execution_plan": {
+                "beat_sequence": ["HOOK", "PROOF", "ENDING"],
+                "shot_plan": [
+                    {
+                        "time_range": f"{index * 2.5:.1f}-{(index + 1) * 2.5:.1f}s",
+                        "structure_beat": beat,
+                        "carrier_mode": "WEARER_ACTIVE",
+                        "continuity_group": f"C{index + 1}",
+                        "opening_mechanism": "PRODUCT_REVEAL" if index == 0 else "",
+                    }
+                    for index, beat in enumerate(beats)
+                ],
+            },
+        }
+        visual = {
+            "shots": [
+                {
+                    "shot_content": f"第{index}段不同可见关系",
+                    "observable_action": f"完成动作{index}",
+                    "framing": "普通手机中景" if index % 2 else "普通手机近景",
+                    "anchor_reference": "短款衣长",
+                    "supported_claim_keys": ["C1"],
+                }
+                for index in range(1, 7)
+            ]
+        }
+        script = assemble_reality_script(
+            direction=direction,
+            visual_plan=visual,
+            voiceover_plan={"lines": [], "silent_shots": list(range(1, 7))},
+        )
+        self.assertEqual(4, len(script["capture_units"]))
+        self.assertEqual(2, script["capture_rhythm_contract"]["camera_setup_count"])
+        self.assertEqual(
+            "production-video-brief-v10-structure-visible-clips",
+            script["video_generation_brief"]["schema_version"],
+        )
+        self.assertTrue(
+            script["video_generation_brief"]["product_identity_lock"][
+                "reference_image_is_authority"
+            ]
+        )
+        self.assertIn("数字裁切", script["video_generation_brief"]["instruction"])
+
+    def test_direct_share_projection_preserves_four_real_clips_and_mixed_carrier(self):
+        carriers = [
+            "STATIC_PRODUCT",
+            "STATIC_PRODUCT",
+            "WEARER_ACTIVE",
+            "WEARER_ACTIVE",
+            "HAND_ONLY",
+            "HAND_ONLY",
+        ]
+        direction = {
+            "direction_assignment_id": "SRA_DIRECT",
+            "selection_run_id": "SR_DIRECT",
+            "cluster_id": 5,
+            "cluster_version": "v1",
+            "p2_lite": {"primary_observation": "短款比例"},
+            "creator_recording_profile": {
+                "enabled": True,
+                "recording_mode": "CREATOR_DIRECT_SHARE",
+                "capture_preset": "PRODUCT_FIRST_THEN_WORN",
+            },
+            "creative_diversity_contract": {
+                "contract_id": "CDV_DIRECT",
+                "required_carrier": "MIXED",
+                "required_presentation_mode": "MIXED",
+            },
+            "content_bundle_brief": {
+                "content_bundle_id": "CBR_DIRECT",
+                "content_mainline": "短款比例",
+                "claim_atoms": [
+                    {"claim_key": "C1", "fact_text": "衣长落在腰线附近", "role": "core_result"}
+                ],
+            },
+            "product_truth": {
+                "product_identity": "短款外套",
+                "identity_anchors": ["单排前襟"],
+                "visible_detail_anchors": ["衣长落在腰线附近"],
+            },
+            "execution_reference": {
+                "execution_card_id": "EXEC_DIRECT",
+                "shot_execution_spine": [
+                    {"order": index, "observable_action": f"来源动作{index}"}
+                    for index in range(1, 5)
+                ],
+            },
+            "structure_execution_plan": {
+                "beat_sequence": ["HOOK", "PROOF", "ENDING"],
+                "shot_plan": [
+                    {
+                        "time_range": f"{index * 2.5:.1f}-{(index + 1) * 2.5:.1f}s",
+                        "structure_beat": "HOOK" if index < 2 else "PROOF" if index < 5 else "ENDING",
+                        "carrier_mode": carrier,
+                        "continuity_group": f"C{index + 1}",
+                        "opening_mechanism": "PRODUCT_REVEAL" if index == 0 else "",
+                    }
+                    for index, carrier in enumerate(carriers)
+                ],
+            },
+            "creative_blueprint": {
+                "creative_blueprint_id": "CBP_DIRECT",
+                "creative_thesis": "直接分享短款比例",
+                "creator_motivation": "想把刚穿上的比例分享给观众",
+                "recording_context": {
+                    "recording_mode": "CREATOR_DIRECT_SHARE",
+                    "recording_motivation": "出门前直接分享刚穿上的比例",
+                    "camera_relationship": "商品先出镜后切自拍",
+                    "viewer_awareness": "知道正在面对观众拍摄",
+                },
+                "persona": {},
+                "scene": {"location": "公寓窗边", "moment": "出门前", "lighting": "自然窗光"},
+                "performance_flow": {},
+                "event_design": {"core_result_moment": "看清短款比例", "natural_event": "主动分享"},
+                "retention_hook": {},
+                "macro_visual_passages": [
+                    {"narrative_role": "EVENT_ENTRY", "visible_process": "商品先进入画面", "observable_action": "拿近商品"},
+                    {"narrative_role": "EVENT_PROOF", "visible_process": "穿着结果可见", "observable_action": "直接说话"},
+                    {"narrative_role": "EVENT_END", "visible_process": "回到中近景", "observable_action": "说完分享"},
+                ],
+                "clip_design": [
+                    {"clip_no": 1, "clip_job": "商品识别", "recording_relation": "手持商品近景", "framing": "普通手机商品近景", "visible_process": "人物拿着外套让前襟进入画面", "observable_action": "人物拿近外套", "supported_claim_keys": []},
+                    {"clip_no": 2, "clip_job": "穿着结果", "recording_relation": "固定手机正面", "framing": "普通手机中景", "visible_process": "人物穿好外套面对手机", "observable_action": "人物直接分享", "supported_claim_keys": ["C1"]},
+                    {"clip_no": 3, "clip_job": "比例证明", "recording_relation": "镜面穿搭关系", "framing": "镜面半身中景", "visible_process": "人物与腰线关系同时可见", "observable_action": "人物保持自然站姿", "supported_claim_keys": ["C1"]},
+                    {"clip_no": 4, "clip_job": "商品回看", "recording_relation": "手持局部近景", "framing": "普通手机局部近景", "visible_process": "人物把衣摆拿近手机", "observable_action": "人物轻拿衣摆", "supported_claim_keys": ["C1"]},
+                ],
+            },
+        }
+
+        visual = project_event_blueprint_to_visual_plan(direction=direction)
+        self.assertEqual(
+            ["CU_01", "CU_02", "CU_02", "CU_03", "CU_03", "CU_04"],
+            [shot["capture_unit_id"] for shot in visual["shots"]],
+        )
+        visible_text = " ".join(shot["shot_content"] for shot in visual["shots"])
+        self.assertNotIn("按已确认锚点呈现", visible_text)
+        self.assertNotIn("维持局部承载观察关系", visible_text)
+
+        script = assemble_reality_script(
+            direction=direction,
+            visual_plan=visual,
+            voiceover_plan={"lines": [], "silent_shots": list(range(1, 7))},
+        )
+        self.assertEqual("MIXED", script["production_design"]["presentation_mode"])
+        self.assertEqual("PASS", script["video_generation_brief"]["carrier_integrity"]["result"])
+        self.assertEqual(4, len(script["capture_units"]))
+        self.assertTrue(script["video_generation_brief"]["creator_recording_profile"]["enabled"])
+        self.assertIn("同一创作者", script["video_generation_brief"]["instruction"])
 
     def test_authenticity_blocks_complete_legacy_action_chain(self):
         result = authenticity_review(

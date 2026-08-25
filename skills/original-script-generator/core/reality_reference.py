@@ -18,12 +18,26 @@ from urllib.parse import unquote, urlparse
 
 from core.structure_execution_compiler import compile_structure_execution_plan
 from core.complete_script_v3 import assign_audio_actual
+from core.simplified_complete_script import (
+    CAPTURE_MODE_CREATOR_SELF_SHOT,
+    CAPTURE_MODE_HANDS_PRODUCT_SHARE,
+    CAPTURE_MODE_STATIC_PRODUCT_RECORD,
+    CAPTURE_PRESET_PRODUCT_FIRST_THEN_WORN,
+    CAPTURE_RHYTHM_MULTICLIP,
+    VIDEO_BRIEF_SCHEMA_VERSION,
+    VIDEO_RENDER_PROFILE,
+    build_capture_rhythm_contract,
+    build_creator_recording_profile,
+    build_product_identity_lock,
+    compile_capture_units,
+    normalize_creator_capture_preset,
+)
 
 
 EXECUTION_CARD_SCHEMA_VERSION = "reality-execution-card-v1"
 REALITY_POLICY_VERSION = "reality-reference-policy-v2"
 AUTHENTICITY_POLICY_VERSION = "original-authenticity-qc-v18-light"
-CONTENT_BUNDLE_SCHEMA_VERSION = "content-bundle-brief-v9-selling-point-authority"
+CONTENT_BUNDLE_SCHEMA_VERSION = "content-bundle-brief-v10-hook-compatibility"
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -61,6 +75,50 @@ def _json_value(value: Any, default: Any) -> Any:
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _anchor_values(anchor_card: Dict[str, Any], key: str) -> List[str]:
+    values: List[str] = []
+    for item in anchor_card.get(key) or []:
+        if isinstance(item, dict):
+            value = (
+                item.get("anchor")
+                or item.get("anchor_text")
+                or item.get("name")
+                or item.get("value")
+            )
+        else:
+            value = item
+        text = _text(value)
+        if text and text not in values:
+            values.append(text)
+    return values
+
+
+def _stage0_product_truth(
+    anchor_card: Dict[str, Any],
+    *,
+    product_type: str,
+) -> Dict[str, Any]:
+    """Project approved product anchors into the shared V5 identity contract."""
+
+    category_contract = (
+        anchor_card.get("category_execution_contract")
+        if isinstance(anchor_card.get("category_execution_contract"), dict)
+        else {}
+    )
+    return {
+        "product_identity": _text(
+            anchor_card.get("product_positioning_one_liner")
+            or anchor_card.get("product_name")
+            or product_type
+        ),
+        "identity_anchors": _anchor_values(anchor_card, "hard_anchors"),
+        "visible_detail_anchors": _anchor_values(anchor_card, "display_anchors"),
+        "canonical_product_type": _text(
+            category_contract.get("canonical_product_type") or product_type
+        ),
+    }
 
 
 def _list(value: Any) -> List[Any]:
@@ -782,6 +840,38 @@ def _hook_candidates_for_bundle(
     ] or claim_atoms[:1]
     groups = {_text(item.get("semantic_group")) for item in primary_atoms}
     candidates: List[str] = list(governed_hooks)
+    argument = selling_argument or {}
+    argument_available = _text(argument.get("status")).upper() == "AVAILABLE"
+    claim_type = _text(argument.get("claim_type")).lower()
+    proof_subject = _text(argument.get("proof_subject")).upper()
+    evidence_mode = _text(argument.get("evidence_mode")).upper()
+    argument_theme = _text(argument.get("argument_theme")).upper()
+
+    # Expand only truth-compatible rhetorical entries.  This is deliberately
+    # driven by the governed selling-argument metadata rather than product-copy
+    # keyword guessing.  GENERAL_PRODUCT_SHARE remains the universal fallback,
+    # but an authorised value should normally have at least one other safe way
+    # to enter the same thesis.
+    detail_argument = (
+        proof_subject == "PRODUCT_DETAIL"
+        or "PRODUCT_DETAIL" in evidence_mode
+        or claim_type in {"feature", "detail"}
+    )
+    visual_argument = (
+        claim_type == "visual_result"
+        or proof_subject in {"ON_BODY_RESULT", "VISUAL_RESULT"}
+        or "VISUAL_RESULT" in evidence_mode
+        or argument_theme in {"COLOR_MOOD", "SURFACE_GLOSS"}
+    )
+    if argument_available and detail_argument:
+        candidates.extend(["DETAIL_SURPRISE", "DISCOVERY_RESULT_PROMISE"])
+    elif argument_available and visual_argument:
+        candidates.extend(["VISUAL_RESULT_DIRECT", "DISCOVERY_RESULT_PROMISE"])
+    elif argument_available:
+        # A verified/operator-confirmed value can be framed as the creator's
+        # own discovery or choice without inventing a shopper pain, scarcity,
+        # comparison or social proof.
+        candidates.extend(["DISCOVERY_RESULT_PROMISE", "USER_ADVOCACY_STANCE"])
     if "detail_structure" in groups:
         candidates.append("DETAIL_SURPRISE")
     if groups.intersection({"fit_proportion", "silhouette", "color", "material"}):
@@ -796,7 +886,7 @@ def _hook_candidates_for_bundle(
         for token in ("手链", "手镯", "手环", "手串", "bracelet", "bangle")
     ):
         candidates.extend(["DISCOVERY_RESULT_PROMISE", "DETAIL_SURPRISE"])
-    candidates.extend(["GENERAL_PRODUCT_SHARE", "USER_ADVOCACY_STANCE"])
+    candidates.extend(["USER_ADVOCACY_STANCE", "GENERAL_PRODUCT_SHARE"])
     return list(dict.fromkeys(candidates))
 
 
@@ -1426,6 +1516,21 @@ def build_reality_direction_packages(
                 "reference_selection": reference_result,
                 "p2_lite": p2_lite,
                 "content_bundle_brief": content_bundle,
+                "product_truth": _stage0_product_truth(
+                    anchor_card,
+                    product_type=product_type,
+                ),
+                "creator_recording_profile": build_creator_recording_profile(
+                    top_category=top_category,
+                    product_type=product_type,
+                    content_carrier=_text(
+                        execution_plan.get("content_carrier")
+                        or (contract.get("hard_constraints") or {}).get(
+                            "content_carrier"
+                        )
+                        or selected_card.get("content_carrier")
+                    ),
+                ),
             }
         )
         if len(packages) >= max(1, min(4, int(direction_limit))):
@@ -1517,12 +1622,25 @@ def validate_visual_adaptation(
     inherited_order_stream: List[int] = []
     all_text_parts: List[str] = []
     hard_audio_shots: List[int] = []
+    direct_share = (
+        _text(
+            (blueprint.get("recording_context") or {}).get("recording_mode")
+            if isinstance(blueprint.get("recording_context"), dict)
+            else ""
+        ).upper()
+        == "CREATOR_DIRECT_SHARE"
+    )
     for index, plan_shot in enumerate(plan_shots):
         if index >= len(shots) or not isinstance(shots[index], dict):
             issues.append(f"缺少镜头{index + 1}")
             continue
         shot = shots[index]
-        for field_name in ("shot_content", "observable_action", "product_visibility", "framing"):
+        required_visual_fields = (
+            ("shot_content", "product_visibility", "framing")
+            if direct_share
+            else ("shot_content", "observable_action", "product_visibility", "framing")
+        )
+        for field_name in required_visual_fields:
             if not _text(shot.get(field_name)):
                 issues.append(f"镜头{index + 1}缺少{field_name}")
         if blueprint:
@@ -1638,6 +1756,29 @@ def project_event_blueprint_to_visual_plan(
     ]
     if len(passages) != 3:
         raise ValueError("事件蓝图必须包含3段macro_visual_passages")
+    recording_profile = (
+        dict(direction.get("creator_recording_profile"))
+        if isinstance(direction.get("creator_recording_profile"), dict)
+        else {}
+    )
+    direct_share = bool(recording_profile.get("enabled"))
+    if direct_share:
+        planned_clip_count = len(
+            [
+                item
+                for item in blueprint.get("clip_design", [])
+                if isinstance(item, dict)
+            ]
+        )
+        if 3 <= planned_clip_count <= 5:
+            recording_profile["planned_visible_clip_count"] = planned_clip_count
+    clip_design = [
+        dict(item)
+        for item in blueprint.get("clip_design", [])
+        if isinstance(item, dict)
+    ][:5]
+    if direct_share and not 3 <= len(clip_design) <= 5:
+        raise ValueError("达人直接分享蓝图必须包含3至5段clip_design")
     execution_plan = (
         direction.get("structure_execution_plan")
         if isinstance(direction.get("structure_execution_plan"), dict)
@@ -1677,7 +1818,8 @@ def project_event_blueprint_to_visual_plan(
         if _text(item.get("claim_key")) and _text(item.get("fact_text"))
     }
     expected_claim_keys = set(claim_text)
-    for passage in passages:
+    visual_sources = clip_design if direct_share else passages
+    for passage in visual_sources:
         passage["supported_claim_keys"] = [
             key
             for key in (_text(item) for item in passage.get("supported_claim_keys", []))
@@ -1688,7 +1830,7 @@ def project_event_blueprint_to_visual_plan(
     }
     missing = [key for key in claim_text if key not in covered]
     if missing:
-        proof_passage = passages[1]
+        proof_passage = visual_sources[min(1, len(visual_sources) - 1)]
         proof_passage["supported_claim_keys"] = list(
             dict.fromkeys([*proof_passage.get("supported_claim_keys", []), *missing])
         )
@@ -1712,12 +1854,37 @@ def project_event_blueprint_to_visual_plan(
         if isinstance(blueprint.get("event_design"), dict)
         else {}
     )
+    recording_context = (
+        blueprint.get("recording_context")
+        if isinstance(blueprint.get("recording_context"), dict)
+        else {}
+    )
+    product_truth = (
+        direction.get("product_truth")
+        if isinstance(direction.get("product_truth"), dict)
+        else {}
+    )
+    product_anchors = [
+        _text(value)
+        for value in [
+            *list(product_truth.get("identity_anchors") or []),
+            *list(product_truth.get("visible_detail_anchors") or []),
+        ]
+        if _text(value)
+    ]
+    if not product_anchors:
+        product_anchors = [
+            _text(product_truth.get("product_identity")) or "当前商品外观"
+        ]
     shots: List[Dict[str, Any]] = []
+    carrier_adjustments: List[Dict[str, Any]] = []
     claim_coverage: Dict[str, List[int]] = {key: [] for key in claim_text}
     slot_count = len(plan_shots)
     for index, plan_shot in enumerate(plan_shots):
-        passage_index = round(index * (len(passages) - 1) / max(1, slot_count - 1))
-        passage = passages[passage_index]
+        passage_index = round(
+            index * (len(visual_sources) - 1) / max(1, slot_count - 1)
+        )
+        passage = visual_sources[passage_index]
         source_index = round(index * (len(source_orders) - 1) / max(1, slot_count - 1))
         order = source_orders[source_index]
         supported = list(passage.get("supported_claim_keys") or [])
@@ -1725,14 +1892,53 @@ def project_event_blueprint_to_visual_plan(
         for key in supported:
             claim_coverage.setdefault(key, []).append(shot_no)
         anchor_text = "；".join(claim_text[key] for key in supported if key in claim_text)
+        carrier_mode = _text(plan_shot.get("carrier_mode")).upper()
+        visible_process = _text(passage.get("visible_process"))
+        observable_action = _text(passage.get("observable_action"))
+        carrier_text = f"{visible_process} {observable_action}"
+        if carrier_mode == "STATIC_PRODUCT" and re.search(
+            r"人物|模特|达人|她|他|手部|双手|拿起|穿着|走向|开门",
+            carrier_text,
+        ):
+            chosen = "、".join(product_anchors[:2])
+            framing = _text(passage.get("framing") or passage.get("camera_observation")) or "普通手机商品近景"
+            visible_process = f"{framing}中，{chosen}清楚可见，商品主体占据画面主要区域"
+            # Do not leave even negated carrier words in the visible text:
+            # the downstream validator intentionally uses a simple lexical
+            # guard, so "不加入人物" would still look like a person action.
+            observable_action = "商品保持自然静置或悬挂，以一次稳定构图记录当前外观状态"
+            carrier_adjustments.append(
+                {
+                    "shot_no": shot_no,
+                    "carrier_mode": carrier_mode,
+                    "reason": "STATIC_PRODUCT_REMOVED_PERSON_OR_HAND_ACTION",
+                }
+            )
+        elif carrier_mode == "HAND_ONLY" and re.search(
+            r"人物|模特|达人|她|他|全身|半身|脸|抬眼|走向|开门|转身|穿着",
+            carrier_text,
+        ):
+            chosen = "、".join(product_anchors[:2])
+            framing = _text(passage.get("framing") or passage.get("camera_observation")) or "普通手机局部近景"
+            visible_process = f"{framing}中，{chosen}清楚可见，商品与局部承载关系稳定"
+            observable_action = "局部将商品自然拿近并保持片刻，只完成一次轻量观察"
+            carrier_adjustments.append(
+                {
+                    "shot_no": shot_no,
+                    "carrier_mode": carrier_mode,
+                    "reason": "HAND_ONLY_REMOVED_FULL_PERSON_ACTION",
+                }
+            )
         shots.append(
             {
                 "shot_no": shot_no,
                 "duration": _text(plan_shot.get("time_range")),
-                "shot_content": _text(passage.get("visible_process")),
-                "observable_action": _text(passage.get("observable_action")),
+                "shot_content": visible_process,
+                "observable_action": observable_action,
                 "product_visibility": _text(passage.get("product_visibility")) or "PARTIAL",
-                "framing": _text(passage.get("camera_observation")),
+                "framing": _text(
+                    passage.get("framing") or passage.get("camera_observation")
+                ),
                 "anchor_reference": anchor_text or "UNAVAILABLE",
                 "supported_claim_keys": supported,
                 "reference_spine_orders": [order],
@@ -1746,14 +1952,39 @@ def project_event_blueprint_to_visual_plan(
                     )
                     if item
                 ),
-                "action_motivation": _text(event.get("natural_event")),
-                "gaze_and_reaction": "NATURAL_UNDIRECTED",
+                "action_motivation": (
+                    _text(recording_context.get("recording_motivation"))
+                    if direct_share
+                    else _text(event.get("natural_event"))
+                ),
+                "gaze_and_reaction": (
+                    "创作者知道正在录制，可自然看镜头、手机屏幕或镜面"
+                    if direct_share and carrier_mode in {"WEARER_ACTIVE", "MIXED"}
+                    else "NATURAL_UNDIRECTED"
+                ),
                 "audio_hard_constraint": "NONE",
                 "audio_preference": "VOICEOVER_PREFERRED",
                 "structure_beat": _text(plan_shot.get("structure_beat")),
                 "carrier_mode": _text(plan_shot.get("carrier_mode")),
                 "continuity_group": _text(plan_shot.get("continuity_group")),
                 "opening_mechanism": _text(plan_shot.get("opening_mechanism")),
+                "capture_unit_id": (
+                    f"CU_{passage_index + 1:02d}" if direct_share else ""
+                ),
+                "starts_new_take": (
+                    direct_share
+                    and (
+                        index == 0
+                        or round(
+                            (index - 1) * (len(visual_sources) - 1)
+                            / max(1, slot_count - 1)
+                        )
+                        != passage_index
+                    )
+                ),
+                "recording_relation": _text(
+                    passage.get("recording_relation")
+                ),
             }
         )
     return {
@@ -1767,11 +1998,320 @@ def project_event_blueprint_to_visual_plan(
         ),
         "creative_design_authority": "CREATIVE_DESIGN",
         "primary_observation": _text(event.get("core_result_moment")),
+        "creator_recording_profile": recording_profile,
+        "recording_context": recording_context,
+        "clip_design": clip_design,
         "macro_visual_passages": passages,
         "shots": shots,
         "claim_coverage_summary": claim_coverage,
+        "carrier_projection_adjustments": carrier_adjustments,
         "reference_preservation_note": "按真实执行卡order单调投影，不增加逐卖点动作",
         "unknowns_preserved": list(reference.get("unknown_fields") or []),
+    }
+
+
+_WEAR_STATE_PRODUCT_TERMS = (
+    r"商品|外套|外搭|上装|衣服|衣物|服装|夹克|上衣|外衣|"
+    r"丝巾|围巾|头巾|发饰|耳饰"
+)
+_EXPLICIT_UNWORN_STATE = r"平铺|悬挂|挂在|挂于|无人穿着|未穿(?:上|着)|脱下|取下"
+_PHYSICAL_PLACEMENT_TARGET = (
+    r"桌(?:面)?|凳(?:子)?|椅(?:子)?|床(?:面)?|架(?:子)?|衣架|衣钩|"
+    r"长凳|收纳(?:架|柜|区)?|柜(?:子|面)?|原处"
+)
+
+
+def _contains_explicit_off_body_product_state(material: Any) -> bool:
+    """Return true only for an explicit physical off-body product state.
+
+    ``放回`` on its own is semantically ambiguous: a script may say that a
+    garment's proportion is "put back into a real café context for viewing".
+    Placement therefore needs either an explicit 把/将 product operation or a
+    concrete physical destination.  This keeps the continuity guard physical
+    instead of turning ordinary creative prose into a state transition.
+    """
+
+    text = _text(material)
+    if not text:
+        return False
+    direct_state = re.compile(
+        rf"(?:{_WEAR_STATE_PRODUCT_TERMS}).{{0,12}}(?:{_EXPLICIT_UNWORN_STATE})|"
+        rf"(?:{_EXPLICIT_UNWORN_STATE}).{{0,12}}(?:{_WEAR_STATE_PRODUCT_TERMS})"
+    )
+    if direct_state.search(text):
+        return True
+    physical_placement = re.compile(
+        rf"(?:{_WEAR_STATE_PRODUCT_TERMS}).{{0,12}}"
+        rf"(?:放在|放到|放回).{{0,10}}(?:{_PHYSICAL_PLACEMENT_TARGET})|"
+        rf"(?:放在|放到|放回).{{0,10}}(?:{_PHYSICAL_PLACEMENT_TARGET})"
+        rf".{{0,12}}(?:{_WEAR_STATE_PRODUCT_TERMS})|"
+        rf"(?:把|将).{{0,8}}(?:{_WEAR_STATE_PRODUCT_TERMS}).{{0,10}}(?:放在|放到|放回)"
+    )
+    return bool(physical_placement.search(text))
+
+
+def normalize_creator_wear_state_continuity(
+    blueprint: Dict[str, Any],
+    recording_profile: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Repair one backwards wearable-state transition without another model call.
+
+    This is intentionally a physical-state normalizer, not another creative
+    validator.  Product-first sharing may start off body once.  After the
+    wearer appears, an accidental flat-lay/hanger detail is projected to the
+    same detail while worn.  The original clip job and claim lineage remain
+    intact, so the correction cannot invent a new selling point.
+    """
+
+    normalized = dict(blueprint or {})
+    if not recording_profile.get("enabled"):
+        return normalized
+    clips = [
+        dict(item)
+        for item in normalized.get("clip_design", [])
+        if isinstance(item, dict)
+    ]
+    if not clips:
+        return normalized
+    preset = normalize_creator_capture_preset(recording_profile)
+    first_off_body_allowed = preset == CAPTURE_PRESET_PRODUCT_FIRST_THEN_WORN
+    corrections: List[Dict[str, Any]] = []
+    states: List[str] = []
+    for index, clip in enumerate(clips):
+        material = " ".join(
+            _text(clip.get(field_name))
+            for field_name in ("visible_process", "observable_action", "framing")
+        )
+        is_off_body = _contains_explicit_off_body_product_state(material)
+        if is_off_body and index == 0 and first_off_body_allowed:
+            states.append("PRODUCT_OFF_BODY")
+            clip["wear_state"] = "PRODUCT_OFF_BODY"
+            continue
+        if is_off_body:
+            original = _text(clip.get("visible_process"))
+            clip["visible_process"] = (
+                "人物保持穿着当前商品，用在身近景继续呈现本段原定的商品细节"
+            )
+            clip["observable_action"] = (
+                "人物保持自然站姿或说话状态，镜头靠近商品所在位置"
+            )
+            clip["framing"] = "普通手机在身商品近景"
+            corrections.append(
+                {
+                    "clip_no": int(clip.get("clip_no") or index + 1),
+                    "reason": "OFF_BODY_AFTER_WORN_PROJECTED_TO_WORN_DETAIL",
+                    "original_visible_process": original,
+                }
+            )
+            states.append("WORN_DETAIL")
+            clip["wear_state"] = "WORN_DETAIL"
+            continue
+        state = "WORN_DETAIL" if re.search(r"近景|细节|局部", material) else "WORN"
+        states.append(state)
+        clip["wear_state"] = state
+    normalized["clip_design"] = clips
+    normalized["wear_state_continuity"] = {
+        "policy": "WEAR_STATE_MONOTONIC",
+        "preset": preset,
+        "states": states,
+        "corrections": corrections,
+        "status": "NORMALIZED" if corrections else "UNCHANGED",
+    }
+    return normalized
+
+
+def review_creator_clip_information_gain(
+    blueprint: Dict[str, Any],
+    recording_profile: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Report late direct-share clips that only reframe the same standing take.
+
+    This is deliberately a non-blocking review.  The model prompt owns the
+    creative choice; this helper only makes the common "closer mid-shot then
+    wider mid-shot" collapse visible in reports.  It does not request another
+    model call, prescribe an action, or reject an otherwise usable blueprint.
+    """
+
+    preset = normalize_creator_capture_preset(recording_profile)
+    if (
+        not recording_profile.get("enabled")
+        or preset != "WORN_DIRECT_SHARE"
+    ):
+        return {
+            "policy_version": "clip-information-gain-review-v1",
+            "status": "NOT_APPLICABLE",
+            "is_blocking": False,
+            "low_information_gain_pairs": [],
+        }
+    clips = [
+        item
+        for item in blueprint.get("clip_design", [])
+        if isinstance(item, dict)
+    ]
+
+    def relation_class(clip: Dict[str, Any]) -> str:
+        text = " ".join(
+            _text(clip.get(field_name))
+            for field_name in (
+                "recording_relation",
+                "visible_process",
+                "observable_action",
+            )
+        )
+        if re.search(r"镜面|镜子", text):
+            return "MIRROR"
+        if re.search(r"手持自拍|自拍手机|拿着手机|举着手机", text):
+            return "HANDHELD_SELFIE"
+        if re.search(r"坐下|坐在|靠坐|座位", text):
+            return "SEATED"
+        if re.search(r"走向|走到|行走|步行|穿过|进入|离开|移动到|从.+到", text):
+            return "MOVING_IN_SCENE"
+        if re.search(r"固定手机|固定机位|正对手机|面对手机", text):
+            return "FIXED_PHONE_SHARE"
+        if re.search(r"站立|站着|站定|自然站姿|原地", text):
+            return "STANDING_SHARE"
+        return "UNSPECIFIED_STATIONARY"
+
+    low_pairs: List[Dict[str, Any]] = []
+    # The first-to-second transition is intentionally allowed to move from an
+    # overall hook to an on-body detail.  Review starts at clip 2 -> clip 3,
+    # where the repeated standing-share ending has appeared in actual renders.
+    for previous_index in range(1, max(1, len(clips) - 1)):
+        current_index = previous_index + 1
+        if current_index >= len(clips):
+            break
+        previous = clips[previous_index]
+        current = clips[current_index]
+        previous_relation = relation_class(previous)
+        current_relation = relation_class(current)
+        stationary_relations = {
+            "FIXED_PHONE_SHARE",
+            "STANDING_SHARE",
+            "UNSPECIFIED_STATIONARY",
+        }
+        if (
+            previous_relation in stationary_relations
+            and current_relation in stationary_relations
+        ):
+            low_pairs.append(
+                {
+                    "clip_pair": [previous_index + 1, current_index + 1],
+                    "reason": "SAME_STATIONARY_SHARE_RELATION_FRAMING_ONLY",
+                    "previous_relation": previous_relation,
+                    "current_relation": current_relation,
+                }
+            )
+    return {
+        "policy_version": "clip-information-gain-review-v1",
+        "status": "LOW_INFORMATION_GAIN" if low_pairs else "SUFFICIENT",
+        "is_blocking": False,
+        "low_information_gain_pairs": low_pairs,
+        "note": (
+            "仅供人工审阅；不触发阻断、重试、修订或新增模型调用。"
+        ),
+    }
+
+
+def validate_creator_recording_blueprint(
+    blueprint: Dict[str, Any],
+    recording_profile: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Validate the small direct-share contract without a style repair loop.
+
+    The existing complete-blueprint validator remains the authority for facts,
+    carrier and the three compatibility passages.  This local gate prevents a
+    Only unusable output, literal duplicate clips and backwards wearable-state
+    transitions block.  Camera ratios, emotion beats and per-cut change axes
+    are deliberately outside this gate.
+    """
+
+    if not recording_profile.get("enabled"):
+        return {
+            "valid": True,
+            "issues": [],
+            "distinct_clip_count": 0,
+            "clip_information_gain_review": review_creator_clip_information_gain(
+                blueprint, recording_profile
+            ),
+        }
+    issues: List[str] = []
+    context = (
+        blueprint.get("recording_context")
+        if isinstance(blueprint.get("recording_context"), dict)
+        else {}
+    )
+    if _text(context.get("recording_mode")).upper() != "CREATOR_DIRECT_SHARE":
+        issues.append("recording_context.recording_mode必须为CREATOR_DIRECT_SHARE")
+    for field_name in ("recording_motivation", "viewer_awareness"):
+        if not _text(context.get(field_name)):
+            issues.append(f"recording_context缺少{field_name}")
+    clips = [
+        item for item in blueprint.get("clip_design", []) if isinstance(item, dict)
+    ]
+    if not 3 <= len(clips) <= 5:
+        issues.append("clip_design必须包含3至5个真实录制片段")
+    signatures: set[str] = set()
+    for index, clip in enumerate(clips, 1):
+        for field_name in ("clip_job", "framing", "visible_process"):
+            if not _text(clip.get(field_name)):
+                issues.append(f"clip_design[{index}]缺少{field_name}")
+        material = "|".join(
+            _text(clip.get(field_name)).lower()
+            for field_name in (
+                "clip_job",
+                "framing",
+                "visible_process",
+            )
+        )
+        signatures.add(material)
+    if clips and len(signatures) != len(clips):
+        issues.append("clip_design包含完全重复的录制片段")
+    generic_text = " ".join(
+        _text(clip.get("visible_process")) + " " + _text(clip.get("observable_action"))
+        for clip in clips
+    )
+    for placeholder in (
+        "按已确认锚点呈现",
+        "维持局部承载观察关系",
+        "商品本体保持清晰可见",
+    ):
+        if placeholder in generic_text:
+            issues.append(f"clip_design含不可执行占位语：{placeholder}")
+    preset = normalize_creator_capture_preset(recording_profile)
+    # One physical rule replaces the previous style/ratio checks.  PRODUCT
+    # FIRST may use an unworn product only in clip 1; WORN DIRECT SHARE may not
+    # return to a flat-lay/hanger state at all.  No automatic rewrite follows.
+    first_forbidden_index = (
+        1 if preset == "PRODUCT_FIRST_THEN_WORN" else 0
+    )
+    continuity_violations: List[int] = []
+    for index, clip in enumerate(clips):
+        if index < first_forbidden_index:
+            continue
+        material = " ".join(
+            _text(clip.get(field_name))
+            for field_name in ("visible_process", "observable_action", "framing")
+        )
+        if _contains_explicit_off_body_product_state(material):
+            continuity_violations.append(index + 1)
+    if continuity_violations:
+        issues.append(
+            "穿戴状态倒退：完成穿戴后不得重新脱下、悬挂或平铺商品；"
+            "违规片段=" + ",".join(str(value) for value in continuity_violations)
+        )
+    return {
+        "valid": not issues,
+        "issues": issues,
+        "distinct_clip_count": len(signatures),
+        "clip_information_gain_review": review_creator_clip_information_gain(
+            blueprint, recording_profile
+        ),
+        "wear_state_continuity": {
+            "policy": "WEAR_STATE_MONOTONIC",
+            "preset": preset,
+            "valid": not continuity_violations,
+            "violating_clips": continuity_violations,
+        },
     }
 
 
@@ -2053,6 +2593,9 @@ def assemble_reality_script(
                 "gaze_and_reaction": _text(visual.get("gaze_and_reaction")),
                 "audio_hard_constraint": _text(visual.get("audio_hard_constraint")) or "NONE",
                 "audio_preference": _text(visual.get("audio_preference")) or "SILENCE_PREFERRED",
+                "capture_unit_id": _text(visual.get("capture_unit_id")),
+                "starts_new_take": visual.get("starts_new_take") is True,
+                "recording_relation": _text(visual.get("recording_relation")),
                 **structural,
             }
         )
@@ -2092,6 +2635,27 @@ def assemble_reality_script(
         if isinstance(blueprint.get("event_design"), dict)
         else {}
     )
+    recording_context = (
+        blueprint.get("recording_context")
+        if isinstance(blueprint.get("recording_context"), dict)
+        else {}
+    )
+    recording_profile = (
+        dict(direction.get("creator_recording_profile"))
+        if isinstance(direction.get("creator_recording_profile"), dict)
+        else {}
+    )
+    direct_share = bool(recording_profile.get("enabled"))
+    if direct_share:
+        planned_clip_count = len(
+            [
+                item
+                for item in blueprint.get("clip_design", [])
+                if isinstance(item, dict)
+            ]
+        )
+        if 3 <= planned_clip_count <= 5:
+            recording_profile["planned_visible_clip_count"] = planned_clip_count
     macro_visual_passages = [
         dict(item)
         for item in blueprint.get("macro_visual_passages", [])
@@ -2105,41 +2669,30 @@ def assemble_reality_script(
     carrier_modes = {
         _text(item.get("carrier_mode")).upper() for item in plan_shots if isinstance(item, dict)
     }
-    person_on_camera = bool(carrier_modes & {"WEARER_ACTIVE", "MIXED"})
-    hands_only = bool(carrier_modes) and carrier_modes <= {"HAND_ONLY"}
-    if person_on_camera:
+    carrier_families: set[str] = set()
+    if carrier_modes & {"WEARER_ACTIVE", "MIXED"}:
+        carrier_families.add("PERSON")
+    if carrier_modes & {"HAND_ONLY", "MIXED"}:
+        carrier_families.add("HANDS")
+    if carrier_modes & {"STATIC_PRODUCT", "MIXED"}:
+        carrier_families.add("STATIC")
+    person_on_camera = "PERSON" in carrier_families
+    if len(carrier_families) > 1:
+        presentation_mode = "MIXED"
+        character_note = "人物、局部或商品静置片段按结构合同组合，人物片段保持同一创作者"
+    elif person_on_camera:
         presentation_mode = "PERSON_ON_CAMERA"
         character_note = "人物按设定出镜并承担动作关系"
-    elif hands_only:
+    elif "HANDS" in carrier_families:
         presentation_mode = "HANDS_ONLY"
         character_note = "仅手部进入画面，人物脸部和整体穿搭不出镜"
     else:
         presentation_mode = "STATIC_PRODUCT"
         character_note = "本方向由静物承载，人物不出镜"
-    visual_language = (
-        blueprint.get("visual_language")
-        if isinstance(blueprint.get("visual_language"), dict)
-        else {}
-    )
     core_atom = next(
         (item for item in claim_atoms if _text(item.get("role")) == "core_result"),
         claim_atoms[0] if claim_atoms else {},
     )
-    core_claim_key = _text(core_atom.get("claim_key"))
-    passive_facts = [
-        _text(item.get("fact_text"))
-        for item in claim_atoms
-        if _text(item.get("fact_text"))
-        and _text(item.get("claim_key")) != core_claim_key
-    ]
-    visible_anchors = list(
-        dict.fromkeys(
-            _text(item.get("anchor_reference"))
-            for item in visual_shots
-            if _text(item.get("anchor_reference"))
-            and _text(item.get("anchor_reference")) != "UNAVAILABLE"
-        )
-    )[:3]
     proof_passage = next(
         (
             item
@@ -2153,83 +2706,42 @@ def assemble_reality_script(
         _text(core_atom.get("fact_text")) or "核心商品结果"
     ).rstrip("。！？!?；;，, ")
     render_focus = (
-        "开头准备动作保持简短，尽快进入"
-        f"{core_result_text}；"
-        f"主要观看时间留给{proof_action or '生活事件中的核心过程'}，"
-        "若有辅助物，只服务生活动作，不单独展示。"
-    )
-    video_generation_brief = {
-        "schema_version": "reality-video-generation-brief-v3-compact",
-        "source": "DETERMINISTIC_COMPACT_PROJECTION",
-        "usage": "VIDEO_MODEL_PRIMARY_INPUT",
-        "presentation_mode": presentation_mode,
-        "carrier_integrity": {
-            "expected_carrier": _text(diversity.get("required_carrier")).upper() or "UNAVAILABLE",
-            "expected_presentation_mode": _text(diversity.get("required_presentation_mode")) or "UNAVAILABLE",
-            "actual_presentation_mode": presentation_mode,
-            "result": "PASS" if (
-                not _text(diversity.get("required_presentation_mode"))
-                or _text(diversity.get("required_presentation_mode")) == presentation_mode
-            ) else "FAIL",
-        },
-        "character": {
-            "identity": _text(persona.get("identity")),
-            "appearance": _text(persona.get("appearance")),
-            "hair_makeup": _text(persona.get("hair_makeup")),
-        },
-        "scene": {
-            "location": _text(scene.get("location")),
-            "moment": _text(scene.get("moment")),
-            "lighting": _text(scene.get("lighting")),
-            "background": _text(scene.get("background")),
-        },
-        "outfit": _text(persona.get("styling")),
-        "opening_observation": _text(event_design.get("start_state"))
-        or _text(retention_hook.get("opening_event")),
-        "natural_behavior_mainline": _text(event_design.get("natural_event"))
-        or _text(performance_flow.get("behavior_motivation")),
-        "core_result_moment": _text(event_design.get("core_result_moment")),
-        "ending_state": _text(event_design.get("end_state"))
-        or _text(performance_flow.get("ending_state")),
-        "macro_visual_passages": macro_visual_passages,
-        "camera_guidance": list(
-            dict.fromkeys(
-                _text(item.get("camera_observation"))
-                for item in macro_visual_passages
-                if _text(item.get("camera_observation"))
-            )
+        (
+            "创作者面对自己的手机直接分享；"
+            f"整条视频自然看清{core_result_text}，不围绕它编排生活剧情或动作清单。"
         )
-        or [
-            _text(visual_language.get("camera_behavior")),
-            _text(visual_language.get("framing_bias")),
-        ],
-        "core_result_to_prove": _text(core_atom.get("fact_text")),
-        "passive_visible_facts": passive_facts,
-        "visible_product_anchors": visible_anchors,
-        "render_focus": render_focus,
-        "continuous_voiceover": " ".join(
-            _text(item.get("voiceover_text_target_language"))
-            for item in storyboard
-            if _text(item.get("voiceover_text_target_language"))
-        ),
-        "rendering_boundary": [
-            "人物完成自己在该场景原本要做的事情，镜头只负责旁观记录",
-            "商品细节保持清楚可见，但不得让人物逐项指向、触摸或核对",
-        ],
-        "internal_structure_note": (
-            f"后台保留{len(storyboard)}个结构槽位用于血缘和时间映射；"
-            "视频生成只执行上面的3段生活事件，不把槽位改写成独立表演任务"
-        ),
+        if direct_share
+        else (
+            "开头准备动作保持简短，尽快进入"
+            f"{core_result_text}；"
+            f"主要观看时间留给{proof_action or '生活事件中的核心过程'}，"
+            "若有辅助物，只服务生活动作，不单独展示。"
+        )
+    )
+    carrier_integrity = {
+        "expected_carrier": _text(diversity.get("required_carrier")).upper() or "UNAVAILABLE",
+        "expected_presentation_mode": _text(diversity.get("required_presentation_mode")) or "UNAVAILABLE",
+        "actual_presentation_mode": presentation_mode,
+        "result": "PASS" if (
+            not _text(diversity.get("required_presentation_mode"))
+            or _text(diversity.get("required_presentation_mode")) == presentation_mode
+        ) else "FAIL",
     }
     script = {
         "reality_reference_schema_version": (
-            "original-reality-complete-script-v22-event" if blueprint else "original-reality-script-v2"
+            "original-reality-complete-script-v24-direct-share-subtractive"
+            if blueprint and direct_share
+            else "original-reality-complete-script-v22-event"
+            if blueprint
+            else "original-reality-script-v2"
         ),
         "proof_path": "REALITY_CONTENT_BUNDLE",
         "creative_diversity_contract": diversity,
         "creative_blueprint": blueprint,
         "production_design": {
             "presentation_mode": presentation_mode,
+            "creator_recording_profile": recording_profile,
+            "recording_context": recording_context,
             "character_setting": {
                 "on_camera": person_on_camera,
                 "note": character_note,
@@ -2286,7 +2798,7 @@ def assemble_reality_script(
                 if _text(item.get("voiceover_text_zh"))
             ),
         },
-        "video_generation_brief": video_generation_brief,
+        "video_generation_brief": {},
         # This is the canonical hand-off to the finished-video voiceover
         # worker.  The original words remain audit context for the generated
         # video, while the downstream worker writes new copy from the actual
@@ -2375,6 +2887,111 @@ def assemble_reality_script(
             "reference_unknown_fields": reference.get("unknown_fields", []),
             "do_not_invent": reference.get("unknown_fields", []),
         },
+    }
+    presentation_capture_modes = {
+        "PERSON_ON_CAMERA": CAPTURE_MODE_CREATOR_SELF_SHOT,
+        "MIXED": CAPTURE_MODE_CREATOR_SELF_SHOT,
+        "HANDS_ONLY": CAPTURE_MODE_HANDS_PRODUCT_SHARE,
+        "STATIC_PRODUCT": CAPTURE_MODE_STATIC_PRODUCT_RECORD,
+    }
+    capture_mode = presentation_capture_modes.get(
+        presentation_mode,
+        CAPTURE_MODE_CREATOR_SELF_SHOT,
+    )
+    routed_beats = [
+        _text(value).upper()
+        for value in execution_plan.get("beat_sequence") or []
+        if _text(value)
+    ]
+    if not routed_beats:
+        for item in plan_shots:
+            beat = _text(item.get("structure_beat")).upper()
+            if beat and (not routed_beats or routed_beats[-1] != beat):
+                routed_beats.append(beat)
+    scene_setting = script["production_design"]["scene_setting"]
+    capture_contract = build_capture_rhythm_contract(
+        capture_mode=capture_mode,
+        macro_structure=routed_beats,
+        scene_context={
+            "location": _text(scene_setting.get("location")),
+            "background": _text(scene_setting.get("background")),
+            "moment": _text(scene_setting.get("moment")),
+        },
+        retrieval_reference={
+            "primary_real_case": {"execution_card": reference}
+        },
+        creator_recording_profile=recording_profile,
+    )
+    compiled_storyboard, capture_units = compile_capture_units(
+        script["storyboard"],
+        capture_contract,
+    )
+    script["storyboard"] = compiled_storyboard
+    script["capture_rhythm_contract"] = capture_contract
+    script["capture_units"] = capture_units
+    if _text(capture_contract.get("profile")) == CAPTURE_RHYTHM_MULTICLIP:
+        setup_count = int(capture_contract.get("camera_setup_count") or 1)
+        scene_setting["camera_setup"] = (
+            f"同一创作者用同一部普通手机分段录制{len(capture_units)}段并直接剪切"
+            if bool(recording_profile.get("enabled"))
+            else (
+                f"使用同一部普通手机、最多{setup_count}个真实布置位置，"
+                f"分段录制{len(capture_units)}个可见素材片段并直接硬切；"
+                "数字裁切、同一素材缩放和时间标签变化不算新镜头"
+            )
+        )
+    product_truth = (
+        direction.get("product_truth")
+        if isinstance(direction.get("product_truth"), dict)
+        else {}
+    )
+    brief_product_truth = {
+        "product_identity": _text(product_truth.get("product_identity")),
+        "identity_anchors": list(product_truth.get("identity_anchors") or []),
+        "visible_detail_anchors": list(
+            product_truth.get("visible_detail_anchors") or []
+        ),
+        "canonical_product_type": _text(
+            product_truth.get("canonical_product_type")
+        ),
+    }
+    script["video_generation_brief"] = {
+        "schema_version": VIDEO_BRIEF_SCHEMA_VERSION,
+        "render_profile": VIDEO_RENDER_PROFILE,
+        "source": "STAGE0_SHARED_VISIBLE_CLIP_COMPILER",
+        "usage": "VIDEO_MODEL_PRIMARY_INPUT",
+        "capture_mode": capture_mode,
+        "presentation_mode": presentation_mode,
+        "carrier_integrity": carrier_integrity,
+        "creator_recording_profile": recording_profile,
+        "recording_context": recording_context,
+        "production_design": script["production_design"],
+        "storyboard": compiled_storyboard,
+        "capture_rhythm_contract": capture_contract,
+        "capture_units": capture_units,
+        "final_information_gain_review": dict(
+            capture_contract.get("final_information_gain_review") or {}
+        ),
+        "product_truth": brief_product_truth,
+        "product_identity_lock": build_product_identity_lock(brief_product_truth),
+        "voiceover": script["continuous_voiceover"],
+        "internal_event_reference": {
+            "macro_visual_passages": macro_visual_passages,
+            "render_focus": render_focus,
+            "recording_context": recording_context,
+            "authority": "CREATIVE_CONTEXT_ONLY_NOT_PRIMARY_CLIP_PLAN",
+        },
+        "instruction": (
+            (
+                "同一创作者在同一地点用自己的手机直接分享；"
+                "保持同一人物、商品、穿搭、地点与时刻。"
+            )
+            if direct_share
+            else "保持同一人物、商品、穿搭、地点、时刻与生活事件；"
+        ) + (
+            f"按结构顺序分别录制{len(capture_units)}段手机素材并直接剪切。"
+            "商品身份与穿戴连续优先；其余动作和表情自然即可，不用数字裁切伪装新镜头。"
+        ),
     }
     script["authenticity_review"] = authenticity_review(script)
     return script

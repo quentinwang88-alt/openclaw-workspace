@@ -2,7 +2,7 @@ import unittest
 from dataclasses import replace
 
 from video_structure_router.models import RouteRequest, StructureCandidate
-from video_structure_router.policy import base_score
+from video_structure_router.policy import base_score, candidate_is_compatible
 from video_structure_router.service import StructureRouterService
 from video_structure_router.validator import validate_script_against_contract
 
@@ -144,6 +144,45 @@ class RouterTest(unittest.TestCase):
             base_score(static, preferred_request),
             base_score(static, base_request),
         )
+
+    def test_original_flow_can_exclude_single_take_without_changing_cluster_status(self):
+        request = replace(
+            self.request(),
+            capabilities={
+                **self.request().capabilities,
+                "forbidden_cut_densities": ["SINGLE_TAKE"],
+            },
+        )
+        single_take = candidate(
+            "c4", ["HOOK", "PROOF"],
+            "WEARER_ACTIVE", "CONTINUOUS", "SINGLE_TAKE", "PERSON_REVEAL",
+            shot_median=1,
+        )
+
+        compatible, reasons = candidate_is_compatible(single_take, request)
+
+        self.assertFalse(compatible)
+        self.assertTrue(any("cut_density=SINGLE_TAKE" in item for item in reasons))
+
+    def test_cut_density_preferences_favor_multiclip_candidates(self):
+        request = replace(
+            self.request(),
+            capabilities={
+                **self.request().capabilities,
+                "preferred_cut_densities": ["MEDIUM"],
+                "discouraged_cut_densities": ["LOW"],
+            },
+        )
+        medium = candidate(
+            "c5", ["HOOK", "PROOF", "ENDING"],
+            "WEARER_ACTIVE", "MULTI_CUT", "MEDIUM", "PERSON_REVEAL",
+        )
+        low = candidate(
+            "c6", ["HOOK", "PROOF", "ENDING"],
+            "WEARER_ACTIVE", "MULTI_CUT", "LOW", "PERSON_REVEAL",
+        )
+
+        self.assertGreater(base_score(medium, request), base_score(low, request))
 
     def test_prompt_only_shot_count_stays_unavailable(self):
         result = StructureRouterService(repository=FakeRepository()).select(self.request()).to_dict()

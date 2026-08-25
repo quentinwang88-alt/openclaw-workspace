@@ -16,7 +16,10 @@ import os
 import re
 from typing import Any, Dict, Iterable
 
-from core.category_execution import resolve_category_carrier_execution
+from core.category_execution import (
+    compile_category_execution_extension,
+    resolve_category_carrier_execution,
+)
 from core.simplified_complete_script import (
     CAPTURE_RHYTHM_LEGACY,
     CAPTURE_RHYTHM_MULTICLIP,
@@ -25,12 +28,14 @@ from core.simplified_complete_script import (
     build_capture_rhythm_contract,
     build_product_identity_lock,
     compile_capture_units,
+    normalize_creator_capture_preset,
 )
 
 
 VIDEO_PROMPT_PROFILE_ENV = "ORIGINAL_SCRIPT_VIDEO_PROMPT_PROFILE"
 UGC_NATIVE_PROFILE = "ugc_native_v1"
 LEGACY_PROFILE = "legacy"
+STAGE0_VIDEO_PROMPT_PROFILE = "stage0-ugc-compact-v2-capture-fidelity"
 UGC_NATIVE_POSITIVE = (
     "普通用户使用手机竖屏随手记录，使用现场已有自然光或普通室内光；"
     "机位简单，允许轻微手持感、轻微构图不完美和真实环境层次，"
@@ -50,9 +55,10 @@ CREATOR_SELF_SHOT_NEGATIVE = (
     "稳定器推拉横移、商业景深、广告定格、模特走位和跨房间调度"
 )
 CREATOR_MULTICLIP_POSITIVE = (
-    "创作者本人在同一地点、同一时刻使用同一部手机分别录制2至3段简短素材；"
+    "创作者本人在同一地点、同一时刻使用同一部手机分别录制3至5段简短素材；"
     "片段间使用普通直接剪切或自然跳剪，不同片段允许在同一小片区域重新放置手机、"
-    "改变人物与手机距离或补录商品细节；人物、商品、穿搭、光线和生活状态保持连续"
+    "改变人物与手机距离或补录商品细节；成片片段数不等于手机布置数，"
+    "人物、商品、穿搭、光线和生活状态保持连续"
 )
 CREATOR_MULTICLIP_NEGATIVE = (
     "不要摄影团队多机位覆盖、第三人跟拍、正反打、稳定器推拉横移、跨房间调度、"
@@ -236,14 +242,51 @@ def _capture_rhythm_contract(
         with_profile = build_capture_rhythm_contract(
             capture_mode=capture_mode,
             macro_structure=[_text(_dict(value).get("narrative_role"), "") for value in storyboard],
+            scene_context=_dict(
+                _dict(brief.get("production_design")).get("scene")
+            ),
         )
         with_profile["profile"] = CAPTURE_RHYTHM_MULTICLIP
-        with_profile["capture_unit_count"] = (
-            3 if capture_mode == CAPTURE_MODE_CREATOR_SELF_SHOT else 2
-        )
         return with_profile
-    # Old stored scripts remain byte-for-byte compatible unless the V2
-    # contract exists or the environment explicitly enables it.
+    allocated_direction = _dict(script.get("allocated_direction"))
+    routed_macro = _list(allocated_direction.get("macro_structure"))
+    if not routed_macro:
+        routed_macro = _list(embedded.get("macro_structure"))
+    if not routed_macro:
+        routed_macro = [
+            _text(_dict(value).get("narrative_role"), "")
+            for value in storyboard
+        ]
+    # V3 encoded the fatal two/three-clip cap. V4 fixed the count but still
+    # flattened different routed structures into one generic four-part
+    # sequence. Upgrade both at render time; product, scene, voiceover and
+    # frozen actions remain untouched.
+    if (
+        _text(embedded.get("schema_version"), "")
+        in {
+            "capture-rhythm-contract-v3-scene-feasible-reference",
+            "capture-rhythm-contract-v4-shot-richness",
+        }
+        and _text(embedded.get("profile"), "").upper()
+        == CAPTURE_RHYTHM_MULTICLIP
+    ):
+        upgraded = build_capture_rhythm_contract(
+            capture_mode=capture_mode,
+            macro_structure=routed_macro,
+            scene_context=_dict(
+                _dict(brief.get("production_design")).get("scene")
+            ),
+        )
+        if isinstance(embedded.get("retrieved_execution_shape"), dict):
+            upgraded["retrieved_execution_shape"] = dict(
+                embedded.get("retrieved_execution_shape") or {}
+            )
+        upgraded["derivation_source"] = (
+            "READ_TIME_STRUCTURE_VISIBLE_CLIP_UPGRADE"
+        )
+        return upgraded
+    # Other old stored scripts remain compatible unless the environment
+    # explicitly enables the current profile.
     if embedded:
         return embedded
     legacy = build_capture_rhythm_contract(
@@ -374,7 +417,35 @@ def _multiclip_text(value: Any, *, max_chars: int) -> str:
 def _capture_unit_passages(
     storyboard: list,
     units: list,
+    *,
+    accessory_brief: Dict[str, Any] | None = None,
+    action_design: Dict[str, Any] | None = None,
 ) -> list:
+    accessory_brief = _dict(accessory_brief)
+    action_design = _dict(action_design)
+    prominence = _dict(accessory_brief.get("product_prominence_contract"))
+    # Current category projection supplies the unit-level motion language.  A
+    # frozen action design may override individual fields, but must not erase a
+    # newer projection field merely because its older performance arc exists.
+    performance_by_role: Dict[str, Dict[str, Any]] = {}
+    for performance_arc in (
+        _list(prominence.get("performance_arc")),
+        _list(action_design.get("performance_arc")),
+    ):
+        for item in performance_arc:
+            if not isinstance(item, dict):
+                continue
+            role = _text(item.get("unit_role"), "").upper()
+            if role:
+                performance_by_role[role] = {
+                    **performance_by_role.get(role, {}),
+                    **item,
+                }
+    terminal = _dict(prominence.get("terminal_visibility"))
+    small_accessory_performance = (
+        _text(prominence.get("sequence_policy"), "").upper()
+        == "PRODUCT_OPENING_TO_MOTION_TO_PRODUCT_RETURN"
+    )
     by_id: Dict[str, list] = {}
     for raw in storyboard:
         shot = _dict(raw)
@@ -396,6 +467,15 @@ def _capture_unit_passages(
             for shot in group
             if _text(shot.get("character_action"), "")
         ]
+        reactions = (
+            [
+                _video_safe_closure_text(shot.get("natural_emotion"), {})
+                for shot in group
+                if _text(shot.get("natural_emotion"), "")
+            ]
+            if small_accessory_performance
+            else []
+        )
         anchors = []
         for shot in group:
             for anchor in _list(shot.get("product_anchors_visible")):
@@ -403,19 +483,533 @@ def _capture_unit_passages(
                     anchors.append(anchor)
         first_range = _text(group[0].get("time_range"), "")
         last_range = _text(group[-1].get("time_range"), "")
-        result.append(
+        unit_role = _text(unit.get("unit_role"), "").upper()
+        performance = performance_by_role.get(unit_role, {})
+        passage = {
+            **unit,
+            "time_range": (
+                first_range
+                if not last_range or first_range == last_range
+                else f"{first_range} → {last_range}"
+            ),
+            "visual_content": _multiclip_text("；".join(visuals), max_chars=150),
+            "character_action": _multiclip_text("；".join(actions), max_chars=95),
+            "natural_reaction": _multiclip_text(
+                "；".join(reactions), max_chars=70
+            ),
+            "gaze_target": _text(performance.get("gaze_target"), ""),
+            "micro_reaction": _text(performance.get("micro_reaction"), ""),
+            "structure_role": _text(
+                unit.get("structure_role")
+                or group[0].get("structure_role")
+                or group[0].get("narrative_role"),
+                "",
+            ).upper(),
+            "observable_change_job": _text(
+                unit.get("observable_change_job")
+                or group[0].get("observable_change_job"),
+                "",
+            ).upper(),
+            "product_anchors_visible": anchors,
+            # The passage was already compacted once at the capture-unit
+            # boundary.  The final renderer must not truncate it a second time
+            # and erase the latter action/state change.
+            "compiled_clip_passage": True,
+        }
+        if small_accessory_performance:
+            movement_guidance = _text(
+                performance.get("movement_guidance"), ""
+            )
+            core_action = _text(action_design.get("core_action"), "")
+            if unit_role == "NATURAL_MOTION_RELATION" and core_action:
+                # The frozen action is the authority for the middle unit.  Do
+                # not let a static first storyboard shot or text compaction
+                # replace it with "stand and talk".
+                passage["character_action"] = core_action
+                passage["core_action_projection_applied"] = True
+            elif movement_guidance:
+                passage["character_action"] = movement_guidance
+                passage["active_boundary_projection_applied"] = True
+        if unit_role == "PRODUCT_REACQUISITION" and terminal:
+            ending_guidance = _text(terminal.get("ending_guidance"), "")
+            if ending_guidance:
+                passage["visual_content"] = ending_guidance
+            if not passage.get("active_boundary_projection_applied"):
+                passage["character_action"] = (
+                    _text(action_design.get("end_state"), "")
+                    or "保持已经完成的佩戴结果，在同一地点自然结束分享"
+                )
+            passage["terminal_projection_applied"] = True
+        result.append(passage)
+    return result
+
+
+def _unique_stage0_texts(
+    values: Iterable[Any],
+    *,
+    identity_lock: Dict[str, Any] | None = None,
+) -> list[str]:
+    """Keep full executable stage-0 prose while removing exact duplicates.
+
+    A stage-0 storyboard may project one real clip onto two internal structure
+    slots.  The video prompt should not repeat those slots, but it must retain
+    the complete framing, phone relationship and visible action of the real
+    clip.  This helper deliberately has no punctuation or character budget.
+    """
+
+    lock = _dict(identity_lock)
+    output: list[str] = []
+    for value in values:
+        text = _video_safe_closure_text(value, lock)
+        if text and text not in output:
+            output.append(text)
+    return output
+
+
+def _stage0_time_range(group: list[Dict[str, Any]], visual_text: str) -> str:
+    """Prefer the authored clip time and fall back to projected slot ranges."""
+
+    match = re.search(
+        r"(?P<start>\d+(?:\.\d+)?)\s*(?:至|[-–—~～])\s*"
+        r"(?P<end>\d+(?:\.\d+)?)\s*(?:秒|s\b)",
+        visual_text,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return f"{float(match.group('start')):g}-{float(match.group('end')):g}s"
+    ranges = _unique_stage0_texts(
+        shot.get("time_range") or shot.get("duration") for shot in group
+    )
+    if not ranges:
+        return ""
+    spans = []
+    for value in ranges:
+        span = re.search(
+            r"(?P<start>\d+(?:\.\d+)?)\s*(?:至|[-–—~～])\s*"
+            r"(?P<end>\d+(?:\.\d+)?)\s*(?:秒|s\b)?",
+            value,
+            flags=re.IGNORECASE,
+        )
+        if span:
+            spans.append((float(span.group("start")), float(span.group("end"))))
+    if spans:
+        return f"{min(start for start, _ in spans):g}-{max(end for _, end in spans):g}s"
+    return ranges[0] if len(ranges) == 1 else " → ".join((ranges[0], ranges[-1]))
+
+
+def _stage0_capture_passages(script: Dict[str, Any]) -> list[Dict[str, Any]]:
+    """Compile one prompt passage per real stage-0 capture unit.
+
+    ``storyboard`` remains the structure/lineage projection.  ``capture_units``
+    is the actual edit authority.  When a one-to-one macro visual passage is
+    available, it is the most faithful source for visible process and camera
+    observation; the projected storyboard still supplies the frozen framing,
+    phone relationship, gaze and product anchors.
+    """
+
+    brief = _dict(script.get("video_generation_brief"))
+    storyboard = [
+        dict(item)
+        for item in (_list(brief.get("storyboard")) or _list(script.get("storyboard")))
+        if isinstance(item, dict)
+    ]
+    units = [
+        dict(item)
+        for item in (_list(brief.get("capture_units")) or _list(script.get("capture_units")))
+        if isinstance(item, dict)
+    ]
+    if not units and storyboard:
+        seen: list[str] = []
+        for index, shot in enumerate(storyboard, 1):
+            unit_id = _text(shot.get("capture_unit_id"), f"CU_{index:02d}")
+            if unit_id in seen:
+                continue
+            seen.append(unit_id)
+            numbers = [
+                int(item.get("shot_no") or item_index)
+                for item_index, item in enumerate(storyboard, 1)
+                if _text(item.get("capture_unit_id"), f"CU_{item_index:02d}")
+                == unit_id
+            ]
+            units.append(
+                {
+                    "capture_unit_id": unit_id,
+                    "shot_numbers": numbers,
+                    "structure_role": _text(shot.get("structure_role") or shot.get("narrative_role"), "MOMENT"),
+                    "framing_guidance": _text(shot.get("framing"), ""),
+                }
+            )
+
+    blueprint = _dict(script.get("creative_blueprint"))
+    macro_passages = _list(brief.get("macro_visual_passages")) or _list(
+        blueprint.get("macro_visual_passages")
+    )
+    macro_passages = [dict(item) for item in macro_passages if isinstance(item, dict)]
+    macros_align = len(macro_passages) == len(units)
+    identity_lock = _dict(brief.get("product_identity_lock"))
+
+    passages: list[Dict[str, Any]] = []
+    for index, unit in enumerate(units, 1):
+        unit_id = _text(unit.get("capture_unit_id"), f"CU_{index:02d}")
+        shot_numbers = {
+            int(value)
+            for value in _list(unit.get("shot_numbers"))
+            if str(value).isdigit()
+        }
+        group = [
+            shot
+            for position, shot in enumerate(storyboard, 1)
+            if (
+                (shot_numbers and int(shot.get("shot_no") or position) in shot_numbers)
+                or (not shot_numbers and _text(shot.get("capture_unit_id"), "") == unit_id)
+            )
+        ]
+        macro = macro_passages[index - 1] if macros_align else {}
+
+        group_visuals = _unique_stage0_texts(
+            (shot.get("shot_content") or shot.get("visual_content") for shot in group),
+            identity_lock=identity_lock,
+        )
+        group_actions = _unique_stage0_texts(
+            (shot.get("observable_action") or shot.get("character_action") or shot.get("person_action") for shot in group),
+            identity_lock=identity_lock,
+        )
+        macro_visual = _video_safe_closure_text(macro.get("visible_process"), identity_lock)
+        macro_action = _video_safe_closure_text(macro.get("observable_action"), identity_lock)
+        visual_text = macro_visual or "；".join(group_visuals)
+        action_text = macro_action or "；".join(group_actions)
+
+        framing = _unique_stage0_texts(
+            [
+                *(shot.get("framing") or shot.get("style_note") for shot in group),
+                macro.get("camera_observation"),
+            ],
+            identity_lock=identity_lock,
+        )
+        recording_relation = _unique_stage0_texts(
+            (shot.get("recording_relation") for shot in group),
+            identity_lock=identity_lock,
+        )
+        if not framing:
+            framing = _unique_stage0_texts(
+                [unit.get("framing_guidance")], identity_lock=identity_lock
+            )
+        gaze_and_reaction = _unique_stage0_texts(
+            (
+                shot.get("gaze_and_reaction")
+                or _dict(shot.get("performance")).get("gaze_and_reaction")
+                for shot in group
+            ),
+            identity_lock=identity_lock,
+        )
+        anchors: list[str] = []
+        for shot in group:
+            for value in [
+                *_list(shot.get("product_anchors_visible")),
+                shot.get("anchor_reference"),
+            ]:
+                text = _video_safe_closure_text(value, identity_lock)
+                if text and text not in anchors:
+                    anchors.append(text)
+
+        passages.append(
             {
-                **unit,
-                "time_range": (
-                    first_range
-                    if not last_range or first_range == last_range
-                    else f"{first_range} → {last_range}"
+                "capture_unit_id": unit_id,
+                "time_range": _stage0_time_range(group, visual_text),
+                "structure_role": _text(
+                    unit.get("structure_role")
+                    or unit.get("unit_role")
+                    or (group[0].get("structure_role") if group else ""),
+                    "MOMENT",
                 ),
-                "visual_content": _multiclip_text("；".join(visuals), max_chars=150),
-                "character_action": _multiclip_text("；".join(actions), max_chars=95),
-                "product_anchors_visible": anchors,
+                "visual_content": visual_text,
+                "character_action": action_text,
+                "framing": "；".join(framing),
+                "recording_relation": "；".join(recording_relation),
+                "gaze_and_reaction": "；".join(gaze_and_reaction),
+                "product_anchors": anchors,
             }
         )
+    return passages
+
+
+def render_stage0_video_generation_prompt(
+    *,
+    script: Dict[str, Any],
+    duration_seconds: float = 15,
+) -> str:
+    """Render the compact but clip-faithful stage-0 production handoff.
+
+    This is a deterministic projection only.  It does not call a model, does
+    not expose claim/QC lineage, and does not turn internal structure slots
+    into fake edits.
+    """
+
+    script = _dict(script)
+    brief = _dict(script.get("video_generation_brief"))
+    production = _dict(brief.get("production_design")) or _dict(
+        script.get("production_design")
+    )
+    character = _dict(brief.get("character")) or _dict(
+        production.get("character_setting") or production.get("character")
+    )
+    scene = _dict(brief.get("scene")) or _dict(
+        production.get("scene_setting") or production.get("scene")
+    )
+    outfit_setting = _dict(production.get("outfit_setting") or production.get("outfit"))
+    outfit = _text(brief.get("outfit") or outfit_setting.get("styling") or outfit_setting.get("base_outfit"), "")
+    identity_lock = _dict(brief.get("product_identity_lock"))
+    must_preserve = _unique_stage0_texts(
+        _list(identity_lock.get("must_preserve")), identity_lock=identity_lock
+    )[:3]
+    must_not_change = _unique_stage0_texts(
+        _list(identity_lock.get("must_not_change")), identity_lock=identity_lock
+    )[:3]
+    voice = _dict(brief.get("voiceover")) or _dict(script.get("continuous_voiceover"))
+    recording_context = _dict(brief.get("recording_context"))
+    capture_rhythm = _dict(brief.get("capture_rhythm_contract")) or _dict(
+        script.get("capture_rhythm_contract")
+    )
+    passages = _stage0_capture_passages(script)
+    if not passages:
+        raise ValueError("阶段0视频提示词缺少可执行拍摄片段")
+
+    lines = [
+        "【视频任务】",
+        f"普通个人账号手机竖屏短视频，时长{float(duration_seconds or 15):g}秒。",
+        "",
+        "【商品身份锁｜最高优先级】",
+        "商品外观以参考图为唯一准则；商品一致性优先于人物表演、场景氛围和镜头效果。",
+    ]
+    if must_preserve:
+        lines.append("必须保持：" + _join(must_preserve))
+    if must_not_change:
+        lines.extend(["", "【商品负向约束】", _join(must_not_change)])
+
+    lines.extend(
+        [
+            "",
+            "【人物、穿搭与场景】",
+            "人物：" + "；".join(
+                value
+                for value in (
+                    _text(character.get("identity"), ""),
+                    _text(character.get("appearance"), ""),
+                    _text(character.get("hair_makeup"), ""),
+                )
+                if value
+            ),
+            f"穿搭：{outfit}",
+            "场景：" + "；".join(
+                value
+                for value in (
+                    _text(scene.get("location"), ""),
+                    _text(scene.get("moment"), ""),
+                    _text(scene.get("lighting"), ""),
+                    _text(scene.get("background"), ""),
+                )
+                if value
+            ),
+            *(
+                ["分享动机：" + _text(recording_context.get("recording_motivation"), "")]
+                if _text(recording_context.get("recording_motivation"), "")
+                else []
+            ),
+            "",
+            "【拍摄与剪辑】",
+            (
+                f"同一创作者、商品、穿搭、地点和时刻，用同一部普通手机分别录制{len(passages)}段素材；"
+                "片段间使用普通直接剪切，不是一个长镜头里的数字裁切、连续变焦或人物反复走近走远。"
+            ),
+            (
+                f"手机布置预算：{int(capture_rhythm.get('camera_setup_count') or 2)}种；"
+                "同一布置可以录制不同内容时刻，成片片段数不等于手机布置数。"
+            ),
+        ]
+    )
+
+    for index, passage in enumerate(passages, 1):
+        if index > 1:
+            lines.extend(["", "【直接剪切｜开始另一段独立手机素材】"])
+        title_parts = [f"拍摄片段{index:02d}"]
+        if _text(passage.get("time_range"), ""):
+            title_parts.append(_text(passage.get("time_range"), ""))
+        title_parts.append(_text(passage.get("structure_role"), "MOMENT"))
+        lines.extend(
+            [
+                "",
+                "【" + "｜".join(title_parts) + "】",
+                f"画面事件：{_text(passage.get('visual_content'), '')}",
+                f"人物动作：{_text(passage.get('character_action'), '')}",
+            ]
+        )
+        if _text(passage.get("framing"), ""):
+            lines.append("本段手机构图：" + _text(passage.get("framing"), ""))
+        if _text(passage.get("recording_relation"), ""):
+            lines.append("拍摄关系：" + _text(passage.get("recording_relation"), ""))
+        if _text(passage.get("gaze_and_reaction"), ""):
+            lines.append("视线与自然状态：" + _text(passage.get("gaze_and_reaction"), ""))
+        anchors = _list(passage.get("product_anchors"))
+        if anchors:
+            lines.append("本段商品焦点：" + _join(anchors))
+
+    lines.extend(
+        [
+            "",
+            "【连续口播｜必须原样使用目标语言】",
+            _text(voice.get("target_language") or voice.get("target_text"), ""),
+            "",
+            "【统一执行优先级】",
+            (
+                "第一优先保持商品身份、穿戴状态和人物肢体连续；第二优先完整执行以上独立可见片段并真实直接剪切；"
+                "第三优先执行具体景别与商品观察关系。发生冲突时先简化背景陈设和人物表演，不得合并片段或退回一镜到底。"
+            ),
+        ]
+    )
+    return "\n".join(lines).strip()
+
+
+def _upgrade_small_accessory_brief_for_render(
+    *,
+    category_extension: Dict[str, Any],
+    accessory_brief: Dict[str, Any],
+    production: Dict[str, Any],
+    item: Any,
+) -> Dict[str, Any]:
+    """Read current soft motion projection for old ready scripts.
+
+    The stored action remains frozen.  Only the read-time prominence contract
+    is upgraded so an already-ready prompt can regain a product-visible ending
+    without rerunning the blueprint or voiceover.
+    """
+
+    result = dict(accessory_brief or {})
+    if not category_extension:
+        return result
+    carrier = resolve_category_carrier_execution(
+        category_extension,
+        presentation_mode=_text(
+            production.get("presentation_mode")
+            or getattr(item, "carrier_mode", ""),
+            "",
+        ),
+    )
+    current_prominence = _dict(carrier.get("product_prominence_contract"))
+    # Very old accessory profiles (v1/v2) predate product_prominence entirely.
+    # Recompile only the current registered category semantics for rendering;
+    # do not change the frozen structure, action, selling point or voiceover.
+    if (
+        _text(current_prominence.get("sequence_policy"), "").upper()
+        != "PRODUCT_OPENING_TO_MOTION_TO_PRODUCT_RETURN"
+    ):
+        type_source = _dict(category_extension.get("product_type_source"))
+        product_type = _text(
+            type_source.get("display_type")
+            or type_source.get("canonical_type"),
+            "",
+        )
+        rebuilt_extension = (
+            compile_category_execution_extension(
+                product_type=product_type,
+                top_category="配饰",
+                anchor_card={},
+                enabled=True,
+            )
+            if product_type
+            else {}
+        )
+        if rebuilt_extension:
+            rebuilt_carrier = resolve_category_carrier_execution(
+                rebuilt_extension,
+                presentation_mode=_text(
+                    production.get("presentation_mode")
+                    or getattr(item, "carrier_mode", ""),
+                    "",
+                ),
+            )
+            current_prominence = _dict(
+                rebuilt_carrier.get("product_prominence_contract")
+            )
+    if (
+        _text(current_prominence.get("sequence_policy"), "").upper()
+        != "PRODUCT_OPENING_TO_MOTION_TO_PRODUCT_RETURN"
+    ):
+        return result
+    stored_prominence = _dict(result.get("product_prominence_contract"))
+    result["product_prominence_contract"] = {
+        **stored_prominence,
+        **current_prominence,
+    }
+    if not result.get("schema_version") or result.get("schema_version") == "accessory-video-handoff-v4-small-prominence":
+        result["schema_version"] = "accessory-video-handoff-v5-small-motion-return"
+    return result
+
+
+def _apply_small_accessory_capture_projection(
+    units: list,
+    *,
+    accessory_brief: Dict[str, Any],
+) -> list:
+    prominence = _dict(
+        _dict(accessory_brief).get("product_prominence_contract")
+    )
+    if (
+        _text(prominence.get("sequence_policy"), "").upper()
+        != "PRODUCT_OPENING_TO_MOTION_TO_PRODUCT_RETURN"
+        or len(units) < 2
+    ):
+        return units
+    terminal = _dict(prominence.get("terminal_visibility"))
+    if len(units) == 2:
+        roles = ["PRODUCT_RESULT_CLOSE", "PRODUCT_REACQUISITION"]
+    else:
+        # V4 commonly produces four visible clips.  Repeating
+        # NATURAL_MOTION_RELATION for every middle clip would project the same
+        # frozen core_action twice and recreate a stiff repeated head turn.
+        # Only one clip owns the core motion; later middle clips retain their
+        # own storyboard detail/context event.
+        middle_roles = ["NATURAL_MOTION_RELATION"]
+        if len(units) >= 4:
+            middle_roles.append("PRODUCT_DETAIL_RELATION")
+        if len(units) >= 5:
+            middle_roles.extend(
+                ["CONTEXT_RELATION"] * (len(units) - 4)
+            )
+        roles = [
+            "PRODUCT_RESULT_CLOSE",
+            *middle_roles,
+            "PRODUCT_REACQUISITION",
+        ]
+    result = []
+    for index, raw in enumerate(units):
+        unit = dict(raw)
+        unit["unit_role"] = roles[index]
+        if index == 0:
+            unit["framing_guidance"] = (
+                "独立录制商品已经佩戴完成的结果近景，让小商品第一眼清楚可辨"
+            )
+        elif index == len(units) - 1:
+            unit["framing_guidance"] = (
+                _text(terminal.get("ending_guidance"), "")
+                or "同一地点补录商品结果近景，自然完成收束"
+            )
+        elif unit["unit_role"] == "NATURAL_MOTION_RELATION":
+            unit["framing_guidance"] = (
+                "同一地点重新放置手机，录制一次连续的上半身或拍摄关系变化，"
+                "不用重复摆头支撑整段"
+            )
+        elif unit["unit_role"] == "PRODUCT_DETAIL_RELATION":
+            unit["framing_guidance"] = (
+                "同一地点补录商品佩戴细节或与人物的清晰位置关系；"
+                "沿用本段原有可见事件，不重复上一段核心动作"
+            )
+        else:
+            unit["framing_guidance"] = (
+                "同一地点补录商品与当前生活状态的自然关系；"
+                "商品仍清楚可辨，不重复核心动作或退到远景"
+            )
+        unit["category_projection"] = "SMALL_ACCESSORY_MOTION_RETURN_V2"
+        result.append(unit)
     return result
 
 
@@ -688,6 +1282,15 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
     outfit = _dict(production.get("outfit"))
     scene = _dict(production.get("scene"))
     life_event = _dict(production.get("life_event"))
+    recording_profile = _dict(brief.get("creator_recording_profile")) or _dict(
+        production.get("creator_recording_profile")
+    )
+    recording_context = _dict(brief.get("recording_context")) or _dict(
+        production.get("recording_context")
+    )
+    direct_creator_share = bool(recording_profile.get("enabled")) and _text(
+        recording_profile.get("recording_mode"), ""
+    ).upper() == "CREATOR_DIRECT_SHARE"
     action_design = _dict(brief.get("action_design")) or _dict(
         production.get("action_execution")
     )
@@ -699,6 +1302,12 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
         }
     identity_lock = _dict(brief.get("product_identity_lock"))
     category_extension = _dict(brief.get("category_execution_extension"))
+    accessory_brief = _upgrade_small_accessory_brief_for_render(
+        category_extension=category_extension,
+        accessory_brief=_dict(brief.get("accessory_execution_brief")),
+        production=production,
+        item=item,
+    )
     persona_contract = _dict(brief.get("persona_selection_contract")) or _dict(
         production.get("persona_selection_contract")
     )
@@ -769,13 +1378,19 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
         # Unit ids are deterministic authority.  Stored metadata may be stale
         # after a profile change, so rebuild it from the current storyboard.
         capture_units = compiled_capture_units
+        capture_units = _apply_small_accessory_capture_projection(
+            capture_units,
+            accessory_brief=accessory_brief,
+        )
     multiclip_enabled = (
         _text(capture_rhythm.get("profile"), "").upper()
         == CAPTURE_RHYTHM_MULTICLIP
     )
     concept = _dict(script.get("script_concept"))
     event_text = _text(
-        life_event.get("continuous_event")
+        recording_context.get("recording_motivation")
+        if direct_creator_share
+        else life_event.get("continuous_event")
         or life_event.get("motivation")
         or concept.get("one_sentence_idea"),
         "",
@@ -819,15 +1434,16 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
             saliency_lines.append(
                 "商品与背景：" + _text(separation.get("background_guidance"), "")
             )
-        opening_parts = [
-            _text(opening_focus.get("guidance"), ""),
-            _text(opening_focus.get("natural_change"), ""),
-        ]
-        opening_text = "".join(part for part in opening_parts if part)
-        if opening_text:
-            saliency_lines.append("首镜：" + opening_text)
+        if not direct_creator_share:
+            opening_parts = [
+                _text(opening_focus.get("guidance"), ""),
+                _text(opening_focus.get("natural_change"), ""),
+            ]
+            opening_text = "".join(part for part in opening_parts if part)
+            if opening_text:
+                saliency_lines.append("首镜：" + opening_text)
         lines.extend(saliency_lines)
-    if opening_scene_projection:
+    if opening_scene_projection and not direct_creator_share:
         projection_lines = ["", "【首帧/第一拍摄单元场景投影｜不改后续场景】"]
         location_identity = _text(
             opening_scene_projection.get("location_identity"), ""
@@ -874,7 +1490,6 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
             ]
         )
 
-    accessory_brief = _dict(brief.get("accessory_execution_brief"))
     if accessory_brief:
         accessory_lines = ["", "【配饰佩戴与展示关系】"]
         product_relation = _text(accessory_brief.get("product_relation"), "")
@@ -928,6 +1543,11 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
                 _text(product_prominence.get("opening_guidance"), ""),
                 _text(product_prominence.get("context_guidance"), ""),
             ]
+            terminal = _dict(product_prominence.get("terminal_visibility"))
+            if _text(terminal.get("ending_guidance"), ""):
+                prominence_parts.append(
+                    _text(terminal.get("ending_guidance"), "")
+                )
             prominence_text = "；".join(
                 part for part in prominence_parts if part
             )
@@ -964,7 +1584,7 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
             )
         lines.extend(accessory_lines)
 
-    if action_design:
+    if action_design and not direct_creator_share:
         action_lines = [
             "",
             "【本条动作主线｜只执行这一条】",
@@ -973,33 +1593,75 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
             f"核心动作：{_text(action_design.get('core_action'))}",
             f"完成状态：{_text(action_design.get('end_state'))}",
         ]
-        if _text(action_design.get("supporting_scene_action"), ""):
+        if _text(action_design.get("motion_scope"), "") == "ONE_CONTINUOUS_CHANGE":
             action_lines.append(
-                "辅助生活衔接："
-                + _text(action_design.get("supporting_scene_action"), "")
-                + "；只作自然衔接，不与核心动作叠成动作清单。"
+                "动态重点：开头在轻微自然变化中看清商品，中段执行上述核心动作，"
+                "结尾在小幅变化或重新构图中回到商品，只在最后一瞬自然收住。"
             )
+        if _text(action_design.get("supporting_scene_action"), ""):
+            if (
+                _text(
+                    _dict(
+                        accessory_brief.get("product_prominence_contract")
+                    ).get("sequence_policy"),
+                    "",
+                ).upper()
+                == "PRODUCT_OPENING_TO_MOTION_TO_PRODUCT_RETURN"
+            ):
+                action_lines.append(
+                    "辅助生活衔接：只保留同一地点内的自然状态；最后一段不离场，"
+                    "结尾服从商品回收近景。"
+                )
+            else:
+                action_lines.append(
+                    "辅助生活衔接："
+                    + _text(action_design.get("supporting_scene_action"), "")
+                    + "；只作自然衔接，不与核心动作叠成动作清单。"
+                )
         lines.extend(action_lines)
 
-    capture_lines = [
-        "",
-        (
-            "【拍摄方式｜UGC_NATIVE_V2_MULTICLIP】"
-            if multiclip_enabled
-            else "【拍摄方式｜UGC_NATIVE_V1】"
-        ),
-        UGC_NATIVE_POSITIVE,
-    ]
-    if multiclip_enabled:
+    if direct_creator_share:
+        preset = normalize_creator_capture_preset(recording_profile)
+        continuity_text = (
+            "首段可以让商品单独出现；人物穿上后始终保持穿着，后续细节都在身上拍。"
+            if preset == "PRODUCT_FIRST_THEN_WORN"
+            else "人物从开头已经穿好商品并全程保持穿着；不重复穿脱。"
+        )
+        capture_lines = [
+            "",
+            "【拍摄方式｜达人直接分享】",
+            (
+                f"同一创作者在同一地点用自己的手机分{len(capture_units)}段直接分享；"
+                "片段间普通直接剪切，可自然使用固定、手持或镜面关系，不规定比例。"
+            ),
+            continuity_text,
+            "不要生活小剧场、逐项检查或广告式走位。",
+        ]
+    else:
+        capture_lines = [
+            "",
+            (
+                "【拍摄方式｜UGC_NATIVE_V2_MULTICLIP】"
+                if multiclip_enabled
+                else "【拍摄方式｜UGC_NATIVE_V1】"
+            ),
+            UGC_NATIVE_POSITIVE,
+        ]
+    if multiclip_enabled and not direct_creator_share:
         capture_lines.extend(
             [
                 "",
                 "【拍摄节奏｜NATIVE_MULTI_CLIP_V1】",
                 CREATOR_MULTICLIP_POSITIVE,
+                (
+                    f"实际剪辑目标：{len(capture_units)}个独立可见片段；"
+                    f"手机布置预算：{int(capture_rhythm.get('camera_setup_count') or 2)}种。"
+                    "同一布置可以录制不同内容时刻，但成片必须发生真实直接剪切。"
+                ),
                 f"拍摄边界：{CREATOR_MULTICLIP_NEGATIVE}",
             ]
         )
-    elif capture_mode == CAPTURE_MODE_CREATOR_SELF_SHOT:
+    elif capture_mode == CAPTURE_MODE_CREATOR_SELF_SHOT and not direct_creator_share:
         capture_lines.extend(
             [
                 "",
@@ -1008,7 +1670,7 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
                 f"拍摄关系边界：{CREATOR_SELF_SHOT_NEGATIVE}",
             ]
         )
-    else:
+    elif not direct_creator_share:
         capture_lines.append(f"风格负向：{UGC_NATIVE_NEGATIVE}")
     lines.extend(
         [
@@ -1087,22 +1749,32 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
                 f"场景关系：{_text(visual_scene_context.get('instruction'), '')}"
             )
         lines.extend(visual_finish_lines)
-    if event_text and (capture_mode != CAPTURE_MODE_CREATOR_SELF_SHOT or visual_finish_enabled):
+    if event_text and not direct_creator_share and (capture_mode != CAPTURE_MODE_CREATOR_SELF_SHOT or visual_finish_enabled):
         lines.append(
             f"连续生活事件：{_compact_native_description(event_text, max_segments=2, max_chars=90)}"
         )
 
-    if multiclip_enabled:
+    if multiclip_enabled and not direct_creator_share:
+        public_setup = (
+            _text(capture_rhythm.get("capture_setup_mode"), "").upper()
+            == "ONE_PUBLIC_PHONE_POSITION_PLUS_HANDHELD_CUTAWAY"
+        )
         lines.extend(
             [
                 (
                     f"拍摄单元：以下{len(capture_units)}段是分别录制的普通手机素材，片段间直接剪切；"
                     "不是一个长镜头里的数字裁切、连续变焦或人物反复走近走远。"
                 ),
-                "连续性：只锁同一人物、商品、穿搭、地点、时刻、手机和生活状态；不锁死手机位置与景别。",
+                (
+                    "公共场景拍摄关系：只使用一个自然可解释的固定手机位置，再补一段手持自拍或商品切片；"
+                    "这两种布置可录制多个不同内容时刻，不得因此合并成两个长镜头；"
+                    "不要在公共空间反复架设、搬动无人值守手机。"
+                    if public_setup else
+                    "连续性：只锁同一人物、商品、穿搭、地点、时刻、手机和生活状态；不锁死手机位置与景别。"
+                ),
             ]
         )
-    elif capture_mode == CAPTURE_MODE_CREATOR_SELF_SHOT:
+    elif capture_mode == CAPTURE_MODE_CREATOR_SELF_SHOT and not direct_creator_share:
         lines.extend(
             [
                 "分享方式：创作者主要看向自己的手机镜头说话；以下结构只控制内容推进，不代表切换摄影机位。",
@@ -1111,7 +1783,12 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
         )
 
     prompt_storyboard = (
-        _capture_unit_passages(storyboard, capture_units)
+        _capture_unit_passages(
+            storyboard,
+            capture_units,
+            accessory_brief=accessory_brief,
+            action_design=action_design,
+        )
         if multiclip_enabled
         else _creator_content_moments(storyboard)
         if capture_mode == CAPTURE_MODE_CREATOR_SELF_SHOT
@@ -1119,6 +1796,34 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
     )
     for index, raw_shot in enumerate(prompt_storyboard, 1):
         shot = _dict(raw_shot)
+        compiled_clip_passage = bool(shot.get("compiled_clip_passage"))
+        character_action = _video_safe_closure_text(
+            shot.get("character_action"), identity_lock
+        )
+        if (
+            shot.get("core_action_projection_applied")
+            or shot.get("active_boundary_projection_applied")
+        ):
+            # These strings are already deterministic category projections.
+            # A second punctuation-based compaction would remove the latter
+            # half of the movement and recreate a static opening or ending.
+            rendered_character_action = _naturalize_text(character_action)[:180]
+        elif compiled_clip_passage:
+            rendered_character_action = _naturalize_text(character_action)[:140]
+        else:
+            rendered_character_action = _compact_native_description(
+                character_action, max_segments=2, max_chars=70
+            )
+        safe_visual = _video_safe_closure_text(
+            shot.get("visual_content"), identity_lock
+        )
+        rendered_visual = (
+            _naturalize_text(safe_visual)[:210]
+            if compiled_clip_passage
+            else _compact_native_description(
+                safe_visual, max_segments=2, max_chars=110
+            )
+        )
         camera = (
             _text(shot.get("framing_guidance"), "")
             if multiclip_enabled
@@ -1131,11 +1836,37 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
         lines.extend(
             [
                 "",
-                f"【{'拍摄片段' if multiclip_enabled else '连续内容段' if capture_mode == CAPTURE_MODE_CREATOR_SELF_SHOT else '片段'}{index:02d}｜{_text(shot.get('time_range'))}｜{_text(shot.get('unit_role') or shot.get('narrative_role'))}】",
-                f"画面事件：{_compact_native_description(_video_safe_closure_text(shot.get('visual_content'), identity_lock), max_segments=2, max_chars=110)}",
-                f"人物动作：{_compact_native_description(_video_safe_closure_text(shot.get('character_action'), identity_lock), max_segments=2, max_chars=70)}",
+                f"【{'拍摄片段' if multiclip_enabled else '连续内容段' if capture_mode == CAPTURE_MODE_CREATOR_SELF_SHOT else '片段'}{index:02d}｜{_text(shot.get('time_range'))}｜{_text(shot.get('structure_role') or shot.get('narrative_role') or shot.get('unit_role'))}】",
+                f"画面事件：{rendered_visual}",
+                f"人物动作：{rendered_character_action}",
             ]
         )
+        if (
+            multiclip_enabled
+            and not direct_creator_share
+            and _text(shot.get("observable_change_job"), "")
+        ):
+            lines.append(
+                "本段相对上一段的新信息："
+                + _text(shot.get("observable_change_job"), "")
+            )
+        physical_unit_role = _text(shot.get("unit_role"), "")
+        structure_role = _text(shot.get("structure_role"), "")
+        if (
+            multiclip_enabled
+            and physical_unit_role
+            and structure_role
+            and physical_unit_role != structure_role
+        ):
+            lines.append(f"商品执行关系：{physical_unit_role}")
+        gaze_target = _text(shot.get("gaze_target"), "")
+        natural_reaction = _text(
+            shot.get("micro_reaction") or shot.get("natural_reaction"), ""
+        )
+        if gaze_target and not direct_creator_share:
+            lines.append(f"视线关系：{gaze_target}")
+        if natural_reaction and not direct_creator_share:
+            lines.append(f"自然反应：{natural_reaction}")
         if camera:
             lines.append(f"{'本段手机构图' if multiclip_enabled else '手机机位'}：{camera}")
         anchors = _list(shot.get("product_anchors_visible"))
@@ -1154,7 +1885,9 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
             "",
             "【统一执行】",
             (
-                "保持同一创作者、商品、穿搭、地点、时刻和手机；片段间直接剪切，允许手机位置与景别发生简单变化，但不建立摄影团队。商品一致性优先于场景美感和镜头效果。"
+                "商品身份和穿戴连续优先；按以上片段直接剪切，其余动作与表情自然即可。"
+                if direct_creator_share
+                else "第一优先保持商品身份、佩戴状态、人物肢体和穿搭连续；第二优先完整执行以上独立可见片段并真实直接剪切；第三优先卖点关系与原生手机可行性。发生冲突时先简化场景陈设和人物表演，不得合并片段或退回一镜到底。"
                 if multiclip_enabled
                 else "保持同一创作者、商品、穿搭、场景和手机视角；结构只改变分享内容，不建立摄影团队。商品一致性优先于场景美感和镜头效果。"
                 if capture_mode == CAPTURE_MODE_CREATOR_SELF_SHOT
@@ -1185,6 +1918,25 @@ def build_production_projection(*, batch: Any, item: Any) -> Dict[str, Any]:
     script = _dict(result.get("script"))
     production = _dict(script.get("production_design"))
     video_brief = _dict(script.get("video_generation_brief"))
+    storyboard = _list(video_brief.get("storyboard")) or _list(
+        script.get("storyboard")
+    )
+    capture_mode = _capture_mode(video_brief, production)
+    # Diagnostics must describe the contract that the final renderer actually
+    # executes.  Stored V3 scripts are upgraded to V4 at read time; reading the
+    # embedded contract directly made reports claim 2/3 clips while the final
+    # prompt correctly rendered four.
+    capture_rhythm = _capture_rhythm_contract(
+        video_brief,
+        script,
+        capture_mode=capture_mode,
+        storyboard=storyboard,
+    )
+    _, effective_capture_units = compile_capture_units(
+        storyboard,
+        capture_rhythm,
+    )
+    shot_richness = _dict(capture_rhythm.get("shot_richness_contract"))
     action_design = _dict(video_brief.get("action_design")) or _dict(
         production.get("action_execution")
     )
@@ -1303,6 +2055,29 @@ def build_production_projection(*, batch: Any, item: Any) -> Dict[str, Any]:
                 _text(provenance.get("model"), ""),
                 _text(provenance.get("reasoning_effort"), ""),
             ) if value
+        ),
+        "capture_rhythm_schema": _text(
+            capture_rhythm.get("schema_version"), ""
+        ),
+        "visible_clip_count": int(
+            len(effective_capture_units)
+            or shot_richness.get("compiled_visible_clips")
+            or capture_rhythm.get("capture_unit_count")
+            or 0
+        ),
+        "camera_setup_count": int(
+            capture_rhythm.get("camera_setup_count")
+            or shot_richness.get("camera_setup_budget")
+            or 0
+        ),
+        "shot_richness_status": _text(
+            shot_richness.get("preservation_status"), ""
+        ),
+        "structure_preservation_status": _text(
+            shot_richness.get("structure_preservation_status"), ""
+        ),
+        "compiled_function_sequence": list(
+            shot_richness.get("compiled_function_sequence") or []
         ),
         "script_type": "原创脚本",
         "processing_status": "待审核",

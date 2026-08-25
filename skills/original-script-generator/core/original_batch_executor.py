@@ -719,6 +719,20 @@ def run_plan_only(
         db_path=voiceover_db_path,
     )
 
+    multidim_reference_contexts: Dict[str, Dict[str, Any]] = {}
+    if request.script_mode == "simplified_v1":
+        from core.multidim_reference_adapter import (
+            load_multidim_reference_contexts,
+        )
+
+        multidim_reference_contexts = load_multidim_reference_contexts(
+            directions,
+            target_country=ctx["target_country"],
+            target_language=ctx["target_language"],
+            top_category=ctx["top_category"],
+            product_type=ctx["product_type"],
+        )
+
     # Allocate
     items, alloc_summary = allocate_batch_items(
         product_code=request.product_code,
@@ -733,6 +747,7 @@ def run_plan_only(
         product_selling_note=ctx["product_selling_note"],
         product_type=ctx["product_type"],
         top_category=ctx["top_category"],
+        multidim_reference_contexts=multidim_reference_contexts,
         category_execution_extension=category_execution_extension,
     )
 
@@ -769,6 +784,36 @@ def run_plan_only(
             ),
         }
         for item in items
+    ]
+    input_snapshot["retrieval_reference_snapshot"] = [
+        {
+            "direction_assignment_id": item.direction_assignment_id,
+            "status": reference.get("status", "UNAVAILABLE"),
+            "selection_mode": reference.get("selection_mode", "NO_EFFECT"),
+            "data_snapshot_hash": reference.get("data_snapshot_hash", ""),
+            "contract_hash": reference.get("contract_hash", ""),
+            "primary_video_id": (
+                (reference.get("primary_case") or {}).get("video_id", "")
+            ),
+            "primary_asset_id": (
+                (reference.get("primary_case") or {}).get("asset_id", "")
+            ),
+            "primary_asset_version": (
+                (reference.get("primary_case") or {}).get("asset_version", 0)
+            ),
+            "supporting_video_id": (
+                (reference.get("supporting_case") or {}).get("video_id", "")
+            ),
+            "fallback_reason": reference.get("fallback_reason", ""),
+        }
+        for item in items
+        for reference in [
+            (
+                json.loads(item.frozen_direction_package_json or "{}")
+                .get("retrieval_reference_contract")
+                or {}
+            )
+        ]
     ]
     data_hash = build_data_snapshot_hash(input_snapshot)
 
@@ -1068,6 +1113,11 @@ def _execute_simplified_single_item(
             content_angle_key=item.content_angle_key,
             product_type=batch.product_type or ctx.get("product_type", ""),
             top_category=batch.top_category or ctx.get("top_category", ""),
+            retrieval_reference_contract=(
+                frozen.get("retrieval_reference_contract")
+                if isinstance(frozen.get("retrieval_reference_contract"), dict)
+                else {}
+            ),
         )
 
     provenance = {
@@ -1248,6 +1298,16 @@ def _execute_simplified_single_item(
     script_id = _stable_id("SCRIPT_", script)
     content_id = _stable_id("CONTENT_", bundle)
     video_prompt_id = _stable_id("VP_", script.get("video_generation_brief", {}))
+    retrieval_reference = (
+        frozen.get("retrieval_reference_contract")
+        if isinstance(frozen.get("retrieval_reference_contract"), dict)
+        else {}
+    )
+    primary_reference = (
+        retrieval_reference.get("primary_case")
+        if isinstance(retrieval_reference.get("primary_case"), dict)
+        else {}
+    )
     binding_id = ""
     try:
         binding_id = bind_structure_application(
@@ -1270,6 +1330,29 @@ def _execute_simplified_single_item(
                     "hook_knowledge_provenance", {}
                 ),
                 "preferred_presentation": seed.get("creative_direction", {}).get("preferred_presentation"),
+                "retrieval_reference": {
+                    "contract_hash": retrieval_reference.get("contract_hash", ""),
+                    "primary_video_id": primary_reference.get("video_id", ""),
+                    "primary_asset_id": primary_reference.get("asset_id", ""),
+                    "primary_asset_version": primary_reference.get("asset_version", 0),
+                    "primary_eligibility_status": primary_reference.get(
+                        "eligibility_status", ""
+                    ),
+                    "reference_spine_id": (
+                        primary_reference.get("reference_execution_spine", {})
+                        .get("execution_card_id", "")
+                        or primary_reference.get("reference_execution_spine", {})
+                        .get("reference_spine_id", "")
+                        if isinstance(
+                            primary_reference.get("reference_execution_spine"),
+                            dict,
+                        )
+                        else ""
+                    ),
+                    "scene_alignment_status": retrieval_reference.get(
+                        "scene_alignment_status", ""
+                    ),
+                },
             },
         ) or ""
     except Exception:
@@ -1289,6 +1372,44 @@ def _execute_simplified_single_item(
         "structure_binding_id": binding_id,
         "frozen_direction_package_schema_version": frozen.get("schema_version"),
         "creative_seed_id": seed.get("creative_seed_id"),
+        "retrieval_reference_provenance": {
+            "status": retrieval_reference.get("status", "UNAVAILABLE"),
+            "contract_hash": retrieval_reference.get("contract_hash", ""),
+            "primary_video_id": primary_reference.get("video_id", ""),
+            "primary_asset_id": primary_reference.get("asset_id", ""),
+            "primary_asset_version": primary_reference.get("asset_version", 0),
+            "primary_category_match_status": primary_reference.get(
+                "category_match_status", ""
+            ),
+            "primary_eligibility_status": primary_reference.get(
+                "eligibility_status", ""
+            ),
+            "storyboard_observed_carrier": primary_reference.get(
+                "storyboard_observed_carrier", ""
+            ),
+            "cross_run_resolution": retrieval_reference.get(
+                "cross_run_resolution", ""
+            ),
+            "reference_spine_id": (
+                primary_reference.get("reference_execution_spine", {})
+                .get("execution_card_id", "")
+                or primary_reference.get("reference_execution_spine", {})
+                .get("reference_spine_id", "")
+                if isinstance(
+                    primary_reference.get("reference_execution_spine"), dict
+                )
+                else ""
+            ),
+            "scene_alignment_status": retrieval_reference.get(
+                "scene_alignment_status", ""
+            ),
+            "candidate_diagnostics": retrieval_reference.get(
+                "candidate_diagnostics", {}
+            ),
+            "reference_realization": script.get(
+                "reference_realization", {}
+            ),
+        },
         "stage_cache": stage_cache,
         "validation": {
             "visual_script": visual_check,

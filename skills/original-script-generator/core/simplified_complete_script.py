@@ -20,10 +20,10 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 SCRIPT_MODE_LEGACY = "legacy_v2"
 SCRIPT_MODE_SIMPLIFIED = "simplified_v1"
-CREATIVE_SEED_SCHEMA_VERSION = "simplified-creative-seed-v17-wearable-visual"
-VISUAL_SCRIPT_SCHEMA_VERSION = "simplified-complete-visual-script-v8-explicit-display-quantity"
+CREATIVE_SEED_SCHEMA_VERSION = "simplified-creative-seed-v21-structure-visible-clips"
+VISUAL_SCRIPT_SCHEMA_VERSION = "simplified-complete-visual-script-v11-structure-visible-clips"
 VALIDATION_POLICY_VERSION = "simplified-minimum-gates-v5-action-soft-signal"
-VIDEO_BRIEF_SCHEMA_VERSION = "production-video-brief-v8-opening-projection"
+VIDEO_BRIEF_SCHEMA_VERSION = "production-video-brief-v10-structure-visible-clips"
 VIDEO_RENDER_PROFILE = "UGC_NATIVE_V2_MULTICLIP"
 
 CAPTURE_MODE_CREATOR_SELF_SHOT = "CREATOR_SELF_SHOT"
@@ -33,7 +33,78 @@ CAPTURE_MODE_STATIC_PRODUCT_RECORD = "STATIC_PRODUCT_RECORD"
 CAPTURE_RHYTHM_PROFILE_ENV = "ORIGINAL_SCRIPT_CAPTURE_RHYTHM_PROFILE"
 CAPTURE_RHYTHM_MULTICLIP = "NATIVE_MULTI_CLIP_V1"
 CAPTURE_RHYTHM_LEGACY = "LEGACY_ONE_TAKE"
-CAPTURE_RHYTHM_SCHEMA_VERSION = "capture-rhythm-contract-v2-validated-boundaries"
+CAPTURE_RHYTHM_SCHEMA_VERSION = "capture-rhythm-contract-v5-structure-visible-clips"
+SHOT_RICHNESS_POLICY_VERSION = "original-15s-shot-richness-v3-information-gain-review"
+CREATOR_RECORDING_PROFILE_VERSION = "creator-recording-profile-v2-subtractive"
+CREATOR_RECORDING_MODE_DIRECT = "CREATOR_DIRECT_SHARE"
+CREATOR_RECORDING_MODE_OBSERVATION = "LIFE_EVENT_OBSERVATION"
+CAPTURE_PRESET_WORN_DIRECT_SHARE = "WORN_DIRECT_SHARE"
+CAPTURE_PRESET_PRODUCT_FIRST_THEN_WORN = "PRODUCT_FIRST_THEN_WORN"
+
+
+def normalize_creator_capture_preset(profile: Dict[str, Any] | None) -> str:
+    """Map old recording grammars onto the two small current presets."""
+
+    value = _text(
+        (profile or {}).get("capture_preset")
+        or (profile or {}).get("capture_grammar")
+    ).upper()
+    if value in {
+        CAPTURE_PRESET_PRODUCT_FIRST_THEN_WORN,
+        "PRODUCT_FIRST_TO_WEARER_SHARE",
+    }:
+        return CAPTURE_PRESET_PRODUCT_FIRST_THEN_WORN
+    return CAPTURE_PRESET_WORN_DIRECT_SHARE
+
+
+def build_creator_recording_profile(
+    *,
+    top_category: str,
+    product_type: str,
+    content_carrier: str,
+) -> Dict[str, Any]:
+    """Return the small, internal recording-intent contract for stage 0.
+
+    V2 is deliberately narrow: only women's-apparel directions that can be
+    carried by a wearer opt into direct creator sharing.  Other categories keep
+    the existing observation path, so this experiment cannot silently change
+    accessories, hands-only or static-product production.
+    """
+
+    category = _text(top_category).lower()
+    carrier = _text(content_carrier).upper()
+    apparel_scope = category in {"女装", "women apparel", "womenswear"}
+    wearer_scope = carrier in {"WEARER_ACTIVE", "MIXED"}
+    enabled = apparel_scope and wearer_scope
+    if not enabled:
+        return {
+            "schema_version": CREATOR_RECORDING_PROFILE_VERSION,
+            "enabled": False,
+            "recording_mode": CREATOR_RECORDING_MODE_OBSERVATION,
+            "scope_reason": "PHASE1_WOMENSWEAR_WEARER_ONLY",
+        }
+
+    capture_preset = (
+        CAPTURE_PRESET_PRODUCT_FIRST_THEN_WORN
+        if carrier == "MIXED"
+        else CAPTURE_PRESET_WORN_DIRECT_SHARE
+    )
+    return {
+        "schema_version": CREATOR_RECORDING_PROFILE_VERSION,
+        "enabled": True,
+        "recording_mode": CREATOR_RECORDING_MODE_DIRECT,
+        "capture_preset": capture_preset,
+        # Keep the old key as a compatibility projection.  New code consumes
+        # capture_preset; old stored readers still receive one stable string.
+        "capture_grammar": capture_preset,
+        "viewer_relationship": "DIRECT_FRIEND_SHARE",
+        "visible_clip_range": [3, 4],
+        "visible_clip_target": 3,
+        "camera_setup_budget": 2,
+        "life_event_required": False,
+        "physical_continuity": "WEAR_STATE_MONOTONIC",
+        "product_type": _text(product_type),
+    }
 
 
 def _text(value: Any) -> str:
@@ -59,17 +130,142 @@ def _dedupe_text(values: Iterable[Any], limit: int = 8) -> List[str]:
     return result
 
 
+def _expand_list_to_count(values: Iterable[Any], target_count: int) -> List[str]:
+    """Resize ordered guidance without inventing a new semantic function."""
+
+    source = [_text(value) for value in values if _text(value)]
+    if not source or target_count <= 0:
+        return []
+    if target_count == 1:
+        return [source[0]]
+    if len(source) == target_count:
+        return source
+    return [
+        source[round(index * (len(source) - 1) / max(1, target_count - 1))]
+        for index in range(target_count)
+    ]
+
+
+def _capture_scene_is_public(scene_context: Dict[str, Any] | None) -> bool:
+    material = json.dumps(scene_context or {}, ensure_ascii=False).lower()
+    public_terms = (
+        "商场", "展览", "展厅", "画廊", "书店", "大堂", "门厅",
+        "电梯厅", "写字楼", "走廊", "连廊", "街边", "车站", "机场",
+        "休息区", "公共", "mall", "gallery", "bookstore", "lobby",
+        "elevator", "office lobby", "corridor", "public",
+    )
+    private_terms = (
+        "公寓", "卧室", "客厅", "玄关", "家中", "化妆台", "home",
+        "apartment", "bedroom", "living room",
+    )
+    return any(term in material for term in public_terms) and not any(
+        term in material for term in private_terms
+    )
+
+
+def _retrieved_execution_card(
+    retrieval_reference: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    reference = retrieval_reference or {}
+    primary = reference.get("primary_real_case")
+    primary = primary if isinstance(primary, dict) else {}
+    card = primary.get("execution_card") or primary.get("reference_execution_spine")
+    return dict(card) if isinstance(card, dict) else {}
+
+
+def _expand_structure_roles(beats: Iterable[Any], unit_count: int) -> List[str]:
+    """Project the routed macro structure onto visible clips without inventing beats.
+
+    Extra clips repeat an existing proof/use beat; they never add a generic
+    ``USE`` or ``ENDING`` that was absent from the selected structure.  This
+    keeps four visible clips useful without flattening every family into the
+    same four-part grammar.
+    """
+
+    roles = [_text(value).upper() for value in beats if _text(value)]
+    if not roles:
+        roles = ["HOOK", "PROOF"]
+    target = max(1, int(unit_count or 1))
+    if len(roles) > target:
+        # The normal 15-second pool currently routes at most five macro beats.
+        # If an older contract exceeds the visible-clip budget, retain both
+        # ends and record the adjacent middle beats together rather than
+        # silently replacing them with a different function.
+        while len(roles) > target:
+            merge_index = max(1, len(roles) - 2)
+            roles[merge_index - 1:merge_index + 1] = [
+                f"{roles[merge_index - 1]}+{roles[merge_index]}"
+            ]
+        return roles
+    while len(roles) < target:
+        proof_index = next(
+            (index for index, role in enumerate(roles) if "PROOF" in role),
+            -1,
+        )
+        if proof_index < 0:
+            proof_index = next(
+                (index for index, role in enumerate(roles) if "USE" in role),
+                len(roles) - 1,
+            )
+        roles.insert(proof_index + 1, roles[proof_index])
+    return roles
+
+
+def _visible_change_jobs(structure_roles: Iterable[Any]) -> List[str]:
+    """Give each cut one perceptible viewing job, not another action checklist."""
+
+    occurrences: Dict[str, int] = {}
+    jobs: List[str] = []
+    for index, raw_role in enumerate(structure_roles):
+        role = _text(raw_role).upper() or "MOMENT"
+        occurrences[role] = occurrences.get(role, 0) + 1
+        occurrence = occurrences[role]
+        if index == 0 or "HOOK" in role or "ATTENTION" in role:
+            job = (
+                "RESULT_OR_ENTRY_ESTABLISHMENT"
+                if occurrence == 1
+                else f"DISTINCT_HOOK_INFORMATION_{occurrence}"
+            )
+        elif "PROOF" in role:
+            job = (
+                "PRIMARY_PRODUCT_EVIDENCE"
+                if occurrence == 1
+                else f"DISTINCT_PRODUCT_EVIDENCE_{occurrence}"
+            )
+        elif "USE" in role:
+            job = (
+                "OBSERVABLE_ACTION_OR_STATE_PROGRESS"
+                if occurrence == 1
+                else f"DISTINCT_ACTION_OR_STATE_PROGRESS_{occurrence}"
+            )
+        elif "ENDING" in role or "CLOSE" in role:
+            job = "PRODUCT_RETURN_OR_EVENT_RESOLUTION"
+        elif "CONTEXT" in role or "SCENE" in role:
+            job = (
+                "PRODUCT_IN_LIFE_CONTEXT"
+                if occurrence == 1
+                else f"DISTINCT_LIFE_CONTEXT_{occurrence}"
+            )
+        else:
+            job = f"DISTINCT_RELATION_OR_STATE_{index + 1}"
+        jobs.append(job)
+    return jobs
+
+
 def build_capture_rhythm_contract(
     *,
     capture_mode: str,
     macro_structure: Iterable[Any],
+    scene_context: Dict[str, Any] | None = None,
+    retrieval_reference: Dict[str, Any] | None = None,
+    creator_recording_profile: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Compile one small public capture contract without another model call.
 
-    Structure beats keep narrative authority.  This contract only says how
-    many separately recorded phone clips should carry those beats.  It keeps
-    person/product/scene continuity while no longer equating authenticity with
-    one fixed camera position.
+    Structure beats keep narrative authority.  This contract separately owns
+    the number of edited clips and the number of physically plausible phone
+    setups.  A public scene can therefore keep one fixed phone position plus a
+    handheld cutaway without collapsing the finished video back to two clips.
     """
 
     configured = _text(os.environ.get(CAPTURE_RHYTHM_PROFILE_ENV)).upper()
@@ -79,22 +275,101 @@ def build_capture_rhythm_contract(
         profile = CAPTURE_RHYTHM_MULTICLIP
     mode = _text(capture_mode).upper() or CAPTURE_MODE_CREATOR_SELF_SHOT
     beats = [_text(value).upper() for value in macro_structure if _text(value)]
+    execution_card = _retrieved_execution_card(retrieval_reference)
+    recording_profile = (
+        dict(creator_recording_profile)
+        if isinstance(creator_recording_profile, dict)
+        else {}
+    )
+    direct_share = bool(recording_profile.get("enabled")) and _text(
+        recording_profile.get("recording_mode")
+    ).upper() == CREATOR_RECORDING_MODE_DIRECT
+    public_scene = _capture_scene_is_public(scene_context)
     if profile == CAPTURE_RHYTHM_LEGACY:
         target_units = 1
+        minimum_units = 1
+        preferred_units = 1
+        maximum_units = 1
         grammar = "CONTINUOUS_SINGLE_PHONE_VIEW"
     else:
-        target_units = 3 if mode == CAPTURE_MODE_CREATOR_SELF_SHOT else 2
-        if any(value in {"USE", "USE_PROCESS", "SCENE_USE"} for value in beats):
-            grammar = "CONTEXT_TO_USE_TO_RESULT"
-        elif any("DETAIL" in value for value in beats):
-            grammar = "DETAIL_TO_RELATION_TO_CONTEXT"
+        # Three clips are sufficient when each one contributes real content;
+        # a fourth is retained only when the blueprint contains another useful
+        # proof/use relation.  Shot count is not a quota for filler endings.
+        minimum_units = 3
+        if direct_share:
+            preferred_units = 3
+            maximum_units = 4
         else:
-            grammar = "OPENING_TO_PROOF_TO_CONTEXT"
-    return {
+            # Keep the established generic/category paths unchanged.  The
+            # 3-or-4 relaxation belongs only to the new women's-apparel direct
+            # sharing path and must not flatten existing five-beat structures.
+            preferred_units = (
+                4 if mode == CAPTURE_MODE_CREATOR_SELF_SHOT else 3
+            )
+            maximum_units = 5 if mode == CAPTURE_MODE_CREATOR_SELF_SHOT else 4
+        # The routed macro structure may legitimately contain more than the
+        # default four beats.  Keep it when it still fits the five-clip
+        # 15-second budget; shorter structures gain extra clips by repeating
+        # an existing proof/use function, not by inventing a new beat.
+        target_units = min(
+            maximum_units,
+            max(preferred_units, min(len(beats), maximum_units)),
+        )
+        if direct_share:
+            planned_direct_clips = int(
+                recording_profile.get("planned_visible_clip_count") or 0
+            )
+            if 3 <= planned_direct_clips <= 5:
+                target_units = planned_direct_clips
+                preferred_units = planned_direct_clips
+        grammar = (
+            normalize_creator_capture_preset(recording_profile)
+            if direct_share
+            else "ROUTED_STRUCTURE_VISIBLE_CLIPS"
+        )
+    setup_mode = (
+        "CONTINUOUS_SINGLE_PHONE_VIEW"
+        if profile == CAPTURE_RHYTHM_LEGACY
+        else "ONE_PUBLIC_PHONE_POSITION_PLUS_HANDHELD_CUTAWAY"
+        if mode == CAPTURE_MODE_CREATOR_SELF_SHOT and public_scene
+        else "FIXED_PHONE_MULTI_CLIP"
+        if mode == CAPTURE_MODE_CREATOR_SELF_SHOT
+        else "PRODUCT_RECORDING_MULTI_CLIP"
+    )
+    camera_setup_count = (
+        1
+        if profile == CAPTURE_RHYTHM_LEGACY
+        else 2
+        if public_scene or mode != CAPTURE_MODE_CREATOR_SELF_SHOT
+        else 2
+    )
+    structure_unit_roles = _expand_structure_roles(beats, target_units)
+    # Direct-share clips already carry concrete model-authored visuals.  Do
+    # not add a second per-cut "new information" job on top of them.
+    visible_change_jobs = (
+        [] if direct_share else _visible_change_jobs(structure_unit_roles)
+    )
+    observed_shot_count = int(execution_card.get("shot_count") or 0)
+    observed_parts = [
+        _text(value).upper()
+        for value in execution_card.get("available_parts") or []
+        if _text(value)
+    ]
+    real_execution_supported = bool(
+        observed_shot_count >= 3 and observed_parts
+    )
+    contract = {
         "schema_version": CAPTURE_RHYTHM_SCHEMA_VERSION,
         "profile": profile,
         "capture_unit_count": target_units,
         "capture_grammar": grammar,
+        "capture_emphasis": (
+            "USE_OR_STATE_PROGRESS"
+            if any(value in {"USE", "USE_PROCESS", "SCENE_USE"} for value in beats)
+            else "DETAIL_RELATION"
+            if any("DETAIL" in value for value in beats)
+            else "RESULT_AND_EVIDENCE"
+        ),
         "edit_style": (
             "CONTINUOUS_RECORDING"
             if profile == CAPTURE_RHYTHM_LEGACY
@@ -111,6 +386,174 @@ def build_capture_rhythm_contract(
         "commercial_camera_forbidden": True,
         "hard_required": False,
         "fallback_policy": "DETERMINISTIC_GROUP_NO_RETRY",
+        "capture_setup_mode": setup_mode,
+        "camera_setup_count": camera_setup_count,
+        "macro_structure": beats,
+        "structure_unit_roles": structure_unit_roles,
+        "observable_change_jobs": visible_change_jobs,
+        "structure_authority": (
+            "ROUTED_MACRO_STRUCTURE_OWNS_VIEWING_ORDER; "
+            "CAPTURE_EXECUTION_MAY_CHANGE_FRAMING_BUT_MUST_NOT_ADD_OR_REMOVE_BEATS"
+        ),
+        "shot_richness_contract": {
+            "policy_version": SHOT_RICHNESS_POLICY_VERSION,
+            "minimum_visible_clips": minimum_units,
+            "preferred_visible_clips": preferred_units,
+            "maximum_visible_clips": maximum_units,
+            "planned_visible_clips": target_units,
+            "camera_setup_budget": camera_setup_count,
+            "required_function_coverage": list(
+                dict.fromkeys(structure_unit_roles)
+            ),
+            "single_take_allowed": profile == CAPTURE_RHYTHM_LEGACY,
+            "difference_policy": (
+                "NO_EXACT_DUPLICATE;LATE_INFORMATION_GAIN_SOFT_REVIEW"
+                if direct_share else "ONE_VISIBLE_DIFFERENCE_PER_CUT"
+            ),
+        },
+        "derivation_source": (
+            "REAL_EXECUTION_CARD"
+            if real_execution_supported else "GENERIC_FALLBACK"
+        ),
+    }
+    if recording_profile:
+        contract["creator_recording_profile"] = recording_profile
+    if direct_share:
+        contract["capture_intent"] = (
+            "同一创作者在同一地点用自己的手机分段直接分享商品。"
+        )
+        contract["physical_continuity"] = (
+            "人物完成穿戴后保持穿戴；后续细节在身上展示，不重新脱下或平铺。"
+        )
+    if (
+        setup_mode == "ONE_PUBLIC_PHONE_POSITION_PLUS_HANDHELD_CUTAWAY"
+        and not direct_share
+    ):
+        middle_guidance = []
+        for middle_index in range(max(0, target_units - 2)):
+            middle_guidance.append(
+                "由创作者手持同一部手机补录商品、穿着或人物关系近景"
+                if middle_index == max(0, target_units - 3)
+                else "沿用同一固定手机布置，换一个明确内容时刻录制不同的证明或使用关系"
+            )
+        contract["framing_guidance_by_unit"] = [
+            "在一个自然可解释的位置固定手机，独立录制商品结果或核心分享开场",
+            *middle_guidance,
+            "回到固定位置或手持关系中的当前结构末段，独立录制而不擅自补结束Beat",
+        ][:target_units]
+    if execution_card:
+        available_parts = observed_parts
+        contract["retrieved_execution_shape"] = {
+            "execution_card_id": _text(
+                execution_card.get("execution_card_id")
+                or execution_card.get("reference_spine_id")
+            ),
+            "observed_shot_count": observed_shot_count,
+            "available_parts": available_parts,
+            "evidence_status": (
+                "SUPPORTED" if real_execution_supported else "INSUFFICIENT"
+            ),
+            "authority_boundary": (
+                "只借鉴真实案例已有的拍摄段数量与功能顺序；"
+                "不复制来源商品、人物、穿搭或宣称。"
+            ),
+        }
+        # The real case contributes an execution example, never a replacement
+        # structure.  Keeping this sequence separate prevents a reference card
+        # with an ending from adding ENDING to a routed USE_PROCESS family.
+        contract["reference_function_sequence"] = (
+            list(available_parts) if real_execution_supported else []
+        )
+    return contract
+
+
+def review_compiled_capture_unit_information_gain(
+    capture_units: Iterable[Any],
+    creator_recording_profile: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    """Review the final compiled clips, not an upstream creative promise.
+
+    This diagnostic intentionally runs after deterministic grouping and any
+    physical-state projection. It is non-blocking and cannot trigger a model
+    retry or rewrite; its only job is to expose when late direct-share clips
+    have collapsed back into the same stationary recording relationship.
+    """
+
+    profile = creator_recording_profile or {}
+    preset = normalize_creator_capture_preset(profile)
+    if not profile.get("enabled") or preset != CAPTURE_PRESET_WORN_DIRECT_SHARE:
+        return {
+            "policy_version": "compiled-information-gain-review-v1",
+            "source": "COMPILED_CAPTURE_UNITS",
+            "status": "NOT_APPLICABLE",
+            "is_blocking": False,
+            "low_information_gain_pairs": [],
+        }
+    units = [item for item in capture_units if isinstance(item, dict)]
+
+    def relation_class(unit: Dict[str, Any]) -> str:
+        material = unit.get("visible_signature_material")
+        material = material if isinstance(material, dict) else {}
+        text = " ".join(
+            _text(value)
+            for value in (
+                material.get("visual"),
+                material.get("action"),
+                material.get("framing"),
+                unit.get("framing_guidance"),
+            )
+        )
+        if re.search(r"镜面|镜子", text):
+            return "MIRROR"
+        if re.search(r"坐下|坐在|靠坐|座位", text):
+            return "SEATED"
+        if re.search(
+            r"(?:人物|她|创作者|模特).{0,12}(?:走向|走到|走入|走进|行走|步行|穿过|进入|离开)|"
+            r"(?:走向|走到|走入|走进|行走|步行|穿过).{0,12}(?:门|窗|座位|走廊|场景|镜头|电梯)",
+            text,
+        ):
+            return "MOVING_IN_SCENE"
+        if re.search(r"手持自拍|自拍手机|拿着手机|举着手机", text):
+            return "HANDHELD_SELFIE"
+        if re.search(r"固定手机|固定机位|正对手机|面对手机", text):
+            return "FIXED_PHONE_SHARE"
+        if re.search(r"站立|站着|站定|自然站姿|原地", text):
+            return "STANDING_SHARE"
+        return "UNSPECIFIED_STATIONARY"
+
+    low_pairs: List[Dict[str, Any]] = []
+    stationary_relations = {
+        "FIXED_PHONE_SHARE",
+        "STANDING_SHARE",
+        "UNSPECIFIED_STATIONARY",
+    }
+    # Opening -> proof may naturally keep one setup. The information-gain
+    # promise concerns clip 2 -> clip 3 and any later transition.
+    for previous_index in range(1, max(1, len(units) - 1)):
+        current_index = previous_index + 1
+        if current_index >= len(units):
+            break
+        previous_relation = relation_class(units[previous_index])
+        current_relation = relation_class(units[current_index])
+        if (
+            previous_relation in stationary_relations
+            and current_relation in stationary_relations
+        ):
+            low_pairs.append(
+                {
+                    "capture_unit_pair": [previous_index + 1, current_index + 1],
+                    "reason": "SAME_STATIONARY_SHARE_RELATION_IN_FINAL_UNITS",
+                    "previous_relation": previous_relation,
+                    "current_relation": current_relation,
+                }
+            )
+    return {
+        "policy_version": "compiled-information-gain-review-v1",
+        "source": "COMPILED_CAPTURE_UNITS",
+        "status": "LOW_INFORMATION_GAIN" if low_pairs else "SUFFICIENT",
+        "is_blocking": False,
+        "low_information_gain_pairs": low_pairs,
+        "note": "最终拍摄单元诊断；不触发阻断、重试、修订或新增模型调用。",
     }
 
 
@@ -122,7 +565,8 @@ def compile_capture_units(
 
     The model may suggest ids, but deterministic grouping prevents prompt drift
     from sending a script back into a repair loop.  Four-to-six structural
-    passages become two or three actual phone recordings.
+    passages become three-to-five visible clips while camera setup count stays
+    a separate feasibility budget.
     """
 
     shots = [dict(value) for value in storyboard if isinstance(value, dict)]
@@ -191,16 +635,44 @@ def compile_capture_units(
         first_size = max(1, len(shots) // 2)
         group_sizes = [first_size, len(shots) - first_size]
     else:
-        # Keep the opening short, then balance proof/use and context/ending.
-        remaining = len(shots) - 1
-        middle_size = (remaining + 1) // 2
-        group_sizes = [1, middle_size, remaining - middle_size]
-        group_sizes = [value for value in group_sizes if value > 0]
+        # Keep opening and ending independently visible.  Only the middle
+        # structural passages are balanced; this prevents a five/six-shot
+        # script from being swallowed into two long passages.
+        if unit_count == len(shots):
+            group_sizes = [1] * unit_count
+        elif unit_count >= 3 and len(shots) >= unit_count:
+            middle_shots = len(shots) - 2
+            middle_units = unit_count - 2
+            base_size, extra = divmod(middle_shots, middle_units)
+            middle_sizes = [
+                base_size + (1 if index < extra else 0)
+                for index in range(middle_units)
+            ]
+            group_sizes = [1, *middle_sizes, 1]
+        else:
+            base_size, extra = divmod(len(shots), unit_count)
+            group_sizes = [
+                base_size + (1 if index < extra else 0)
+                for index in range(unit_count)
+            ]
 
     roles_by_count = {
         1: ["CONTINUOUS_SHARE"],
         2: ["OPENING", "PROOF_AND_CONTEXT"],
         3: ["OPENING", "CORE_PROOF_OR_USE", "CONTEXT_END"],
+        4: [
+            "OPENING",
+            "CORE_PROOF",
+            "USE_OR_RELATION",
+            "CONTEXT_OR_PRODUCT_RETURN",
+        ],
+        5: [
+            "OPENING",
+            "PROOF_1",
+            "PROOF_OR_USE_2",
+            "CONTEXT_RELATION",
+            "PRODUCT_RETURN",
+        ],
     }
     framing_by_count = {
         1: ["沿用同一普通手机关系"],
@@ -213,19 +685,99 @@ def compile_capture_units(
             "同一地点重新放置手机，录制商品证明或使用关系，景别与上一段有可感知差异",
             "同一地点补录人物、商品与生活场景关系，完成自然收束",
         ],
+        4: [
+            "独立录制抓人结果景或商品主体景",
+            "录制与开场有明确景别差异的商品证明或可见细节",
+            "录制人物、商品与使用或穿搭关系的自然变化",
+            "独立补录商品结果或生活关系收束，不退回远景弱化商品",
+        ],
+        5: [
+            "独立录制抓人结果景或商品主体景",
+            "补录第一处核心证明，景别与开场不同",
+            "补录第二处兼容证明或使用关系，不增加动作清单",
+            "录制人物、商品与生活场景的自然关系",
+            "独立回到商品清晰结果，自然完成收束",
+        ],
     }
     roles = roles_by_count[len(group_sizes)]
     framing = framing_by_count[len(group_sizes)]
+    structure_authoritative = bool(
+        contract.get("structure_unit_roles") or contract.get("macro_structure")
+    )
+    structure_roles = [
+        _text(value).upper()
+        for value in contract.get("structure_unit_roles") or []
+        if _text(value)
+    ]
+    if len(structure_roles) != len(group_sizes) and structure_authoritative:
+        structure_roles = _expand_structure_roles(
+            contract.get("macro_structure") or [],
+            len(group_sizes),
+        )
+    change_jobs = [
+        _text(value).upper()
+        for value in contract.get("observable_change_jobs") or []
+        if _text(value)
+    ]
+    recording_profile = (
+        contract.get("creator_recording_profile")
+        if isinstance(contract.get("creator_recording_profile"), dict)
+        else {}
+    )
+    direct_share = bool(recording_profile.get("enabled")) and _text(
+        recording_profile.get("recording_mode")
+    ).upper() == CREATOR_RECORDING_MODE_DIRECT
+    if not direct_share and len(change_jobs) != len(group_sizes) and structure_roles:
+        change_jobs = _visible_change_jobs(structure_roles)
+    if not direct_share and len(change_jobs) != len(group_sizes):
+        change_jobs = [f"DISTINCT_VISIBLE_INFORMATION_{index + 1}" for index in range(len(group_sizes))]
+    frozen_roles = [
+        _text(value).upper()
+        for value in contract.get("unit_roles") or []
+        if _text(value)
+    ]
+    frozen_framing = [
+        _text(value)
+        for value in contract.get("framing_guidance_by_unit") or []
+        if _text(value)
+    ]
+    # Category execution roles may own the physical display relation (for
+    # example PRODUCT_REACQUISITION for a hair accessory), while
+    # structure_roles independently retain the routed viewing order.
+    if len(frozen_roles) == len(group_sizes):
+        roles = frozen_roles
+    elif len(structure_roles) == len(group_sizes):
+        roles = structure_roles
+    if len(frozen_framing) == len(group_sizes):
+        framing = frozen_framing
     units: List[Dict[str, Any]] = []
     annotated: List[Dict[str, Any]] = []
     cursor = 0
     for unit_index, size in enumerate(group_sizes, 1):
         unit_id = f"CU_{unit_index:02d}"
         group = shots[cursor:cursor + size]
+        unit_structure_role = (
+            structure_roles[unit_index - 1]
+            if len(structure_roles) == len(group_sizes)
+            else _text(group[0].get("narrative_role")).upper()
+            if group
+            else roles[unit_index - 1]
+        )
         shot_numbers = []
         narrative_roles = []
         for local_index, shot in enumerate(group):
             item = dict(shot)
+            source_narrative_role = _text(item.get("narrative_role")).upper()
+            structure_role = unit_structure_role or source_narrative_role or roles[unit_index - 1]
+            if structure_authoritative:
+                if source_narrative_role and source_narrative_role != structure_role:
+                    item["source_narrative_role"] = source_narrative_role
+                item["narrative_role"] = structure_role
+            item["structure_role"] = structure_role
+            if len(change_jobs) == len(group_sizes):
+                item["observable_change_job"] = change_jobs[unit_index - 1]
+            else:
+                item.pop("observable_change_job", None)
             item["capture_unit_id"] = unit_id
             item["starts_new_take"] = local_index == 0
             item["edit_before"] = (
@@ -241,19 +793,114 @@ def compile_capture_units(
             role = _text(item.get("narrative_role")).upper()
             if role and role not in narrative_roles:
                 narrative_roles.append(role)
+        visible_signature_material = {
+            "framing": _dedupe_text(
+                item.get("framing") or item.get("style_note") for item in group
+            ),
+            "carrier": _dedupe_text(item.get("carrier_mode") for item in group),
+            "visual": _dedupe_text(
+                item.get("shot_content") or item.get("visual_content") for item in group
+            ),
+            "action": _dedupe_text(
+                item.get("observable_action") or item.get("character_action") for item in group
+            ),
+            "proof_job": (
+                change_jobs[unit_index - 1]
+                if len(change_jobs) == len(group_sizes)
+                else ""
+            ),
+        }
         units.append(
             {
                 "capture_unit_id": unit_id,
                 "order": unit_index,
                 "shot_numbers": shot_numbers,
                 "narrative_roles": narrative_roles,
+                "structure_role": unit_structure_role,
                 "unit_role": roles[unit_index - 1],
+                "observable_change_job": (
+                    change_jobs[unit_index - 1]
+                    if len(change_jobs) == len(group_sizes)
+                    else ""
+                ),
                 "framing_guidance": framing[unit_index - 1],
                 "edit_before": "START" if unit_index == 1 else "DIRECT_CUT",
                 "grouping_source": grouping_source,
+                "visible_signature": _stable_id(
+                    "VSG_", visible_signature_material
+                ),
+                "visible_signature_material": visible_signature_material,
             }
         )
         cursor += size
+    final_information_gain_review = review_compiled_capture_unit_information_gain(
+        units,
+        recording_profile,
+    )
+    contract["final_information_gain_review"] = final_information_gain_review
+    richness = dict(contract.get("shot_richness_contract") or {})
+    if richness:
+        planned = int(
+            richness.get("planned_visible_clips")
+            or contract.get("capture_unit_count")
+            or len(units)
+        )
+        minimum = int(richness.get("minimum_visible_clips") or 1)
+        richness["compiled_visible_clips"] = len(units)
+        richness["storyboard_segment_count"] = len(shots)
+        richness["maximum_storyboard_segments_per_clip"] = max(
+            (len(unit.get("shot_numbers") or []) for unit in units),
+            default=0,
+        )
+        richness["compiled_function_sequence"] = [
+            _text(unit.get("structure_role")).upper() for unit in units
+        ]
+        collapsed_compiled = []
+        for role in richness["compiled_function_sequence"]:
+            for part in role.split("+"):
+                if not collapsed_compiled or collapsed_compiled[-1] != part:
+                    collapsed_compiled.append(part)
+        routed_macro = [
+            _text(value).upper()
+            for value in contract.get("macro_structure") or []
+            if _text(value)
+        ]
+        richness["structure_preservation_status"] = (
+            "PRESERVED"
+            if not routed_macro or collapsed_compiled == routed_macro
+            else "MISMATCH"
+        )
+        richness["observable_change_jobs"] = [
+            _text(unit.get("observable_change_job")).upper() for unit in units
+        ]
+        signature_count = len(
+            {
+                _text(unit.get("visible_signature"))
+                for unit in units
+                if _text(unit.get("visible_signature"))
+            }
+        )
+        richness["distinct_visible_signature_count"] = signature_count
+        richness["visible_signature_status"] = (
+            "DISTINCT"
+            if signature_count == len(units)
+            else "DUPLICATE_CLIP_DESIGN_WARNING"
+        )
+        clip_count_preserved = (
+            len(units) == min(planned, len(shots)) and len(units) >= minimum
+        )
+        richness["preservation_status"] = (
+            "PRESERVED"
+            if clip_count_preserved
+            and richness["structure_preservation_status"] == "PRESERVED"
+            else "STRUCTURE_MISMATCH"
+            if clip_count_preserved
+            else "DEGRADED_STORYBOARD_TOO_SHORT"
+        )
+        richness["final_information_gain_review"] = dict(
+            final_information_gain_review
+        )
+        contract["shot_richness_contract"] = richness
     return annotated, units
 
 
@@ -824,16 +1471,41 @@ def _compile_action_design(
         digest = hashlib.sha256(
             json.dumps(material, ensure_ascii=False, sort_keys=True).encode("utf-8")
         ).digest()
-        selected = dict(pool[digest[0] % len(pool)])
+        continuous_motion_pool = (
+            len(pool) > 1
+            and all(
+                _text(item.get("motion_scope")).upper()
+                == "ONE_CONTINUOUS_CHANGE"
+                for item in pool
+            )
+        )
+        if continuous_motion_pool and _text(creative_contract.get("contract_id")):
+            # The direction contract is already frozen and unique per item.
+            # Use a separate digest byte so small-accessory motion families
+            # rotate across directions without a state table or quota rule.
+            rotation_digest = hashlib.sha256(
+                _text(creative_contract.get("contract_id")).encode("utf-8")
+            ).digest()
+            selected = dict(pool[rotation_digest[1] % len(pool)])
+        else:
+            selected = dict(pool[digest[0] % len(pool)])
 
     if selected:
         supporting = "→".join(grammar)
+        selected_schema_version = (
+            _text(selected.get("schema_version"))
+            or "action-design-v1"
+        )
         selected.update(
             {
-                "schema_version": "action-design-v1",
+                "schema_version": selected_schema_version,
                 "supporting_scene_action": supporting,
                 "source": "CATEGORY_CAPABILITY",
-                "selection_policy": "action-variety-v1",
+                "selection_policy": (
+                    "action-variety-v2-direction-rotation"
+                    if continuous_motion_pool
+                    else "action-variety-v1"
+                ),
                 "hard_required": False,
             }
         )
@@ -886,7 +1558,9 @@ def build_simplified_creative_seed(
     relationship_device: str = "",
     product_type: str = "",
     top_category: str = "",
+    retrieval_reference_contract: Dict[str, Any] | None = None,
     category_execution_extension: Dict[str, Any] | None = None,
+    creator_recording_profile: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Freeze only the information needed by the simplified generator."""
 
@@ -1124,6 +1798,9 @@ def build_simplified_creative_seed(
             "approved_claims": claim_atoms,
             "value_proposition": safe_value,
             "selling_argument": safe_argument,
+            "selling_argument_lineage": dict(
+                content_bundle.get("selling_argument_lineage") or {}
+            ),
             "display_quantity_contract": dict(
                 safe_argument.get("display_quantity_contract") or {}
             ),
@@ -1188,6 +1865,13 @@ def build_simplified_creative_seed(
         },
         "optional_visual_inspiration": optional_reference,
     }
+    from core.multidim_reference_adapter import (
+        model_visible_reference_projection,
+    )
+
+    seed["retrieval_reference"] = model_visible_reference_projection(
+        retrieval_reference_contract
+    )
     action_design = _compile_action_design(
         creative_contract=creative_contract,
         structure_contract=structure_contract,
@@ -1211,7 +1895,79 @@ def build_simplified_creative_seed(
     capture_rhythm_contract = build_capture_rhythm_contract(
         capture_mode=capture_mode,
         macro_structure=seed["creative_direction"].get("macro_structure") or [],
+        scene_context={
+            "preferred_scene_motif": creative_contract.get("scene_motif"),
+            "scene_reference": scene_reference,
+        },
+        retrieval_reference=seed.get("retrieval_reference")
+        if isinstance(seed.get("retrieval_reference"), dict) else {},
+        creator_recording_profile=creator_recording_profile,
     )
+    retrieved_dimensions = (
+        seed.get("retrieval_reference", {})
+        .get("primary_real_case", {})
+        .get("dimension_references", {})
+    )
+    retrieved_rhythm = (
+        retrieved_dimensions.get("rhythm")
+        if isinstance(retrieved_dimensions, dict)
+        and isinstance(retrieved_dimensions.get("rhythm"), dict)
+        else {}
+    )
+    if retrieved_rhythm and not bool(retrieved_rhythm.get("is_generic_rhythm")):
+        capture_rhythm_contract["retrieved_rhythm_reference"] = {
+            "production_family_id": _text(
+                retrieved_rhythm.get("production_family_id")
+            ),
+            "production_family_name": _text(
+                retrieved_rhythm.get("production_family_name")
+            ),
+            "production_brief": _text(
+                retrieved_rhythm.get("production_brief")
+            ),
+            "authority_boundary": (
+                "只控制既有结构内的拍摄单元速度和切换感觉，"
+                "不得改变 macro_structure、商品动作或口播。"
+            ),
+        }
+    prominence = (
+        carrier_specific_execution.get("product_prominence_contract")
+        if isinstance(
+            carrier_specific_execution.get("product_prominence_contract"), dict
+        )
+        else {}
+    )
+    if (
+        _text(prominence.get("sequence_policy")).upper()
+        == "PRODUCT_OPENING_TO_MOTION_TO_PRODUCT_RETURN"
+        and int(capture_rhythm_contract.get("capture_unit_count") or 0) >= 3
+    ):
+        terminal = (
+            prominence.get("terminal_visibility")
+            if isinstance(prominence.get("terminal_visibility"), dict)
+            else {}
+        )
+        unit_count = int(capture_rhythm_contract.get("capture_unit_count") or 3)
+        capture_rhythm_contract.update({
+            "capture_grammar": "PRODUCT_OPENING_TO_MOTION_TO_PRODUCT_RETURN",
+            "unit_roles": [
+                "PRODUCT_RESULT_CLOSE",
+                *(["NATURAL_MOTION_RELATION"] * (unit_count - 2)),
+                "PRODUCT_REACQUISITION",
+            ],
+            "framing_guidance_by_unit": [
+                "独立录制商品已经佩戴完成的结果近景，让小商品第一眼清楚可辨",
+                *(
+                    [
+                        "同一地点重新放置手机或使用同一布置的另一时刻，录制上半身、侧后方或商品关系变化，不用重复摆头支撑整段"
+                    ]
+                    * (unit_count - 2)
+                ),
+                _text(terminal.get("ending_guidance"))
+                or "同一地点补录商品结果近景，自然完成收束",
+            ],
+            "category_projection": "SMALL_ACCESSORY_MOTION_RETURN_V2",
+        })
     seed["capture_rhythm_contract"] = capture_rhythm_contract
     seed["creative_direction"]["capture_rhythm_profile"] = _text(
         capture_rhythm_contract.get("profile")
@@ -1340,13 +2096,18 @@ def build_simplified_script_prompt(
                 "starts_new_take": True,
                 "product_anchors_visible": ["来自授权锚点"],
                 "supported_claim_keys": ["当前镜头实际支持的claim_key"],
-                "narrative_role": "HOOK|PROOF|USE|TRANSITION|ENDING",
+                "narrative_role": "必须按capture_rhythm_contract.structure_unit_roles的顺序填写，不得自行补USE或ENDING",
             }
         ],
         "voiceover_context": {
             "viewer_relationship": "与观众的关系",
             "speaking_intent": "为什么此刻开口",
             "desired_tone": "自然口语语气",
+        },
+        "reference_realization": {
+            "status": "APPLIED|PARTIAL|NOT_USED|UNAVAILABLE",
+            "adopted_parts": ["opening|proof|use_process|ending"],
+            "adaptation_notes": "简要说明借鉴了哪些镜头功能；没有使用则说明不兼容点",
         },
     }
     category_extension = (
@@ -1391,35 +2152,40 @@ def build_simplified_script_prompt(
             "本条使用旧版连续录制关系：保持一个主要手机视角和一个连续时刻。"
         )
     else:
+        setup_mode = _text(capture_contract.get("capture_setup_mode")).upper()
+        setup_guidance = (
+            "公共场景使用一至两个自然可解释的手机位置，不要求固定、手持或镜面比例；"
+            "不要反复架设和搬动无人值守手机。"
+            if setup_mode == "ONE_PUBLIC_PHONE_POSITION_PLUS_HANDHELD_CUTAWAY"
+            else "不同片段可以在同一小片区域自然补录。"
+        )
         capture_guidance = (
             f"本条使用{_text(capture_contract.get('profile'))}：同一创作者或商品、同一地点、"
             f"同一时刻和同一部手机，分别录制{int(capture_contract.get('capture_unit_count') or 2)}段简短素材，"
-            "片段间使用普通直接剪切或自然跳剪。不同片段可以在同一小片区域重新放置手机、改变人物与手机距离，"
-            "或补录商品细节；人物、商品、穿搭、光线和生活状态必须连续。景别变化来自下一段真实录制，"
-            "不得只靠数字裁切、连续变焦或人物在一个长镜头里反复走近走远来假装切镜。"
-            "这仍是创作者自己完成的手机分享，不得扩写成摄影团队、第三人跟拍、正反打、稳定器运镜、跨房间调度、商业景深或广告定格。"
+            f"片段间普通直接剪切。{setup_guidance}"
+            "人物、商品、穿搭、光线和生活状态保持连续；不是同一素材的数字裁切。"
         )
     model_visible_seed = _model_visible_creative_seed(seed)
     return f"""你是使用手机创作内容的短视频分享者与完整脚本作者。请为{target_country}市场生成一条约{duration_seconds:g}秒的原创商品短视频视觉脚本。
 
-这不是分层规划题。请一次写出能够直接拍摄/生成的完整内容：人物、外形、穿搭、场景、自然状态和4至6个结构时间段必须同时成立。storyboard 继续表达结构内容段，但必须按 capture_rhythm_contract 归并成2至3个真实拍摄单元；同一 capture_unit_id 内连续录制，不同 capture_unit_id 之间是直接剪切后的另一段手机素材。
+这不是分层规划题。请一次写出能够直接拍摄/生成的完整内容：人物、外形、穿搭、场景、自然状态和4至6个结构时间段必须同时成立。storyboard 继续表达结构内容段，并按 capture_rhythm_contract 编译成3至5个真实可见剪辑片段；成片片段数与手机布置数是两个概念，同一自然手机布置可以录制不同内容时刻。相同 capture_unit_id 内连续录制，不同 capture_unit_id 之间是直接剪切后的另一段手机素材。
 
 拍摄关系：
 {capture_guidance}{category_guidance_block}
 核心原则：
 1. 商品事实只能来自 product_truth；不知道的内容不补写，绝不虚构功效、材质、颜色或使用结果。
 2. product_truth.content_mode=SELLING_ARGUMENT 时，只有非空的 content_mainline / selling_argument.creative_core_value 可以作为视觉创作语义；它是全片购买理由，但不要求人物动作或场景制造这个理由。若两者为空，表示原始运营卖点措辞仅供中央口播使用：不得从卖点推断人物出身、职业、地域、经济身份或特殊场景，只按 creative_direction、商品锚点和普通生活状态完成画面。approved_claims 只用作画面证据，禁止把第一个扣子、口袋或袖型细节改写成全片主题。content_mode=FACTUAL_OBSERVATION 时围绕可见事实做观察，不伪造用户痛点或产品收益。
-3. creative_direction.macro_structure 只控制观看顺序，不规定统一镜头模板；capture_rhythm_contract 只控制真实拍摄单元数量与剪辑关系，不改变Beat、承载、动作主线或商品事实。requested_hook_id 只描述口播意图，本步骤不写{target_language}口播。
+3. creative_direction.macro_structure 是观看顺序权威，不规定统一镜头模板；capture_rhythm_contract.structure_unit_roles 是它展开到可见片段后的唯一Beat顺序。每个capture_unit按同序角色填写；为了增加片段可以重复已有PROOF/USE，但禁止补入原结构没有的USE、ENDING或其他Beat。类目执行的商品近景/动态/回收关系只改变拍摄方式，不得覆盖structure_unit_roles。requested_hook_id 只描述口播意图，本步骤不写{target_language}口播。
 4. presentation_mode 必须等于 preferred_presentation，capture_mode 必须等于 creative_direction.capture_mode。PERSON_ON_CAMERA 必须写完整人物、穿搭、场景和自然状态；CREATOR_SELF_SHOT 中人物是正在对自己的手机镜头说话的创作者，不是被摄影团队拍摄的沉默模特。STATIC_PRODUCT 不虚构出镜人物或商品情绪；HANDS_ONLY 只允许手部进入画面。
-5. 默认采用观察式画面，但 action_design 是本条已经选定的动作主线，围绕它完成“开始状态→一个核心商品互动或生活动作→完成状态”。动作不必承担卖点因果，也不要求每镜变化；同一动作可以跨两个内容段自然完成。supporting_scene_action 只作前后衔接，不得与核心动作叠成清单。不要为了证明卖点制造遮挡后揭示、偶然吹开、通知弹出、道具机关或“恰好发现”等剧情。
+5. action_design只在类目确实需要商品互动时提供一次简单动作；没有必要时人物可以只是面对自己的手机分享。不同片段不要求分别增加动作、情绪或生活事件，只要不是同一素材重复裁切即可。不要制造遮挡后揭示、通知弹出、道具机关或“恰好发现”等剧情。
 6. 商品锚点与 claim_key 必须逐字从输入中选择。approved_claims 是可选事实池，不是拍摄清单：只选择当前结构自然需要的少量事实，未选事实无需安排镜头。被写入 selling_points_used 或 supported_claim_keys 的事实必须来自池内；同一事实只需全片有一处自然可见，不要求逐项触摸、指向或分配独立动作。本步骤不得决定中央口播最终选择哪些事实，也不得按口播逐句设计镜头。
 7. 人物和场景要具体但克制，情绪是自然的小变化，不写广告演员式惊讶。CREATOR_SELF_SHOT 的场景只是分享发生的普通背景，不得扩写成走廊、电梯、室内外连续调度。diversity_context.scene_reference.scene_request 只说明当前商品展示所需的场景语义；其中 time_light_need=DAYLIGHT 时保持同一地点的白天自然光，不能改成夜间氛围。execution_card 若为 AVAILABLE，优先把它的 space 翻译为场景字段：写清手机放在哪里、人物与手机的自然相对位置、背景的前后层次，并自然保留至多两项 background_anchors 和一个 lived_in_trace。位置只用“靠近、旁边、前后、同一小片区域”等相对关系；输入没有实测值时，不写米、厘米、精确距离或精确机位高度。场景卡不是拍摄任务清单，道具不得变成必须触摸或使用的动作；照样只使用现场已有自然光或普通室内光。execution_card 不可用时按原有创意方向完成。
 8. diversity_context.outfit_selection_contract 是本条生成前已经选定的穿搭合同。outfit_recipe 是本条唯一配方，其中非空的连体单品，或非空的上装与下装，以及鞋包和辅助配饰应被完整写入 production_design.outfit.base_outfit，不得重新选择、拆分或替换其中任一单品；one_piece 非空时必须按一件连体服装执行，top / bottom 应为空，不得把连衣裙或连体裤改写成上下装。target_role 只说明目标商品在整套造型中的角色，visibility_zones 用于保持商品可见。source_type=LIGHTWEIGHT_TEMPLATE 时，只执行合同里已经标准化的结构化字段和 base_outfit_direction；不得猜测或索取模板标题、正文、prompt_core、notes。source_type=INTERNAL_PROFILE 时，结合 silhouette_key、style_family、style_intensity、outfit_recipe 和 base_outfit_direction形成可感知的完整轮廓；outer_layer_direction / neckline_direction / hair_direction / palette_relation / visibility_requirement 只作柔性设计参考，不增加独立动作或质检门槛。允许因真实场景做轻微自然调整，但不要仅换颜色后重新回到近期相同的“基础上衣＋长裤”组合。preferred_surface_profile 只作旧字段兼容。全片保持一个连续、普通的生活时刻，但允许分成多个手机拍摄单元；不要默认写成“靠近镜头→退后展示→整理衣服→微笑收尾”的固定动作链。
 8.1 diversity_context.persona_selection_contract 若 availability=AVAILABLE，人物身份只允许来自这份冻结合同：persona_id、script_projection、identity_lock 和参考资产共同拥有权威，production_design.character 必须逐项继承 script_projection。商品参考图只决定商品，不得继承其中模特的脸、年龄、体型、发型、滤镜、姿态或背景。模型只可按当前生活时刻调整自然表情、视线和小动作，不得重新设计人物。若合同为 UNAVAILABLE/NOT_APPLICABLE，沿用普通创作者设计且不伪装成已使用人物库。
-9. creative_direction.opening_visual_job 只是前三秒的软观看任务：优先让核心结果、相关细节、使用场景或静物商品中的一种尽快成立。不得为了执行它强制设计前后对比、身体缺点特写、苦恼到惊喜的情绪反转或额外剧情动作；卖点无法被画面直接证明时，保持商品与场景清楚可见即可，由中央口播承担表达。
 10. 类目执行补充中的 interaction_boundary 是全片一次生效的物理边界。storyboard 只写这一镜实际发生的正向动作，不要在每个镜头反复写“不得、禁止、不缠绕、不重新系”等负向规则。若冻结了 selected_action_design，按它执行一个核心商品互动；不得再把 optional_simple_interactions 当作候选清单逐项加入。若冻结了 primary_demonstration_mode，本条只表现这一种用法；supported_demonstration_modes 只是授权范围，不是镜头清单。
 10.1 product_truth.display_quantity_contract 只有 status=AUTHORIZED 时才允许出现多只同款商品。此时 required_display_count 是全片唯一数量权威：这组同款不是“竞争性配饰”，人物穿搭与每个拍摄单元都必须保持该数量，不得从单戴切成叠戴、边拍边增加或中途摘下。字段为空时继续默认只出现一只目标商品，禁止模型自行复制。
-11. 若输入含 visual_execution_contract，必须把“手机原生质感”和“人物/穿搭/场景的审美完成度”当成两个独立维度：NATIVE_STYLED 是真实创作者已经完成当天造型后的手机分享，不是精修广告，也不是素上衣、无妆发、空背景的代名词。优先执行 styling_context 的轮廓、配色、妆发与少量辅助元素；scene_context.situation_tags 只说明生活情境，不得当作材质、色调或审美措辞。场景优先消费 visual_scene_recipe 中非空的空间关系、材质色调、光线质感和生活痕迹；aesthetic_anchors 只作补充，而且所有视觉元素必须来自同一 coherence_key，不混拼成布景。配方字段为空就自然忽略，不得自行补造。visual_saliency 只负责最终画面关系：在不改变商品身份、佩戴状态、冻结穿搭轮廓和既有场景的前提下，把主体放在清楚亮部，按 separation 建立商品与内搭/背景的边界，并让 storyboard 首镜服从 opening_focus 的焦点与景别；natural_change 最多作为一次低表演感状态变化，不能覆盖 action_design。life_event 只写同一地点和时刻中的连续状态，按action_design允许1至2次自然过渡；它不是逐镜动作配额。这些均为软创意指导，不得因此拒绝产出或增加商品事实。
+11. 若输入含 visual_execution_contract，只执行已经选定的人物、穿搭、场景、清楚曝光和商品分离关系。精致感来自真实造型和空间，不来自磨皮、影棚布光或电影运镜；这些视觉信息不得扩写成新的动作、剧情或首镜表演任务。
+11.1 retrieval_reference.status=AVAILABLE 时，primary_real_case.execution_card 是同一条真实视频反推得到的执行示范。opening / proof / use_process / ending 只能按各自镜头功能使用；status=UNAVAILABLE 的段落必须保持缺失，不得从其他镜头补造。优先自然借鉴其动作顺序、景别变化、拍摄单元关系与节奏，再用当前商品、卖点、人物、穿搭和场景重新设计；来源具体动作不兼容时，要为同一功能换成当前商品能够成立的可见动作、观察角度或事件状态，不能删完具体执行后只剩“正面站着说→更近一点站着说”。supporting_real_case 只用于补充同功能段的另一种执行可能。五维标签已锁在 same_video_dimension_bundle 中，禁止拆开重组。口播聚类池不会进入本视觉步骤，只在后续中央口播中使用。不得照抄来源商品外观、人物身份、穿搭、品牌文字、价格、具体宣称、CTA原句或不兼容场景。只有实际转化为本条可见变化的功能段才写入reference_realization.adopted_parts；只继承opening/proof/use_process/ending名称不算采用。该字段只用于观察，不影响脚本通过、修订或重试。authority_boundary 必须遵守：当前 product_truth、selling_argument、人物模板、穿搭模板、已选场景、macro_structure 和中央口播仍拥有最终权威。
 12. 只返回一个JSON对象，不要Markdown，不要解释。字段齐全，结构如下：
 {json.dumps(schema, ensure_ascii=False, indent=2)}
 
@@ -1451,6 +2217,48 @@ def _model_visible_creative_seed(seed: Dict[str, Any]) -> Dict[str, Any]:
     # it in the persisted seed and final brief, but do not ask the model to
     # interpret an internal ranking decision it cannot improve.
     diversity.pop("outfit_scene_affinity_contract", None)
+    creative_direction = (
+        visible.get("creative_direction")
+        if isinstance(visible.get("creative_direction"), dict)
+        else {}
+    )
+    # Opening jobs and per-cut change jobs remain persisted for reporting, but
+    # no longer compete with structure, category action and the actual clip
+    # prose inside the visual model prompt.
+    creative_direction.pop("opening_visual_job", None)
+    visual_contract = (
+        visible.get("visual_execution_contract")
+        if isinstance(visible.get("visual_execution_contract"), dict)
+        else {}
+    )
+    visual_saliency = (
+        visual_contract.get("visual_saliency")
+        if isinstance(visual_contract.get("visual_saliency"), dict)
+        else {}
+    )
+    # ``opening_focus`` and ``opening_scene_projection`` are both derived from
+    # the persisted opening job.  Sending either one would silently restore the
+    # same instruction under another name, so keep them for lineage only.
+    visual_saliency.pop("opening_focus", None)
+    visual_contract.pop("opening_scene_projection", None)
+    capture_contract = (
+        visible.get("capture_rhythm_contract")
+        if isinstance(visible.get("capture_rhythm_contract"), dict)
+        else {}
+    )
+    capture_contract.pop("observable_change_jobs", None)
+    richness = (
+        capture_contract.get("shot_richness_contract")
+        if isinstance(capture_contract.get("shot_richness_contract"), dict)
+        else {}
+    )
+    for key in (
+        "visible_change_axes",
+        "minimum_changed_axes_per_cut",
+        "change_policy",
+        "priority_order",
+    ):
+        richness.pop(key, None)
     recipe = contract.get("outfit_recipe") if isinstance(contract.get("outfit_recipe"), dict) else {}
     if any(_text(value) for value in recipe.values()):
         projection = _outfit_prompt_projection(contract)
@@ -1688,6 +2496,78 @@ def normalize_simplified_visual_script(
     script["storyboard"] = compiled_storyboard
     script["capture_rhythm_contract"] = capture_rhythm_contract
     script["capture_units"] = capture_units
+    retrieval_reference = (
+        seed.get("retrieval_reference")
+        if isinstance(seed.get("retrieval_reference"), dict)
+        else {}
+    )
+    raw_realization = (
+        script.get("reference_realization")
+        if isinstance(script.get("reference_realization"), dict)
+        else {}
+    )
+    allowed_parts = {"opening", "proof", "use_process", "ending"}
+    declared_adopted_parts = [
+        _text(value).lower()
+        for value in raw_realization.get("adopted_parts") or []
+        if _text(value).lower() in allowed_parts
+    ]
+    declared_adopted_parts = list(dict.fromkeys(declared_adopted_parts))
+    execution_card = _retrieved_execution_card(retrieval_reference)
+    available_reference_parts = {
+        _text(value).lower()
+        for value in execution_card.get("available_parts") or []
+        if _text(value)
+    }
+    compiled_roles = {
+        _text(item.get("structure_role")).upper()
+        for item in capture_units
+        if isinstance(item, dict) and _text(item.get("structure_role"))
+    }
+    part_is_present = {
+        "opening": any("HOOK" in role or "OPENING" in role for role in compiled_roles),
+        "proof": any("PROOF" in role for role in compiled_roles),
+        "use_process": any("USE" in role for role in compiled_roles),
+        "ending": any("ENDING" in role or "CLOSE" in role for role in compiled_roles),
+    }
+    adopted_parts = [
+        part for part in declared_adopted_parts
+        if (not available_reference_parts or part in available_reference_parts)
+        and part_is_present.get(part, False)
+    ]
+    excluded_declared_parts = [
+        part for part in declared_adopted_parts if part not in adopted_parts
+    ]
+    if _text(retrieval_reference.get("status")) != "AVAILABLE":
+        realization_status = "UNAVAILABLE"
+        adopted_parts = []
+    elif adopted_parts:
+        realization_status = "APPLIED" if len(adopted_parts) >= 2 else "PARTIAL"
+    else:
+        requested_status = _text(raw_realization.get("status")).upper()
+        realization_status = (
+            "NOT_USED" if requested_status == "NOT_USED" else "NOT_REPORTED"
+        )
+    script["reference_realization"] = {
+        "status": realization_status,
+        "execution_card_id": _text(
+            retrieval_reference.get("execution_card_id")
+            or retrieval_reference.get("reference_spine_id")
+        ),
+        "reference_spine_id": _text(
+            retrieval_reference.get("execution_card_id")
+            or retrieval_reference.get("reference_spine_id")
+        ),
+        "adopted_parts": adopted_parts,
+        "declared_adopted_parts": declared_adopted_parts,
+        "excluded_declared_parts": excluded_declared_parts,
+        "adaptation_notes": _text(
+            raw_realization.get("adaptation_notes")
+        )[:400],
+        "signal_type": "MODEL_DECLARED_SOFT_OBSERVATION",
+        "realization_level": "FUNCTION_SEQUENCE_ONLY",
+        "hard_required": False,
+    }
     script["generation_provenance"] = dict(generation_provenance)
     script["simplified_script_id"] = _stable_id("SSV_", script)
     return script
@@ -2072,6 +2952,22 @@ def build_simplified_voiceover_inputs(
         "creative_diversity_contract": frozen.get("creative_diversity_contract") or {},
         "creative_blueprint": creative_blueprint,
     }
+    retrieval_contract = (
+        frozen.get("retrieval_reference_contract")
+        if isinstance(frozen.get("retrieval_reference_contract"), dict)
+        else {}
+    )
+    if retrieval_contract:
+        direction["retrieval_reference_contract"] = {
+            "status": _text(retrieval_contract.get("status")),
+            "speech_hook_pool": list(
+                retrieval_contract.get("speech_hook_pool") or []
+            )[:4],
+            "active_runs": dict(retrieval_contract.get("active_runs") or {}),
+            "data_snapshot_hash": _text(
+                retrieval_contract.get("data_snapshot_hash")
+            ),
+        }
     category_extension = (
         seed.get("category_execution_extension")
         if isinstance(seed.get("category_execution_extension"), dict)
@@ -2170,6 +3066,9 @@ def assemble_simplified_complete_script(
         "storyboard": result.get("storyboard") or [],
         "capture_rhythm_contract": capture_rhythm_contract,
         "capture_units": capture_units,
+        "final_information_gain_review": dict(
+            capture_rhythm_contract.get("final_information_gain_review") or {}
+        ),
         "product_truth": brief_product_truth,
         "product_identity_lock": build_product_identity_lock(brief_product_truth),
         "action_design": dict(seed.get("action_design") or {}),
@@ -2191,8 +3090,8 @@ def assemble_simplified_complete_script(
         ),
         "voiceover": result["continuous_voiceover"],
         "instruction": (
-            "保持同一人物、商品、穿搭、地点、时刻和生活事件；按拍摄节奏合同分别录制2至3段普通手机素材并直接剪切。"
-            "商品一致性优先于场景美感和镜头效果"
+            "保持同一人物、商品、穿搭、地点、时刻和生活事件；按拍摄节奏合同分别录制3至5段普通手机素材并直接剪切。"
+            "优先级依次为商品与物理连续性、实际镜头推进、卖点关系和原生拍摄可行性；发生冲突时先简化场景与表演，不得退回一镜到底"
             if _text(capture_rhythm_contract.get("profile")) == CAPTURE_RHYTHM_MULTICLIP
             else "保持同一人物、商品、穿搭、场景和连续事件；商品一致性优先于场景美感和镜头效果"
         ),
@@ -2274,6 +3173,16 @@ def assemble_simplified_complete_script(
             (product_truth.get("selling_argument") or {}).get("source_claim_ids") or []
             if isinstance(product_truth.get("selling_argument"), dict)
             else []
+        ),
+        "selling_argument_source_argument_id": _text(
+            (product_truth.get("selling_argument") or {}).get("source_argument_id")
+            if isinstance(product_truth.get("selling_argument"), dict)
+            else ""
+        ),
+        "selling_argument_lineage_status": _text(
+            (product_truth.get("selling_argument_lineage") or {}).get("status")
+            if isinstance(product_truth.get("selling_argument_lineage"), dict)
+            else ""
         ),
     }
     result["complete_script_id"] = _stable_id("SCSCRIPT_", result)

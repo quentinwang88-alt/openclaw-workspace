@@ -106,6 +106,12 @@ def select_original_structure_directions(
             ),
             # 当前原创脚本 Schema 仍是 4-6 个分镜，不能忠实承载 SINGLE_SHOT。
             "allowed_continuity_modes": ["MULTI_CUT", "CONTINUOUS_LOW_CUT"],
+            # Original 15-second production treats visible clip progression as
+            # a primary quality target.  Keep single-take clusters available
+            # to other consumers, but do not route them into this flow.
+            "forbidden_cut_densities": ["SINGLE_TAKE"],
+            "preferred_cut_densities": ["MEDIUM_CUT", "MEDIUM", "HIGH_CUT", "HIGH"],
+            "discouraged_cut_densities": ["LOW_CUT", "LOW"],
             "forbidden_beats": forbidden_beats,
             "preferred_carriers": list(profile.get("preferred_carriers") or []),
             "preferred_beats": ["HOOK", "PROOF"] if profile else [],
@@ -113,7 +119,7 @@ def select_original_structure_directions(
             "preferred_proof_mechanisms": list(
                 profile.get("preferred_proof_mechanisms") or []
             ),
-            "min_shots": 4,
+            "min_shots": 3,
             "max_shots": 6,
             # Planning history only affects exploratory directions.  The
             # highest-evidence baseline remains stable.

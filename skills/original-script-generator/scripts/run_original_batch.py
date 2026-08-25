@@ -50,6 +50,16 @@ def main() -> int:
     )
     parser.add_argument("--target-country", default="")
     parser.add_argument("--target-language", default="")
+    parser.add_argument(
+        "--top-category",
+        default="",
+        help="可选：覆盖旧历史记录中的一级类目；新产品或旧泛类目记录调试时使用",
+    )
+    parser.add_argument(
+        "--product-type",
+        default="",
+        help="可选：覆盖旧历史记录中的具体产品类型，例如抓夹、耳环；必须使用已登记类型",
+    )
     args = parser.parse_args()
 
     from core.original_batch_models import BatchRequest, generate_request_id
@@ -84,6 +94,8 @@ def main() -> int:
             random_seed=args.seed,
             target_country=args.target_country,
             target_language=args.target_language,
+            top_category=args.top_category,
+            product_type=args.product_type,
             script_mode=args.script_mode,
         )
         print(f"\n🧩 批次计划: {request.product_code} × {request.requested_count}")
@@ -170,6 +182,30 @@ def _save_report(output_dir, batch, items, summary):
         )
         return contract if isinstance(contract, dict) else {}
 
+    def _production_diagnostics(item):
+        result = _result(item)
+        if not isinstance(result.get("script"), dict):
+            return {}
+        try:
+            from core.production_script_renderer import (
+                build_production_projection,
+            )
+
+            projection = build_production_projection(batch=batch, item=item)
+        except Exception as exc:
+            return {"status": "UNAVAILABLE", "reason": str(exc)[:240]}
+        return {
+            "status": "AVAILABLE",
+            "capture_rhythm_schema": projection.get(
+                "capture_rhythm_schema", ""
+            ),
+            "visible_clip_count": projection.get("visible_clip_count", 0),
+            "camera_setup_count": projection.get("camera_setup_count", 0),
+            "shot_richness_status": projection.get(
+                "shot_richness_status", ""
+            ),
+        }
+
     report = {
         "batch_id": batch.batch_id,
         "request_id": batch.request_id,
@@ -226,6 +262,10 @@ def _save_report(output_dir, batch, items, summary):
                 "status": it.status,
                 "script_mode": _result(it).get("script_mode", ""),
                 "stage_cache": _result(it).get("stage_cache", {}),
+                "retrieval_reference_provenance": _result(it).get(
+                    "retrieval_reference_provenance", {}
+                ),
+                "production_diagnostics": _production_diagnostics(it),
                 "script": _result(it).get("script", {}),
             }
             for it in items
@@ -338,6 +378,16 @@ def _render_complete_scripts_markdown(report) -> str:
         emotion = production.get("emotion") if isinstance(production.get("emotion"), dict) else {}
         product_usage = script.get("product_usage") if isinstance(script.get("product_usage"), dict) else {}
         voice = script.get("continuous_voiceover") if isinstance(script.get("continuous_voiceover"), dict) else {}
+        reference_provenance = (
+            item.get("retrieval_reference_provenance")
+            if isinstance(item.get("retrieval_reference_provenance"), dict)
+            else {}
+        )
+        reference_realization = (
+            script.get("reference_realization")
+            if isinstance(script.get("reference_realization"), dict)
+            else {}
+        )
 
         lines.extend(
             [
@@ -384,6 +434,15 @@ def _render_complete_scripts_markdown(report) -> str:
                 "",
                 f"- 商品身份锚点：{_md('；'.join(product_usage.get('identity_anchors_preserved') or []))}",
                 f"- 本条使用的证明事实：{_md('；'.join(product_usage.get('selling_points_used') or []))}",
+                "",
+                "### 真实案例参考（仅观察）",
+                "",
+                f"- 案例状态：{_md(reference_provenance.get('status'))}",
+                f"- 类目匹配：{_md(reference_provenance.get('primary_category_match_status'))}",
+                f"- 分镜观察承载：{_md(reference_provenance.get('storyboard_observed_carrier'))}",
+                f"- 执行骨架：{_md(reference_provenance.get('reference_spine_id'))}",
+                f"- 实际借鉴：{_md(reference_realization.get('status'))} / {_md('、'.join(reference_realization.get('adopted_parts') or []))}",
+                f"- 改写说明：{_md(reference_realization.get('adaptation_notes'))}",
                 "",
                 "### 连续口播",
                 "",

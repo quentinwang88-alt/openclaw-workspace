@@ -20,6 +20,14 @@ def build_complete_script_blueprint_prompt(
     execution_plan = direction.get("structure_execution_plan") if isinstance(direction.get("structure_execution_plan"), dict) else {}
     reference = direction.get("execution_reference") if isinstance(direction.get("execution_reference"), dict) else {}
     diversity = direction.get("creative_diversity_contract") if isinstance(direction.get("creative_diversity_contract"), dict) else {}
+    recording_profile = direction.get("creator_recording_profile") if isinstance(direction.get("creator_recording_profile"), dict) else {}
+    direct_share = bool(recording_profile.get("enabled"))
+    capture_preset = str(
+        recording_profile.get("capture_preset")
+        or recording_profile.get("capture_grammar")
+        or ""
+    ).strip().upper()
+    worn_direct_share = direct_share and capture_preset == "WORN_DIRECT_SHARE"
     carrier = _compact({
         "required_carrier": diversity.get("required_carrier", "UNAVAILABLE"),
         "required_presentation_mode": diversity.get("required_presentation_mode", "UNAVAILABLE"),
@@ -37,8 +45,77 @@ def build_complete_script_blueprint_prompt(
             "shot_execution_spine": reference.get("shot_execution_spine", []),
             "unknown_fields": reference.get("unknown_fields", []),
         },
+        "creator_recording_profile": recording_profile,
     }
-    return f"""你是原创短视频的事件蓝图编剧。你不写逐镜分镜和口播，而是把已分配的创意坐标补全成一个具体、连贯、可拍的15秒生活事件，并输出三段宏观画面过程。
+    recording_directive = (
+        """【本方向拍摄模式：CREATOR_DIRECT_SHARE】
+1. 同一创作者在同一地点，用自己的手机分3至4段直接分享商品；不要求生活剧情、自拍比例或情绪表演。
+2. WORN_DIRECT_SHARE从开头已经穿好并保持穿着；PRODUCT_FIRST_THEN_WORN只允许首段商品单独出现，人物穿上后不再脱下、平铺或重新穿戴。
+3. 每段是独立录制后直接剪切的真实手机素材，不是同一素材的时间切片或数字缩放。具体固定、手持或镜面关系由当前画面自然决定，不按比例验收。
+4. 不为证明卖点设计逐项检查、反复系扣解扣、表演式转身或生活小剧场。人物可以面对自己的手机自然分享；若内容自然需要，允许一次不做作的人物状态或人物与场景关系变化。
+"""
+        if direct_share
+        else "【本方向沿用兼容模式：LIFE_EVENT_OBSERVATION】\n继续按下方生活过程纪律输出；recording_context和clip_design可留空。\n"
+    )
+    responsibility_directive = (
+        """【职责边界｜达人直分享减法版】
+1. 商品事实、结构承载、人物、穿搭和场景继续准确继承；源视频未知信息不冒充观察事实。
+2. viewer_relationship和scene_motif必须继承。opening_action只作轻量创意参考，不要求逐字执行或围绕它编排一件生活事件。
+3. creator_motivation只写为什么愿意分享；event_design、performance_flow和macro_visual_passages仅保留兼容投影，不得扩写成生活剧情、情绪曲线或商品检查链。
+4. clip_design是画面权威。通常输出3段；只有确有另一项新证明、使用关系或观看信息时才输出第4段。不得为了凑数补拿包、伸手停录、无信息地回到商品或远景收尾。
+5. 人物状态只写自然清醒、像给朋友分享；不设计表演式的强笑、点头、挑眉、停顿、转身或逐项指向，但允许一次自然发生且确实改变观看关系的轻微状态变化。
+6. content_bundle中的卖点只需在整条视频范围内获得可见支持，不要求每个细节对应专门动作。
+7. 结构Beat只控制观看顺序；真实执行卡只提供镜头语法参考，不复制来源商品、人物、场景或宣称。
+8. 不写完整口播。人物、穿搭、场景和商品细节保持具体，减少的是行为控制而不是制作信息。
+9. 结构Beat仍是权威：不得为了增加片段而补入原结构没有的USE或ENDING；新片段只能展开已有HOOK/PROOF/USE/ENDING功能。"""
+        if direct_share
+        else """【职责边界】
+1. 源视频未知的人物、地点、灯光继续保持未知；你输出的人物场景属于CREATIVE_DESIGN生产设计，不得声称来自源视频观察。
+2. 必须准确继承diversity contract的viewer_relationship、scene_motif和opening_action。forbidden_recent_patterns禁止的是上一轮已失败的完整组合，不是永久封禁单个元素；本轮不得未经合同分配自行退回该失败组合。
+3. 不写戏剧化剧情。WEARER_ACTIVE/MIXED只解释为什么顺手记录普通事情；STATIC_PRODUCT时人物和手均不出现；HAND_ONLY时人物整体不出现。
+4. 不输出抽象情绪标签。reaction_points允许空数组，不为了证明人物有情绪而强制笑、点头、挑眉、突然停住或看镜头。
+5. persona和scene必须具体，但不能增加未经商品事实授权的功效、材质、价格、销量或使用结果。
+6. retention_hook从合同允许的自然状态开始，不要求突然停住、抬眼或表演戏剧性反应。
+7. performance_flow不是商品检查清单；macro_visual_passages固定3段并保持同一连续过程。
+8. content_bundle中的卖点在三段整体范围内获得支持；其他事实自然可见，不为它们设计专门动作。
+9. observable_action只写合同允许的可见动作；三段继承真实执行卡的动作关系。"""
+    )
+    behavior_motivation_schema = (
+        "只写主动分享当前商品，不扩写生活事件"
+        if direct_share
+        else "必须逐字包含程序分配的opening_action，并只概括同一连续过程"
+    )
+    natural_event_schema = (
+        "主动分享当前商品；不要求生活事件或动作链"
+        if direct_share
+        else "必须逐字包含程序分配的opening_action；随后继续同一过程"
+    )
+    clip_information_gain_directive = (
+        """【WORN_DIRECT_SHARE三段信息分工】
+1. 第1段负责整体结果或自然钩子；第2段负责一个在身细节或证明；第3段必须提供一种新的“人物—商品—场景”观看关系。
+2. 第3段的新关系可来自人物状态、人物在场景中的位置、手机与人物的关系，或商品与完整穿搭的观察关系；只选一种自然可拍的变化，不需要动作清单。
+3. 以下不算新关系：中景改成稍宽中景；同一位置继续站着说话；把第1段整体效果换句话再写一次；对同一素材做数字裁切或缩放。
+4. 不强制走路、转身、拿包或整理衣服。若没有自然变化，应重新设计第三段的观看关系，而不是补一个表演动作。
+"""
+        if worn_direct_share
+        else ""
+    )
+    macro_action_entry = (
+        "可为空；仅作兼容投影，不为凑动作补写生活行为"
+        if direct_share
+        else "一项正在发生的生活动作"
+    )
+    macro_action_proof = (
+        "可为空；仅作兼容投影，可保持自然说话状态"
+        if direct_share
+        else "延续上一段的生活动作"
+    )
+    macro_action_end = (
+        "可为空；仅作兼容投影，不补表演式收尾"
+        if direct_share
+        else "连续完成同一件生活事件，不增加展示性停顿"
+    )
+    return f"""你是原创短视频的完整拍摄蓝图编剧。你不写口播，而是把已分配的创意坐标补全成一个具体、连贯、可拍的15秒手机短视频。
 
 【目标国家】{target_country}
 【产品类型】{product_type}
@@ -52,22 +129,11 @@ def build_complete_script_blueprint_prompt(
 【承载方式硬约束】
 {carrier}
 
-【职责边界】
-1. 源视频未知的人物、地点、灯光继续保持未知；你输出的人物场景属于CREATIVE_DESIGN生产设计，不得声称来自源视频观察。
-2. 必须准确继承diversity contract的viewer_relationship、scene_motif和opening_action。forbidden_recent_patterns禁止的是上一轮已失败的完整组合，不是永久封禁“卧室、镜子、转身”等单个元素；本轮不得未经合同分配自行退回该失败组合。
-3. 不写戏剧化剧情。WEARER_ACTIVE/MIXED时，creator_motivation解释为什么这个人在场景里顺手记录，event_design让人物完成一件本来就要做的普通事情；STATIC_PRODUCT时，三段是同一静物承载上的连续观察，人物和手均不出现；HAND_ONLY时，只能由手和商品完成连续操作，人物整体不出现。
-   creative_product_profile只提供轻量类目适配：WORN_APPAREL看穿着中的整体关系；WORN_ACCESSORY从已经佩戴好的状态进入，让配饰与身体或整套穿搭的关系自然可见；HAND_STATIC_ACCESSORY按结构承载做手部或静物观察。它不能覆盖required_carrier，也不要求增加专门表演动作。
-4. 不输出“轻判断、轻满意、小惊喜、情绪推进、决策信号”等抽象标签。人物状态必须写成可见行为或具体说话方式。
-5. persona和scene必须具体，但不能增加未经商品事实授权的功效、材质、价格、销量或使用结果。
-6. 说话人格要适合泰国短视频自然分享，避免主播式催单；语气词密度写成具体原则，不直接写完整口播。
-7. reaction_points只在场景自然产生反应时写0至1个；允许空数组。不要为了证明人物有情绪而强制笑、点头、挑眉、突然停住或看镜头。
-8. anti_template_rules必须包含程序合同的forbidden_recent_patterns，不再补充大段新限制。
-9. primary_hook_id是本方向已经选定的口播注意力意图。retention_hook从合同允许的自然起始状态开始：人物事件、手部操作或静物观察；不要求突然停住、抬眼或表演戏剧性反应。
-10. performance_flow不是商品检查清单。behavior_motivation只写event_design.natural_event的简洁投影，不得另外创造袖口观察、扣位观察、口袋检查、侧身确认等商品展示链。
-11. macro_visual_passages固定3段：进入、展开与核心结果、自然结束。三段必须是同一件连续过程：人物事件、手部操作或静物观察，不能按商品部位拆段；结尾不得为了展示而额外摆姿势或停一拍，除非停下本来就是该过程的一部分。
-12. content_bundle中的2至3个claim_atom必须在三段整体范围内全部进入supported_claim_keys，但单个过渡段或结束段允许空数组。同一段可以同时支持多个claim；除核心结果外，其他事实只要自然可见，不得为它们设计专门动作。
-13. observable_action只写合同允许的可见动作。visible_process写承载方式、场景、穿搭（若人物出镜）和商品在该过程中的可见状态；camera_observation只写旁观机位。人物无需表演情绪或对镜头反应。
-14. 三段画面必须继承shot_execution_spine的动作关系；不用输出逐镜reference order，程序会按源动作顺序确定性投影。
+{recording_directive}
+
+{responsibility_directive}
+
+{clip_information_gain_directive}
 
 只输出合法JSON对象：
 {{
@@ -78,6 +144,12 @@ def build_complete_script_blueprint_prompt(
   "creative_thesis":"",
   "creator_motivation":"",
   "viewer_relationship":"",
+  "recording_context":{{
+    "recording_mode":"CREATOR_DIRECT_SHARE|LIFE_EVENT_OBSERVATION",
+    "recording_motivation":"为什么此刻主动录这条分享",
+    "camera_relationship":"自拍|镜面自拍|固定手机|商品先出镜后切人物",
+    "viewer_awareness":"创作者知道正在对观众拍摄"
+  }},
   "retention_hook":{{
     "opening_event":"0至1.5秒内摄像机可见的具体事件",
     "delayed_answer":"暂时不完全展示、到后续才看清的具体答案或结果",
@@ -102,23 +174,55 @@ def build_complete_script_blueprint_prompt(
   }},
   "performance_flow":{{
     "entry_state":"",
-    "behavior_motivation":"必须逐字包含程序分配的opening_action，并只概括合同允许的同一连续过程",
+    "behavior_motivation":"{behavior_motivation_schema}",
     "reaction_points":[],
     "ending_state":"事件自然完成；不为展示商品额外停住"
   }},
   "event_design":{{
     "event_motif":"一句话说明合同允许的连续过程",
     "start_state":"过程开始时人物/手部/静物承载和商品的具体状态",
-    "natural_event":"必须逐字包含程序分配的opening_action；随后继续同一过程",
+    "natural_event":"{natural_event_schema}",
     "core_result_moment":"过程中自然看清核心商品结果的时刻",
     "end_state":"过程结束后的具体状态，不为展示商品额外停住"
   }},
+  "clip_design":[
+    {{
+      "clip_no":1,
+      "clip_job":"本段给观众的新信息",
+      "recording_relation":"当前自然手机关系；可为空，不按自拍或镜面比例验收",
+      "framing":"具体景别和观看关系",
+      "visible_process":"本段能直接拍到的具体画面",
+      "observable_action":"可为空；不为凑动作补写表演",
+      "product_visibility":"FULL|PARTIAL|OCCLUDED",
+      "supported_claim_keys":["CLM_xxx"]
+    }},
+    {{
+      "clip_no":2,
+      "clip_job":"与上一段不同的新信息",
+      "recording_relation":"当前自然手机关系；可为空",
+      "framing":"与上一段有可感知差异的景别和观看关系",
+      "visible_process":"本段能直接拍到的具体画面",
+      "observable_action":"可为空；允许只是自然说话状态",
+      "product_visibility":"FULL|PARTIAL|OCCLUDED",
+      "supported_claim_keys":["CLM_xxx"]
+    }},
+    {{
+      "clip_no":3,
+      "clip_job":"商品与人物或穿搭关系",
+      "recording_relation":"当前自然手机关系；可为空",
+      "framing":"与前两段有可感知差异的景别和观看关系",
+      "visible_process":"本段能直接拍到的具体画面",
+      "observable_action":"可为空；允许只是自然说话状态",
+      "product_visibility":"FULL|PARTIAL|OCCLUDED",
+      "supported_claim_keys":["CLM_xxx"]
+    }}
+  ],
   "macro_visual_passages":[
     {{
       "passage_no":1,
       "narrative_role":"EVENT_ENTRY",
       "visible_process":"人物、场景、穿搭和商品的可见过程",
-      "observable_action":"一项正在发生的生活动作",
+      "observable_action":"{macro_action_entry}",
       "camera_observation":"旁观式机位和景别",
       "product_visibility":"FULL|PARTIAL|OCCLUDED|NONE",
       "supported_claim_keys":[]
@@ -127,7 +231,7 @@ def build_complete_script_blueprint_prompt(
       "passage_no":2,
       "narrative_role":"EVENT_PROOF",
       "visible_process":"同一事件继续，核心结果自然出现",
-      "observable_action":"延续上一段的生活动作",
+      "observable_action":"{macro_action_proof}",
       "camera_observation":"旁观式机位和景别",
       "product_visibility":"FULL|PARTIAL|OCCLUDED|NONE",
       "supported_claim_keys":["CLM_xxx","CLM_xxx"]
@@ -136,7 +240,7 @@ def build_complete_script_blueprint_prompt(
       "passage_no":3,
       "narrative_role":"EVENT_END",
       "visible_process":"事件自然完成后的状态",
-      "observable_action":"连续完成同一件生活事件，不增加展示性停顿",
+      "observable_action":"{macro_action_end}",
       "camera_observation":"旁观式机位和景别",
       "product_visibility":"FULL|PARTIAL|OCCLUDED|NONE",
       "supported_claim_keys":[]

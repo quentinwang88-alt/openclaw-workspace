@@ -2161,6 +2161,12 @@ def validate_complete_script(script: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(script.get("production_design"), dict)
         else {}
     )
+    recording_context = (
+        blueprint.get("recording_context")
+        if isinstance(blueprint.get("recording_context"), dict)
+        else {}
+    )
+    direct_share = _text(recording_context.get("recording_mode")).upper() == "CREATOR_DIRECT_SHARE"
     if not blueprint:
         issues.append("完整脚本缺少creative_blueprint")
     if not contract:
@@ -2173,7 +2179,10 @@ def validate_complete_script(script: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(shot, dict):
             issues.append("storyboard包含非对象项")
             continue
-        for field in ("shot_content", "observable_action", "framing", "audio_actual"):
+        required_fields = ("shot_content", "framing", "audio_actual") if direct_share else (
+            "shot_content", "observable_action", "framing", "audio_actual"
+        )
+        for field in required_fields:
             if not _text(shot.get(field)):
                 issues.append(f"镜头{shot.get('shot_no')}缺少{field}")
         fact_keys.update(_text(item) for item in shot.get("supported_claim_keys", []) if _text(item))

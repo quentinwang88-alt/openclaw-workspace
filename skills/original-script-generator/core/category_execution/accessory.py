@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -36,6 +37,9 @@ _WRIST_TYPES = {"bracelet", "bangle", "slim_bangle"}
 _SCARF_TYPES = {"scarf", "winter_scarf", "silk_scarf", "headscarf"}
 _SUPPORTED_TYPES = {"earring", *_SCARF_TYPES, *_HAIR_TYPES, *_WRIST_TYPES}
 _SMALL_PROMINENCE_TYPES = {"earring", *_HAIR_TYPES, *_WRIST_TYPES}
+_SMALL_MOTION_TYPES = {"earring", *_HAIR_TYPES}
+
+SMALL_ACCESSORY_MOTION_ENV = "ORIGINAL_SCRIPT_SMALL_ACCESSORY_MOTION_V2_ENABLED"
 
 _PAIR_TERMS = ("一对", "成对", "一副", "双耳", "两只")
 _SINGLE_TERMS = ("单只", "单个", "单耳", "单边")
@@ -56,6 +60,74 @@ def _dedupe(values: Iterable[Any], limit: int = 8) -> List[str]:
         if len(result) >= limit:
             break
     return result
+
+
+def _small_accessory_motion_enabled() -> bool:
+    value = _text(os.environ.get(SMALL_ACCESSORY_MOTION_ENV, "1")).lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _small_accessory_performance_arc(kind: str) -> List[Dict[str, str]]:
+    if kind == "HAIR_ACCESSORY":
+        return [
+            {
+                "unit_role": "PRODUCT_RESULT_CLOSE",
+                "gaze_target": "先观察镜中或侧后方的发饰位置",
+                "micro_reaction": "保持轻专注，像在确认当天已经完成的发型",
+                "movement_guidance": (
+                    "发饰从第一帧已经清楚可见，人物的肩部和头部正处在一个很小的自然角度变化中，"
+                    "不先静止等待再开始"
+                ),
+            },
+            {
+                "unit_role": "NATURAL_MOTION_RELATION",
+                "gaze_target": "动作完成时短暂与自己的手机建立视线联系",
+                "micro_reaction": "确认取景后神情稍微放松，不做夸张惊喜",
+            },
+            {
+                "unit_role": "PRODUCT_REACQUISITION",
+                "gaze_target": "回到镜中整体或发饰结果确认点",
+                "micro_reaction": "以轻确认自然结束，不做广告式定格",
+                "movement_guidance": (
+                    "通过一次轻微肩部或头部角度变化，或同一部手机的简单重新构图，"
+                    "把发饰带回侧后方近景；动作延续到片段末尾，只在最后一瞬自然收住，不重新夹发"
+                ),
+            },
+        ]
+    return [
+        {
+            "unit_role": "PRODUCT_RESULT_CLOSE",
+            "gaze_target": "先观察镜中耳侧或当前耳饰位置",
+            "micro_reaction": "保持轻专注，让半脸与耳侧关系自然成立",
+            "movement_guidance": (
+                "耳饰从第一帧已经清楚可见，人物的肩部和侧脸正处在一个很小的自然角度变化中，"
+                "不先静止等待再开始"
+            ),
+        },
+        {
+            "unit_role": "NATURAL_MOTION_RELATION",
+            "gaze_target": "角度变化后短暂看向自己的手机",
+            "micro_reaction": "神情稍微放松，像朋友间确认佩戴效果",
+        },
+        {
+            "unit_role": "PRODUCT_REACQUISITION",
+            "gaze_target": "回到耳侧或镜中整体确认点",
+            "micro_reaction": "轻确认后自然收住，不触碰耳饰",
+            "movement_guidance": (
+                "通过一次轻微上半身角度变化，或同一部手机的简单重新构图，"
+                "把耳饰带回半脸耳侧近景；动作延续到片段末尾，只在最后一瞬自然收住，不触碰耳饰"
+            ),
+        },
+    ]
+
+
+def _small_accessory_motion_fields(kind: str) -> Dict[str, Any]:
+    return {
+        "schema_version": "action-design-v2-continuous-motion",
+        "motion_scope": "ONE_CONTINUOUS_CHANGE",
+        "motion_duration_preference": "3_TO_6_SECONDS",
+        "performance_arc": _small_accessory_performance_arc(kind),
+    }
 
 
 def _anchor_texts(anchor_card: Dict[str, Any]) -> List[str]:
@@ -109,6 +181,54 @@ def _resolve_product_prominence(
     if not contract:
         return {}
     mode = _text(presentation_mode).upper()
+    motion_kind = _text(contract.get("motion_projection_kind")).upper()
+    # Historical frozen extensions predate ``motion_projection_kind``.  Infer
+    # only from the registered subtype so old SCRIPT_READY rows can receive
+    # the new soft render projection without rerunning blueprint or voiceover.
+    if not motion_kind:
+        product_subtype = _text(profile.get("product_subtype"))
+        if product_subtype in _HAIR_TYPES:
+            motion_kind = "HAIR_ACCESSORY"
+        elif product_subtype == "earring":
+            motion_kind = "EAR_ACCESSORY"
+    wearer = mode in {
+        "PERSON_ON_CAMERA", "MIXED", "WEARER_ACTIVE", "WEARER_PASSIVE",
+    }
+    if (
+        wearer
+        and motion_kind in {"HAIR_ACCESSORY", "EAR_ACCESSORY"}
+        and _small_accessory_motion_enabled()
+    ):
+        ending_framing = (
+            "后脑发饰区域或头肩侧后方近景"
+            if motion_kind == "HAIR_ACCESSORY"
+            else "半脸耳侧近景"
+        )
+        ending_guidance = (
+            "最后一段在同一地点补录后脑发饰区域或头肩侧后方近景，"
+            "让发饰、佩戴位置、相对大小和发束关系重新清楚可辨"
+            if motion_kind == "HAIR_ACCESSORY"
+            else "最后一段在同一地点补录半脸耳侧近景，"
+            "让耳饰本体、佩戴落点和相对长度重新清楚可辨"
+        )
+        contract.update({
+            "schema_version": "small-accessory-prominence-v2-motion-return",
+            "sequence_policy": "PRODUCT_OPENING_TO_MOTION_TO_PRODUCT_RETURN",
+            "capture_arc": [
+                "PRODUCT_RESULT_CLOSE",
+                "NATURAL_MOTION_RELATION",
+                "PRODUCT_REACQUISITION",
+            ],
+            "terminal_visibility": {
+                "category": motion_kind,
+                "ending_framing": ending_framing,
+                "ending_guidance": ending_guidance,
+                "renderer_authority": "SOFT_DETERMINISTIC_PROJECTION",
+                "hard_qc": False,
+                "may_trigger_retry": False,
+            },
+            "performance_arc": _small_accessory_performance_arc(motion_kind),
+        })
     if mode in {"HAND_ONLY", "HANDS_ONLY"}:
         contract.update({
             "primary_observation_unit": "PRODUCT_AND_SAME_PERSON_HANDS",
@@ -136,7 +256,8 @@ def _resolve_product_prominence(
             ),
         })
     contract.update({
-        "sequence_policy": "ONE_PRODUCT_DOMINANT_VIEW_THEN_CONTEXT_VIEW",
+        "sequence_policy": contract.get("sequence_policy")
+        or "ONE_PRODUCT_DOMINANT_VIEW_THEN_CONTEXT_VIEW",
         "opening_timing": "FIRST_CORE_DISPLAY_SEGMENT_PREFER_0_TO_3S",
         "authority": "SOFT_CATEGORY_COMPOSITION",
         "hard_required": False,
@@ -164,6 +285,7 @@ def _profile_definition(canonical_type: str) -> Dict[str, Any]:
             "supporting_style_context": "FACE_AND_OUTFIT_RELATION",
             "product_prominence": {
                 "scope": "SMALL_WORN_ACCESSORY",
+                "motion_projection_kind": "EAR_ACCESSORY",
                 "primary_observation_unit": "EAR_AND_HALF_FACE",
                 "primary_framing": "EAR_HALF_FACE_CLOSE",
                 "context_framing": "HEAD_SHOULDER_OR_UPPER_BODY",
@@ -191,6 +313,7 @@ def _profile_definition(canonical_type: str) -> Dict[str, Any]:
             "supporting_style_context": "DAILY_HAIRSTYLE",
             "product_prominence": {
                 "scope": "SMALL_WORN_ACCESSORY",
+                "motion_projection_kind": "HAIR_ACCESSORY",
                 "primary_observation_unit": "HAIR_ACCESSORY_AND_HAIR_REGION",
                 "primary_framing": "HAIR_REGION_CLOSE",
                 "context_framing": "HEAD_SHOULDER_REAR_OR_MIRROR",
@@ -416,8 +539,8 @@ _DEMONSTRATION_PROFILES = {
         "required_result_view": "ALREADY_WORN_EAR_VISIBLE",
         "supporting_style_context": "FACE_AND_OUTFIT_RELATION",
         "optional_simple_interactions": [
-            "保持耳侧无遮挡，做一次很小的侧脸变化",
-            "从半脸结果自然停到耳侧细节",
+            "让肩部、上半身和侧脸一起完成一次连续角度变化，耳侧始终无遮挡",
+            "镜面头肩结果与半脸耳侧近景分成两段手机素材直接剪切",
         ],
     },
     "HAIR_WORN": {
@@ -425,9 +548,9 @@ _DEMONSTRATION_PROFILES = {
         "required_result_view": "ALREADY_STYLED_HAIR_RESULT",
         "supporting_style_context": "DAILY_HAIRSTYLE",
         "optional_simple_interactions": [
-            "从已经夹好的发型开始，轻微侧头或回头一次",
-            "通过镜面或侧后方三分之四角度确认已经完成的发型结果",
-            "在商品无遮挡时短暂停留看清固定位置",
+            "从已经夹好的发型开始，让肩部、上半身和头部一起完成一次连续转向",
+            "把镜面头肩结果与侧后方发饰近景分成两段手机素材直接剪切",
+            "在头肩构图内自然改变一次重心，随后补录发饰结果近景",
         ],
     },
     "WRIST_WORN": {
@@ -624,6 +747,39 @@ def _interaction_capabilities(
                 "action_keywords": ["拿近", "细节", "放回"],
             },
         ]
+    if product_subtype in _HAIR_TYPES and _small_accessory_motion_enabled():
+        return [
+            {
+                "interaction_id": "HAIR_BODY_ARC_REVEAL",
+                "primary_action_mode": "RESULT_SHOW",
+                "start_state": "发饰已经固定完成并从第一帧可见，人物正处在很小的自然角度变化中",
+                "core_action": "肩部、上半身和头部作为整体完成一次连续转向，头部自然跟随，不单独反复摆动",
+                "end_state": "通过轻微角度变化回到商品无遮挡的发型结果，只在最后一瞬自然收住",
+                "risk_tier": "LOW",
+                "action_keywords": ["上半身连续转向", "侧后方", "发型结果"],
+                **_small_accessory_motion_fields("HAIR_ACCESSORY"),
+            },
+            {
+                "interaction_id": "HAIR_MIRROR_TO_REAR_CUT",
+                "primary_action_mode": "RESULT_SHOW",
+                "start_state": "发饰已经固定完成并从第一帧可见，人物在普通镜面距离内保持轻微自然状态变化",
+                "core_action": "先录一段镜面头肩结果，再重新放置同一部手机补录侧后方发饰近景，两段直接剪切",
+                "end_state": "重新构图回到发饰位置、相对大小和发束关系清楚的近景，只在最后一瞬收住",
+                "risk_tier": "LOW",
+                "action_keywords": ["镜面头肩", "侧后方近景", "直接剪切"],
+                **_small_accessory_motion_fields("HAIR_ACCESSORY"),
+            },
+            {
+                "interaction_id": "HAIR_WEIGHT_SHIFT_REFRAME",
+                "primary_action_mode": "RESULT_SHOW",
+                "start_state": "发饰已经固定完成并从第一帧可见，人物在头肩或上半身构图内轻微调整自然重心",
+                "core_action": "人物在头肩关系内自然改变一次重心或轻微侧移，下一段重新放置手机补录发饰结果",
+                "end_state": "通过重新构图回到发饰无遮挡的头肩侧后方近景，只在最后一瞬收住",
+                "risk_tier": "LOW",
+                "action_keywords": ["自然重心变化", "重新构图", "发饰近景"],
+                **_small_accessory_motion_fields("HAIR_ACCESSORY"),
+            },
+        ]
     if product_subtype in _HAIR_TYPES:
         return [
             {
@@ -643,6 +799,39 @@ def _interaction_capabilities(
                 "end_state": "发饰位置、相对大小和发束关系保持清楚",
                 "risk_tier": "LOW",
                 "action_keywords": ["镜面", "后脑", "固定结果"],
+            },
+        ]
+    if product_subtype == "earring" and _small_accessory_motion_enabled():
+        return [
+            {
+                "interaction_id": "EAR_FACE_ARC_REVEAL",
+                "primary_action_mode": "RESULT_SHOW",
+                "start_state": "耳饰已经佩戴完成并从第一帧可见，耳侧和半脸正在发生很小的自然角度变化",
+                "core_action": "肩部、上半身和侧脸一起完成一次连续角度变化，耳饰始终留在清楚亮部",
+                "end_state": "通过轻微角度变化回到耳饰、耳侧和半脸关系清楚的结果，只在最后一瞬收住",
+                "risk_tier": "LOW",
+                "action_keywords": ["侧脸连续变化", "半脸耳侧", "佩戴结果"],
+                **_small_accessory_motion_fields("EAR_ACCESSORY"),
+            },
+            {
+                "interaction_id": "EAR_MIRROR_TO_PHONE",
+                "primary_action_mode": "RESULT_SHOW",
+                "start_state": "耳饰已经佩戴完成并从第一帧可见，人物在镜中观察时保持轻微自然状态变化",
+                "core_action": "镜面头肩结果与半脸耳侧近景分成两段手机素材，人物只短暂看向自己的手机",
+                "end_state": "重新构图回到耳饰无遮挡的半脸耳侧结果，只在最后一瞬收住",
+                "risk_tier": "LOW",
+                "action_keywords": ["镜面", "手机视线", "耳侧近景"],
+                **_small_accessory_motion_fields("EAR_ACCESSORY"),
+            },
+            {
+                "interaction_id": "EAR_RELATION_TO_CLOSE_RETURN",
+                "primary_action_mode": "RESULT_SHOW",
+                "start_state": "耳饰已经佩戴完成并从第一帧可见，人物在头肩关系内保持轻微自然状态变化",
+                "core_action": "人物完成一次自然上半身角度变化，下一段重新放置手机回到半脸耳侧近景",
+                "end_state": "通过重新构图让耳饰本体、佩戴落点和相对长度重新清楚可辨，只在最后一瞬收住",
+                "risk_tier": "LOW",
+                "action_keywords": ["头肩关系", "上半身变化", "耳侧回收"],
+                **_small_accessory_motion_fields("EAR_ACCESSORY"),
             },
         ]
     if product_subtype in _WRIST_TYPES:
@@ -826,6 +1015,11 @@ class AccessoryExecutionAdapter(CategoryExecutionAdapter):
             "schema_version": (
                 "accessory-execution-profile-v3-scarf"
                 if resolved.canonical_type in _SCARF_TYPES
+                else "accessory-execution-profile-v5-small-motion-return"
+                if (
+                    resolved.canonical_type in _SMALL_MOTION_TYPES
+                    and _small_accessory_motion_enabled()
+                )
                 else "accessory-execution-profile-v4-small-prominence"
                 if resolved.canonical_type in _SMALL_PROMINENCE_TYPES
                 else "accessory-execution-profile-v2"
@@ -999,11 +1193,20 @@ class AccessoryExecutionAdapter(CategoryExecutionAdapter):
             else {}
         )
         if prominence:
+            prominence_parts = [
+                _text(prominence.get("opening_guidance")),
+                _text(prominence.get("context_guidance")),
+            ]
+            terminal = (
+                prominence.get("terminal_visibility")
+                if isinstance(prominence.get("terminal_visibility"), dict)
+                else {}
+            )
+            if _text(terminal.get("ending_guidance")):
+                prominence_parts.append(_text(terminal.get("ending_guidance")))
             lines.append(
                 "小商品观察尺度："
-                + _text(prominence.get("opening_guidance"))
-                + "；"
-                + _text(prominence.get("context_guidance"))
+                + "；".join(part for part in prominence_parts if part)
                 + "。这只调整兼容内容段的景别，不改变结构、佩戴状态或动作主线"
             )
         boundaries = _dedupe(carrier_execution.get("interaction_boundary") or [], limit=3)
@@ -1085,6 +1288,11 @@ class AccessoryExecutionAdapter(CategoryExecutionAdapter):
             "schema_version": (
                 "accessory-video-handoff-v5-state-aware"
                 if _text(profile.get("product_subtype")) in _SCARF_TYPES
+                else "accessory-video-handoff-v5-small-motion-return"
+                if (
+                    _text(profile.get("product_subtype")) in _SMALL_MOTION_TYPES
+                    and _small_accessory_motion_enabled()
+                )
                 else "accessory-video-handoff-v4-small-prominence"
                 if _text(profile.get("product_subtype")) in _SMALL_PROMINENCE_TYPES
                 else "accessory-video-handoff-v2"

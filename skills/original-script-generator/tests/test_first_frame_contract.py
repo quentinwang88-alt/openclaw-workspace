@@ -79,6 +79,69 @@ def _script():
 
 
 class FirstFrameContractTest(unittest.TestCase):
+    def test_stage0_setting_aliases_are_preserved(self):
+        script = {
+            "video_generation_brief": {
+                "production_design": {
+                    "presentation_mode": "PERSON_ON_CAMERA",
+                    "character_setting": {
+                        "identity": "曼谷年轻通勤女性",
+                        "appearance": "自然真实",
+                        "hair_makeup": "自然棕色长发",
+                        "age_presence": "自然成年女性比例",
+                    },
+                    "scene_setting": {
+                        "location": "咖啡厅窗边",
+                        "moment": "下午",
+                        "lighting": "自然光",
+                        "background": "普通座椅",
+                    },
+                    "outfit_setting": {
+                        "styling": "白色T恤、浅蓝牛仔裤与近黑短外搭",
+                        "visibility_note": "完整穿搭清楚可见",
+                    },
+                },
+                "product_identity_lock": {"must_preserve": ["近黑短外搭"]},
+                "storyboard": [
+                    {
+                        "shot_content": "外搭平整放在长凳上，全段无人无手",
+                        "observable_action": "商品保持静止",
+                        "framing": "固定竖屏近景",
+                        "carrier_mode": "STATIC_PRODUCT",
+                        "anchor_reference": "圆领与前襟",
+                    }
+                ],
+            }
+        }
+        contract = build_first_frame_contract(
+            script_id="SCSCRIPT_STAGE0_744_S1",
+            product_code="1734257377321977850",
+            product_images=[{"file_token": "product"}],
+            script=script,
+        )
+        self.assertEqual(contract["availability"], "AVAILABLE")
+        self.assertEqual(contract["scene_contract"]["location"], "咖啡厅窗边")
+        self.assertEqual(
+            contract["outfit_prompt_projection"]["frozen_outfit"],
+            "白色T恤、浅蓝牛仔裤与近黑短外搭",
+        )
+        self.assertEqual(
+            contract["persona_contract"]["reference_strategy"],
+            "FROZEN_SCRIPT_TEXT_ONLY",
+        )
+        self.assertEqual(
+            contract["body_proportion_authority"]["guidance"],
+            "自然成年女性比例",
+        )
+        self.assertEqual(
+            contract["opening_contract"]["visual_content"],
+            "外搭平整放在长凳上，全段无人无手",
+        )
+        self.assertEqual(contract["opening_contract"]["carrier_mode"], "STATIC_PRODUCT")
+        prompt = render_first_frame_prompt(contract)
+        self.assertIn("首帧承载方式：纯商品静物", prompt)
+        self.assertIn("不得出现人物、脸、身体、穿搭、手或手臂", prompt)
+
     def test_contract_and_prompt_keep_reference_authorities_separate(self):
         contract = build_first_frame_contract(
             script_id="S1", product_code="1730000000000000000",
@@ -97,6 +160,7 @@ class FirstFrameContractTest(unittest.TestCase):
         self.assertIn("上身4下身6", prompt)
         self.assertIn("人物参考图不控制头身比", prompt)
         self.assertIn("至少覆盖头部至膝部", prompt)
+        self.assertIn("不要尺寸数字、尺寸线、测量箭头、尺码表、规格标签", prompt)
         self.assertIn("参考图的裁切、镜头距离与头部画面占比不代表身体比例", prompt)
         self.assertIn("书架、货架、文字和陈列只放画面侧边或远处", prompt)
         self.assertNotIn("桌边收据和待归还书籍", prompt)

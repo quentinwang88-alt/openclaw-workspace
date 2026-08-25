@@ -54,6 +54,27 @@ _HOOK_RELATIONSHIP_PREFERENCES = {
 }
 
 
+_HOOK_FAMILY_BY_ID = {
+    "PAIN_REFRAME": "NEED_TENSION",
+    "AUDIENCE_NEED_CALLOUT": "NEED_TENSION",
+    "DISCOVERY_RESULT_PROMISE": "DISCOVERY_DETAIL",
+    "DETAIL_SURPRISE": "DISCOVERY_DETAIL",
+    "NOVELTY_NEW_ARRIVAL": "DISCOVERY_DETAIL",
+    "VISUAL_RESULT_DIRECT": "RESULT_COMPARE",
+    "BINARY_COMPARISON": "RESULT_COMPARE",
+    "USER_ADVOCACY_STANCE": "CREATOR_RELATION",
+    "GENERAL_PRODUCT_SHARE": "CREATOR_RELATION",
+    "SOCIAL_VALIDATION": "SOCIAL_PROOF",
+    "PARTICIPATION_CHOICE": "PARTICIPATION",
+    "LIVE_SCARCITY": "SCARCITY",
+}
+
+
+def _hook_family(hook_id: str) -> str:
+    value = _text(hook_id).upper()
+    return _HOOK_FAMILY_BY_ID.get(value, value or "UNAVAILABLE")
+
+
 def _relationship_device_for_hook(
     hook_id: str,
     already_assigned: Sequence[str],
@@ -148,12 +169,206 @@ def _annotate_variant_fit(bundle: Dict[str, Any], *, anchor_card: Dict[str, Any]
         "hard_anchors": anchor_card.get("hard_anchors"),
         "display_anchors": anchor_card.get("display_anchors"),
     })
-    mismatch = bool(argument_colors and product_colors and argument_colors.isdisjoint(product_colors))
+    argument_text = _semantic_text({
+        "operator_expression": argument.get("operator_expression"),
+        "core_value": argument.get("core_value"),
+        "creative_core_value": argument.get("creative_core_value"),
+    }).lower()
+    excluded_current_color = any(
+        phrase in argument_text
+        for phrase in (
+            "不只有黑白", "不止黑白", "区别于黑白", "不是黑白",
+            "不只是纯黑白", "不只有纯黑白", "不止纯黑白", "区别于纯黑白",
+            "不是纯黑白", "不局限于黑白", "不局限于纯黑白",
+            "not just black and white", "not only black and white",
+            "ไม่ใช่แค่สีดำและสีขาว", "ไม่ใช่แค่ดำขาว",
+        )
+    ) and bool(product_colors & {"BLACK", "WHITE"})
+    mismatch = bool(
+        (argument_colors and product_colors and argument_colors.isdisjoint(product_colors))
+        or excluded_current_color
+    )
     result["variant_fit_status"] = "DEFERRED" if mismatch else "MATCHED"
     result["variant_fit_reason"] = "VARIANT_MISMATCH" if mismatch else "NOT_APPLICABLE"
     result["argument_variant_tokens"] = sorted(argument_colors)
     result["product_variant_tokens"] = sorted(product_colors)
     return result
+
+
+def _authoritative_selling_catalog(catalog: Iterable[Dict[str, Any]]) -> bool:
+    """Whether the batch is using the governed operator/central catalog.
+
+    Legacy tests and old frozen inputs may contain plain value rows without
+    lineage metadata.  They remain compatible; once an authoritative catalog
+    is present, every selling argument must retain at least one stable source
+    identifier.
+    """
+
+    for row in catalog:
+        if not isinstance(row, dict):
+            continue
+        if (
+            row.get("source_argument_id")
+            or row.get("source_claim_ids")
+        ):
+            return True
+    return False
+
+
+def _annotate_selling_argument_lineage(
+    bundle: Dict[str, Any], *, authoritative_catalog: bool
+) -> Dict[str, Any]:
+    """Freeze source IDs without treating an unmapped human value as invalid."""
+
+    result = copy.deepcopy(bundle)
+    argument = result.get("selling_argument") if isinstance(result.get("selling_argument"), dict) else {}
+    if _text(result.get("content_mode")).upper() != "SELLING_ARGUMENT":
+        result["selling_argument_lineage"] = {
+            "policy_version": "selling-argument-lineage-v1",
+            "status": "NOT_APPLICABLE",
+            "hard_required": False,
+        }
+        return result
+    source_argument_id = _text(argument.get("source_argument_id"))
+    source_claim_ids = [
+        _text(value) for value in (argument.get("source_claim_ids") or [])
+        if _text(value)
+    ]
+    confirmed = bool(source_argument_id or source_claim_ids)
+    status = "CONFIRMED" if confirmed else (
+        "DEFERRED" if authoritative_catalog else "LEGACY_COMPATIBLE"
+    )
+    result["selling_argument_lineage"] = {
+        "policy_version": "selling-argument-lineage-v1",
+        "status": status,
+        "source_argument_id": source_argument_id,
+        "source_claim_ids": source_claim_ids,
+        "authority_source": _text(
+            argument.get("authorization_source") or argument.get("source")
+        ),
+        "mapping_status": _text(argument.get("mapping_status")),
+        "hard_required": bool(authoritative_catalog),
+    }
+    return result
+
+
+def _build_proof_execution_intent(
+    bundle: Dict[str, Any], creative: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Compile existing governed semantics into retrieval preferences only."""
+
+    argument = bundle.get("selling_argument") if isinstance(bundle.get("selling_argument"), dict) else {}
+    subject = normalized_proof_subject(argument)
+    claim_theme = _text(argument.get("claim_theme")).lower()
+    scene_request = creative.get("scene_request_contract") if isinstance(creative.get("scene_request_contract"), dict) else {}
+    scene_intent = _text(scene_request.get("scene_intent")).upper()
+    scene_preferences = {
+        _text(value).upper()
+        for value in (creative.get("selling_scene_affinity_preferences") or [])
+        if _text(value)
+    }
+    if subject == "GENERAL_EXPRESSION" and scene_intent in {
+        "SCENE_USAGE", "MULTI_OCCASION", "DAYTIME_USE",
+    }:
+        subject = "SCENE_USAGE"
+    if subject == "GENERAL_EXPRESSION" and scene_preferences.intersection({
+        "COMMUTE", "MULTI_OCCASION", "DAYTIME_USE",
+    }):
+        subject = "SCENE_USAGE"
+    if subject == "GENERAL_EXPRESSION" and claim_theme == "style":
+        subject = "STYLE_RELATION"
+    spec = {
+        "ON_BODY_RESULT": {
+            "preferred_parts": ["opening", "proof"],
+            "required_any_parts": ["proof"],
+            "preferred_action_tokens": ["WEAR", "RESULT_SHOW", "TURN", "WALK"],
+            "hard_required_part_match": True,
+        },
+        "PRODUCT_DETAIL": {
+            "preferred_parts": ["proof"],
+            "required_any_parts": ["proof"],
+            "preferred_action_tokens": ["DETAIL_SHOW", "HOLD", "ADJUST"],
+            "hard_required_part_match": True,
+        },
+        "SCENE_USAGE": {
+            "preferred_parts": ["opening", "use_process"],
+            "required_any_parts": ["use_process"],
+            "preferred_action_tokens": ["WEAR", "WALK", "TRY_ON"],
+            "hard_required_part_match": True,
+        },
+        "STYLE_RELATION": {
+            "preferred_parts": ["opening", "proof"],
+            "required_any_parts": [],
+            "preferred_action_tokens": ["WEAR", "RESULT_SHOW", "ADJUST"],
+            "hard_required_part_match": False,
+        },
+        "GENERAL_EXPRESSION": {
+            "preferred_parts": ["opening", "proof"],
+            "required_any_parts": [],
+            "preferred_action_tokens": [],
+            "hard_required_part_match": False,
+        },
+    }[subject]
+    return {
+        "policy_version": "proof-execution-intent-v1",
+        "proof_subject": subject,
+        "scene_intent": scene_intent or "UNAVAILABLE",
+        "claim_theme": claim_theme or "UNAVAILABLE",
+        "scene_affinity_preferences": sorted(scene_preferences),
+        **spec,
+    }
+
+
+def _build_argument_context_alignment(
+    bundle: Dict[str, Any], creative: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Describe the current outfit example without judging the selling point.
+
+    Operator-maintained selling points remain authoritative.  This small
+    contract only stops the utterance from claiming that an unselected shirt,
+    collar or colour is visible in the current script.
+    """
+
+    argument = (
+        bundle.get("selling_argument")
+        if isinstance(bundle.get("selling_argument"), dict) else {}
+    )
+    argument_text = _semantic_text({
+        "operator_expression": argument.get("operator_expression"),
+        "core_value": argument.get("core_value"),
+        "creative_core_value": argument.get("creative_core_value"),
+    })
+    outfit = (
+        creative.get("outfit_selection_contract")
+        if isinstance(creative.get("outfit_selection_contract"), dict) else {}
+    )
+    recipe = outfit.get("outfit_recipe") if isinstance(outfit.get("outfit_recipe"), dict) else {}
+    selected_top = _text(recipe.get("top") or recipe.get("one_piece"))
+    needs_shirt_example = any(
+        term in argument_text.lower()
+        for term in ("衬衫", "领型", "shirt collar", "collar type", "ปกเสื้อเชิ้ต")
+    )
+    current_has_shirt = any(
+        term in selected_top.lower()
+        for term in ("衬衫", "shirt", "เสื้อเชิ้ต", "翻领", "collar")
+    )
+    status = (
+        "GENERALIZE_UNSELECTED_STYLING_EXAMPLE"
+        if needs_shirt_example and not current_has_shirt
+        else "CURRENT_OUTFIT_COMPATIBLE"
+    )
+    return {
+        "policy_version": "argument-context-alignment-v1",
+        "status": status,
+        "selected_inner_top": selected_top,
+        "instruction": (
+            "保留当前卖点，但把衬衫、领型等未在本条穿搭中出现的例子概括为不同内搭；"
+            "不得说成当前画面已经展示了这些单品。"
+            if status == "GENERALIZE_UNSELECTED_STYLING_EXAMPLE"
+            else "按当前冻结穿搭自然表达，不要求口播逐句对应画面。"
+        ),
+        "hard_required": False,
+    }
 
 
 def _is_creator_wearable_batch(top_category: str, product_type: str) -> bool:
@@ -464,6 +679,7 @@ def allocate_batch_items(
     product_type: str = "",
     top_category: str = "",
     scene_reference_contexts: Optional[Dict[str, Dict[str, Any]]] = None,
+    multidim_reference_contexts: Optional[Dict[str, Dict[str, Any]]] = None,
     category_execution_extension: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[PlanItem], Dict[str, Any]]:
     """Three-round deterministic allocation returning items and allocation summary."""
@@ -472,7 +688,10 @@ def allocate_batch_items(
     items: List[PlanItem] = []
     reserved_visual_signatures: List[str] = []
     reserved_creative_contracts: List[Dict[str, Any]] = []
+    reference_video_usage: Counter = Counter()
     deferred_content: List[Dict[str, Any]] = []
+    catalog_rows = list(selling_point_catalog or [])
+    authoritative_catalog = _authoritative_selling_catalog(catalog_rows)
     if scene_reference_contexts is None:
         # Best-effort and read-only.  The adapter returns an empty mapping when
         # disabled, so normal planning stays fully offline by default.
@@ -506,7 +725,7 @@ def allocate_batch_items(
         raw_candidates = build_content_bundle_candidates(
             anchor_card, bundle_reference,
             product_type=product_type,
-            selling_point_catalog=selling_point_catalog,
+            selling_point_catalog=catalog_rows,
             product_selling_note=product_selling_note,
             # A test batch should see the available selling-point breadth.
             # The previous fixed limit of three candidates per carrier made a
@@ -515,13 +734,29 @@ def allocate_batch_items(
         )
         all_candidates = [
             _annotate_carrier_fit(
-                _annotate_variant_fit(bundle, anchor_card=anchor_card),
+                _annotate_variant_fit(
+                    _annotate_selling_argument_lineage(
+                        bundle, authoritative_catalog=authoritative_catalog
+                    ),
+                    anchor_card=anchor_card,
+                ),
                 direction=d,
             )
             for bundle in raw_candidates
         ]
         candidates: List[Dict[str, Any]] = []
         for bundle in all_candidates:
+            lineage = bundle.get("selling_argument_lineage") or {}
+            if lineage.get("status") == "DEFERRED":
+                deferred_content.append({
+                    "direction_assignment_id": d.get("direction_assignment_id", ""),
+                    "output_slot": d.get("output_slot", ""),
+                    "content_bundle_id": bundle.get("content_bundle_id", ""),
+                    "content_mode": bundle.get("content_mode", "FACTUAL_OBSERVATION"),
+                    "downgrade_reason": "SELLING_ARGUMENT_LINEAGE_MISSING",
+                    "recommended_flow": "REFRESH_SELLING_POINT_CATALOG",
+                })
+                continue
             if bundle.get("variant_fit_status") == "DEFERRED":
                 deferred_content.append(
                     {
@@ -573,6 +808,7 @@ def allocate_batch_items(
     angle_usage: Counter = Counter()
     argument_usage: Counter = Counter()
     hook_usage: Counter = Counter()
+    hook_family_usage: Counter = Counter()
     visual_usage: Counter = Counter()
     used_signatures: set = set()
     relationship_devices: List[str] = []
@@ -597,7 +833,9 @@ def allocate_batch_items(
         eligible_hooks, _ = _eligible_hooks_for_bundle(bundle, active_hook_ids)
         if not eligible_hooks:
             continue
-        hook_id = _pick_least_used(eligible_hooks, hook_usage, rng)
+        hook_id = _pick_least_used(
+            eligible_hooks, hook_usage, rng, family_usage=hook_family_usage
+        )
         relationship_device = _relationship_device_for_hook(
             hook_id, relationship_devices
         )
@@ -630,6 +868,10 @@ def allocate_batch_items(
             anchor_card=anchor_card, product_type=product_type,
             top_category=top_category,
             relationship_device=relationship_device,
+            multidim_reference_context=(multidim_reference_contexts or {}).get(
+                _text(direction.get("direction_assignment_id"))
+            ),
+            reference_video_usage=reference_video_usage,
             category_execution_extension=category_execution_extension,
         )
         if item:
@@ -641,6 +883,7 @@ def allocate_batch_items(
             angle_usage[angle_key] += 1
             argument_usage[_bundle_argument_key(bundle)] += 1
             hook_usage[hook_id] += 1
+            hook_family_usage[_hook_family(hook_id)] += 1
             visual_usage[visual_sig] += 1
             mother_bundle_indices[struct_idx] = bundle_index
             relationship_devices.append(relationship_device)
@@ -692,7 +935,9 @@ def allocate_batch_items(
         eligible_hooks, _ = _eligible_hooks_for_bundle(bundle, active_hook_ids)
         if not eligible_hooks:
             continue
-        hook_id = _pick_least_used(eligible_hooks, hook_usage, rng)
+        hook_id = _pick_least_used(
+            eligible_hooks, hook_usage, rng, family_usage=hook_family_usage
+        )
         relationship_device = _relationship_device_for_hook(
             hook_id, relationship_devices
         )
@@ -725,6 +970,10 @@ def allocate_batch_items(
             anchor_card=anchor_card, product_type=product_type,
             top_category=top_category,
             relationship_device=relationship_device,
+            multidim_reference_context=(multidim_reference_contexts or {}).get(
+                _text(direction.get("direction_assignment_id"))
+            ),
+            reference_video_usage=reference_video_usage,
             category_execution_extension=category_execution_extension,
         )
         if item:
@@ -736,6 +985,7 @@ def allocate_batch_items(
             angle_usage[angle_key] += 1
             argument_usage[_bundle_argument_key(bundle)] += 1
             hook_usage[hook_id] += 1
+            hook_family_usage[_hook_family(hook_id)] += 1
             visual_usage[visual_sig] += 1
             relationship_devices.append(relationship_device)
 
@@ -756,9 +1006,32 @@ def allocate_batch_items(
 # ── Helpers ────────────────────────────────────────────────────────────
 
 
-def _pick_least_used(candidates: List[str], usage: Counter, rng: random.Random) -> str:
-    min_use = min(usage.get(c, 0) for c in candidates)
-    least = [c for c in candidates if usage.get(c, 0) == min_use]
+def _pick_least_used(
+    candidates: List[str],
+    usage: Counter,
+    rng: random.Random,
+    *,
+    family_usage: Optional[Counter] = None,
+) -> str:
+    """Pick a compatible hook with soft family rotation.
+
+    The allocator never introduces a hook outside ``candidates``.  Within that
+    governed pool it prefers an under-used rhetorical family, then an
+    under-used hook ID.  GENERAL_PRODUCT_SHARE loses only an exact tie so it
+    remains a safe fallback without swallowing every batch.
+    """
+
+    family_usage = family_usage or Counter()
+
+    def score(candidate: str) -> Tuple[int, int, int]:
+        return (
+            family_usage.get(_hook_family(candidate), 0),
+            usage.get(candidate, 0),
+            1 if _text(candidate).upper() == "GENERAL_PRODUCT_SHARE" else 0,
+        )
+
+    minimum = min(score(candidate) for candidate in candidates)
+    least = [candidate for candidate in candidates if score(candidate) == minimum]
     rng.shuffle(least)
     return least[0]
 
@@ -856,13 +1129,22 @@ def _make_item(
     product_type: str = "",
     top_category: str = "",
     relationship_device: str = "HOOK_DECIDES",
+    multidim_reference_context: Optional[Dict[str, Any]] = None,
+    reference_video_usage: Optional[Counter] = None,
     category_execution_extension: Optional[Dict[str, Any]] = None,
 ) -> Optional[PlanItem]:
     da_id = direction.get("direction_assignment_id", "")
     atoms = bundle.get("claim_atoms", [])
     claim_keys = [_text(a.get("claim_key")) for a in atoms if _text(a.get("claim_key"))]
 
-    selling_argument = bundle.get("selling_argument") if isinstance(bundle.get("selling_argument"), dict) else {}
+    frozen_bundle = copy.deepcopy(bundle)
+    frozen_bundle["argument_context_alignment"] = _build_argument_context_alignment(
+        frozen_bundle, creative
+    )
+    frozen_bundle["proof_execution_intent"] = _build_proof_execution_intent(
+        frozen_bundle, creative
+    )
+    selling_argument = frozen_bundle.get("selling_argument") if isinstance(frozen_bundle.get("selling_argument"), dict) else {}
     selling_argument_id = _text(selling_argument.get("argument_id"))
     sig = build_allocation_signature(
         da_id, angle_key, claim_keys, hook_id, visual_signature, selling_argument_id,
@@ -889,7 +1171,7 @@ def _make_item(
         "structure_source_mode": direction.get(
             "structure_source_mode", "VIDEO_REFERENCED"
         ),
-        "content_bundle_brief": bundle,
+        "content_bundle_brief": frozen_bundle,
         "p2_lite": direction.get("p2_lite", {}),
         "creative_diversity_contract": creative,
         "outfit_scene_affinity_contract": creative.get(
@@ -901,8 +1183,30 @@ def _make_item(
         "persona_selection_contract": creative.get("persona_selection_contract", {}),
         "scene_reference_contract": creative.get("scene_reference_contract", {}),
         "requested_hook_id": hook_id,
+        "hook_allocation_contract": {
+            "policy_version": "hook-allocation-v2-compatible-family-rotation",
+            "requested_hook_id": hook_id,
+            "hook_family": _hook_family(hook_id),
+            "eligible_hook_ids": list(eligible_hooks),
+            "eligible_hook_families": list(dict.fromkeys(
+                _hook_family(item) for item in eligible_hooks
+            )),
+            "allocation_status": (
+                "GENERAL_FALLBACK_ONLY"
+                if eligible_hooks == ["GENERAL_PRODUCT_SHARE"]
+                else "COMPATIBLE_ROTATION"
+                if len(eligible_hooks) > 1
+                else "SINGLE_COMPATIBLE"
+            ),
+        },
         "content_angle_key": angle_key,
         "selling_argument_id": selling_argument_id,
+        "selling_argument_lineage": copy.deepcopy(
+            frozen_bundle.get("selling_argument_lineage") or {}
+        ),
+        "proof_execution_intent": copy.deepcopy(
+            frozen_bundle.get("proof_execution_intent") or {}
+        ),
     }
     from core.category_execution import (
         compile_category_execution_extension,
@@ -926,22 +1230,60 @@ def _make_item(
         frozen_package["category_execution_extension"] = (
             category_execution_extension
         )
+    from core.multidim_reference_adapter import (
+        select_retrieval_reference_contract,
+    )
+
+    retrieval_creative = dict(creative)
+    retrieval_creative.setdefault(
+        "carrier_mode", _text(hard.get("content_carrier"))
+    )
+    retrieval_reference_contract = select_retrieval_reference_contract(
+        multidim_reference_context,
+        creative_contract=retrieval_creative,
+        content_bundle=frozen_bundle,
+        requested_hook_id=hook_id,
+        used_video_ids=reference_video_usage,
+        category_execution_extension=category_execution_extension,
+    )
+    frozen_package["retrieval_reference_contract"] = (
+        retrieval_reference_contract
+    )
+    from core.multidim_reference_adapter import (
+        legacy_execution_reference_projection,
+    )
+    projected_execution_reference = legacy_execution_reference_projection(
+        retrieval_reference_contract
+    )
+    if projected_execution_reference:
+        frozen_package["route_execution_reference"] = dict(
+            direction.get("execution_reference", {}) or {}
+        )
+        frozen_package["execution_reference"] = projected_execution_reference
     # The simplified path consumes the same frozen plan without changing the
     # allocator or adding another database.  It is a compact input contract,
     # not a second creative decision layer.
     from core.simplified_complete_script import build_simplified_creative_seed
+    from core.simplified_complete_script import build_creator_recording_profile
+    recording_profile = build_creator_recording_profile(
+        top_category=top_category,
+        product_type=product_type,
+        content_carrier=_text(hard.get("content_carrier")),
+    )
     frozen_package["simplified_creative_seed"] = build_simplified_creative_seed(
         anchor_card=dict(anchor_card or {}),
         structure_contract=contract,
-        content_bundle=bundle,
+        content_bundle=frozen_bundle,
         creative_contract=creative,
-        execution_reference=direction.get("execution_reference", {}) or {},
+        execution_reference=frozen_package.get("execution_reference", {}) or {},
         requested_hook_id=hook_id,
         content_angle_key=angle_key,
         relationship_device=relationship_device,
         product_type=product_type,
         top_category=top_category,
+        retrieval_reference_contract=retrieval_reference_contract,
         category_execution_extension=category_execution_extension,
+        creator_recording_profile=recording_profile,
     )
 
     item_snapshot = {
@@ -1004,6 +1346,11 @@ def _build_summary(
     families = list(set(it.macro_family_key for it in items if it.macro_family_key))
     carriers = list(set(it.carrier_mode for it in items if it.carrier_mode))
     hooks = list(set(it.requested_hook_id for it in items if it.requested_hook_id))
+    hook_family_counts = Counter(
+        _hook_family(it.requested_hook_id)
+        for it in items
+        if it.requested_hook_id
+    )
     angles = list(set(it.content_angle_key for it in items if it.content_angle_key))
 
     struct_counts: Counter = Counter()
@@ -1017,6 +1364,12 @@ def _build_summary(
     persona_template_counts: Counter = Counter()
     outfit_persona_affinity_counts: Counter = Counter()
     reference_strategy_counts: Counter = Counter()
+    retrieval_status_counts: Counter = Counter()
+    retrieval_scene_alignment_counts: Counter = Counter()
+    retrieval_primary_eligibility_counts: Counter = Counter()
+    retrieval_fallback_reason_counts: Counter = Counter()
+    retrieval_cross_run_resolution_counts: Counter = Counter()
+    retrieval_primary_video_ids: set = set()
     for it in items:
         struct_counts[it.direction_assignment_id] += 1
         try:
@@ -1035,6 +1388,35 @@ def _build_summary(
             frozen = json.loads(it.frozen_direction_package_json or "{}")
         except (TypeError, json.JSONDecodeError):
             frozen = {}
+        retrieval = (
+            frozen.get("retrieval_reference_contract")
+            if isinstance(frozen.get("retrieval_reference_contract"), dict)
+            else {}
+        )
+        retrieval_status = _text(retrieval.get("status")) or "UNAVAILABLE"
+        retrieval_status_counts[retrieval_status] += 1
+        scene_alignment = _text(retrieval.get("scene_alignment_status"))
+        if scene_alignment:
+            retrieval_scene_alignment_counts[scene_alignment] += 1
+        primary_case = (
+            retrieval.get("primary_case")
+            if isinstance(retrieval.get("primary_case"), dict)
+            else {}
+        )
+        primary_eligibility = _text(primary_case.get("eligibility_status"))
+        if primary_eligibility:
+            retrieval_primary_eligibility_counts[primary_eligibility] += 1
+        fallback_reason = _text(retrieval.get("fallback_reason"))
+        if fallback_reason:
+            retrieval_fallback_reason_counts[fallback_reason] += 1
+        cross_run_resolution = _text(retrieval.get("cross_run_resolution"))
+        if cross_run_resolution:
+            retrieval_cross_run_resolution_counts[cross_run_resolution] += 1
+        primary_video_id = _text(
+            primary_case.get("video_id")
+        )
+        if primary_video_id:
+            retrieval_primary_video_ids.add(primary_video_id)
         capture_mode = _text(
             frozen.get("simplified_creative_seed", {})
             .get("creative_direction", {})
@@ -1113,6 +1495,8 @@ def _build_summary(
         "unique_families": len(families),
         "unique_carriers": len(carriers),
         "unique_hooks": len(hooks),
+        "unique_hook_families": len(hook_family_counts),
+        "hook_family_distribution": dict(hook_family_counts),
         "unique_angles": len(angles),
         "structure_distribution": dict(struct_counts),
         "selling_argument_distribution": dict(argument_counts),
@@ -1133,6 +1517,22 @@ def _build_summary(
             outfit_persona_affinity_counts
         ),
         "reference_strategy_distribution": dict(reference_strategy_counts),
+        "retrieval_reference_status_distribution": dict(
+            retrieval_status_counts
+        ),
+        "retrieval_scene_alignment_distribution": dict(
+            retrieval_scene_alignment_counts
+        ),
+        "retrieval_primary_eligibility_distribution": dict(
+            retrieval_primary_eligibility_counts
+        ),
+        "retrieval_fallback_reason_distribution": dict(
+            retrieval_fallback_reason_counts
+        ),
+        "retrieval_cross_run_resolution_distribution": dict(
+            retrieval_cross_run_resolution_counts
+        ),
+        "unique_retrieval_primary_videos": len(retrieval_primary_video_ids),
         "persona_template_provider_snapshot": {
             key: persona_provider_snapshot.get(key)
             for key in (

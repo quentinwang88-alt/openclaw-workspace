@@ -11,6 +11,79 @@ from scripts import run_reality_reference_stage0 as stage0
 
 
 class RealityReferenceStage0RunnerTests(unittest.TestCase):
+    def test_direct_share_releases_only_legacy_macro_action_quota(self) -> None:
+        blueprint = {
+            "schema_version": "complete-script-blueprint-v4-carrier",
+            "diversity_contract_id": "CDV_1",
+            "presentation_mode": "PERSON_ON_CAMERA",
+            "creative_thesis": "分享外套",
+            "creator_motivation": "愿意直接分享",
+            "viewer_relationship": "像朋友分享",
+            "persona": {
+                "identity": "创作者", "age_presence": "年轻成年人",
+                "appearance": "自然", "hair_makeup": "日常妆发",
+                "styling": "日常穿搭", "speaking_personality": "自然",
+                "performance_intensity": "轻",
+            },
+            "scene": {
+                "location": "咖啡厅窗边", "moment": "下午",
+                "lighting": "自然光", "background": "简洁",
+                "camera_setup": "固定手机", "why_this_scene": "日常分享",
+            },
+            "performance_flow": {
+                "entry_state": "已穿好", "behavior_motivation": "直接分享",
+                "ending_state": "自然说完",
+            },
+            "retention_hook": {
+                "opening_event": "整体入镜", "delayed_answer": "后续看细节",
+                "payoff_time": "3-5s",
+            },
+            "event_design": {
+                "event_motif": "直接分享", "start_state": "已穿好",
+                "natural_event": "面对手机说话", "core_result_moment": "细节清楚",
+                "end_state": "自然说完",
+            },
+            "macro_visual_passages": [
+                {
+                    "passage_no": index, "narrative_role": role,
+                    "visible_process": "直接分享", "observable_action": "",
+                    "camera_observation": "普通手机", "product_visibility": "FULL",
+                    "supported_claim_keys": [],
+                }
+                for index, role in enumerate(("HOOK", "PROOF", "PROOF"), 1)
+            ],
+            "visual_language": {
+                "image_texture": "手机实拍", "camera_behavior": "稳定",
+                "framing_bias": "中景", "editing_rhythm": "直接剪切",
+                "anti_template_rules": ["不表演"],
+            },
+            "voice_identity": {
+                "tone": "自然", "relationship_mode": "朋友分享",
+                "particle_density": "适量", "sales_pressure": "低",
+                "forbidden_tone": "广告腔",
+            },
+            "audio_direction": {
+                "bgm_style": "轻", "environment_sound": "自然",
+                "voiceover_priority": "口播优先",
+            },
+        }
+        blueprint = stage0.attach_field_consumers(blueprint)
+        contract = {
+            "contract_id": "CDV_1",
+            "viewer_relationship": "像朋友分享",
+            "required_presentation_mode": "PERSON_ON_CAMERA",
+            "scene_motif": "咖啡厅窗边",
+        }
+        validation = stage0._validate_blueprint_for_recording_profile(
+            blueprint,
+            contract,
+            {"enabled": True},
+        )
+        self.assertTrue(validation["valid"], validation["issues"])
+
+    def test_formal_voiceover_defaults_to_sol_high_wrapper(self) -> None:
+        self.assertIn("codex_model_command.py", stage0.DEFAULT_VOICEOVER_MODEL_COMMAND)
+
     def test_auto_selection_skips_long_candidate(self) -> None:
         selected = stage0._first_auto_selectable_candidate(
             [
@@ -29,25 +102,53 @@ class RealityReferenceStage0RunnerTests(unittest.TestCase):
     def test_legacy_candidate_remains_selectable(self) -> None:
         self.assertTrue(stage0._candidate_is_auto_selectable({"candidate_id": "VOC_LEGACY"}))
 
-    def test_rendered_stage0_script_prioritizes_compact_video_brief(self) -> None:
+    def test_stale_local_candidate_is_never_formally_selectable(self) -> None:
+        self.assertFalse(
+            stage0._candidate_is_auto_selectable(
+                {
+                    "candidate_id": "VOC_LOCAL_OLD",
+                    "copy_generation_mode": "LOCAL_DETERMINISTIC",
+                    "selection_readiness": {"auto_selectable": True},
+                }
+            )
+        )
+
+    def test_rendered_stage0_script_prioritizes_visible_clip_video_brief(self) -> None:
         rendered = stage0._render_storyboard(
             {
                 "video_generation_brief": {
-                    "character": {"identity": "日常穿搭创作者"},
-                    "scene": {"location": "窗边"},
-                    "outfit": "浅色内搭和黑色外套",
-                    "opening_observation": "从正在扣衣服的动作中途开始",
-                    "natural_behavior_mainline": "扣好衣服后自然准备出门",
-                    "macro_visual_passages": [
+                    "production_design": {
+                        "character_setting": {"identity": "日常穿搭创作者"},
+                        "scene_setting": {"location": "窗边"},
+                        "outfit_setting": {"styling": "浅色内搭和黑色外套"},
+                    },
+                    "capture_units": [
                         {
-                            "visible_process": "人物扣好外套",
-                            "observable_action": "拿起包",
-                            "camera_observation": "固定中景",
+                            "capture_unit_id": "CU_01",
+                            "shot_numbers": [1],
+                            "structure_role": "HOOK",
+                            "observable_change_job": "OPENING_ATTENTION_CHANGE",
+                            "framing_guidance": "独立录制开场",
                         }
                     ],
-                    "render_focus": "开头准备动作保持简短，尽快进入完整上身画面。",
-                    "continuous_voiceover": "ข้อความ",
-                    "internal_structure_note": "六镜只用于后台",
+                    "storyboard": [
+                        {
+                            "shot_no": 1,
+                            "shot_content": "前襟近景",
+                            "observable_action": "扣好衣服",
+                        }
+                    ],
+                    "instruction": "按可见素材片段直接剪切，不使用数字裁切。",
+                    "voiceover": {"target_language": "ข้อความ"},
+                    "product_identity_lock": {
+                        "must_preserve": ["近黑色短款外套", "圆领", "五颗前襟纽扣", "多余锚点"],
+                        "must_not_change": [
+                            "禁止双排扣",
+                            "禁止改变扣子数量",
+                            "禁止替换商品",
+                            "多余负向",
+                        ],
+                    },
                 },
                 "storyboard": [
                     {
@@ -61,11 +162,16 @@ class RealityReferenceStage0RunnerTests(unittest.TestCase):
                 ],
             }
         )
-        self.assertLess(rendered.index("【视频模型主输入"), rendered.index("【内部六镜结构槽位"))
+        self.assertLess(rendered.index("【视频模型主输入"), rendered.index("【内部结构槽位"))
         primary = rendered.split("【制作设定与内部证据", 1)[0]
-        self.assertIn("生活事件：扣好衣服后自然准备出门", primary)
-        self.assertIn("执行重点：开头准备动作保持简短", primary)
-        self.assertNotIn("六镜只用于后台", primary)
+        self.assertIn("可见素材片段", primary)
+        self.assertIn("动作：扣好衣服", primary)
+        self.assertIn("执行重点：按可见素材片段直接剪切", primary)
+        self.assertIn("商品锁：参考图商品为最高权威", primary)
+        self.assertIn("五颗前襟纽扣", primary)
+        self.assertIn("禁止双排扣", primary)
+        self.assertNotIn("多余锚点", primary)
+        self.assertNotIn("多余负向", primary)
 
     def test_rendered_storyboard_does_not_label_voiceover_continuation_as_silence(self) -> None:
         rendered = stage0._render_storyboard(

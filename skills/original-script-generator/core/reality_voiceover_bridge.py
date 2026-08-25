@@ -22,7 +22,7 @@ from light_tryon.voiceover_engine_bridge import (  # noqa: E402
 
 
 VOICEOVER_BRIDGE_VERSION = (
-    "original-central-voiceover-bridge-v33-core-proof-first"
+    "original-central-voiceover-bridge-v34-model-formal-local-preview"
 )
 VOICEOVER_ARGUMENT_CONTRACT_VERSION = "voiceover-argument-contract-v6-single-theme"
 VOICEOVER_KNOWLEDGE_SNAPSHOT_PATH = (
@@ -228,9 +228,9 @@ def _selection_readiness(
     """Expose whether a generated candidate can be selected without repair.
 
     The central engine deliberately keeps modest duration overages as warnings
-    so one long candidate cannot fail a batch.  Selection is a different
-    decision: a 15-second production run should not automatically take a
-    candidate whose central estimate already exceeds 15 seconds.
+    so one long candidate cannot fail a batch.  Stage-0 keeps 15-18 seconds as
+    a review warning and reserves the single compression pass for an explicitly
+    selected candidate whose central estimate exceeds 18 seconds.
     """
 
     estimate = (
@@ -247,14 +247,24 @@ def _selection_readiness(
     except (TypeError, ValueError):
         upper_sec = 0.0
 
-    if estimated_sec > target_duration_sec:
+    repair_threshold_sec = target_duration_sec * 1.2
+    if estimated_sec > repair_threshold_sec:
         return {
-            "status": "LONG_WARNING",
+            "status": "LONG_REPAIR_REQUIRED",
             "auto_selectable": False,
             "estimated_sec": estimated_sec,
             "upper_sec": upper_sec,
             "warning_code": "COPY_DURATION_ESTIMATE_WARNING",
-            "message": "中心估时超过目标时长；保留候选供人工查看，自动选择时跳过。",
+            "message": "中心估时超过18秒软上限；仅在人选定后执行一次定向压缩。",
+        }
+    if estimated_sec > target_duration_sec:
+        return {
+            "status": "READY_WITH_DURATION_WARNING",
+            "auto_selectable": True,
+            "estimated_sec": estimated_sec,
+            "upper_sec": upper_sec,
+            "warning_code": "COPY_DURATION_SOFT_WARNING",
+            "message": "中心估时在15至18秒之间；保留为软提示，不自动重写。",
         }
     return {
         "status": "READY_FOR_SELECTION",
@@ -819,6 +829,10 @@ def build_voiceover_argument_contract(
     value = bundle.get("value_proposition") if isinstance(bundle.get("value_proposition"), dict) else {}
     tension = bundle.get("audience_tension") if isinstance(bundle.get("audience_tension"), dict) else {}
     selling_argument = bundle.get("selling_argument") if isinstance(bundle.get("selling_argument"), dict) else {}
+    context_alignment = (
+        bundle.get("argument_context_alignment")
+        if isinstance(bundle.get("argument_context_alignment"), dict) else {}
+    )
     lived_moment_binding = _creative_lived_moment_binding(direction, blueprint)
     tension_available = (
         _text(bundle.get("content_mode")) == "SELLING_ARGUMENT"
@@ -936,6 +950,7 @@ def build_voiceover_argument_contract(
                 "core_proof_claim_keys": sorted(core_proof_keys),
                 "optional_visual_claim_keys": sorted(optional_visual_keys),
             },
+            "argument_context_alignment": dict(context_alignment),
         },
         "creative_voice_context": {
             "grounding_mode": _text(blueprint.get("voiceover_grounding_mode")),
@@ -1239,14 +1254,24 @@ def run_central_voiceover(
         lines,
         total_duration_ms=total_duration_ms,
     )
+    model_generated = bool(_text(model_command))
     selection_readiness = _selection_readiness(
         engine_qc,
         target_duration_sec=15.0,
     )
+    if not model_generated:
+        selection_readiness = {
+            "status": "PREVIEW_ONLY",
+            "auto_selectable": False,
+            "estimated_sec": selection_readiness.get("estimated_sec", 0),
+            "upper_sec": selection_readiness.get("upper_sec", 0),
+            "warning_code": "LOCAL_DETERMINISTIC_PREVIEW_ONLY",
+            "message": "本地确定性口播只供调试，不得进入正式脚本。",
+        }
     return {
         "voiceover_plan_schema_version": "visual-first-voiceover-v5",
         "bridge_version": VOICEOVER_BRIDGE_VERSION,
-        "copy_generation_mode": "MODEL" if _text(model_command) else "LOCAL_DETERMINISTIC",
+        "copy_generation_mode": "MODEL" if model_generated else "LOCAL_DETERMINISTIC",
         "candidate_id": _text(candidate_id) or preferred_hook_id,
         "source": "voiceover_copy_engine",
         "hook_id": ready_hook_id or allowed_hook_ids[0],
@@ -1256,11 +1281,13 @@ def run_central_voiceover(
             if preferred_hook_id == ready_hook_id
             else "MISMATCHED"
         ),
-        "hook_delivery_status": _hook_delivery_status(engine_qc),
-        "hook_qc_status": _hook_qc_status(
-            preferred_hook_id,
-            ready_hook_id,
-            engine_qc,
+        "hook_delivery_status": (
+            _hook_delivery_status(engine_qc) if model_generated else "PREVIEW_ONLY"
+        ),
+        "hook_qc_status": (
+            _hook_qc_status(preferred_hook_id, ready_hook_id, engine_qc)
+            if model_generated
+            else "PREVIEW_ONLY"
         ),
         "selection_readiness": selection_readiness,
         "eligible_hook_ids": allowed_hook_ids,
