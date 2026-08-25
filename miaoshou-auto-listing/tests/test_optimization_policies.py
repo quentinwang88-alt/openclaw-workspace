@@ -1,17 +1,30 @@
 import inspect
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from miaoshou_auto_listing.handlers.editor_dom import (
     atomic_row_input_values,
+    clear_description_text,
     contains_thai,
+    description_counter_value,
+    description_character_count,
+    description_text_cutoff,
     grams_to_kg_text,
+    has_visible_description_text,
+    normalize_description_length,
 )
 from miaoshou_auto_listing.handlers.image_translation import (
+    _choose_ali_translation_provider,
+    _is_ali_translation_provider,
+    image_dialog_state,
     image_language_code,
     image_url_fingerprint,
 )
 from miaoshou_auto_listing.handlers.preflight import (
+    clear_description_text_record_ids,
+    description_validation_error,
     numeric_equal,
+    should_clear_description_text,
     shorten_option_name,
     unique_short_option_names,
 )
@@ -61,6 +74,42 @@ class OptimizationPolicyTest(unittest.TestCase):
         self.assertTrue(numeric_equal("100.00", "100"))
         self.assertFalse(numeric_equal("99.83", "100"))
         self.assertFalse(numeric_equal("", "100"))
+
+    def test_description_counter_detects_over_limit_without_form_error(self) -> None:
+        self.assertEqual(
+            description_counter_value("字符： 11308/10000 图片：11/30"),
+            11308,
+        )
+        self.assertIsNone(description_counter_value("产品描述"))
+
+    def test_description_validation_fails_closed(self) -> None:
+        code, message = description_validation_error(None)
+        self.assertEqual(code.value, "DESCRIPTION_COUNT_UNAVAILABLE")
+        self.assertIn("禁止发布", message)
+        code, message = description_validation_error(11308)
+        self.assertEqual(code.value, "DESCRIPTION_LIMIT_EXCEEDED")
+        self.assertIn("11308/10000", message)
+        self.assertEqual(description_validation_error(10000), (None, ""))
+
+    def test_description_cutoff_prefers_a_semantic_boundary(self) -> None:
+        text = "第一段完整内容。第二段不应该被切断在单词中间 trailing"
+        cutoff = description_text_cutoff(text, 18)
+        self.assertLessEqual(cutoff, 18)
+        self.assertEqual(text[:cutoff], "第一段完整内容。")
+
+    def test_explicit_description_clear_allowlist_is_exact(self) -> None:
+        value = "recvsUdEXiHWTV, recOther\nrecThird"
+        self.assertEqual(
+            clear_description_text_record_ids(value),
+            {"recvsUdEXiHWTV", "recOther", "recThird"},
+        )
+        self.assertTrue(should_clear_description_text("recvsUdEXiHWTV", value))
+        self.assertFalse(should_clear_description_text("recvsUdEXiHW", value))
+        self.assertFalse(should_clear_description_text("recUnrelated", value))
+
+    def test_description_visible_text_ignores_editor_placeholders(self) -> None:
+        self.assertFalse(has_visible_description_text(" \n\u200b\ufeff"))
+        self.assertTrue(has_visible_description_text("产品参数"))
 
     def test_long_translated_option_names_are_short_and_unique(self) -> None:
         values = [
@@ -131,6 +180,14 @@ class OptimizationPolicyTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no language mapping"):
             image_language_code("XX")
 
+    def test_ali_translation_provider_matches_current_and_legacy_labels(self) -> None:
+        self.assertTrue(_is_ali_translation_provider("阿里翻译（剩216张）"))
+        self.assertTrue(_is_ali_translation_provider("阿里AI翻译（剩216张）"))
+        self.assertFalse(
+            _is_ali_translation_provider("简体中文→英语(阿里/不翻品牌)")
+        )
+        self.assertFalse(_is_ali_translation_provider("顶秀译图（剩0张）"))
+
     def test_image_fingerprint_is_ordered_and_ignores_fragments(self) -> None:
         first = image_url_fingerprint(
             ["https://img.example/a.jpg#x", "https://img.example/b.jpg"]
@@ -177,6 +234,218 @@ class OptimizationPolicyTest(unittest.TestCase):
 
 
 class VirtualSkuSnapshotTest(unittest.IsolatedAsyncioTestCase):
+    async def test_image_dialog_state_reports_existing_overlays(self) -> None:
+        class Dialogs:
+            def __init__(self, visible, selected=""):
+                self.visible = visible
+                self.selected = selected
+
+            def filter(self, *, has):
+                return Dialogs(self.visible, has)
+
+            async def count(self):
+                return int(self.selected in self.visible)
+
+        class Page:
+            def __init__(self):
+                self.visible = {"图片翻译", "批量翻译/处理图片"}
+
+            def locator(self, selector):
+                return Dialogs(self.visible)
+
+            def get_by_role(self, role, *, name, exact):
+                return name
+
+        self.assertEqual(
+            await image_dialog_state(Page()),
+            ["图片翻译", "批量翻译/处理图片"],
+        )
+
+    async def test_explicit_description_clear_preserves_images(self) -> None:
+        class Images:
+            async def count(self):
+                return 11
+
+        class Editable:
+            def __init__(self):
+                self.text = "需要清除的产品描述"
+                self.script = ""
+
+            async def text_content(self):
+                return self.text
+
+            def locator(self, selector):
+                return Images()
+
+            async def evaluate(self, script):
+                self.script = script
+                self.text = ""
+
+        class Editables:
+            def __init__(self, editable):
+                self.first = editable
+
+            async def count(self):
+                return 1
+
+        class Region:
+            def __init__(self, editable):
+                self.editable = editable
+
+            def locator(self, selector):
+                return Editables(self.editable)
+
+        editable = Editable()
+        with patch(
+            "miaoshou_auto_listing.handlers.editor_dom.description_region",
+            AsyncMock(return_value=Region(editable)),
+        ):
+            result = await clear_description_text(object())
+        self.assertEqual(result["text_characters_after"], 0)
+        self.assertEqual(result["images_before"], 11)
+        self.assertEqual(result["images_after"], 11)
+        self.assertIn("NodeFilter.SHOW_TEXT", editable.script)
+        self.assertNotIn("remove()", editable.script)
+
+    async def test_description_count_uses_label_ancestor_fallback(self) -> None:
+        class Empty:
+            @property
+            def first(self):
+                return self
+
+            async def count(self):
+                return 0
+
+        class Editable(Empty):
+            async def count(self):
+                return 1
+
+        class Ancestor(Empty):
+            def __init__(self, matches):
+                self.matches = matches
+
+            async def inner_text(self):
+                if self.matches:
+                    return "产品描述 字符：11308/10000 图片：11/30"
+                return "产品描述"
+
+            def locator(self, selector):
+                return Editable() if self.matches else Empty()
+
+        class Anchor(Empty):
+            def locator(self, selector):
+                return Ancestor(selector.count("..") == 3)
+
+        class Anchors(Empty):
+            async def count(self):
+                return 1
+
+            def nth(self, index):
+                return Anchor()
+
+        class Editor:
+            def get_by_text(self, text, exact=False):
+                if text == "产品描述":
+                    return Anchors()
+                return Empty()
+
+            def locator(self, selector):
+                return Empty()
+
+        with patch(
+            "miaoshou_auto_listing.handlers.editor_dom.form_item",
+            AsyncMock(return_value=None),
+        ):
+            self.assertEqual(await description_character_count(Editor()), 11308)
+
+    async def test_description_count_uses_editor_counter_without_richtext_dom(self) -> None:
+        class Editor:
+            async def inner_text(self):
+                return "产品描述 字符： 9988/10000 图片：11/30"
+
+        self.assertEqual(await description_character_count(Editor()), 9988)
+
+    async def test_description_normalizer_only_edits_text_nodes(self) -> None:
+        class Editable:
+            def __init__(self):
+                self.script = ""
+                self.cutoff = None
+
+            async def text_content(self):
+                return "保留的完整句子。需要删除的尾部内容"
+
+            async def evaluate(self, script, cutoff):
+                self.script = script
+                self.cutoff = cutoff
+
+        class Editables:
+            def __init__(self, editable):
+                self.first = editable
+
+            async def count(self):
+                return 1
+
+        class Region:
+            def __init__(self, editable):
+                self.editable = editable
+
+            def locator(self, selector):
+                return Editables(self.editable)
+
+        editable = Editable()
+        with patch(
+            "miaoshou_auto_listing.handlers.editor_dom.description_region",
+            AsyncMock(return_value=Region(editable)),
+        ):
+            changed = await normalize_description_length(
+                object(), current_count=10_005
+            )
+        self.assertTrue(changed)
+        self.assertIn("NodeFilter.SHOW_TEXT", editable.script)
+        self.assertNotIn("innerHTML", editable.script)
+        self.assertGreater(editable.cutoff, 0)
+        self.assertLess(editable.cutoff, len(await editable.text_content()))
+
+    async def test_current_ali_provider_option_is_clicked(self) -> None:
+        class Candidate:
+            def __init__(self, text):
+                self.text = text
+                self.clicked = False
+
+            async def inner_text(self):
+                return self.text
+
+            async def is_visible(self):
+                return True
+
+            async def click(self, *, force=False):
+                self.clicked = force
+
+        class Candidates:
+            def __init__(self, items):
+                self.items = items
+
+            async def count(self):
+                return len(self.items)
+
+            def nth(self, index):
+                return self.items[index]
+
+        class Menu:
+            def __init__(self, items):
+                self.items = items
+
+            def locator(self, selector):
+                return Candidates(self.items)
+
+        recent = Candidate("简体中文→英语(阿里/不翻品牌)")
+        provider = Candidate("阿里翻译（剩216张）")
+        self.assertTrue(
+            await _choose_ali_translation_provider(Menu([recent, provider]))
+        )
+        self.assertFalse(recent.clicked)
+        self.assertTrue(provider.clicked)
+
     async def test_atomic_input_snapshot_uses_one_browser_evaluation(self) -> None:
         class Fields:
             calls = 0

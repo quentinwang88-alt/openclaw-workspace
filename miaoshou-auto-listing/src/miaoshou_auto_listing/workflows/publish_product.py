@@ -415,6 +415,7 @@ class PublishProductWorkflow:
             )
             self._emit(failed, events)
             page_url = getattr(page, "url", "")
+            diagnostics = await self._failure_diagnostics(page, context)
             screenshot = await self.evidence.capture(
                 page,
                 task.task_id,
@@ -425,6 +426,7 @@ class PublishProductWorkflow:
                     "error_message": error.message,
                     "page_url": page_url,
                     "retry_count": total_retries,
+                    "diagnostics": diagnostics,
                 },
             )
             draft_saved = False
@@ -488,7 +490,11 @@ class PublishProductWorkflow:
                 task_id=task.task_id,
                 success=False,
                 current_step=failed_step,
-                error_code=error.code,
+                error_code=(
+                    ErrorCode.PUBLISH_PENDING_VERIFICATION
+                    if pending_verification
+                    else error.code
+                ),
                 error_message=error.message,
                 published_status=(
                     "SUBMITTED_PENDING_VERIFICATION"
@@ -501,6 +507,34 @@ class PublishProductWorkflow:
                 preflight=getattr(context, "preflight_snapshot", {}),
                 events=events,
             )
+
+    @staticmethod
+    async def _failure_diagnostics(page: Any, context: HandlerContext) -> dict:
+        diagnostics = {
+            "preflight": getattr(context, "preflight_snapshot", {}),
+            "image_translation": getattr(context, "image_translation", {}),
+            "category_inference": getattr(context, "category_inference", {}),
+            "visible_dialogs": [],
+            "visible_validation_errors": [],
+        }
+        try:
+            diagnostics["visible_dialogs"] = await page.locator(
+                "[role='dialog']:visible"
+            ).evaluate_all(
+                "elements => elements.map(element => ({"
+                "label: String(element.getAttribute('aria-label') || ''),"
+                "text: String(element.innerText || '').trim().slice(0, 500)"
+                "}))"
+            )
+        except Exception:
+            pass
+        try:
+            diagnostics["visible_validation_errors"] = await page.locator(
+                ".jx-form-item__error:visible, .jx-message--error:visible"
+            ).all_text_contents()
+        except Exception:
+            pass
+        return diagnostics
 
     @staticmethod
     def _can_save_failed_draft(step: Step) -> bool:

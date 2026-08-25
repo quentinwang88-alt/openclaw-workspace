@@ -14,7 +14,7 @@ from miaoshou_auto_listing.handlers.product import (
     is_unbound_shop_row_text,
     miaoshou_row_identity,
 )
-from miaoshou_auto_listing.handlers.shop import infer_category_group
+from miaoshou_auto_listing.handlers.shop import ShopHandler, infer_category_group
 from miaoshou_auto_listing.handlers.stock import warehouse_selection_matches
 from miaoshou_auto_listing.models import ErrorCode, ProductTask, Step
 from miaoshou_auto_listing.state import (
@@ -124,6 +124,9 @@ class WorkflowTest(unittest.IsolatedAsyncioTestCase):
             "高级感小号侧边刘海鸭嘴夹",
             "彩钻前额碎发发卡",
             "法式鲨鱼抓夹",
+            "法式香蕉夹",
+            "简约盘发夹子",
+            "蓬松高马尾夹",
             "古风发簪",
             "小众法式简约花朵耳钉",
             "天然珍珠耳环女气质耳饰",
@@ -151,6 +154,32 @@ class WorkflowTest(unittest.IsolatedAsyncioTestCase):
             "保暖针织帽子",
         ):
             self.assertEqual(infer_category_group(title), "ACCESSORY")
+
+    async def test_category_waits_for_two_stable_observations(self) -> None:
+        class LoadingCategoryText:
+            def __init__(self):
+                self.values = iter(("加载中", "法式香蕉夹", "法式香蕉夹"))
+                self.current = ""
+
+            async def inner_text(self):
+                try:
+                    self.current = next(self.values)
+                except StopIteration:
+                    pass
+                return self.current
+
+        listing_task = task().model_copy(update={"category_group": "AUTO"})
+        context = SimpleNamespace(
+            task=listing_task,
+            config=load_config(ROOT / "config"),
+            page=FakePage(),
+        )
+        await ShopHandler()._ensure_category(context, LoadingCategoryText())
+        self.assertEqual(listing_task.category_group, "ACCESSORY")
+        self.assertEqual(context.category_inference["observations"][-2:], [
+            "ACCESSORY",
+            "ACCESSORY",
+        ])
 
     async def test_known_hair_accessories_use_exact_miaoshou_category(self) -> None:
         self.assertEqual(
@@ -497,6 +526,9 @@ class WorkflowTest(unittest.IsolatedAsyncioTestCase):
             ).execute(FakePage(), task(), allow_publish=True)
             self.assertFalse(result.success)
             self.assertEqual(result.published_status, "SUBMITTED_PENDING_VERIFICATION")
+            self.assertEqual(
+                result.error_code, ErrorCode.PUBLISH_PENDING_VERIFICATION
+            )
             self.assertEqual(calls, [Step.VERIFY])
             receipt = submissions.load(task())
             self.assertEqual(receipt.status, SUBMISSION_PENDING)
@@ -531,6 +563,9 @@ class WorkflowTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(result.success)
             self.assertEqual(
                 result.published_status, "SUBMITTED_PENDING_VERIFICATION"
+            )
+            self.assertEqual(
+                result.error_code, ErrorCode.PUBLISH_PENDING_VERIFICATION
             )
             self.assertEqual(submissions.load(task()).status, SUBMISSION_PENDING)
 

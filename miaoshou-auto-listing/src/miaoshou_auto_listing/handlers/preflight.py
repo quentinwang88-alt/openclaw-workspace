@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 from decimal import Decimal
+import os
 import re
 
 from ..errors import ExecutorError
 from ..models import ErrorCode, PricingMode, Step
 from .base import Handler, HandlerContext
 from .editor_dom import (
+    DESCRIPTION_CHAR_LIMIT,
     all_sku_snapshots,
+    clear_description_text,
     contains_thai,
+    description_character_count,
+    description_text_content,
     editor_root,
     grams_to_kg_text,
     logistics_inputs,
@@ -52,6 +57,34 @@ def unique_short_option_names(values, max_length: int = 50):
         used.add(candidate)
         results.append(candidate)
     return results
+
+
+CLEAR_DESCRIPTION_TEXT_RECORD_IDS_ENV = (
+    "MIAOSHOU_CLEAR_DESCRIPTION_TEXT_RECORD_IDS"
+)
+
+
+def clear_description_text_record_ids(value: str = "") -> set[str]:
+    raw = value if value else os.environ.get(CLEAR_DESCRIPTION_TEXT_RECORD_IDS_ENV, "")
+    return {item for item in re.split(r"[,\s]+", raw.strip()) if item}
+
+
+def should_clear_description_text(task_id: str, value: str = "") -> bool:
+    return str(task_id or "").strip() in clear_description_text_record_ids(value)
+
+
+def description_validation_error(count):
+    if count is None:
+        return (
+            ErrorCode.DESCRIPTION_COUNT_UNAVAILABLE,
+            "商品描述字符数读取失败；为防止超限，已禁止发布",
+        )
+    if count > DESCRIPTION_CHAR_LIMIT:
+        return (
+            ErrorCode.DESCRIPTION_LIMIT_EXCEEDED,
+            f"商品描述超限：{count}/{DESCRIPTION_CHAR_LIMIT}",
+        )
+    return None, ""
 
 
 async def normalize_option_name_lengths(editor) -> int:
@@ -116,6 +149,35 @@ class PreflightHandler(Handler):
                 step=self.step,
             )
 
+        issues = []
+        description_error_code = None
+        description_clear_result = {}
+        clear_description_authorized = should_clear_description_text(
+            context.task.task_id
+        )
+        description_count = await description_character_count(editor)
+        if clear_description_authorized:
+            try:
+                description_clear_result = await clear_description_text(editor)
+                await context.page.wait_for_timeout(500)
+                remaining_text = await description_text_content(editor)
+                if remaining_text is None:
+                    issues.append(
+                        "product description could not be verified after explicit clear"
+                    )
+                elif re.sub(r"[\s\u200b\ufeff]+", "", remaining_text):
+                    issues.append(
+                        "product description text remains after explicit clear"
+                    )
+            except Exception as exc:
+                issues.append(f"product description explicit clear failed: {exc}")
+            description_count = await description_character_count(editor)
+        description_error_code, description_error = description_validation_error(
+            description_count
+        )
+        if description_error:
+            issues.append(description_error)
+
         profile = context.config.logistics_profiles[context.task.category_group]
         expected_weight = grams_to_kg_text(profile["weight_g"])
         expected_stock = str(
@@ -128,7 +190,6 @@ class PreflightHandler(Handler):
             if context.task.pricing_mode == PricingMode.FIXED
             else None
         )
-        issues = []
         sku_results = []
         snapshots = await all_sku_snapshots(context.page)
         for item in snapshots:
@@ -229,6 +290,10 @@ class PreflightHandler(Handler):
                 ),
             },
             "title": title,
+            "description_character_count": description_count,
+            "description_character_limit": DESCRIPTION_CHAR_LIMIT,
+            "description_text_clear_authorized": clear_description_authorized,
+            "description_text_clear_result": description_clear_result,
             "sku_count": len(snapshots),
             "skus": sku_results,
             "package": {
@@ -239,12 +304,13 @@ class PreflightHandler(Handler):
             },
             "size_chart_count": size_chart_count,
             "image_translation": getattr(context, "image_translation", {}),
+            "category_inference": getattr(context, "category_inference", {}),
             "validation_errors": validation_errors,
         }
         setattr(context, "preflight_snapshot", snapshot)
         if issues:
             raise ExecutorError(
-                ErrorCode.PREFLIGHT_FAILED,
+                description_error_code or ErrorCode.PREFLIGHT_FAILED,
                 "; ".join(issues),
                 step=self.step,
             )

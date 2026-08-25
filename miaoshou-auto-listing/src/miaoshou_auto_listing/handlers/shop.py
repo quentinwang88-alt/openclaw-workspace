@@ -43,6 +43,9 @@ ACCESSORY_CATEGORY_TOKENS = (
     "抓夹",
     "鲨鱼夹",
     "鸭嘴夹",
+    "香蕉夹",
+    "高马尾夹",
+    "夹子",
     "围巾",
     "披肩",
     "首饰",
@@ -93,12 +96,12 @@ class ShopHandler(Handler):
             )
         editor = await editor_root(context.page)
         if editor is not None and display_name in await editor.inner_text():
-            self._ensure_category(context, await editor.inner_text())
+            await self._ensure_category(context, editor)
             return
         row = getattr(context, "product_row", None)
         if editor is None and row is not None:
             await self._set_shop_on_real_row(context, row, display_name)
-            self._ensure_category(context, await row.inner_text())
+            await self._ensure_category(context, row)
             return
         try:
             chips = await context.selectors.resolve_all(context.page, "selected_shop_chips")
@@ -107,7 +110,7 @@ class ShopHandler(Handler):
                 for index in range(await chips.count())
             )
             if display_name in selected:
-                self._ensure_category(context, selected)
+                await self._ensure_category(context, context.page.locator("body"))
                 return
         except SelectorNotFound:
             pass
@@ -128,7 +131,7 @@ class ShopHandler(Handler):
                 display_name,
                 timeout_ms=context.config.browser.timeout_ms,
             )
-            self._ensure_category(context, await context.page.locator("body").inner_text())
+            await self._ensure_category(context, context.page.locator("body"))
         except Exception as exc:
             raise ExecutorError(
                 ErrorCode.SHOP_BIND_FAILED,
@@ -197,14 +200,47 @@ class ShopHandler(Handler):
                 state="hidden", timeout=context.config.browser.timeout_ms
             )
 
-    def _ensure_category(self, context: HandlerContext, page_text: str) -> None:
+    async def _ensure_category(self, context: HandlerContext, text_source) -> None:
         if context.task.category_group != "AUTO":
             return
-        inferred = infer_category_group(page_text)
-        if not inferred:
-            raise ExecutorError(
-                ErrorCode.SHOP_BIND_FAILED,
-                "Target shop is bound but product category group could not be inferred",
-                step=self.step,
-            )
-        context.task.category_group = inferred
+        deadline = monotonic() + min(
+            context.config.browser.navigation_timeout_ms, 30_000
+        ) / 1000
+        previous = ""
+        stable_hits = 0
+        observations = []
+        while monotonic() < deadline:
+            try:
+                page_text = await text_source.inner_text()
+            except Exception:
+                page_text = ""
+            inferred = infer_category_group(page_text)
+            observations.append(inferred or "未识别")
+            if inferred and inferred == previous:
+                stable_hits += 1
+            elif inferred:
+                previous = inferred
+                stable_hits = 1
+            else:
+                previous = ""
+                stable_hits = 0
+            if stable_hits >= 2:
+                context.task.category_group = inferred
+                setattr(
+                    context,
+                    "category_inference",
+                    {"group": inferred, "observations": observations[-5:]},
+                )
+                return
+            await context.page.wait_for_timeout(500)
+        setattr(
+            context,
+            "category_inference",
+            {"group": "", "observations": observations[-10:]},
+        )
+        raise ExecutorError(
+            ErrorCode.CATEGORY_INFERENCE_FAILED,
+            "店铺已绑定，但类目数据在等待后仍无法稳定识别："
+            + ", ".join(observations[-5:]),
+            step=self.step,
+        )

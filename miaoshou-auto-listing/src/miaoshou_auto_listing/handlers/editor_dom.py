@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 
 THAI_START = "\u0e00"
 THAI_END = "\u0e7f"
+DESCRIPTION_CHAR_LIMIT = 10_000
 
 
 def grams_to_kg_text(weight_g: Any) -> str:
@@ -93,6 +94,206 @@ async def title_value(editor: Any) -> str:
         return ""
     field = await first_editable_text_input(item)
     return (await field.input_value()).strip() if field is not None else ""
+
+
+def description_counter_value(
+    text: str, limit: int = DESCRIPTION_CHAR_LIMIT
+) -> Optional[int]:
+    matches = re.findall(rf"(\d+)\s*/\s*{limit}\b", str(text or ""))
+    return int(matches[-1]) if matches else None
+
+
+def description_text_cutoff(text: str, target_length: int) -> int:
+    """Return a safe trailing-text cutoff without splitting a word/sentence."""
+    value = str(text or "")
+    if len(value) <= target_length:
+        return len(value)
+    if target_length <= 0:
+        return 0
+    floor = max(0, target_length - 200)
+    window = value[floor:target_length]
+    for pattern in (r"[。！？.!?]\s*", r"[；;]\s*", r"\n+", r"\s+"):
+        boundaries = list(re.finditer(pattern, window))
+        if boundaries:
+            return floor + boundaries[-1].end()
+    return target_length
+
+
+async def _is_description_region(region: Any) -> bool:
+    try:
+        text = await region.inner_text()
+        if "产品描述" not in text or description_counter_value(text) is None:
+            return False
+        return await region.locator("[contenteditable='true']:visible").count() == 1
+    except Exception:
+        return False
+
+
+async def description_region(editor: Any) -> Optional[Any]:
+    """Find the smallest real description region using label, limit and editor."""
+    item = await form_item(editor, "产品描述")
+    if item is not None and await _is_description_region(item):
+        return item
+
+    anchors = editor.get_by_text("产品描述", exact=True)
+    for index in range(await anchors.count()):
+        anchor = anchors.nth(index)
+        for levels in range(1, 13):
+            ancestor = anchor.locator("xpath=" + "/".join([".."] * levels))
+            if await _is_description_region(ancestor):
+                return ancestor
+
+    counters = editor.get_by_text(re.compile(r"\d+\s*/\s*10000\b"))
+    for index in range(await counters.count()):
+        counter = counters.nth(index)
+        for levels in range(1, 13):
+            ancestor = counter.locator("xpath=" + "/".join([".."] * levels))
+            if await _is_description_region(ancestor):
+                return ancestor
+
+    editables = editor.locator("[contenteditable='true']:visible")
+    for index in range(await editables.count()):
+        editable = editables.nth(index)
+        for levels in range(1, 13):
+            ancestor = editable.locator("xpath=" + "/".join([".."] * levels))
+            if await _is_description_region(ancestor):
+                return ancestor
+    return None
+
+
+async def description_character_count(editor: Any) -> Optional[int]:
+    # Counting must not depend on successfully locating the rich-text editor.
+    # Miaoshou renders the authoritative "current/10000" counter in the editor
+    # dialog even when contenteditable is wrapped by a changing component DOM.
+    try:
+        global_count = description_counter_value(await editor.inner_text())
+        if global_count is not None:
+            return global_count
+    except Exception:
+        pass
+    region = await description_region(editor)
+    if region is None:
+        return None
+    count = description_counter_value(await region.inner_text())
+    if count is not None:
+        return count
+    editable = region.locator("[contenteditable='true']:visible")
+    if await editable.count() == 0:
+        return None
+    return len(str(await editable.first.text_content() or ""))
+
+
+def has_visible_description_text(text: str) -> bool:
+    return bool(re.sub(r"[\s\u200b\ufeff]+", "", str(text or "")))
+
+
+async def description_text_content(editor: Any) -> Optional[str]:
+    region = await description_region(editor)
+    if region is None:
+        return None
+    editable = region.locator("[contenteditable='true']:visible")
+    if await editable.count() != 1:
+        return None
+    return str(await editable.first.text_content() or "")
+
+
+async def clear_description_text(editor: Any) -> Dict[str, int]:
+    """Clear description text nodes only, preserving elements and all images."""
+    region = await description_region(editor)
+    if region is None:
+        raise ValueError("Product-description editor region is unavailable")
+    editable = region.locator("[contenteditable='true']:visible")
+    if await editable.count() != 1:
+        raise ValueError(
+            f"Expected one product-description editor, found {await editable.count()}"
+        )
+    editable = editable.first
+    before_text = str(await editable.text_content() or "")
+    images_before = await editable.locator("img").count()
+    await editable.evaluate(
+        """element => {
+            const walker = document.createTreeWalker(
+                element, NodeFilter.SHOW_TEXT
+            );
+            const nodes = [];
+            while (walker.nextNode()) nodes.push(walker.currentNode);
+            for (const node of nodes) node.data = "";
+            element.dispatchEvent(new InputEvent("input", {
+                bubbles: true,
+                inputType: "deleteContentBackward",
+                data: null,
+            }));
+            element.dispatchEvent(new Event("change", {bubbles: true}));
+        }"""
+    )
+    after_text = str(await editable.text_content() or "")
+    images_after = await editable.locator("img").count()
+    if images_after != images_before:
+        raise ValueError(
+            "Clearing description text changed the image count: "
+            f"{images_before} -> {images_after}"
+        )
+    if has_visible_description_text(after_text):
+        raise ValueError("Product-description text remains after explicit clear")
+    return {
+        "text_characters_before": len(before_text),
+        "text_characters_after": len(after_text),
+        "images_before": images_before,
+        "images_after": images_after,
+    }
+
+
+async def normalize_description_length(
+    editor: Any,
+    current_count: int,
+    limit: int = DESCRIPTION_CHAR_LIMIT,
+) -> bool:
+    """Trim only trailing text nodes; keep the rich-text DOM and images intact."""
+    if current_count <= limit:
+        return False
+    region = await description_region(editor)
+    if region is None:
+        raise ValueError("Product-description editor region is unavailable")
+    editable = region.locator("[contenteditable='true']:visible")
+    if await editable.count() != 1:
+        raise ValueError(
+            f"Expected one product-description editor, found {await editable.count()}"
+        )
+    editable = editable.first
+    text = str(await editable.text_content() or "")
+    excess = current_count - limit
+    if len(text) <= excess:
+        raise ValueError(
+            "Product description cannot be shortened safely without removing images"
+        )
+    cutoff = description_text_cutoff(text, len(text) - excess)
+    await editable.evaluate(
+        """(element, cutoff) => {
+            const walker = document.createTreeWalker(
+                element, NodeFilter.SHOW_TEXT
+            );
+            const nodes = [];
+            while (walker.nextNode()) nodes.push(walker.currentNode);
+            let remaining = cutoff;
+            for (const node of nodes) {
+                if (remaining >= node.data.length) {
+                    remaining -= node.data.length;
+                    continue;
+                }
+                node.data = node.data.slice(0, Math.max(0, remaining))
+                    .replace(/\s+$/u, "");
+                remaining = 0;
+            }
+            element.dispatchEvent(new InputEvent("input", {
+                bubbles: true,
+                inputType: "deleteContentBackward",
+                data: null,
+            }));
+            element.dispatchEvent(new Event("change", {bubbles: true}));
+        }""",
+        cutoff,
+    )
+    return True
 
 
 async def logistics_inputs(editor: Any) -> list[Any]:

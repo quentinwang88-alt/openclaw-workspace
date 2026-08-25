@@ -565,6 +565,8 @@ class FeishuTaskTable:
             material_error = result.error_code in {
                 ErrorCode.SIZE_CHART_REQUIRED,
                 ErrorCode.SIZE_CHART_DETECTION_FAILED,
+                ErrorCode.DESCRIPTION_COUNT_UNAVAILABLE,
+                ErrorCode.DESCRIPTION_LIMIT_EXCEEDED,
             }
             updates = {
                 fields["status"]: (

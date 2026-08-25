@@ -252,3 +252,23 @@ class FeishuTaskMappingTest(unittest.TestCase):
         self.assertEqual(table.updated[1]["执行状态"], "待核验")
         self.assertIn("禁止自动重发", table.updated[1]["执行结果"])
         self.assertEqual(table.updated[1]["TikTok产品ID"], "")
+
+    def test_description_limit_problem_is_written_as_needs_input(self) -> None:
+        class RecordingTable(FeishuTaskTable):
+            def _update_record(self, record_id, fields):
+                self.updated = (record_id, fields)
+
+        claimed = task_from_record(self.record(), self.config)
+        table = RecordingTable(self.config)
+        table.complete(
+            claimed,
+            ExecutionResult(
+                task_id=claimed.task.task_id,
+                success=False,
+                current_step=Step.PREFLIGHT,
+                error_code=ErrorCode.DESCRIPTION_LIMIT_EXCEEDED,
+                error_message="商品描述超限：11308/10000",
+            ),
+        )
+        self.assertEqual(table.updated[1]["执行状态"], "待补资料")
+        self.assertIn("11308/10000", table.updated[1]["执行结果"])

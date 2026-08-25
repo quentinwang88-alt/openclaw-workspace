@@ -24,6 +24,8 @@ CommandRunner = Callable[[List[str]], subprocess.CompletedProcess[str]]
 SAFE_PREFLIGHT_SKIP_CODES = {
     "SIZE_CHART_REQUIRED",
     "SIZE_CHART_DETECTION_FAILED",
+    "DESCRIPTION_COUNT_UNAVAILABLE",
+    "DESCRIPTION_LIMIT_EXCEEDED",
 }
 PENDING_VERIFICATION_STATUS = "SUBMITTED_PENDING_VERIFICATION"
 
@@ -191,16 +193,40 @@ def execute_pending_batch(
 
     remaining = table.inspect()
     finished_at = datetime.now(timezone.utc)
+    latest_outcomes: Dict[str, Dict[str, Any]] = {}
+    for outcome in [*items, *verification_items]:
+        task_id = str(outcome.get("task_id") or "")
+        if task_id:
+            latest_outcomes[task_id] = outcome
+    confirmed_success = sum(
+        bool(outcome.get("success")) for outcome in latest_outcomes.values()
+    )
+    submitted_pending = sum(
+        outcome.get("published_status") == PENDING_VERIFICATION_STATUS
+        for outcome in latest_outcomes.values()
+    )
+    needs_input = sum(
+        not bool(outcome.get("success"))
+        and outcome.get("published_status") != PENDING_VERIFICATION_STATUS
+        and outcome.get("error_code") in SAFE_PREFLIGHT_SKIP_CODES
+        for outcome in latest_outcomes.values()
+    )
+    true_failed = sum(
+        not bool(outcome.get("success"))
+        and outcome.get("published_status") != PENDING_VERIFICATION_STATUS
+        and outcome.get("error_code") not in SAFE_PREFLIGHT_SKIP_CODES
+        for outcome in latest_outcomes.values()
+    )
     return {
         "started_at": started_at.isoformat(),
         "finished_at": finished_at.isoformat(),
         "processed": len(items),
-        "succeeded": sum(bool(item.get("success")) for item in items),
-        "failed": sum(
-            not bool(item.get("success"))
-            and item.get("published_status") != PENDING_VERIFICATION_STATUS
-            for item in items
-        ),
+        "succeeded": confirmed_success,
+        "confirmed_success": confirmed_success,
+        "submitted_pending": submitted_pending,
+        "needs_input": needs_input,
+        "true_failed": true_failed,
+        "failed": needs_input + true_failed,
         "verification_pending_submissions": sum(
             item.get("published_status") == PENDING_VERIFICATION_STATUS
             for item in items
@@ -208,12 +234,7 @@ def execute_pending_batch(
         "skipped": sum(
             item.get("error_code") in SAFE_PREFLIGHT_SKIP_CODES for item in items
         ),
-        "blocking_failed": sum(
-            not bool(item.get("success"))
-            and item.get("published_status") != PENDING_VERIFICATION_STATUS
-            and item.get("error_code") not in SAFE_PREFLIGHT_SKIP_CODES
-            for item in items
-        ),
+        "blocking_failed": true_failed,
         "stopped_reason": stopped_reason,
         "remaining_actionable": remaining["actionable"],
         "remaining_pending_verification": remaining.get(
@@ -294,6 +315,10 @@ def main() -> int:
             summary = {
                 "processed": 0,
                 "succeeded": 0,
+                "confirmed_success": 0,
+                "submitted_pending": 0,
+                "needs_input": 0,
+                "true_failed": 0,
                 "failed": 0,
                 "skipped": 0,
                 "blocking_failed": 0,
@@ -309,6 +334,10 @@ def main() -> int:
                 summary = {
                     "processed": 0,
                     "succeeded": 0,
+                    "confirmed_success": 0,
+                    "submitted_pending": 0,
+                    "needs_input": 0,
+                    "true_failed": 1,
                     "failed": 1,
                     "skipped": 0,
                     "blocking_failed": 1,
@@ -345,6 +374,10 @@ def main() -> int:
                     summary = {
                         "processed": 0,
                         "succeeded": 0,
+                        "confirmed_success": 0,
+                        "submitted_pending": 0,
+                        "needs_input": 0,
+                        "true_failed": 1,
                         "failed": 1,
                         "skipped": 0,
                         "blocking_failed": 1,

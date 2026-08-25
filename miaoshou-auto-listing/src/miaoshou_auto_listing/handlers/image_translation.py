@@ -211,6 +211,70 @@ async def _wait_for_visible_dialog(page: Any, heading: str, timeout_ms: int):
     raise TimeoutError(f"Miaoshou dialog did not appear: {heading}")
 
 
+IMAGE_DIALOG_HEADINGS = ("翻译结果预览", "图片翻译", "批量翻译/处理图片")
+
+
+def _image_dialog(page: Any, heading: str):
+    return page.locator("[role='dialog']:visible").filter(
+        has=page.get_by_role("heading", name=heading, exact=True)
+    )
+
+
+async def image_dialog_state(page: Any) -> List[str]:
+    """Return the visible image dialogs from top-level state, not screenshots."""
+    visible = []
+    for heading in IMAGE_DIALOG_HEADINGS:
+        if await _image_dialog(page, heading).count():
+            visible.append(heading)
+    return visible
+
+
+async def _close_image_dialogs_except(page: Any, keep: set[str]) -> None:
+    for heading in IMAGE_DIALOG_HEADINGS:
+        if heading in keep:
+            continue
+        await dismiss_dialog(page, heading)
+        if await _image_dialog(page, heading).count():
+            raise ValueError(f"Could not close stale image dialog: {heading}")
+
+
+async def _recover_translation_preview(
+    context: HandlerContext,
+    region: str,
+    image_count: int,
+    image_container: Any,
+) -> bool:
+    """Commit an already-generated preview instead of starting a paid retry."""
+    preview = _image_dialog(context.page, "翻译结果预览")
+    if await preview.count() == 0:
+        return False
+    preview = preview.last
+    if await preview.locator("img").count() == 0:
+        raise ValueError("Existing translation preview has no generated images")
+    confirm = preview.get_by_text("确认并保存", exact=True)
+    if await confirm.count() != 1:
+        raise ValueError("Existing translation preview has no unique save control")
+    await confirm.click(force=True)
+    await preview.wait_for(
+        state="hidden", timeout=context.config.browser.navigation_timeout_ms
+    )
+    translator = _image_dialog(context.page, "图片翻译")
+    if await translator.count():
+        await translator.last.wait_for(
+            state="hidden", timeout=context.config.browser.navigation_timeout_ms
+        )
+    result_fingerprint = await _image_fingerprint(image_container)
+    _record(
+        context,
+        region,
+        "RECOVERED_TRANSLATION_PREVIEW",
+        image_count,
+        result_fingerprint=result_fingerprint,
+        target_language=image_language_code(context.task.market),
+    )
+    return True
+
+
 async def _ensure_selected(region: Any, trigger: Any) -> None:
     button = trigger.locator("xpath=ancestor::button[1]")
     if await trigger.evaluate("element => element.tagName === 'BUTTON'"):
@@ -224,12 +288,40 @@ async def _ensure_selected(region: Any, trigger: Any) -> None:
         raise ValueError("Image translation button is disabled after selecting images")
 
 
+def _is_ali_translation_provider(text: str) -> bool:
+    normalized = "".join(str(text or "").split())
+    return normalized.startswith(("阿里翻译", "阿里AI翻译"))
+
+
+async def _choose_ali_translation_provider(menu: Any) -> bool:
+    candidates = menu.locator(
+        ".image-translate-panel-item, [role='menuitem'], li, button, div"
+    )
+    for index in range(await candidates.count() - 1, -1, -1):
+        candidate = candidates.nth(index)
+        try:
+            if (
+                _is_ali_translation_provider(await candidate.inner_text())
+                and await candidate.is_visible()
+            ):
+                await candidate.click(force=True)
+                return True
+        except Exception:
+            continue
+    return False
+
+
 async def _open_translation_dialog(page: Any, button: Any, timeout_ms: int):
     deadline = monotonic() + timeout_ms / 1000
     translator = page.locator("[role='dialog']:visible").filter(
         has=page.get_by_role("heading", name="图片翻译", exact=True)
     )
     quick_menu = page.locator(".jx-popper:visible").filter(has_text="选择翻译渠道")
+    preview = _image_dialog(page, "翻译结果预览")
+    if await preview.count():
+        raise ValueError("Translation preview is already visible and must be recovered")
+    if await translator.count():
+        return translator.last
     if await quick_menu.count() == 0:
         await button.click()
     chose_channel = False
@@ -237,12 +329,7 @@ async def _open_translation_dialog(page: Any, button: Any, timeout_ms: int):
         if await translator.count():
             return translator.last
         if not chose_channel and await quick_menu.count():
-            channels = quick_menu.last.locator(".image-translate-panel-item").filter(
-                has_text="阿里AI翻译"
-            )
-            if await channels.count():
-                await channels.last.click()
-                chose_channel = True
+            chose_channel = await _choose_ali_translation_provider(quick_menu.last)
         await page.wait_for_timeout(300)
     raise TimeoutError("Miaoshou image translation settings did not appear")
 
@@ -261,11 +348,6 @@ async def _click_visible_text_control(container: Any, label: str) -> bool:
         except Exception:
             continue
     return False
-
-
-async def _dismiss_stale_image_dialogs(page: Any) -> None:
-    for heading in ("翻译结果预览", "图片翻译", "批量翻译/处理图片"):
-        await dismiss_dialog(page, heading)
 
 
 async def _select_language_control(
@@ -381,23 +463,40 @@ class DetailImageTranslationHandler(Handler):
 
     async def run(self, context: HandlerContext) -> None:
         try:
-            await _dismiss_stale_image_dialogs(context.page)
             editor = await editor_root(context.page)
             if editor is None:
                 raise ValueError("Calibrated Miaoshou editor is unavailable")
-            entry = editor.get_by_text("批量翻译/处理图片", exact=True)
-            if await entry.count() != 1:
-                raise ValueError(
-                    f"Expected one detail-image processor, found {await entry.count()}"
+            processor = _image_dialog(context.page, "批量翻译/处理图片")
+            if await processor.count():
+                processor = processor.last
+            else:
+                await _close_image_dialogs_except(context.page, set())
+                entry = editor.get_by_text("批量翻译/处理图片", exact=True)
+                if await entry.count() != 1:
+                    raise ValueError(
+                        "Expected one detail-image processor, "
+                        f"found {await entry.count()}"
+                    )
+                await entry.click()
+                processor = await _wait_for_visible_dialog(
+                    context.page,
+                    "批量翻译/处理图片",
+                    context.config.browser.navigation_timeout_ms,
                 )
-            await entry.click()
-            processor = await _wait_for_visible_dialog(
-                context.page,
-                "批量翻译/处理图片",
-                context.config.browser.navigation_timeout_ms,
-            )
             image_count = await processor.locator(".product-picture-item").count()
-            if image_count:
+            if image_count and await _recover_translation_preview(
+                context, "detail", image_count, processor
+            ):
+                await processor.get_by_role("button", name="保存", exact=True).click()
+                await processor.wait_for(
+                    state="hidden",
+                    timeout=context.config.browser.navigation_timeout_ms,
+                )
+                return
+            translator_open = bool(
+                await _image_dialog(context.page, "图片翻译").count()
+            )
+            if image_count and not translator_open:
                 image_count = await _limit_detail_images(
                     context.page,
                     processor,
@@ -430,9 +529,11 @@ class DetailImageTranslationHandler(Handler):
         except ExecutorError:
             raise
         except Exception as exc:
+            dialogs = await image_dialog_state(context.page)
             raise ExecutorError(
                 ErrorCode.IMAGE_TRANSLATE_FAILED,
-                f"Miaoshou detail-image translation failed: {exc}",
+                "Miaoshou detail-image translation failed: "
+                f"{exc}; visible_image_dialogs={dialogs}",
                 step=self.step,
             ) from exc
 
@@ -442,7 +543,13 @@ class MainImageTranslationHandler(Handler):
 
     async def run(self, context: HandlerContext) -> None:
         try:
-            await _dismiss_stale_image_dialogs(context.page)
+            # A processor dialog belongs to the previous detail-image step.
+            # Close that stack top-down; otherwise keep an inline translator or
+            # preview so this same step can resume without paying for a retry.
+            if await _image_dialog(
+                context.page, "批量翻译/处理图片"
+            ).count():
+                await _close_image_dialogs_except(context.page, set())
             editor = await editor_root(context.page)
             if editor is None:
                 raise ValueError("Calibrated Miaoshou editor is unavailable")
@@ -454,6 +561,10 @@ class MainImageTranslationHandler(Handler):
             image_count = await region.locator("img").count()
             if image_count == 0:
                 raise ValueError("Product has no main images")
+            if await _recover_translation_preview(
+                context, "main", image_count, region
+            ):
+                return
             if await _reuse_saved_translation(context, "main", region, image_count):
                 return
             trigger = region.get_by_text("图片翻译", exact=True)
@@ -466,9 +577,11 @@ class MainImageTranslationHandler(Handler):
         except ExecutorError:
             raise
         except Exception as exc:
+            dialogs = await image_dialog_state(context.page)
             raise ExecutorError(
                 ErrorCode.IMAGE_TRANSLATE_FAILED,
-                f"Miaoshou main-image translation failed: {exc}",
+                "Miaoshou main-image translation failed: "
+                f"{exc}; visible_image_dialogs={dialogs}",
                 step=self.step,
             ) from exc
 
@@ -481,7 +594,10 @@ class SizeChartTranslationHandler(Handler):
             _record(context, "size_chart", "SKIPPED_NOT_CLOTHING", 0)
             return
         try:
-            await _dismiss_stale_image_dialogs(context.page)
+            if await _image_dialog(
+                context.page, "批量翻译/处理图片"
+            ).count():
+                await _close_image_dialogs_except(context.page, set())
             editor = await editor_root(context.page)
             if editor is None:
                 raise ValueError("Calibrated Miaoshou editor is unavailable")
@@ -490,6 +606,10 @@ class SizeChartTranslationHandler(Handler):
             image_count = await region.locator("img").count()
             if image_count == 0:
                 _record(context, "size_chart", "MISSING_VERIFIED_SOURCE", 0)
+                return
+            if await _recover_translation_preview(
+                context, "size_chart", image_count, region
+            ):
                 return
             if not needs_translation:
                 _record(
@@ -513,9 +633,11 @@ class SizeChartTranslationHandler(Handler):
         except ExecutorError:
             raise
         except Exception as exc:
+            dialogs = await image_dialog_state(context.page)
             raise ExecutorError(
                 ErrorCode.IMAGE_TRANSLATE_FAILED,
-                f"Miaoshou size-chart translation failed: {exc}",
+                "Miaoshou size-chart translation failed: "
+                f"{exc}; visible_image_dialogs={dialogs}",
                 step=self.step,
             ) from exc
 

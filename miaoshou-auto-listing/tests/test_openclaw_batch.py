@@ -121,7 +121,29 @@ class OpenClawBatchTest(unittest.TestCase):
         )
         self.assertEqual(summary["processed"], 2)
         self.assertEqual(summary["verification_pending_submissions"], 1)
+        self.assertEqual(summary["submitted_pending"], 1)
+        self.assertEqual(summary["confirmed_success"], 1)
+        self.assertEqual(summary["true_failed"], 0)
         self.assertEqual(summary["blocking_failed"], 0)
+
+    def test_verify_only_success_is_counted_as_confirmed_success(self) -> None:
+        completed = subprocess.CompletedProcess(
+            [],
+            0,
+            '{"task_id":"rec1","success":true,"platform_product_id":"p1"}',
+            "",
+        )
+        summary = execute_pending_batch(
+            FakeTable([0], verification_ids=["rec1"]),
+            config_dir=Path("config"),
+            max_items=20,
+            command_runner=lambda command: completed,
+            verify_only=True,
+        )
+        self.assertEqual(summary["processed"], 0)
+        self.assertEqual(summary["succeeded"], 1)
+        self.assertEqual(summary["confirmed_success"], 1)
+        self.assertEqual(summary["submitted_pending"], 0)
 
 
 if __name__ == "__main__":
