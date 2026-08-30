@@ -157,7 +157,10 @@ def _load_script(script_id: str, db_path: Optional[str] = None) -> Dict[str, Any
     return script
 
 
-def _download_references(client: Any, assets: Iterable[Mapping[str, Any]], output_dir: Path) -> list[str]:
+def _download_references(
+    client: Any, assets: Iterable[Mapping[str, Any]], output_dir: Path,
+    *, cache_dir: Optional[Path] = None,
+) -> list[str]:
     paths: list[str] = []
     for index, asset in enumerate(assets, start=1):
         if not isinstance(asset, Mapping) or not _text(asset.get("file_token")):
@@ -168,7 +171,15 @@ def _download_references(client: Any, assets: Iterable[Mapping[str, Any]], outpu
         }.get(content_type, ".jpg")
         path = output_dir / f"ref_{index:02d}{suffix}"
         path.write_bytes(content)
-        paths.append(str(path))
+        selected = path
+        if cache_dir is not None:
+            digest = hashlib.sha256(content).hexdigest()
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cached = cache_dir / f"ref_{index:02d}_{digest[:10]}{suffix}"
+            if not cached.is_file():
+                cached.write_bytes(content)
+            selected = cached
+        paths.append(str(selected))
     return paths
 
 
@@ -372,9 +383,24 @@ def run_tasks(
                 reference_assets = list(contract.get("product_reference_assets") or []) + list(
                     contract.get("persona_reference_assets") or []
                 )
-                reference_paths = _download_references(client, reference_assets, tmp_dir)
+                reference_paths = _download_references(
+                    client, reference_assets, tmp_dir,
+                    cache_dir=asset_dir / "references",
+                )
                 if not reference_paths:
                     raise ValueError("没有可下载的商品/人物参考图")
+                product_ref_count = len(contract.get("product_reference_assets") or [])
+                contract["cached_reference_assets"] = [
+                    {
+                        "role": (
+                            "PRODUCT_REFERENCE"
+                            if index <= product_ref_count else "PERSONA_REFERENCE"
+                        ),
+                        "local_path": path,
+                        "sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest(),
+                    }
+                    for index, path in enumerate(reference_paths, 1)
+                ]
                 generated = _generate_image(
                     prompt=prompt, reference_paths=reference_paths,
                     output_dir=tmp_dir, asset_id=asset_id,

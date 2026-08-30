@@ -24,7 +24,7 @@ from core.product_type_resolution import normalize_product_type
 
 
 REFERENCE_SCHEMA_VERSION = "retrieval-reference-contract-v4-execution-shape"
-REFERENCE_POLICY_VERSION = "execution-case-retrieval-v5-shot-richness"
+REFERENCE_POLICY_VERSION = "execution-case-retrieval-v6-execution-only"
 
 # Run ids are deliberately not listed here.  sd_dimension_release is the only
 # authority for active discovery data; keeping a fallback list would silently
@@ -36,7 +36,6 @@ _REQUIRED_ACTIVE_DIMENSIONS = (
     "persona_presentation",
     "visual_hook",
     "script_execution",
-    "speech_hook",
 )
 
 _PROTOTYPE_TABLES = {
@@ -982,31 +981,12 @@ def _load_v3_reference_contexts(
                 continue
             assignments_by_video[_text(row.get("video_id"))][dimension] = dict(row)
 
-    speech_run = active_runs["speech_hook"]
-    cursor.execute(
-        "SELECT * FROM sd_speech_hook_prototype WHERE run_id=%s",
-        (speech_run,),
-    )
-    speech_prototypes = [dict(row) for row in cursor.fetchall()]
-    cursor.execute(
-        """
-        SELECT p.*, c.cluster_id
-        FROM sd_speech_hook_profile p
-        JOIN sd_speech_hook_cluster c
-          ON c.run_id=p.run_id AND c.video_id=p.video_id
-        WHERE p.run_id=%s AND p.hook_usable=1 AND COALESCE(c.is_noise,0)=0
-        ORDER BY p.video_id
-        """,
-        (speech_run,),
-    )
-    speech_profiles = [dict(row) for row in cursor.fetchall()]
-    speech_pool = _speech_pool_from_rows(
-        speech_prototypes,
-        speech_profiles,
-        target_language=target_language,
-        top_category=top_category,
-        product_type=product_type,
-    )
+    # Spoken-hook discovery is deliberately consumed by the central
+    # voiceover engine, not by visual case retrieval.  Keeping the old query
+    # here coupled a missing/noisy speech release to otherwise valid structure
+    # and scene references.  The compatibility field remains empty for frozen
+    # report readers; no raw ASR enters the visual contract.
+    speech_pool: List[Dict[str, Any]] = []
 
     candidates: List[Dict[str, Any]] = []
     for row in feature_rows:
@@ -2198,6 +2178,85 @@ def model_visible_reference_projection(
         if isinstance(support.get("execution_card") or support.get("reference_execution_spine"), Mapping)
         else {}
     )
+
+    def execution_only_projection(card: Mapping[str, Any]) -> Dict[str, Any]:
+        """Expose how the source video moves and cuts, never what it sells.
+
+        Real cases are valuable execution examples, but their titles,
+        storyboard nouns, source logic and scene/product summaries are also a
+        strong semantic prompt.  Passing those fields to the blueprint model
+        lets a source commute/cafe story overwrite the current product's
+        frozen narrative context.  This projection deliberately keeps only
+        timing, carrier, motion family, framing and segment order.
+        """
+
+        if not isinstance(card, Mapping):
+            return {}
+        projected_parts: Dict[str, Any] = {}
+        raw_parts = card.get("parts") if isinstance(card.get("parts"), Mapping) else {}
+        for part_name in ("opening", "proof", "use_process", "ending"):
+            raw_part = raw_parts.get(part_name)
+            if not isinstance(raw_part, Mapping):
+                continue
+            status = _text(raw_part.get("status")).upper() or "UNAVAILABLE"
+            part_projection: Dict[str, Any] = {
+                "status": status,
+                "part": part_name,
+            }
+            if status == "AVAILABLE":
+                indexes = raw_part.get("shot_indexes") or []
+                if indexes:
+                    part_projection["shot_indexes"] = [
+                        _int(value) for value in indexes if _int(value) > 0
+                    ]
+                shots = raw_part.get("shots") if isinstance(raw_part.get("shots"), list) else []
+                shot_projection = []
+                for index, shot in enumerate(shots[:6], start=1):
+                    if not isinstance(shot, Mapping):
+                        continue
+                    shot_projection.append({
+                        "shot_index": _int(shot.get("shot_index"), index),
+                        "duration": _compact_text(
+                            shot.get("duration") or shot.get("duration_sec"), 48
+                        ),
+                        "framing_and_editing": _compact_text(
+                            shot.get("camera_and_editing")
+                            or shot.get("framing_and_transition"),
+                            220,
+                        ),
+                    })
+                if shot_projection:
+                    part_projection["shots"] = shot_projection
+                # Legacy reference spines already isolate framing from visual
+                # content.  Preserve that isolated field only.
+                legacy_framing = _compact_text(
+                    raw_part.get("framing_and_transition"), 220
+                )
+                if legacy_framing and not shot_projection:
+                    part_projection["framing_and_transition"] = legacy_framing
+            projected_parts[part_name] = part_projection
+        identifier = _text(
+            card.get("execution_card_id") or card.get("reference_spine_id")
+        )
+        return {
+            "schema_version": "model-visible-execution-only-v1",
+            "execution_card_id": identifier,
+            "reference_spine_id": (
+                identifier if _text(card.get("reference_spine_id")) else ""
+            ),
+            "content_carrier": _text(card.get("content_carrier")),
+            "physical_action_type": _text(card.get("physical_action_type")),
+            "duration_sec": card.get("duration_sec"),
+            "shot_count": _int(card.get("shot_count")),
+            "coarse_beat_sequence": list(card.get("coarse_beat_sequence") or []),
+            "rhythm_logic": _compact_text(card.get("rhythm_logic"), 240),
+            "parts": projected_parts,
+            "available_parts": list(card.get("available_parts") or []),
+            "semantic_boundary": "EXECUTION_ONLY_NO_SOURCE_CONTENT",
+        }
+
+    primary_visible_spine = execution_only_projection(primary_spine)
+    support_visible_spine = execution_only_projection(support_spine)
     primary_payload = {
         "_meta": dict(primary.get("_meta") or {}),
         "same_video_dimension_bundle": dict(
@@ -2206,17 +2265,17 @@ def model_visible_reference_projection(
         "matched_scene_realism": scene_reference,
     }
     if _text(primary_spine.get("execution_card_id")):
-        primary_payload["execution_card"] = primary_spine
+        primary_payload["execution_card"] = primary_visible_spine
     else:
-        primary_payload["reference_execution_spine"] = primary_spine
+        primary_payload["reference_execution_spine"] = primary_visible_spine
     support_payload = {"_meta": dict(support.get("_meta") or {})}
     if support:
         if _text(support_spine.get("execution_card_id")):
-            support_payload["execution_card"] = support_spine
+            support_payload["execution_card"] = support_visible_spine
         else:
             support_payload["opening_inspiration"] = (
-                (support_spine.get("parts") or {}).get("opening", {})
-                if isinstance(support_spine.get("parts"), Mapping)
+                (support_visible_spine.get("parts") or {}).get("opening", {})
+                if isinstance(support_visible_spine.get("parts"), Mapping)
                 else {}
             )
     return {
@@ -2260,6 +2319,27 @@ def legacy_execution_reference_projection(
     ]
     source = primary.get("source_metadata")
     source = source if isinstance(source, Mapping) else {}
+
+    # ``script-execution-card-v2`` stores measured framing per shot, while the
+    # older projection only looked for the retired part-level
+    # ``framing_and_transition`` field.  That made a successfully retrieved
+    # 3-6 shot real case arrive downstream with an empty camera grammar.  Keep
+    # source visual nouns private, but preserve the already-sanitized framing
+    # and edit relation that the execution layer is allowed to consume.
+    camera_grammar: List[str] = []
+    for item in ordered:
+        legacy = _text(item.get("framing_and_transition"))
+        if legacy and legacy not in camera_grammar:
+            camera_grammar.append(legacy)
+        for shot in item.get("shots") or []:
+            if not isinstance(shot, Mapping):
+                continue
+            framing = _text(
+                shot.get("camera_and_editing")
+                or shot.get("framing_and_transition")
+            )
+            if framing and framing not in camera_grammar:
+                camera_grammar.append(framing)
     return {
         "reference_status": "VIDEO_REFERENCED",
         "execution_card_id": _text(
@@ -2272,10 +2352,7 @@ def legacy_execution_reference_projection(
             _text(item.get("visual_action")) for item in ordered
             if _text(item.get("visual_action"))
         ],
-        "camera_grammar": [
-            _text(item.get("framing_and_transition")) for item in ordered
-            if _text(item.get("framing_and_transition"))
-        ],
+        "camera_grammar": camera_grammar,
         "visual_hook_type": _text(
             (parts.get("opening") or {}).get("shot_function")
             if isinstance(parts.get("opening"), Mapping) else ""

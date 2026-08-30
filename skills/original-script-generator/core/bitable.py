@@ -307,6 +307,18 @@ class FeishuBitableClient:
             raise FeishuAPIError(f"重命名字段失败【{field_name}】: {result.get('msg')}")
         return result.get("data", {}) or {}
 
+    def delete_field(self, field_id: str, field_name: str = "") -> None:
+        """Delete one exact non-primary field by its resolved field ID."""
+        url = (
+            f"https://open.feishu.cn/open-apis/bitable/v1/apps/"
+            f"{self.app_token}/tables/{self.table_id}/fields/{field_id}"
+        )
+        response = self._request("DELETE", url, headers=self._headers())
+        result = response.json()
+        if result.get("code") != 0:
+            label = f"【{field_name}】" if field_name else ""
+            raise FeishuAPIError(f"删除字段失败{label}: {result.get('msg')}")
+
     def batch_create_records(self, records: List[Dict[str, Any]]) -> List[str]:
         if not records:
             return []

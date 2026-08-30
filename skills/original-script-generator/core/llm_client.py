@@ -7,9 +7,12 @@
 """
 
 import base64
+import contextlib
 import json
 import os
+import signal
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -58,6 +61,12 @@ PRIMARY_LLM_REASONING_EFFORT = os.environ.get("ORIGINAL_SCRIPT_PRIMARY_REASONING
 PRIMARY_LLM_STREAM_RETURN_ON_TEXT_DONE = (
     os.environ.get("ORIGINAL_SCRIPT_STREAM_RETURN_ON_TEXT_DONE", "1") != "0"
 )
+PRIMARY_LLM_STREAM_TOTAL_TIMEOUT_SECONDS = int(
+    os.environ.get("ORIGINAL_SCRIPT_STREAM_TOTAL_TIMEOUT_SECONDS", "150") or 150
+)
+PRIMARY_LLM_STREAM_CLI_FALLBACK_ENABLED = (
+    os.environ.get("ORIGINAL_SCRIPT_STREAM_CLI_FALLBACK_ENABLED", "1") != "0"
+)
 CODEX_CLI_BINARY = "/Users/likeu3/.codex/packages/standalone/current/codex"
 OPENCLAW_CONFIG_PATH = Path(
     os.environ.get("OPENCLAW_CONFIG_PATH", str(Path.home() / ".openclaw" / "openclaw.json"))
@@ -74,6 +83,41 @@ CODEX_AUTH_PATH = Path(
 HERMES_AUTH_PATH = Path(
     os.environ.get("HERMES_AUTH_PATH", str(Path.home() / ".hermes" / "auth.json"))
 )
+
+
+class _PrimaryStreamDeadlineExceeded(TimeoutError):
+    """Raised when a streaming request keeps its socket open without finishing."""
+
+
+@contextlib.contextmanager
+def _stream_total_deadline(seconds: int):
+    """Bound total wall time for a synchronous Responses stream on macOS/Linux."""
+
+    if (
+        seconds <= 0
+        or not hasattr(signal, "SIGALRM")
+        or threading.current_thread() is not threading.main_thread()
+    ):
+        yield
+        return
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+
+    def _on_deadline(_signum, _frame):
+        raise _PrimaryStreamDeadlineExceeded(
+            f"Primary Responses stream exceeded total timeout ({seconds}s)"
+        )
+
+    signal.signal(signal.SIGALRM, _on_deadline)
+    signal.setitimer(signal.ITIMER_REAL, float(seconds))
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, *previous_timer)
 
 
 def _safe_read_json(path: Path) -> Dict[str, Any]:
@@ -348,43 +392,53 @@ class OriginalScriptLLMClient:
         fallback_text = ""
         final_response_dump: Dict[str, Any] = {}
         saw_text_done = False
-        with client.responses.stream(
-            model=self.primary_model,
-            reasoning={"effort": self.primary_reasoning_effort},
-            instructions=(
-                "You are a multimodal content generation worker for original short-video scripting. "
-                "Follow the user prompt exactly. "
-                "If the prompt asks for JSON, output only valid JSON with no extra prose."
-            ),
-            store=False,
-            input=[{"role": "user", "content": input_content}],
-        ) as stream:
-            for event in stream:
-                event_type = str(getattr(event, "type", "") or "")
-                if event_type == "response.output_text.delta":
-                    delta = str(getattr(event, "delta", "") or "")
-                    if delta:
-                        text_chunks.append(delta)
-                elif event_type == "response.output_text.done":
-                    done_text = str(getattr(event, "text", "") or "")
-                    if done_text:
-                        fallback_text = done_text
-                    saw_text_done = True
-                    if PRIMARY_LLM_STREAM_RETURN_ON_TEXT_DONE and (fallback_text.strip() or text_chunks):
-                        break
-                elif event_type == "response.completed":
-                    response_obj = getattr(event, "response", None)
-                    if response_obj is not None and hasattr(response_obj, "model_dump"):
-                        final_response_dump = response_obj.model_dump(mode="json")
-                    break
-                elif event_type in {"response.failed", "response.incomplete"}:
-                    response_obj = getattr(event, "response", None)
-                    if response_obj is not None and hasattr(response_obj, "model_dump"):
-                        final_response_dump = response_obj.model_dump(mode="json")
-                    raise Exception(f"Responses stream ended with {event_type}: {final_response_dump or event}")
-            if not (text_chunks or fallback_text.strip() or saw_text_done or final_response_dump):
-                response = stream.get_final_response()
-                final_response_dump = response.model_dump(mode="json")
+        try:
+            with _stream_total_deadline(PRIMARY_LLM_STREAM_TOTAL_TIMEOUT_SECONDS):
+                with client.responses.stream(
+                    model=self.primary_model,
+                    reasoning={"effort": self.primary_reasoning_effort},
+                    instructions=(
+                        "You are a multimodal content generation worker for original short-video scripting. "
+                        "Follow the user prompt exactly. "
+                        "If the prompt asks for JSON, output only valid JSON with no extra prose."
+                    ),
+                    store=False,
+                    input=[{"role": "user", "content": input_content}],
+                ) as stream:
+                    for event in stream:
+                        event_type = str(getattr(event, "type", "") or "")
+                        if event_type == "response.output_text.delta":
+                            delta = str(getattr(event, "delta", "") or "")
+                            if delta:
+                                text_chunks.append(delta)
+                        elif event_type == "response.output_text.done":
+                            done_text = str(getattr(event, "text", "") or "")
+                            if done_text:
+                                fallback_text = done_text
+                            saw_text_done = True
+                            if PRIMARY_LLM_STREAM_RETURN_ON_TEXT_DONE and (fallback_text.strip() or text_chunks):
+                                break
+                        elif event_type == "response.completed":
+                            response_obj = getattr(event, "response", None)
+                            if response_obj is not None and hasattr(response_obj, "model_dump"):
+                                final_response_dump = response_obj.model_dump(mode="json")
+                            break
+                        elif event_type in {"response.failed", "response.incomplete"}:
+                            response_obj = getattr(event, "response", None)
+                            if response_obj is not None and hasattr(response_obj, "model_dump"):
+                                final_response_dump = response_obj.model_dump(mode="json")
+                            raise Exception(f"Responses stream ended with {event_type}: {final_response_dump or event}")
+                    if not (text_chunks or fallback_text.strip() or saw_text_done or final_response_dump):
+                        response = stream.get_final_response()
+                        final_response_dump = response.model_dump(mode="json")
+        except (_PrimaryStreamDeadlineExceeded, httpx.NetworkError, httpx.TimeoutException) as exc:
+            if not PRIMARY_LLM_STREAM_CLI_FALLBACK_ENABLED:
+                raise
+            print(f"    ⚠️ 主线路流式传输异常，改用 Codex CLI 续接: {exc}")
+            return self._call_primary_via_codex_cli(
+                prompt=prompt,
+                image_paths=image_paths,
+            )
         dumped = final_response_dump
         text = fallback_text.strip() or "".join(text_chunks).strip()
         if not text and dumped:

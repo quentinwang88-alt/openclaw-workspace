@@ -30,6 +30,11 @@ from core.original_batch_allocator import (
     _relationship_device_for_hook,
     _relationship_schedule,
 )
+from core.complete_script_v3 import (
+    _perceptual_action_family,
+    _perceptual_signature,
+    _usage_perceptual_signature,
+)
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -97,6 +102,41 @@ def _fake_selling_catalog() -> list:
 
 
 # ── Storage tests ──────────────────────────────────────────────────────
+
+
+class PerceptualRepeatContractTest(unittest.TestCase):
+    def test_signature_ignores_surface_wording_but_tracks_viewer_pattern(self):
+        first = _perceptual_signature(
+            product_code="P1",
+            item={
+                "scene_family_key": "HOME_ROUTINE",
+                "action_grammar": "拿起随身包→走向门口",
+            },
+            outfit_contract={"silhouette_key": "SHORT_TOP_HIGH_WAIST"},
+            direction_carrier="WEARER_ACTIVE",
+            structure_family="HOOK>PROOF",
+        )
+        second = _perceptual_signature(
+            product_code="P1",
+            item={
+                "scene_family_key": "HOME_ROUTINE",
+                "action_grammar": "拿起钥匙后自然走向出口",
+            },
+            outfit_contract={"silhouette_key": "SHORT_TOP_HIGH_WAIST"},
+            direction_carrier="WEARER_ACTIVE",
+            structure_family="HOOK>PROOF",
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(
+            "TRANSIT_WALK", _perceptual_action_family("沿走廊走向出口")
+        )
+        self.assertEqual(
+            first,
+            _usage_perceptual_signature({
+                "metadata_json": json.dumps({"perceptual_signature": first})
+            }),
+        )
+
 
 class BatchStorageTest(unittest.TestCase):
     def setUp(self):
@@ -415,7 +455,7 @@ class BatchAllocatorTest(unittest.TestCase):
         frozen = json.loads(items[0].frozen_direction_package_json)
         self.assertEqual(
             frozen["simplified_creative_seed"]["schema_version"],
-            "simplified-creative-seed-v21-structure-visible-clips",
+            "simplified-creative-seed-v25-apparel-action-soft-match",
         )
         self.assertIn(
             frozen["simplified_creative_seed"]["creative_direction"]["opening_visual_job"]["job"],
@@ -522,11 +562,10 @@ class BatchAllocatorTest(unittest.TestCase):
             {item.requested_hook_id for item in items},
             {
                 "DISCOVERY_RESULT_PROMISE",
-                "USER_ADVOCACY_STANCE",
                 "GENERAL_PRODUCT_SHARE",
             },
         )
-        self.assertEqual(summary["unique_hooks"], 3)
+        self.assertEqual(summary["unique_hooks"], 2)
         self.assertEqual(summary["unique_hook_families"], 2)
         for item in items:
             frozen = json.loads(item.frozen_direction_package_json)
@@ -906,6 +945,12 @@ class BatchAllocatorTest(unittest.TestCase):
                 frozen["creative_diversity_contract"]["contract_id"],
                 it.creative_contract_id,
             )
+            self.assertIn("semantic_spine_contract", frozen)
+            self.assertIn("context_bridge_contract", frozen)
+            self.assertEqual(
+                frozen["content_bundle_brief"]["semantic_spine_contract"],
+                frozen["semantic_spine_contract"],
+            )
 
     def test_eligible_hooks_exclude_tension_dependent_archetypes_without_tension(self):
         bundle = {
@@ -922,10 +967,10 @@ class BatchAllocatorTest(unittest.TestCase):
                 "USER_ADVOCACY_STANCE", "DETAIL_SURPRISE",
             ],
         )
-        self.assertEqual(eligible, ["USER_ADVOCACY_STANCE", "DETAIL_SURPRISE"])
+        self.assertEqual(eligible, ["DETAIL_SURPRISE"])
         self.assertEqual(
             suppressed,
-            ["AUDIENCE_NEED_CALLOUT", "PAIN_REFRAME"],
+            ["AUDIENCE_NEED_CALLOUT", "PAIN_REFRAME", "USER_ADVOCACY_STANCE"],
         )
 
     def test_eligible_hooks_allows_pain_reframe_with_tension(self):

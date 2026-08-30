@@ -34,12 +34,24 @@ _HAIR_TYPES = {
     "hair_pin",
 }
 _WRIST_TYPES = {"bracelet", "bangle", "slim_bangle"}
+_FINGER_TYPES = {"ring"}
 _SCARF_TYPES = {"scarf", "winter_scarf", "silk_scarf", "headscarf"}
-_SUPPORTED_TYPES = {"earring", *_SCARF_TYPES, *_HAIR_TYPES, *_WRIST_TYPES}
-_SMALL_PROMINENCE_TYPES = {"earring", *_HAIR_TYPES, *_WRIST_TYPES}
+_SUPPORTED_TYPES = {
+    "earring", *_SCARF_TYPES, *_HAIR_TYPES, *_WRIST_TYPES, *_FINGER_TYPES,
+}
+_SMALL_PROMINENCE_TYPES = {
+    "earring", *_HAIR_TYPES, *_WRIST_TYPES, *_FINGER_TYPES,
+}
 _SMALL_MOTION_TYPES = {"earring", *_HAIR_TYPES}
 
 SMALL_ACCESSORY_MOTION_ENV = "ORIGINAL_SCRIPT_SMALL_ACCESSORY_MOTION_V2_ENABLED"
+SCARF_MULTICLIP_ENV = "ORIGINAL_SCRIPT_SCARF_MULTICLIP_V1_ENABLED"
+SMALL_ACCESSORY_MULTICLIP_ENV = (
+    "ORIGINAL_SCRIPT_SMALL_ACCESSORY_MULTICLIP_V1_ENABLED"
+)
+
+SCARF_MULTICLIP_PROFILE = "SCARF_MULTICLIP_V1"
+SMALL_ACCESSORY_MULTICLIP_PROFILE = "SMALL_ACCESSORY_MULTICLIP_V1"
 
 _PAIR_TERMS = ("一对", "成对", "一副", "双耳", "两只")
 _SINGLE_TERMS = ("单只", "单个", "单耳", "单边")
@@ -65,6 +77,156 @@ def _dedupe(values: Iterable[Any], limit: int = 8) -> List[str]:
 def _small_accessory_motion_enabled() -> bool:
     value = _text(os.environ.get(SMALL_ACCESSORY_MOTION_ENV, "1")).lower()
     return value not in {"0", "false", "no", "off"}
+
+
+def _category_multiclip_enabled(env_name: str) -> bool:
+    """Return the isolated category rollout switch.
+
+    The rollout defaults on only for an already-matched accessory extension.
+    Women's apparel never creates this extension and therefore cannot enter
+    either branch.  Each family still has its own one-variable rollback.
+    """
+
+    value = _text(os.environ.get(env_name, "1")).lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _category_capture_roles(
+    *, product_subtype: str, unit_count: int, action_mode: str
+) -> List[str]:
+    if product_subtype in _SCARF_TYPES:
+        middle = (
+            "SIMPLE_WEAR_PROCESS_OR_DETAIL"
+            if action_mode == "SIMPLE_WEAR_PROCESS"
+            else "DETAIL_OR_WORN_RELATION"
+        )
+        if unit_count == 3:
+            return ["WORN_OR_PRODUCT_OPENING", middle, "WORN_OR_CONTEXT_RESULT"]
+        if unit_count == 4:
+            return [
+                "WORN_OR_PRODUCT_OPENING",
+                "DETAIL_PROOF",
+                middle,
+                "WORN_OR_CONTEXT_RESULT",
+            ]
+        return [
+            "WORN_OR_PRODUCT_OPENING",
+            "DETAIL_PROOF",
+            middle,
+            *(["DISTINCT_WORN_RELATION"] * max(0, unit_count - 4)),
+            "WORN_OR_CONTEXT_RESULT",
+        ]
+    if unit_count == 3:
+        return [
+            "PRODUCT_RESULT_CLOSE",
+            "PRODUCT_OR_PERSON_RELATION",
+            "PRODUCT_VISIBLE_RESULT",
+        ]
+    if unit_count == 4:
+        return [
+            "PRODUCT_RESULT_CLOSE",
+            "PRODUCT_DETAIL_RELATION",
+            "PRODUCT_OR_PERSON_RELATION",
+            "PRODUCT_VISIBLE_RESULT",
+        ]
+    return [
+        "PRODUCT_RESULT_CLOSE",
+        "PRODUCT_DETAIL_RELATION",
+        *(["DISTINCT_PRODUCT_RELATION"] * max(0, unit_count - 3)),
+        "PRODUCT_VISIBLE_RESULT",
+    ]
+
+
+def _category_capture_framing(
+    *, product_subtype: str, unit_count: int, action_mode: str
+) -> List[str]:
+    if product_subtype in _SCARF_TYPES:
+        process_or_relation = (
+            "独立补录一次已经冻结的简单佩戴步骤，完成后保持同一结果；不得从已经佩戴完成倒退为重新系结"
+            if action_mode == "SIMPLE_WEAR_PROCESS"
+            else "独立补录一个新的商品细节或佩戴关系，改变真实观看信息而不是数字裁切"
+        )
+        values = [
+            "独立录制已经搭配完成的围巾结果或商品主体开场，让商品与当前佩戴区域清楚可辨",
+            "独立补录图案、边缘、垂坠或与领口/头发的一个已确认关系",
+            process_or_relation,
+            "独立补录商品与人物穿搭或当前生活场景的清楚结果；不擅自增加远景收尾",
+        ]
+    else:
+        values = [
+            "独立录制小商品已经佩戴完成的主体近景，让商品第一眼清楚可辨",
+            "独立补录商品结构、佩戴落点或与人体局部的清楚关系，不用数字裁切假装换镜头",
+            "独立补录人物、穿搭或自然使用中的一种新关系；中远景不得承担小商品结构证明",
+            "在当前结构最后一个兼容片段中保持商品清楚可辨，不额外补无信息远景收尾",
+        ]
+    if unit_count == 3:
+        # Three visible clips still need a complete opening-middle-result arc.
+        # Truncating the four-clip template would drop the final product result
+        # and make the third role disagree with its framing instruction.
+        return [values[0], values[2], values[-1]]
+    if unit_count <= len(values):
+        return values[:unit_count]
+    return [
+        *values[:-1],
+        *(
+            ["独立补录另一项兼容证明或观看关系，不重复上一段核心动作"]
+            * (unit_count - len(values))
+        ),
+        values[-1],
+    ]
+
+
+def _small_accessory_motion_capture(
+    *, unit_count: int, terminal_guidance: str
+) -> tuple[List[str], List[str]]:
+    """Project the existing small-accessory motion arc once, before blueprint."""
+
+    if unit_count == 3:
+        roles = [
+            "PRODUCT_RESULT_CLOSE",
+            "NATURAL_MOTION_RELATION",
+            "PRODUCT_REACQUISITION",
+        ]
+    else:
+        middle_roles = ["NATURAL_MOTION_RELATION"]
+        if unit_count >= 4:
+            middle_roles.append("PRODUCT_DETAIL_RELATION")
+        if unit_count >= 5:
+            middle_roles.extend(
+                ["CONTEXT_RELATION"] * (unit_count - 4)
+            )
+        roles = [
+            "PRODUCT_RESULT_CLOSE",
+            *middle_roles,
+            "PRODUCT_REACQUISITION",
+        ]
+
+    framing: List[str] = []
+    for index, role in enumerate(roles):
+        if index == 0:
+            framing.append(
+                "独立录制商品已经佩戴完成的结果近景，让小商品第一眼清楚可辨"
+            )
+        elif index == len(roles) - 1:
+            framing.append(
+                terminal_guidance or "同一地点补录商品结果近景，自然完成收束"
+            )
+        elif role == "NATURAL_MOTION_RELATION":
+            framing.append(
+                "同一地点重新放置手机，录制一次连续的上半身或拍摄关系变化，"
+                "不用重复摆头支撑整段"
+            )
+        elif role == "PRODUCT_DETAIL_RELATION":
+            framing.append(
+                "同一地点补录商品佩戴细节或与人物的清晰位置关系；"
+                "沿用本段原有可见事件，不重复上一段核心动作"
+            )
+        else:
+            framing.append(
+                "同一地点补录商品与当前生活状态的自然关系；"
+                "商品仍清楚可辨，不重复核心动作或退到远景"
+            )
+    return roles, framing
 
 
 def _small_accessory_performance_arc(kind: str) -> List[Dict[str, str]]:
@@ -354,6 +516,50 @@ def _profile_definition(canonical_type: str) -> Dict[str, Any]:
                 "placement_zone",
             ],
         }
+    if canonical_type in _FINGER_TYPES:
+        return {
+            "display_family": "FINGER_ACCESSORY",
+            "wearing_zone": "FINGER_HAND",
+            "required_result_view": "ALREADY_WORN_FINGER_RESULT",
+            "supporting_style_context": "HAND_AND_SIMPLE_UPPER_BODY_RELATION",
+            "product_prominence": {
+                "scope": "SMALL_WORN_ACCESSORY",
+                "primary_observation_unit": "RING_FINGER_AND_HAND",
+                "primary_framing": "RING_HAND_CLOSE",
+                "context_framing": "HAND_FOREARM_OR_UPPER_BODY",
+                "opening_guidance": (
+                    "首个核心展示段优先使用手指与手部近景，让戒指本体、戒面、开口或指间佩戴位置成为主要观察对象"
+                ),
+                "context_guidance": (
+                    "后续可带到手、前臂或简洁上半身关系；中远景只作生活关系，不承担戒指结构证明"
+                ),
+            },
+            "process_policy": "ONE_GOVERNED_ACTION_THEN_STABLE_WORN_RESULT",
+            "preferred_carriers": ["HAND_ONLY", "MIXED", "WEARER_ACTIVE"],
+            "compatible_proof_subjects": [
+                "ON_BODY_RESULT", "SCENE_USAGE", "PRODUCT_DETAIL",
+                "GENERAL_EXPRESSION",
+            ],
+            "outfit_context": {
+                "target_role": "SUPPORTING_HAND_STYLING",
+                "visibility_zones": ["FINGER", "HAND", "FOREARM", "UPPER_BODY"],
+                "occlusion_avoid": ["竞争性戒指", "抢主体的手链或腕表", "遮挡手部的宽大袖口"],
+                "style_family_preferences": ["CLEAN_HAND_DETAIL", "DAILY_RING_ACCENT"],
+                "visibility_requirement": "至少一段清楚看到戒指本体、手指佩戴位置和相对尺寸；人物上半身入镜时采用简洁上衣与干净手部造型",
+            },
+            "scene_preferences": [
+                "HOME_ROUTINE", "CAFE_DINING", "OFFICE_WORKBREAK", "STREET_OUTING",
+            ],
+            "capture_relationship": (
+                "以同一人物的手部近景为主要证明；如带入上半身，只作自然生活关系，"
+                "不得用远景代替戒指本体证明"
+            ),
+            "risk_registry_key": "general_accessory",
+            "identity_priority": [
+                "overall_shape", "ring_face", "opening_or_closed_band",
+                "ornament_layout", "material_color",
+            ],
+        }
     if canonical_type in _WRIST_TYPES:
         return {
             "display_family": "WRIST_ACCESSORY",
@@ -516,6 +722,7 @@ _RESULT_LABELS = {
     "ALREADY_WORN_EAR_VISIBLE": "从已经佩戴好的状态开始，至少有一段清楚看到耳饰与耳部、脸部或整套穿搭的关系",
     "ALREADY_STYLED_HAIR_RESULT": "真人方向从已经固定好的发型状态开始，至少有一段清楚看到发饰位置、相对大小和发型结果",
     "ALREADY_WORN_WRIST_RESULT": "真人方向从已经佩戴好的腕部状态开始，至少有一段清楚看到腕饰与手腕、袖口或整套穿搭的比例关系",
+    "ALREADY_WORN_FINGER_RESULT": "从戒指已经位于手指或正在完成一次冻结动作的状态开始，至少有一段清楚看到戒指本体、佩戴位置和手部关系",
     "ALREADY_WORN_UPPER_BODY_RESULT": "从已经围好或披好的状态开始，至少有一段清楚看到围巾与脖颈、肩部及上半身穿搭的关系",
     "ALREADY_STYLED_NECK_RESULT": "从已经搭配好的状态开始，至少有一段清楚看到丝巾与颈部、领口及上半身穿搭的关系",
     "ALREADY_STYLED_HEAD_RESULT": "从已经完成的头部造型开始，至少有一段清楚看到头巾位置、轮廓及与头发和穿搭的关系",
@@ -527,6 +734,7 @@ _RELATION_LABELS = {
     "EAR": "商品已经正确佩戴在耳部，耳侧保持清楚可见",
     "HAIR": "商品已经固定在头发或发型的正确位置",
     "WRIST_FOREARM": "商品已经正确佩戴在手腕位置，腕部和前臂关系保持清楚可见",
+    "FINGER_HAND": "商品位于同一人物的手指或手部近景中，戒指本体与佩戴位置保持清楚可见",
     "NECK_SHOULDER": "商品已经自然位于脖颈和肩部区域",
     "NECK_UPPER_BODY": "商品已经自然搭配在颈部和上半身领口区域",
     "HEAD_HAIR": "商品已经位于头部或头发的日常造型位置",
@@ -561,6 +769,16 @@ _DEMONSTRATION_PROFILES = {
             "腕饰已经戴好，前臂自然落在桌面或包带旁",
             "手腕只做一次很小的自然转动，让整体轮廓看清",
             "用一个日常拿取动作带出腕饰与袖口的关系，不重新佩戴",
+        ],
+    },
+    "FINGER_WORN": {
+        "wearing_zone": "FINGER_HAND",
+        "required_result_view": "ALREADY_WORN_FINGER_RESULT",
+        "supporting_style_context": "HAND_AND_SIMPLE_UPPER_BODY_RELATION",
+        "optional_simple_interactions": [
+            "戒指已经戴好，手部只做一次自然角度变化",
+            "手部在拿杯、翻页或拿包时自然进入近景，戒指仍然清楚",
+            "先用同一人物的手托住商品看清，再进入稳定佩戴结果",
         ],
     },
     "NECK_WORN": {
@@ -710,9 +928,50 @@ def _interaction_capabilities(
         "risk_tier": "MEDIUM",
         "action_keywords": ["套入", "一次佩戴", "腕部结果"],
     }
+    ring_adjust_then_wear = {
+        "interaction_id": "RING_ADJUST_THEN_WEAR",
+        "primary_action_mode": "ADJUST_THEN_WEAR",
+        "start_state": "同一人物用另一只手稳定托住戒指，开口或可调节位置清楚可见",
+        "core_action": "只完成一次很小的尺寸调节并戴到一根手指上，不反复掰动或摘戴",
+        "end_state": "戒指稳定留在手指上，戒面、开口与指间比例清楚可见",
+        "risk_tier": "MEDIUM",
+        "action_keywords": ["一次小幅调节", "戴到手指", "稳定结果"],
+    }
+    ring_handheld = {
+        "interaction_id": "RING_HANDHELD_MATERIAL_TO_WORN",
+        "primary_action_mode": "HANDHELD_PRODUCT",
+        "start_state": "同一人物用指腹自然托住戒指，商品完整形态清楚可见",
+        "core_action": "在手部近景中只做一次很小的角度变化看清金属或戒面，再直接进入佩戴结果",
+        "end_state": "戒指稳定佩戴在一根手指上，商品与手部关系清楚",
+        "risk_tier": "MEDIUM",
+        "action_keywords": ["手持近景", "一次角度变化", "佩戴结果"],
+    }
+    ring_result = {
+        "interaction_id": "RING_WORN_RESULT_ANGLE",
+        "primary_action_mode": "RESULT_SHOW",
+        "start_state": "戒指已经稳定佩戴在一根手指上，手部自然放松",
+        "core_action": "手部只做一次自然角度变化，让戒面、指间位置和整体效果看清",
+        "end_state": "回到戒指无遮挡且手部造型干净的佩戴结果",
+        "risk_tier": "LOW",
+        "action_keywords": ["手部角度", "戒面", "佩戴结果"],
+    }
+    ring_scene_use = {
+        "interaction_id": "RING_SCENE_USE_RELATION",
+        "primary_action_mode": "SCENE_USE",
+        "start_state": "戒指已经戴好，人物处于当前真实生活场景",
+        "core_action": "通过一次拿杯、翻页、打字或拿包中的自然动作让佩戴手进入近景",
+        "end_state": "动作结束时戒指本体仍清楚，场景只提供使用关系而不抢主体",
+        "risk_tier": "LOW",
+        "action_keywords": ["生活动作", "手部近景", "场景关系"],
+    }
     if mode in {"STATIC_PRODUCT"}:
         return []
     if mode in {"HAND_ONLY", "HANDS_ONLY"}:
+        if product_subtype in _FINGER_TYPES:
+            capabilities = [ring_result, ring_handheld]
+            if preferred_mode == "ADJUST_THEN_WEAR":
+                capabilities.insert(0, ring_adjust_then_wear)
+            return capabilities
         if product_subtype in _WRIST_TYPES and preferred_mode == "SIMPLE_WEAR_PROCESS":
             return [wrist_process]
         if product_subtype in _WRIST_TYPES or product_subtype in _HAIR_TYPES:
@@ -857,6 +1116,11 @@ def _interaction_capabilities(
         ]
         if preferred_mode == "SIMPLE_WEAR_PROCESS":
             capabilities.append(wrist_process)
+        return capabilities
+    if product_subtype in _FINGER_TYPES:
+        capabilities = [ring_result, ring_handheld, ring_scene_use]
+        if preferred_mode == "ADJUST_THEN_WEAR":
+            capabilities.insert(0, ring_adjust_then_wear)
         return capabilities
     capabilities = [dict(item) for item in _COMMON_WEARER_INTERACTION_CAPABILITIES]
     process = (
@@ -1065,6 +1329,8 @@ class AccessoryExecutionAdapter(CategoryExecutionAdapter):
                 demonstration_mode = "HAIR_WORN"
             elif product_subtype in _WRIST_TYPES:
                 demonstration_mode = "WRIST_WORN"
+            elif product_subtype in _FINGER_TYPES:
+                demonstration_mode = "FINGER_WORN"
             elif product_subtype == "earring":
                 demonstration_mode = "EAR_WORN"
             else:
@@ -1116,6 +1382,10 @@ class AccessoryExecutionAdapter(CategoryExecutionAdapter):
                 profile.get("primary_demonstration_mode") or demonstration_mode
             ),
             "preferred_action_mode": _text(profile.get("preferred_action_mode")),
+            "proof_action_intent": _text(profile.get("proof_action_intent")),
+            "required_proof_relation": _text(
+                profile.get("required_proof_relation")
+            ),
             "demonstration_policy": _text(profile.get("demonstration_policy")),
             "optional_simple_interactions": optional_interactions,
             "interaction_capabilities": _interaction_capabilities(
@@ -1143,14 +1413,23 @@ class AccessoryExecutionAdapter(CategoryExecutionAdapter):
         result = copy.deepcopy(extension)
         profile = result.get("profile") if isinstance(result.get("profile"), dict) else {}
         product_subtype = _text(profile.get("product_subtype"))
-        if product_subtype in _WRIST_TYPES:
+        if product_subtype in {*_WRIST_TYPES, *_FINGER_TYPES, *_HAIR_TYPES, "earring"}:
             preferred_action_mode = _text(
                 selling_argument.get("preferred_action_mode")
             ).upper()
-            if preferred_action_mode in {"RESULT_SHOW", "SIMPLE_WEAR_PROCESS"}:
+            if preferred_action_mode in {
+                "RESULT_SHOW", "SIMPLE_WEAR_PROCESS", "ADJUST_THEN_WEAR",
+                "HANDHELD_PRODUCT", "SCENE_USE",
+            }:
                 profile["preferred_action_mode"] = preferred_action_mode
                 profile["argument_theme"] = _text(
                     selling_argument.get("argument_theme")
+                )
+                profile["proof_action_intent"] = _text(
+                    selling_argument.get("proof_action_intent")
+                )
+                profile["required_proof_relation"] = _text(
+                    selling_argument.get("required_proof_relation")
                 )
                 result["profile"] = profile
             return result
@@ -1329,6 +1608,138 @@ class AccessoryExecutionAdapter(CategoryExecutionAdapter):
             "wear_state_contract": wear_state,
             "hand_anatomy_guard": _hand_anatomy_guard(carrier_execution),
         }
+
+    def project_capture_rhythm(
+        self,
+        extension: Dict[str, Any],
+        *,
+        carrier_execution: Dict[str, Any],
+        capture_contract: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Add category filming relations without touching structure order.
+
+        The shared compiler continues to own visible-clip count, macro beats,
+        edit boundaries and phone feasibility.  This projection only supplies
+        physical category roles and per-clip framing.  It is deliberately
+        impossible for women's apparel to enter because no ACCESSORY extension
+        exists for apparel.
+        """
+
+        result = copy.deepcopy(capture_contract)
+        profile = (
+            extension.get("profile")
+            if isinstance(extension.get("profile"), dict)
+            else {}
+        )
+        product_subtype = _text(profile.get("product_subtype"))
+        if product_subtype in _SCARF_TYPES:
+            env_name = SCARF_MULTICLIP_ENV
+            rollout_profile = SCARF_MULTICLIP_PROFILE
+            preferred_visible_clips = 4
+        elif product_subtype in _SMALL_PROMINENCE_TYPES:
+            env_name = SMALL_ACCESSORY_MULTICLIP_ENV
+            rollout_profile = SMALL_ACCESSORY_MULTICLIP_PROFILE
+            preferred_visible_clips = 3
+        else:
+            return result
+        if not _category_multiclip_enabled(env_name):
+            return result
+        if _text(result.get("profile")).upper() == "LEGACY_ONE_TAKE":
+            return result
+
+        unit_count = int(result.get("capture_unit_count") or 0)
+        if unit_count < 3:
+            # The category layer cannot invent cuts when the public compiler
+            # has explicitly selected a legacy/insufficient contract.
+            return result
+        selected_action = (
+            carrier_execution.get("selected_action_design")
+            if isinstance(
+                carrier_execution.get("selected_action_design"), dict
+            )
+            else {}
+        )
+        action_mode = _text(
+            selected_action.get("primary_action_mode")
+            or carrier_execution.get("preferred_action_mode")
+        ).upper()
+        prominence = (
+            carrier_execution.get("product_prominence_contract")
+            if isinstance(
+                carrier_execution.get("product_prominence_contract"), dict
+            )
+            else {}
+        )
+        motion_return = (
+            product_subtype in _SMALL_PROMINENCE_TYPES
+            and _text(prominence.get("sequence_policy")).upper()
+            == "PRODUCT_OPENING_TO_MOTION_TO_PRODUCT_RETURN"
+        )
+        if motion_return:
+            terminal = (
+                prominence.get("terminal_visibility")
+                if isinstance(prominence.get("terminal_visibility"), dict)
+                else {}
+            )
+            category_roles, framing = _small_accessory_motion_capture(
+                unit_count=unit_count,
+                terminal_guidance=_text(terminal.get("ending_guidance")),
+            )
+        else:
+            category_roles = _category_capture_roles(
+                product_subtype=product_subtype,
+                unit_count=unit_count,
+                action_mode=action_mode,
+            )
+            framing = _category_capture_framing(
+                product_subtype=product_subtype,
+                unit_count=unit_count,
+                action_mode=action_mode,
+            )
+        result.update({
+            "category_projection": rollout_profile,
+            "category_unit_roles": category_roles,
+            # ``unit_roles`` owns only the physical display relation.  The
+            # shared ``structure_unit_roles`` remains untouched and continues
+            # to own HOOK/PROOF/USE/ENDING order.
+            "unit_roles": category_roles,
+            "framing_guidance_by_unit": framing,
+            "category_rollout_contract": {
+                "profile": rollout_profile,
+                "product_subtype": product_subtype,
+                "policy_version": "category-multiclip-rollout-v1",
+                "preferred_visible_clips": preferred_visible_clips,
+                "planned_visible_clips": unit_count,
+                "structure_order_unchanged": True,
+                "female_apparel_unchanged": True,
+                "hard_required": False,
+                "may_trigger_retry": False,
+                "rollback_env": env_name,
+            },
+        })
+        if motion_return:
+            result["capture_grammar"] = (
+                "PRODUCT_OPENING_TO_MOTION_TO_PRODUCT_RETURN"
+            )
+        richness = (
+            dict(result.get("shot_richness_contract"))
+            if isinstance(result.get("shot_richness_contract"), dict)
+            else {}
+        )
+        richness.update({
+            "category_profile": rollout_profile,
+            "category_preferred_visible_clips": preferred_visible_clips,
+            "category_planned_visible_clips": unit_count,
+            "category_difference_policy": (
+                "SCARF_RESULT_DETAIL_RELATION_WITHOUT_STATE_REGRESSION"
+                if product_subtype in _SCARF_TYPES
+                else "SMALL_PRODUCT_OPEN_MOTION_RETURN"
+                if motion_return
+                else "SMALL_PRODUCT_CLOSE_RELATION_VISIBLE_RESULT"
+            ),
+        })
+        result["shot_richness_contract"] = richness
+        return result
 
     def validate_identity(
         self,

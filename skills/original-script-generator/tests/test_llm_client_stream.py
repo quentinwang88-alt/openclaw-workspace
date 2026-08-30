@@ -2,6 +2,7 @@
 
 import unittest
 import os
+import httpx
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -130,6 +131,24 @@ class LLMClientStreamTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertIn("gpt-5.6-sol", command)
         self.assertIn("model_reasoning_effort=high", command)
+
+    def test_network_failure_falls_back_to_codex_cli(self) -> None:
+        class _BrokenStream(_FakeStream):
+            def __iter__(self):
+                raise httpx.ReadTimeout("gateway stalled")
+
+        client = OriginalScriptLLMClient(primary_api_key="token")
+        client._primary_client = _FakeClient(_BrokenStream([]))
+        client._call_primary_via_codex_cli = MagicMock(
+            return_value={"choices": [{"message": {"content": "{\"ok\":true}"}}]}
+        )
+
+        response = client._call_primary("return json", image_paths=[], max_tokens=100)
+
+        self.assertEqual(response["choices"][0]["message"]["content"], '{"ok":true}')
+        client._call_primary_via_codex_cli.assert_called_once_with(
+            prompt="return json", image_paths=[]
+        )
 
 
 if __name__ == "__main__":

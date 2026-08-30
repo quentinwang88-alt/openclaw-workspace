@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -32,6 +33,13 @@ VOICEOVER_KNOWLEDGE_SNAPSHOT_PATH = (
     / "data"
     / "voiceover_hook_knowledge_snapshot.json"
 )
+VOICEOVER_CONTEXT_V2_ENV = "CENTRAL_VOICEOVER_CONTEXT_V2_ENABLED"
+
+
+def _voiceover_context_v2_enabled() -> bool:
+    return _text(os.environ.get(VOICEOVER_CONTEXT_V2_ENV, "1")).lower() not in {
+        "0", "false", "off", "no",
+    }
 
 
 HOOK_SURFACE_CONTRACTS = {
@@ -134,6 +142,12 @@ def resolve_voiceover_hook_policy(
             eligible.append(hook_id)
 
     tension_text = _text(bundle.get("audience_tension", {}).get("text")).lower()
+    audience_need_authorized = (
+        _voiceover_context_v2_enabled()
+        and _text(bundle.get("audience_need_authority")).upper()
+        in {"APPROVED_AUDIENCE_TENSION", "APPROVED_SELLING_SCENARIO"}
+        and bool(_text(bundle.get("audience_situation")))
+    )
     governed_concept_tension = (
         _text(bundle.get("hook_tension_authority")).upper()
         == "CENTRAL_CONCEPT"
@@ -148,7 +162,8 @@ def resolve_voiceover_hook_policy(
     if not tension_text and not governed_concept_tension:
         eligible = [
             item for item in eligible
-            if item not in {"PAIN_REFRAME", "AUDIENCE_NEED_CALLOUT"}
+            if item != "PAIN_REFRAME"
+            and (item != "AUDIENCE_NEED_CALLOUT" or audience_need_authorized)
         ]
 
     if not eligible:
@@ -175,6 +190,7 @@ def resolve_voiceover_hook_policy(
         "selected_hook_id": selected,
         "requested_hook_id": requested,
         "tension_available": bool(tension_text) or governed_concept_tension,
+        "audience_need_authorized": audience_need_authorized,
         "hook_tension_authority": (
             "CENTRAL_CONCEPT" if governed_concept_tension else ""
         ),
@@ -609,6 +625,126 @@ def _creative_lived_moment_binding(
     }
 
 
+def _compile_voiceover_context_contract(
+    bundle: Dict[str, Any], blueprint: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Compile one optional speech context without granting product claims."""
+
+    if not _voiceover_context_v2_enabled():
+        return {
+            "schema_version": "voiceover-context-contract-v2",
+            "status": "DISABLED",
+            "context_mode": "UNAVAILABLE",
+            "hard_required": False,
+        }
+    selling = (
+        bundle.get("selling_argument")
+        if isinstance(bundle.get("selling_argument"), dict)
+        else {}
+    )
+    scene = blueprint.get("scene") if isinstance(blueprint.get("scene"), dict) else {}
+    event = (
+        blueprint.get("event_design")
+        if isinstance(blueprint.get("event_design"), dict)
+        else {}
+    )
+    audience_situation = _text(
+        bundle.get("audience_situation") or selling.get("audience_situation")
+    )
+    audience_authority = _text(
+        bundle.get("audience_need_authority")
+        or selling.get("audience_need_authority")
+    ).upper()
+    natural_event = _text(event.get("natural_event"))
+    scene_moment = _text(scene.get("moment"))
+    scene_location = _text(scene.get("location"))
+    current_life_moment = natural_event or scene_moment
+    selling_scenario_authorized = (
+        audience_authority
+        in {"APPROVED_AUDIENCE_TENSION", "APPROVED_SELLING_SCENARIO"}
+        and bool(audience_situation)
+    )
+    context_mode = (
+        "SELLING_SCENARIO"
+        if selling_scenario_authorized
+        else "VISUAL_ONLY"
+        if current_life_moment or scene_location
+        else "UNAVAILABLE"
+    )
+    scenario_budget = (
+        2
+        if selling_scenario_authorized
+        and bool(
+            bundle.get("multi_scenario_authorized")
+            or selling.get("multi_scenario_authorized")
+        )
+        else 1
+    )
+    moment_anchor_id = (
+        "CTX_"
+        + hashlib.sha256(
+            f"life_moment|{current_life_moment}".encode("utf-8")
+        ).hexdigest()[:16].upper()
+        if current_life_moment
+        else ""
+    )
+    audience_anchor_id = (
+        "CTX_"
+        + hashlib.sha256(
+            f"selling_scenario|{audience_situation}".encode("utf-8")
+        ).hexdigest()[:16].upper()
+        if selling_scenario_authorized
+        else ""
+    )
+    return {
+        "schema_version": "voiceover-context-contract-v2",
+        "status": "AVAILABLE" if context_mode != "UNAVAILABLE" else "UNAVAILABLE",
+        "context_mode": context_mode,
+        "audience_situation": {
+            "anchor_id": audience_anchor_id,
+            "text": audience_situation,
+            "authority": audience_authority or "UNAVAILABLE",
+            "spoken_use_policy": (
+                "PREFERRED_OPENING_OR_MAINLINE_CONTEXT"
+                if selling_scenario_authorized
+                else "UNAVAILABLE"
+            ),
+        },
+        "current_life_moment": {
+            "anchor_id": moment_anchor_id,
+            "text": current_life_moment,
+            "authority": "CREATIVE_DESIGN" if current_life_moment else "UNAVAILABLE",
+            "spoken_use_policy": (
+                "OPTIONAL_SPEAKER_POSITION_ONLY"
+                if current_life_moment
+                else "UNAVAILABLE"
+            ),
+        },
+        "visual_location": {
+            "text": scene_location,
+            "authority": "CREATIVE_DESIGN" if scene_location else "UNAVAILABLE",
+            "spoken_use_policy": "OPTIONAL_NOT_PRODUCT_PROOF",
+        },
+        "scenario_budget": scenario_budget,
+        "use_priority": (
+            "PREFERRED" if selling_scenario_authorized else "OPTIONAL"
+        ),
+        "rhetorical_jobs": [
+            "HOOK_OR_SITUATION",
+            "CORE_ANSWER",
+            "PROOF_OR_PERSONAL_DECISION",
+        ],
+        "jobs_are_template": False,
+        "hard_required": False,
+        "may_trigger_retry": False,
+        "instruction": (
+            "把授权卖点、人物所处时刻和个人选择组织成一段完整分享；"
+            "SELLING_SCENARIO 优先用于建立观众处境或开口，其余生活语境可以不用；"
+            "不得把拍摄地点写成商品功效证据。"
+        ),
+    }
+
+
 def build_voiceover_expression_contract(
     direction: Dict[str, Any],
     visual_plan: Dict[str, Any],
@@ -686,6 +822,9 @@ def build_voiceover_expression_contract(
     voice_identity = blueprint.get("voice_identity") if isinstance(blueprint.get("voice_identity"), dict) else {}
     retention_hook = blueprint.get("retention_hook") if isinstance(blueprint.get("retention_hook"), dict) else {}
     lived_moment_binding = _creative_lived_moment_binding(direction, blueprint)
+    voiceover_context_contract = _compile_voiceover_context_contract(
+        bundle, blueprint
+    )
     audio_constraints = [
         {
             "shot_no": index,
@@ -695,6 +834,16 @@ def build_voiceover_expression_contract(
         for index, shot in enumerate(shots, 1)
     ]
     argument_contract = build_voiceover_argument_contract(direction, visual_plan)
+    semantic_spine = (
+        direction.get("semantic_spine_contract")
+        if isinstance(direction.get("semantic_spine_contract"), dict)
+        else bundle.get("semantic_spine_contract", {})
+    )
+    context_bridge = (
+        direction.get("context_bridge_contract")
+        if isinstance(direction.get("context_bridge_contract"), dict)
+        else bundle.get("context_bridge_contract", {})
+    )
     return {
         "schema_version": "voiceover-expression-contract-v2",
         "content_mainline": _text(
@@ -703,6 +852,13 @@ def build_voiceover_expression_contract(
             or p2_lite.get("primary_observation")
         ),
         "argument_contract": argument_contract,
+        # These two contracts are the lossless hand-off to both the embedded
+        # original-script voiceover call and the separate run-manager
+        # voiceover flow.  Legacy content_mainline remains a compatibility
+        # summary, never the semantic authority when a spine is present.
+        "semantic_spine_contract": dict(semantic_spine or {}),
+        "context_bridge_contract": dict(context_bridge or {}),
+        "voiceover_context_contract": voiceover_context_contract,
         "claim_atoms": claim_atoms,
         "structure_context": {
             "macro_family_key": _text(execution_plan.get("macro_family_key")),
@@ -922,6 +1078,13 @@ def build_voiceover_argument_contract(
                 "authorization_source": _text(selling_argument.get("authorization_source")),
                 "mapping_status": _text(selling_argument.get("mapping_status")),
                 "operator_expression": _text(selling_argument.get("operator_expression")),
+                "source_operator_expression": _text(
+                    selling_argument.get("source_operator_expression")
+                ),
+                "source_scope_concept_count": int(
+                    selling_argument.get("source_scope_concept_count") or 1
+                ),
+                "source_ref": _text(selling_argument.get("source_ref")),
                 "expression_policy": _text(selling_argument.get("expression_policy")),
                 "respectful_reframe_required": bool(
                     selling_argument.get("respectful_reframe_required")
@@ -938,6 +1101,15 @@ def build_voiceover_argument_contract(
                 "claim_theme": _text(selling_argument.get("claim_theme")),
                 "argument_theme": _text(selling_argument.get("argument_theme")),
                 "concept_ids": list(selling_argument.get("concept_ids") or []),
+                "audience_need_authority": _text(
+                    selling_argument.get("audience_need_authority")
+                ),
+                "audience_situation": _text(
+                    selling_argument.get("audience_situation")
+                ),
+                "multi_scenario_authorized": bool(
+                    selling_argument.get("multi_scenario_authorized")
+                ),
                 "primary_demonstration_mode": _text(
                     selling_argument.get("primary_demonstration_mode")
                 ),

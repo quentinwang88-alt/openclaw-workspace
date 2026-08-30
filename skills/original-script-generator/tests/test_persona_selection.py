@@ -136,6 +136,78 @@ class PersonaSelectionTest(unittest.TestCase):
             contract["identity_lock"]["body_proportion_text"],
         )
 
+    def test_persona_projection_cleans_editor_notes_and_freezes_hair_choice(self):
+        self._insert(
+            "P_DIRTY",
+            references=[{"file_token": "dirty_persona_ref"}],
+            product_types=["outerwear"],
+            categories=["女装"],
+            modes=["GARMENT_WORN"],
+            presentations=["PERSON_ON_CAMERA"],
+            captures=["CREATOR_SELF_SHOT"],
+        )
+        payload = {
+            "applicable_categories": ["女装"],
+            "applicable_product_types": ["outerwear"],
+            "supported_demonstration_modes": ["GARMENT_WORN"],
+            "supported_presentation_modes": ["PERSON_ON_CAMERA"],
+            "supported_capture_modes": ["CREATOR_SELF_SHOT"],
+            "identity_text": "泰国年轻女性，下班前或出门前用手机分享穿搭",
+            "appearance_text": (
+                "泰国年轻女性，，不要网红精修脸，把模特妆容换成淡妆，"
+                "其余发型身材不变。注意还原参考图的肤色以及皮肤自然纹理"
+            ),
+            "hair_makeup_text": "微卷粽色长发或低双马尾，不要帖头皮，轻妆",
+            "speaking_personality": "自然朋友式分享",
+        }
+        self.conn.execute(
+            "UPDATE persona_templates SET source_payload=?, prompt_core=? WHERE persona_id=?",
+            (
+                json.dumps(payload, ensure_ascii=False),
+                "真实人物，其余发型身材不变",
+                "P_DIRTY",
+            ),
+        )
+        self.conn.commit()
+
+        contracts = []
+        for _ in range(2):
+            contract, _, _ = select_persona_contract(
+                product_type="外套", top_category="女装", country="泰国",
+                presentation_mode="PERSON_ON_CAMERA",
+                capture_mode="CREATOR_SELF_SHOT",
+                demonstration_mode="GARMENT_WORN", seed=17, recent_usage=[],
+                db_path=str(self.db_path),
+            )
+            contracts.append(contract)
+        projection = contracts[0]["script_projection"]
+        material = json.dumps(
+            {
+                "projection": projection,
+                "prompt_core": contracts[0]["prompt_core"],
+                "prompt_negative": contracts[0]["prompt_negative"],
+            },
+            ensure_ascii=False,
+        )
+        self.assertEqual(
+            projection["hair_makeup"],
+            contracts[1]["script_projection"]["hair_makeup"],
+        )
+        self.assertNotIn("或", projection["hair_makeup"])
+        self.assertNotIn("或", projection["identity"])
+        self.assertIn("用手机分享穿搭", projection["identity"])
+        self.assertNotIn("粽色", material)
+        self.assertNotIn("帖头皮", material)
+        self.assertNotIn("其余发型身材不变", material)
+        self.assertNotIn("把模特妆容换成淡妆", material)
+        self.assertNotIn("，，", material)
+        self.assertIn("自然未精修面部质感", projection["appearance"])
+        self.assertIn("自然肤色与真实皮肤纹理", projection["appearance"])
+        self.assertEqual(
+            "persona-projection-sanitize-v1",
+            contracts[0]["projection_policy_version"],
+        )
+
     def test_persona_presentation_scope_is_respected(self):
         self._insert(
             "P_HAND_ONLY",

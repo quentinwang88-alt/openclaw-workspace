@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import Counter
 from typing import Any, Dict, List, Sequence, Tuple
 
@@ -11,7 +12,7 @@ from core.persona_template_provider import load_persona_templates
 from core.product_type_resolution import normalize_product_type
 
 
-CONTRACT_VERSION = "persona-selection-v4-body-proportion"
+CONTRACT_VERSION = "persona-selection-v5-clean-projection"
 OUTFIT_PERSONA_AFFINITY_VERSION = "outfit-persona-affinity-v1-soft"
 FACE_ADJACENT_TYPES = {"headscarf", "earring", "hair_accessory", "hairclip"}
 WEARER_PROMINENT_TYPES = {
@@ -70,9 +71,110 @@ def _market_matches(values: Sequence[str], target: str) -> bool:
     return not normalized or "*" in normalized or _canonical_market(target) in normalized
 
 
-def _script_projection(template: Dict[str, Any], country: str) -> Dict[str, str]:
+_PERSONA_TEXT_REPLACEMENTS = (
+    ("粽色", "棕色"),
+    ("帖头皮", "贴头皮"),
+    ("不要网红精修脸", "自然未精修面部质感"),
+    ("把模特妆容换成淡妆", ""),
+    ("其余发型身材不变", ""),
+    ("注意还原参考图的肤色以及皮肤自然纹理", "自然肤色与真实皮肤纹理"),
+    ("面部不要碎发", "面部轮廓清楚，碎发不过度遮脸"),
+    ("不要贴头皮", "发根自然蓬松"),
+    ("保持原样", ""),
+    ("和上一个一样", ""),
+)
+
+
+def _sanitize_persona_text(value: Any) -> str:
+    """Turn operator editing notes into a clean executable description."""
+
+    text = _text(value)
+    for source, target in _PERSONA_TEXT_REPLACEMENTS:
+        text = text.replace(source, target)
+    text = re.sub(r"[，,]{2,}", "，", text)
+    text = re.sub(r"[；;]{2,}", "；", text)
+    text = re.sub(r"[。\.]{2,}", "。", text)
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"\s*([，。；,;])\s*", r"\1", text)
+    text = re.sub(r"([，；,;])([。\.])", r"\2", text)
+    return text.strip(" ，。；,;.")
+
+
+def _freeze_hair_alternatives(value: str, *, seed_material: str) -> str:
+    """Freeze one hairstyle choice without changing the source template."""
+
+    parts = re.split(r"([，,；;])", value)
+    frozen: List[str] = []
+    clause_index = 0
+    for part in parts:
+        if part in {"，", ",", "；", ";"}:
+            frozen.append("，" if part in {"，", ","} else "；")
+            continue
+        clause = _text(part)
+        if "或" not in clause:
+            frozen.append(clause)
+            continue
+        choices = [_text(item) for item in clause.split("或") if _text(item)]
+        if len(choices) < 2:
+            frozen.append(clause)
+            continue
+        digest = hashlib.sha256(
+            f"{seed_material}|hair|{clause_index}|{clause}".encode("utf-8")
+        ).digest()
+        selected = choices[digest[0] % len(choices)]
+        if (
+            selected != choices[0]
+            and choices[0].startswith("头发")
+            and not selected.startswith("头发")
+        ):
+            selected = "头发" + selected
+        frozen.append(selected)
+        clause_index += 1
+    return _sanitize_persona_text("".join(frozen))
+
+
+def _freeze_inline_alternatives(value: str, *, seed_material: str) -> str:
+    """Resolve simple inline choices such as 下班前或出门前."""
+
+    parts = re.split(r"([，,；;。])", value)
+    frozen: List[str] = []
+    for index, part in enumerate(parts):
+        clause = _text(part)
+        if "或" not in clause or part in {"，", ",", "；", ";", "。"}:
+            frozen.append(part)
+            continue
+        left, right_tail = clause.split("或", 1)
+        left = _text(left)
+        right_tail = _text(right_tail)
+        if not left or not right_tail:
+            frozen.append(clause)
+            continue
+        # When both alternatives share a natural boundary character (for
+        # example 下班前 / 出门前 or 户外 / 半户外), keep the trailing action
+        # text after the second option instead of dropping it.
+        boundary = left[-1]
+        boundary_index = right_tail.find(boundary)
+        if 0 <= boundary_index <= 8:
+            right = right_tail[: boundary_index + 1]
+            tail = right_tail[boundary_index + 1 :]
+        else:
+            right = right_tail
+            tail = ""
+        digest = hashlib.sha256(
+            f"{seed_material}|inline|{index}|{clause}".encode("utf-8")
+        ).digest()
+        frozen.append((left if digest[0] % 2 == 0 else right) + tail)
+    return _sanitize_persona_text("".join(frozen))
+
+
+def _script_projection(
+    template: Dict[str, Any], country: str, *, seed_material: str
+) -> Dict[str, str]:
     country_label = "泰国" if _canonical_market(country) == "TH" else _text(country)
-    identity = _text(template.get("identity_text"))
+    identity = _freeze_inline_alternatives(
+        _sanitize_persona_text(template.get("identity_text")),
+        seed_material=seed_material,
+    )
     if not identity:
         identity = "、".join(
             value
@@ -84,19 +186,19 @@ def _script_projection(template: Dict[str, Any], country: str) -> Dict[str, str]
             if value
         )
     appearance_parts = [
-        _text(template.get("appearance_text")),
-        _text(template.get("body_type")),
+        _sanitize_persona_text(template.get("appearance_text")),
+        _sanitize_persona_text(template.get("body_type")),
     ]
     if not appearance_parts[0]:
         appearance_parts.extend([
-            _text(template.get("skin_tone")),
+            _sanitize_persona_text(template.get("skin_tone")),
             "自然未精修肤质",
             "、".join(_list(template.get("vibe_tags"))),
         ])
     appearance = "；".join(dict.fromkeys(
         value for value in appearance_parts if value
     ))
-    hair_makeup = _text(template.get("hair_makeup_text")) or "；".join(
+    hair_makeup = _sanitize_persona_text(template.get("hair_makeup_text")) or "；".join(
         value
         for value in (
             " ".join(
@@ -111,11 +213,15 @@ def _script_projection(template: Dict[str, Any], country: str) -> Dict[str, str]
         )
         if value
     )
+    hair_makeup = _freeze_hair_alternatives(
+        hair_makeup,
+        seed_material=seed_material,
+    )
     return {
         "identity": identity,
         "appearance": appearance,
         "hair_makeup": hair_makeup,
-        "speaking_personality": _text(template.get("speaking_personality"))
+        "speaking_personality": _sanitize_persona_text(template.get("speaking_personality"))
         or "像普通创作者对自己的手机镜头自然分享",
     }
 
@@ -255,9 +361,14 @@ def select_persona_contract(
                 "body_proportion_text",
             )
         },
-        "script_projection": _script_projection(selected, country),
-        "prompt_core": _text(selected.get("prompt_core")),
-        "prompt_negative": _text(selected.get("prompt_negative")),
+        "script_projection": _script_projection(
+            selected,
+            country,
+            seed_material=f"{seed}|{persona_id}|{canonical}|{mode}",
+        ),
+        "prompt_core": _sanitize_persona_text(selected.get("prompt_core")),
+        "prompt_negative": _sanitize_persona_text(selected.get("prompt_negative")),
+        "projection_policy_version": "persona-projection-sanitize-v1",
         "non_authorities": [
             "PRODUCT_REFERENCE_PERSON",
             "PRODUCT_REFERENCE_FILTER",

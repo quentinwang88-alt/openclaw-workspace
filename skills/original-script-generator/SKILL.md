@@ -68,6 +68,26 @@ Git 只管理开发源目录：
 
 `workspace 开发源 -> 同步到 ~/.codex/skills -> OpenClaw 使用 -> 运行数据写 ~/.openclaw/shared/data`
 
+## 20–45 秒可变分段 Plan C 隔离旁路（V3）
+
+- 入口：`scripts/run_longform_original.py`；说明：`docs/LONGFORM_PLAN_C_V1.md`。
+- 状态独立写入 `~/.openclaw/shared/data/longform_original_video.sqlite3`，当前只允许本地 JSON/CLI 灰度，不接飞书、不注册 OpenClaw 自然语言意图，也不得由现有 15 秒入口隐式调用。
+- MiniMax H3 复用既有 MetaSo 渠道的本地网关；真实提交必须显式使用 `--allow-real-submit`，提交结果不确定时禁止自动重试。
+- 20–30 秒自动编排为两个整数时长片段，31–45 秒自动编排为三个整数时长片段；每段最长 15 秒。20 秒默认均衡为 `10+10`，21–24 秒同样自动均衡，不要求运营计算分段。所有片段共用一个主合同和一个开场钩子，禁止把多条独立短视频直接拼接。
+- 长视频入口会只读中央运营确认卖点库生成 `longform_argument_bundle`：20–24 秒软目标 1–2 个有效价值，25–30 秒软目标 2–3 个，40–45 秒软目标 3–4 个；主价值定主线，支持价值承担商品原因、使用价值或风格回报。卖点不足不补齐、不阻断，卖点充足时也不得逐条念清单。
+- `--scene-mode single|auto|multi` 控制场景规划；默认仍为 `single`，环境变量 `LONGFORM_MULTISCENE_V1_ENABLED=1` 只把未显式指定时的默认值切为 `auto`。V6 会在主脚本生成前编译 `scene_progression_contract`：`auto` 只消费已确认卖点和 `product-market-context` 中现有的使用情境；存在明确第二使用语义时优先两个场景，没有时保留单场景，不为换景编造咖啡厅、办公室等地点。全片仍最多两个场景，一个片段只属于一个场景，失败退回只记录软提示。
+- 边界合同继续区分 `CONTINUOUS` 与 `DISCONTINUOUS_CUT`，但不再把“同场景”自动等同于“必须续尾帧”。只有同一物理动作确实连续时才抽上一片段实际尾帧；跨场景使用 `SCENE_ENTRY`，同场景切到新的商品观察关系使用 `SETUP_ENTRY`。两者复用同一无人工确认的片段进入帧管线，以 K0 为构图与人物血缘，并在可用时追加冻结商品原图和人物参考；人物、商品、穿搭与已完成穿戴状态继续冻结。
+- `longform-original-plan-v6-visual-progression` 为两段视频固定 `CONTEXT_AND_WEAR_RESULT → DETAIL_AND_REAL_USE`，为三段视频固定 `CONTEXT_AND_WEAR_RESULT → DETAIL_AND_PROOF → SECOND_CONTEXT_AND_PAYOFF` 的片段职责。主合同保留全部拍摄单元审计，H3 每段只消费三个有优先级的 `OPENING / CORE / PAYOFF` 执行单元；不再要求四个同权单元全部出现。第二片段的商品细节直接投到进入帧，细节只取现有商品身份锁和已验证事实，最多两项，不建立新规则库。执行单元选择额外使用“商品部位×动作关系×景别”的全片软去重签名；有替代单元时优先不重复，没有时保留原计划并只写软警告，不新增动作池、重试或阻断。
+- H3 提示词继续只包含人物/穿搭、本片段场景、最多 3 项商品身份锚点和紧凑执行单元；所有片段顶部保留通用商品延续指令。完整主合同继续留库审计，不得再次把 authority、information_gain、策略解释或整张 production_world JSON 塞回视频提示词。`visual_progression_report` 只记录场景偏好是否实现、商品细节片段和视觉职责差异；`LOW_VISUAL_PROGRESSION` 不阻断、不修订、不自动重跑。
+- H3 准备与提交只消费 SQLite 已登记的关键帧：首段必须先到 `KEYFRAMES_READY`，后续片段必须先到 `BRIDGE_READY`；合并前全部片段都必须为 `READY`。付费幂等使用图片内容 SHA256 而不是本地路径，图片同路径换内容必须形成新指纹。
+- `run-to-final` 在任何新的付费 H3 提交前先执行 Edge TTS 实测；每段软目标为本段时长的90%-96%，86%-100%视为可接受。只有实测过短或过长时允许中央口播做一次定向修订，修订不得增加新卖点或重写画面；一次后保留实测更优版本并继续，不循环追求绝对满时长。预检音频按文本哈希、音色、文件路径、实测时长和语速冻结；最终混音命中相同文本哈希时必须直接复用该音频及其已选语速，不得再次计算速度或重复合成。对 10–11 秒短片段，语义段上界会给固定开口延迟预留尾部安全空间；若冻结音频已经接近片段上限，只自动缩短该段开口延迟，不重新加速口播。`h3-submit` 独立调试入口也执行同一预检。H3 与外部 TTS 分别要求显式 `--allow-real-submit / --allow-external-tts`。
+- 最终音频默认叠加现有 CC0 本地轻量 BGM 底床，音量固定为低存在感且不得替代口播；可用 `LONGFORM_BGM_PATH` 指定已批准素材。BGM 不可用只记录软降级，不阻断成片。
+- 新产品在首次商品锚点下载时把原始商品参考图持久化到共享缓存；长视频 `plan` 建单时把当前可用的商品原图、人物参考或已经批准的统一首帧复制进本 job 的 `frozen_references/` 并记录 SHA256。冻结清单同时记录 `reference_mode` 和每项 authority：商品原图控制商品结构，人物图控制身份，合成首帧只控制构图。K0 有商品原图时只用“商品原图+人物图”，不再让合成图覆盖商品；历史任务缺商品原图时以 `COMPOSITE_FALLBACK` 自动继续并写明软降级，不增加人工确认或批量阻断。片段进入帧继续使用 K0 做构图，并追加冻结商品原图纠偏。
+- `visible_closure_contract` 原样从 15 秒完整脚本进入长视频主合同、关键帧、H3 提示词和中央口播。闭合方式已经核实时才使用对应的拉链/按扣/纽扣动作词；状态为 `UNAVAILABLE` 时只使用“合上、敞开、调整前襟”等中性语义。该规则只约束闭合件词汇，不建立全局“禁止拉链”黑名单，也不触发整条口播重写。
+- 关键帧登记完成后，`run-to-final` 按 `segments[]` 状态幂等循环提交/下载、处理对应边界、合并和最终混音。中央口播仍是一条连续思想，只按 A/B/C 语义段在对应视频片段开头附近铺设；禁止用负速率把短口播拖满。最终成片就绪后自动刷新 `text_review/`，确保人工审阅看到最终采用的口播、片段计划和状态，而不是预检前旧稿。`--manual-bridge` 仅保留为同场景调试选项，批量默认不使用。
+- MiniMax Key 只从当前进程环境或 macOS `launchctl` 环境读取，缺失时在付费提交前预检失败；禁止从历史会话、飞书、JSON、代码或日志恢复凭据。
+- 本旁路文本/视频小样未通过前，不得修改现有 15 秒生产表、任务状态、默认模型或现有自然语言入口。
+
 ## 核心能力
 
 当用户在飞书多维表格中把 `任务状态（需填写，仅选择待执行）` 设为待执行状态后，这条流水线会：
@@ -93,14 +113,15 @@ Git 只管理开发源目录：
 正式流程之外保留一条不写飞书、不生成视频、不生成变体的文本实验路径。该路径会：
 
 - 先按近期历史用量分配 `人物角色 × 场景母题 × 开场动作` 创意多样性合同；
-- 创意多样性合同额外携带不参与硬校验的类目软适配档：`WORN_APPAREL / WORN_ACCESSORY / HAND_STATIC_ACCESSORY`。围巾、帽子、耳饰、项链、包、腕饰和发饰优先从已经佩戴或造型完成的生活状态进入；戒指保留手部/静物软偏好。结构合同仍是最终承载权威，软适配不得覆盖它；
+- 创意多样性合同额外携带不参与硬校验的类目软适配档：`WORN_APPAREL / WORN_ACCESSORY / HAND_STATIC_ACCESSORY`。围巾、帽子、耳饰、项链、包、腕饰和发饰优先从已经佩戴或造型完成的生活状态进入；戒指优先使用手部或人物佩戴关系，只有商品细节型卖点才保留手持方向，静物不得承载调节、手感或佩戴效果。结构合同仍是最终承载权威，软适配不得覆盖它；
 - 内容论证包先确定 `primary_hook_id`，再生成带 `CREATIVE_DESIGN` 权威标记的完整脚本蓝图，使画面开场和中央口播从同一个钩子意图出发；
 - 内容论证包以中央卖点目录为内容权威：飞书中已经人工确认的每个编号卖点都自动获得原创使用资格；中央概念映射只补充 `allowed_strength / claim_type / carrier` 标签，映射失败不得删除卖点。画面语义匹配只记录 `proof_match_status=MATCHED/UNMATCHED` 并辅助选择细节，不得否决或降级卖点。未匹配时扣子、口袋等事实只能作为并列产品细节，禁止被写成卖点成立的原因；
 - 蓝图沿用紧凑的 `retention_hook`；兼容观察方向仍可生成一件普通 `event_design`，达人直分享方向不再要求生活事件，兼容字段只作内部投影；开头不强制快速入画、停顿、抬眼或表演情绪；
 - 由真实视频执行参考控制动作关系，由结构合同控制节奏；内容论证包 V4 明确分开“核心价值、用户顾虑、2–3 个可见证据”，不再把可见结构事实误当成完整卖点；
 - 结构计划继续控制宏观 Beat、承载方式、连续性和开场机制；3 段事件画面由代码确定性投影到现有4至6个兼容槽位，不再调用独立视觉适配模型；相邻槽位只延续同一事件过程，同一画面可以同时支持多个卖点；
 - 观察方向的 `event_design` 只是一件普通事情；达人直分享允许人物只是面对自己的手机说话。扣子、口袋、袖型等商品细节只需保持可见，不分配逐项指向、触摸或核对动作；`reaction_points` 可为空且不再进入达人直分享的视频提示词；
-- 原创流程只通过 `voiceover-argument-contract-v1` 决定讲什么，不再维护自己的目标语言钩子措辞模板；自然称呼、观众指代（如“你们/谁正在……”）、钩子表面表达、语气词、跨镜语义段和本地语言表达统一由中央口播引擎负责。批次冻结的 `目标语言` 是唯一语言权威：泰语、越南语和马来语共用同一套钩子与卖点合同，但分别注入本地关系语言和语气表面；非泰语任务必须清除提示中的泰语示例，生成后进行轻量文字系统校验，错语种在脚本装配和写飞书前硬阻断，且目标国家、目标语言和类目进入口播缓存依赖，不能复用其他市场的旧口播。中央口播 V36 会把完整钩子原型的 `core_intent / attention_mechanisms / minimal_structure / relation_modes` 作为整段修辞路径传给生成器，而不是只传 `hook_id` 或只改第一句；批次层只按钩子兼容性给出一个可放弃的观众关系软偏好，每5条最多建议1条显式“姐妹们”式称呼，不强制实现。话术样本优先按同 `hook_id + 国家 + 类目` 读取；精确类目缺失时，可按同 `hook_id + 国家 + FEMALE_FASHION_WEARABLE` 表达族读取最多两条，只学习观众关系、句子节奏、衔接和信息密度，不得继承商品事实、材质、功效、用法、CTA或原句，且仍禁止跨钩子兜底。正式口播使用“一个核心卖点＋一个同主题信息＋轻收尾”的软密度目标，不引入第二卖点；钩子ID血缘与钩子表面实现分别记录，表面弱只是观察信号，不新增失败门槛、重试或自动润色；
+- 原创流程只通过 `voiceover-argument-contract-v1` 决定讲什么，不再维护自己的目标语言钩子措辞模板；自然称呼、观众指代（如“你们/谁正在……”）、钩子表面表达、语气词、跨镜语义段和本地语言表达统一由中央口播引擎负责。批次冻结的 `目标语言` 是唯一语言权威：泰语、越南语、马来语和墨西哥西班牙语共用同一套钩子与卖点合同，但分别注入本地关系语言和语气表面；跨市场任务必须清除不属于目标语言的表面示例，生成后进行轻量文字系统校验，错语种在脚本装配和写飞书前硬阻断，且目标国家、目标语言和类目进入口播缓存依赖，不能复用其他市场的旧口播。中央口播会把完整钩子原型的 `core_intent / attention_mechanisms / minimal_structure / relation_modes` 作为整段修辞路径传给生成器，而不是只传 `hook_id` 或只改第一句；批次层只按钩子兼容性给出一个可放弃的观众关系软偏好，不强制称呼数量。话术样本只用于修辞或目标语言节奏，不得继承商品事实、材质、功效、用法、CTA或原句，且仍禁止跨钩子兜底。正式口播使用“一个核心卖点＋一个同主题信息＋轻收尾”的软密度目标，不引入第二卖点；钩子ID血缘与钩子表面实现分别记录，表面弱只是观察信号，不新增失败门槛、重试或自动润色；
+- 口播聚类是人工 ACTIVE 钩子下面的证据层，不能替换人工 `hook_id`、卖点授权或本地关系语言。中央口播按版本化兼容映射读取 `speech_hook` 活跃 release：簇原型只提供修辞顺序；成员原句只有在 ASR 质量明确 `PASS`（或人工母语批准）且产品细分类目精确匹配时才能成为 `NATIVE_SURFACE_REFERENCE`，其他样本一律降为结构参考。合格母语样本与人工批准话术同时保留、分工使用，不再互相排斥；没有兼容簇或合格原句时直接回退人工钩子原型、批准样本和 locale pack，不得随机借用其他钩子或类目的簇；
 - 中央口播采用三段语义计划：自然抓人开场、连续卖点论证、轻收尾。计划由代码确定性生成，不再额外调用模型决定逐句落在哪个镜头；
 - 画面只需要在整条视频中为口播事实提供证据。局部先说后拍、跨镜延续和顺序轻微不同只记录警告；保守时长上界超出也只警告，中心估时超过成片时长 20% 才按不可容纳阻断；只有编造事实、整片无证据、语言不可用、确实无法容纳或显式 `MUST_SILENT` 冲突才阻断；
 - 支持只生成 3 个中央口播候选供人工选择；候选必须使用不同 ACTIVE 钩子原型，画面、人物和场景保持不变，未显式选择前不继续组装完整脚本；
@@ -320,17 +341,27 @@ python3 scripts/run_reality_reference_stage0.py --product-code <产品编码> --
 
 执行时只让 `gpt-5.6-sol/high` 生成一次完整蓝图；代码随后把三段连续生活事件确定性投影到结构槽位，不再调用旧视觉适配模型把画面写回商品检查清单。中央口播使用 `creative_full_single_v1` 一次生成完整表达：有卖点论证时建议 11-15 秒，只围绕一个已经拆分的主卖点展开，并至多消费一个直接相关的可见事实；普通事实观察允许 7-11 秒且默认只说一个代表事实。整段跨镜挂载，下游不得重新规划或逐句对齐。同一条人工卖点若被中央标准化为多个独立概念，规划目录必须将其拆成多个可轮换方向，不能把头发状态、静电、光泽等不同主题重新拼回同一条15秒口播。
 
+中央口播现使用 `voiceover-context-contract-v2 / central-voiceover-v39-operator-context` 做减法式语境接入。女装、围巾和其他可穿戴类都可把已经冻结的生活时刻作为可选说话位置传给中央口播，不再只对白围巾开放；场景地点和生活动作始终属于 `CREATIVE_DESIGN`，可以不用，也不能作为商品功效证据。飞书卖点同步采用 `operator-argument-v2`：编号、项目符号和空行仍是强边界；没有编号时，可将“短标题＋下一行具体解释”识别为一个独立人工卖点，但逗号、顿号和分号不会被机械拆分。V2 分段存在后，中央目录只消费最新的 `#argument-v2-N` 来源，旧整段和旧 `#segment-N` 不再重复进入候选池；未映射中央概念的人工确认段仍保持原创资格。同一人工卖点被标准化为多个概念时，批次优先轮换不同 `source_argument_id`，不会让同一原始卖点的几个概念连续占满有限名额。标准化后的 `operator_expression` 继续决定本条唯一核心价值，`source_operator_expression` 只补回该编号内已经人工确认的人群、旅行、通勤等具体语境，不得引入另一编号卖点。已确认卖点本身属于场景/人群需求时，即使没有另写 `dominant_user_question`，也可授权 `AUDIENCE_NEED_CALLOUT`；这类 `SELLING_SCENARIO` 语境以软优先方式进入开场或主线，中央口播可因自然度放弃，不形成失败、修订或重试。`PAIN_REFRAME` 仍要求明确痛点或中央概念授权。口播不再固定压成两个信息槽，而是围绕一个核心卖点自由组织观众处境、核心回答、一个相关事实或个人决定；普通卖点仍最多一个使用情境，只有 `CCP_MULTI_SCENE` 等已授权多场景卖点才可自然对照两个场景，禁止列举清单和引入第二卖点。输出记录 `used_context_anchor / context_consumption_status / voiceover_context_mode` 用于判断语境是否真正被模型消费，但不形成失败门槛；可用 `CENTRAL_VOICEOVER_CONTEXT_V2_ENABLED=0` 整体回退旧语境行为。
+
+中央口播 V40 在上述语境能力之上改用 `central-spoken-brief-v1 / central-voiceover-v40-native-spoken-brief`。生成模型只看到“目标市场、观众或需求、一个生活处境、唯一核心购买理由、至多一个可选支持事实、钩子意图”这份精简说话简报；完整视觉计划、信息单元配额、全字段覆盖要求和逐镜解释都不再进入写作任务。人物、场景和支持事实可以不用，只有唯一核心消费理由必须让听众听懂。目标语言原生样本优先指导口语节奏；人工批准的中文话术只在缺少原生表面样本时辅助观众关系和论证节奏，两者都不提供商品事实。中央模型仍一次完成整段口播且下游不得重写；机器硬检查只保留目标语言可用、事实与卖点血缘合法、时长可容纳以及结构化结果完整，称呼、语气词、场景消费、支持事实使用和钩子表面强弱都只是观察信号，不触发自动润色、修订或重试。
+
+V41 起新增 `script-semantic-spine-v1 / product-market-context-v1 / whole-video-context-bridge-v1`，用一份无损语义主线同时驱动画面和中央口播。人工卖点原文与分段语义始终保留，`operator_expression / content_mainline / core_result_moment` 只作兼容摘要，不能覆盖主消费情境和核心购买理由。场景只分 `SUPPORTS / NEUTRAL / CONFLICTS`：支持时可让口播自然提到当前生活时刻；中性时口播可讲主情境但不假装当前地点就是该情境；明确冲突只在规划排序中强降级，不新增模型修订或逐句逐镜校验。真实爆款案例对蓝图只暴露承载、节奏、时长、机位和剪辑语法，原视频商品、场景与故事内容不再进入模型可见投影。人物模板继续锁长相、体型、妆发和参考资产，当前脚本人物角色由冻结创意语境决定，模板中的旧职业或旧场景不得覆盖本条内容。最终脚本、报告、首帧与视频提示词都显示同一份主消费情境和核心购买理由；硬阻断仍只限既有事实、物理与语言安全问题，不因为某句话没有对上某个镜头而失败。
+
+中央口播 V38 进一步把 speech-hook 聚类消费下沉为 `native-rhetoric-contract-v1` 公共能力，原创、人工上传、运行管理表和轻视频不再各自读取或解释口播聚类。中央层按 `hook_id + 国家 + 语言 + 类目/表达族` 读取 active speech-hook release，并严格分开 `RHETORIC_STRUCTURE_REFERENCE` 与 `NATIVE_SURFACE_REFERENCE`：混语种、脚本纯度不足或疑似坏 ASR 的记录只能贡献开口动作、论证顺序和收尾结构，不能把原文喂给生成模型；通过脚本纯度检查的目标语言样本才可软参考口语节奏。中文人工批准样本仍是 `RHETORIC_REFERENCE`，不能伪装成本土语言证据。视觉多维检索不再查询或冻结 `speech_hook_pool`，speech-hook 缺失不得使结构/场景检索失效。泰国、越南、马来西亚和墨西哥共用中央钩子语义与事实边界，并分别使用 `th-TH / vi-VN / ms-MY / es-MX` locale pack；称呼、语气词和本土表达都是软资源，不增加次数配额、模型调用、自动修订、失败门槛或重试。`VOICEOVER_NATIVE_RHETORIC_ENABLED=0` 可关闭聚类检索并回退中央钩子原型与 locale pack。
+
 批次执行只设三类硬阻断：完整蓝图/创意合同缺失；与承载方式相匹配的必要制作设定缺失；口播出现内容包未授权的商品效果。钩子强弱、首句与首镜局部错位、语气词数量和叙事锚点是否使用均不进入自动修订循环。
 
 每个批次 item 使用一个 `stage_checkpoint_json` 保存蓝图原始结果、归一化蓝图、视觉计划和完整口播。任一阶段产出后立即落库；同一 `item_snapshot_hash`、冻结方向包和蓝图模型配置下，`--resume` 先复用检查点并重新执行当前校验，不从头调用模型。冻结输入或蓝图模型发生变化时整条检查点自动失效；视觉与口播各自再按依赖指纹判断是否复用。蓝图遇到瞬时容量、5xx、429、连接或超时错误时，先以 `gpt-5.6-sol/high` 发起两次带短退避的相同请求；仍失败才以同一冻结提示词兜底一次 `gpt-5.6-terra/high`。认证、JSON/schema、事实或校验错误不切换模型；长期失败仍交给 item 级 resume，避免无限重试。
 
 批次计划会读取并预留既有 `creative_pattern_usage`，以 `人物角色 × 场景母题 × 开场动作` 的实际近期使用量选择下一组组合；相同请求由冻结批次保证幂等，新批次不得因为同一产品/结构而自动复用旧创意组合。创意历史只影响候选选择，不形成新的脚本失败门槛。
 
-钩子分配使用 `hook-allocation-v2-compatible-family-rotation`：中央卖点语义先给出事实兼容的钩子池，`PAIN_REFRAME / AUDIENCE_NEED_CALLOUT` 仍需明确用户张力或中央概念授权，`USER_ADVOCACY_STANCE` 只表达创作者个人选择，不再被误判为必须依赖痛点。已确认的普通卖点可安全进入发现式、个人选择式和通用分享式表达；产品细节与视觉结果再分别开放细节式或结果式钩子。`PLAN_ONLY` 只在兼容池内按“本批较少使用的修辞家族 → 较少使用的 hook_id”软轮换，`GENERAL_PRODUCT_SHARE` 只在完全同分时后置；候选不足仍正常生成并记录回退，不新增模型调用、配额、失败门槛或口播末端修订。冻结方向包保存 `hook_allocation_contract`，中央口播继续负责目标语言中的完整修辞实现。
+钩子分配使用 `hook-allocation-v2-compatible-family-rotation`：中央卖点语义先给出事实兼容的钩子池；`PAIN_REFRAME` 必须有明确痛点，`AUDIENCE_NEED_CALLOUT` 必须有明确需求或已批准销售场景，`USER_ADVOCACY_STANCE` 必须有真实观众冲突/立场授权，不能再退化成普通个人夸赞。已确认的普通卖点可安全进入发现式、结果式和通用分享式表达；产品细节与视觉结果再分别开放细节式或结果式钩子。`PLAN_ONLY` 只在兼容池内按“本批较少使用的修辞家族 → 较少使用的 hook_id”软轮换，`GENERAL_PRODUCT_SHARE` 只在完全同分时后置；候选不足仍正常生成并记录回退，不新增模型调用、配额、失败门槛或口播末端修订。冻结方向包保存 `hook_allocation_contract`，中央口播继续负责目标语言中的完整修辞实现。
 
 场景聚类是默认关闭的只读软参考：启用 `ORIGINAL_SCRIPT_SCENE_REFERENCE_ENABLED=1` 后，`PLAN_ONLY` 只读取 `sd_structure_scene_matrix / sd_scene_prototype`，将既有创意候选映射为场景族群，并仅在“精确结构×场景”存在至少 3 个样本且相对全局有正向提升时给予小幅排序偏好。选中的 `scene_reference_contract` 会冻结进 item 与 `simplified_creative_seed`；脚本阶段不再读取 RDS。场景执行卡按“精确结构场景 → 同宏观结构 → 场景族原型 → 既有策划场景母题”四级寻找参考，但最终可执行视觉配方只允许两种连贯来源：一条兼容的真实观察，或整张既有策划场景卡；聚类原型继续参与族群路由和代表样本定位，不再把聚合道具、光线或氛围拼接进策划地点。规划层额外冻结轻量 `scene_request_contract`，只携带标准产品类型、承载方式、场景意图、时段光线需要和拍摄关系；头巾遮阳等已有中央语义可以要求白天观察，并获得户外或半户外证明环境的正向软排序。未知商品类型标签仍可作为弱类目观察；当任务和历史样本的细分类目都已识别且明显不兼容时，不再伪装为同类真实样本，而是完整回退到一张连贯的策划场景卡。同国家候选中明确的场景族或昼夜冲突同样完整回退，不形成脚本失败。`WORK_BREAK / ON_THE_GO / OTHER` 等枚举只保留为 `situation_tags`，不能再写入审美锚点或最终视频提示词。`visual_scene_recipe` 只包含非空的空间关系、材质与色调、光线质感、生活痕迹；原始观察没有相应信息时明确留空，不调用模型补造。每批场景族与具体场景只做软轮换，不能形成固定配额、失败门槛或额外模型修订。
 
-`simplified_v1` 的聚类消费现使用 `execution-case-retrieval-v5-shot-richness`。`PLAN_ONLY` 必须从 `sd_dimension_release` 动态读取 active run，不再读取 `sd_table_registry` 或写死 `prompt_only_full / scene_v2 / rhythm_v1`。结构路由只消费 active `structure` 原型；执行案例从 `sd_video_script_feature_v2.execution_card_json` 读取。每条候选始终以一个真实 `video_id` 为原子，同时冻结该视频在 structure / scene / rhythm / persona_presentation / visual_hook 五维的赋值，禁止拆维拼装。排序严格遵循“商品细类兼容 → 承载兼容 → 动作兼容 → 镜头丰富度与执行卡完整度 → 创作者/模板去重 → raw_video_verified → 表现数据”；15秒原创生产的主执行卡必须至少有3个实测镜头且不得属于 `SINGLE_TAKE`，精确结构簇只有单镜案例时，可从相同宏观结构族选择兼容的多镜头真实视频并显式标记 `MACRO_FAMILY_SUPPORT`。中文动作会先确定性映射到 WEAR / ADJUST / HOLD / WALK / TURN / STATIC 等检索词，避免动作兼容实际失效。`VIDEO_DERIVED_SCRIPT` 与 `VIDEO_INDEPENDENT` 都能成为主执行卡，`raw_video_verified` 只作低位加分和证据说明，不得成为硬门槛。仍不得拆维拼装。每个 item 冻结 `primary_execution_card / supplemental_execution_card / execution_candidate_pool / speech_hook_pool`，并把主卡确定性投影到旧 `execution_reference` 供既有下游消费，同时保留原路由参考。执行卡中的 `opening / proof / use_process / ending` 只能按原镜头功能消费，`UNAVAILABLE` 段不得补造。蓝图只借鉴镜头功能、动作顺序、景别变化和节奏关系，不得复制来源商品外观、品牌文字、价格或具体宣称；商品事实、卖点、人物身份、穿搭和已选场景仍由原创流程拥有权威。口播池只向中央口播提供修辞结构与目标语言代表表达，不能替代当前商品卖点选择，也不得继承来源事实、功效、CTA或原句。检索失败明确冻结 `UNAVAILABLE/NO_EFFECT` 并沿用原流程，不增加模型调用；`SCRIPT_ONLY` 只能消费冻结合同，不得重新读取 RDS。可用 `ORIGINAL_SCRIPT_MULTIDIM_REFERENCE_ENABLED=0` 临时关闭该层，默认开启。
+`simplified_v1` 的聚类消费现使用 `execution-case-retrieval-v5-shot-richness`。`PLAN_ONLY` 必须从 `sd_dimension_release` 动态读取 active run，不再读取 `sd_table_registry` 或写死 `prompt_only_full / scene_v2 / rhythm_v1`。结构路由只消费 active `structure` 原型；执行案例从 `sd_video_script_feature_v2.execution_card_json` 读取。每条候选始终以一个真实 `video_id` 为原子，同时冻结该视频在 structure / scene / rhythm / persona_presentation / visual_hook 五维的赋值，禁止拆维拼装。排序严格遵循“商品细类兼容 → 承载兼容 → 动作兼容 → 镜头丰富度与执行卡完整度 → 创作者/模板去重 → raw_video_verified → 表现数据”；15秒原创生产的主执行卡必须至少有3个实测镜头且不得属于 `SINGLE_TAKE`，精确结构簇只有单镜案例时，可从相同宏观结构族选择兼容的多镜头真实视频并显式标记 `MACRO_FAMILY_SUPPORT`。中文动作会先确定性映射到 WEAR / ADJUST / HOLD / WALK / TURN / STATIC 等检索词，避免动作兼容实际失效。`VIDEO_DERIVED_SCRIPT` 与 `VIDEO_INDEPENDENT` 都能成为主执行卡，`raw_video_verified` 只作低位加分和证据说明，不得成为硬门槛。仍不得拆维拼装。每个 item 只冻结 `primary_execution_card / supplemental_execution_card / execution_candidate_pool`，并把主卡确定性投影到旧 `execution_reference` 供既有下游消费，同时保留原路由参考；不再冻结口播聚类原文。执行卡中的 `opening / proof / use_process / ending` 只能按原镜头功能消费，`UNAVAILABLE` 段不得补造。蓝图只借鉴镜头功能、动作顺序、景别变化和节奏关系，不得复制来源商品外观、品牌文字、价格或具体宣称；商品事实、卖点、人物身份、穿搭和已选场景仍由原创流程拥有权威。视觉检索失败明确冻结 `UNAVAILABLE/NO_EFFECT` 并沿用原流程，不增加模型调用；`SCRIPT_ONLY` 只能消费冻结视觉合同，口播生成时由中央引擎独立消费 active speech-hook release。可用 `ORIGINAL_SCRIPT_MULTIDIM_REFERENCE_ENABLED=0` 临时关闭视觉检索层，默认开启。
+
+女装真人方向不再新增独立的“商品证明动作池”或第二套动作合同。既有 `action_design` 直接消费商品锚点卡中已批准的 `display_anchors.recommended_shot_type / operation_anchors / safe_shot_templates`，并携带已选真实执行卡的实测片段、节奏和机位元数据；执行案例只提供怎么推进和怎么切，商品锚点只提供当前商品可以安全怎么展示。已有候选会先按本条冻结卖点的语义主线、核心证明事实与轮廓/比例/领口闭合关系做软排序；只改变“用哪一个已有安全动作”，不生成新动作，完全没有相关信号时继续按原确定性哈希轮换。创意组合中的 `opening_action / action_grammar` 在该路径降级为人物所处的生活时刻，不再把“拿包→站着展示→补录细节”重新注入视觉执行合同。没有可执行商品锚点时才沿用旧场景动作兜底。该改动复用原 `action_design`、蓝图和提示词接口，不新增字段、表、模型调用、质检、修订、重试或硬性动作配额；配饰类仍由各自 `category_execution_extension` 拥有动作权威。
 
 已就绪的 `simplified_v1` 批次如只需升级场景配方，可运行 `scripts/refresh_scene_recipe_batch.py --batch-id <批次ID>` 预演，再加 `--apply` 更新本地。该入口不调用模型，保持结构、卖点、钩子、口播、人物、穿搭、分镜和脚本ID不变，只刷新冻结场景参考、视觉执行合同与确定性视频提示词；显式增加 `--write-feishu` 才会按脚本ID原位更新飞书，且必须与 `--apply` 同时使用。执行前会自动备份原始 item。
 
@@ -370,6 +401,7 @@ python3 /Users/likeu3/.openclaw/workspace/skills/original-script-generator/scrip
 | “刷新卖点后重新规划 recXXXX” | 同步卖点后新建规划批次 | `replan --record-id recXXXX` |
 | “刷新穿搭模板” | 仅同步轻视频穿搭模板到本地共享库，不生成脚本 | `refresh-outfits` |
 | “刷新原创人物模板” | 将原创人物模板库同步到本地共享库，不生成脚本 | `refresh-personas` |
+| “刷新原创生产配置” | 依次刷新穿搭与原创人物模板，并输出统一快照 | `refresh-production-config` |
 | “检查勾选生成首帧的脚本” | 只预览用户已勾选的首帧任务 | `first-frame-check --limit 5` |
 | “生成勾选脚本的首帧” | 生成或复用统一首帧并回写同一脚本行 | `first-frame-run --limit 5` |
 | “重试首帧 recXXXX” | 忽略缓存重生成指定脚本的首帧 | `first-frame-retry --record-id recXXXX --limit 1` |
@@ -378,6 +410,9 @@ python3 /Users/likeu3/.openclaw/workspace/skills/original-script-generator/scrip
 
 路由约束：
 
+- 明确执行指令必须直接调用上述白名单适配器；不得先用 `feishu_bitable_list_records` 手工翻页扫描同一张运营任务表，再启动会重复扫表的适配器。
+- 只读检查如确需直接读取飞书，全表扫描固定使用 `page_size=500` 并且只沿返回的 `page_token` 继续；禁止用 5/10/20/25/100 条小分页遍历整表，也禁止在已读取 500 条后重新从首页小分页扫描。
+- 正式生产入口使用跨进程排他锁；已有任务运行时，新的 `run / plan / resume / replan / export-ready` 请求只记录 `SKIPPED_LOCKED`并正常退出，不得并发执行或自动重试。
 - 只提取 `record_id`（必须 `rec` 开头）、`product_code`（8–30位数字）和“最多处理几条**运营任务**”（1–5）。禁止把自然语言直接拼接进命令。
 - 飞书任务行的 `生成数量` 才是一个产品要生成几条脚本（1–20）的唯一权威；“生成 10 条脚本”不能映射为 `--limit 10`。
 - `run` 只读取并执行任务状态为`待执行`的行；`resume` 只接受`失败/部分完成`；`replan` 只接受`失败/部分完成/已完成`。没有候选时如实回复，不得把空白、已完成或其他状态偷偷改为`待执行`。
@@ -390,7 +425,7 @@ python3 /Users/likeu3/.openclaw/workspace/skills/original-script-generator/scrip
 
 场景排序补充使用 `creative-diversity-v13-selling-scene-priority`：如果卖点本身明确指向拍照打卡、通勤、防晒等场景语义，则匹配候选获得 40 分软奖励，优先于产品专属穿搭的 30 分场景软偏好，但仍低于完整组合重复的 100 分惩罚。该信号只参与规划排序，不形成场景硬门槛、质检失败或额外模型修订。
 
-人物模板的外貌、气质与身体比例继续分权：`外貌特征` 和 `身形气质` 进入普通人物描述，`身形比例（可选）` 单独进入 `identity_lock.body_proportion_text`，不得再重复拼回外貌文案。统一首帧的人物参考图只控制脸部身份、五官、肤色、肤质和妆发，不控制参考图裁切、拍摄距离、头部画面占比或身体几何；身体比例由结构化比例字段控制，未填写时使用自然写实成年比例并继续生成。女装真人首帧额外使用普通手机距离、至少头部至膝部的软构图投影，避免贴脸广角与头大身小；该投影不修改完整脚本、视频分镜、配饰近景或静物方向，也不增加质检和重试。
+人物模板的外貌、气质与身体比例继续分权：`外貌特征` 和 `身形气质` 进入普通人物描述，`身形比例（可选）` 单独进入 `identity_lock.body_proportion_text`，不得再重复拼回外貌文案。人物进入冻结合同时会把“其余保持不变、把模特妆容换成”等运营编辑指令转成干净的正向人物描述，修正常见错字，并按 item 种子把妆发中的“或”候选确定性冻结成一个可执行选项；原模板仍保留供运营审计，脚本、首帧和视频提示词只消费清洗后的投影。统一首帧的人物参考图只控制脸部身份、五官、肤色、肤质和妆发，不控制参考图裁切、拍摄距离、头部画面占比或身体几何；身体比例由结构化比例字段控制，未填写时使用自然写实成年比例并继续生成。女装真人首帧额外使用普通手机距离、至少头部至膝部的软构图投影，避免贴脸广角与头大身小；该投影不修改完整脚本、视频分镜、配饰近景或静物方向，也不增加质检和重试。
 
 旧完整脚本若已冻结同一人物但 `body_proportion_text` 为空，用户主动生成或重试首帧时只允许按原 `persona_id` 从最新人物库回填该比例字段，并记录 `LATEST_SAME_PERSONA_BACKFILL`；不得借此重选人物或更新其他创意合同。最新库仍无比例时继续使用自然成年比例回退。
 
@@ -471,7 +506,11 @@ python3 scripts/run_feishu_operation_tasks.py \
 
 生产提示词默认使用 `UGC_NATIVE_V1` 交接档。完整脚本仍保留人物、情绪、精确场景和详细分镜供人工审核；交给视频模型的提示词会把商品身份锁和商品负向约束放在最前，随后使用统一手机原生拍摄说明，并把逐镜机位压缩为必要景别。`product-identity-lock-v2` 只从已确认 `identity_anchors / visible_detail_anchors` 确定性编译：参考图是商品外观权威；已明确的单列可见扣与隐藏暗扣会分别表达，隐藏闭合件不得被转写成第二列可见纽扣；真正的双排扣或未知排布不得被擅自改成单排。渲染器会用 V2 重新编译旧视频简报中的 V1 商品锁，因此不需要重跑蓝图或口播。该过程不调用新模型，也不会根据未知属性编造负向约束。旧提示词可通过 `ORIGINAL_SCRIPT_VIDEO_PROMPT_PROFILE=legacy` 临时回退，默认值为 `ugc_native_v1`。
 
-配饰通过可选 `category_execution_extension` 接入，不建立第二条生产流程。启用 `ORIGINAL_SCRIPT_ACCESSORY_PROFILE_ENABLED=1` 后，类型注册表明确识别的耳饰、发饰、腕饰和围巾会在 `PLAN_ONLY` 编译类目执行档案；其中 `围巾 / 秋冬围巾 / 丝巾 / 头巾` 先编译通用围巾档案，再按本条已分配卖点冻结为 `accessory-execution-profile-v5-scarf-action`，不得互相回退成同一个秋冬围巾模板。手链/手镯从已戴好的腕部结果开始，抓夹等发饰从已完成发型开始，并使用镜面或侧后方三分之四手机关系展示后脑区域；两类均禁止误用围巾的垂端、领口动作。旧 P1 类目合同只提供观察，产品类型注册表与类目扩展拥有分型和物理执行权威；除运营卖点明确授权外，不因类型名推断材质、功效、宗教或文化身份。
+配饰通过可选 `category_execution_extension` 接入，不建立第二条生产流程。启用 `ORIGINAL_SCRIPT_ACCESSORY_PROFILE_ENABLED=1` 后，类型注册表明确识别的耳饰、发饰、腕饰、戒指和围巾会在 `PLAN_ONLY` 编译类目执行档案；其中 `围巾 / 秋冬围巾 / 丝巾 / 头巾` 先编译通用围巾档案，再按本条已分配卖点冻结为 `accessory-execution-profile-v5-scarf-action`，不得互相回退成同一个秋冬围巾模板。手链/手镯从已戴好的腕部结果开始，戒指使用手指与手部近景并保持简洁上衣、干净手部和无竞争首饰的辅助关系，抓夹等发饰从已完成发型开始，并使用镜面或侧后方三分之四手机关系展示后脑区域；各类均禁止误用围巾的垂端、领口动作。旧 P1 类目合同只提供观察，产品类型注册表与类目扩展拥有分型和物理执行权威；除运营卖点明确授权外，不因类型名推断材质、功效、宗教或文化身份。
+
+小配饰卖点在中央卖点适配阶段可以冻结轻量 `claim_action_contract`：可调节戒指对应 `SIZE_ADJUSTMENT / ADJUST_THEN_WEAR`，重量或手感对应 `HANDHELD_MATERIAL_FEEL / HANDHELD_PRODUCT`，佩戴视觉结果对应 `WORN_VISUAL_RESULT / RESULT_SHOW`，明确场景用途对应 `SCENE_USAGE / SCENE_USE`。这只把运营已确认卖点翻译成可见动作关系，不重写、不审核卖点，也不新增模型调用；不兼容承载在规划期改选其他卖点，未知表述继续走原灵活路径。可用 `ORIGINAL_SCRIPT_SMALL_ACCESSORY_CLAIM_ACTION_V1=0` 关闭新语义映射。
+
+同产品跨批次创意轮换除现有精确 `visual_signature` 外，还计算一个不含商品颜色、人物姓名、钩子措辞和场景自由文本的 `perceptual_signature`，只使用场景族、核心动作族、结构母体、穿搭轮廓和承载方式。近期同产品重复只获得软惩罚，候选不足时标记 `SOFT_REPEAT_FALLBACK` 后继续生产，不新增表、硬门槛、修订或模型调用；数据写入现有 `creative_pattern_usage.metadata_json`。可用 `ORIGINAL_SCRIPT_PERCEPTUAL_REPEAT_PENALTY_V1=0` 单独回退。
 
 腕饰卖点的执行语义现统一在中央卖点适配器中轻量编译，不在脚本末端追加修补规则：运营卖点明确写有“单戴/叠戴/戴着/上腕”等佩戴结果时，优先使用手腕或人物承载并从已佩戴状态证明；明确写有“一滑就能套入/容易戴”等过程时，允许一次简单佩戴过程并以稳定佩戴结果结束，禁止摘下后再次佩戴。只讲切面、光泽或外观细节的卖点继续保持承载方式灵活。该语义仅决定如何呈现运营已确认的卖点，不改写卖点、不替运营判断卖点是否成立，也不影响女装、围巾、耳饰和发饰。
 
@@ -488,6 +527,8 @@ python3 scripts/run_feishu_operation_tasks.py \
 配饰视频交接额外携带 `wear_state_contract` 与软性的 `hand_anatomy_guard`。`RESULT_SHOW / DETAIL_SHOW` 从已经完成的佩戴结果开始，只允许轻调；`SIMPLE_WEAR_PROCESS` 从松结或未完成状态开始，完成一个冻结步骤后再展示结果，视频提示词不得同时写“开场已经佩戴完成”和“重新系结”。手部提示最多出现同一人物的两只手并明确左右手属于同一人，用于降低第三只手与助手手臂风险，但不作为脚本失败门槛，也不宣称能完全消除视频模型的肢体生成误差。
 
 穿戴类正式批次额外冻结拍摄关系：真人方向默认 `capture_mode=CREATOR_SELF_SHOT`，表示创作者本人面对自己的一台手机完成分享；手部和静物方向分别使用 `HANDS_PRODUCT_SHARE / STATIC_PRODUCT_RECORD`。`capture_mode` 是内部合同，不新增飞书人工字段。结构 Beat 继续控制同一生活时刻中的内容推进；当前 `capture-rhythm-contract-v5-structure-visible-clips` 优先参考已选真实执行卡的可用功能段与实测镜头数，并把15秒真人方向编译为优先4个可见片段、手部/静物优先3个可见片段；真实案例只提供同功能段的可执行示范，不能替换结构顺序。手机布置是独立预算：展厅、商场连廊、写字楼走廊和电梯厅等公共空间仍固定采用“一个自然可解释的固定手机位置＋一段手持自拍或商品切片”，但同一布置允许录制多个内容时刻，不得因此合并成两个长镜头；居家或普通静态空间可在同一小片区域自然补录。片段间只使用普通直接剪切或自然跳剪，同一人物、商品、穿搭、地点、时刻和手机保持连续；不得退回数字裁切、人物走近假装换景别，也不得扩写成摄影团队多机位。已存储的 V3 合同会在最终渲染时确定性升级到当前合同，缺失拍摄单元时只做确定性归并并记录兜底，不新增模型修订、重试或失败门槛。环境变量 `ORIGINAL_SCRIPT_CAPTURE_RHYTHM_PROFILE=legacy_one_take` 可回退旧连续录制，`native_multiclip_v1` 可显式启用新版。每 5 条穿戴类脚本仍优先形成约 4 条创作者自拍 + 1 条手部/静物补充，结构继续从当前证据池轮换。
+
+围巾与小配饰现通过两个隔离的类目投影复用上述公共多片段能力，不改变女装的 `WORN_APPAREL` 参数、直接分享档案或提示词。`SCARF_MULTICLIP_V1` 只为围巾、秋冬围巾、丝巾和头巾补充“佩戴结果/商品主体、细节、简单过程或新关系、清楚结果”的物理片段角色；`SMALL_ACCESSORY_MULTICLIP_V1` 只为耳饰、腕饰和发饰补充“商品近景、商品/人物关系、商品清楚结果”的物理片段角色。三片段档显式保持“开场—新信息—商品清楚结果”，不得从四片段模板截断掉末段；类目投影在最终 `action_design` 冻结后执行，小配饰旧动态回收逻辑已合并为同一投影权威，新脚本不再在蓝图后被第二次覆盖，渲染端只为没有新合同的历史脚本保留兼容投影。两者都保留原 `structure_unit_roles` 作为 HOOK/PROOF/USE/ENDING 的唯一顺序权威，只改变兼容片段的取景和商品观察关系，不擅自增加结构 Beat，不新增模型调用、硬质检、修订或重试。新冻结合同记录 `category_rollout_contract`，并分别可用 `ORIGINAL_SCRIPT_SCARF_MULTICLIP_V1_ENABLED=0`、`ORIGINAL_SCRIPT_SMALL_ACCESSORY_MULTICLIP_V1_ENABLED=0` 单独回退；女装不会生成 ACCESSORY 扩展，因此无论两个开关取值如何都不会进入类目投影。
 
 ```bash
 python3 scripts/run_original_batch.py \
@@ -639,6 +680,61 @@ python3 skills/original-script-generator/scripts/run_reality_reference_stage0.py
 中间过程数据库默认保存在：
 
 - `/Users/likeu3/.openclaw/shared/data/original_script_generator.sqlite3`
+
+### 种草不挂车分支（独立边界）
+
+`SEEDING_ORGANIC` 与当前 `DIRECT_RESPONSE` 共用商品视觉事实、中央治理卖点的只读快照、模型传输、目标语言估时和媒体执行能力；不共用带货卖点投影、销售论证包、语义主线、口播提示词、业务质检、运行数据库、飞书工作台或发布策略。共享的是“产品有什么价值及证据边界”，隔离的是“如何推动成交”。
+
+- 带货线数据库仍为 `original_script_generator.sqlite3`。
+- 种草线数据库为 `organic_seeding_generator.sqlite3`，可用 `ORGANIC_SEEDING_DB_PATH` 覆盖。
+- 人工工作台只展示 `发布策略=种草不挂车`；同步适配器将其确定性展开为 `脚本类型=种草脚本`、`发布用途=种草`、`是否挂车=否`、`内容分支=SEEDING_ORGANIC`。
+- 种草同步缺少或篡改 `发布策略` 时必须 fail closed；发布端再次根据展开后的分支、用途和挂车标记清空商品 ID。
+- 种草体验权限分为 `NONE / CURRENT_OBSERVATION / OPERATOR_CONFIRMED_HISTORY`。未获人工历史授权时，长期使用、回购、朋友询问等经历会被硬阻断。
+- 种草运营任务表固定为 18 个字段，生产脚本表在增加人工需要的 `首帧图` 后固定为 21 个字段。默认时长为 15 秒；商品角色和露出时机由规划器轮换，不再要求运营填写。
+- 种草商业语言质检只扫描观众可见或视频可执行字段，结构化商业标记为真时继续硬阻断；“不得出现价格、链接”等否定性制作约束只留审计记录，不计为 CTA。真实商业表达允许一次局部修订，复检仍失败则阻断，并持久化原稿、命中字段、词项与上下文。
+- 部分失败任务可在显式 `--record-id` 下用一个或多个 `--item-index` 精确补跑。执行槽位选择不进入内容身份哈希，因此补跑更新同一脚本身份，不重复生成已通过槽位。
+- 种草 V3 在同一运营目标下确定性轮换内容子角度、修辞家族、开场机制、收尾方式、场景族、动作族和拍摄模式；这些冻结合同进入视觉意图，商品参考图只控制商品，不控制图中人物、穿搭、背景、姿势或构图。
+- 种草 V7 在上述差异轮换之前增加分支独占的兴趣与留存层：同一运营目标下确定性分配 `VISUAL_SURPRISE / RELATABLE_TENSION / COUNTERINTUITIVE_POSITION / CHOICE_RULE / MOTION_REVEAL` 话题家族，并冻结 `topic_contract + retention_contract`。画面与口播必须共同消费同一话题命题；前段优先1.2至2.2秒的动作中点、构图反差或结果状态，前3秒建立未完成问题，约6至10秒完成回答。该层不进入 `DIRECT_RESPONSE`，可用 `ORGANIC_SEEDING_INTEREST_ENGINE_V1=0` 回退。
+- 种草 V9 用 `central-claim-snapshot-v1` 只读消费中央卖点事实与证据血缘，再由分支独占 `OrganicClaimAdapter` 投影为 `VALUE_TRIGGER / VISIBLE_REASON / CONTEXT_SEED / SOFT_PERSONAL_ONLY / DEFERRED`。`UNRESOLVED` 和强度为 forbidden 的内容只保留审计，不能进入正式商品事实；每条只开放一个核心价值和至多一个同主题支持事实，全目录不得投给模型。
+- 种草 V9 在模型前生成 8–12 个 `OrganicStorySeed`，按事实可信度、可见性和语义差异软排序，再冻结 `OrganicStorySpine`。同一主线同时驱动画面和口播；话题家族降级为注意力表面标签，不能覆盖观众处境、说话动机和核心价值。候选弱只影响选择与人工审核，不增加末端修订循环。
+- 种草 V9 口播改用 `organic-spoken-brief-v1`：模型只看到目标市场、具体观众、说话动机、一个生活处境、唯一核心价值、至多一个可选支持事实和轻收尾意图。旧四步推进与 86% 最低填充率不再是写作任务或自动重写触发器；有核心价值时建议实测约 70%–96%，普通观察允许更短，均可给 BGM、环境声和画面留白。只有事实、体验、商业、语言和确实不可容纳的时长错误触发一次定向修订。
+- 公共内核继续提供分支中立的商品视觉证据快照、中央卖点只读 Provider、目标语言口播时长估算、视频执行合同和阶段产物存储；`OrganicClaimAdapter`、故事候选、语义主线、提示词、种草质检、批次质检、数据库、飞书表和发布策略由 `SEEDING_ORGANIC` 独占。
+- 正式生成按 `商品视觉证据 → 冻结计划 → 画面生成/预检 → 口播生成/实测 → 执行合同 → 单条质检 → 批次质检 → 确定性渲染` 运行。画面和口播各自最多一次定向修订，禁止因口播问题重写已通过的画面。
+- 视觉自然语言内部字段统一使用简体中文，只有正式口播使用目标语言；画面合同显式记录景别、身体覆盖范围、机位关系、拍摄 setup、授权道具、可见区域和证据引用。
+- 视觉模型只输出结构化 `capture_units`，不再自由生成最终视频提示词。共享 `video-execution-brief-v1` 负责商品锁、参考权威、连续性、可见片段、声音路由和最多 3 项负向约束，再由代码确定性渲染紧凑提示词；发布策略不进入视频模型提示词。
+- 正式目标语言口播与视频画面分开交接。生产脚本被人工勾选“进入生产”后，`script-run-manager-sync` 从现有“口播/中文口播”字段生成 `PRESERVE_SOURCE_COPY` 执行计划，下游只做 TTS 与混音，不重写文案；缺少正式口播时同步 fail closed。
+- 种草质检使用事实、商业安全、体验权限、画面执行、批次差异、语言机检和交接完整性等显式维度；旧数值分仅保留兼容，不再作为飞书人工审核结论。飞书用“安全通过/阻断、执行等级、创意待审、批次等级、目标语言待母语审”表达机器能力边界。动作过载、场景重复和目标语言母语自然度均只作审核提示，不扩大硬阻断。
+- V7 创意质检与安全质检完全分离：事实、商业、体验、语言和物理错误继续硬阻断；`opening_strength / topic_clarity / information_gain / commentability / organicness / audio_arc` 只输出 A/B/C 与定向原因。静态开场或话题未实现会标为创意 C 和“建议修订”，但不会令整条任务或整批失败；飞书继续复用现有 `质检结果` 字段显示创意与前3秒等级，不增加人工字段。
+- 种草视觉执行使用独立 `ORGANIC_LIFESTYLE` 渲染档：每个拍摄单元显式声明生活叙事任务、商品视觉权重和商品互动方式；按 `HERO / SUPPORTING / INCIDENTAL` 限制商品主导与演示镜头，并硬阻断逐项商品证明清单。最终提示词按生活时刻、人物与场景、自然画面推进、商品连续性、声音后期交接渲染，不复用带货线逐镜商品证明文案。
+- 送生产时如脚本行存在 `首帧图`，同步器优先将其写入运行管理表参考图；种草任务自动勾选 `是否配口播`，保留源口播原文，并携带必选生活方式 BGM 合同。V7 音频使用“开场 medium 轻入口 → 口播 low 底床 → 揭示点 medium 回升”的能量曲线，按脚本序号轮换清爽揭示、轻张力、编辑感、解释感和向前运动五类选择档；继续禁止商业 whoosh、强销售转场和节庆 EDM。后处理仍以“低原声＋BGM床＋TTS”三轨混音；必选 BGM 不可用时进入人工处理，禁止静默降级成无音乐成片。
+
+本地文本入口：
+
+```bash
+python3 scripts/run_organic_seeding.py \
+  --input examples/organic_seeding_input.example.json \
+  --count 3 \
+  --image /absolute/path/to/product.jpg \
+  --output /absolute/path/to/organic_seeding_result.json
+```
+
+只验证规划、隔离存储、质检和发布合同，不调用模型：
+
+```bash
+python3 scripts/run_organic_seeding.py \
+  --input examples/organic_seeding_input.example.json \
+  --count 2 --preview-only \
+  --output /tmp/organic_seeding_preview.json
+```
+
+独立飞书入口不配置默认表地址，必须显式提供种草运营任务表和种草生产脚本表，避免误读或改写原创带货表：
+
+```bash
+python3 scripts/run_feishu_seeding_tasks.py \
+  --operation-url '<种草视频运营任务表URL>' \
+  --script-url '<种草视频生产脚本表URL>' \
+  --dry-run
+```
 
 支持环境变量覆盖：
 

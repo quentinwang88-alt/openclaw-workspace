@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import time
 from collections import Counter
@@ -30,9 +31,14 @@ from core.outfit_selection import (
     target_role_for,
 )
 from core.product_type_resolution import normalize_product_type
+from core.semantic_spine import (
+    classify_scene_relation,
+    scene_relation_score,
+    semantic_spine_enabled,
+)
 
 
-CREATIVE_DIVERSITY_POLICY_VERSION = "creative-diversity-v13-selling-scene-priority"
+CREATIVE_DIVERSITY_POLICY_VERSION = "creative-diversity-v14-semantic-scene-bridge"
 OUTFIT_SCENE_AFFINITY_POLICY_VERSION = "outfit-scene-affinity-v2-exact-soft-boost"
 OUTFIT_SCENE_MATCH_BONUS = 24
 EXACT_PRODUCT_OUTFIT_SCENE_MATCH_BONUS = 30
@@ -460,6 +466,33 @@ def _creative_combinations(
                 "opening_action": "完成外搭穿着动作后从沙发扶手拿起随身包",
                 "action_grammar": "完成穿着→拿起随身包→经过窗边准备离开",
                 "visual_tone": "自然窗光旁观记录",
+            },
+            {
+                "moment_family_id": "TRAVEL_PREP",
+                "persona_role": "出发前整理旅行行李的城市穿搭者",
+                "viewer_relationship": "像朋友分享这次旅行为什么只带这一件外搭",
+                "scene_motif": "卧室行李箱旁的自然光空地",
+                "opening_action": "外搭已经穿好，人物把一件折好的内搭放进行李箱后回到手机前",
+                "action_grammar": "放入一件内搭→回到手机前展示整体→补录外搭细节",
+                "visual_tone": "出发前真实行李整理记录",
+            },
+            {
+                "moment_family_id": "TRAVEL_TRANSIT",
+                "persona_role": "在机场等待登机的旅行穿搭者",
+                "viewer_relationship": "像朋友分享这一趟旅行随身穿着的一件外搭",
+                "scene_motif": "机场候机区靠窗的普通座位边缘",
+                "opening_action": "外搭已经穿好，人物从座位旁拿起随身小包后面对手机",
+                "action_grammar": "拿起随身包→手机前展示整体→近距离补录外搭细节",
+                "visual_tone": "候机时的普通手机分享",
+            },
+            {
+                "moment_family_id": "TRAVEL_STAY",
+                "persona_role": "到达目的地后准备从酒店出门的旅行者",
+                "viewer_relationship": "像朋友分享旅行当天已经搭好的外出穿搭",
+                "scene_motif": "酒店房间行李架旁的自然光墙面",
+                "opening_action": "外搭已经穿好，人物从行李架旁拿起随身包回到手机前",
+                "action_grammar": "拿起随身包→手机前展示整体→在身补录外搭细节",
+                "visual_tone": "酒店出门前的真实手机记录",
             },
             {
                 "moment_family_id": "COMMUTE_TRANSITION",
@@ -1312,6 +1345,36 @@ _ACCESSORY_OUTFIT_PROFILES.update({
     )
 })
 
+_ACCESSORY_OUTFIT_PROFILES["ring"] = (
+    {
+        "silhouette_key": "RING_CLEAN_HAND_CONTEXT",
+        "style_family": "DAILY_RING_ACCENT",
+        "style_intensity": "DAILY_STYLED",
+        "climate_profile": "TH_WARM",
+        "hair_direction": "自然日常妆发；手部是主要商品证明，上半身只提供真实人物关系",
+        "base_outfit_direction": "简洁纯色无袖、短袖或袖口不过腕的日常上衣，手部与前臂无遮挡",
+        "outer_layer_direction": "不使用遮挡手部和前臂的宽大袖口",
+        "neckline_direction": "领口简洁，不叠加抢主体的项链或胸前装饰",
+        "palette_relation": "上衣和背景与戒指现有金属色保持自然明暗分离，不做珠宝广告式黑棚",
+        "visibility_requirement": "戒指、手指、手部和必要时的简洁上半身关系清楚；指甲干净自然",
+        "finish_direction": "像个人账号在普通生活场景分享当天手部小配饰，不使用精修珠宝大片造型",
+        "supporting_elements": "不叠戴竞争性戒指、手链或腕表；生活道具最多自然出现一项",
+        "grooming_direction": "手部和指甲干净自然，保留真实肤质，不使用过度磨皮与高反商业布光",
+        "target_role": "SUPPORTING_OUTFIT_HAND",
+        "supported_target_roles": ["SUPPORTING_OUTFIT_HAND"],
+        "supported_demonstration_modes": ["FINGER_WORN"],
+        "scene_families": ["HOME_ROUTINE", "CAFE_DINING", "OFFICE_WORKBREAK"],
+        "visibility_zones": ["FINGER", "HAND", "FOREARM", "UPPER_BODY"],
+        "outfit_recipe": {
+            "top": "简洁纯色无袖、短袖或袖口不过腕的日常上衣",
+            "bottom": "不要求入镜；需要上半身关系时保持普通日常下装",
+            "footwear": "不要求入镜",
+            "bag": "普通日常小包或无包",
+            "other_accessories": "无竞争性戒指、手链和腕表",
+        },
+    },
+)
+
 
 def _usage_metadata(row: Dict[str, Any]) -> Dict[str, Any]:
     metadata = row.get("metadata")
@@ -1369,6 +1432,63 @@ def _usage_outfit_selection_key(row: Dict[str, Any]) -> str:
     return f"INTERNAL_PROFILE:{silhouette}" if silhouette else ""
 
 
+def _perceptual_repeat_penalty_enabled() -> bool:
+    value = _text(
+        os.environ.get("ORIGINAL_SCRIPT_PERCEPTUAL_REPEAT_PENALTY_V1", "1")
+    ).lower()
+    return value not in {"0", "false", "off", "no"}
+
+
+def _perceptual_action_family(value: Any) -> str:
+    """Collapse wording variants into one viewer-perceived action family."""
+
+    text = _text(value).lower()
+    families = (
+        ("HAND_PRODUCT", ("手部", "拿起", "取出", "展开", "翻看", "放回", "托住")),
+        ("TRANSIT_WAIT", ("电梯", "等候", "来车", "站台")),
+        ("TRANSIT_WALK", ("沿", "走向", "前行", "经过", "离开", "出口", "门口")),
+        ("DETAIL_RESULT", ("局部", "细节", "角度", "侧面", "近看", "观察", "核对")),
+        ("LIFE_OBJECT", ("拿包", "随身包", "钥匙", "翻页", "拿杯", "笔记本")),
+        ("STATIC_RESULT", ("静态", "静止", "落定", "整体收束", "完整轮廓")),
+    )
+    for family, markers in families:
+        if any(marker in text for marker in markers):
+            return family
+    return "OTHER_ACTION"
+
+
+def _perceptual_signature(
+    *,
+    product_code: str,
+    item: Mapping[str, Any],
+    outfit_contract: Mapping[str, Any],
+    direction_carrier: str,
+    structure_family: str,
+) -> str:
+    """Return a compact, deterministic cross-batch perception key.
+
+    Product colour, persona name, hook wording and free-form scene prose are
+    intentionally excluded.  The key catches the same viewer experience even
+    when surface text changes, while remaining a soft ranking signal only.
+    """
+
+    del product_code  # product scope is applied by the history filter.
+    return "|".join((
+        _text(item.get("scene_family_key")) or "GENERIC_INDOOR",
+        _perceptual_action_family(item.get("action_grammar")),
+        _text(structure_family) or "UNAVAILABLE_STRUCTURE",
+        _text(outfit_contract.get("silhouette_key")) or "PRODUCT_LED",
+        _text(direction_carrier) or "UNAVAILABLE_CARRIER",
+    ))
+
+
+def _usage_perceptual_signature(row: Mapping[str, Any]) -> str:
+    direct = _text(row.get("perceptual_signature"))
+    if direct:
+        return direct
+    return _text(_usage_metadata(dict(row)).get("perceptual_signature"))
+
+
 def _select_outfit_contract(
     *,
     seed: int,
@@ -1398,8 +1518,7 @@ def _select_outfit_contract(
         demonstration_mode=demonstration_mode,
     )
     is_wearer_accessory = (
-        product_profile == "WORN_ACCESSORY"
-        and canonical_type in _ACCESSORY_OUTFIT_PROFILES
+        canonical_type in _ACCESSORY_OUTFIT_PROFILES
         and direction_carrier in {"WEARER_ACTIVE", "MIXED", "UNAVAILABLE"}
     )
     if not (is_wearer_apparel or is_wearer_accessory):
@@ -1566,6 +1685,21 @@ def build_creative_diversity_contract(
 
     product_profile = creative_product_profile(product_type, category)
     direction_carrier = authoritative_carrier(direction)
+    structure = direction.get("structure_execution_plan") if isinstance(direction.get("structure_execution_plan"), dict) else {}
+    structure_contract = (
+        direction.get("structure_contract")
+        if isinstance(direction.get("structure_contract"), dict)
+        else {}
+    )
+    structure_family = _text(
+        structure.get("macro_family_key")
+        or (structure_contract.get("direction_identity") or {}).get(
+            "macro_family_key"
+        )
+        or (structure_contract.get("hard_constraints") or {}).get(
+            "macro_family_key"
+        )
+    )
     candidates = [
         {
             **candidate,
@@ -1584,6 +1718,12 @@ def build_creative_diversity_contract(
     )
     opening_counts = Counter(_text(row.get("opening_action")) for row in recent_usage)
     persona_counts = Counter(_text(row.get("persona_role")) for row in recent_usage)
+    same_product_perceptual_counts = Counter(
+        _usage_perceptual_signature(row)
+        for row in recent_usage
+        if _text(row.get("product_code")) == _text(product_code)
+        and _usage_perceptual_signature(row)
+    )
     selling_scene_preferences = _selling_argument_scene_preferences(direction)
     category_scene_preferences = _category_scene_preferences(direction)
     carrier_contract = _carrier_contract(direction_carrier)
@@ -1599,6 +1739,16 @@ def build_creative_diversity_contract(
         *category_scene_preferences,
         *_scene_request_affinity_tags(scene_request),
     ]))
+    content_bundle = (
+        direction.get("content_bundle_brief")
+        if isinstance(direction.get("content_bundle_brief"), dict)
+        else {}
+    )
+    semantic_spine = (
+        content_bundle.get("semantic_spine_contract")
+        if isinstance(content_bundle.get("semantic_spine_contract"), dict)
+        else {}
+    )
     seed_material = f"{product_code}|{_direction_id(direction)}|{direction.get('cluster_id')}"
     seed = int(hashlib.sha256(seed_material.encode("utf-8")).hexdigest()[:12], 16)
     # Batch request idempotency is handled by the frozen batch itself.  A new
@@ -1659,11 +1809,58 @@ def build_creative_diversity_contract(
                 direction=direction,
             )
         )
+        market_context = (
+            semantic_spine.get("product_market_context")
+            if isinstance(semantic_spine.get("product_market_context"), dict)
+            else {}
+        )
+        market_primary = (
+            market_context.get("primary_usage_world")
+            if isinstance(market_context.get("primary_usage_world"), dict)
+            else {}
+        )
+        if _text(market_primary.get("kind")) == "TRAVEL_TO_COOLER_DESTINATION":
+            # Country climate describes where the audience lives; it must not
+            # override the destination climate explicitly maintained by the
+            # operator.  This is a soft styling context, not a material or
+            # warmth claim about the product.
+            outfit_contract["climate_profile"] = "TRAVEL_COOL_DESTINATION"
+            outfit_contract["market_context_affinity_contract"] = {
+                "status": "MATCHED",
+                "context_id": _text(market_primary.get("context_id")),
+                "context_text": _text(market_primary.get("text")),
+                "authority": "SOFT_STYLING_CONTEXT",
+                "product_performance_authority": False,
+            }
         outfit_scene_affinity = _outfit_scene_affinity_contract(
             outfit_contract, family_key
         )
         outfit_scene_bonus = int(
             outfit_scene_affinity.get("ranking_bonus") or 0
+        )
+        semantic_scene_relation = (
+            classify_scene_relation(semantic_spine, item)
+            if semantic_spine_enabled() and semantic_spine
+            else {
+                "relation": "UNAVAILABLE",
+                "reason": "SEMANTIC_SPINE_DISABLED_OR_UNAVAILABLE",
+            }
+        )
+        semantic_scene_score = scene_relation_score(semantic_scene_relation)
+        perceptual_signature = _perceptual_signature(
+            product_code=product_code,
+            item=item,
+            outfit_contract=outfit_contract,
+            direction_carrier=direction_carrier,
+            structure_family=structure_family,
+        )
+        perceptual_repeat_count = same_product_perceptual_counts[
+            perceptual_signature
+        ]
+        perceptual_repeat_penalty = (
+            55 * perceptual_repeat_count
+            if _perceptual_repeat_penalty_enabled()
+            else 0
         )
         scene_reference = scene_reference_contract_for_family(
             scene_reference_context,
@@ -1691,16 +1888,25 @@ def build_creative_diversity_contract(
             "_joint_outfit_recent_count": outfit_recent_count,
             "_joint_outfit_batch_count": outfit_batch_count,
             "_joint_outfit_scene_affinity": outfit_scene_affinity,
+            "perceptual_signature": perceptual_signature,
+            "perceptual_repeat_count": perceptual_repeat_count,
+            "perceptual_repeat_status": (
+                "SOFT_REPEAT_FALLBACK" if perceptual_repeat_count else "NEW"
+            ),
+            "perceptual_repeat_penalty": perceptual_repeat_penalty,
+            "semantic_scene_relation": semantic_scene_relation,
+            "semantic_scene_score": semantic_scene_score,
         }
         scored.append((
             reuse_penalty + axis_penalty + family_repeat_penalty
+            + perceptual_repeat_penalty
+            + semantic_scene_score
             - affinity_bonus - proof_environment_score - matrix_bonus
             - outfit_scene_bonus,
             tie_break,
             enriched_item,
         ))
     _, _, selected = min(scored, key=lambda row: (row[0], row[1]))
-    structure = direction.get("structure_execution_plan") if isinstance(direction.get("structure_execution_plan"), dict) else {}
     outfit_contract = dict(selected.pop("_joint_outfit_contract", {}) or {})
     outfit_recent_count = int(selected.pop("_joint_outfit_recent_count", 0) or 0)
     outfit_batch_count = int(selected.pop("_joint_outfit_batch_count", 0) or 0)
@@ -1778,6 +1984,9 @@ def build_creative_diversity_contract(
         ),
         "scene_reference_bonus": int(selected.get("scene_reference_bonus") or 0),
         "scene_request_contract": scene_request,
+        "semantic_scene_relation": dict(
+            selected.get("semantic_scene_relation") or {}
+        ),
         "outfit_silhouette_recent_count": outfit_recent_count,
         "outfit_silhouette_batch_count": outfit_batch_count,
         "outfit_scene_match_status": _text(
@@ -1795,6 +2004,16 @@ def build_creative_diversity_contract(
             outfit_persona_affinity.get("match_status")
         ),
         "reused_same_product_direction": False,
+        "perceptual_signature": _text(selected.get("perceptual_signature")),
+        "perceptual_repeat_count": int(
+            selected.get("perceptual_repeat_count") or 0
+        ),
+        "perceptual_repeat_status": _text(
+            selected.get("perceptual_repeat_status")
+        ) or "NEW",
+        "perceptual_repeat_penalty": int(
+            selected.get("perceptual_repeat_penalty") or 0
+        ),
     }
     material = {
         "product_code": product_code,
@@ -1851,6 +2070,14 @@ def build_creative_diversity_contract(
         "history_snapshot": snapshot,
         "structure_family": _text(structure.get("macro_family_key")),
         "visual_signature": visual_signature,
+        "perceptual_signature": _text(selected.get("perceptual_signature")),
+        "perceptual_repeat_status": _text(
+            selected.get("perceptual_repeat_status")
+        ) or "NEW",
+        "perceptual_repeat_count": int(
+            selected.get("perceptual_repeat_count") or 0
+        ),
+        "product_code": product_code,
         "country": country,
         "category": category,
     }
@@ -1897,6 +2124,10 @@ def creative_usage_row(
             "outfit_scene_affinity_contract": contract.get("outfit_scene_affinity_contract") or {},
             "persona_selection_contract": contract.get("persona_selection_contract") or {},
             "outfit_persona_affinity_contract": contract.get("outfit_persona_affinity_contract") or {},
+            "perceptual_signature": contract.get("perceptual_signature", ""),
+            "perceptual_repeat_status": contract.get(
+                "perceptual_repeat_status", "NEW"
+            ),
         },
     }
 

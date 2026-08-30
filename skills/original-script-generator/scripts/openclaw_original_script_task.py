@@ -9,6 +9,7 @@ It never creates a task row or changes a row into ``待执行`` by itself.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -46,7 +47,9 @@ ACTION_STATUSES = {
     "replan": {"失败", "部分完成", "已完成"},
     "export-ready": {"失败", "部分完成", "已完成", "执行中-脚本生成", "执行中-规划"},
 }
-REFRESH_ACTIONS = {"refresh-outfits", "refresh-personas"}
+REFRESH_ACTIONS = {
+    "refresh-outfits", "refresh-personas", "refresh-production-config",
+}
 FIRST_FRAME_ACTIONS = {"first-frame-check", "first-frame-run", "first-frame-retry"}
 ALL_ACTIONS = {*ACTION_STATUSES, *REFRESH_ACTIONS, *FIRST_FRAME_ACTIONS}
 
@@ -72,7 +75,7 @@ def resolve_record_id_for_product(*, product_code: str, action: str) -> str:
     product_code = _validate_product_code(product_code)
     allowed_statuses = ACTION_STATUSES[action]
     matches: list[str] = []
-    for record in _operation_client().list_records(page_size=100):
+    for record in _operation_client().list_records(page_size=500):
         task = operation_record_values(record)
         if str(task.get("product_code") or "").strip() != product_code:
             continue
@@ -102,6 +105,10 @@ def build_runner_command(
     """Build the fixed runner invocation; no user text becomes shell text."""
     if action not in ALL_ACTIONS:
         raise ValueError(f"未知 action: {action}")
+    if action == "refresh-production-config":
+        raise ValueError(
+            "refresh-production-config 是组合动作，请通过本适配器 main 执行"
+        )
     if action == "refresh-outfits":
         if record_id or limit is not None:
             raise ValueError("refresh-outfits 不接受任务记录、产品编码或任务数量")
@@ -167,6 +174,19 @@ def build_runner_command(
     return command
 
 
+def build_refresh_commands(action: str) -> list[list[str]]:
+    """Return fixed refresh subprocesses without accepting task input."""
+
+    if action == "refresh-production-config":
+        return [
+            build_runner_command(action="refresh-outfits"),
+            build_runner_command(action="refresh-personas"),
+        ]
+    if action in {"refresh-outfits", "refresh-personas"}:
+        return [build_runner_command(action=action)]
+    raise ValueError(f"非刷新动作: {action}")
+
+
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="OpenClaw 原创脚本任务适配器（只转发固定白名单命令）"
@@ -191,6 +211,52 @@ def main(argv: Iterable[str] | None = None) -> int:
             args.record_id or args.product_code or args.limit is not None
         ):
             raise ValueError("刷新模板是独立动作，不接受任务选择参数")
+        if args.action == "refresh-production-config":
+            commands = build_refresh_commands(args.action)
+            environment = os.environ.copy()
+            for index, refresh_command in enumerate(commands, start=1):
+                print(
+                    f"配置刷新 {index}/{len(commands)}: "
+                    + Path(refresh_command[1]).name
+                )
+                completed = subprocess.run(
+                    refresh_command,
+                    cwd=str(SKILL_ROOT),
+                    env=environment,
+                    check=False,
+                )
+                if completed.returncode:
+                    return completed.returncode
+            from core.outfit_template_provider import (
+                get_outfit_template_provider_snapshot,
+            )
+            from core.persona_template_provider import load_persona_templates
+
+            outfit = get_outfit_template_provider_snapshot()
+            persona = load_persona_templates()
+            print(json.dumps({
+                "status": "REFRESHED",
+                "outfit": {
+                    "last_refreshed_at": outfit.get("last_refreshed_at"),
+                    "template_count": outfit.get("template_count"),
+                    "enabled_template_count": outfit.get(
+                        "enabled_template_count"
+                    ),
+                    "soft_warnings": outfit.get("soft_warnings") or [],
+                },
+                "persona": {
+                    "last_refreshed_at": persona.get("last_refreshed_at"),
+                    "enabled_count": persona.get("enabled_count"),
+                    "approved_asset_count": persona.get(
+                        "approved_asset_count"
+                    ),
+                    "text_quality_warning_count": persona.get(
+                        "text_quality_warning_count"
+                    ),
+                    "soft_warnings": persona.get("soft_warnings") or [],
+                },
+            }, ensure_ascii=False, indent=2))
+            return 0
         record_id = args.record_id
         if record_id:
             record_id = _validate_record_id(record_id)

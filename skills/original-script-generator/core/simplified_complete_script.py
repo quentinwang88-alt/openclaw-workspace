@@ -15,15 +15,16 @@ import hashlib
 import json
 import os
 import re
+import copy
 from typing import Any, Dict, Iterable, List, Tuple
 
 
 SCRIPT_MODE_LEGACY = "legacy_v2"
 SCRIPT_MODE_SIMPLIFIED = "simplified_v1"
-CREATIVE_SEED_SCHEMA_VERSION = "simplified-creative-seed-v21-structure-visible-clips"
+CREATIVE_SEED_SCHEMA_VERSION = "simplified-creative-seed-v25-apparel-action-soft-match"
 VISUAL_SCRIPT_SCHEMA_VERSION = "simplified-complete-visual-script-v11-structure-visible-clips"
 VALIDATION_POLICY_VERSION = "simplified-minimum-gates-v5-action-soft-signal"
-VIDEO_BRIEF_SCHEMA_VERSION = "production-video-brief-v10-structure-visible-clips"
+VIDEO_BRIEF_SCHEMA_VERSION = "production-video-brief-v11-semantic-context"
 VIDEO_RENDER_PROFILE = "UGC_NATIVE_V2_MULTICLIP"
 
 CAPTURE_MODE_CREATOR_SELF_SHOT = "CREATOR_SELF_SHOT"
@@ -1089,8 +1090,13 @@ def build_product_identity_lock(product_truth: Dict[str, Any]) -> Dict[str, Any]
     identity_anchors = _dedupe_text(product_truth.get("identity_anchors") or [], limit=8)
     visible_details = _dedupe_text(product_truth.get("visible_detail_anchors") or [], limit=6)
     product_identity = _text(product_truth.get("product_identity"))
+    # Structured identity anchors are the physical authority.  The display
+    # label may contain operator positioning (for example ``通勤`` or
+    # ``咖啡店出片``); mixing that prose into the visual identity lock lets a
+    # marketing context silently become a compulsory scene.  Keep the label
+    # only as a last-resort fallback when no approved physical anchor exists.
     must_preserve = _dedupe_text(
-        [product_identity, *identity_anchors],
+        identity_anchors or ([product_identity] if product_identity else []),
         limit=8,
     )
     evidence_text = "；".join([*must_preserve, *visible_details])
@@ -1373,6 +1379,10 @@ def _visual_selling_argument_view(raw_argument: Dict[str, Any]) -> Dict[str, Any
         ),
         "evidence_mode": _text(raw_argument.get("evidence_mode")),
         "preferred_action_mode": _text(raw_argument.get("preferred_action_mode")),
+        "proof_action_intent": _text(raw_argument.get("proof_action_intent")),
+        "required_proof_relation": _text(
+            raw_argument.get("required_proof_relation")
+        ),
         "display_quantity_contract": dict(
             raw_argument.get("display_quantity_contract") or {}
         ),
@@ -1415,6 +1425,175 @@ def _split_action_grammar(value: Any) -> List[str]:
     )
 
 
+def _apparel_anchor_action_candidates(anchor_card: Dict[str, Any]) -> List[str]:
+    """Reuse already-approved apparel shot/action text as the action source.
+
+    Product anchor cards already contain executable display anchors, operation
+    anchors and safe shot templates.  The old apparel fallback ignored all of
+    them and promoted the scene template's ``action_grammar`` into the full
+    action authority.  Keep the existing ``action_design`` surface, but feed
+    it the product-safe material that is already available instead of adding
+    another contract or validator.
+    """
+
+    contract = (
+        anchor_card.get("category_execution_contract")
+        if isinstance(anchor_card.get("category_execution_contract"), dict)
+        else {}
+    )
+    display_family = _text(contract.get("display_family")).lower()
+    if display_family != "apparel":
+        return []
+
+    candidates: List[str] = []
+    for item in anchor_card.get("display_anchors") or []:
+        if not isinstance(item, dict):
+            continue
+        anchor = _text(item.get("anchor"))
+        shot = _text(item.get("recommended_shot_type"))
+        # A bare product noun (for example "five front buttons") is an
+        # identity anchor, not an executable action.  Consume display anchors
+        # only when the anchor card already includes an approved shot form.
+        value = "；".join(part for part in (anchor, shot) if part) if shot else ""
+        if value:
+            candidates.append(value)
+    action_markers = (
+        "可", "轻", "扶", "插", "整理", "转", "走", "展示", "拿", "放",
+        "adjust", "turn", "walk", "hold", "show",
+    )
+    candidates.extend(
+        _text(item) for item in (anchor_card.get("operation_anchors") or [])
+        if _text(item)
+        and any(marker in _text(item).lower() for marker in action_markers)
+    )
+    candidates.extend(
+        _text(item) for item in (contract.get("safe_shot_templates") or [])
+        if _text(item)
+    )
+    return _dedupe_text(candidates, limit=10)
+
+
+_APPAREL_ACTION_INTENT_FAMILIES = (
+    (
+        "NECK_CLOSURE",
+        ("高领", "立领", "领口", "脖子", "门襟", "前襟", "拉链", "拉起", "敞开", "防风"),
+        ("高领", "立领", "领口", "脖子", "门襟", "前襟", "拉链", "整理", "轻扶"),
+    ),
+    (
+        "LAYERING_SILHOUETTE",
+        ("宽松", "臃肿", "叠穿", "内搭", "加衣服", "卫衣", "针织", "版型"),
+        ("轮廓", "衣身", "侧面", "侧前", "背面", "袖筒", "下摆", "转身", "走动", "慢走"),
+    ),
+    (
+        "BODY_PROPORTION",
+        ("短款", "小个子", "身高", "腿长", "腿部", "腰线", "比例", "利落"),
+        ("短款", "下摆", "全身", "半身", "腰线", "比例", "侧前", "转身"),
+    ),
+)
+
+
+def _select_apparel_anchor_action(
+    candidates: List[str],
+    *,
+    semantic_context: Dict[str, Any] | None,
+    fallback_material: Dict[str, Any],
+) -> Tuple[str, bool]:
+    """Soft-rank existing approved actions by the selected selling point.
+
+    This is deliberately not another action policy.  The candidate set still
+    comes exclusively from the product anchor card; semantic relevance only
+    decides which already-approved candidate is consumed.  When no useful
+    relation is found, selection falls back to the previous deterministic
+    hash so broad lifestyle arguments keep their original behaviour.
+    """
+
+    if not candidates:
+        return "", False
+    context = semantic_context if isinstance(semantic_context, dict) else {}
+    semantic_text = "；".join(
+        _dedupe_text(
+            [
+                context.get("core_buying_reason"),
+                context.get("source_argument_text"),
+                context.get("creative_core_value"),
+                context.get("claim_theme"),
+                context.get("argument_theme"),
+                context.get("proof_action_intent"),
+                *(context.get("core_proof_texts") or []),
+            ],
+            limit=12,
+        )
+    ).lower()
+    core_proof_texts = [
+        _text(value).lower()
+        for value in (context.get("core_proof_texts") or [])
+        if _text(value)
+    ]
+
+    scored: List[Tuple[int, str]] = []
+    for candidate in candidates:
+        candidate_text = _text(candidate).lower()
+        score = 0
+        # Exact reuse of the already-selected proof atom is the strongest and
+        # most general relation available in the current contracts.
+        for proof_text in core_proof_texts:
+            if proof_text and (
+                proof_text in candidate_text or candidate_text in proof_text
+            ):
+                score += 20
+        # These three broad apparel relations cover closure, silhouette and
+        # proportion without inventing product-specific actions.
+        for _, source_terms, candidate_terms in _APPAREL_ACTION_INTENT_FAMILIES:
+            if any(term in semantic_text for term in source_terms):
+                score += 6 * sum(
+                    1 for term in candidate_terms if term in candidate_text
+                )
+        scored.append((score, candidate))
+
+    best_score = max(score for score, _ in scored)
+    pool = [candidate for score, candidate in scored if score == best_score]
+    material = dict(fallback_material)
+    if best_score > 0:
+        material["semantic_best_score"] = best_score
+        material["semantic_pool"] = pool
+    digest = hashlib.sha256(
+        json.dumps(material, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).digest()
+    return pool[digest[0] % len(pool)], best_score > 0
+
+
+def _retrieval_execution_metadata(
+    retrieval_reference_contract: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    """Return execution-only metadata from the already-selected real case."""
+
+    contract = (
+        retrieval_reference_contract
+        if isinstance(retrieval_reference_contract, dict)
+        else {}
+    )
+    if _text(contract.get("status")).upper() != "AVAILABLE":
+        return {}
+    primary = contract.get("primary_execution_card") or contract.get("primary_case")
+    primary = primary if isinstance(primary, dict) else {}
+    card = primary.get("execution_card") or primary.get("reference_execution_spine")
+    card = card if isinstance(card, dict) else {}
+    if not card:
+        return {}
+    return {
+        "execution_card_id": _text(
+            card.get("execution_card_id") or card.get("reference_spine_id")
+        ),
+        "physical_action_type": _text(card.get("physical_action_type")).upper(),
+        "shot_count": int(card.get("shot_count") or 0),
+        "available_parts": [
+            _text(value).lower() for value in (card.get("available_parts") or [])
+            if _text(value)
+        ],
+        "rhythm_logic": _text(card.get("rhythm_logic")),
+    }
+
+
 def _compile_action_design(
     *,
     creative_contract: Dict[str, Any],
@@ -1423,6 +1602,9 @@ def _compile_action_design(
     carrier_execution: Dict[str, Any],
     proof_subject: str,
     preferred_action_mode: str = "",
+    action_semantic_context: Dict[str, Any] | None = None,
+    anchor_card: Dict[str, Any] | None = None,
+    retrieval_reference_contract: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Freeze one executable action spine without adding another model stage.
 
@@ -1441,6 +1623,14 @@ def _compile_action_design(
     ]
     macro = _macro_structure(structure_contract)
     proof = _text(proof_subject).upper()
+    anchor_candidates = (
+        _apparel_anchor_action_candidates(dict(anchor_card or {}))
+        if presentation == "PERSON_ON_CAMERA"
+        else []
+    )
+    retrieval_meta = _retrieval_execution_metadata(
+        retrieval_reference_contract
+    )
     selected: Dict[str, Any] = {}
     if capabilities:
         preferred_mode = _text(
@@ -1509,6 +1699,53 @@ def _compile_action_design(
                 "hard_required": False,
             }
         )
+    elif anchor_candidates:
+        # For person-led apparel, the product anchor card owns the safe
+        # product-facing action.  The real case contributes measured rhythm
+        # and clip availability; the scene combination remains context only.
+        # This replaces the old scene-template action chain rather than adding
+        # a second proof-action layer.
+        material = {
+            "contract_id": _text(creative_contract.get("contract_id")),
+            "scene_motif": _text(creative_contract.get("scene_motif")),
+            "proof": proof,
+            "macro": macro,
+            "execution_card_id": _text(retrieval_meta.get("execution_card_id")),
+            "candidates": anchor_candidates,
+        }
+        core, semantic_match = _select_apparel_anchor_action(
+            anchor_candidates,
+            semantic_context=action_semantic_context,
+            fallback_material=material,
+        )
+        scene_motif = _text(creative_contract.get("scene_motif"))
+        selected = {
+            "schema_version": "action-design-v2-existing-authority-rewire",
+            "interaction_id": "APPAREL_PRODUCT_ANCHOR_ACTION",
+            "primary_action_mode": "LIFESTYLE_USE",
+            "start_state": (
+                f"商品已经穿好，人物处于{scene_motif}的当前生活时刻"
+                if scene_motif
+                else "商品已经穿好，人物处于当前真实生活时刻"
+            ),
+            "core_action": core,
+            "end_state": "保持同一人物、商品和场景连续，商品仍清楚可见，自然结束这一段分享",
+            "supporting_scene_action": "",
+            "risk_tier": "LOW",
+            "action_keywords": _dedupe_text([core], limit=4),
+            "source": (
+                "PRODUCT_ANCHOR_WITH_REAL_EXECUTION"
+                if retrieval_meta else "PRODUCT_ANCHOR"
+            ),
+            "selection_policy": (
+                "existing-action-design-v3-selling-point-soft-match"
+                if semantic_match
+                else "existing-action-design-v2-anchor-consumption"
+            ),
+            "execution_reference": retrieval_meta,
+            "scene_action_authority": "CONTEXT_ONLY",
+            "hard_required": False,
+        }
     else:
         # Apparel and legacy categories continue to use the already allocated
         # creative grammar.  This adds structure, not a new action invention.
@@ -1543,6 +1780,30 @@ def _compile_action_design(
             "supporting": selected.get("supporting_scene_action"),
         },
     )
+    selected["claim_action_contract"] = {
+        "policy_version": "small-accessory-claim-action-v1",
+        "proof_action_intent": _text(
+            carrier_execution.get("proof_action_intent")
+        ),
+        "requested_action_mode": _text(
+            preferred_action_mode or carrier_execution.get("preferred_action_mode")
+        ).upper(),
+        "selected_action_mode": _text(
+            selected.get("primary_action_mode")
+        ).upper(),
+        "required_proof_relation": _text(
+            carrier_execution.get("required_proof_relation")
+        ),
+        "compatibility": (
+            "MATCHED"
+            if not _text(preferred_action_mode or carrier_execution.get("preferred_action_mode"))
+            or _text(selected.get("primary_action_mode")).upper()
+            == _text(preferred_action_mode or carrier_execution.get("preferred_action_mode")).upper()
+            else "SOFT_FALLBACK"
+        ),
+        "hard_required": False,
+        "may_trigger_retry": False,
+    }
     return selected
 
 
@@ -1785,12 +2046,39 @@ def build_simplified_creative_seed(
             "instruction": "只补足同一场景来源中的空间、真实感与审美锚点，不改变商品事实、卖点主线、人物动作或结构。",
         },
     }
+    persona_selection_contract = copy.deepcopy(
+        creative_contract.get("persona_selection_contract") or {}
+    )
+    runtime_persona_role = _text(creative_contract.get("persona_role"))
+    if (
+        _text(persona_selection_contract.get("availability")) == "AVAILABLE"
+        and runtime_persona_role
+    ):
+        projection = dict(
+            persona_selection_contract.get("script_projection") or {}
+        )
+        persona_selection_contract["template_identity_text"] = _text(
+            projection.get("identity")
+        )
+        projection["identity"] = runtime_persona_role
+        persona_selection_contract["script_projection"] = projection
+        persona_selection_contract["runtime_role_contract"] = {
+            "current_role": runtime_persona_role,
+            "authority": "FROZEN_CREATIVE_CONTEXT",
+            "template_still_owns": [
+                "appearance", "hair_makeup", "body_proportion", "reference_assets"
+            ],
+            "instruction": (
+                "人物模板决定长相与整体气质；当前角色只描述这条视频里她正在做什么，"
+                "不得把模板中的固定职业或旧场景带入本条视频。"
+            ),
+        }
+
     seed = {
         "schema_version": CREATIVE_SEED_SCHEMA_VERSION,
         "product_truth": {
             "product_identity": _text(
-                anchor_card.get("product_positioning_one_liner")
-                or anchor_card.get("product_name")
+                anchor_card.get("product_name")
                 or product_type
             ),
             "identity_anchors": identity_anchors,
@@ -1814,6 +2102,15 @@ def build_simplified_creative_seed(
             "content_mainline": mainline,
             "forbidden_inferences": forbidden,
         },
+        # One lossless semantic spine is shared by visual planning and the
+        # central voiceover.  Compact legacy summaries remain available for
+        # compatibility, but they no longer own the meaning of this item.
+        "semantic_spine_contract": dict(
+            content_bundle.get("semantic_spine_contract") or {}
+        ),
+        "context_bridge_contract": dict(
+            content_bundle.get("context_bridge_contract") or {}
+        ),
         "creative_direction": {
             "content_angle_key": _text(content_angle_key),
             "requested_hook_id": _text(requested_hook_id),
@@ -1847,9 +2144,7 @@ def build_simplified_creative_seed(
             "outfit_scene_affinity_contract": dict(
                 creative_contract.get("outfit_scene_affinity_contract") or {}
             ),
-            "persona_selection_contract": dict(
-                creative_contract.get("persona_selection_contract") or {}
-            ),
+            "persona_selection_contract": persona_selection_contract,
             "outfit_persona_affinity_contract": dict(
                 creative_contract.get("outfit_persona_affinity_contract") or {}
             ),
@@ -1872,6 +2167,39 @@ def build_simplified_creative_seed(
     seed["retrieval_reference"] = model_visible_reference_projection(
         retrieval_reference_contract
     )
+    semantic_spine = (
+        content_bundle.get("semantic_spine_contract")
+        if isinstance(content_bundle.get("semantic_spine_contract"), dict)
+        else {}
+    )
+    semantic_source = (
+        semantic_spine.get("source_argument")
+        if isinstance(semantic_spine.get("source_argument"), dict)
+        else {}
+    )
+    semantic_thesis = (
+        semantic_spine.get("script_thesis")
+        if isinstance(semantic_spine.get("script_thesis"), dict)
+        else {}
+    )
+    core_proof_keys = {
+        _text(value)
+        for value in (safe_argument.get("core_proof_claim_keys") or [])
+        if _text(value)
+    }
+    action_semantic_context = {
+        "core_buying_reason": _text(semantic_thesis.get("core_buying_reason")),
+        "source_argument_text": _text(semantic_source.get("raw_text")),
+        "creative_core_value": _text(safe_argument.get("creative_core_value")),
+        "claim_theme": _text(safe_argument.get("claim_theme")),
+        "argument_theme": _text(safe_argument.get("argument_theme")),
+        "proof_action_intent": _text(safe_argument.get("proof_action_intent")),
+        "core_proof_texts": [
+            _text(item.get("fact_text"))
+            for item in claim_atoms
+            if _text(item.get("claim_key")) in core_proof_keys
+        ],
+    }
     action_design = _compile_action_design(
         creative_contract=creative_contract,
         structure_contract=structure_contract,
@@ -1879,6 +2207,9 @@ def build_simplified_creative_seed(
         carrier_execution=carrier_specific_execution,
         proof_subject=_text(safe_argument.get("proof_subject")),
         preferred_action_mode=_text(safe_argument.get("preferred_action_mode")),
+        action_semantic_context=action_semantic_context,
+        anchor_card=anchor_card,
+        retrieval_reference_contract=retrieval_reference_contract,
     )
     seed["action_design"] = action_design
     seed["creative_direction"]["primary_action_mode"] = _text(
@@ -1903,6 +2234,21 @@ def build_simplified_creative_seed(
         if isinstance(seed.get("retrieval_reference"), dict) else {},
         creator_recording_profile=creator_recording_profile,
     )
+    if category_execution_extension:
+        from core.category_execution import (
+            project_category_capture_rhythm_contract,
+        )
+
+        # The category filming projection must consume the final frozen action
+        # design. Supplying only the earlier carrier preference can make a
+        # SIMPLE_WEAR_PROCESS blueprint disagree with result-only framing.
+        carrier_specific_execution = dict(carrier_specific_execution)
+        carrier_specific_execution["selected_action_design"] = dict(action_design)
+        capture_rhythm_contract = project_category_capture_rhythm_contract(
+            category_execution_extension,
+            carrier_execution=carrier_specific_execution,
+            capture_contract=capture_rhythm_contract,
+        )
     retrieved_dimensions = (
         seed.get("retrieval_reference", {})
         .get("primary_real_case", {})
@@ -1930,44 +2276,6 @@ def build_simplified_creative_seed(
                 "不得改变 macro_structure、商品动作或口播。"
             ),
         }
-    prominence = (
-        carrier_specific_execution.get("product_prominence_contract")
-        if isinstance(
-            carrier_specific_execution.get("product_prominence_contract"), dict
-        )
-        else {}
-    )
-    if (
-        _text(prominence.get("sequence_policy")).upper()
-        == "PRODUCT_OPENING_TO_MOTION_TO_PRODUCT_RETURN"
-        and int(capture_rhythm_contract.get("capture_unit_count") or 0) >= 3
-    ):
-        terminal = (
-            prominence.get("terminal_visibility")
-            if isinstance(prominence.get("terminal_visibility"), dict)
-            else {}
-        )
-        unit_count = int(capture_rhythm_contract.get("capture_unit_count") or 3)
-        capture_rhythm_contract.update({
-            "capture_grammar": "PRODUCT_OPENING_TO_MOTION_TO_PRODUCT_RETURN",
-            "unit_roles": [
-                "PRODUCT_RESULT_CLOSE",
-                *(["NATURAL_MOTION_RELATION"] * (unit_count - 2)),
-                "PRODUCT_REACQUISITION",
-            ],
-            "framing_guidance_by_unit": [
-                "独立录制商品已经佩戴完成的结果近景，让小商品第一眼清楚可辨",
-                *(
-                    [
-                        "同一地点重新放置手机或使用同一布置的另一时刻，录制上半身、侧后方或商品关系变化，不用重复摆头支撑整段"
-                    ]
-                    * (unit_count - 2)
-                ),
-                _text(terminal.get("ending_guidance"))
-                or "同一地点补录商品结果近景，自然完成收束",
-            ],
-            "category_projection": "SMALL_ACCESSORY_MOTION_RETURN_V2",
-        })
     seed["capture_rhythm_contract"] = capture_rhythm_contract
     seed["creative_direction"]["capture_rhythm_profile"] = _text(
         capture_rhythm_contract.get("profile")
@@ -1990,14 +2298,15 @@ def build_simplified_creative_seed(
         canonical_product_type = (
             _text(profile.get("product_subtype")) or canonical_product_type
         )
-        carrier_specific_execution = dict(carrier_specific_execution)
-        carrier_specific_execution["selected_action_design"] = dict(action_design)
         seed["category_execution_extension"] = category_execution_extension
         seed["carrier_specific_execution"] = carrier_specific_execution
     if canonical_product_type:
         seed["product_truth"]["canonical_product_type"] = canonical_product_type
     from core.visual_execution_contract import build_visual_execution_contract
 
+    apparel_anchor_action = _text(action_design.get("interaction_id")) == (
+        "APPAREL_PRODUCT_ANCHOR_ACTION"
+    )
     visual_execution_contract = build_visual_execution_contract(
         canonical_product_type=canonical_product_type,
         presentation_mode=presentation,
@@ -2007,8 +2316,18 @@ def build_simplified_creative_seed(
         product_truth=seed["product_truth"],
         opening_visual_job=seed["creative_direction"].get("opening_visual_job"),
         action_design=action_design,
-        suggested_opening_action=_text(creative_contract.get("opening_action")),
-        suggested_event_flow=_text(creative_contract.get("action_grammar")),
+        # Once the existing action_design has consumed approved apparel
+        # anchors, the hard-coded creative combination is only a scene/moment
+        # selector.  Do not re-inject its old bag/standing/detail chain through
+        # the visual contract and silently restore the former authority.
+        suggested_opening_action=(
+            "" if apparel_anchor_action
+            else _text(creative_contract.get("opening_action"))
+        ),
+        suggested_event_flow=(
+            "" if apparel_anchor_action
+            else _text(creative_contract.get("action_grammar"))
+        ),
     )
     if visual_execution_contract:
         seed["visual_execution_contract"] = visual_execution_contract
@@ -2174,14 +2493,14 @@ def build_simplified_script_prompt(
 {capture_guidance}{category_guidance_block}
 核心原则：
 1. 商品事实只能来自 product_truth；不知道的内容不补写，绝不虚构功效、材质、颜色或使用结果。
-2. product_truth.content_mode=SELLING_ARGUMENT 时，只有非空的 content_mainline / selling_argument.creative_core_value 可以作为视觉创作语义；它是全片购买理由，但不要求人物动作或场景制造这个理由。若两者为空，表示原始运营卖点措辞仅供中央口播使用：不得从卖点推断人物出身、职业、地域、经济身份或特殊场景，只按 creative_direction、商品锚点和普通生活状态完成画面。approved_claims 只用作画面证据，禁止把第一个扣子、口袋或袖型细节改写成全片主题。content_mode=FACTUAL_OBSERVATION 时围绕可见事实做观察，不伪造用户痛点或产品收益。
+2. semantic_spine_contract.script_thesis 是本条内容语义权威，原始人工卖点保存在 source_argument，主情境与核心购买理由不得被场景、人物、穿搭或真实案例改写。context_bridge_contract 只决定整片画面与口播如何处于同一个消费世界，不要求逐句逐镜对齐。product_truth.content_mainline、selling_argument.creative_core_value 与 core_result_moment 都只是旧字段兼容投影；存在语义主干时不得用这些摘要覆盖它。approved_claims 只用作画面证据，禁止把第一个扣子、口袋或袖型细节改写成全片主题。content_mode=FACTUAL_OBSERVATION 时围绕可见事实做观察，不伪造用户痛点或产品收益。
 3. creative_direction.macro_structure 是观看顺序权威，不规定统一镜头模板；capture_rhythm_contract.structure_unit_roles 是它展开到可见片段后的唯一Beat顺序。每个capture_unit按同序角色填写；为了增加片段可以重复已有PROOF/USE，但禁止补入原结构没有的USE、ENDING或其他Beat。类目执行的商品近景/动态/回收关系只改变拍摄方式，不得覆盖structure_unit_roles。requested_hook_id 只描述口播意图，本步骤不写{target_language}口播。
 4. presentation_mode 必须等于 preferred_presentation，capture_mode 必须等于 creative_direction.capture_mode。PERSON_ON_CAMERA 必须写完整人物、穿搭、场景和自然状态；CREATOR_SELF_SHOT 中人物是正在对自己的手机镜头说话的创作者，不是被摄影团队拍摄的沉默模特。STATIC_PRODUCT 不虚构出镜人物或商品情绪；HANDS_ONLY 只允许手部进入画面。
 5. action_design只在类目确实需要商品互动时提供一次简单动作；没有必要时人物可以只是面对自己的手机分享。不同片段不要求分别增加动作、情绪或生活事件，只要不是同一素材重复裁切即可。不要制造遮挡后揭示、通知弹出、道具机关或“恰好发现”等剧情。
 6. 商品锚点与 claim_key 必须逐字从输入中选择。approved_claims 是可选事实池，不是拍摄清单：只选择当前结构自然需要的少量事实，未选事实无需安排镜头。被写入 selling_points_used 或 supported_claim_keys 的事实必须来自池内；同一事实只需全片有一处自然可见，不要求逐项触摸、指向或分配独立动作。本步骤不得决定中央口播最终选择哪些事实，也不得按口播逐句设计镜头。
-7. 人物和场景要具体但克制，情绪是自然的小变化，不写广告演员式惊讶。CREATOR_SELF_SHOT 的场景只是分享发生的普通背景，不得扩写成走廊、电梯、室内外连续调度。diversity_context.scene_reference.scene_request 只说明当前商品展示所需的场景语义；其中 time_light_need=DAYLIGHT 时保持同一地点的白天自然光，不能改成夜间氛围。execution_card 若为 AVAILABLE，优先把它的 space 翻译为场景字段：写清手机放在哪里、人物与手机的自然相对位置、背景的前后层次，并自然保留至多两项 background_anchors 和一个 lived_in_trace。位置只用“靠近、旁边、前后、同一小片区域”等相对关系；输入没有实测值时，不写米、厘米、精确距离或精确机位高度。场景卡不是拍摄任务清单，道具不得变成必须触摸或使用的动作；照样只使用现场已有自然光或普通室内光。execution_card 不可用时按原有创意方向完成。
+7. 人物和场景要具体但克制，情绪是自然的小变化，不写广告演员式惊讶。CREATOR_SELF_SHOT 的场景只是分享发生的普通背景，不得扩写成走廊、电梯、室内外连续调度。context_bridge_contract.scene_relation=SUPPORTS 时让画面自然支持主情境；NEUTRAL 时只做不冲突的商品展示，不擅自增加另一种用途；CONFLICTS 不应进入新规划。diversity_context.scene_reference.scene_request 只说明当前商品展示所需的场景语义；其中 time_light_need=DAYLIGHT 时保持同一地点的白天自然光，不能改成夜间氛围。execution_card 若为 AVAILABLE，优先把它的 space 翻译为场景字段：写清手机放在哪里、人物与手机的自然相对位置、背景的前后层次，并自然保留至多两项 background_anchors 和一个 lived_in_trace。位置只用“靠近、旁边、前后、同一小片区域”等相对关系；输入没有实测值时，不写米、厘米、精确距离或精确机位高度。场景卡不是拍摄任务清单，道具不得变成必须触摸或使用的动作；照样只使用现场已有自然光或普通室内光。execution_card 不可用时按原有创意方向完成。
 8. diversity_context.outfit_selection_contract 是本条生成前已经选定的穿搭合同。outfit_recipe 是本条唯一配方，其中非空的连体单品，或非空的上装与下装，以及鞋包和辅助配饰应被完整写入 production_design.outfit.base_outfit，不得重新选择、拆分或替换其中任一单品；one_piece 非空时必须按一件连体服装执行，top / bottom 应为空，不得把连衣裙或连体裤改写成上下装。target_role 只说明目标商品在整套造型中的角色，visibility_zones 用于保持商品可见。source_type=LIGHTWEIGHT_TEMPLATE 时，只执行合同里已经标准化的结构化字段和 base_outfit_direction；不得猜测或索取模板标题、正文、prompt_core、notes。source_type=INTERNAL_PROFILE 时，结合 silhouette_key、style_family、style_intensity、outfit_recipe 和 base_outfit_direction形成可感知的完整轮廓；outer_layer_direction / neckline_direction / hair_direction / palette_relation / visibility_requirement 只作柔性设计参考，不增加独立动作或质检门槛。允许因真实场景做轻微自然调整，但不要仅换颜色后重新回到近期相同的“基础上衣＋长裤”组合。preferred_surface_profile 只作旧字段兼容。全片保持一个连续、普通的生活时刻，但允许分成多个手机拍摄单元；不要默认写成“靠近镜头→退后展示→整理衣服→微笑收尾”的固定动作链。
-8.1 diversity_context.persona_selection_contract 若 availability=AVAILABLE，人物身份只允许来自这份冻结合同：persona_id、script_projection、identity_lock 和参考资产共同拥有权威，production_design.character 必须逐项继承 script_projection。商品参考图只决定商品，不得继承其中模特的脸、年龄、体型、发型、滤镜、姿态或背景。模型只可按当前生活时刻调整自然表情、视线和小动作，不得重新设计人物。若合同为 UNAVAILABLE/NOT_APPLICABLE，沿用普通创作者设计且不伪装成已使用人物库。
+8.1 diversity_context.persona_selection_contract 若 availability=AVAILABLE，人物长相、年龄感、体型、发型妆容和参考资产由 persona_id、identity_lock 与参考资产共同拥有权威；script_projection.identity 已是为当前脚本冻结的临时角色，必须使用它，禁止把 template_identity_text 中的旧职业或旧场景带回当前视频。production_design.character 逐项继承 script_projection。商品参考图只决定商品，不得继承其中模特的脸、年龄、体型、发型、滤镜、姿态或背景。模型只可按当前生活时刻调整自然表情、视线和小动作，不得重新设计人物。若合同为 UNAVAILABLE/NOT_APPLICABLE，沿用普通创作者设计且不伪装成已使用人物库。
 10. 类目执行补充中的 interaction_boundary 是全片一次生效的物理边界。storyboard 只写这一镜实际发生的正向动作，不要在每个镜头反复写“不得、禁止、不缠绕、不重新系”等负向规则。若冻结了 selected_action_design，按它执行一个核心商品互动；不得再把 optional_simple_interactions 当作候选清单逐项加入。若冻结了 primary_demonstration_mode，本条只表现这一种用法；supported_demonstration_modes 只是授权范围，不是镜头清单。
 10.1 product_truth.display_quantity_contract 只有 status=AUTHORIZED 时才允许出现多只同款商品。此时 required_display_count 是全片唯一数量权威：这组同款不是“竞争性配饰”，人物穿搭与每个拍摄单元都必须保持该数量，不得从单戴切成叠戴、边拍边增加或中途摘下。字段为空时继续默认只出现一只目标商品，禁止模型自行复制。
 11. 若输入含 visual_execution_contract，只执行已经选定的人物、穿搭、场景、清楚曝光和商品分离关系。精致感来自真实造型和空间，不来自磨皮、影棚布光或电影运镜；这些视觉信息不得扩写成新的动作、剧情或首镜表演任务。
@@ -2202,7 +2521,11 @@ def _model_visible_creative_seed(seed: Dict[str, Any]) -> Dict[str, Any]:
     ``吊带或短袖`` re-opened a decision that code had already made.
     """
 
-    visible = json.loads(json.dumps(seed, ensure_ascii=False))
+    # Frozen seeds normally come back from SQLite as JSON strings, but a
+    # provider may still attach datetime metadata during an in-process run.
+    # Preserve that metadata as text at the model boundary rather than
+    # failing before the visual-script call.
+    visible = json.loads(json.dumps(seed, ensure_ascii=False, default=str))
     diversity = (
         visible.get("diversity_context")
         if isinstance(visible.get("diversity_context"), dict)
@@ -2683,7 +3006,38 @@ def validate_simplified_visual_script(
             )
         )
 
-    authorized_text = json.dumps(truth, ensure_ascii=False)
+    semantic_spine = (
+        seed.get("semantic_spine_contract")
+        if isinstance(seed.get("semantic_spine_contract"), dict)
+        else {}
+    )
+    source_argument = (
+        semantic_spine.get("source_argument")
+        if isinstance(semantic_spine.get("source_argument"), dict)
+        else {}
+    )
+    script_thesis = (
+        semantic_spine.get("script_thesis")
+        if isinstance(semantic_spine.get("script_thesis"), dict)
+        else {}
+    )
+    # The reviewed operator argument is already the content authority for this
+    # item.  Product anchors still own visible identity and proof facts, but an
+    # effect word explicitly present in the selected Feishu selling point must
+    # not be rejected merely because it is absent from the visual anchor card.
+    # Keep the scope narrow: only the frozen source argument and its semantic
+    # thesis are added; unrelated product/market context cannot authorize a
+    # new benefit.
+    authorized_text = json.dumps(
+        {
+            "product_truth": truth,
+            "operator_source_argument": source_argument.get("raw_text"),
+            "operator_core_buying_reason": script_thesis.get(
+                "core_buying_reason"
+            ),
+        },
+        ensure_ascii=False,
+    )
     # Effect terms are product-truth checks, so only inspect fields whose job is
     # to describe the target product or its result.  Character actions, scene
     # prose and emotion can legitimately contain words such as “舒适位置”
@@ -2823,10 +3177,14 @@ def build_simplified_voiceover_inputs(
         if isinstance(seed.get("visual_execution_contract"), dict)
         else {}
     )
-    # Preserve the established scarf voiceover grounding behavior.  Apparel
-    # saliency is composition-only and must not make the central voiceover
-    # inherit a visual life event.
-    visual_execution_enabled = (
+    # V2 lets every wearable category pass the already-frozen life moment as
+    # optional rhetoric context.  It remains CREATIVE_DESIGN rather than claim
+    # evidence, so a location/event can frame the speaker but cannot prove a
+    # product benefit.  The single flag restores the old scarf-only behavior.
+    context_v2_enabled = _text(
+        os.environ.get("CENTRAL_VOICEOVER_CONTEXT_V2_ENABLED", "1")
+    ).lower() not in {"0", "false", "off", "no"}
+    visual_execution_enabled = context_v2_enabled or (
         _text(visual_execution.get("feature_scope")) == "SCARF_ACCESSORY_GREY"
     )
     voice = script.get("voiceover_context") or {}
@@ -2994,6 +3352,8 @@ def assemble_simplified_complete_script(
     seed: Dict[str, Any],
     voiceover_plan: Dict[str, Any],
 ) -> Dict[str, Any]:
+    from core.semantic_spine import semantic_trace
+
     result = dict(visual_script)
     production_design = (
         result.get("production_design")
@@ -3036,8 +3396,31 @@ def assemble_simplified_complete_script(
         "selling_argument_realization_zh": _text(
             voiceover_plan.get("selling_argument_realization_zh")
         ),
+        # Preserve central-engine context diagnostics in the final script.
+        # Without these fields, an authorised travel or audience situation
+        # may be used successfully but become unobservable after assembly.
+        "used_context_anchor": _text(
+            voiceover_plan.get("used_context_anchor")
+        ),
+        "context_consumption_status": _text(
+            voiceover_plan.get("context_consumption_status")
+        ) or "UNAVAILABLE",
+        "voiceover_context_mode": _text(
+            voiceover_plan.get("voiceover_context_mode")
+        ) or "UNAVAILABLE",
         "generation_mode": "CENTRAL_VOICEOVER_COMPLETE_UTTERANCE",
     }
+    semantic_spine = dict(seed.get("semantic_spine_contract") or {})
+    context_bridge = dict(seed.get("context_bridge_contract") or {})
+    result["semantic_spine_contract"] = semantic_spine
+    result["context_bridge_contract"] = context_bridge
+    result["semantic_trace"] = semantic_trace(
+        semantic_spine,
+        context_bridge,
+        voiceover_context_mode=_text(
+            result["continuous_voiceover"].get("voiceover_context_mode")
+        ),
+    )
     brief_product_truth = {
         "product_identity": _text(product_truth.get("product_identity")),
         "identity_anchors": product_truth.get("identity_anchors") or [],
@@ -3089,6 +3472,27 @@ def assemble_simplified_complete_script(
             ) or {}
         ),
         "voiceover": result["continuous_voiceover"],
+        "semantic_context": {
+            "primary_narrative_context": _text(
+                (semantic_spine.get("script_thesis") or {}).get(
+                    "primary_narrative_context"
+                )
+            ),
+            "core_buying_reason": _text(
+                (semantic_spine.get("script_thesis") or {}).get(
+                    "core_buying_reason"
+                )
+            ),
+            "scene_relation": dict(context_bridge.get("scene_relation") or {}),
+            "bridge_mode": _text(
+                context_bridge.get("voiceover_context_mode")
+                or context_bridge.get("bridge_mode")
+            ),
+            "instruction": (
+                "整片保持与主消费情境同一语义世界；不要求逐句对应镜头，"
+                "也不得让背景场景改写商品的核心购买理由。"
+            ),
+        },
         "instruction": (
             "保持同一人物、商品、穿搭、地点、时刻和生活事件；按拍摄节奏合同分别录制3至5段普通手机素材并直接剪切。"
             "优先级依次为商品与物理连续性、实际镜头推进、卖点关系和原生拍摄可行性；发生冲突时先简化场景与表演，不得退回一镜到底"

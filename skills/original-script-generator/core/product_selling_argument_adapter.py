@@ -19,8 +19,10 @@ from core.product_type_resolution import normalize_product_type
 
 
 DEFAULT_VOICEOVER_ROOT = Path("/Users/likeu3/voiceover_copy_engine")
-SELLING_ARGUMENT_CATALOG_VERSION = "selling-argument-catalog-v7-explicit-display-quantity"
-ARGUMENT_CLAIM_TYPES = frozenset({"benefit", "visual_result"})
+SELLING_ARGUMENT_CATALOG_VERSION = "selling-argument-catalog-v10-operator-argument-v2"
+ARGUMENT_CLAIM_TYPES = frozenset(
+    {"benefit", "visual_result", "scenario", "audience"}
+)
 FEISHU_OPERATOR_SOURCE_PREFIX = "feishu-product-claims:"
 FLEXIBLE_CARRIER_REQUIREMENT = "FLEXIBLE"
 KNOWN_CARRIER_REQUIREMENTS = frozenset(
@@ -29,6 +31,11 @@ KNOWN_CARRIER_REQUIREMENTS = frozenset(
 
 _SCARF_TYPES = {"scarf", "winter_scarf", "silk_scarf", "headscarf"}
 _WRIST_TYPES = {"bracelet", "bangle", "slim_bangle"}
+_FINGER_TYPES = {"ring"}
+_HAIR_TYPES = {
+    "hair_accessory_generic", "claw_clip", "hair_clip", "headband",
+    "scrunchie", "hair_tie", "ribbon", "hair_pin",
+}
 _SCARF_USAGE_CONCEPTS = {
     "CCP_SCARF_HAIR_RESCUE": {
         "argument_theme": "HAIR_RESCUE",
@@ -165,9 +172,16 @@ def _carrier_policy(claim_type: str, claim_theme: str = "") -> Dict[str, Any]:
     second claim-review system in the original-script workflow.
     """
 
-    if _text(claim_type).lower() == "visual_result":
+    normalized_claim_type = _text(claim_type).lower()
+    if normalized_claim_type == "visual_result":
         return {
             "proof_subject": "ON_BODY_RESULT",
+            "visual_dependency": "WEARER_REQUIRED",
+            "compatible_carriers": ["WEARER_ACTIVE", "MIXED"],
+        }
+    if normalized_claim_type == "scenario":
+        return {
+            "proof_subject": "SCENE_USAGE",
             "visual_dependency": "WEARER_REQUIRED",
             "compatible_carriers": ["WEARER_ACTIVE", "MIXED"],
         }
@@ -254,8 +268,82 @@ def _operator_expression(source_span: Any) -> str:
 
 
 def _operator_source_order(source_span: Any) -> int:
-    matched = re.match(r"^\s*(\d+)\s*[、./.)）:-]", _text(source_span))
+    value = _text(source_span)
+    matched = re.search(r"#argument-v2-(\d+)$", value)
+    if matched:
+        return int(matched.group(1))
+    matched = re.search(r"#segment-(\d+)$", value)
+    if matched:
+        return int(matched.group(1))
+    matched = re.match(r"^\s*(\d+)\s*[、./.)）:-]", value)
     return int(matched.group(1)) if matched else 9999
+
+
+def _prefer_segmented_operator_sources(
+    rows: Iterable[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Consume the newest, most specific Feishu argument generation.
+
+    Feishu sync used to store one row containing every numbered selling point.
+    It later stored ``#segment-N`` and now stores the more capable
+    ``#argument-v2-N`` sources.  Once a V2 generation exists for a Feishu row,
+    older whole-cell and numbered generations must not re-enter the catalog.
+    Re-syncs can also leave two source ids under the same source_ref after the
+    operator edits text; only the newest source id is active.  Independent
+    Feishu rows remain independent even when they map to the same concept.
+    """
+
+    material = [dict(row) for row in rows]
+    if not material:
+        return []
+
+    def base_ref(value: Any) -> str:
+        return re.sub(
+            r"#(?:argument-v2|segment)-\d+$", "", _text(value)
+        )
+
+    generation_by_base: Dict[str, str] = {}
+    for row in material:
+        ref = _text(row.get("source_ref"))
+        base = base_ref(ref)
+        generation = (
+            "V2" if re.search(r"#argument-v2-\d+$", ref)
+            else "SEGMENT" if re.search(r"#segment-\d+$", ref)
+            else "WHOLE"
+        )
+        previous = generation_by_base.get(base, "WHOLE")
+        rank = {"WHOLE": 0, "SEGMENT": 1, "V2": 2}
+        if rank[generation] > rank[previous]:
+            generation_by_base[base] = generation
+        else:
+            generation_by_base.setdefault(base, previous)
+
+    filtered: List[Dict[str, Any]] = []
+    for row in material:
+        ref = _text(row.get("source_ref"))
+        wanted = generation_by_base.get(base_ref(ref), "WHOLE")
+        current = (
+            "V2" if re.search(r"#argument-v2-\d+$", ref)
+            else "SEGMENT" if re.search(r"#segment-\d+$", ref)
+            else "WHOLE"
+        )
+        if current == wanted:
+            filtered.append(row)
+
+    newest_source_by_ref: Dict[str, tuple[str, str]] = {}
+    for row in filtered:
+        ref = _text(row.get("source_ref"))
+        candidate = (
+            _text(row.get("source_created_at")),
+            _text(row.get("claim_source_id")),
+        )
+        if candidate > newest_source_by_ref.get(ref, ("", "")):
+            newest_source_by_ref[ref] = candidate
+    return [
+        row for row in filtered
+        if _text(row.get("claim_source_id"))
+        == newest_source_by_ref.get(_text(row.get("source_ref")), ("", ""))[1]
+    ]
 
 
 def _operator_catalog_entries(source_id: str, source_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -298,6 +386,8 @@ def _operator_catalog_entries(source_id: str, source_rows: List[Dict[str, Any]])
             "row": best,
             "value_suffix": "",
             "operator_expression": operator_expression,
+            "source_operator_expression": operator_expression,
+            "source_scope_concept_count": max(1, len(distinct_concepts)),
             "primary_selling_point": operator_expression,
             "source_claim_ids": [
                 _text(row.get("claim_id"))
@@ -327,6 +417,11 @@ def _operator_catalog_entries(source_id: str, source_rows: List[Dict[str, Any]])
             "row": row,
             "value_suffix": "_" + claim_id,
             "operator_expression": canonical,
+            # Keep the complete, separately confirmed operator point as
+            # rhetoric context.  The canonical expression remains the only
+            # one-argument mainline, so this cannot recombine several claims.
+            "source_operator_expression": operator_expression,
+            "source_scope_concept_count": max(1, len(distinct_concepts)),
             "primary_selling_point": canonical,
             "source_claim_ids": [claim_id] if _text(row.get("verification_status")) == "VERIFIED" else [],
             "normalization_claim_ids": [claim_id],
@@ -518,6 +613,110 @@ def _accessory_operator_execution_semantics(
     return {}
 
 
+def _small_accessory_claim_action_semantics(
+    product_type: str,
+    operator_expression: str,
+    claim_theme: str = "",
+) -> Dict[str, Any]:
+    """Compile an approved small-accessory value into a proof-action intent.
+
+    This narrow planning adapter never approves, rejects or rewrites the
+    operator's selling point. It only prevents values such as ``可调节`` or
+    ``拿在手里有分量`` from reaching an execution that cannot show them.
+    Unknown wording stays on the existing flexible path.
+    """
+
+    enabled = _text(
+        os.environ.get("ORIGINAL_SCRIPT_SMALL_ACCESSORY_CLAIM_ACTION_V1", "1")
+    ).lower()
+    if enabled in {"0", "false", "off", "no"}:
+        return {}
+
+    resolved = normalize_product_type(product_type, "配饰")
+    canonical = resolved.canonical_type
+    if canonical not in {*_FINGER_TYPES, *_HAIR_TYPES, "earring"}:
+        return {}
+    text = _text(operator_expression).lower()
+    theme = _text(claim_theme).lower()
+    if not text and not theme:
+        return {}
+
+    if canonical in _FINGER_TYPES and any(marker in text for marker in (
+        "可调节", "调节大小", "调节尺寸", "开口戒", "开口设计",
+        "粗细手指", "不同手指", "戒围", "松紧", "adjustable", "open ring",
+    )):
+        return {
+            "proof_action_intent": "SIZE_ADJUSTMENT",
+            "preferred_action_mode": "ADJUST_THEN_WEAR",
+            "required_proof_relation": "先清楚展示一次小幅调节，再保留稳定的手指佩戴结果",
+            "proof_subject": "ON_BODY_RESULT",
+            "visual_dependency": "HAND_REQUIRED",
+            "compatible_carriers": [
+                "HAND_ONLY", "HANDS_ONLY", "PERSON_ON_CAMERA",
+                "WEARER_ACTIVE", "MIXED",
+            ],
+            "execution_semantics_source": "EXPLICIT_OPERATOR_SMALL_ACCESSORY_ACTION",
+        }
+
+    if any(marker in text for marker in (
+        "重量", "分量", "压手", "拿在手", "手感", "金属感",
+        "weight", "weighted", "in hand", "metal feel",
+    )):
+        return {
+            "proof_action_intent": "HANDHELD_MATERIAL_FEEL",
+            "preferred_action_mode": "HANDHELD_PRODUCT",
+            "required_proof_relation": "商品先由同一人物自然拿在手中看清，再进入佩戴或使用结果",
+            "proof_subject": "PRODUCT_DETAIL",
+            "visual_dependency": "HAND_REQUIRED",
+            "compatible_carriers": [
+                "HAND_ONLY", "HANDS_ONLY", "PERSON_ON_CAMERA",
+                "WEARER_ACTIVE", "MIXED",
+            ],
+            "execution_semantics_source": "EXPLICIT_OPERATOR_SMALL_ACCESSORY_ACTION",
+        }
+
+    scene_theme = theme in {
+        "scene_usage", "usage_scene", "usage_scenario", "occasion",
+        "multi_occasion", "commute", "travel", "photo_scene",
+    }
+    scene_wording = any(marker in text for marker in (
+        "通勤", "上班", "办公室", "聚会", "约会", "出门", "日常",
+        "多场景", "多种场合", "work", "office", "commute", "party", "daily",
+    ))
+    if scene_theme or scene_wording:
+        return {
+            "proof_action_intent": "SCENE_USAGE",
+            "preferred_action_mode": "SCENE_USE",
+            "required_proof_relation": "让商品佩戴结果与一个真实使用场景及相应造型同时成立",
+            "proof_subject": "SCENE_USAGE",
+            "visual_dependency": "WEARER_REQUIRED",
+            "compatible_carriers": [
+                "PERSON_ON_CAMERA", "WEARER_ACTIVE", "MIXED",
+            ],
+            "execution_semantics_source": "EXPLICIT_OPERATOR_SMALL_ACCESSORY_ACTION",
+        }
+
+    if any(marker in text for marker in (
+        "显白", "提亮", "闪", "光泽", "修饰脸型", "精致", "上手效果",
+        "佩戴效果", "好看", "brighten", "sparkle", "worn result",
+    )):
+        visual_carriers = [
+            "PERSON_ON_CAMERA", "WEARER_ACTIVE", "MIXED",
+        ]
+        if canonical in _FINGER_TYPES:
+            visual_carriers.extend(["HAND_ONLY", "HANDS_ONLY"])
+        return {
+            "proof_action_intent": "WORN_VISUAL_RESULT",
+            "preferred_action_mode": "RESULT_SHOW",
+            "required_proof_relation": "从已经佩戴完成的状态展示商品与对应身体区域的视觉结果",
+            "proof_subject": "ON_BODY_RESULT",
+            "visual_dependency": "WEARER_REQUIRED",
+            "compatible_carriers": visual_carriers,
+            "execution_semantics_source": "EXPLICIT_OPERATOR_SMALL_ACCESSORY_ACTION",
+        }
+    return {}
+
+
 def load_verified_selling_point_catalog(
     product_code: str,
     *,
@@ -613,15 +812,28 @@ def load_verified_selling_point_catalog(
         base["snapshot_hash"] = _stable_hash(base)
         return base
 
+    operator_material = [dict(row) for row in operator_rows]
+    active_operator_rows = _prefer_segmented_operator_sources(operator_material)
+    active_operator_source_ids = {
+        _text(row.get("claim_source_id")) for row in active_operator_rows
+        if _text(row.get("claim_source_id"))
+    }
+    # Superseded whole-cell sources must also be excluded from the later
+    # generic VERIFIED-claim pass; otherwise they re-enter without operator
+    # lineage and recreate the same duplicate catalog entries.
+    superseded_operator_source_ids = {
+        _text(row.get("claim_source_id")) for row in operator_material
+        if _text(row.get("claim_source_id")) not in active_operator_source_ids
+    }
     operator_groups: Dict[str, List[Dict[str, Any]]] = {}
-    for row in operator_rows:
-        material = dict(row)
+    for material in active_operator_rows:
         operator_groups.setdefault(_text(material.get("claim_source_id")), []).append(material)
 
-    included_operator_sources = set()
+    included_operator_sources = set(superseded_operator_source_ids)
     ordered_operator_groups = sorted(
         operator_groups.items(),
         key=lambda pair: (
+            _operator_source_order(pair[1][0].get("source_ref") if pair[1] else ""),
             _operator_source_order(pair[1][0].get("raw_text") if pair[1] else ""),
             _text(pair[1][0].get("source_created_at") if pair[1] else ""),
             pair[0],
@@ -642,11 +854,18 @@ def load_verified_selling_point_catalog(
                 {
                     "value_id": "OPERATOR_" + source_id + _text(entry.get("value_suffix")),
                     "source_argument_id": source_id,
+                    "source_ref": _text(first.get("source_ref")),
                     "primary_selling_point": _text(entry.get("primary_selling_point")),
                     "canonical_selling_point": (
                         _text(best.get("canonical_claim_zh")) if mapped else ""
                     ),
                     "operator_expression": _text(entry.get("operator_expression")),
+                    "source_operator_expression": _text(
+                        entry.get("source_operator_expression")
+                    ),
+                    "source_scope_concept_count": int(
+                        entry.get("source_scope_concept_count") or 1
+                    ),
                     "dominant_user_question": "",
                     "proof_thesis": "",
                     "decision_thesis": "",
@@ -687,6 +906,11 @@ def load_verified_selling_point_catalog(
                     **_accessory_operator_execution_semantics(
                         product_type,
                         _text(entry.get("operator_expression")),
+                    ),
+                    **_small_accessory_claim_action_semantics(
+                        product_type,
+                        _text(entry.get("operator_expression")),
+                        _text(best.get("claim_theme")),
                     ),
                 }
             )
@@ -775,6 +999,11 @@ def load_verified_selling_point_catalog(
                     **_accessory_operator_execution_semantics(
                         product_type,
                         operator_expression or text,
+                    ),
+                    **_small_accessory_claim_action_semantics(
+                        product_type,
+                        operator_expression or text,
+                        common["claim_theme"],
                     ),
                 }
             )

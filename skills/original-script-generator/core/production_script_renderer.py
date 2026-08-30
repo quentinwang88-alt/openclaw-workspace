@@ -217,6 +217,50 @@ def _capture_mode(brief: Dict[str, Any], production: Dict[str, Any]) -> str:
     ).upper()
 
 
+def _preserve_category_capture_projection(
+    rebuilt: Dict[str, Any], embedded: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Keep an already-frozen accessory projection during public rebuilds."""
+
+    if not isinstance(embedded.get("category_rollout_contract"), dict):
+        return rebuilt
+    rebuilt_count = int(rebuilt.get("capture_unit_count") or 0)
+    category_roles = _list(embedded.get("category_unit_roles"))
+    unit_roles = _list(embedded.get("unit_roles"))
+    framing = _list(embedded.get("framing_guidance_by_unit"))
+    if (
+        rebuilt_count < 1
+        or len(category_roles) != rebuilt_count
+        or len(unit_roles) != rebuilt_count
+        or len(framing) != rebuilt_count
+    ):
+        # A stale category projection must not claim to be active after the
+        # public compiler has selected a different visible-clip count.
+        return rebuilt
+    result = dict(rebuilt)
+    for key in (
+        "category_projection",
+        "category_unit_roles",
+        "unit_roles",
+        "framing_guidance_by_unit",
+        "category_rollout_contract",
+    ):
+        value = embedded.get(key)
+        if isinstance(value, dict):
+            result[key] = dict(value)
+        elif isinstance(value, list):
+            result[key] = list(value)
+        elif value not in (None, ""):
+            result[key] = value
+    rebuilt_richness = _dict(result.get("shot_richness_contract"))
+    embedded_richness = _dict(embedded.get("shot_richness_contract"))
+    for key, value in embedded_richness.items():
+        if key.startswith("category_"):
+            rebuilt_richness[key] = value
+    result["shot_richness_contract"] = rebuilt_richness
+    return result
+
+
 def _capture_rhythm_contract(
     brief: Dict[str, Any],
     script: Dict[str, Any],
@@ -247,7 +291,7 @@ def _capture_rhythm_contract(
             ),
         )
         with_profile["profile"] = CAPTURE_RHYTHM_MULTICLIP
-        return with_profile
+        return _preserve_category_capture_projection(with_profile, embedded)
     allocated_direction = _dict(script.get("allocated_direction"))
     routed_macro = _list(allocated_direction.get("macro_structure"))
     if not routed_macro:
@@ -766,6 +810,7 @@ def render_stage0_video_generation_prompt(
         _list(identity_lock.get("must_not_change")), identity_lock=identity_lock
     )[:3]
     voice = _dict(brief.get("voiceover")) or _dict(script.get("continuous_voiceover"))
+    semantic_context = _dict(brief.get("semantic_context"))
     recording_context = _dict(brief.get("recording_context"))
     capture_rhythm = _dict(brief.get("capture_rhythm_contract")) or _dict(
         script.get("capture_rhythm_contract")
@@ -781,6 +826,21 @@ def render_stage0_video_generation_prompt(
         "【商品身份锁｜最高优先级】",
         "商品外观以参考图为唯一准则；商品一致性优先于人物表演、场景氛围和镜头效果。",
     ]
+    if _text(semantic_context.get("primary_narrative_context"), ""):
+        lines.extend(
+            [
+                "",
+                "【整片语义主线｜不做逐句逐镜绑定】",
+                "主消费情境："
+                + _text(semantic_context.get("primary_narrative_context"), ""),
+                "核心购买理由："
+                + _text(semantic_context.get("core_buying_reason"), ""),
+                (
+                    "画面、人物和口播保持在同一个消费世界；不要求每句口播由当前镜头证明，"
+                    "也不得让背景地点改写这条主线。"
+                ),
+            ]
+        )
     if must_preserve:
         lines.append("必须保持：" + _join(must_preserve))
     if must_not_change:
@@ -1222,6 +1282,7 @@ def _render_legacy_video_generation_prompt(*, item: Any, duration_seconds: float
     emotion = _dict(production.get("emotion"))
     truth = _dict(brief.get("product_truth"))
     voice = _dict(brief.get("voiceover")) or _dict(script.get("continuous_voiceover"))
+    semantic_context = _dict(brief.get("semantic_context"))
     storyboard = _list(brief.get("storyboard")) or _list(script.get("storyboard"))
 
     lines = [
@@ -1361,6 +1422,7 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
     ]
     must_not_change = _list(identity_lock.get("must_not_change"))
     voice = _dict(brief.get("voiceover")) or _dict(script.get("continuous_voiceover"))
+    semantic_context = _dict(brief.get("semantic_context"))
     storyboard = _list(brief.get("storyboard")) or _list(script.get("storyboard"))
     capture_mode = _capture_mode(brief, production)
     capture_rhythm = _capture_rhythm_contract(
@@ -1378,10 +1440,16 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
         # Unit ids are deterministic authority.  Stored metadata may be stale
         # after a profile change, so rebuild it from the current storyboard.
         capture_units = compiled_capture_units
-        capture_units = _apply_small_accessory_capture_projection(
-            capture_units,
-            accessory_brief=accessory_brief,
-        )
+        if not isinstance(
+            capture_rhythm.get("category_rollout_contract"), dict
+        ):
+            # Backward compatibility for old SCRIPT_READY rows. New rows have
+            # already frozen the same motion relation before blueprint and
+            # must not be projected a second time during rendering.
+            capture_units = _apply_small_accessory_capture_projection(
+                capture_units,
+                accessory_brief=accessory_brief,
+            )
     multiclip_enabled = (
         _text(capture_rhythm.get("profile"), "").upper()
         == CAPTURE_RHYTHM_MULTICLIP
@@ -1408,6 +1476,21 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
             else "商品外观以参考图为唯一准则；商品一致性优先于人物美感、场景氛围和镜头效果。"
         ),
     ]
+    if _text(semantic_context.get("primary_narrative_context"), ""):
+        lines.extend(
+            [
+                "",
+                "【整片语义主线｜不做逐句逐镜绑定】",
+                "主消费情境："
+                + _text(semantic_context.get("primary_narrative_context"), ""),
+                "核心购买理由："
+                + _text(semantic_context.get("core_buying_reason"), ""),
+                (
+                    "画面、人物和口播保持在同一个消费世界；不要求每句口播由当前镜头证明，"
+                    "也不得让背景地点改写这条主线。"
+                ),
+            ]
+        )
     if visual_saliency:
         lines.append(
             "参考图只负责商品颜色、图案、形状和结构；参考图的整体曝光、滤镜、"

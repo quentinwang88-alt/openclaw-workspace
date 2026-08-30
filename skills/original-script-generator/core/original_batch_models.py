@@ -37,6 +37,7 @@ CONTENT_ANGLE_KEYS = frozenset({
 HOOK_ID_BLACKLIST_FOR_NO_TENSION = frozenset({
     "PAIN_REFRAME",
     "AUDIENCE_NEED_CALLOUT",
+    "USER_ADVOCACY_STANCE",
 })
 
 
@@ -124,6 +125,10 @@ def build_input_snapshot(
         "anchor_card_hash": hashlib.sha256(
             json.dumps(product_context.get("anchor_card", {}), ensure_ascii=False, sort_keys=True, default=str).encode()
         ).hexdigest()[:16],
+        "product_reference_assets": [
+            dict(item) for item in product_context.get("product_reference_assets", [])
+            if isinstance(item, dict)
+        ],
         "selling_point_catalog_hash": hashlib.sha256(
             json.dumps(product_context.get("selling_point_catalog", []), ensure_ascii=False, sort_keys=True, default=str).encode()
         ).hexdigest()[:16],
@@ -150,7 +155,18 @@ def build_input_snapshot(
 
 
 def build_data_snapshot_hash(input_snapshot: Dict[str, Any]) -> str:
-    raw = json.dumps(input_snapshot, ensure_ascii=False, sort_keys=True, default=str)
+    def portable(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: portable(nested)
+                for key, nested in value.items()
+                if key not in {"local_path", "cached_path"}
+            }
+        if isinstance(value, list):
+            return [portable(item) for item in value]
+        return value
+
+    raw = json.dumps(portable(input_snapshot), ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 

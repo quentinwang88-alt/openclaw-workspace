@@ -27,7 +27,7 @@ _BATCH_TABLE_NAMES = {
     "original_content_item",
 }
 
-POLICY_VERSION = "original-batch-allocation-v24-shot-richness"
+POLICY_VERSION = "original-batch-allocation-v26-context-coherence"
 
 
 def _now() -> str:

@@ -22,6 +22,7 @@ SUPPORTING_OUTFIT_NECK = "SUPPORTING_OUTFIT_NECK"
 SUPPORTING_OUTFIT_HEAD = "SUPPORTING_OUTFIT_HEAD"
 SUPPORTING_OUTFIT_WRIST = "SUPPORTING_OUTFIT_WRIST"
 SUPPORTING_OUTFIT_HAIR = "SUPPORTING_OUTFIT_HAIR"
+SUPPORTING_OUTFIT_HAND = "SUPPORTING_OUTFIT_HAND"
 
 _WRIST_TYPES = {"bracelet", "bangle", "slim_bangle"}
 _HAIR_TYPES = {
@@ -85,6 +86,8 @@ def target_role_for(
     canonical = _text(canonical_type).lower()
     if canonical in _WRIST_TYPES or _text(demonstration_mode).upper() == "WRIST_WORN":
         return SUPPORTING_OUTFIT_WRIST
+    if canonical == "ring" or _text(demonstration_mode).upper() == "FINGER_WORN":
+        return SUPPORTING_OUTFIT_HAND
     if canonical in _HAIR_TYPES or _text(demonstration_mode).upper() == "HAIR_WORN":
         return SUPPORTING_OUTFIT_HAIR
     if canonical == "headscarf" or _text(
@@ -106,6 +109,8 @@ def default_demonstration_mode(canonical_type: str) -> str:
         return "HAIR_WORN"
     if canonical in _WRIST_TYPES:
         return "WRIST_WORN"
+    if canonical == "ring":
+        return "FINGER_WORN"
     if canonical == "earring":
         return "EAR_WORN"
     if canonical in {"scarf", "winter_scarf", "silk_scarf"}:
@@ -154,6 +159,8 @@ def _default_visibility_zones(target_role: str) -> List[str]:
         return ["WRIST", "FOREARM", "UPPER_BODY"]
     if target_role == SUPPORTING_OUTFIT_HAIR:
         return ["HEAD", "HAIR", "SHOULDER", "UPPER_BODY"]
+    if target_role == SUPPORTING_OUTFIT_HAND:
+        return ["FINGER", "HAND", "FOREARM", "UPPER_BODY"]
     return ["TARGET_GARMENT", "BODY_PROPORTION"]
 
 
@@ -220,6 +227,10 @@ def normalize_outfit_candidate(
     elif normalized["target_role"] == SUPPORTING_OUTFIT_WRIST:
         visibility_zones = list(dict.fromkeys([
             "WRIST", "FOREARM", "UPPER_BODY", *visibility_zones,
+        ]))
+    elif normalized["target_role"] == SUPPORTING_OUTFIT_HAND:
+        visibility_zones = list(dict.fromkeys([
+            "FINGER", "HAND", "FOREARM", "UPPER_BODY", *visibility_zones,
         ]))
     normalized["visibility_zones"] = visibility_zones
     recipe = normalized.get("outfit_recipe")

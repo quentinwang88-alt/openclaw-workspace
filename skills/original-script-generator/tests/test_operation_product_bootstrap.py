@@ -59,6 +59,8 @@ class OperationProductBootstrapTest(unittest.TestCase):
             self.assertEqual(context["anchor_card"]["anchor_authority"], "OPERATION_TASK_PRODUCT_IMAGES")
             self.assertEqual(context["selling_point_catalog"], [{"value_id": "ARG_1"}])
             self.assertEqual(context["structure_route"]["status"], "REBUILD_REQUIRED")
+            self.assertEqual(len(context["product_reference_assets"]), 1)
+            self.assertTrue(Path(context["product_reference_assets"][0]["local_path"]).is_file())
             operation_client.download_attachment.assert_called_once()
             llm.call_json.assert_called_once()
 

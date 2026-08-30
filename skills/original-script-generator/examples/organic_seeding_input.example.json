@@ -1,0 +1,33 @@
+{
+  "product_context": {
+    "product_code": "YOUR_PRODUCT_CODE",
+    "top_category": "配饰",
+    "product_type": "围巾",
+    "target_country": "泰国",
+    "target_language": "泰语",
+    "facts": [
+      {
+        "fact_id": "FACT_1",
+        "text": "请替换为已经人工确认的客观商品事实"
+      }
+    ],
+    "identity_anchors": [
+      "商品颜色、纹理和数量以产品参考图为准"
+    ],
+    "negative_constraints": [
+      "不得编造材质、功效或长期使用体验"
+    ]
+  },
+  "themes": [
+    {
+      "objective": "STYLE_MEMORY",
+      "viewer_payoff": "看懂这个单品如何成为日常造型中的记忆点",
+      "lived_context": "出门前在窗边完成最后一次造型整理",
+      "taste_judgment": "只表达个人审美偏好，不替观众下购买结论",
+      "product_role": "SUPPORTING",
+      "product_prominence": "MID",
+      "experience_authority": "NONE",
+      "interaction_ending_allowed": true
+    }
+  ]
+}

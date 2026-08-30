@@ -428,6 +428,40 @@ class SimplifiedCompleteScriptTest(unittest.TestCase):
             seed["voiceover_surface_contract"]["speaker_position"],
             "CREATOR_TO_CAMERA",
         )
+
+    def test_persona_template_keeps_appearance_but_current_role_follows_scene(self):
+        seed = build_simplified_creative_seed(
+            anchor_card=_anchor(),
+            structure_contract=_contract("WEARER_ACTIVE"),
+            content_bundle=_bundle(),
+            creative_contract={
+                "persona_role": "出发前整理旅行行李的城市穿搭者",
+                "persona_selection_contract": {
+                    "availability": "AVAILABLE",
+                    "persona_id": "TH_BASE_1",
+                    "script_projection": {
+                        "identity": "曼谷办公室通勤女性",
+                        "appearance": "自然泰国年轻女性",
+                        "hair_makeup": "自然长发与淡妆",
+                        "speaking_personality": "像朋友自然分享",
+                    },
+                },
+            },
+            execution_reference={"content_carrier": "WEARER_ACTIVE"},
+            requested_hook_id="GENERAL_PRODUCT_SHARE",
+            content_angle_key="FACT_DISCOVERY",
+            product_type="外套",
+            top_category="女装",
+        )
+        persona = seed["diversity_context"]["persona_selection_contract"]
+        self.assertEqual(
+            persona["script_projection"]["identity"],
+            "出发前整理旅行行李的城市穿搭者",
+        )
+        self.assertEqual(persona["template_identity_text"], "曼谷办公室通勤女性")
+        self.assertEqual(
+            persona["script_projection"]["appearance"], "自然泰国年轻女性"
+        )
         prompt = build_simplified_script_prompt(
             seed, target_country="泰国", target_language="泰语", duration_seconds=15
         )
@@ -681,7 +715,8 @@ class SimplifiedCompleteScriptTest(unittest.TestCase):
             }
         )
         self.assertTrue(lock["reference_image_is_authority"])
-        self.assertIn("棕色短款翻领上装", lock["must_preserve"])
+        self.assertNotIn("棕色短款翻领上装", lock["must_preserve"])
+        self.assertIn("翻领结构与竖向前襟门襟", lock["must_preserve"])
         self.assertIn("袖口扣与侧面衣身线条", lock["critical_visible_details"])
         self.assertIn("禁止将参考图中的前襟扣子改成双排扣", lock["must_not_change"])
         self.assertEqual("product-identity-lock-v2", lock["compiler_version"])
@@ -1265,7 +1300,10 @@ class SimplifiedCompleteScriptTest(unittest.TestCase):
             direction["creative_blueprint"]["creator_motivation"],
             "分享出门前的真实选择",
         )
-        self.assertEqual(direction["creative_blueprint"]["event_design"]["natural_event"], "")
+        self.assertEqual(
+            direction["creative_blueprint"]["event_design"]["natural_event"],
+            "穿好外套、扣一颗纽扣、拿包离开",
+        )
         self.assertEqual(direction["creative_blueprint"]["retention_hook"]["opening_event"], "")
         self.assertEqual(
             [item["claim_key"] for item in direction["content_bundle_brief"]["claim_atoms"]],
@@ -1278,6 +1316,9 @@ class SimplifiedCompleteScriptTest(unittest.TestCase):
             "selected_selling_argument_id": "ARG_1",
             "selling_argument_realization": "ใส่คลุมเวลาอยู่ในห้องแอร์",
             "selling_argument_realization_zh": "空调房里披上更安心",
+            "used_context_anchor": "CTX_SCENARIO_1",
+            "context_consumption_status": "USED",
+            "voiceover_context_mode": "SELLING_SCENARIO",
             "lines": [{
                 "voiceover_text_target_language": "สาวๆ ดูตัวนี้ก่อนนะ",
                 "voiceover_text_zh": "姐妹们，先看这件。",
@@ -1301,6 +1342,18 @@ class SimplifiedCompleteScriptTest(unittest.TestCase):
         self.assertEqual(
             assembled["continuous_voiceover"]["selling_argument_realization_zh"],
             "空调房里披上更安心",
+        )
+        self.assertEqual(
+            assembled["continuous_voiceover"]["used_context_anchor"],
+            "CTX_SCENARIO_1",
+        )
+        self.assertEqual(
+            assembled["continuous_voiceover"]["context_consumption_status"],
+            "USED",
+        )
+        self.assertEqual(
+            assembled["continuous_voiceover"]["voiceover_context_mode"],
+            "SELLING_SCENARIO",
         )
         self.assertEqual(
             assembled["video_generation_brief"]["render_profile"],
@@ -1370,6 +1423,33 @@ class SimplifiedCompleteScriptTest(unittest.TestCase):
         result = validate_simplified_visual_script(script, seed)
         self.assertFalse(result["valid"])
         self.assertIn("商品事实冲突：出现未授权效果词=舒适", result["issues"])
+
+    def test_operator_argument_explicitly_authorizes_effect_word(self):
+        seed = build_simplified_creative_seed(
+            anchor_card=_anchor(),
+            structure_contract=_contract("WEARER_ACTIVE"),
+            content_bundle=_bundle(),
+            creative_contract={},
+            execution_reference={"content_carrier": "WEARER_ACTIVE"},
+            requested_hook_id="AUDIENCE_NEED_CALLOUT",
+            content_angle_key="FACT_DISCOVERY",
+            product_type="外套",
+            top_category="女装",
+        )
+        seed["semantic_spine_contract"] = {
+            "source_argument": {
+                "raw_text": "里面可以加针织衫，保暖的同时不会显得太笨重"
+            },
+            "script_thesis": {
+                "core_buying_reason": "里面可以加衣服，保暖但不显笨重"
+            },
+        }
+        script = _person_script()
+        script["storyboard"][0]["visual_content"] = (
+            "人物穿好外套和针织内搭，呈现保暖但不显笨重的上身结果"
+        )
+        result = validate_simplified_visual_script(script, seed)
+        self.assertNotIn("商品事实冲突：出现未授权效果词=保暖", result["issues"])
 
     def test_comfortable_sitting_posture_is_not_treated_as_product_claim(self):
         seed = build_simplified_creative_seed(
@@ -1643,6 +1723,177 @@ class SimplifiedCompleteScriptTest(unittest.TestCase):
             "outerwear",
             apparel_seed["product_truth"]["canonical_product_type"],
         )
+
+    def test_apparel_reuses_anchor_actions_and_demotes_scene_action_chain(self):
+        anchor = {
+            "product_positioning_one_liner": "浅蓝色短款蓬松外套",
+            "hard_anchors": [{"anchor": "浅蓝色短款蓬松外套"}],
+            "display_anchors": [
+                {
+                    "anchor": "背面展示横向分隔线和短款轮廓",
+                    "recommended_shot_type": "背面中景，人物自然站立",
+                }
+            ],
+            "operation_anchors": ["可轻扶领口进行小幅整理"],
+            "category_execution_contract": {
+                "display_family": "apparel",
+                "safe_shot_templates": [
+                    "侧前方轻微转身，保持外套轮廓完整可见"
+                ],
+            },
+        }
+        retrieval = {
+            "status": "AVAILABLE",
+            "primary_execution_card": {
+                "execution_card": {
+                    "execution_card_id": "EXEC_APPAREL_TEST",
+                    "physical_action_type": "WEAR",
+                    "shot_count": 5,
+                    "available_parts": ["opening", "proof", "ending"],
+                    "rhythm_logic": "多个短片段直接剪切",
+                }
+            },
+        }
+        seed = build_simplified_creative_seed(
+            anchor_card=anchor,
+            structure_contract=_contract("WEARER_ACTIVE"),
+            content_bundle=_bundle("短款比例清楚可见"),
+            creative_contract={
+                "contract_id": "CDV_APPAREL_TEST",
+                "scene_motif": "酒店房间行李架旁",
+                "opening_action": "拿起随身包回到手机前",
+                "action_grammar": "拿包→站着展示→补录细节",
+            },
+            execution_reference={"content_carrier": "WEARER_ACTIVE"},
+            requested_hook_id="AUDIENCE_NEED_CALLOUT",
+            content_angle_key="FACT_DISCOVERY",
+            product_type="外套",
+            top_category="女装",
+            retrieval_reference_contract=retrieval,
+        )
+
+        action = seed["action_design"]
+        self.assertEqual("APPAREL_PRODUCT_ANCHOR_ACTION", action["interaction_id"])
+        self.assertEqual("PRODUCT_ANCHOR_WITH_REAL_EXECUTION", action["source"])
+        self.assertNotIn("拿包", action["core_action"])
+        self.assertEqual("", action["supporting_scene_action"])
+        self.assertEqual(
+            "EXEC_APPAREL_TEST",
+            action["execution_reference"]["execution_card_id"],
+        )
+        event = seed["visual_execution_contract"]["event_progression"]
+        self.assertEqual("", event["suggested_opening_action"])
+        self.assertEqual("", event["suggested_event_flow"])
+
+    def test_apparel_soft_ranking_prefers_collar_action_for_collar_argument(self):
+        anchor = {
+            "product_positioning_one_liner": "浅蓝色短款立领外套",
+            "hard_anchors": [{"anchor": "浅蓝色短款立领外套"}],
+            "display_anchors": [
+                {
+                    "anchor": "正面半身展示立领、门襟和短款下摆",
+                    "recommended_shot_type": "正面中近景",
+                },
+                {
+                    "anchor": "背面展示横向分隔线和衣身轮廓",
+                    "recommended_shot_type": "背面中景",
+                },
+            ],
+            "operation_anchors": [
+                "可双手插入口袋做自然站姿",
+                "可轻扶领口进行小幅整理",
+            ],
+            "category_execution_contract": {
+                "display_family": "apparel",
+                "safe_shot_templates": ["侧前方轻微转身，保持外套轮廓清楚"],
+            },
+        }
+        bundle = _bundle("手插口袋或轻扶领口的日常上身状态", "CLM_COLLAR")
+        bundle["selling_argument"] = {
+            "status": "AVAILABLE",
+            "argument_id": "ARG_COLLAR",
+            "creative_core_value": "高领防风",
+            "claim_theme": "operator_value",
+            "proof_subject": "ON_BODY_RESULT",
+            "core_proof_claim_keys": ["CLM_COLLAR"],
+        }
+        bundle["semantic_spine_contract"] = {
+            "source_argument": {
+                "raw_text": "高领防风，拉起来更暖，进入室内也可以敞开穿"
+            },
+            "script_thesis": {
+                "core_buying_reason": "冷风里护住领口，进室内可以敞开"
+            },
+        }
+        seed = build_simplified_creative_seed(
+            anchor_card=anchor,
+            structure_contract=_contract("WEARER_ACTIVE"),
+            content_bundle=bundle,
+            creative_contract={"contract_id": "CDV_COLLAR", "scene_motif": "酒店房间"},
+            execution_reference={"content_carrier": "WEARER_ACTIVE"},
+            requested_hook_id="AUDIENCE_NEED_CALLOUT",
+            content_angle_key="FACT_DISCOVERY",
+            product_type="外套",
+            top_category="女装",
+        )
+        action = seed["action_design"]
+        self.assertIn("existing-action-design-v3", action["selection_policy"])
+        self.assertTrue(
+            any(term in action["core_action"] for term in ("领口", "立领", "门襟")),
+            action,
+        )
+        self.assertNotEqual("可双手插入口袋做自然站姿", action["core_action"])
+
+    def test_apparel_soft_ranking_prefers_silhouette_for_layering_argument(self):
+        anchor = {
+            "product_positioning_one_liner": "浅蓝色宽松短外套",
+            "hard_anchors": [{"anchor": "浅蓝色宽松短外套"}],
+            "display_anchors": [
+                {
+                    "anchor": "背面展示衣身宽松轮廓",
+                    "recommended_shot_type": "背面中景自然慢走",
+                }
+            ],
+            "operation_anchors": ["可双手插入口袋做自然站姿"],
+            "category_execution_contract": {
+                "display_family": "apparel",
+                "safe_shot_templates": ["侧前方轻微转身，保持衣身轮廓清楚"],
+            },
+        }
+        bundle = _bundle("衣身宽松轮廓清楚可见", "CLM_FIT")
+        bundle["selling_argument"] = {
+            "status": "AVAILABLE",
+            "argument_id": "ARG_LAYERING",
+            "creative_core_value": "宽松版型",
+            "claim_theme": "fit",
+            "proof_subject": "ON_BODY_RESULT",
+        }
+        bundle["semantic_spine_contract"] = {
+            "source_argument": {
+                "raw_text": "宽松不臃肿，里面还能叠穿卫衣或针织衫"
+            },
+            "script_thesis": {
+                "core_buying_reason": "可以加内搭但轮廓不会显得笨重"
+            },
+        }
+        seed = build_simplified_creative_seed(
+            anchor_card=anchor,
+            structure_contract=_contract("WEARER_ACTIVE"),
+            content_bundle=bundle,
+            creative_contract={"contract_id": "CDV_LAYERING"},
+            execution_reference={"content_carrier": "WEARER_ACTIVE"},
+            requested_hook_id="GENERAL_PRODUCT_SHARE",
+            content_angle_key="FACT_DISCOVERY",
+            product_type="外套",
+            top_category="女装",
+        )
+        action = seed["action_design"]
+        self.assertIn("existing-action-design-v3", action["selection_policy"])
+        self.assertTrue(
+            any(term in action["core_action"] for term in ("轮廓", "背面", "侧前")),
+            action,
+        )
+        self.assertNotEqual("可双手插入口袋做自然站姿", action["core_action"])
 
     def test_hair_motion_actions_rotate_by_frozen_direction_without_state(self):
         hair_anchor = {

@@ -339,6 +339,16 @@ class MultidimReferenceAdapterTest(unittest.TestCase):
             contract["primary_execution_card"]["video_id"],
             projected["_meta"]["video_id"],
         )
+        self.assertTrue(projected["camera_grammar"])
+        self.assertTrue(
+            any("手机" in item for item in projected["camera_grammar"]),
+            projected["camera_grammar"],
+        )
+        # Source product/story nouns stay outside the legacy execution-only
+        # bridge; only measured framing/editing is restored.
+        self.assertFalse(
+            any("商品先进入近景" in item for item in projected["camera_grammar"])
+        )
 
     def test_v3_accepts_derived_script_and_preserves_same_video_dimensions(self):
         derived = _candidate(
@@ -508,6 +518,11 @@ class MultidimReferenceAdapterTest(unittest.TestCase):
         spine = primary["reference_execution_spine"]
         self.assertEqual(spine["available_parts"], ["opening", "proof", "ending"])
         self.assertTrue(spine["reference_spine_id"].startswith("RSP_"))
+        self.assertEqual(
+            spine["semantic_boundary"], "EXECUTION_ONLY_NO_SOURCE_CONTENT"
+        )
+        self.assertNotIn("visual_action", spine["parts"]["opening"])
+        self.assertNotIn("shot_function", spine["parts"]["opening"])
         scene = primary["matched_scene_realism"]
         self.assertEqual(
             scene["distinctive_anchors"]["color_light_anchors"],

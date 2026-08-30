@@ -1,10 +1,13 @@
 import json
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from core.production_script_renderer import (
     _apply_small_accessory_capture_projection,
+    _capture_rhythm_contract,
+    _preserve_category_capture_projection,
     build_production_projection,
     render_complete_production_script,
     render_stage0_video_generation_prompt,
@@ -119,6 +122,25 @@ class ProductionScriptRendererTest(unittest.TestCase):
         self.assertIn("窗边自然光和普通顶灯混合", text)
         self.assertIn("随手放在矮台上的帆布包", text)
 
+    def test_video_prompt_keeps_whole_video_semantic_context(self):
+        result = json.loads(self.item.result_json)
+        script = result["script"]
+        script["video_generation_brief"].update({
+            "render_profile": "UGC_NATIVE_V2_MULTICLIP",
+            "production_design": script["production_design"],
+            "storyboard": script["storyboard"],
+            "voiceover": script["continuous_voiceover"],
+            "semantic_context": {
+                "primary_narrative_context": "前往气温较低地区旅行",
+                "core_buying_reason": "一件商品适配多种穿搭或使用场景",
+            },
+        })
+        self.item.result_json = json.dumps(result, ensure_ascii=False)
+        text = render_video_generation_prompt(item=self.item, duration_seconds=15)
+        self.assertIn("【整片语义主线｜不做逐句逐镜绑定】", text)
+        self.assertIn("主消费情境：前往气温较低地区旅行", text)
+        self.assertIn("核心购买理由：一件商品适配多种穿搭或使用场景", text)
+
     def test_direct_share_prompt_removes_overlapping_behavior_controls(self):
         result = json.loads(self.item.result_json)
         script = result["script"]
@@ -159,7 +181,7 @@ class ProductionScriptRendererTest(unittest.TestCase):
             "edit_style": "NATIVE_HARD_CUT",
         }
         script["video_generation_brief"] = {
-            "schema_version": "production-video-brief-v10-structure-visible-clips",
+            "schema_version": "production-video-brief-v11-semantic-context",
             "render_profile": "UGC_NATIVE_V2_MULTICLIP",
             "capture_mode": "CREATOR_SELF_SHOT",
             "creator_recording_profile": profile,
@@ -531,6 +553,81 @@ class ProductionScriptRendererTest(unittest.TestCase):
         self.assertIn("不锁死手机位置与景别", text)
         self.assertNotIn("结构只控制内容推进，不代表切换摄影机位", text)
         self.assertNotIn("保持同一创作者、商品、穿搭、场景和手机视角", text)
+
+    def test_explicit_public_multiclip_rebuild_preserves_category_projection(self):
+        embedded = {
+            "schema_version": "capture-rhythm-contract-v5-structure-visible-clips",
+            "profile": "NATIVE_MULTI_CLIP_V1",
+            "capture_unit_count": 4,
+            "macro_structure": ["HOOK", "PROOF", "PROOF", "ENDING"],
+            "structure_unit_roles": ["HOOK", "PROOF", "PROOF", "ENDING"],
+            "category_projection": "SCARF_MULTICLIP_V1",
+            "category_unit_roles": [
+                "WORN_OR_PRODUCT_OPENING",
+                "DETAIL_PROOF",
+                "DETAIL_OR_WORN_RELATION",
+                "WORN_OR_CONTEXT_RESULT",
+            ],
+            "unit_roles": [
+                "WORN_OR_PRODUCT_OPENING",
+                "DETAIL_PROOF",
+                "DETAIL_OR_WORN_RELATION",
+                "WORN_OR_CONTEXT_RESULT",
+            ],
+            "framing_guidance_by_unit": ["围巾画面1", "围巾画面2", "围巾画面3", "围巾画面4"],
+            "category_rollout_contract": {
+                "profile": "SCARF_MULTICLIP_V1",
+                "female_apparel_unchanged": True,
+            },
+            "shot_richness_contract": {
+                "category_profile": "SCARF_MULTICLIP_V1",
+                "category_preferred_visible_clips": 4,
+            },
+        }
+        brief = {"capture_rhythm_contract": embedded}
+        storyboard = [
+            {"narrative_role": role}
+            for role in ("HOOK", "PROOF", "PROOF", "ENDING")
+        ]
+        with patch.dict(
+            os.environ,
+            {"ORIGINAL_SCRIPT_CAPTURE_RHYTHM_PROFILE": "native_multiclip_v1"},
+            clear=False,
+        ):
+            rebuilt = _capture_rhythm_contract(
+                brief,
+                {},
+                capture_mode="CREATOR_SELF_SHOT",
+                storyboard=storyboard,
+            )
+        self.assertEqual("SCARF_MULTICLIP_V1", rebuilt["category_projection"])
+        self.assertEqual(embedded["unit_roles"], rebuilt["unit_roles"])
+        self.assertEqual(
+            "SCARF_MULTICLIP_V1",
+            rebuilt["shot_richness_contract"]["category_profile"],
+        )
+
+    def test_public_rebuild_drops_stale_category_projection_on_count_change(self):
+        embedded = {
+            "capture_unit_count": 4,
+            "category_projection": "SCARF_MULTICLIP_V1",
+            "category_unit_roles": ["A", "B", "C", "D"],
+            "unit_roles": ["A", "B", "C", "D"],
+            "framing_guidance_by_unit": ["1", "2", "3", "4"],
+            "category_rollout_contract": {"profile": "SCARF_MULTICLIP_V1"},
+            "shot_richness_contract": {
+                "category_profile": "SCARF_MULTICLIP_V1"
+            },
+        }
+        rebuilt = {
+            "capture_unit_count": 3,
+            "unit_roles": ["HOOK", "PROOF", "ENDING"],
+            "shot_richness_contract": {"planned_visible_clips": 3},
+        }
+        result = _preserve_category_capture_projection(rebuilt, embedded)
+        self.assertNotIn("category_rollout_contract", result)
+        self.assertNotIn("category_projection", result)
+        self.assertEqual(["HOOK", "PROOF", "ENDING"], result["unit_roles"])
 
     def test_stage0_prompt_keeps_real_clip_framing_and_phone_relationship(self):
         macro_passages = [

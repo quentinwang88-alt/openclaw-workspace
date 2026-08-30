@@ -55,6 +55,12 @@ class OpenClawOriginalScriptTaskTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "不接受"):
             adapter.build_runner_command(action="refresh-personas", limit=1)
 
+    def test_refresh_production_config_composes_existing_refreshes(self):
+        commands = adapter.build_refresh_commands("refresh-production-config")
+        self.assertEqual(2, len(commands))
+        self.assertIn("lightweight-tryon-video", commands[0][1])
+        self.assertIn("ensure_persona_template_workbench.py", commands[1][1])
+
     def test_first_frame_actions_use_fixed_runner(self):
         check = adapter.build_runner_command(action="first-frame-check", limit=5)
         self.assertIn("run_first_frame_tasks.py", check[1])

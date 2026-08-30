@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 import sys
+from datetime import datetime
 from unittest.mock import patch
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
@@ -14,15 +15,52 @@ from core.complete_voiceover_direct import (
     _approved_style_references,
     _estimated_spoken_seconds,
     _expression_with_selected_claims,
+    _invoke_model,
     _hook_surface_status,
     _narrative_anchor_options,
     _relationship_language_profile,
+    _resolve_style_reference_routing,
     _target_language_error,
     run_central_complete_voiceover,
 )
 
 
 class CompleteVoiceoverDirectTest(unittest.TestCase):
+    def test_native_surface_keeps_human_approved_rhetoric_anchor(self):
+        approved = [{"reference_sample_id": "HUMAN_1"}]
+        refs, policy = _resolve_style_reference_routing(
+            approved,
+            {"native_surface_references": [{"video_id": "NATIVE_1"}]},
+            "APPROVED_ONLY",
+        )
+        self.assertEqual(refs, approved)
+        self.assertEqual(
+            policy, "HYBRID_NATIVE_SURFACE_AND_APPROVED_RHETORIC"
+        )
+
+    def test_model_boundary_stringifies_provider_datetime_metadata(self):
+        captured = {}
+
+        def fake_run(command, *, input, **kwargs):
+            captured["input"] = input
+            return type(
+                "Completed",
+                (),
+                {"returncode": 0, "stdout": '{"ok": true}', "stderr": ""},
+            )()
+
+        with patch(
+            "core.complete_voiceover_direct.subprocess.run",
+            side_effect=fake_run,
+        ):
+            result = _invoke_model(
+                "mock-command",
+                {"hook_knowledge": {"created_at": datetime(2026, 8, 27, 1, 2, 3)}},
+            )
+
+        self.assertEqual(result, {"ok": True})
+        self.assertIn("2026-08-27 01:02:03", captured["input"])
+
     def test_target_language_guard_rejects_thai_for_vietnamese_and_malay(self):
         thai = "ดูนี่ก่อนนะ ตัวนี้สวยมากค่ะ"
         self.assertIn("越南语", _target_language_error(thai, "越南语"))
@@ -43,6 +81,13 @@ class CompleteVoiceoverDirectTest(unittest.TestCase):
                 "马来语",
             ),
         )
+        self.assertEqual(
+            "",
+            _target_language_error(
+                "Amigas, vean este detalle porque la verdad se ve muy bonito.",
+                "西班牙语",
+            ),
+        )
 
     def test_relationship_surfaces_follow_frozen_target_language(self):
         vietnamese = _relationship_language_profile(
@@ -51,8 +96,12 @@ class CompleteVoiceoverDirectTest(unittest.TestCase):
         malay = _relationship_language_profile(
             "DETAIL_SURPRISE", target_language="马来语"
         )
+        spanish = _relationship_language_profile(
+            "AUDIENCE_NEED_CALLOUT", target_language="西班牙语"
+        )
         self.assertIn("chị em", vietnamese["audience_addresses"])
         self.assertIn("korang", malay["audience_addresses"])
+        self.assertIn("amigas", spanish["audience_addresses"])
         self.assertNotRegex(json.dumps(vietnamese, ensure_ascii=False), r"[\u0E00-\u0E7F]")
         self.assertNotRegex(json.dumps(malay, ensure_ascii=False), r"[\u0E00-\u0E7F]")
 
@@ -265,6 +314,8 @@ class CompleteVoiceoverDirectTest(unittest.TestCase):
             [item["source"] for item in anchors],
             ["speaker_intent", "scene_moment"],
         )
+        self.assertTrue(all(item["anchor_id"].startswith("CTX_") for item in anchors))
+        self.assertEqual(len({item["anchor_id"] for item in anchors}), 2)
 
     def test_available_selling_argument_is_declared_as_voiceover_mainline(self):
         direction = {
@@ -339,20 +390,24 @@ class CompleteVoiceoverDirectTest(unittest.TestCase):
             "ONE_CORE_ARGUMENT_WITH_SAME_THEME_SUPPORT",
         )
         self.assertEqual(
-            captured["expression_density_contract"]["preferred_information_units"],
-            2,
+            captured["spoken_brief"]["core_buying_reason"],
+            "适合作为降温环境的外搭",
+        )
+        self.assertEqual(
+            captured["spoken_brief"]["optional_supporting_fact"]["claim_key"],
+            "C1",
         )
         self.assertFalse(
             captured["expression_density_contract"]["second_selling_argument_allowed"]
+        )
+        self.assertFalse(
+            captured["expression_density_contract"]["full_input_coverage_required"]
         )
         self.assertEqual(
             captured["selling_argument"]["primary_demonstration_mode"],
             "NECK_WORN",
         )
-        self.assertIn(
-            "不枚举其他佩戴方式",
-            captured["mainline_scope"]["instruction"],
-        )
+        self.assertNotIn("instruction", captured["mainline_scope"])
 
     def test_selling_argument_may_generate_without_a_visible_fact(self):
         direction = {"content_bundle_brief": {"content_mode": "SELLING_ARGUMENT"}}
@@ -407,6 +462,88 @@ class CompleteVoiceoverDirectTest(unittest.TestCase):
             )
         self.assertEqual(result["selected_claim_count"], 0)
         self.assertEqual(result["selected_selling_argument_id"], "ARG_COOLING_LAYER")
+
+    def test_selling_scenario_context_is_passed_and_consumption_is_observable(self):
+        direction = {"content_bundle_brief": {"content_mode": "SELLING_ARGUMENT"}}
+        visual = {"shots": [{"supported_claim_keys": []}]}
+        context_anchor = "CTX_SCENARIO_1"
+        expression = {
+            "claim_atoms": [],
+            "argument_contract": {
+                "content": {
+                    "value_proposition": {"text": "适配多种日常场景"},
+                    "audience_tension": {"text": ""},
+                    "selling_argument": {
+                        "argument_id": "ARG_MULTI_SCENE",
+                        "status": "AVAILABLE",
+                        "core_value": "适配多种日常场景",
+                        "target_need": "旅行只想带一件，办公室、通勤和休闲都能穿",
+                        "operator_expression": "适配多种日常场景",
+                        "source_operator_expression": "旅行只想带一件，办公室、通勤和休闲都能穿",
+                        "source_scope_concept_count": 2,
+                        "audience_need_authority": "APPROVED_SELLING_SCENARIO",
+                        "audience_situation": "旅行只想带一件，办公室、通勤和休闲都能穿",
+                        "multi_scenario_authorized": True,
+                        "allowed_strength": "soft_only",
+                        "proof_match_status": "UNMATCHED",
+                    },
+                }
+            },
+            "voiceover_context_contract": {
+                "status": "AVAILABLE",
+                "context_mode": "SELLING_SCENARIO",
+                "use_priority": "PREFERRED",
+                "audience_situation": {
+                    "anchor_id": context_anchor,
+                    "text": "旅行只想带一件，办公室、通勤和休闲都能穿",
+                    "authority": "APPROVED_SELLING_SCENARIO",
+                },
+                "current_life_moment": {},
+                "scenario_budget": 2,
+            },
+            "creative_voice_context": {},
+            "forbidden_leaps": [],
+        }
+        captured = {}
+
+        def fake_invoke(_command, payload):
+            captured.update(payload)
+            return {
+                "candidate_id": "AUDIENCE_NEED_CALLOUT",
+                "hook_id": "AUDIENCE_NEED_CALLOUT",
+                "target_text": "ถ้าไปเที่ยวแล้วอยากพกเสื้อคลุมแค่ตัวเดียว ตัวนี้ใส่ต่อได้ทั้งวันค่ะ",
+                "chinese_translation": "旅行只想带一件外套时，这件可以接着穿一整天。",
+                "used_claim_refs": [],
+                "used_selling_argument_id": "ARG_MULTI_SCENE",
+                "selling_argument_realization": "ตัวนี้ใส่ต่อได้ทั้งวัน",
+                "selling_argument_realization_zh": "一件外套覆盖当天多种场景。",
+                "used_context_anchor": context_anchor,
+            }
+
+        with patch(
+            "core.complete_voiceover_direct.load_active_voiceover_hooks",
+            return_value=[{"hook_id": "AUDIENCE_NEED_CALLOUT"}],
+        ), patch(
+            "core.complete_voiceover_direct._expression_with_selected_claims",
+            return_value=(expression, []),
+        ), patch(
+            "core.complete_voiceover_direct._invoke_model", side_effect=fake_invoke,
+        ):
+            result = run_central_complete_voiceover(
+                product_code="P1", target_country="泰国", target_language="泰语",
+                top_category="女装", product_type="外套", direction=direction,
+                visual_plan=visual, model_command="mock-command",
+                candidate_hook_id="AUDIENCE_NEED_CALLOUT",
+            )
+
+        self.assertEqual(
+            captured["spoken_brief"]["operator_context"],
+            "旅行只想带一件，办公室、通勤和休闲都能穿",
+        )
+        self.assertEqual(captured["voiceover_context_contract"]["use_priority"], "PREFERRED")
+        self.assertEqual(result["used_context_anchor"], context_anchor)
+        self.assertEqual(result["context_consumption_status"], "USED")
+        self.assertEqual(result["voiceover_context_mode"], "SELLING_SCENARIO")
 
     def test_builds_one_cross_shot_line_without_rewrite(self):
         direction = {
@@ -493,12 +630,15 @@ class CompleteVoiceoverDirectTest(unittest.TestCase):
         )
         self.assertFalse(result["engine_provenance"]["downstream_rewritten"])
         self.assertEqual(captured["content_mode"], "FACTUAL_OBSERVATION")
+        self.assertIn("native_rhetoric_contract", captured)
+        self.assertNotIn("retrieved_speech_hook_pool", captured)
         self.assertEqual(
             captured["category_identity_authority"]["pairing_mode"],
             "UNAVAILABLE",
         )
         self.assertEqual(captured["spoken_duration_preference_seconds"], [7, 11])
-        self.assertIn("personal_preference", captured["expression_freedom"]["allowed_without_claim_ref"])
+        self.assertNotIn("expression_freedom", captured)
+        self.assertIn("spoken_brief", captured)
         self.assertEqual(
             captured["hook_guidance"]["minimal_structure"],
             ["reveal_detail", "offer_proof", "state_feature"],
@@ -545,6 +685,79 @@ class CompleteVoiceoverDirectTest(unittest.TestCase):
         })
         self.assertEqual(result["hook_lineage_status"], "PINNED")
         self.assertEqual(result["hook_surface_status"], "REALIZED")
+
+    def test_native_provider_cannot_replace_the_governed_hook(self):
+        direction = {
+            "content_bundle_brief": {
+                "eligible_hook_ids": ["USER_ADVOCACY_STANCE"],
+            }
+        }
+        visual = {"shots": [{"supported_claim_keys": ["C1"]}]}
+        expression = {
+            "claim_atoms": [{
+                "claim_key": "C1",
+                "fact_text": "蓝橙撞色",
+                "supported_shot_nos": [1],
+            }],
+            "argument_contract": {
+                "content": {
+                    "value_proposition": {"text": "撞色让造型更醒目"},
+                    "audience_tension": {},
+                    "proof_atoms": [],
+                }
+            },
+            "creative_voice_context": {},
+            "forbidden_leaps": [],
+        }
+        captured = {}
+
+        def fake_invoke(_command, payload):
+            captured.update(payload)
+            return {
+                "candidate_id": "USER_ADVOCACY_STANCE",
+                "hook_id": "USER_ADVOCACY_STANCE",
+                "target_text": "สำหรับเรา ผ้าผืนนี้ทำให้ชุดเรียบดูเด่นขึ้นแบบพอดีค่ะ",
+                "chinese_translation": "对我来说，这条丝巾让简单穿搭恰到好处地更醒目。",
+                "used_claim_refs": ["C1"],
+            }
+
+        with patch(
+            "core.complete_voiceover_direct.load_active_voiceover_hooks",
+            return_value=[
+                {"hook_id": "USER_ADVOCACY_STANCE"},
+                {"hook_id": "GENERAL_PRODUCT_SHARE"},
+            ],
+        ), patch(
+            "core.complete_voiceover_direct._expression_with_selected_claims",
+            return_value=(expression, expression["claim_atoms"]),
+        ), patch(
+            "core.complete_voiceover_direct._central_native_rhetoric_contract",
+            return_value={
+                "status": "UNAVAILABLE",
+                "resolved_hook_id": "GENERAL_PRODUCT_SHARE",
+                "structural_patterns": [],
+                "native_surface_references": [],
+            },
+        ), patch(
+            "core.complete_voiceover_direct._invoke_model", side_effect=fake_invoke
+        ):
+            result = run_central_complete_voiceover(
+                product_code="P1",
+                target_country="泰国",
+                target_language="泰语",
+                top_category="配饰",
+                product_type="丝巾",
+                direction=direction,
+                visual_plan=visual,
+                model_command="mock-command",
+                candidate_hook_id="USER_ADVOCACY_STANCE",
+            )
+        self.assertEqual(captured["requested_hook_id"], "USER_ADVOCACY_STANCE")
+        self.assertEqual(result["hook_id"], "USER_ADVOCACY_STANCE")
+        self.assertEqual(
+            result["hook_knowledge_provenance"]["upstream_requested_hook_id"],
+            "USER_ADVOCACY_STANCE",
+        )
 
 
 if __name__ == "__main__":

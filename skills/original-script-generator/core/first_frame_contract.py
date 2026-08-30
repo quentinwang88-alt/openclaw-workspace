@@ -324,8 +324,19 @@ def _project_first_frame_opening_action(action: Any, presentation: Any) -> str:
     return text
 
 
-def render_first_frame_prompt(contract: Mapping[str, Any]) -> str:
-    """Render the exact image-edit prompt; reference roles stay explicit."""
+def render_first_frame_prompt(
+    contract: Mapping[str, Any], *, frame_role: str = "OPENING"
+) -> str:
+    """Render one still-image prompt while keeping reference roles explicit.
+
+    ``OPENING`` remains the backward-compatible default used by the existing
+    15-second pipeline. ``BRIDGE`` and ``SCENE_ENTRY`` are isolated long-form
+    projections; adding them does not change OPENING rendering.
+    """
+
+    frame_role = _text(frame_role).upper() or "OPENING"
+    if frame_role not in {"OPENING", "BRIDGE", "SCENE_ENTRY"}:
+        raise ValueError(f"不支持的帧角色: {frame_role}")
 
     identity = _dict(contract.get("product_identity_lock"))
     truth = _dict(contract.get("product_truth"))
@@ -445,6 +456,82 @@ def render_first_frame_prompt(contract: Mapping[str, Any]) -> str:
         opening_carrier_rule = (
             f"首帧承载方式：{opening_carrier or presentation or '按冻结开场'}。"
         )
+
+    if frame_role == "SCENE_ENTRY":
+        opening_prompt = render_first_frame_prompt(contract, frame_role="OPENING")
+        return (
+            "这是同一条长视频跨场景硬切后的片段进入帧，不是第二条视频的新钩子。"
+            "保持同一人物身份、同一商品、同一冻结穿搭和已经完成的穿戴状态；"
+            "只按本合同切换生活场景，不模仿上一片段的姿势或机位。\n"
+            + opening_prompt
+            .replace("统一首帧", "场景进入帧")
+            .replace("首帧", "场景进入帧")
+        )
+
+    if frame_role == "BRIDGE":
+        bridge_person_visible = opening_person_visible
+        bridge_carrier = (
+            opening_carrier_rule
+            .replace("首帧承载方式", "桥接画面承载方式")
+            .replace("不得提前进入首帧", "不得进入桥接画面")
+        )
+        bridge_category_extension = category_extension.replace("首帧", "桥接画面")
+        return "\n".join(
+            [
+                f"生成一张竖屏 {_text(contract.get('aspect_ratio')) or DEFAULT_ASPECT_RATIO} 的片段A结束桥接参考图，供片段B从同一状态直接续接。",
+                "这不是新开场，不重新介绍人物或商品，不改变构图逻辑。",
+                "",
+                "【参考图角色与权威顺序】",
+                "1. 商品参考图只决定目标商品的颜色、图案、材质观感、形状、数量和结构；忽略其中的模特、姿态、滤镜与背景。",
+                persona_reference_rule,
+                "3. 冻结人物、穿搭和场景决定连续生产世界；下方结束状态决定姿势、动作停点、机位和景别。",
+                "4. 商品一致性和跨段连续性高于人物美感、场景氛围与重新构图。",
+                "",
+                "【商品身份锁】",
+                _lines("必须保持", must_preserve),
+                _lines("负向结构约束", must_not),
+                f"展示数量合同：{json.dumps(quantity, ensure_ascii=False, sort_keys=True) if quantity else '只按参考图实际数量，不主动复制商品'}",
+                "",
+                "【人物与穿搭连续性】",
+                f"人物模板：{_text(persona.get('persona_name')) or _text(persona.get('persona_id')) or '不适用'}",
+                f"人物身份与外貌：{_text(persona_projection.get('identity'))}；{_text(persona_projection.get('appearance'))}",
+                f"身体比例权威：{body_proportion or '采用自然写实的成年人物比例'}",
+                f"妆发：{_text(persona_projection.get('hair_makeup'))}",
+                bridge_carrier,
+                f"冻结穿搭：{frozen_outfit_text or json.dumps(recipe, ensure_ascii=False)}",
+                "穿搭、人物比例、妆发和商品穿戴状态必须与片段A保持一致。",
+                "",
+                "【场景、光线与机位连续性】",
+                f"地点：{_text(scene.get('location'))}",
+                f"生活时刻：{_text(scene.get('moment'))}",
+                f"背景：{_text(scene.get('background')) or _text(scene.get('background_depth'))}",
+                f"光线：{_text(scene.get('lighting'))}",
+                f"曝光：{_text(exposure.get('guidance')) or '人物和商品处于自然清楚亮部，保留真实纹理。'}",
+                f"商品与穿搭：{_text(separation.get('outfit_guidance')) or '冻结穿搭保持不变。'}",
+                f"商品与背景：{_text(separation.get('background_guidance')) or '商品与背景保持清楚边界。'}",
+                "",
+                "【片段A结束状态】",
+                f"稳定画面：{opening_visual}",
+                f"动作停点：{opening_action}",
+                f"机位与景别：{_text(opening.get('camera'))}",
+                f"商品可见锚点：{'；'.join(_list(opening.get('product_anchors_visible')))}",
+                (
+                    "人物嘴唇自然放松；这是动作结束后的稳定停点，不表现重新开口。"
+                    if bridge_person_visible else "人物口型：不适用。"
+                ),
+                "",
+                "【画面风格】",
+                "普通创作者手机记录的自然稳定画面；白平衡自然、清楚明亮但不过曝，保留真实皮肤、发丝和衣物纹理。",
+                "不要棚拍、广告大片、电影灯光、过度景深、磨皮塑料脸、HDR过强或夸张模特姿态。",
+                bridge_category_extension,
+                "",
+                "【通用负向要求】",
+                "不要文字、字幕、水印、Logo杜撰、尺寸数字、尺寸线或规格标注。",
+                "不要多余人物、助手手臂、三只手、多余肢体、畸形手指或扭曲脸部。",
+                f"人物模板负向：{prompt_negative}" if prompt_negative else "人物模板负向：避免塑料皮肤、畸形脸与夸张商业模特姿态。",
+                "只输出一张可用于跨段续接的完整静止画面。",
+            ]
+        ).strip()
 
     return "\n".join(
         [

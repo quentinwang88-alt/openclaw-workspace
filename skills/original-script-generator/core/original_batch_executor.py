@@ -30,7 +30,7 @@ from core.complete_script_v3 import CREATIVE_DIVERSITY_POLICY_VERSION
 
 STAGE_CHECKPOINT_SCHEMA_VERSION = "original-batch-stage-checkpoint-v1"
 VISUAL_PROJECTION_CHECKPOINT_VERSION = "event-projection-v2"
-VOICEOVER_CHECKPOINT_VERSION = "central-complete-voiceover-v10-target-language-safe"
+VOICEOVER_CHECKPOINT_VERSION = "central-complete-voiceover-v11-semantic-spine"
 BLUEPRINT_PRIMARY_TRANSIENT_ATTEMPTS = max(
     1, int(os.environ.get("ORIGINAL_SCRIPT_BLUEPRINT_PRIMARY_TRANSIENT_ATTEMPTS", "2"))
 )
@@ -313,7 +313,7 @@ def validate_batch_script_integrity(
         issues.append(f"未知制作承载方式：{presentation or '空'}")
 
     bundle = direction.get("content_bundle_brief") if isinstance(direction.get("content_bundle_brief"), dict) else {}
-    authority_text = json.dumps(bundle, ensure_ascii=False)
+    authority_text = json.dumps(bundle, ensure_ascii=False, default=str)
     voice_text = _text(script.get("continuous_voiceover", {}).get("chinese_translation"))
     unsupported_effect_terms = (
         "显腿长", "腿更长", "拉长腿", "显瘦", "显高", "塑形",
@@ -747,6 +747,8 @@ def run_plan_only(
         product_selling_note=ctx["product_selling_note"],
         product_type=ctx["product_type"],
         top_category=ctx["top_category"],
+        target_country=ctx["target_country"],
+        target_language=ctx["target_language"],
         multidim_reference_contexts=multidim_reference_contexts,
         category_execution_extension=category_execution_extension,
     )
@@ -781,6 +783,24 @@ def run_plan_only(
                 (json.loads(item.frozen_direction_package_json or "{}")
                  .get("creative_diversity_contract", {})
                  .get("outfit_selection_contract") or {})
+            ),
+        }
+        for item in items
+    ]
+    input_snapshot["semantic_spine_snapshot"] = [
+        {
+            "direction_assignment_id": item.direction_assignment_id,
+            "semantic_spine_contract": (
+                json.loads(item.frozen_direction_package_json or "{}").get(
+                    "semantic_spine_contract"
+                )
+                or {}
+            ),
+            "context_bridge_contract": (
+                json.loads(item.frozen_direction_package_json or "{}").get(
+                    "context_bridge_contract"
+                )
+                or {}
             ),
         }
         for item in items
@@ -1298,6 +1318,20 @@ def _execute_simplified_single_item(
     script_id = _stable_id("SCRIPT_", script)
     content_id = _stable_id("CONTENT_", bundle)
     video_prompt_id = _stable_id("VP_", script.get("video_generation_brief", {}))
+    try:
+        batch_snapshot = json.loads(batch.input_snapshot_json or "{}")
+    except (TypeError, json.JSONDecodeError):
+        batch_snapshot = {}
+    product_reference_assets = [
+        dict(asset) for asset in batch_snapshot.get("product_reference_assets") or []
+        if isinstance(asset, dict)
+    ]
+    if product_reference_assets:
+        # Asset lineage is attached after content IDs are frozen: local cache
+        # paths must not change script semantics or force a text regeneration.
+        # Keep it outside video_generation_brief so local paths/tokens never
+        # enter a model prompt or a user-facing video prompt.
+        script["runtime_reference_assets"] = product_reference_assets
     retrieval_reference = (
         frozen.get("retrieval_reference_contract")
         if isinstance(frozen.get("retrieval_reference_contract"), dict)

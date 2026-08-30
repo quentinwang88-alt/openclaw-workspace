@@ -35,6 +35,25 @@ def _anchor_cache_root() -> Path:
     return Path.home() / ".openclaw" / "shared" / "data" / "original_product_anchor_cache"
 
 
+def _reference_cache_root() -> Path:
+    configured = _text(os.environ.get("ORIGINAL_SCRIPT_PRODUCT_REFERENCE_CACHE_ROOT"))
+    if configured:
+        return Path(configured).expanduser()
+    return _anchor_cache_root().parent / "original_product_reference_cache"
+
+
+def _asset_descriptor(path: str | Path, *, attachment: Mapping[str, Any]) -> Dict[str, Any]:
+    source = Path(path).expanduser().resolve()
+    return {
+        "role": "PRODUCT_REFERENCE",
+        "local_path": str(source),
+        "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "file_token": _text(attachment.get("file_token")),
+        "name": _text(attachment.get("name") or attachment.get("file_name")),
+        "authority": "OPERATION_TASK_PRODUCT_IMAGES",
+    }
+
+
 def build_operation_product_context(
     *,
     operation_client: Any,
@@ -86,16 +105,25 @@ def build_operation_product_context(
     )
     if anchor_card:
         validate_anchor_card_payload(anchor_card)
+        product_reference_assets = [
+            dict(item) for item in cached.get("product_reference_assets") or []
+            if isinstance(item, Mapping)
+            and Path(_text(item.get("local_path"))).expanduser().is_file()
+        ]
     else:
-        image_root = Path(output_dir) / "product_anchor_inputs"
+        image_root = (
+            _reference_cache_root() / _text(task.get("product_code")) / anchor_cache_key
+        )
+        image_root.mkdir(parents=True, exist_ok=True)
         image_paths = []
+        product_reference_assets = []
         for index, attachment in enumerate(attachments[:4], start=1):
-            image_paths.append(
-                str(
-                    operation_client.download_attachment(
-                        attachment, image_root / f"image_{index}"
-                    )
-                )
+            downloaded = operation_client.download_attachment(
+                attachment, image_root / f"image_{index}"
+            )
+            image_paths.append(str(downloaded))
+            product_reference_assets.append(
+                _asset_descriptor(downloaded, attachment=attachment)
             )
 
         client = llm_client or OriginalScriptLLMClient(route="primary")
@@ -119,6 +147,7 @@ def build_operation_product_context(
                     "product_code": _text(task.get("product_code")),
                     "schema_version": "operation-new-sku-anchor-v2-product-cache",
                     "anchor_card": anchor_card,
+                    "product_reference_assets": product_reference_assets,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -132,6 +161,7 @@ def build_operation_product_context(
                 "cache_key": anchor_cache_key,
                 "shared_cache_path": str(cache_path),
                 "anchor_card": anchor_card,
+                "product_reference_assets": product_reference_assets,
             },
             ensure_ascii=False,
             indent=2,
@@ -171,6 +201,13 @@ def build_operation_product_context(
             _text(item.get("file_token")) for item in attachments if isinstance(item, dict)
         ],
         "anchor_card": anchor_card,
+        "product_reference_asset_fingerprints": [
+            {
+                "role": item.get("role"), "sha256": item.get("sha256"),
+                "file_token": item.get("file_token"),
+            }
+            for item in product_reference_assets
+        ],
         "selling_snapshot_hash": central_snapshot.get("snapshot_hash"),
     }
     return {
@@ -183,6 +220,7 @@ def build_operation_product_context(
         "product_type": _text(task.get("product_type")),
         "top_category": _text(task.get("top_category")),
         "anchor_card": anchor_card,
+        "product_reference_assets": product_reference_assets,
         "structure_route": {
             "status": "REBUILD_REQUIRED",
             "request": {},

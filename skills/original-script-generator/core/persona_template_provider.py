@@ -79,6 +79,22 @@ def _stable_hash(payload: Dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
+_PERSONA_TEXT_QUALITY_MARKERS = (
+    "，，", "其余发型身材不变", "保持原样", "和上一个一样", "微卷粽色长发",
+)
+
+
+def _persona_text_quality_issues(template: Dict[str, Any]) -> List[str]:
+    material = " ".join(
+        _text(template.get(key))
+        for key in (
+            "identity_text", "appearance_text", "body_proportion_text",
+            "hair_makeup_text", "prompt_core", "prompt_negative",
+        )
+    )
+    return [marker for marker in _PERSONA_TEXT_QUALITY_MARKERS if marker in material]
+
+
 def load_persona_templates(
     *, db_path: Optional[str | Path] = None
 ) -> Dict[str, Any]:
@@ -96,6 +112,8 @@ def load_persona_templates(
         "templates": [],
         "enabled_count": 0,
         "approved_asset_count": 0,
+        "last_refreshed_at": "",
+        "text_quality_warning_count": 0,
         "soft_warnings": [],
     }
     if not snapshot["enabled"]:
@@ -144,6 +162,7 @@ def load_persona_templates(
     snapshot["enabled_count"] = len(rows)
     templates: List[Dict[str, Any]] = []
     missing_asset_ids: List[str] = []
+    text_quality_warnings: List[str] = []
     for raw in rows:
         row = dict(raw)
         source = _json(row.get("source_payload"), {})
@@ -214,6 +233,11 @@ def load_persona_templates(
             "updated_at": _text(row.get("updated_at")),
         }
         template["structured_snapshot_hash"] = _stable_hash(template)
+        quality_issues = _persona_text_quality_issues(template)
+        if quality_issues:
+            text_quality_warnings.append(
+                f"{template['persona_id']}:{','.join(quality_issues)}"
+            )
         templates.append(template)
 
     snapshot["templates"] = templates
@@ -221,8 +245,18 @@ def load_persona_templates(
         len(item.get("reference_asset_ids") or []) for item in templates
     )
     snapshot["status"] = "AVAILABLE" if templates else "UNAVAILABLE"
+    snapshot["last_refreshed_at"] = max(
+        (_text(item.get("updated_at")) for item in templates),
+        default="",
+    )
+    snapshot["text_quality_warning_count"] = len(text_quality_warnings)
     if missing_asset_ids:
         snapshot["soft_warnings"].append(
             "PERSONA_REFERENCE_ASSET_MISSING:" + ",".join(missing_asset_ids)
+        )
+    if text_quality_warnings:
+        snapshot["soft_warnings"].append(
+            "PERSONA_TEXT_QUALITY_WARNING:"
+            + "|".join(text_quality_warnings[:12])
         )
     return snapshot

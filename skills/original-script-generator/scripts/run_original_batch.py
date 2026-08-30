@@ -182,6 +182,35 @@ def _save_report(output_dir, batch, items, summary):
         )
         return contract if isinstance(contract, dict) else {}
 
+    def _semantic_contracts(item):
+        try:
+            frozen = json.loads(item.frozen_direction_package_json or "{}")
+        except Exception:
+            frozen = {}
+        return {
+            "semantic_spine_contract": (
+                frozen.get("semantic_spine_contract")
+                if isinstance(frozen.get("semantic_spine_contract"), dict)
+                else {}
+            ),
+            "context_bridge_contract": (
+                frozen.get("context_bridge_contract")
+                if isinstance(frozen.get("context_bridge_contract"), dict)
+                else {}
+            ),
+        }
+
+    def _claim_action_contract(item):
+        try:
+            frozen = json.loads(item.frozen_direction_package_json or "{}")
+        except Exception:
+            frozen = {}
+        contract = (
+            frozen.get("claim_action_contract")
+            if isinstance(frozen, dict) else {}
+        )
+        return contract if isinstance(contract, dict) else {}
+
     def _production_diagnostics(item):
         result = _result(item)
         if not isinstance(result.get("script"), dict):
@@ -236,6 +265,7 @@ def _save_report(output_dir, batch, items, summary):
                     "audience_tension_status": it.audience_tension_status,
                     "audience_tension_text": it.audience_tension_text,
                     "claim_keys": json.loads(it.claim_keys_json) if it.claim_keys_json else [],
+                    **_semantic_contracts(it),
                 },
                 "expression": {
                     "requested_hook_id": it.requested_hook_id,
@@ -246,11 +276,20 @@ def _save_report(output_dir, batch, items, summary):
                 "creative": {
                     "creative_contract_id": it.creative_contract_id,
                     "visual_signature": it.visual_signature,
+                    "perceptual_signature": _creative_contract(it).get(
+                        "perceptual_signature", ""
+                    ),
+                    "perceptual_repeat_status": _creative_contract(it).get(
+                        "perceptual_repeat_status", "NEW"
+                    ),
                     "frozen_direction_package": bool(it.frozen_direction_package_json),
                     "scene_family_key": _creative_contract(it).get("scene_family_key", ""),
                     "scene_motif": _creative_contract(it).get("scene_motif", ""),
                     "outfit_selection_contract": _creative_contract(it).get(
                         "outfit_selection_contract", {}
+                    ),
+                    "outfit_scene_affinity_contract": _creative_contract(it).get(
+                        "outfit_scene_affinity_contract", {}
                     ),
                     "persona_selection_contract": _creative_contract(it).get(
                         "persona_selection_contract", {}
@@ -258,6 +297,7 @@ def _save_report(output_dir, batch, items, summary):
                     "outfit_persona_affinity_contract": _creative_contract(it).get(
                         "outfit_persona_affinity_contract", {}
                     ),
+                    "claim_action_contract": _claim_action_contract(it),
                 },
                 "status": it.status,
                 "script_mode": _result(it).get("script_mode", ""),
@@ -343,6 +383,26 @@ def _render_complete_scripts_markdown(report) -> str:
             "FALLBACK": "已回退",
             "NOT_APPLICABLE": "不适用",
         }.get(str(scene_affinity_contract.get("match_status") or "").upper(), "不适用")
+        semantic_spine = (
+            (item.get("content") or {}).get("semantic_spine_contract")
+            if isinstance((item.get("content") or {}).get("semantic_spine_contract"), dict)
+            else {}
+        )
+        semantic_thesis = (
+            semantic_spine.get("script_thesis")
+            if isinstance(semantic_spine.get("script_thesis"), dict)
+            else {}
+        )
+        context_bridge = (
+            (item.get("content") or {}).get("context_bridge_contract")
+            if isinstance((item.get("content") or {}).get("context_bridge_contract"), dict)
+            else {}
+        )
+        scene_relation = (
+            context_bridge.get("scene_relation")
+            if isinstance(context_bridge.get("scene_relation"), dict)
+            else {}
+        )
         lines.extend(
             [
                 f"## [{int(item.get('item_index') or 0):02d}] {_md(item.get('compatibility_slot'))}",
@@ -356,7 +416,15 @@ def _render_complete_scripts_markdown(report) -> str:
                 f"| 实际钩子 | {_md(expression.get('actual_hook_id'))} |",
                 f"| 观众关系偏好 | {_md((expression.get('voiceover_surface_contract') or {}).get('relationship_device'))} |",
                 f"| 内容角度 | {_md((item.get('content') or {}).get('content_angle_key'))} |",
+                f"| 主消费情境 | {_md(semantic_thesis.get('primary_narrative_context'))} |",
+                f"| 核心购买理由 | {_md(semantic_thesis.get('core_buying_reason'))} |",
+                f"| 场景语义关系 | {_md(scene_relation.get('relation'))} |",
+                f"| 口播语境模式 | {_md(context_bridge.get('voiceover_context_mode'))} |",
                 f"| 视觉签名 | {_md(creative.get('visual_signature'))} |",
+                f"| 感知签名 | {_md(creative.get('perceptual_signature'))} |",
+                f"| 跨批次重复状态 | {_md(creative.get('perceptual_repeat_status'))} |",
+                f"| 卖点动作意图 | {_md((creative.get('claim_action_contract') or {}).get('proof_action_intent'))} |",
+                f"| 选定动作模式 | {_md((creative.get('claim_action_contract') or {}).get('preferred_action_mode'))} |",
                 f"| 人物模板 | {_md(persona_contract.get('persona_name') or persona_contract.get('persona_id'))} |",
                 f"| 穿搭模板 | {_md(outfit_contract.get('template_display_name') or outfit_contract.get('template_id') or outfit_contract.get('silhouette_key'))} |",
                 f"| 实际配饰 | {_md('；'.join(accessory_items) or outfit_recipe.get('other_accessories') or '不适用')} |",

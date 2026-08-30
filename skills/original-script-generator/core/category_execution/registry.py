@@ -190,6 +190,30 @@ def build_category_video_brief(
     )
 
 
+def project_category_capture_rhythm_contract(
+    extension: Dict[str, Any],
+    *,
+    carrier_execution: Dict[str, Any],
+    capture_contract: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Apply an optional category-only filming projection.
+
+    Unsupported categories and adapters without the optional hook return a
+    deep copy of the shared contract.  The common compiler remains the owner
+    of structure order and cut count.
+    """
+
+    adapter = _adapter_for_extension(extension)
+    projector = getattr(adapter, "project_capture_rhythm", None) if adapter else None
+    if not callable(projector):
+        return copy.deepcopy(capture_contract)
+    return projector(
+        extension,
+        carrier_execution=carrier_execution,
+        capture_contract=capture_contract,
+    )
+
+
 def validate_category_execution_identity(
     extension: Dict[str, Any],
     *,

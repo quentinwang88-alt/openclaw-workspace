@@ -103,6 +103,8 @@ def _verify_distribution(
     projections: Sequence[Dict[str, Any]],
     expected_count: int,
     expected_products: Dict[str, int],
+    *,
+    allow_duplicate_signatures: bool = False,
 ) -> Dict[str, Any]:
     script_ids = [str(item.get("script_id") or "").strip() for item in projections]
     signatures = [str(item.get("creative_signature") or "").strip() for item in projections]
@@ -116,7 +118,7 @@ def _verify_distribution(
     duplicate_signatures = sorted(
         signature for signature, count in Counter(signatures).items() if count > 1
     )
-    if duplicate_signatures:
+    if duplicate_signatures and not allow_duplicate_signatures:
         raise RuntimeError(f"新脚本存在重复创意签名: {duplicate_signatures}")
     if expected_products and dict(product_counts) != expected_products:
         raise RuntimeError(
@@ -127,6 +129,7 @@ def _verify_distribution(
         "product_counts": dict(product_counts),
         "unique_script_ids": len(set(script_ids)),
         "unique_creative_signatures": len(set(signatures)),
+        "duplicate_creative_signatures": duplicate_signatures,
         "unique_scene_summaries": len(
             {str(item.get("scene_summary") or "").strip() for item in projections}
         ),
@@ -149,9 +152,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--include-batch-id", action="append", required=True)
     parser.add_argument("--exclude-item-id", action="append", default=[])
     parser.add_argument("--expected-count", type=int, required=True)
+    parser.add_argument(
+        "--expected-old-count",
+        type=int,
+        default=None,
+        help="可选：待删除旧记录数量；未提供时沿用 --expected-count",
+    )
     parser.add_argument("--expected-product-count", action="append", default=[])
+    parser.add_argument(
+        "--expected-old-product-count",
+        action="append",
+        default=[],
+        help="可选：待删除旧记录的产品分布，格式为 产品编码=数量",
+    )
     parser.add_argument("--backup-root", default=str(DEFAULT_BACKUP_ROOT))
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument(
+        "--allow-duplicate-signatures",
+        action="store_true",
+        help="允许创意签名重复但仍要求脚本ID、数量和产品分布正确；重复将记为警告",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     db_path = str(Path(args.db_path).expanduser().resolve())
@@ -161,6 +181,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     include_batch_ids = _clean(args.include_batch_id)
     excluded_item_ids = _clean(args.exclude_item_id)
     expected_products = _parse_expected_product_counts(args.expected_product_count)
+    expected_old_products = _parse_expected_product_counts(
+        args.expected_old_product_count
+    )
 
     storage = BatchStorage()
     selected = _selected_local_items(
@@ -168,7 +191,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     projections = [projection for _, _, projection in selected]
     new_summary = _verify_distribution(
-        projections, args.expected_count, expected_products
+        projections,
+        args.expected_count,
+        expected_products,
+        allow_duplicate_signatures=args.allow_duplicate_signatures,
     )
 
     client = _client(args.script_url)
@@ -199,9 +225,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"matched={sorted(matched_script_ids)}, "
                 f"expected={sorted(set(delete_script_ids))}"
             )
-    if len(old_records) != args.expected_count:
+    expected_old_count = (
+        args.expected_old_count
+        if args.expected_old_count is not None
+        else args.expected_count
+    )
+    if len(old_records) != expected_old_count:
         raise RuntimeError(
-            f"待删除记录数量不符: {len(old_records)} != {args.expected_count}"
+            f"待删除记录数量不符: {len(old_records)} != {expected_old_count}"
         )
     blocked = [
         record.record_id
@@ -216,9 +247,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         str(record.fields.get(PRODUCTION_SCRIPT_FIELD_NAMES["product_code"]) or "").strip()
         for record in old_records
     )
-    if expected_products and dict(old_product_counts) != expected_products:
+    old_products_for_check = expected_old_products or expected_products
+    if old_products_for_check and dict(old_product_counts) != old_products_for_check:
         raise RuntimeError(
-            f"旧记录产品分布不符: {dict(old_product_counts)} != {expected_products}"
+            f"旧记录产品分布不符: {dict(old_product_counts)} != {old_products_for_check}"
         )
 
     product_images: Dict[str, List[Dict[str, Any]]] = {}
@@ -239,7 +271,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "include_batch_ids": include_batch_ids,
         "excluded_item_ids": excluded_item_ids,
         "old_record_count": len(old_records),
+        "expected_old_count": expected_old_count,
         "old_product_counts": dict(old_product_counts),
+        "expected_old_product_counts": old_products_for_check,
         "new": new_summary,
     }
     print(json.dumps({"preflight": preflight}, ensure_ascii=False, indent=2))

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import atexit
+import fcntl
 import hashlib
 import json
 import os
@@ -52,10 +54,29 @@ DEFAULT_SCRIPT_URL = (
     "https://gcngopvfvo0q.feishu.cn/wiki/"
     "KsX7w8Y8ZiJfnsk2Mtvc7xLun1f?table=tblIvHJ0nsn9WCwi&view=vewKfXc8lj"
 )
+DEFAULT_RUN_LOCK_PATH = (
+    Path.home() / ".openclaw" / "shared" / "locks" / "original-script-production.lock"
+)
 
 
 class RunInterrupted(RuntimeError):
     """Raised when the scheduler asks the active task to stop gracefully."""
+
+
+def _acquire_process_lock(lock_path: Path = DEFAULT_RUN_LOCK_PATH):
+    """Acquire the production-wide lock without waiting or triggering retries."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    handle.seek(0)
+    handle.truncate()
+    handle.write(f"pid={os.getpid()}\n")
+    handle.flush()
+    return handle
 
 
 def _install_interrupt_handler() -> None:
@@ -319,6 +340,14 @@ def main() -> int:
     if args.export_ready_only and not args.record_id:
         parser.error("--export-ready-only 必须与 --record-id 一起使用")
 
+    run_lock = None
+    if not args.dry_run:
+        run_lock = _acquire_process_lock()
+        if run_lock is None:
+            print("SKIPPED_LOCKED: 已有原创脚本生产任务运行，本次不重复启动")
+            return 0
+        atexit.register(run_lock.close)
+
     _install_interrupt_handler()
 
     operation_client = _client(args.operation_url)
@@ -337,7 +366,7 @@ def main() -> int:
     ensure_fields(script_client, primary_field_name="脚本ID", specs=PRODUCTION_SCRIPT_FIELDS)
 
     candidates = []
-    for record in operation_client.list_records(page_size=100):
+    for record in operation_client.list_records(page_size=500):
         if args.record_id and record.record_id != args.record_id:
             continue
         task = operation_record_values(record)

@@ -334,6 +334,9 @@ def scene_family_for_motif(scene_motif: Any) -> str:
 
     value = _text(scene_motif).lower()
     mappings = (
+        ("TRAVEL_PREP", ("行李箱", "整理行李", "收拾行李")),
+        ("TRAVEL_TRANSIT", ("机场", "候机", "出发层")),
+        ("TRAVEL_STAY", ("酒店房间", "酒店客房", "民宿房间")),
         ("OFFICE_WORKBREAK", ("办公室", "写字楼", "电梯", "办公")),
         ("CAR_TRANSIT", ("车道", "等车", "车内", "搭车")),
         # Exit corridors and public walkways behave like outing/transit

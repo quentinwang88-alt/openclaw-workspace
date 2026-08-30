@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import re
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -25,8 +27,8 @@ from core.reality_voiceover_bridge import (
 )
 
 
-SCHEMA_VERSION = "creative-full-script-voiceover-v5-multilingual"
-HOOK_EXECUTION_POLICY_VERSION = "central-voiceover-v36-target-language-safe"
+SCHEMA_VERSION = "creative-full-script-voiceover-v8-semantic-spine"
+HOOK_EXECUTION_POLICY_VERSION = "central-voiceover-v41-semantic-spine"
 
 
 def _text(value: Any) -> str:
@@ -41,6 +43,8 @@ def _target_language_key(value: str) -> str:
         return "vi"
     if any(token in normalized for token in ("马来语", "马来西亚语", "malay", "ms-my")) or normalized == "ms":
         return "ms"
+    if any(token in normalized for token in ("西班牙语", "spanish", "es-mx")) or normalized == "es":
+        return "es"
     if any(token in normalized for token in ("中文", "汉语", "chinese", "zh-cn")) or normalized == "zh":
         return "zh"
     return "unknown"
@@ -60,7 +64,7 @@ def _target_language_error(text: str, target_language: str) -> str:
     key = _target_language_key(target_language)
     thai_count = len(re.findall(r"[\u0E00-\u0E7F]", value))
     cjk_count = len(re.findall(r"[\u3400-\u9FFF]", value))
-    latin_count = len(re.findall(r"[A-Za-zÀ-ỹĐđ]", value))
+    latin_count = len(re.findall(r"[A-Za-z\u00C0-\u024F\u1E00-\u1EFF]", value))
     compact_count = len(re.sub(r"\s+", "", value))
     if key == "th":
         if cjk_count or thai_count < max(4, int(compact_count * 0.35)):
@@ -83,6 +87,14 @@ def _target_language_error(text: str, target_language: str) -> str:
         )
         if thai_count or cjk_count or latin_count < 8 or len(malay_markers) < 2:
             return "任务目标语言为马来语，但口播正文不是马来语"
+    elif key == "es":
+        spanish_markers = re.findall(
+            r"\b(?:que|para|esta|este|con|cuando|porque|pero|muy|queda|"
+            r"se ve|me gusta|si|una|un|lo|la|las|los)\b",
+            value.lower(),
+        )
+        if thai_count or cjk_count or latin_count < 8 or len(spanish_markers) < 2:
+            return "任务目标语言为西班牙语，但口播正文不是西班牙语"
     elif key == "zh":
         if cjk_count < 2:
             return "任务目标语言为中文，但口播正文不是中文"
@@ -107,6 +119,51 @@ def hook_knowledge_snapshot_hash() -> str:
         return "UNAVAILABLE"
 
 
+def _central_native_rhetoric_contract(
+    *,
+    voiceover_root: str,
+    requested_hook_id: str,
+    target_country: str,
+    target_language: str,
+    top_category: str,
+    product_type: str,
+    audience_tension: str,
+    audience_need_authorized: bool,
+    rhetorical_conflict_authorized: bool,
+) -> Dict[str, Any]:
+    """Call the central provider; original-script owns no retrieval policy."""
+
+    root = Path(voiceover_root or "/Users/likeu3/voiceover_copy_engine")
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    try:
+        from voiceover_copy_engine.services.native_rhetoric import (
+            build_native_rhetoric_contract,
+        )
+        return build_native_rhetoric_contract(
+            requested_hook_id=requested_hook_id,
+            target_country=target_country,
+            target_language=target_language,
+            top_category=top_category,
+            product_type=product_type,
+            audience_tension=audience_tension,
+            audience_need_authorized=audience_need_authorized,
+            rhetorical_conflict_authorized=rhetorical_conflict_authorized,
+        )
+    except Exception as exc:
+        return {
+            "schema_version": "native-rhetoric-contract-v2",
+            "policy_version": "central-native-rhetoric-v2-quality-gated",
+            "status": "UNAVAILABLE",
+            "requested_hook_id": requested_hook_id,
+            "resolved_hook_id": requested_hook_id,
+            "hook_compatibility_status": "FALLBACK_TO_GOVERNED_HOOK",
+            "structural_patterns": [],
+            "native_surface_references": [],
+            "diagnostics": {"reason": "CENTRAL_PROVIDER_UNAVAILABLE", "error_type": type(exc).__name__},
+        }
+
+
 def _invoke_model(model_command: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     command = shlex.split(model_command)
     if not command:
@@ -116,6 +173,11 @@ def _invoke_model(model_command: str, payload: Dict[str, Any]) -> Dict[str, Any]
         input=json.dumps(
             {"contract_name": "creative_full_single_v1", "payload": payload},
             ensure_ascii=False,
+            # Knowledge snapshots can contain provider timestamps (for
+            # example, an approved sample's created_at).  They are metadata,
+            # not speech content; stringify them at the process boundary so a
+            # harmless datetime cannot abort an otherwise valid voiceover.
+            default=str,
         ),
         text=True,
         capture_output=True,
@@ -337,12 +399,18 @@ def _narrative_anchor_options(creative: Dict[str, Any]) -> List[Dict[str, str]]:
         scene_moment = _text(creative.get("scene_moment"))
         if motivation:
             result.append({
+                "anchor_id": "CTX_" + hashlib.sha256(
+                    f"speaker_intent|{motivation}".encode("utf-8")
+                ).hexdigest()[:16].upper(),
                 "source": "speaker_intent",
                 "label": "人物此刻愿意分享的原因",
                 "moment_zh": motivation,
             })
         if scene_moment:
             result.append({
+                "anchor_id": "CTX_" + hashlib.sha256(
+                    f"scene_moment|{scene_moment}".encode("utf-8")
+                ).hexdigest()[:16].upper(),
                 "source": "scene_moment",
                 "label": "人物所处的普通生活时刻",
                 "moment_zh": scene_moment,
@@ -358,8 +426,101 @@ def _narrative_anchor_options(creative: Dict[str, Any]) -> List[Dict[str, str]]:
     for key in ("event_context", "core_result_moment", "scene_moment", "opening_event"):
         value = _text(creative.get(key))
         if value and value.upper() != "UNAVAILABLE":
-            result.append({"source": key, "label": labels[key], "moment_zh": value})
+            result.append({
+                "anchor_id": "CTX_" + hashlib.sha256(
+                    f"{key}|{value}".encode("utf-8")
+                ).hexdigest()[:16].upper(),
+                "source": key,
+                "label": labels[key],
+                "moment_zh": value,
+            })
     return result[:3]
+
+
+def _compact_voiceover_context(contract: Dict[str, Any]) -> Dict[str, Any]:
+    """Expose only speakable context to the writer.
+
+    The full context contract remains in expression lineage.  The writer only
+    needs an authorised audience situation, one current moment and a scenario
+    budget; locations and visual actions are not sentence slots.
+    """
+
+    if not isinstance(contract, dict):
+        return {}
+    projected: Dict[str, Any] = {
+        "status": _text(contract.get("status")) or "UNAVAILABLE",
+        "context_mode": _text(contract.get("context_mode")) or "UNAVAILABLE",
+        "use_priority": _text(contract.get("use_priority")) or "OPTIONAL",
+        "scenario_budget": max(
+            1, min(2, int(contract.get("scenario_budget") or 1))
+        ),
+    }
+    for key in ("audience_situation", "current_life_moment"):
+        value = contract.get(key)
+        if not isinstance(value, dict):
+            continue
+        item = {
+            field: value.get(field)
+            for field in ("anchor_id", "text", "authority")
+            if value.get(field) not in (None, "", [])
+        }
+        if item:
+            projected[key] = item
+    return projected
+
+
+def _compact_creative_voice_context(creative: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep a speaker position without asking speech to narrate the shoot."""
+
+    if not isinstance(creative, dict):
+        return {}
+    return {
+        key: creative.get(key)
+        for key in ("creator_motivation", "scene_moment", "speaking_personality")
+        if creative.get(key) not in (None, "", [])
+    }
+
+
+def _compact_native_rhetoric_contract(contract: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(contract, dict):
+        return {}
+    return {
+        "schema_version": _text(contract.get("schema_version")),
+        "status": _text(contract.get("status")) or "UNAVAILABLE",
+        "resolved_hook_id": _text(contract.get("resolved_hook_id")),
+        "structural_patterns": [
+            item
+            for item in contract.get("structural_patterns") or []
+            if isinstance(item, dict)
+        ][:2],
+        "native_surface_references": [
+            item
+            for item in contract.get("native_surface_references") or []
+            if isinstance(item, dict)
+        ][:2],
+    }
+
+
+def _resolve_style_reference_routing(
+    approved_style_references: List[Dict[str, Any]],
+    native_rhetoric_contract: Dict[str, Any],
+    fallback_policy: str,
+) -> tuple[List[Dict[str, Any]], str]:
+    """Keep human rhetoric anchors when qualified native cadence is present."""
+
+    approved = [
+        item for item in approved_style_references if isinstance(item, dict)
+    ]
+    native_available = bool(
+        (native_rhetoric_contract or {}).get("native_surface_references")
+    )
+    if native_available and approved:
+        policy = "HYBRID_NATIVE_SURFACE_AND_APPROVED_RHETORIC"
+    elif native_available:
+        policy = "NATIVE_SURFACE_ONLY"
+    else:
+        policy = fallback_policy
+    return approved, policy
 
 
 def _relationship_language_profile(
@@ -392,6 +553,12 @@ def _relationship_language_profile(
             "viewer_reference_forms": ["siapa yang tengah", "kalau korang suka", "yang sedang cari"],
             "reaction_openers": ["jujur cakap", "baru perasan", "tengok ni"],
             "natural_particles": ["ya", "lah", "tau", "memang"],
+        },
+        "es": {
+            "audience_addresses": ["amigas", "oigan"],
+            "viewer_reference_forms": ["si están buscando", "para quienes quieren"],
+            "reaction_openers": ["la verdad", "vean esto", "me acabo de fijar"],
+            "natural_particles": ["la verdad", "justo", "¿verdad?"],
         },
     }.get(language_key, {
         "audience_addresses": [],
@@ -483,6 +650,7 @@ def run_central_complete_voiceover(
         direction, active_ids, requested_hook_id=candidate_hook_id
     )
     hook_id = _text(hook_policy.get("selected_hook_id"))
+    originally_requested_hook_id = hook_id
     hook_row = next(
         (item for item in hooks if _text(item.get("hook_id")) == hook_id), {}
     )
@@ -491,6 +659,7 @@ def run_central_complete_voiceover(
         target_country=target_country,
         top_category=top_category,
         product_type=product_type,
+        limit=1,
     )
     style_selection_policy = _style_reference_selection_policy(
         approved_style_references
@@ -507,6 +676,43 @@ def run_central_complete_voiceover(
     argument_context_alignment = (
         content.get("argument_context_alignment")
         if isinstance(content.get("argument_context_alignment"), dict) else {}
+    )
+    argument_expression_policy = (
+        argument.get("expression_policy")
+        if isinstance(argument.get("expression_policy"), dict)
+        else {}
+    )
+    native_rhetoric_contract = _central_native_rhetoric_contract(
+        voiceover_root=voiceover_root,
+        requested_hook_id=hook_id,
+        target_country=target_country,
+        target_language=target_language,
+        top_category=top_category,
+        product_type=product_type,
+        audience_tension=_text(tension.get("text")),
+        audience_need_authorized=(
+            _text(selling_argument.get("audience_need_authority")).upper()
+            == "APPROVED_SELLING_SCENARIO"
+        ),
+        rhetorical_conflict_authorized=bool(
+            argument_expression_policy.get("rhetorical_conflict_allowed")
+        ),
+    )
+    # The allocator/manual hook library owns hook semantics.  Discovery may
+    # add compatible structure or native cadence, or return UNAVAILABLE; it
+    # must never replace the already-governed hook with a generic fallback.
+    context_v2_enabled = _text(
+        os.environ.get("CENTRAL_VOICEOVER_CONTEXT_V2_ENABLED", "1")
+    ).lower() not in {"0", "false", "off", "no"}
+    voiceover_context_contract = (
+        expression.get("voiceover_context_contract")
+        if context_v2_enabled
+        and isinstance(expression.get("voiceover_context_contract"), dict)
+        else {}
+    )
+    scenario_budget = max(
+        1,
+        min(2, int(voiceover_context_contract.get("scenario_budget") or 1)),
     )
     selling_argument_available = _text(selling_argument.get("status")).upper() == "AVAILABLE"
     content_mode = _text(
@@ -528,6 +734,53 @@ def run_central_complete_voiceover(
     if not facts and not selling_argument_mode:
         raise ValueError("批次方向没有可验证且有画面支持的口播事实")
     creative = expression.get("creative_voice_context") if isinstance(expression.get("creative_voice_context"), dict) else {}
+    compact_context = _compact_voiceover_context(voiceover_context_contract)
+    compact_creative = _compact_creative_voice_context(creative)
+    semantic_spine = (
+        direction.get("semantic_spine_contract")
+        if isinstance(direction.get("semantic_spine_contract"), dict)
+        else (direction.get("content_bundle_brief") or {}).get(
+            "semantic_spine_contract", {}
+        )
+    )
+    semantic_spine = semantic_spine if isinstance(semantic_spine, dict) else {}
+    semantic_thesis = (
+        semantic_spine.get("script_thesis")
+        if isinstance(semantic_spine.get("script_thesis"), dict)
+        else {}
+    )
+    context_bridge = (
+        direction.get("context_bridge_contract")
+        if isinstance(direction.get("context_bridge_contract"), dict)
+        else (direction.get("content_bundle_brief") or {}).get(
+            "context_bridge_contract", {}
+        )
+    )
+    context_bridge = context_bridge if isinstance(context_bridge, dict) else {}
+    context_mode = _text(context_bridge.get("voiceover_context_mode"))
+    bridge_relation = (
+        context_bridge.get("scene_relation")
+        if isinstance(context_bridge.get("scene_relation"), dict)
+        else {}
+    )
+    scene_anchored = (
+        context_mode == "SCENE_ANCHORED"
+        and _text(bridge_relation.get("relation")) == "SUPPORTS"
+    )
+    compact_native_rhetoric = _compact_native_rhetoric_contract(
+        native_rhetoric_contract
+    )
+    # Discovery evidence and human-approved rhetoric are complementary.  A
+    # qualified native sample may teach target-language cadence, while the
+    # approved sample remains the quality/relationship anchor.  Neither is
+    # allowed to replace the governed hook semantics or product facts.
+    writer_style_references, writer_style_selection_policy = (
+        _resolve_style_reference_routing(
+            approved_style_references,
+            compact_native_rhetoric,
+            style_selection_policy,
+        )
+    )
     category_extension = (
         direction.get("category_execution_extension")
         if isinstance(direction.get("category_execution_extension"), dict)
@@ -543,36 +796,12 @@ def run_central_complete_voiceover(
         if isinstance(category_profile.get("identity_authority"), dict)
         else {}
     )
-    retrieval_contract = (
-        direction.get("retrieval_reference_contract")
-        if isinstance(direction.get("retrieval_reference_contract"), dict)
-        else {}
-    )
-    retrieved_speech_hook_pool = [
-        {
-            "cluster_id": _text(item.get("cluster_id")),
-            "prototype_name": _text(item.get("prototype_name")),
-            "opening_move": _text(item.get("opening_move")),
-            "relation_mode": _text(item.get("relation_mode")),
-            "argument_order": _text(item.get("argument_order")),
-            "ending_pattern": _text(item.get("ending_pattern")),
-            "target_language_examples": [
-                {
-                    "language": _text(example.get("language")),
-                    "rhetorical_example": _text(example.get("rhetorical_example")),
-                }
-                for example in item.get("target_language_examples") or []
-                if isinstance(example, dict)
-            ][:2],
-        }
-        for item in retrieval_contract.get("speech_hook_pool") or []
-        if isinstance(item, dict)
-    ][:3]
     payload = {
         "schema_version": "original-batch-complete-voiceover-input-v2",
         "hook_execution_policy_version": HOOK_EXECUTION_POLICY_VERSION,
         "candidate_id": hook_id,
         "requested_hook_id": hook_id,
+        "upstream_requested_hook_id": originally_requested_hook_id,
         "product_code": product_code,
         "target_country": target_country,
         "target_language": target_language,
@@ -594,51 +823,91 @@ def run_central_complete_voiceover(
         "spoken_duration_preference_seconds": (
             [11, 15] if content_mode == "SELLING_ARGUMENT" else [7, 11]
         ),
-        "content_mainline": _text(value.get("text")) or _text(expression.get("content_mainline")),
+        "content_mainline": (
+            _text(semantic_thesis.get("core_buying_reason"))
+            or _text(value.get("text"))
+            or _text(expression.get("content_mainline"))
+        ),
         "audience_tension": _text(tension.get("text")),
         "selling_argument": {
             key: selling_argument.get(key)
             for key in (
                 "argument_id", "status", "core_value", "target_need",
-                "proof_thesis", "decision_thesis", "allowed_strength",
-                "verification_status", "evidence_requirement",
-                "operator_priority", "proof_match_status",
-                "claim_theme", "argument_theme", "concept_ids",
+                "operator_expression", "allowed_strength",
+                "audience_need_authority", "audience_situation",
+                "multi_scenario_authorized",
                 "primary_demonstration_mode", "demonstration_policy",
-                "voiceover_scope_policy",
+                "voiceover_scope_policy", "respectful_reframe_required",
             )
             if selling_argument.get(key) not in (None, "", [])
         },
         "argument_context_alignment": argument_context_alignment,
+        "voiceover_context_contract": compact_context,
         "verified_facts": facts,
+        "spoken_brief": {
+            "schema_version": "central-spoken-brief-v2-semantic-spine",
+            "audience_or_need": (
+                _text(semantic_thesis.get("target_audience"))
+                or _text(semantic_thesis.get("primary_narrative_context"))
+                or _text((compact_context.get("audience_situation") or {}).get("text"))
+                or _text(selling_argument.get("target_need"))
+                or _text(tension.get("text"))
+            ),
+            "primary_narrative_context": _text(
+                semantic_thesis.get("primary_narrative_context")
+            ),
+            "selected_source_span": _text(
+                semantic_thesis.get("selected_source_span")
+            ),
+            "current_life_situation": (
+                _text(context_bridge.get("speaker_context"))
+                or _text((compact_context.get("current_life_moment") or {}).get("text"))
+                or _text(compact_creative.get("scene_moment"))
+            ) if scene_anchored else "",
+            "core_buying_reason": (
+                _text(semantic_thesis.get("core_buying_reason"))
+                or _text(selling_argument.get("operator_expression"))
+                or _text(selling_argument.get("core_value"))
+                or _text(value.get("text"))
+                or _text(expression.get("content_mainline"))
+            ),
+            # The full reviewed sentence remains in semantic_spine_contract
+            # for audit.  The writer receives only the source span selected
+            # for this item, so secondary examples cannot silently replace
+            # the primary context.
+            "operator_context": (
+                _text(semantic_thesis.get("selected_source_span"))
+                or _text(selling_argument.get("source_operator_expression"))
+            ),
+            "optional_supporting_fact": facts[0] if facts else {},
+            "speaker_position": (
+                _text(context_bridge.get("speaker_context"))
+                if scene_anchored else ""
+            ),
+            "voiceover_context_mode": context_mode or "PRODUCT_ANCHORED",
+            "semantic_spine_id": _text(semantic_spine.get("spine_id")),
+            "allowed_spoken_context": list(
+                context_bridge.get("allowed_spoken_context") or []
+            ),
+            "hook_job": {
+                "hook_id": hook_id,
+                "core_intent": _text(hook_row.get("core_intent")),
+                "relation_modes": list(hook_row.get("relation_modes") or []),
+            },
+            "composition_goal": (
+                "像创作者对手机自然说完一个选择理由；保持主消费情境，"
+                "不要求逐句对应镜头，可省略任何让表达变差的可选信息。"
+            ),
+        },
         "expression_density_contract": {
-            "preferred_information_units": 2 if selling_argument_mode else 1,
-            "max_usage_scenarios": 1,
+            "max_usage_scenarios": scenario_budget,
             "max_supporting_facts": 1 if selling_argument_mode else len(facts),
             "second_selling_argument_allowed": False,
-            "unlinked_visual_facts_policy": "OMIT",
-            "instruction": (
-                "用一个核心卖点加一个同主题信息完成自然论证；"
-                "同主题信息可以是人工确认的使用情境、直接相关机理/结果、"
-                "或一个直接相关可见细节；不得引入第二卖点。"
-                if selling_argument_mode else
-                "只完成当前可见事实的自然观察，不补字数。"
-            ),
+            "full_input_coverage_required": False,
         },
         "mainline_scope": {
             "policy": "ONE_CORE_ARGUMENT_WITH_SAME_THEME_SUPPORT",
-            "instruction": (
-                "整条15秒口播只围绕当前 selling_argument.core_value 展开；"
-                "verified_facts 最多作为同一主线的一个可见补充，不得并列引入其他用途、功效或材质主题。"
-                + (
-                    " 当前卖点已按 primary_demonstration_mode 收束，本条只说这一种主要用法，不枚举其他佩戴方式。"
-                    if _text(selling_argument.get("voiceover_scope_policy"))
-                    == "PRIMARY_DEMONSTRATION_MODE_ONLY"
-                    else ""
-                )
-                if selling_argument_mode else
-                "围绕当前可见事实完成一条自然观察。"
-            ),
+            "full_input_coverage_required": False,
         },
         "category_identity_authority": {
             "product_subtype": _text(category_profile.get("product_subtype")),
@@ -659,50 +928,28 @@ def run_central_complete_voiceover(
             for key in (
                 "hook_id", "hook_name", "hook_type", "core_intent",
                 "attention_mechanisms", "minimal_structure", "relation_modes",
-                "risk_tags", "allowed_visual_focuses", "required_evidence",
-                "source", "source_version",
             )
             if hook_row.get(key) not in (None, "", [])
         },
-        "retrieved_speech_hook_pool": {
-            "status": "AVAILABLE" if retrieved_speech_hook_pool else "UNAVAILABLE",
-            "authority": "RHETORIC_ONLY",
-            "candidates": retrieved_speech_hook_pool,
-            "instruction": (
-                "这些真实口播样例只用于学习开口动作、观众关系、论证顺序、句子节奏和目标语言语感；"
-                "当前 selling_argument 与 verified_facts 仍是唯一内容权威。不得继承样例中的商品、材质、"
-                "功效、品牌、价格、具体宣称、CTA原句或逐句翻译。与当前 hook_guidance 不兼容时可以不用。"
-            ),
-        },
-        "creative_voice_context": creative,
+        "native_rhetoric_contract": compact_native_rhetoric,
+        "creative_voice_context": compact_creative,
         "narrative_anchor_options": _narrative_anchor_options(creative),
-        "approved_style_references": approved_style_references,
+        "approved_style_references": writer_style_references,
         "hook_knowledge": {
             "snapshot_hash": hook_snapshot_hash,
             "sample_status": (
-                "AVAILABLE" if approved_style_references else "UNAVAILABLE"
+                "AVAILABLE" if writer_style_references else "UNAVAILABLE"
             ),
             "sample_ids": [
                 item["reference_sample_id"]
-                for item in approved_style_references
+                for item in writer_style_references
             ],
-            "selection_policy": style_selection_policy,
+            "selection_policy": writer_style_selection_policy,
             "policy_version": HOOK_EXECUTION_POLICY_VERSION,
         },
         "relationship_language": _relationship_language_profile(
             hook_id, relationship_device, target_language
         ),
-        "expression_freedom": {
-            "allowed_without_claim_ref": [
-                "audience_relationship",
-                "light_reaction",
-                "personal_selection_criterion",
-                "personal_preference",
-                "natural_transition",
-                "light_personal_close",
-            ],
-            "boundary": "个人立场不得改写成对所有人的客观商品功效",
-        },
         "forbidden_leaps": list(expression.get("forbidden_leaps") or []),
     }
     generated = _invoke_model(model_command, payload)
@@ -739,6 +986,33 @@ def run_central_complete_voiceover(
     if _text(generated.get("hook_id")) != hook_id:
         raise ValueError("中央完整口播没有保持请求的hook_id")
 
+    narrative_anchor_ids = {
+        _text(item.get("anchor_id"))
+        for item in payload.get("narrative_anchor_options") or []
+        if isinstance(item, dict) and _text(item.get("anchor_id"))
+    }
+    context_anchor_ids = {
+        _text(item.get("anchor_id"))
+        for item in (
+            voiceover_context_contract.get("audience_situation"),
+            voiceover_context_contract.get("current_life_moment"),
+        )
+        if isinstance(item, dict) and _text(item.get("anchor_id"))
+    }
+    used_context_anchor = _text(generated.get("used_context_anchor"))
+    if used_context_anchor not in narrative_anchor_ids | context_anchor_ids:
+        used_context_anchor = ""
+    context_available = (
+        _text(voiceover_context_contract.get("status")).upper() == "AVAILABLE"
+    )
+    context_consumption_status = (
+        "USED"
+        if used_context_anchor
+        else "AVAILABLE_NOT_USED"
+        if context_available
+        else "UNAVAILABLE"
+    )
+
     shot_count = len(
         [item for item in visual_plan.get("shots") or [] if isinstance(item, dict)]
     )
@@ -748,7 +1022,7 @@ def run_central_complete_voiceover(
     minimum_ready_sec = 9.5 if content_mode == "SELLING_ARGUMENT" else 6.5
     plan = {
         "voiceover_plan_schema_version": SCHEMA_VERSION,
-        "bridge_version": "original-batch-complete-voiceover-v4-rhetoric-recovery",
+        "bridge_version": "original-batch-complete-voiceover-v5-context-bridge",
         "copy_generation_mode": "CREATIVE_FULL_SCRIPT",
         "candidate_id": hook_id,
         "source": "CENTRAL_VOICEOVER_CREATIVE_FULL_SCRIPT",
@@ -783,6 +1057,13 @@ def run_central_complete_voiceover(
         # model response cannot block production; Feishu will safely degrade
         # rather than reveal the reviewed operator wording.
         "selling_argument_realization_zh": selling_argument_realization_zh,
+        "used_context_anchor": used_context_anchor,
+        "context_consumption_status": context_consumption_status,
+        "voiceover_context_mode": (
+            context_mode
+            or _text(voiceover_context_contract.get("context_mode"))
+            or "UNAVAILABLE"
+        ),
         "expression_contract": expression,
         "copy_plan": {
             "schema_version": "creative-full-script-direct-v1",
@@ -812,22 +1093,26 @@ def run_central_complete_voiceover(
         "hook_knowledge_provenance": {
             "snapshot_hash": hook_snapshot_hash,
             "sample_status": (
-                "AVAILABLE" if approved_style_references else "UNAVAILABLE"
+                "AVAILABLE" if writer_style_references else "UNAVAILABLE"
             ),
             "sample_ids": [
                 item["reference_sample_id"]
-                for item in approved_style_references
+                for item in writer_style_references
             ],
-            "selection_policy": style_selection_policy,
+            "selection_policy": writer_style_selection_policy,
             "policy_version": HOOK_EXECUTION_POLICY_VERSION,
-            "retrieved_speech_hook_run_id": _text(
-                (retrieval_contract.get("active_runs") or {}).get("speech_hook")
-                if isinstance(retrieval_contract.get("active_runs"), dict)
+            "native_rhetoric_status": _text(native_rhetoric_contract.get("status")),
+            "native_rhetoric_run_id": _text(
+                (native_rhetoric_contract.get("source_release") or {}).get("run_id")
+                if isinstance(native_rhetoric_contract.get("source_release"), dict)
                 else ""
             ),
-            "retrieved_speech_hook_clusters": [
-                item.get("cluster_id") for item in retrieved_speech_hook_pool
+            "native_rhetoric_clusters": [
+                item.get("cluster_id")
+                for item in native_rhetoric_contract.get("structural_patterns") or []
+                if isinstance(item, dict)
             ],
+            "upstream_requested_hook_id": originally_requested_hook_id,
         },
         "relationship_surface": {
             "requested": _text(relationship_device) or "HOOK_DECIDES",

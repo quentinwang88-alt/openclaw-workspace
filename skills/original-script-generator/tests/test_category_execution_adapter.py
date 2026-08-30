@@ -9,12 +9,19 @@ from core.category_execution import (
     build_category_blueprint_guidance,
     build_category_video_brief,
     compile_category_execution_extension,
+    project_category_capture_rhythm_contract,
     reconcile_anchor_category_contract,
     resolve_category_argument_execution,
     resolve_category_carrier_execution,
     validate_category_execution_identity,
 )
-from core.category_execution.accessory import SMALL_ACCESSORY_MOTION_ENV
+from core.category_execution.accessory import (
+    SCARF_MULTICLIP_ENV,
+    SCARF_MULTICLIP_PROFILE,
+    SMALL_ACCESSORY_MOTION_ENV,
+    SMALL_ACCESSORY_MULTICLIP_ENV,
+    SMALL_ACCESSORY_MULTICLIP_PROFILE,
+)
 from core.original_batch_allocator import _make_item
 from core.production_script_renderer import render_video_generation_prompt
 from core.simplified_complete_script import (
@@ -22,6 +29,7 @@ from core.simplified_complete_script import (
     build_simplified_creative_seed,
     build_simplified_script_prompt,
     build_simplified_voiceover_inputs,
+    compile_capture_units,
     normalize_simplified_visual_script,
     validate_simplified_complete_script,
     validate_simplified_visual_script,
@@ -120,6 +128,64 @@ class CategoryExecutionAdapterTest(unittest.TestCase):
         self.assertEqual("WRIST_FOREARM_CLOSE", prominence["primary_framing"])
         self.assertFalse(prominence["hard_required"])
         self.assertFalse(prominence["may_trigger_retry"])
+
+    def test_ring_compiles_finger_profile_and_matching_claim_actions(self):
+        extension = compile_category_execution_extension(
+            product_type="戒指",
+            top_category="配饰",
+            anchor_card=_anchor("银色开口戒指"),
+            enabled=True,
+        )
+        self.assertEqual("FINGER_HAND", extension["profile"]["wearing_zone"])
+        self.assertEqual(
+            "ALREADY_WORN_FINGER_RESULT",
+            extension["profile"]["required_result_view"],
+        )
+        resolved = resolve_category_argument_execution(
+            extension,
+            selling_argument={
+                "proof_action_intent": "SIZE_ADJUSTMENT",
+                "preferred_action_mode": "ADJUST_THEN_WEAR",
+                "required_proof_relation": "调节一次后保留佩戴结果",
+            },
+        )
+        carrier = resolve_category_carrier_execution(
+            resolved, presentation_mode="HANDS_ONLY"
+        )
+        self.assertEqual("FINGER_WORN", carrier["primary_demonstration_mode"])
+        self.assertEqual("SIZE_ADJUSTMENT", carrier["proof_action_intent"])
+        self.assertEqual(
+            "RING_ADJUST_THEN_WEAR",
+            carrier["interaction_capabilities"][0]["interaction_id"],
+        )
+        seed = build_simplified_creative_seed(
+            anchor_card=_anchor("银色开口戒指"),
+            structure_contract=_contract("HAND_ONLY"),
+            content_bundle={
+                **_bundle("开口戒指可以小幅调节后稳定佩戴", "R1"),
+                "selling_argument": {
+                    "argument_id": "RING_ADJUST",
+                    "proof_subject": "ON_BODY_RESULT",
+                    "proof_action_intent": "SIZE_ADJUSTMENT",
+                    "preferred_action_mode": "ADJUST_THEN_WEAR",
+                    "required_proof_relation": "调节一次后保留佩戴结果",
+                },
+            },
+            creative_contract={},
+            execution_reference={"content_carrier": "HAND_ONLY"},
+            requested_hook_id="DETAIL_SURPRISE",
+            content_angle_key="RING_ADJUSTMENT",
+            product_type="戒指",
+            top_category="配饰",
+            category_execution_extension=resolved,
+        )
+        self.assertEqual(
+            "ADJUST_THEN_WEAR", seed["action_design"]["primary_action_mode"]
+        )
+        self.assertEqual(
+            "MATCHED",
+            seed["action_design"]["claim_action_contract"]["compatibility"],
+        )
 
     def test_wrist_put_on_argument_exposes_one_matching_process_action(self):
         extension = compile_category_execution_extension(
@@ -551,6 +617,277 @@ class CategoryExecutionAdapterTest(unittest.TestCase):
                 target_language="泰语",
                 duration_seconds=15,
             ),
+        )
+
+    def test_category_multiclip_projection_is_isolated_from_apparel(self):
+        base = {
+            "profile": "NATIVE_MULTI_CLIP_V1",
+            "capture_unit_count": 4,
+            "structure_unit_roles": ["HOOK", "PROOF", "PROOF", "ENDING"],
+            "shot_richness_contract": {"planned_visible_clips": 4},
+        }
+        projected = project_category_capture_rhythm_contract(
+            {}, carrier_execution={}, capture_contract=base
+        )
+        self.assertEqual(base, projected)
+        self.assertIsNot(base, projected)
+        self.assertNotIn("category_rollout_contract", projected)
+
+    def test_scarf_multiclip_projection_adds_physical_roles_only(self):
+        extension = compile_category_execution_extension(
+            product_type="丝巾",
+            top_category="配饰",
+            anchor_card=_anchor("深蓝波点丝巾"),
+            enabled=True,
+        )
+        carrier = resolve_category_carrier_execution(
+            extension, presentation_mode="PERSON_ON_CAMERA"
+        )
+        base = {
+            "profile": "NATIVE_MULTI_CLIP_V1",
+            "capture_unit_count": 4,
+            "macro_structure": ["HOOK", "PROOF", "PROOF", "ENDING"],
+            "structure_unit_roles": ["HOOK", "PROOF", "PROOF", "ENDING"],
+            "shot_richness_contract": {"planned_visible_clips": 4},
+        }
+        with patch.dict(
+            os.environ, {SCARF_MULTICLIP_ENV: "1"}, clear=False
+        ):
+            projected = project_category_capture_rhythm_contract(
+                extension,
+                carrier_execution=carrier,
+                capture_contract=base,
+            )
+        self.assertEqual(
+            ["HOOK", "PROOF", "PROOF", "ENDING"],
+            projected["structure_unit_roles"],
+        )
+        self.assertEqual(SCARF_MULTICLIP_PROFILE, projected["category_projection"])
+        self.assertEqual(4, len(projected["category_unit_roles"]))
+        self.assertEqual(4, len(projected["framing_guidance_by_unit"]))
+        self.assertTrue(
+            projected["category_rollout_contract"]["female_apparel_unchanged"]
+        )
+        self.assertFalse(
+            projected["category_rollout_contract"]["may_trigger_retry"]
+        )
+
+    def test_small_accessory_multiclip_projection_has_independent_rollback(self):
+        extension = compile_category_execution_extension(
+            product_type="手镯",
+            top_category="配饰",
+            anchor_card=_anchor("金色细手镯"),
+            enabled=True,
+        )
+        carrier = resolve_category_carrier_execution(
+            extension, presentation_mode="PERSON_ON_CAMERA"
+        )
+        base = {
+            "profile": "NATIVE_MULTI_CLIP_V1",
+            "capture_unit_count": 3,
+            "macro_structure": ["HOOK", "PROOF", "ENDING"],
+            "structure_unit_roles": ["HOOK", "PROOF", "ENDING"],
+            "shot_richness_contract": {"planned_visible_clips": 3},
+        }
+        with patch.dict(
+            os.environ, {SMALL_ACCESSORY_MULTICLIP_ENV: "1"}, clear=False
+        ):
+            enabled = project_category_capture_rhythm_contract(
+                extension,
+                carrier_execution=carrier,
+                capture_contract=base,
+            )
+        self.assertEqual(
+            SMALL_ACCESSORY_MULTICLIP_PROFILE,
+            enabled["category_projection"],
+        )
+        self.assertEqual("PRODUCT_RESULT_CLOSE", enabled["unit_roles"][0])
+        self.assertEqual("PRODUCT_VISIBLE_RESULT", enabled["unit_roles"][-1])
+        self.assertIn("清楚可辨", enabled["framing_guidance_by_unit"][-1])
+        with patch.dict(
+            os.environ, {SMALL_ACCESSORY_MULTICLIP_ENV: "0"}, clear=False
+        ):
+            disabled = project_category_capture_rhythm_contract(
+                extension,
+                carrier_execution=carrier,
+                capture_contract=base,
+            )
+        self.assertEqual(base, disabled)
+
+    def test_three_clip_scarf_projection_keeps_final_result_framing(self):
+        extension = compile_category_execution_extension(
+            product_type="丝巾",
+            top_category="配饰",
+            anchor_card=_anchor("深蓝波点丝巾"),
+            enabled=True,
+        )
+        carrier = resolve_category_carrier_execution(
+            extension, presentation_mode="PERSON_ON_CAMERA"
+        )
+        carrier["preferred_action_mode"] = "RESULT_SHOW"
+        carrier["selected_action_design"] = {
+            "primary_action_mode": "SIMPLE_WEAR_PROCESS"
+        }
+        base = {
+            "profile": "NATIVE_MULTI_CLIP_V1",
+            "capture_unit_count": 3,
+            "macro_structure": ["HOOK", "USE_PROCESS", "ENDING"],
+            "structure_unit_roles": ["HOOK", "USE_PROCESS", "ENDING"],
+        }
+        projected = project_category_capture_rhythm_contract(
+            extension,
+            carrier_execution=carrier,
+            capture_contract=base,
+        )
+        self.assertEqual(
+            [
+                "WORN_OR_PRODUCT_OPENING",
+                "SIMPLE_WEAR_PROCESS_OR_DETAIL",
+                "WORN_OR_CONTEXT_RESULT",
+            ],
+            projected["unit_roles"],
+        )
+        self.assertIn("佩戴步骤", projected["framing_guidance_by_unit"][1])
+        self.assertIn("清楚结果", projected["framing_guidance_by_unit"][-1])
+
+    def test_small_accessory_motion_is_frozen_by_single_category_projection(self):
+        extension = compile_category_execution_extension(
+            product_type="抓夹",
+            top_category="配饰",
+            anchor_card=_anchor("棕色抓夹"),
+            enabled=True,
+        )
+        carrier = resolve_category_carrier_execution(
+            extension, presentation_mode="PERSON_ON_CAMERA"
+        )
+        base = {
+            "profile": "NATIVE_MULTI_CLIP_V1",
+            "capture_unit_count": 4,
+            "macro_structure": ["HOOK", "PROOF", "PROOF", "ENDING"],
+            "structure_unit_roles": ["HOOK", "PROOF", "PROOF", "ENDING"],
+        }
+        projected = project_category_capture_rhythm_contract(
+            extension,
+            carrier_execution=carrier,
+            capture_contract=base,
+        )
+        self.assertEqual(SMALL_ACCESSORY_MULTICLIP_PROFILE, projected["category_projection"])
+        self.assertEqual(
+            [
+                "PRODUCT_RESULT_CLOSE",
+                "NATURAL_MOTION_RELATION",
+                "PRODUCT_DETAIL_RELATION",
+                "PRODUCT_REACQUISITION",
+            ],
+            projected["unit_roles"],
+        )
+        self.assertEqual(
+            projected["category_unit_roles"], projected["unit_roles"]
+        )
+        self.assertEqual(1, projected["unit_roles"].count("NATURAL_MOTION_RELATION"))
+
+    def test_scarf_seed_consumes_category_multiclip_without_new_stage(self):
+        kwargs = dict(
+            anchor_card={
+                "product_positioning_one_liner": "深蓝波点丝巾",
+                "hard_anchors": [{"anchor": "深蓝波点丝巾"}],
+                "display_anchors": [{"anchor": "波点图案"}],
+            },
+            structure_contract=_contract(),
+            content_bundle=_bundle("丝巾佩戴后的穿搭点缀", "C1"),
+            creative_contract={},
+            execution_reference={"content_carrier": "WEARER_ACTIVE"},
+            requested_hook_id="GENERAL_PRODUCT_SHARE",
+            content_angle_key="DETAIL_OBSERVATION",
+            product_type="丝巾",
+            top_category="配饰",
+        )
+        with patch.dict(
+            os.environ,
+            {
+                ACCESSORY_PROFILE_ENV: "1",
+                SCARF_MULTICLIP_ENV: "1",
+            },
+            clear=False,
+        ):
+            seed = build_simplified_creative_seed(**kwargs)
+        rhythm = seed["capture_rhythm_contract"]
+        self.assertEqual(SCARF_MULTICLIP_PROFILE, rhythm["category_projection"])
+        self.assertEqual(
+            ["HOOK", "PROOF", "PROOF", "ENDING"],
+            rhythm["structure_unit_roles"],
+        )
+        self.assertEqual(
+            len(rhythm["category_unit_roles"]), rhythm["capture_unit_count"]
+        )
+        storyboard = [
+            {
+                "shot_no": index,
+                "narrative_role": role,
+                "visual_content": f"丝巾画面{index}",
+                "character_action": "自然展示",
+            }
+            for index, role in enumerate(
+                rhythm["structure_unit_roles"], start=1
+            )
+        ]
+        compiled, units = compile_capture_units(storyboard, rhythm)
+        self.assertEqual(
+            rhythm["structure_unit_roles"],
+            [item["structure_role"] for item in units],
+        )
+        self.assertEqual(
+            rhythm["category_unit_roles"],
+            [item["unit_role"] for item in units],
+        )
+        self.assertTrue(all(item["edit_before"] in {"START", "DIRECT_CUT"} for item in units))
+        self.assertTrue(all(item.get("capture_unit_role") for item in compiled))
+
+    def test_scarf_seed_passes_final_action_design_into_capture_projection(self):
+        structure = _contract()
+        structure["hard_constraints"]["beat_sequence"] = [
+            "HOOK",
+            "USE_PROCESS",
+            "PROOF",
+            "ENDING",
+        ]
+        structure["direction_identity"]["macro_family_key"] = (
+            "HOOK>USE_PROCESS>PROOF>ENDING"
+        )
+        with patch.dict(
+            os.environ,
+            {
+                ACCESSORY_PROFILE_ENV: "1",
+                SCARF_MULTICLIP_ENV: "1",
+            },
+            clear=False,
+        ):
+            seed = build_simplified_creative_seed(
+                anchor_card={
+                    "product_positioning_one_liner": "深蓝波点丝巾",
+                    "hard_anchors": [{"anchor": "深蓝波点丝巾"}],
+                    "display_anchors": [{"anchor": "波点图案"}],
+                },
+                structure_contract=structure,
+                content_bundle=_bundle("丝巾佩戴后的穿搭点缀", "C1"),
+                creative_contract={},
+                execution_reference={"content_carrier": "WEARER_ACTIVE"},
+                requested_hook_id="GENERAL_PRODUCT_SHARE",
+                content_angle_key="DETAIL_OBSERVATION",
+                product_type="丝巾",
+                top_category="配饰",
+            )
+        self.assertEqual(
+            seed["action_design"],
+            seed["carrier_specific_execution"]["selected_action_design"],
+        )
+        self.assertEqual(
+            "SIMPLE_WEAR_PROCESS",
+            seed["action_design"]["primary_action_mode"],
+        )
+        self.assertIn(
+            "SIMPLE_WEAR_PROCESS_OR_DETAIL",
+            seed["capture_rhythm_contract"]["unit_roles"],
         )
 
     def test_accessory_extension_flows_from_plan_to_video_brief(self):

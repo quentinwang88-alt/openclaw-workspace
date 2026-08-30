@@ -29,6 +29,12 @@ from core.outfit_template_provider import (
 )
 from core.persona_template_provider import load_persona_templates
 from core.product_type_resolution import normalize_product_type
+from core.semantic_spine import (
+    build_context_bridge,
+    build_product_market_context,
+    build_script_semantic_spine,
+    semantic_spine_enabled,
+)
 
 
 def _relationship_schedule(requested_count: int, rng: random.Random) -> List[str]:
@@ -492,6 +498,12 @@ def _bundle_argument_key(bundle: Dict[str, Any]) -> str:
         if isinstance(bundle.get("selling_argument"), dict)
         else {}
     )
+    # Several central concepts may come from one numbered operator selling
+    # point.  Balance the human-authored point first, then rotate its concept
+    # variants after other selling points have had a turn.
+    source_argument_id = _text(argument.get("source_argument_id"))
+    if source_argument_id:
+        return source_argument_id
     argument_id = _text(argument.get("argument_id"))
     if argument_id:
         return argument_id
@@ -526,6 +538,9 @@ def build_content_bundle_candidates(
     )
     primary_argument = primary.get("selling_argument") if isinstance(primary.get("selling_argument"), dict) else {}
     primary_argument_id = _text(primary_argument.get("argument_id"))
+    primary_source_key = _text(
+        primary_argument.get("source_argument_id") or primary_argument_id
+    )
     primary["content_angle_key"] = (
         f"ARGUMENT_{primary_argument_id}"
         if _text(primary.get("content_mode")) == "SELLING_ARGUMENT" and primary_argument_id
@@ -545,8 +560,25 @@ def build_content_bundle_candidates(
             if kind == "SELLING_ARGUMENT" or is_legacy_value:
                 value_angles.append(sp)
 
-    seen_argument_ids = {primary_argument_id} if primary_argument_id else set()
+    # Preserve operator-level breadth before consuming several normalized
+    # concepts from the same numbered selling point.
+    first_by_source: List[Dict[str, Any]] = []
+    additional_concepts: List[Dict[str, Any]] = []
+    seen_source_keys: set[str] = (
+        {primary_source_key} if primary_source_key else set()
+    )
     for value_angle in value_angles:
+        source_key = _text(
+            value_angle.get("source_argument_id") or value_angle.get("value_id")
+        )
+        if source_key and source_key not in seen_source_keys:
+            seen_source_keys.add(source_key)
+            first_by_source.append(value_angle)
+        else:
+            additional_concepts.append(value_angle)
+
+    seen_argument_ids = {primary_argument_id} if primary_argument_id else set()
+    for value_angle in [*first_by_source, *additional_concepts]:
         if len(candidates) >= max_candidates:
             break
         variant = build_content_bundle_brief(
@@ -645,13 +677,34 @@ def _eligible_hooks_for_bundle(
     # Legacy tests and frozen packages may only carry the top-level status.
     if not tension and tension_status == "AVAILABLE":
         tension_available = True
+    selling_argument = (
+        bundle.get("selling_argument")
+        if isinstance(bundle.get("selling_argument"), dict)
+        else {}
+    )
+    audience_need_authorized = (
+        _text(
+            bundle.get("audience_need_authority")
+            or selling_argument.get("audience_need_authority")
+        ).upper()
+        == "APPROVED_SELLING_SCENARIO"
+    )
     suppressed = []
     result = []
     for hid in eligible:
         hid = _text(hid)
         if not hid:
             continue
-        if not tension_available and hid in HOOK_ID_BLACKLIST_FOR_NO_TENSION:
+        needs_tension = hid in {"PAIN_REFRAME", "USER_ADVOCACY_STANCE"}
+        needs_need_authority = hid == "AUDIENCE_NEED_CALLOUT"
+        if (
+            (needs_tension and not tension_available)
+            or (
+                needs_need_authority
+                and not tension_available
+                and not audience_need_authorized
+            )
+        ):
             suppressed.append(hid)
             continue
         if hid in active_hook_ids:
@@ -678,6 +731,8 @@ def allocate_batch_items(
     product_selling_note: str = "",
     product_type: str = "",
     top_category: str = "",
+    target_country: str = "",
+    target_language: str = "",
     scene_reference_contexts: Optional[Dict[str, Dict[str, Any]]] = None,
     multidim_reference_contexts: Optional[Dict[str, Dict[str, Any]]] = None,
     category_execution_extension: Optional[Dict[str, Any]] = None,
@@ -692,6 +747,17 @@ def allocate_batch_items(
     deferred_content: List[Dict[str, Any]] = []
     catalog_rows = list(selling_point_catalog or [])
     authoritative_catalog = _authoritative_selling_catalog(catalog_rows)
+    product_market_context = (
+        build_product_market_context(
+            product_code=product_code,
+            target_country=target_country,
+            target_language=target_language,
+            product_type=product_type,
+            selling_point_catalog=catalog_rows,
+        )
+        if semantic_spine_enabled()
+        else {}
+    )
     if scene_reference_contexts is None:
         # Best-effort and read-only.  The adapter returns an empty mapping when
         # disabled, so normal planning stays fully offline by default.
@@ -744,6 +810,13 @@ def allocate_batch_items(
             )
             for bundle in raw_candidates
         ]
+        if semantic_spine_enabled():
+            for bundle in all_candidates:
+                bundle["semantic_spine_contract"] = build_script_semantic_spine(
+                    product_code=product_code,
+                    content_bundle=bundle,
+                    market_context=product_market_context,
+                )
         candidates: List[Dict[str, Any]] = []
         for bundle in all_candidates:
             lineage = bundle.get("selling_argument_lineage") or {}
@@ -825,6 +898,7 @@ def allocate_batch_items(
         bundle_index, bundle = min(
             eligible_pairs,
             key=lambda pair: (
+                argument_usage[_bundle_argument_key(pair[1])],
                 angle_usage[_text(pair[1].get("content_angle_key", "FACT_DISCOVERY"))],
                 pair[0],
             ),
@@ -924,6 +998,7 @@ def allocate_batch_items(
                     )
                     else 1
                 ),
+                argument_usage[_bundle_argument_key(entry[3])],
                 angle_usage[_text(entry[3].get("content_angle_key", "FACT_DISCOVERY"))],
                 struct_usage[entry[0]],
                 entry[1],
@@ -1023,11 +1098,12 @@ def _pick_least_used(
 
     family_usage = family_usage or Counter()
 
-    def score(candidate: str) -> Tuple[int, int, int]:
+    def score(candidate: str) -> Tuple[int, int, int, int]:
         return (
             family_usage.get(_hook_family(candidate), 0),
             usage.get(candidate, 0),
             1 if _text(candidate).upper() == "GENERAL_PRODUCT_SHARE" else 0,
+            candidates.index(candidate),
         )
 
     minimum = min(score(candidate) for candidate in candidates)
@@ -1064,7 +1140,11 @@ def _allocate_creative(
     augmented = [
         *recent_usage,
         *[
-            {**contract, "_batch_reserved": True}
+            {
+                **contract,
+                "product_code": product_code,
+                "_batch_reserved": True,
+            }
             for contract in (reserved_creatives or [])
         ],
     ]
@@ -1145,7 +1225,38 @@ def _make_item(
         frozen_bundle, creative
     )
     selling_argument = frozen_bundle.get("selling_argument") if isinstance(frozen_bundle.get("selling_argument"), dict) else {}
+    semantic_spine = copy.deepcopy(
+        frozen_bundle.get("semantic_spine_contract") or {}
+    )
+    context_bridge = (
+        build_context_bridge(semantic_spine, creative)
+        if semantic_spine_enabled() and semantic_spine
+        else {}
+    )
+    if semantic_spine:
+        frozen_bundle["semantic_spine_contract"] = semantic_spine
+    if context_bridge:
+        frozen_bundle["context_bridge_contract"] = context_bridge
     selling_argument_id = _text(selling_argument.get("argument_id"))
+    claim_action_contract = {
+        "policy_version": "small-accessory-claim-action-v1",
+        "selling_argument_id": selling_argument_id,
+        "proof_action_intent": _text(
+            selling_argument.get("proof_action_intent")
+        ),
+        "preferred_action_mode": _text(
+            selling_argument.get("preferred_action_mode")
+        ).upper(),
+        "required_proof_relation": _text(
+            selling_argument.get("required_proof_relation")
+        ),
+        "carrier_fit_status": _text(
+            frozen_bundle.get("carrier_fit_status")
+        ) or "MATCHED",
+        "hard_required": False,
+        "may_trigger_retry": False,
+    }
+    frozen_bundle["claim_action_contract"] = claim_action_contract
     sig = build_allocation_signature(
         da_id, angle_key, claim_keys, hook_id, visual_signature, selling_argument_id,
     )
@@ -1172,6 +1283,8 @@ def _make_item(
             "structure_source_mode", "VIDEO_REFERENCED"
         ),
         "content_bundle_brief": frozen_bundle,
+        "semantic_spine_contract": semantic_spine,
+        "context_bridge_contract": context_bridge,
         "p2_lite": direction.get("p2_lite", {}),
         "creative_diversity_contract": creative,
         "outfit_scene_affinity_contract": creative.get(
@@ -1207,6 +1320,7 @@ def _make_item(
         "proof_execution_intent": copy.deepcopy(
             frozen_bundle.get("proof_execution_intent") or {}
         ),
+        "claim_action_contract": copy.deepcopy(claim_action_contract),
     }
     from core.category_execution import (
         compile_category_execution_extension,

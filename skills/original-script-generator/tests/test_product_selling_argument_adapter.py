@@ -6,8 +6,10 @@ from unittest.mock import patch
 
 from core.product_selling_argument_adapter import (
     _accessory_operator_execution_semantics,
+    _prefer_segmented_operator_sources,
     _requires_respectful_reframe,
     _scarf_execution_semantics,
+    _small_accessory_claim_action_semantics,
     compatible_structure_carriers,
     load_verified_selling_point_catalog,
     normalized_carrier_requirement,
@@ -15,6 +17,76 @@ from core.product_selling_argument_adapter import (
 
 
 class ProductSellingArgumentAdapterTest(unittest.TestCase):
+    def test_v2_arguments_supersede_old_generations_and_keep_latest_source(self):
+        rows = [
+            {
+                "claim_source_id": "WHOLE",
+                "source_ref": "feishu-product-claims:rec1",
+                "source_created_at": "2026-01-01",
+            },
+            {
+                "claim_source_id": "SEG1",
+                "source_ref": "feishu-product-claims:rec1#segment-1",
+                "source_created_at": "2026-01-02",
+            },
+            {
+                "claim_source_id": "V2_OLD",
+                "source_ref": "feishu-product-claims:rec1#argument-v2-1",
+                "source_created_at": "2026-01-03",
+            },
+            {
+                "claim_source_id": "V2_NEW",
+                "source_ref": "feishu-product-claims:rec1#argument-v2-1",
+                "source_created_at": "2026-01-04",
+            },
+            {
+                "claim_source_id": "V2_NEW",
+                "source_ref": "feishu-product-claims:rec1#argument-v2-1",
+                "source_created_at": "2026-01-04",
+                "claim_id": "C2",
+            },
+            {
+                "claim_source_id": "V2_2",
+                "source_ref": "feishu-product-claims:rec1#argument-v2-2",
+                "source_created_at": "2026-01-03",
+            },
+        ]
+
+        selected = _prefer_segmented_operator_sources(rows)
+
+        self.assertEqual(
+            {"V2_NEW", "V2_2"},
+            {row["claim_source_id"] for row in selected},
+        )
+        self.assertEqual(3, len(selected))
+
+    def test_small_accessory_claims_compile_to_visible_action_intents(self):
+        adjustable = _small_accessory_claim_action_semantics(
+            "戒指", "开口设计可以调节大小，粗细手指都方便"
+        )
+        self.assertEqual("SIZE_ADJUSTMENT", adjustable["proof_action_intent"])
+        self.assertEqual("ADJUST_THEN_WEAR", adjustable["preferred_action_mode"])
+        self.assertNotIn("STATIC_PRODUCT", adjustable["compatible_carriers"])
+
+        handheld = _small_accessory_claim_action_semantics(
+            "发夹", "金属材质拿在手里有一点分量"
+        )
+        self.assertEqual(
+            "HANDHELD_MATERIAL_FEEL", handheld["proof_action_intent"]
+        )
+        self.assertEqual("HANDHELD_PRODUCT", handheld["preferred_action_mode"])
+
+        scene = _small_accessory_claim_action_semantics(
+            "戒指", "上班通勤和周末聚会都可以戴"
+        )
+        self.assertEqual("SCENE_USAGE", scene["proof_action_intent"])
+        self.assertEqual("WEARER_REQUIRED", scene["visual_dependency"])
+
+        unknown = _small_accessory_claim_action_semantics(
+            "戒指", "戒面有一圈几何纹理"
+        )
+        self.assertEqual({}, unknown)
+
     def test_wrist_operator_wording_only_controls_execution_semantics(self):
         stacked = _accessory_operator_execution_semantics(
             "手镯", "2毫米细圈，单戴秀气，两个叠戴更有层次"
@@ -150,6 +222,71 @@ class ProductSellingArgumentAdapterTest(unittest.TestCase):
                 ["UNMAPPED", "MAPPED", "MAPPED", "UNMAPPED", "UNMAPPED"],
             )
             self.assertEqual(result["catalog"][0]["source_claim_ids"], [])
+
+    def test_segmented_operator_sources_replace_legacy_whole_cell_source(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "voiceover.sqlite"
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """CREATE TABLE product_claim_sources (
+                        claim_source_id TEXT, product_id TEXT, raw_text TEXT,
+                        source_type TEXT, source_ref TEXT,
+                        operator_priority TEXT, created_at TEXT
+                    )"""
+                )
+                conn.execute(
+                    """CREATE TABLE product_claims (
+                        product_id TEXT, verification_status TEXT, claim_id TEXT,
+                        claim_source_id TEXT, concept_id TEXT, source_span TEXT,
+                        canonical_claim_zh TEXT, claim_type TEXT, claim_theme TEXT,
+                        evidence_requirement TEXT, allowed_strength TEXT,
+                        operator_priority TEXT, updated_at TEXT, created_at TEXT,
+                        normalizer_confidence REAL
+                    )"""
+                )
+                conn.executemany(
+                    "INSERT INTO product_claim_sources VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        (
+                            "OLD", "P1", "1、旅行办公室休闲都能穿\n2、版型遮肉",
+                            "operator_input", "feishu-product-claims:rec1",
+                            "core", "1",
+                        ),
+                        (
+                            "TRAVEL", "P1", "1、旅行只带一件，办公室、通勤和休闲都能穿",
+                            "operator_input", "feishu-product-claims:rec1#segment-1",
+                            "core", "2",
+                        ),
+                        (
+                            "FIT", "P1", "2、版型遮肉",
+                            "operator_input", "feishu-product-claims:rec1#segment-2",
+                            "core", "2",
+                        ),
+                    ],
+                )
+                conn.executemany(
+                    "INSERT INTO product_claims VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    [
+                        ("P1", "VERIFIED", "O1", "OLD", "CCP_MULTI_SCENE", "旅行办公室休闲", "适配多种日常场景", "scenario", "scenario", "source_plus_video", "soft_only", "core", "", "1", 0.9),
+                        ("P1", "VERIFIED", "O2", "OLD", "CCP_BODY_SKIMMING", "版型遮肉", "版型对身形有视觉包容感", "visual_result", "fit", "video_positive", "soft_only", "core", "", "2", 0.9),
+                        ("P1", "VERIFIED", "T1", "TRAVEL", "CCP_DAILY_SCENE", "办公室、通勤和休闲", "适合日常穿搭场景", "scenario", "scenario", "source_plus_video", "soft_only", "core", "", "3", 0.9),
+                        ("P1", "VERIFIED", "T2", "TRAVEL", "CCP_MULTI_SCENE", "旅行只带一件", "适配多种日常场景", "scenario", "scenario", "source_plus_video", "soft_only", "core", "", "4", 0.9),
+                        ("P1", "VERIFIED", "F1", "FIT", "CCP_BODY_SKIMMING", "版型遮肉", "版型对身形有视觉包容感", "visual_result", "fit", "video_positive", "soft_only", "core", "", "5", 0.9),
+                    ],
+                )
+            with patch.dict("os.environ", {"ORIGINAL_SCRIPT_CLAIMS_DB_PATH": str(db_path)}):
+                result = load_verified_selling_point_catalog("P1")
+
+            source_ids = [item["source_argument_id"] for item in result["catalog"]]
+            self.assertNotIn("OLD", source_ids)
+            self.assertEqual(source_ids, ["TRAVEL", "TRAVEL", "FIT"])
+            travel = result["catalog"][0]
+            self.assertEqual(travel["operator_expression"], "适合日常穿搭场景")
+            self.assertEqual(
+                travel["source_operator_expression"],
+                "旅行只带一件，办公室、通勤和休闲都能穿",
+            )
+            self.assertEqual(travel["source_scope_concept_count"], 2)
 
     def test_only_verified_benefits_and_results_become_arguments(self):
         with tempfile.TemporaryDirectory() as tmpdir:

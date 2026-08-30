@@ -231,6 +231,50 @@ class RealityReferenceTests(unittest.TestCase):
         )
         self.assertTrue(contract["expression_policy"]["rhetorical_conflict_allowed"])
 
+    def test_expression_contract_separates_selling_scenario_from_visual_location(self):
+        direction = {
+            "content_bundle_brief": {
+                "content_mode": "SELLING_ARGUMENT",
+                "audience_need_authority": "APPROVED_SELLING_SCENARIO",
+                "audience_situation": "旅行只想带一件能覆盖通勤和休闲的外套",
+                "multi_scenario_authorized": True,
+                "value_proposition": {
+                    "text": "旅行带一件就能覆盖多种日常场景",
+                    "status": "AVAILABLE",
+                },
+                "selling_argument": {
+                    "argument_id": "ARG_MULTI",
+                    "status": "AVAILABLE",
+                    "audience_need_authority": "APPROVED_SELLING_SCENARIO",
+                    "audience_situation": "旅行只想带一件能覆盖通勤和休闲的外套",
+                    "multi_scenario_authorized": True,
+                    "core_proof_claim_keys": ["C1"],
+                },
+                "audience_tension": {"status": "UNAVAILABLE", "text": ""},
+                "claim_atoms": [{"claim_key": "C1", "fact_text": "短款衣长"}],
+            },
+            "creative_blueprint": {
+                "voiceover_grounding_mode": "CONTENT_FIRST_WHOLE_VIDEO",
+                "scene": {"location": "酒店客房", "moment": "收拾短途行李时"},
+                "event_design": {"natural_event": "把外套放进行李后准备出门"},
+            },
+        }
+        expression = build_voiceover_expression_contract(
+            direction,
+            {"shots": [{"shot_no": 1, "supported_claim_keys": ["C1"]}]},
+        )
+        context = expression["voiceover_context_contract"]
+        self.assertEqual(context["context_mode"], "SELLING_SCENARIO")
+        self.assertEqual(context["scenario_budget"], 2)
+        self.assertEqual(
+            context["current_life_moment"]["authority"], "CREATIVE_DESIGN"
+        )
+        self.assertEqual(
+            context["visual_location"]["spoken_use_policy"],
+            "OPTIONAL_NOT_PRODUCT_PROOF",
+        )
+        self.assertFalse(context["hard_required"])
+
     def test_operator_confirmed_argument_keeps_authority_and_reframe_policy(self):
         visual = {"shots": [{"shot_no": 1, "supported_claim_keys": ["C1"]}]}
         bundle = {
@@ -1144,6 +1188,57 @@ class RealityReferenceTests(unittest.TestCase):
         self.assertIn("USER_ADVOCACY_STANCE", bundle["eligible_hook_ids"])
         self.assertIn("GENERAL_PRODUCT_SHARE", bundle["eligible_hook_ids"])
 
+    def test_approved_multi_scene_argument_authorizes_need_hook_without_fake_pain(self):
+        anchor = {
+            "display_anchors": [
+                {"anchor": "短款衣长"},
+                {"anchor": "前襟金属拉链"},
+            ]
+        }
+        card = compile_execution_card(
+            observed_row(), cluster_run_id="prompt_only_full", cluster_id=5,
+            cluster_version="v1",
+        )
+        assert card is not None
+        bundle = build_content_bundle_brief(
+            anchor,
+            card.to_dict(),
+            product_type="外套",
+            selling_point_catalog=[{
+                "value_id": "ARG_MULTI_SCENE",
+                "primary_selling_point": "适配多种日常场景",
+                "operator_expression": "适配多种日常场景",
+                "source_operator_expression": "旅行带一件就好，办公室、通勤和休闲都能穿",
+                "argument_kind": "SELLING_ARGUMENT",
+                "source": "FEISHU_OPERATOR_CONFIRMED_ARGUMENT",
+                "claim_type": "scenario",
+                "claim_theme": "scenario",
+                "concept_ids": ["CCP_MULTI_SCENE"],
+            }],
+        )
+
+        self.assertEqual(bundle["audience_tension"]["status"], "UNAVAILABLE")
+        self.assertEqual(
+            bundle["audience_need_authority"], "APPROVED_SELLING_SCENARIO"
+        )
+        self.assertEqual(
+            bundle["audience_situation"],
+            "旅行带一件就好，办公室、通勤和休闲都能穿",
+        )
+        self.assertEqual(
+            bundle["selling_argument"]["target_need"],
+            "旅行带一件就好，办公室、通勤和休闲都能穿",
+        )
+        self.assertTrue(bundle["multi_scenario_authorized"])
+        self.assertEqual(bundle["primary_hook_id"], "AUDIENCE_NEED_CALLOUT")
+        self.assertNotIn("PAIN_REFRAME", bundle["eligible_hook_ids"])
+        policy = resolve_voiceover_hook_policy(
+            {"content_bundle_brief": bundle},
+            {"AUDIENCE_NEED_CALLOUT", "GENERAL_PRODUCT_SHARE", "PAIN_REFRAME"},
+            requested_hook_id="AUDIENCE_NEED_CALLOUT",
+        )
+        self.assertTrue(policy["audience_need_authorized"])
+
     def test_voiceover_hook_policy_accepts_governed_concept_without_raw_tension(self):
         direction = {
             "content_bundle_brief": {
@@ -1705,7 +1800,7 @@ class RealityReferenceTests(unittest.TestCase):
             script["video_generation_brief"]["usage"],
         )
         self.assertEqual(
-            "production-video-brief-v10-structure-visible-clips",
+            "production-video-brief-v11-semantic-context",
             script["video_generation_brief"]["schema_version"],
         )
         self.assertEqual(
@@ -1888,7 +1983,7 @@ class RealityReferenceTests(unittest.TestCase):
         self.assertEqual(4, len(script["capture_units"]))
         self.assertEqual(2, script["capture_rhythm_contract"]["camera_setup_count"])
         self.assertEqual(
-            "production-video-brief-v10-structure-visible-clips",
+            "production-video-brief-v11-semantic-context",
             script["video_generation_brief"]["schema_version"],
         )
         self.assertTrue(

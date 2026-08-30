@@ -37,7 +37,75 @@ from core.simplified_complete_script import (
 EXECUTION_CARD_SCHEMA_VERSION = "reality-execution-card-v1"
 REALITY_POLICY_VERSION = "reality-reference-policy-v2"
 AUTHENTICITY_POLICY_VERSION = "original-authenticity-qc-v18-light"
-CONTENT_BUNDLE_SCHEMA_VERSION = "content-bundle-brief-v10-hook-compatibility"
+CONTENT_BUNDLE_SCHEMA_VERSION = "content-bundle-brief-v11-operator-context"
+VOICEOVER_CONTEXT_V2_ENV = "CENTRAL_VOICEOVER_CONTEXT_V2_ENABLED"
+
+
+def _voiceover_context_v2_enabled() -> bool:
+    return _text(os.environ.get(VOICEOVER_CONTEXT_V2_ENV, "1")).lower() not in {
+        "0", "false", "off", "no",
+    }
+
+
+def _selling_argument_context_semantics(
+    value: Dict[str, Any], tension: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Expose authorised audience/scenario meaning without rewriting it.
+
+    The central taxonomy and the reviewed operator expression remain the only
+    semantic authorities.  This deliberately avoids a second keyword
+    classifier in the original-script flow.
+    """
+
+    if not _voiceover_context_v2_enabled():
+        return {
+            "audience_need_authority": "UNAVAILABLE",
+            "audience_situation": "",
+            "multi_scenario_authorized": False,
+        }
+    claim_type = _text(value.get("claim_type")).lower()
+    claim_theme = _text(value.get("claim_theme")).lower()
+    argument_theme = _text(value.get("argument_theme")).upper()
+    proof_subject = _text(value.get("proof_subject")).upper()
+    concept_ids = {
+        _text(item).upper() for item in value.get("concept_ids") or [] if _text(item)
+    }
+    scenario_authorized = (
+        claim_type in {"scenario", "audience"}
+        or claim_theme in {
+            "scenario", "scene_usage", "usage_scene", "usage_scenario",
+            "occasion", "multi_occasion", "commute", "travel", "photo_scene",
+        }
+        or proof_subject == "SCENE_USAGE"
+        or bool(concept_ids & {"CCP_DAILY_SCENE", "CCP_MULTI_SCENE"})
+        or argument_theme in {
+            "SCENE_USAGE", "MULTI_SCENE", "MULTI_OCCASION", "DAILY_SCENE",
+        }
+    )
+    tension_text = _text(tension.get("text"))
+    audience_situation = tension_text
+    if not audience_situation and scenario_authorized:
+        audience_situation = (
+            _text(value.get("source_operator_expression"))
+            or _text(value.get("operator_expression"))
+            or _text(value.get("text"))
+        )
+    multi_scenario = (
+        "CCP_MULTI_SCENE" in concept_ids
+        or argument_theme in {"MULTI_SCENE", "MULTI_OCCASION"}
+        or claim_theme == "multi_occasion"
+    )
+    return {
+        "audience_need_authority": (
+            "APPROVED_AUDIENCE_TENSION"
+            if tension_text
+            else "APPROVED_SELLING_SCENARIO"
+            if scenario_authorized
+            else "UNAVAILABLE"
+        ),
+        "audience_situation": audience_situation,
+        "multi_scenario_authorized": bool(multi_scenario),
+    }
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -972,6 +1040,12 @@ def _select_value_proposition(
             score += 60.0
         if _text(item.get("claim_type")).lower() == "benefit":
             score += 16.0
+        elif _text(item.get("claim_type")).lower() in {"scenario", "audience"}:
+            # A reviewed audience/situation point contains the contextual
+            # specificity that generic value labels lack.  Prefer it softly
+            # as the first direction; later allocation still rotates source
+            # selling points before reusing this one.
+            score += 24.0
         # Carrier compatibility is a creative preference, not permission to
         # speak an already VERIFIED selling point.  Static or hand-led product
         # visuals may still carry an authorised use-case voiceover; they are
@@ -1017,6 +1091,13 @@ def _select_value_proposition(
             "authorization_source": _text(selected.get("authority")),
             "mapping_status": _text(selected.get("mapping_status")),
             "operator_expression": _text(selected.get("operator_expression")),
+            "source_operator_expression": _text(
+                selected.get("source_operator_expression")
+            ),
+            "source_scope_concept_count": int(
+                selected.get("source_scope_concept_count") or 1
+            ),
+            "source_ref": _text(selected.get("source_ref")),
             # This normalized label is safe for visual planning.  The reviewed
             # operator sentence remains available to the central voiceover but
             # must not be reused as character or scene biography.
@@ -1247,6 +1328,9 @@ def build_content_bundle_brief(
         "authorization_source": _text(value_proposition.get("authorization_source")) if selling_argument_available else "",
         "mapping_status": _text(value_proposition.get("mapping_status")) if selling_argument_available else "",
         "operator_expression": _text(value_proposition.get("operator_expression")) if selling_argument_available else "",
+        "source_operator_expression": _text(value_proposition.get("source_operator_expression")) if selling_argument_available else "",
+        "source_scope_concept_count": int(value_proposition.get("source_scope_concept_count") or 1) if selling_argument_available else 0,
+        "source_ref": _text(value_proposition.get("source_ref")) if selling_argument_available else "",
         "creative_core_value": _text(value_proposition.get("creative_core_value")) if selling_argument_available else "",
         "claim_type": _text(value_proposition.get("claim_type")) if selling_argument_available else "",
         "claim_theme": _text(value_proposition.get("claim_theme")) if selling_argument_available else "",
@@ -1283,6 +1367,18 @@ def build_content_bundle_brief(
         # explicit split above rather than treating all visual facts as copy.
         "proof_claim_keys": core_proof_claim_keys,
     }
+    context_semantics = _selling_argument_context_semantics(
+        value_proposition, audience_tension
+    )
+    selling_argument.update(context_semantics)
+    if (
+        not _text(selling_argument.get("target_need"))
+        and _text(context_semantics.get("audience_need_authority"))
+        == "APPROVED_SELLING_SCENARIO"
+    ):
+        selling_argument["target_need"] = _text(
+            context_semantics.get("audience_situation")
+        )
     preferred_hook_angles = _hook_candidates_for_bundle(
         reference,
         atoms,
@@ -1303,6 +1399,21 @@ def build_content_bundle_brief(
                     *preferred_hook_angles,
                 ]
             )
+        )
+    elif (
+        argument_ready
+        and _text(context_semantics.get("audience_need_authority"))
+        == "APPROVED_SELLING_SCENARIO"
+    ):
+        # A reviewed scenario selling point is enough authority to ask the
+        # corresponding viewer need.  It is not permission to invent a pain.
+        preferred_hook_angles = list(
+            dict.fromkeys([
+                "AUDIENCE_NEED_CALLOUT",
+                "GENERAL_PRODUCT_SHARE",
+                "USER_ADVOCACY_STANCE",
+                *preferred_hook_angles,
+            ])
         )
     elif argument_ready and hook_tension_authorized:
         # The central concept is permission to use the concept's governed hook
@@ -1355,6 +1466,15 @@ def build_content_bundle_brief(
         "eligible_hook_ids": preferred_hook_angles,
         "hook_tension_authority": _text(
             value_proposition.get("hook_tension_authority")
+        ),
+        "audience_need_authority": _text(
+            context_semantics.get("audience_need_authority")
+        ),
+        "audience_situation": _text(
+            context_semantics.get("audience_situation")
+        ),
+        "multi_scenario_authorized": bool(
+            context_semantics.get("multi_scenario_authorized")
         ),
         # Pick the content-level hook before the blueprint is written.  The
         # central voiceover engine still owns the final wording, but visual
@@ -2516,6 +2636,8 @@ def assemble_reality_script(
     visual_plan: Dict[str, Any],
     voiceover_plan: Dict[str, Any],
 ) -> Dict[str, Any]:
+    from core.semantic_spine import semantic_trace
+
     execution_plan = direction["structure_execution_plan"]
     p2_lite = direction["p2_lite"]
     content_bundle = (
@@ -2727,6 +2849,16 @@ def assemble_reality_script(
             or _text(diversity.get("required_presentation_mode")) == presentation_mode
         ) else "FAIL",
     }
+    semantic_spine = dict(
+        direction.get("semantic_spine_contract")
+        or content_bundle.get("semantic_spine_contract")
+        or {}
+    )
+    context_bridge = dict(
+        direction.get("context_bridge_contract")
+        or content_bundle.get("context_bridge_contract")
+        or {}
+    )
     script = {
         "reality_reference_schema_version": (
             "original-reality-complete-script-v24-direct-share-subtractive"
@@ -2738,6 +2870,15 @@ def assemble_reality_script(
         "proof_path": "REALITY_CONTENT_BUNDLE",
         "creative_diversity_contract": diversity,
         "creative_blueprint": blueprint,
+        "semantic_spine_contract": semantic_spine,
+        "context_bridge_contract": context_bridge,
+        "semantic_trace": semantic_trace(
+            semantic_spine,
+            context_bridge,
+            voiceover_context_mode=_text(
+                voiceover_plan.get("voiceover_context_mode")
+            ),
+        ),
         "production_design": {
             "presentation_mode": presentation_mode,
             "creator_recording_profile": recording_profile,

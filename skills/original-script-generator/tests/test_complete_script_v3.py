@@ -453,6 +453,9 @@ class CompleteScriptV3Tests(unittest.TestCase):
                     "LEISURE_OUTING",
                     "QUICK_ERRAND",
                     "WAITING_IN_TRANSIT",
+                    "TRAVEL_PREP",
+                    "TRAVEL_TRANSIT",
+                    "TRAVEL_STAY",
                 }
                 for contract in recent
             )
@@ -716,6 +719,17 @@ class CompleteScriptV3Tests(unittest.TestCase):
         signature = lambda item: (item["persona_role"], item["scene_motif"], item["opening_action"])
         self.assertNotEqual(signature(first), signature(rerun))
         self.assertFalse(rerun["history_snapshot"]["reused_same_product_direction"])
+        self.assertTrue(first["perceptual_signature"])
+        row = creative_usage_row(
+            contract=first,
+            product_code="P1",
+            direction=direction(),
+            source_run_id=11,
+        )
+        self.assertEqual(
+            first["perceptual_signature"],
+            row["metadata"]["perceptual_signature"],
+        )
 
     def test_blueprint_fields_have_consumers_and_projection_is_render_only(self) -> None:
         contract = build_creative_diversity_contract(

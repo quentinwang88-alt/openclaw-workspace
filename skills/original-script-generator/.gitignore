@@ -1,3 +1,9 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# 本地批次审阅与 SQLite 运行产物，不属于 skill 源码。
+batch_complete_scripts.md
+batch_plan_report.json
+voiceover_stage0.sqlite3-*
+v*_smoke_*/
