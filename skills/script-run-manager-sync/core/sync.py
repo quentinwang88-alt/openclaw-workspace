@@ -100,6 +100,8 @@ TARGET_FIELD_ALIASES: Dict[str, List[str]] = {
     "video_duration": ["视频时长", "短视频时长", "时长", "视频秒数", "duration", "video_duration"],
     "voiceover_expression_contract": ["口播表达合同"],
     "voiceover_execution_plan": ["口播执行计划"],
+    "voiceover_requested": ["是否配口播"],
+    "voiceover_status": ["口播状态"],
     "persona_id": ["人物模板ID", "人物模板ID（系统）"],
     "persona_contract": ["人物模板合同", "人物模板合同_JSON（系统）"],
     "first_frame_strategy": ["视觉参考模式", "视觉参考模式（系统）", "首帧策略"],
@@ -111,12 +113,14 @@ SCRIPT_ID_HEADER_PATTERN = re.compile(r"\A\s*【脚本ID】\s*\n-\s*[^\n\r]+(?:\
 SCRIPT_TYPE_ORIGINAL = "原创脚本"
 SCRIPT_TYPE_SHORT_VIDEO_REMAKE = "短视频复刻脚本"
 SCRIPT_TYPE_NURTURE = "养号脚本"
+SCRIPT_TYPE_SEEDING = "种草脚本"
 SCRIPT_TYPE_LIGHT_VIDEO = "轻视频脚本"
 SCRIPT_TYPE_LIGHT_VIDEO_SUPPLEMENT = "轻视频补素材脚本"
 RUN_MANAGER_SCRIPT_TYPE_OPTIONS = (
     SCRIPT_TYPE_ORIGINAL,
     SCRIPT_TYPE_SHORT_VIDEO_REMAKE,
     SCRIPT_TYPE_NURTURE,
+    SCRIPT_TYPE_SEEDING,
     SCRIPT_TYPE_LIGHT_VIDEO,
     SCRIPT_TYPE_LIGHT_VIDEO_SUPPLEMENT,
 )
@@ -155,6 +159,8 @@ class ScriptSyncTask:
     persona_contract: str = ""
     first_frame_strategy: str = ""
     reference_preparation_error: str = ""
+    voiceover_requested: bool = False
+    voiceover_status: str = ""
 
 
 def is_variant_slot(task_suffix: str) -> bool:
@@ -249,6 +255,12 @@ def normalize_run_manager_script_type(
     content_branch_text = normalize_text(content_branch)
     upstream_types = {script_source_text, source_script_type_text, task_source_text}
     if (
+        SCRIPT_TYPE_SEEDING in upstream_types
+        or publish_purpose_text == "种草"
+        or content_branch_text == "SEEDING_ORGANIC"
+    ):
+        return SCRIPT_TYPE_SEEDING
+    if (
         upstream_types & {"养号复刻", SCRIPT_TYPE_NURTURE}
         or publish_purpose_text == "养号"
         or content_branch_text == "非商品展示型"
@@ -279,6 +291,23 @@ def task_script_type(task: ScriptSyncTask) -> str:
 
 def is_nurture_task(task: ScriptSyncTask) -> bool:
     return task_script_type(task) == SCRIPT_TYPE_NURTURE
+
+
+def is_seeding_task(task: ScriptSyncTask) -> bool:
+    return task_script_type(task) == SCRIPT_TYPE_SEEDING
+
+
+def validate_seeding_publish_guard(task: ScriptSyncTask) -> None:
+    """Fail closed before a seeding task can enter the run manager."""
+
+    if not is_seeding_task(task):
+        return
+    if normalize_text(task.content_branch) != "SEEDING_ORGANIC":
+        raise ValueError("SEEDING_PUBLISH_POLICY_UNAVAILABLE")
+    if normalize_text(task.publish_purpose) != "种草":
+        raise ValueError("SEEDING_PUBLISH_POLICY_UNAVAILABLE")
+    if normalize_text(task.cart_enabled) != "否":
+        raise ValueError("SEEDING_CART_GUARD_MISSING")
 
 
 def extract_attachments(raw_value: Any) -> List[Dict[str, Any]]:
@@ -576,6 +605,7 @@ def build_target_fields(
     *,
     include_publish_metadata: bool = False,
 ) -> Dict[str, Any]:
+    validate_seeding_publish_guard(task)
     fields: Dict[str, Any] = {}
     if mapping.get("task_name"):
         fields[mapping["task_name"]] = task.task_name
@@ -625,6 +655,10 @@ def build_target_fields(
         fields[mapping["voiceover_expression_contract"]] = task.voiceover_expression_contract
     if mapping.get("voiceover_execution_plan") and task.voiceover_execution_plan:
         fields[mapping["voiceover_execution_plan"]] = task.voiceover_execution_plan
+    if mapping.get("voiceover_requested") and task.voiceover_requested:
+        fields[mapping["voiceover_requested"]] = True
+    if mapping.get("voiceover_status") and task.voiceover_status:
+        fields[mapping["voiceover_status"]] = task.voiceover_status
     if mapping.get("persona_id") and task.persona_id:
         fields[mapping["persona_id"]] = task.persona_id
     if mapping.get("persona_contract") and task.persona_contract:

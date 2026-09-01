@@ -10,6 +10,19 @@ description: |
 
 # Script Run Manager Sync
 
+## 种草不挂车脚本
+
+种草脚本使用独立源适配器 `core/seeding_batch_source.py`，不会复用原创生产脚本源表的业务字段。人工源表只需满足 `发布策略=种草不挂车`；适配器会在内部冻结 `脚本类型=种草脚本`、`发布用途=种草`、`是否挂车=否`、`内容分支=SEEDING_ORGANIC`。发布策略缺失或冲突都会阻断同步。商品编码只写入 `全球产品ID` 供内部分析，运行表的可挂车 `产品ID` 保持为空。
+
+```bash
+python3 scripts/openclaw_seeding_batch_sync.py check \
+  --source-url '<种草视频生产脚本表URL>'
+
+python3 scripts/openclaw_seeding_batch_sync.py sync \
+  --source-url '<种草视频生产脚本表URL>' \
+  --record-id recXXXXXXXX
+```
+
 ## 核心能力
 
 这个 skill 会：
@@ -108,6 +121,8 @@ python3 /Users/likeu3/.openclaw/workspace/skills/script-run-manager-sync/scripts
 - 每个非空脚本都会新增一条目标记录
 - 同步成功后自动取消源表 `是否可同步`
 - 如果源表存在 `同步状态` / `同步时间` 字段，会自动回写结果
+- `SEEDING_ORGANIC` 生产脚本优先使用源表 `首帧图` 作为参考图；没有首帧时才回退商品图。
+- `SEEDING_ORGANIC` 自动写入 `是否配口播=true / 口播状态=待处理`，并保留已审核口播原文；执行计划携带必选生活方式 BGM 床，不允许下游把种草任务静默做成无口播或无音乐版本。V7 按脚本序号轮换 BGM 选择档，并携带“开场 medium → 口播 low → 揭示点 medium”的能量曲线以及商业转场音禁用列表，不增加飞书字段。
 - `短视频复刻` 必须同时具备复刻流水线的来源证据（`源复刻任务ID`，或 `脚本来源=短视频复刻` 且 `发布用途=短视频复刻`）；只有一个孤立的 `脚本类型=短视频复刻` 时按原创脚本处理，避免复制行残留值造成错分
 
 ## 字段要求

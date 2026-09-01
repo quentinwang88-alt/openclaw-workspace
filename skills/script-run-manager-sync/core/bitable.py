@@ -197,15 +197,29 @@ class FeishuBitableClient:
             raise FeishuAPIError(f"创建字段失败: {result.get('msg')}")
         return result.get("data", {})
 
-    def update_field(self, field_id: str, *, field_name: Optional[str] = None) -> Dict[str, Any]:
-        """Rename an existing field without changing its type or stored values."""
-        if not field_name:
+    def update_field(
+        self,
+        field_id: str,
+        *,
+        field_name: Optional[str] = None,
+        field_type: Optional[int] = None,
+        property: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Update a field definition while preserving omitted attributes."""
+        if not field_name and field_type is None and property is None:
             return {}
         url = (
             f"https://open.feishu.cn/open-apis/bitable/v1/apps/"
             f"{self.app_token}/tables/{self.table_id}/fields/{field_id}"
         )
-        response = self._request("PUT", url, headers=self._headers(), json={"field_name": field_name})
+        payload: Dict[str, Any] = {}
+        if field_name:
+            payload["field_name"] = field_name
+        if field_type is not None:
+            payload["type"] = field_type
+        if property is not None:
+            payload["property"] = property
+        response = self._request("PUT", url, headers=self._headers(), json=payload)
         result = response.json()
         if result.get("code") != 0:
             raise FeishuAPIError(f"更新字段失败: {result.get('msg')}")

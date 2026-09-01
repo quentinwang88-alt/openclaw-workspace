@@ -43,6 +43,9 @@ ORIGINAL_BATCH_SOURCE_FIELD_ALIASES: Dict[str, List[str]] = {
     "first_frame_requested": ["生成首帧（需勾选）", "生成首帧"],
     "composite_first_frame": ["统一首帧（系统）", "统一首帧", "AI统一首帧"],
     "first_frame_status": ["首帧准备状态（系统）", "首帧准备状态", "首帧状态"],
+    "publish_purpose": ["发布用途"],
+    "cart_enabled": ["是否挂车"],
+    "content_branch": ["内容分支"],
 }
 
 
@@ -146,6 +149,18 @@ def build_original_batch_sync_tasks(
                 variant_strength="母版",
                 script_source="原创脚本",
                 source_script_type="原创脚本",
+                publish_purpose=(
+                    normalize_text(fields.get(mapping.get("publish_purpose")))
+                    if mapping.get("publish_purpose") else ""
+                ) or "带货",
+                cart_enabled=(
+                    normalize_text(fields.get(mapping.get("cart_enabled")))
+                    if mapping.get("cart_enabled") else ""
+                ) or "是",
+                content_branch=(
+                    normalize_text(fields.get(mapping.get("content_branch")))
+                    if mapping.get("content_branch") else ""
+                ) or "DIRECT_RESPONSE",
                 video_duration=normalize_video_duration(fields.get(mapping.get("video_duration")) if mapping.get("video_duration") else None),
                 persona_id=normalize_text(fields.get(mapping.get("persona_id"))) if mapping.get("persona_id") else "",
                 persona_contract=normalize_text(fields.get(mapping.get("persona_contract"))) if mapping.get("persona_contract") else "",

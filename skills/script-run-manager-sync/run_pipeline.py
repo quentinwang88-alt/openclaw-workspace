@@ -30,6 +30,10 @@ from core.original_batch_source import (  # noqa: E402
     build_original_batch_sync_tasks,
     resolve_original_batch_field_mapping,
 )
+from core.seeding_batch_source import (  # noqa: E402
+    build_seeding_sync_tasks,
+    resolve_seeding_batch_field_mapping,
+)
 from core.sync import (  # noqa: E402
     RUN_MANAGER_SCRIPT_TYPE_OPTIONS,
     SOURCE_FIELD_ALIASES,
@@ -112,6 +116,25 @@ def ensure_target_default_fields(client: FeishuBitableClient, field_names: List[
             property={"options": [{"name": item} for item in RUN_MANAGER_SCRIPT_TYPE_OPTIONS]},
         )
         changed = True
+    else:
+        script_type_field = next(
+            (field for field in client.list_fields() if field.field_name == "脚本类型"),
+            None,
+        )
+        if script_type_field and int(script_type_field.field_type or 0) == 3:
+            current_options = list((script_type_field.property or {}).get("options") or [])
+            current_names = {str(item.get("name") or "") for item in current_options}
+            missing_options = [
+                value for value in RUN_MANAGER_SCRIPT_TYPE_OPTIONS if value not in current_names
+            ]
+            if missing_options:
+                client.update_field(
+                    script_type_field.field_id,
+                    field_name="脚本类型",
+                    field_type=3,
+                    property={"options": current_options + [{"name": value} for value in missing_options]},
+                )
+                changed = True
     if "店铺ID" not in field_names:
         print("🧩 目标运行表缺少字段【店铺ID】，正在创建...")
         client.create_field("店铺ID", field_type=1, ui_type="Text")
@@ -142,6 +165,12 @@ def ensure_target_default_fields(client: FeishuBitableClient, field_names: List[
     if "视觉参考模式" not in field_names:
         print("🧩 目标运行表缺少字段【视觉参考模式】，正在创建...")
         client.create_field("视觉参考模式", field_type=1, ui_type="Text")
+        changed = True
+    for field_name in ("发布用途", "是否挂车", "内容分支"):
+        if field_name in field_names:
+            continue
+        print(f"🧩 目标运行表缺少字段【{field_name}】，正在创建...")
+        client.create_field(field_name, field_type=1, ui_type="Text")
         changed = True
     return client.list_field_names() if changed else field_names
 
@@ -267,7 +296,11 @@ def build_existing_target_updates(
     ):
         updates[prompt_field] = fields[prompt_field]
 
-    for logical_name in ("script_id", "store_id", "internal_script_key", "task_name", "script_type"):
+    for logical_name in (
+        "script_id", "store_id", "internal_script_key", "task_name", "script_type",
+        "short_video_title", "parent_slot", "direction_label", "variant_strength",
+        "script_source", "publish_purpose", "cart_enabled", "content_branch",
+    ):
         field_name = mapping.get(logical_name)
         if field_name and fields.get(field_name) and (allow_full_patch or not existing_target.fields.get(field_name)):
             updates[field_name] = fields[field_name]
@@ -357,9 +390,9 @@ def main() -> None:
     parser.add_argument("--mode", choices=["manual", "scheduled"], default="manual", help="触发模式")
     parser.add_argument(
         "--source-kind",
-        choices=["production", "manual", "original-batch"],
+        choices=["production", "manual", "original-batch", "seeding-batch"],
         default="production",
-        help="源表类型；original-batch 为一行一条的原创视频生产脚本表",
+        help="源表类型；original-batch/seeding-batch 均为一行一条的独立生产脚本表",
     )
     parser.add_argument("--source-feishu-url", help="源表飞书 URL；未传时按源表类型使用默认表")
     parser.add_argument("--target-feishu-url", default=DEFAULT_TARGET_FEISHU_URL, help="目标表飞书 URL")
@@ -384,12 +417,15 @@ def main() -> None:
 def _main_with_lock(args: argparse.Namespace) -> None:
 
     print(f"🚀 开始执行同步任务 | mode={args.mode} | source_kind={args.source_kind}")
+    include_publish_metadata = args.include_publish_metadata or args.source_kind == "seeding-batch"
 
     default_source_urls = {
         "manual": DEFAULT_MANUAL_SOURCE_FEISHU_URL,
         "original-batch": DEFAULT_ORIGINAL_BATCH_SOURCE_FEISHU_URL,
         "production": DEFAULT_SOURCE_FEISHU_URL,
     }
+    if args.source_kind == "seeding-batch" and not args.source_feishu_url:
+        raise ValueError("seeding-batch 必须显式传 --source-feishu-url，禁止误读原创脚本表")
     source_feishu_url = args.source_feishu_url or default_source_urls[args.source_kind]
     source_app_token, source_table_id = resolve_feishu_config(source_feishu_url)
     target_app_token, target_table_id = resolve_feishu_config(args.target_feishu_url)
@@ -403,6 +439,8 @@ def _main_with_lock(args: argparse.Namespace) -> None:
         source_mapping = resolve_manual_field_mapping(source_field_names)
     elif args.source_kind == "original-batch":
         source_mapping = resolve_original_batch_field_mapping(source_field_names)
+    elif args.source_kind == "seeding-batch":
+        source_mapping = resolve_seeding_batch_field_mapping(source_field_names)
     else:
         source_mapping = resolve_field_mapping(source_field_names, SOURCE_FIELD_ALIASES)
     target_mapping = resolve_field_mapping(target_field_names, TARGET_FIELD_ALIASES)
@@ -413,6 +451,14 @@ def _main_with_lock(args: argparse.Namespace) -> None:
         validate_required_fields(
             source_mapping,
             ["script_id", "product_code", "product_images", "video_prompt", "sync_enabled"],
+        )
+    elif args.source_kind == "seeding-batch":
+        validate_required_fields(
+            source_mapping,
+            [
+                "script_id", "product_code", "product_images", "video_prompt",
+                "sync_enabled", "publish_policy",
+            ],
         )
     else:
         validate_required_fields(
@@ -450,6 +496,14 @@ def _main_with_lock(args: argparse.Namespace) -> None:
         preflight_errors = manual_result.errors
     elif args.source_kind == "original-batch":
         sync_tasks = build_original_batch_sync_tasks(
+            source_records,
+            source_mapping,
+            product_code=args.product_code,
+            record_id=args.record_id,
+            limit=args.limit,
+        )
+    elif args.source_kind == "seeding-batch":
+        sync_tasks = build_seeding_sync_tasks(
             source_records,
             source_mapping,
             product_code=args.product_code,
@@ -549,7 +603,7 @@ def _main_with_lock(args: argparse.Namespace) -> None:
                 fields = build_target_fields(
                     task,
                     target_mapping,
-                    include_publish_metadata=args.include_publish_metadata,
+                    include_publish_metadata=include_publish_metadata,
                 )
                 existing_target, existing_reason = find_existing_target(task, target_indexes)
                 if existing_target is not None:
@@ -564,7 +618,7 @@ def _main_with_lock(args: argparse.Namespace) -> None:
                         continue
                     allow_full_patch = (
                     existing_reason != "脚本ID"
-                    or args.source_kind in {"manual", "original-batch"}
+                    or args.source_kind in {"manual", "original-batch", "seeding-batch"}
                     ) and can_update_existing_target(existing_target, target_mapping)
                     existing_updates = build_existing_target_updates(
                         existing_target,
@@ -573,7 +627,7 @@ def _main_with_lock(args: argparse.Namespace) -> None:
                         allow_full_patch=allow_full_patch,
                     )
                     if (
-                        args.source_kind in {"manual", "original-batch"}
+                        args.source_kind in {"manual", "original-batch", "seeding-batch"}
                         and allow_full_patch
                         and task.reference_images
                         and target_mapping.get("reference_images")
@@ -633,7 +687,7 @@ def _main_with_lock(args: argparse.Namespace) -> None:
                 cleared_master=master_enabled,
                 cleared_variant=variant_enabled,
             )
-            if args.source_kind == "original-batch":
+            if args.source_kind in {"original-batch", "seeding-batch"}:
                 if source_mapping.get("processing_status"):
                     success_fields[source_mapping["processing_status"]] = "已送生产"
                 if source_mapping.get("sync_time"):
@@ -666,9 +720,9 @@ def _main_with_lock(args: argparse.Namespace) -> None:
                 synced_at=synced_at,
                 sync_scope="人工脚本" if args.source_kind == "manual" else summarize_sync_scope(source_tasks),
             )
-            if args.source_kind == "original-batch" and source_mapping.get("processing_status"):
+            if args.source_kind in {"original-batch", "seeding-batch"} and source_mapping.get("processing_status"):
                 failure_fields[source_mapping["processing_status"]] = "同步失败"
-            if args.source_kind == "original-batch" and source_mapping.get("sync_time"):
+            if args.source_kind in {"original-batch", "seeding-batch"} and source_mapping.get("sync_time"):
                 failure_fields[source_mapping["sync_time"]] = int(time.time() * 1000)
             script_id_field = source_mapping.get("script_id")
             if args.source_kind == "manual" and script_id_field and manual_script_ids.get(source_record_id):

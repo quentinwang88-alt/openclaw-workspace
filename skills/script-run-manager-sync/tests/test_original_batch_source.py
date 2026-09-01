@@ -88,6 +88,9 @@ class OriginalBatchSourceTest(unittest.TestCase):
         self.assertEqual(
             task.first_frame_strategy, "PERSONA_PRODUCT_COMPOSITE_PREFERRED"
         )
+        self.assertEqual(task.publish_purpose, "带货")
+        self.assertEqual(task.cart_enabled, "是")
+        self.assertEqual(task.content_branch, "DIRECT_RESPONSE")
 
     def test_unchecked_row_is_ignored(self):
         mapping = resolve_original_batch_field_mapping(
