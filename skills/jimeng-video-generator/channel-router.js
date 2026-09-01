@@ -11,9 +11,25 @@ function stableHashForChannelRouting(recordId, taskName, submitIndex, channel) {
 function resolveChannel(context, config) {
   const channelConfig = config.channels || {};
   const iminiConfig = channelConfig.imini || {};
+  const metasoH3Config = channelConfig.metasoH3 || {};
   const defaultChannel = channelConfig.default || '即梦';
 
   const recordChannel = (context.channel || '').trim().toLowerCase();
+
+  const h3Aliases = new Set([
+    'metaso',
+    'minimax h3 api',
+    'minimax-h3',
+    'metaso h3',
+    String(metasoH3Config.channelValue || '').trim().toLowerCase()
+  ].filter(Boolean));
+  if (h3Aliases.has(recordChannel)) {
+    return {
+      channel: 'minimax_h3',
+      source: 'manual',
+      reason: `渠道字段指定 ${context.channel}`
+    };
+  }
 
   if (recordChannel === 'imini') {
     return {
@@ -23,11 +39,19 @@ function resolveChannel(context, config) {
     };
   }
 
-  if (recordChannel === '即梦' || recordChannel) {
+  if (recordChannel === '即梦' || recordChannel === 'jimeng') {
     return {
       channel: '即梦',
       source: 'manual',
       reason: `渠道字段指定 ${context.channel || defaultChannel}`
+    };
+  }
+
+  if (recordChannel) {
+    return {
+      channel: 'unsupported',
+      source: 'manual',
+      reason: `不支持的渠道: ${context.channel}`
     };
   }
 

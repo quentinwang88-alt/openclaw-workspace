@@ -1036,19 +1036,19 @@ function sortSubmitContexts(contexts) {
 
 function contextMatchesChannelFilter(context, config, cliArgs) {
   const channelFilter = normalizeChannelFilter(cliArgs.channel);
+  const resolved = resolveChannel(context, config);
   if (!channelFilter) {
-    return true;
+    return resolved.channel === '即梦' || resolved.channel === 'imini';
   }
 
-  const resolved = resolveChannel(context, config);
   if (channelFilter === 'imini') {
     return resolved.channel === 'imini';
   }
   if (channelFilter === 'jimeng') {
-    return resolved.channel !== 'imini';
+    return resolved.channel === '即梦';
   }
 
-  return String(resolved.channel || '').trim().toLowerCase() === channelFilter;
+  return false;
 }
 
 function escapeRegex(value) {

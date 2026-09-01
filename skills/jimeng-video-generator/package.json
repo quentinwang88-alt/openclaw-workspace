@@ -14,7 +14,11 @@
     "segment-package-dry": "node segment-package-worker.js --config ./segment-package.json --dry-run --submit-only",
     "segment-package-download": "node segment-package-worker.js --config ./segment-package.json --download-only",
     "clear-submit-pause": "node clear-submit-pause.js --config ./feishu-direct.json",
-    "daily-report": "node send-jimeng-daily-report.js --config ./feishu-direct.json"
+    "daily-report": "node send-jimeng-daily-report.js --config ./feishu-direct.json",
+    "minimax-h3-dry": "node minimax-h3-feishu-worker.js --config ./feishu-direct.json --dry-run",
+    "minimax-h3-schema-dry": "node minimax-h3-feishu-worker.js --config ./feishu-direct.json --ensure-schema-only --dry-run",
+    "minimax-h3-test": "node tests/test-minimax-h3.js",
+    "test:h3": "node tests/test-minimax-h3.js && node tests/test-minimax-h3-local-runner.js"
   },
   "dependencies": {
     "puppeteer": "^22.15.0",

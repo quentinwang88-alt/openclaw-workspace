@@ -216,6 +216,35 @@ python3 -m auto_mixcut.cli top-up --product-id <商品ID> --count <目标数量>
 
 该入口只按有效成片缺口补齐，不会默认重刷 10 条。
 
+## MiniMax H3 API 飞书直连
+
+MiniMax H3 使用同一张“短视频自动脚本运行管理表”作为同事的操作界面，不依赖同事电脑上的客户端。正式行必须设置：
+
+- `渠道 = METASO` 且 `模型 = MiniMax H3`，只会被 `minimax-h3-feishu-worker.js` 处理；即梦 worker 必须严格排除该渠道。
+- `提示词`、`视频时长`、`分辨率`、`视频比例`，参考图直接上传到 `参考图`。
+- `MiniMax参考模式` 可选 `文生视频 / 首帧 / 首尾帧 / 多参考图`。`首帧` 优先读 `首帧图片`，为空时回退到单张 `参考图`；`首尾帧` 优先读 `首帧图片 + 尾帧图片`，两个专用字段都为空时才按顺序读取 2 张 `参考图`；`多参考图` 只读 `参考图`，最多 9 张。
+- 第一版强制 `生成次数 = 1`，避免单行单结果附件导致覆盖或重复计费。
+- 成片下载后回写 `生成视频`；大于 20 MB 的成片使用飞书分片上传。
+
+密钥只允许从 `METASO_MINIMAX_API_KEY` 环境变量读取，禁止写入飞书、JSON、代码或日志。先撤销已暴露的密钥，再注入新密钥。
+
+仅查看待处理数量，不改表、不提单：
+
+```bash
+cd /Users/likeu3/.openclaw/workspace/skills/jimeng-video-generator
+./run-minimax-h3-feishu.sh --dry-run
+```
+
+预览缺少的表字段，不修改飞书：
+
+```bash
+./run-minimax-h3-feishu.sh --ensure-schema-only --dry-run
+```
+
+只有在用户确认允许修改正式表结构后，才可执行不带 `--dry-run` 的 `--ensure-schema-only`。付费 smoke test 需再次明确确认，建议先限定一条 `4s + 768P`记录。
+
+创建请求如果网络超时或返回 5xx，会标记为 `submit_uncertain` 并停止自动重试，防止同一任务重复计费。查询、下载和飞书回传可安全续跑。
+
 ## 运行前检查
 
 - Chrome 已用调试端口启动。
@@ -241,3 +270,5 @@ python3 -m auto_mixcut.cli top-up --product-id <商品ID> --count <目标数量>
 - 每日运行日报：[send-jimeng-daily-report.js](./send-jimeng-daily-report.js)
 - 页面/下载基础能力：[folder-processor.js](./folder-processor.js)
 - trace 状态管理：[trace-state.js](./trace-state.js)
+- MiniMax H3 飞书 worker：[minimax-h3-feishu-worker.js](./minimax-h3-feishu-worker.js)
+- MiniMax H3 API 适配：[platforms/minimax-h3](./platforms/minimax-h3)
