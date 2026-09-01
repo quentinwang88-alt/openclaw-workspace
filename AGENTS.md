@@ -184,6 +184,13 @@ Reactions are lightweight social signals. Humans use them constantly — they sa
 
 Skills provide your tools. When you need one, check its `SKILL.md`. Keep local notes (camera names, SSH details, voice preferences) in `TOOLS.md`.
 
+### 📉 Feishu API call discipline
+
+- When a domain skill or fixed adapter can execute a Feishu-table request, call that adapter directly. Do not manually scan the same table first just to rediscover rows that the adapter will scan again.
+- For `feishu_bitable_list_records`, use `page_size=500` for full-table reads and continue only with the returned `page_token` while `has_more=true`. Never restart the same scan with page sizes such as 5, 10, 20, 25, or 100.
+- Use a smaller page only when the user explicitly asks for a small preview and a single page is sufficient. Do not paginate a full table with a small page size.
+- Reuse records already returned in the current turn. Do not repeat an identical unfiltered first-page request because the response was large; switch to the relevant skill adapter or add a server-side filter instead.
+
 **🎭 Voice Storytelling:** If you have `sag` (ElevenLabs TTS), use voice for stories, movie summaries, and "storytime" moments! Way more engaging than walls of text. Surprise people with funny voices.
 
 **📝 Platform Formatting:**
