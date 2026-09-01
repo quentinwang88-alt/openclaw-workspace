@@ -46,6 +46,9 @@ class BasePublishAdapter(ABC):
             statuses[task_id] = self.query_task_status(task_id=task_id, scheduled_for=scheduled_for)
         return statuses
 
+    def terminate_task(self, *, task_id: str) -> PublishTaskStatus:
+        raise NotImplementedError(f"发布适配器不支持终止任务: {task_id}")
+
 
 class DryRunPublishAdapter(BasePublishAdapter):
     def create_scheduled_task(
@@ -68,6 +71,9 @@ class DryRunPublishAdapter(BasePublishAdapter):
         if datetime.now() >= scheduled_for:
             return PublishTaskStatus(state="success", result="发布成功", published_at=scheduled_for.strftime("%Y-%m-%d %H:%M:%S"))
         return PublishTaskStatus(state="pending", result="待执行")
+
+    def terminate_task(self, *, task_id: str) -> PublishTaskStatus:
+        return PublishTaskStatus(state="terminated", result="已终止")
 
 
 class HttpPublishAdapter(BasePublishAdapter):
@@ -687,6 +693,10 @@ class RoutedPublishAdapter(BasePublishAdapter):
     def query_task_status(self, *, task_id: str, scheduled_for: datetime) -> PublishTaskStatus:
         adapter = self._adapter_for_task_id(task_id)
         return adapter.query_task_status(task_id=task_id, scheduled_for=scheduled_for)
+
+    def terminate_task(self, *, task_id: str) -> PublishTaskStatus:
+        adapter = self._adapter_for_task_id(task_id)
+        return adapter.terminate_task(task_id=task_id)
 
     def query_task_statuses(self, tasks: Iterable[Any]) -> Dict[str, PublishTaskStatus]:
         statuses: Dict[str, PublishTaskStatus] = {}

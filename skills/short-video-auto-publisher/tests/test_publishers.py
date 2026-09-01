@@ -27,6 +27,7 @@ class RecordingPublishAdapter(BasePublishAdapter):
         self.name = name
         self.created = []
         self.queried = []
+        self.terminated = []
 
     def create_scheduled_task(
         self,
@@ -47,6 +48,10 @@ class RecordingPublishAdapter(BasePublishAdapter):
     def query_task_status(self, *, task_id: str, scheduled_for: datetime) -> PublishTaskStatus:
         self.queried.append(task_id)
         return PublishTaskStatus(state="pending", result=self.name)
+
+    def terminate_task(self, *, task_id: str) -> PublishTaskStatus:
+        self.terminated.append(task_id)
+        return PublishTaskStatus(state="terminated", result="已终止")
 
 
 class GeeLarkPublishAdapterTest(unittest.TestCase):
@@ -565,6 +570,22 @@ class RoutedPublishAdapterTest(unittest.TestCase):
         self.assertEqual(gee_status.result, "geelark")
         self.assertEqual(neobund.queried, ["neobund:623335"])
         self.assertEqual(geelark.queried, ["614372922865225911"])
+
+    def test_terminate_task_routes_by_task_prefix(self) -> None:
+        geelark = RecordingPublishAdapter("geelark")
+        neobund = RecordingPublishAdapter("neobund")
+        router = RoutedPublishAdapter(
+            default_adapter=geelark,
+            channel_adapters={"GeeLark": geelark, "NeoBund": neobund},
+            account_channels={},
+            task_prefix_adapters={"neobund:": neobund},
+        )
+
+        status = router.terminate_task(task_id="neobund:623335")
+
+        self.assertEqual(status.state, "terminated")
+        self.assertEqual(neobund.terminated, ["neobund:623335"])
+        self.assertEqual(geelark.terminated, [])
 
 
 if __name__ == "__main__":

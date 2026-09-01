@@ -24,13 +24,16 @@ from app.publishers import BasePublishAdapter, DryRunPublishAdapter
 from app.scheduler import (
     ACCOUNT_FIELD_ALIASES,
     RUN_MANAGER_FIELD_ALIASES,
+    account_can_publish_candidate,
     resolve_field_mapping,
     schedule_slots,
+    is_non_shoppable_candidate,
     is_short_video_remake_candidate,
     should_mark_ai_for_geelark,
     sync_accounts,
     sync_publish_results,
     sync_videos,
+    terminate_and_requeue_tasks,
 )
 
 
@@ -88,6 +91,16 @@ class StatusPublisher(RealishPublisher):
         return self.statuses.get(task_id, PublishTaskStatus(state="pending", result="待执行"))
 
 
+class TerminatablePublisher(RealishPublisher):
+    def __init__(self) -> None:
+        super().__init__()
+        self.terminated = []
+
+    def terminate_task(self, *, task_id: str) -> PublishTaskStatus:
+        self.terminated.append(task_id)
+        return PublishTaskStatus(state="terminated", result="已终止")
+
+
 class FailingAccountPublisher(RealishPublisher):
     def __init__(self, failing_account_id: str) -> None:
         super().__init__()
@@ -125,6 +138,45 @@ class SchedulerTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+
+    def test_seeding_candidate_is_always_non_shoppable(self) -> None:
+        class Candidate:
+            script_source = "种草脚本"
+            publish_purpose = "种草"
+            content_branch = "SEEDING_ORGANIC"
+            cart_enabled = ""
+
+        self.assertTrue(is_non_shoppable_candidate(Candidate()))
+
+    def test_neobund_capabilities_gate_organic_and_shoppable_candidates(self) -> None:
+        self.db.upsert_account_configs(
+            [
+                AccountConfig(
+                    account_id="acc-neo", account_name="Neo账号", store_id="SHOP-01",
+                    account_status="可用", publish_channel="NeoBund",
+                    publish_time_1="12:00", publish_time_2="", publish_time_3="",
+                )
+            ]
+        )
+        self.db.update_account_capabilities(
+            [{"account_id": "acc-neo", "organic_capable": False, "shoppable_capable": True}]
+        )
+        account = self.db.get_account_config("acc-neo")
+
+        class OrganicCandidate:
+            script_source = "种草脚本"
+            publish_purpose = "种草"
+            content_branch = "SEEDING_ORGANIC"
+            cart_enabled = "否"
+
+        class ShoppableCandidate:
+            script_source = "原创脚本"
+            publish_purpose = "带货"
+            content_branch = "商品展示型"
+            cart_enabled = "是"
+
+        self.assertFalse(account_can_publish_candidate(account, OrganicCandidate()))
+        self.assertTrue(account_can_publish_candidate(account, ShoppableCandidate()))
 
     def _upsert_script(
         self,
@@ -679,6 +731,52 @@ class SchedulerTest(unittest.TestCase):
         self.assertEqual(asset["download_status"], "下载成功")
         self.assertEqual(asset["run_video_status"], "已完成")
 
+    def test_sync_videos_builds_metadata_for_seeding_run_manager_record(self) -> None:
+        field_names = [
+            "内部脚本键", "脚本ID", "任务名", "提示词", "店铺ID", "产品ID",
+            "脚本类型", "发布用途", "是否挂车", "内容分支", "短视频标题",
+            "状态", "是否发布", "生成视频",
+        ]
+        mapping = resolve_field_mapping(field_names, RUN_MANAGER_FIELD_ALIASES)
+        record = DummyRecord(
+            "run-seed-1",
+            {
+                "内部脚本键": "seeding:source-seed-1:SEED_SCRIPT_1",
+                "脚本ID": "SEED_SCRIPT_1",
+                "任务名": "P1001.SEED_SCRIPT_1",
+                "提示词": "organic seed prompt",
+                "店铺ID": "THFZ01",
+                "产品ID": "MUST-NOT-BIND",
+                "脚本类型": "种草脚本",
+                "发布用途": "种草",
+                "是否挂车": "否",
+                "内容分支": "SEEDING_ORGANIC",
+                "短视频标题": None,
+                "状态": "已完成",
+                "是否发布": True,
+                "生成视频": [{"file_token": "seed-video", "name": "seed.mp4"}],
+            },
+        )
+
+        stats = sync_videos(
+            [record], mapping, self.db,
+            download_dir=Path(self.temp_dir.name) / "videos", client=DummyClient(),
+        )
+
+        self.assertEqual(stats["metadata_created"], 1)
+        self.assertEqual(stats["synced"], 1)
+        metadata = self.db.get_script_metadata("seeding:source-seed-1:SEED_SCRIPT_1")
+        self.assertIsNotNone(metadata)
+        self.assertEqual(metadata["product_id"], "")
+        self.assertEqual(metadata["script_source"], "种草脚本")
+        self.assertEqual(metadata["publish_purpose"], "种草")
+        self.assertEqual(metadata["cart_enabled"], "否")
+        self.assertEqual(metadata["content_branch"], "SEEDING_ORGANIC")
+        self.assertTrue(metadata["short_video_title"])
+        self.assertEqual(metadata["title_source"], "run_manager_seeding_fallback")
+        self.assertRegex(metadata["short_video_title"], r"[\u0E00-\u0E7F]")
+        self.assertIsNotNone(self.db.get_video_asset("seeding:source-seed-1:SEED_SCRIPT_1"))
+
     def test_sync_videos_uses_oss_when_attachment_was_archived(self) -> None:
         self._upsert_script("005_M1_V9", "P1001", "P1001_M1")
         field_names = ["脚本ID", "状态", "是否发布", "OSS对象ID", "OSS路径"]
@@ -729,6 +827,31 @@ class SchedulerTest(unittest.TestCase):
         self.assertEqual(stats["waiting_voiceover"], 1)
         self.assertEqual(stats["synced"], 0)
         self.assertEqual(self.db.get_video_asset("005_M1_V10")["publish_status"], "等待口播")
+
+    def test_sync_videos_ignores_voiceover_status_when_voiceover_not_requested(self) -> None:
+        self._upsert_script("005_M1_V10_RAW", "P1001", "P1001_M1_RAW")
+        field_names = ["脚本ID", "状态", "是否发布", "生成视频", "是否配口播", "口播状态", "口播成片"]
+        mapping = resolve_field_mapping(field_names, RUN_MANAGER_FIELD_ALIASES)
+        record = DummyRecord("run-raw-no-voiceover", {
+            "脚本ID": "005_M1_V10_RAW",
+            "状态": "已完成",
+            "是否发布": True,
+            "生成视频": [{"file_token": "raw-token", "name": "raw.mp4"}],
+            "是否配口播": False,
+            "口播状态": "处理中",
+        })
+
+        stats = sync_videos(
+            [record], mapping, self.db,
+            download_dir=Path(self.temp_dir.name) / "videos", client=DummyClient(),
+        )
+
+        self.assertEqual(stats["waiting_voiceover"], 0)
+        self.assertEqual(stats["synced"], 1)
+        asset = self.db.get_video_asset("005_M1_V10_RAW")
+        self.assertEqual(asset["video_source_type"], "attachment")
+        self.assertEqual(asset["video_source_value"], "raw-token")
+        self.assertEqual(asset["publish_status"], "待排期")
 
     def test_sync_videos_prefers_completed_voiceover_attachment(self) -> None:
         self._upsert_script("005_M1_V11", "P1001", "P1001_M1")
@@ -1008,6 +1131,78 @@ class SchedulerTest(unittest.TestCase):
         self.assertEqual([call["script_id"] for call in publisher.calls], ["YR030_YR1_M"])
         self.assertEqual([call["product_id"] for call in publisher.calls], [""])
 
+    def test_nurture_disabled_account_never_falls_back_to_nurture_video(self) -> None:
+        self.db.upsert_account_configs(
+            [
+                AccountConfig(
+                    account_id="acc-1",
+                    account_name="账号1",
+                    store_id="SHOP-01",
+                    account_status="可用",
+                    publish_time_1="12:00",
+                    publish_time_2="",
+                    publish_time_3="",
+                    nurture_enabled=False,
+                )
+            ]
+        )
+        self._upsert_nurture_script("YR_DISABLED_1")
+        publisher = RealishPublisher()
+
+        stats = schedule_slots(
+            self.db,
+            publisher,
+            now=datetime(2026, 4, 15, 11, 0, 0),
+        )
+
+        self.assertEqual(stats.scheduled, 0)
+        self.assertEqual(publisher.calls, [])
+
+    def test_seeding_uses_nurture_quota_and_never_binds_product(self) -> None:
+        self.db.upsert_account_configs(
+            [
+                AccountConfig(
+                    account_id="acc-1",
+                    account_name="账号1",
+                    store_id="SHOP-01",
+                    account_status="可用",
+                    publish_time_1="12:00",
+                    publish_time_2="17:00",
+                    publish_time_3="20:00",
+                    nurture_enabled=True,
+                    nurture_daily_count=2,
+                )
+            ]
+        )
+        self._upsert_script(
+            "SEED_SCRIPT_1", "", "SEED_SCRIPT_1",
+            script_source="种草脚本", publish_purpose="种草",
+            cart_enabled="否", content_branch="SEEDING_ORGANIC",
+        )
+        self._upsert_script(
+            "SEED_SCRIPT_2", "", "SEED_SCRIPT_2",
+            script_source="种草脚本", publish_purpose="种草",
+            cart_enabled="否", content_branch="SEEDING_ORGANIC",
+        )
+        self._upsert_script("PRODUCT_SCRIPT_1", "P1001", "P1001_M1")
+        publisher = RealishPublisher()
+
+        stats = schedule_slots(
+            self.db,
+            publisher,
+            now=datetime(2026, 4, 15, 11, 0, 0),
+        )
+
+        self.assertEqual(stats.scheduled, 3)
+        self.assertEqual(
+            [call["script_id"] for call in publisher.calls],
+            ["SEED_SCRIPT_1", "SEED_SCRIPT_2", "PRODUCT_SCRIPT_1"],
+        )
+        self.assertEqual(
+            [call["product_id"] for call in publisher.calls],
+            ["", "", "P1001"],
+        )
+
     def test_assign_slot_clears_stale_failure_state_when_rescheduling(self) -> None:
         self._upsert_script("009_M1_V1", "P1009", "P1009_M1")
 
@@ -1048,6 +1243,70 @@ class SchedulerTest(unittest.TestCase):
         self.assertEqual(asset["publish_result"], None)
         self.assertEqual(asset["error_message"], None)
         self.assertEqual(asset["published_at"], None)
+
+    def test_terminate_and_requeue_preserves_task_history(self) -> None:
+        self._upsert_script("REQUEUE_1", "P1001", "P1001_REQUEUE")
+        self.db.generate_future_slots(datetime(2026, 4, 15, 11, 0, 0), 24)
+        slot = self.db.list_pending_slots(datetime(2026, 4, 15, 11, 0, 0), 24)[0]
+        self.db.assign_slot(
+            slot_id=int(slot["slot_id"]),
+            script_id="REQUEUE_1",
+            publish_task_id="neobund:task-requeue",
+            account_id=str(slot["account_id"]),
+            account_name=str(slot["account_name"]),
+            planned_publish_at=datetime.strptime(str(slot["scheduled_for"]), "%Y-%m-%d %H:%M:%S"),
+        )
+        publisher = TerminatablePublisher()
+
+        stats = terminate_and_requeue_tasks(
+            self.db,
+            publisher,
+            ["neobund:task-requeue"],
+            reason="迁移测试",
+        )
+
+        self.assertEqual(stats["requeued"], 1)
+        self.assertEqual(publisher.terminated, ["neobund:task-requeue"])
+        asset = self.db.get_video_asset("REQUEUE_1")
+        self.assertEqual(asset["publish_status"], "待排期")
+        self.assertEqual(asset["publish_task_id"], None)
+        history = self.db.list_publish_task_history("neobund:task-requeue")
+        self.assertEqual([row["event_type"] for row in history], ["created", "terminated"])
+        self.assertNotIn(
+            "neobund:task-requeue",
+            [str(row["publish_task_id"]) for row in self.db.list_scheduled_tasks()],
+        )
+
+    def test_stale_task_result_does_not_overwrite_current_asset_assignment(self) -> None:
+        self._upsert_script("STALE_RESULT_1", "P1001", "P1001_STALE")
+        self.db.generate_future_slots(datetime(2026, 4, 15, 11, 0, 0), 48)
+        slots = self.db.list_pending_slots(datetime(2026, 4, 15, 11, 0, 0), 48)
+        first_time = datetime.strptime(str(slots[0]["scheduled_for"]), "%Y-%m-%d %H:%M:%S")
+        second_time = datetime.strptime(str(slots[1]["scheduled_for"]), "%Y-%m-%d %H:%M:%S")
+        self.db.assign_slot(
+            slot_id=int(slots[0]["slot_id"]), script_id="STALE_RESULT_1",
+            publish_task_id="neobund:old-task", account_id=str(slots[0]["account_id"]),
+            account_name=str(slots[0]["account_name"]), planned_publish_at=first_time,
+        )
+        self.db.requeue_terminated_task("neobund:old-task", reason="迁移")
+        self.db.assign_slot(
+            slot_id=int(slots[1]["slot_id"]), script_id="STALE_RESULT_1",
+            publish_task_id="neobund:new-task", account_id=str(slots[1]["account_id"]),
+            account_name=str(slots[1]["account_name"]), planned_publish_at=second_time,
+        )
+
+        self.db.mark_publish_result(
+            script_id="STALE_RESULT_1",
+            publish_task_id="neobund:old-task",
+            schedule_status="发布失败",
+            publish_status="发布失败",
+            publish_result="发布失败",
+            error_message="old task terminated",
+        )
+
+        asset = self.db.get_video_asset("STALE_RESULT_1")
+        self.assertEqual(asset["publish_task_id"], "neobund:new-task")
+        self.assertEqual(asset["publish_status"], "已排期")
 
     def test_schedule_slots_does_not_auto_retry_after_product_failures(self) -> None:
         self._upsert_script("010_M1_V1", "P1010", "P1010_M1")

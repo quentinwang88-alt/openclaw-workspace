@@ -18,7 +18,13 @@ if str(SKILL_DIR) not in sys.path:
 from app.db import AutoPublishDB
 from app.models import AccountConfig, ScriptMetadata
 from app.notifications import format_product_publish_weekly_report
-from app.reporting import REPORT_FIELDS, ensure_report_fields, sync_product_publish_report_table, sync_publish_report_table
+from app.reporting import (
+    REPORT_FIELDS,
+    build_report_fields,
+    ensure_report_fields,
+    sync_product_publish_report_table,
+    sync_publish_report_table,
+)
 
 
 class DummyField:
@@ -138,8 +144,32 @@ class ReportingTest(unittest.TestCase):
         self.assertEqual(client.updated_records[0]["fields"]["内部脚本键"], "rec-001:S1")
         self.assertEqual(client.updated_records[0]["fields"]["发布任务ID"], "task-001")
         self.assertEqual(client.updated_records[0]["fields"]["实际发布渠道"], "GeeLark")
+        self.assertEqual(client.updated_records[0]["fields"]["实际发布素材"], "生成视频")
         self.assertEqual(client.updated_records[0]["fields"]["排期状态"], "已排期")
         self.assertEqual(client.updated_records[0]["fields"]["计划发布时间"], "2026-04-13 12:00:00")
+
+    def test_sync_publish_report_table_skips_unchanged_existing_record(self) -> None:
+        row = self.db.list_publish_report_rows()[0]
+        existing = DummyRecord("rpt-1", build_report_fields(row))
+        client = DummyClient(fields=[spec["name"] for spec in REPORT_FIELDS], records=[existing])
+
+        stats = sync_publish_report_table(self.db, client)
+
+        self.assertEqual(stats["updated_records"], 0)
+        self.assertEqual(stats["unchanged_records"], 1)
+        self.assertEqual(client.updated_records, [])
+
+    def test_sync_publish_report_table_updates_only_changed_fields(self) -> None:
+        row = self.db.list_publish_report_rows()[0]
+        existing_fields = build_report_fields(row)
+        existing_fields["发布结果"] = "旧结果"
+        existing = DummyRecord("rpt-1", existing_fields)
+        client = DummyClient(fields=[spec["name"] for spec in REPORT_FIELDS], records=[existing])
+
+        stats = sync_publish_report_table(self.db, client)
+
+        self.assertEqual(stats["updated_records"], 1)
+        self.assertEqual(client.updated_records[0]["fields"], {"发布结果": ""})
 
     def test_product_publish_report_includes_scheduled_unpublished_count(self) -> None:
         client = DummyClient(fields=[])

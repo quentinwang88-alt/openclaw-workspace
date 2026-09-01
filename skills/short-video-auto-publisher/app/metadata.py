@@ -176,6 +176,9 @@ def is_nurture_metadata(script_source: str, publish_purpose: str, content_branch
         normalize_text(script_source) == "养号复刻"
         or normalize_text(publish_purpose) == "养号"
         or normalize_text(content_branch) == "非商品展示型"
+        or normalize_text(script_source) == "种草脚本"
+        or normalize_text(publish_purpose) == "种草"
+        or normalize_text(content_branch) == "SEEDING_ORGANIC"
     )
 
 
@@ -303,7 +306,7 @@ def localized_template_title(metadata: ScriptMetadata) -> str:
     )
     seed = metadata.canonical_script_key or metadata.script_id or metadata.script_text
     index = int(hashlib.md5(str(seed or "").encode("utf-8")).hexdigest()[:8], 16)
-    if country in {"th", "thailand", "thai", "泰国"}:
+    if country in {"th", "thailand", "thai", "泰国", "泰语"}:
         templates = (
             "บรรยากาศวันสบายๆ ที่ดูน่าจำ",
             "มุมเล็กๆ ที่ดูเข้ากับวันนี้",
@@ -313,7 +316,7 @@ def localized_template_title(metadata: ScriptMetadata) -> str:
             "ไอเดียเล็กๆ สำหรับลุคสบายๆ",
             "มุมนี้ทำให้ของชิ้นนี้ดูน่ารักขึ้น",
         )
-    elif country in {"vn", "vietnam", "vietnamese", "越南"}:
+    elif country in {"vn", "vietnam", "vietnamese", "越南", "越南语"}:
         templates = (
             "Một khoảnh khắc đời thường rất dễ nhớ",
             "Một chút bình yên trong ngày thường",
@@ -323,7 +326,7 @@ def localized_template_title(metadata: ScriptMetadata) -> str:
             "Nhìn đơn giản mà rất dễ hợp mỗi ngày",
             "Một điểm nhỏ làm tổng thể gọn hơn",
         )
-    elif country in {"my", "malaysia", "malay", "马来西亚"}:
+    elif country in {"my", "malaysia", "malay", "马来西亚", "马来语"}:
         templates = (
             "Momen harian yang terasa tenang",
             "Suasana ringkas yang nampak natural",

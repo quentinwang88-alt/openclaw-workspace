@@ -39,10 +39,17 @@ def build_canonical_script_key(source_record_id: str, script_slot: str) -> str:
 
 
 def is_nurture_candidate(candidate: PublishCandidate) -> bool:
+    markers = " ".join(
+        str(getattr(candidate, attr, "") or "").strip()
+        for attr in ("script_source", "publish_purpose", "content_branch")
+    )
     return (
         str(candidate.script_source or "").strip() == "养号复刻"
         or str(candidate.publish_purpose or "").strip() == "养号"
         or str(candidate.content_branch or "").strip() == "非商品展示型"
+        or "种草脚本" in markers
+        or "种草" in markers
+        or "SEEDING_ORGANIC" in markers
     )
 
 
@@ -114,6 +121,13 @@ class AutoPublishDB:
             self._ensure_column(conn, "account_configs", "nurture_daily_count", "INTEGER NOT NULL DEFAULT 2")
             self._ensure_column(conn, "account_configs", "nurture_only", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "account_configs", "publish_channel", "TEXT NOT NULL DEFAULT 'GeeLark'")
+            self._ensure_column(conn, "account_configs", "organic_capable", "INTEGER")
+            self._ensure_column(conn, "account_configs", "shoppable_capable", "INTEGER")
+            self._ensure_column(conn, "account_configs", "organic_auth_id", "TEXT")
+            self._ensure_column(conn, "account_configs", "shoppable_auth_id", "TEXT")
+            self._ensure_column(conn, "account_configs", "capability_status", "TEXT NOT NULL DEFAULT 'unknown'")
+            self._ensure_column(conn, "account_configs", "capability_checked_at", "TEXT")
+            self._ensure_column(conn, "account_configs", "capability_error", "TEXT")
             self._ensure_column(conn, "publish_slots", "error_message", "TEXT")
             self._ensure_column(conn, "publish_slots", "slot_source", "TEXT NOT NULL DEFAULT 'auto'")
             self._ensure_column(conn, "publish_slots", "manual_request_record_id", "TEXT")
@@ -123,6 +137,7 @@ class AutoPublishDB:
             self._ensure_product_schedule_preferences_table(conn)
             self._ensure_notification_log_table(conn)
             self._ensure_manual_publish_requests_table(conn)
+            self._ensure_publish_task_history_table(conn)
             self._ensure_indexes(conn)
 
     def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_def: str) -> None:
@@ -196,6 +211,13 @@ class AutoPublishDB:
                 nurture_enabled INTEGER NOT NULL DEFAULT 0,
                 nurture_daily_count INTEGER NOT NULL DEFAULT 2,
                 nurture_only INTEGER NOT NULL DEFAULT 0,
+                organic_capable INTEGER,
+                shoppable_capable INTEGER,
+                organic_auth_id TEXT,
+                shoppable_auth_id TEXT,
+                capability_status TEXT NOT NULL DEFAULT 'unknown',
+                capability_checked_at TEXT,
+                capability_error TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -225,6 +247,7 @@ class AutoPublishDB:
         self._ensure_product_schedule_preferences_table(conn)
         self._ensure_notification_log_table(conn)
         self._ensure_manual_publish_requests_table(conn)
+        self._ensure_publish_task_history_table(conn)
         self._ensure_indexes(conn)
 
     def _ensure_disabled_products_table(self, conn: sqlite3.Connection) -> None:
@@ -292,6 +315,43 @@ class AutoPublishDB:
             """
         )
 
+    def _ensure_publish_task_history_table(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS publish_task_history (
+                history_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                slot_id INTEGER,
+                canonical_script_key TEXT,
+                script_id TEXT,
+                account_id TEXT,
+                account_name TEXT,
+                scheduled_for TEXT,
+                publish_task_id TEXT,
+                event_type TEXT NOT NULL,
+                event_detail TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO publish_task_history (
+                slot_id, canonical_script_key, script_id, account_id, account_name,
+                scheduled_for, publish_task_id, event_type, event_detail, created_at
+            )
+            SELECT ps.slot_id, ps.canonical_script_key, ps.script_id, ps.account_id, ps.account_name,
+                   ps.scheduled_for, ps.publish_task_id, 'baseline', '升级时回填现有任务',
+                   COALESCE(ps.created_at, ps.updated_at)
+            FROM publish_slots ps
+            WHERE COALESCE(ps.publish_task_id, '') <> ''
+              AND NOT EXISTS (
+                  SELECT 1 FROM publish_task_history history
+                  WHERE history.publish_task_id = ps.publish_task_id
+                    AND history.event_type IN ('baseline', 'created')
+              )
+            """
+        )
+
     def _ensure_indexes(self, conn: sqlite3.Connection) -> None:
         conn.executescript(
             """
@@ -330,6 +390,12 @@ class AutoPublishDB:
 
             CREATE INDEX IF NOT EXISTS idx_product_schedule_preferences_strategy
             ON product_schedule_preferences(schedule_strategy, store_id, product_id);
+
+            CREATE INDEX IF NOT EXISTS idx_publish_task_history_task
+            ON publish_task_history(publish_task_id, created_at);
+
+            CREATE INDEX IF NOT EXISTS idx_publish_task_history_script
+            ON publish_task_history(canonical_script_key, created_at);
             """
         )
 
@@ -1581,6 +1647,171 @@ class AutoPublishDB:
                 (account_id,),
             ).fetchone()
 
+    def list_account_configs(self, *, publish_channel: str = "") -> List[sqlite3.Row]:
+        with self._connect() as conn:
+            if publish_channel:
+                return conn.execute(
+                    """
+                    SELECT * FROM account_configs
+                    WHERE publish_channel = ?
+                    ORDER BY store_id, account_name, account_id
+                    """,
+                    (str(publish_channel).strip(),),
+                ).fetchall()
+            return conn.execute(
+                "SELECT * FROM account_configs ORDER BY store_id, account_name, account_id"
+            ).fetchall()
+
+    def update_account_capabilities(self, capabilities: Iterable[Dict[str, Any]]) -> int:
+        rows = list(capabilities)
+        if not rows:
+            return 0
+        now = self._now_text()
+        with self._connect() as conn:
+            updated = 0
+            for item in rows:
+                updated += int(
+                    conn.execute(
+                        """
+                        UPDATE account_configs
+                        SET organic_capable = ?,
+                            shoppable_capable = ?,
+                            organic_auth_id = ?,
+                            shoppable_auth_id = ?,
+                            capability_status = 'ok',
+                            capability_checked_at = ?,
+                            capability_error = NULL,
+                            updated_at = ?
+                        WHERE account_id = ?
+                        """,
+                        (
+                            1 if item.get("organic_capable") else 0,
+                            1 if item.get("shoppable_capable") else 0,
+                            str(item.get("organic_auth_id") or ""),
+                            str(item.get("shoppable_auth_id") or ""),
+                            now,
+                            now,
+                            str(item.get("account_id") or "").strip(),
+                        ),
+                    ).rowcount
+                    or 0
+                )
+        return updated
+
+    def mark_account_capability_error(self, account_ids: Iterable[str], error_message: str) -> int:
+        ids = [str(item or "").strip() for item in account_ids if str(item or "").strip()]
+        if not ids:
+            return 0
+        now = self._now_text()
+        with self._connect() as conn:
+            updated = 0
+            for account_id in ids:
+                updated += int(
+                    conn.execute(
+                        """
+                        UPDATE account_configs
+                        SET capability_status = CASE
+                                WHEN capability_status = 'ok' THEN capability_status
+                                ELSE 'error'
+                            END,
+                            capability_error = ?,
+                            updated_at = ?
+                        WHERE account_id = ?
+                        """,
+                        (str(error_message or "").strip()[:1000], now, account_id),
+                    ).rowcount
+                    or 0
+                )
+        return updated
+
+    def get_publish_slot_by_task_id(self, publish_task_id: str) -> Optional[sqlite3.Row]:
+        task_id = str(publish_task_id or "").strip()
+        if not task_id:
+            return None
+        with self._connect() as conn:
+            return conn.execute(
+                """
+                SELECT * FROM publish_slots
+                WHERE publish_task_id = ?
+                ORDER BY slot_id DESC
+                LIMIT 1
+                """,
+                (task_id,),
+            ).fetchone()
+
+    def requeue_terminated_task(self, publish_task_id: str, *, reason: str = "") -> Dict[str, Any]:
+        task_id = str(publish_task_id or "").strip()
+        message = str(reason or "远端任务已终止，视频重新进入待排期池").strip()
+        now = self._now_text()
+        with self._connect() as conn:
+            slot = conn.execute(
+                """
+                SELECT * FROM publish_slots
+                WHERE publish_task_id = ?
+                ORDER BY slot_id DESC
+                LIMIT 1
+                """,
+                (task_id,),
+            ).fetchone()
+            if slot is None:
+                return {"requeued": 0, "reason": "task_not_found", "publish_task_id": task_id}
+            if str(slot["schedule_status"] or "") == "已发布":
+                return {"requeued": 0, "reason": "already_published", "publish_task_id": task_id}
+            conn.execute(
+                """
+                INSERT INTO publish_task_history (
+                    slot_id, canonical_script_key, script_id, account_id, account_name,
+                    scheduled_for, publish_task_id, event_type, event_detail, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'terminated', ?, ?)
+                """,
+                (
+                    int(slot["slot_id"]), str(slot["canonical_script_key"] or ""),
+                    str(slot["script_id"] or ""), str(slot["account_id"] or ""),
+                    str(slot["account_name"] or ""), str(slot["scheduled_for"] or ""),
+                    task_id, message, now,
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE publish_slots
+                SET schedule_status = '已取消', error_message = ?, updated_at = ?
+                WHERE slot_id = ?
+                """,
+                (message, now, int(slot["slot_id"])),
+            )
+            asset_changes = conn.execute(
+                """
+                UPDATE video_assets
+                SET publish_status = '待排期', account_id = NULL, account_name = NULL,
+                    planned_publish_at = NULL, published_at = NULL, publish_task_id = NULL,
+                    publish_result = NULL, error_message = NULL, updated_at = ?
+                WHERE canonical_script_key = ? AND publish_task_id = ?
+                """,
+                (now, str(slot["canonical_script_key"] or ""), task_id),
+            ).rowcount
+        return {
+            "requeued": int(asset_changes or 0),
+            "publish_task_id": task_id,
+            "script_id": str(slot["script_id"] or ""),
+            "canonical_script_key": str(slot["canonical_script_key"] or ""),
+            "slot_id": int(slot["slot_id"]),
+        }
+
+    def list_publish_task_history(self, publish_task_id: str = "") -> List[sqlite3.Row]:
+        with self._connect() as conn:
+            if publish_task_id:
+                return conn.execute(
+                    """
+                    SELECT * FROM publish_task_history
+                    WHERE publish_task_id = ?
+                    ORDER BY history_id
+                    """,
+                    (str(publish_task_id).strip(),),
+                ).fetchall()
+            return conn.execute(
+                "SELECT * FROM publish_task_history ORDER BY history_id"
+            ).fetchall()
+
     def list_account_publish_channels(self) -> Dict[str, str]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -1609,7 +1840,14 @@ class AutoPublishDB:
                   AND ps.scheduled_for >= ?
                   AND ps.scheduled_for <= ?
                   AND ps.schedule_status IN ('已排期', '已发布')
-                  AND (sm.script_source = '养号复刻' OR sm.publish_purpose = '养号' OR sm.content_branch = '非商品展示型')
+                  AND (
+                      sm.script_source = '养号复刻'
+                      OR sm.publish_purpose = '养号'
+                      OR sm.content_branch = '非商品展示型'
+                      OR sm.script_source = '种草脚本'
+                      OR sm.publish_purpose = '种草'
+                      OR sm.content_branch = 'SEEDING_ORGANIC'
+                  )
                 """,
                 (account_id, day_start, day_end),
             ).fetchone()
@@ -1810,6 +2048,18 @@ class AutoPublishDB:
                 """,
                 (script_id, account_id, account_name, planned_text, publish_task_id, now, resolved_key),
             )
+            conn.execute(
+                """
+                INSERT INTO publish_task_history (
+                    slot_id, canonical_script_key, script_id, account_id, account_name,
+                    scheduled_for, publish_task_id, event_type, event_detail, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'created', '', ?)
+                """,
+                (
+                    int(slot_id), resolved_key, script_id, account_id, account_name,
+                    planned_text, publish_task_id, now,
+                ),
+            )
         return True
 
     def cancel_slot(self, slot_id: int, reason: str = "") -> int:
@@ -1881,8 +2131,12 @@ class AutoPublishDB:
                 SET publish_status = ?, publish_result = ?, published_at = COALESCE(?, published_at),
                     error_message = ?, updated_at = ?
                 WHERE canonical_script_key = ?
+                  AND (? = '已发布' OR COALESCE(publish_task_id, '') = '' OR publish_task_id = ?)
                 """,
-                (publish_status, publish_result, published_at, error_message, now, resolved_key),
+                (
+                    publish_status, publish_result, published_at, error_message, now,
+                    resolved_key, publish_status, publish_task_id,
+                ),
             )
 
     def mark_manual_publish_result(
@@ -1965,6 +2219,11 @@ class AutoPublishDB:
                     OR (
                         ps.schedule_status = '已取消'
                         AND COALESCE(ps.publish_task_id, '') LIKE 'neobund:%'
+                        AND NOT EXISTS (
+                            SELECT 1 FROM publish_task_history history
+                            WHERE history.publish_task_id = ps.publish_task_id
+                              AND history.event_type = 'terminated'
+                        )
                     )
                 )
                 ORDER BY ps.scheduled_for ASC

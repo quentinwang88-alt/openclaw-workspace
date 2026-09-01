@@ -194,6 +194,9 @@ class NeoBundClient:
     def list_organic_videos(self, params: Dict[str, Any]) -> Any:
         return self.get(self.organic_list_path, params)
 
+    def terminate_video(self, task_id: str) -> Any:
+        return self.get("/shoppable/video/terminate", {"taskId": _maybe_int(task_id)})
+
 
 class NeoBundS3Uploader:
     def __init__(self, *, timeout: int = 300, session: Optional[requests.Session] = None):
@@ -682,8 +685,13 @@ class NeoBundPublishAdapter(BasePublishAdapter):
         product_title: str = "",
         ref_video_id: str = "",
         mark_ai: Optional[bool] = None,
+        music_selection: Optional[Dict[str, Any]] = None,
     ) -> str:
         tt_product_id = str(product_id or "").strip()
+        if music_selection and tt_product_id:
+            raise ValueError(
+                "music_selection 仅支持 Organic 非带货发布；带货任务请勿传 music_selection"
+            )
         if not tt_product_id:
             auth_id = self._resolve_auth_id(account_id, content_type="organic")
             return self._create_organic_scheduled_task(
@@ -693,6 +701,7 @@ class NeoBundPublishAdapter(BasePublishAdapter):
                 publish_at=publish_at,
                 script_id=script_id,
                 mark_ai=mark_ai,
+                music_selection=music_selection,
             )
 
         auth_id = self._resolve_auth_id(account_id, content_type="shoppable")
@@ -706,6 +715,41 @@ class NeoBundPublishAdapter(BasePublishAdapter):
             product_id=tt_product_id,
             product_title=product_title,
         )
+
+    @staticmethod
+    def _music_commit_fields(music_selection: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Map a validated music selection onto organic commit fields.
+
+        Field names captured from real NeoBund traffic 2026-08-31
+        (POST /np/shoppable/video/commit with a hot-list song attached):
+        musicId / musicTitle / musicAuthor / musicUrl / musicCoverUrl /
+        musicSoundVolume / videoOriginalSoundVolume (both 0-100, frontend
+        default 50).
+        """
+        if not music_selection:
+            return {}
+        required = ("music_id", "music_title", "music_author", "music_url")
+        missing = [
+            key
+            for key in required
+            if not str(music_selection.get(key) or "").strip()
+        ]
+        if missing:
+            raise ValueError(f"music_selection 缺少必填字段: {missing}")
+        fields: Dict[str, Any] = {
+            "musicId": str(music_selection["music_id"]),
+            "musicTitle": str(music_selection["music_title"]),
+            "musicAuthor": str(music_selection["music_author"]),
+            "musicUrl": str(music_selection["music_url"]),
+            "musicSoundVolume": int(music_selection.get("music_sound_volume", 50)),
+            "videoOriginalSoundVolume": int(
+                music_selection.get("video_original_sound_volume", 50)
+            ),
+        }
+        cover_url = str(music_selection.get("music_cover_url") or "").strip()
+        if cover_url:
+            fields["musicCoverUrl"] = cover_url
+        return fields
 
     def _create_shoppable_scheduled_task(
         self,
@@ -762,6 +806,7 @@ class NeoBundPublishAdapter(BasePublishAdapter):
         publish_at: datetime,
         script_id: str,
         mark_ai: Optional[bool],
+        music_selection: Optional[Dict[str, Any]] = None,
     ) -> str:
         upload_result = self.upload_video(video_path)
         payload: Dict[str, Any] = {
@@ -772,9 +817,18 @@ class NeoBundPublishAdapter(BasePublishAdapter):
             "attachFileId": _maybe_int(upload_result.file_id),
             "isPrecheck": self.is_precheck,
             "remark": str(script_id or Path(video_path).name).strip()[:100],
+            # Captured 2026-08-31 from real NeoBund frontend traffic; the
+            # commit rejects payloads missing these organic post options.
+            "postType": 1,
+            "brandContentToggle": 0,
+            "brandOrganicToggle": 0,
+            "disableComment": 0,
+            "disableDuet": 0,
+            "disableStitch": 0,
         }
         if mark_ai is not None and self.ai_generated_field:
-            payload[self.ai_generated_field] = bool(mark_ai)
+            payload[self.ai_generated_field] = 1 if mark_ai else 0
+        payload.update(self._music_commit_fields(music_selection))
         result = self.client.commit_organic_video(payload)
         task_id = self._extract_commit_task_id(result)
         if not task_id:
@@ -853,6 +907,41 @@ class NeoBundPublishAdapter(BasePublishAdapter):
             if remark == str(script_id or "").strip() or item_title == video_title:
                 return item_id
         return ""
+
+    def find_organic_task_record(
+        self,
+        *,
+        script_id: str,
+        video_title: str,
+        scheduled_for: str,
+        auth_id: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        """Return the full organic task record (includes actual music fields).
+
+        Same matching rules as _find_committed_task_id (remark==script_id or
+        title match + identical scheduledReleaseTime); auth_id narrows the
+        query when known but is omitted from the request when empty.
+        """
+        params: Dict[str, Any] = {"current": 1, "size": 50, "authType": 2}
+        if str(auth_id or "").strip():
+            params["authId"] = _maybe_int(str(auth_id).strip())
+        payload = self.client.list_organic_videos(params)
+        records = payload.get("records", []) if isinstance(payload, dict) else []
+        wanted_scheduled = str(scheduled_for or "").strip()
+        wanted_script = str(script_id or "").strip()
+        wanted_title = str(video_title or "").strip()
+        for item in records:
+            if not isinstance(item, dict):
+                continue
+            if wanted_scheduled and str(item.get("scheduledReleaseTime") or "").strip() != wanted_scheduled:
+                continue
+            remark = str(item.get("remark") or "").strip()
+            item_title = str(item.get("videoTitle") or item.get("postTitle") or "").strip()
+            if wanted_script and remark == wanted_script:
+                return item
+            if wanted_title and item_title == wanted_title:
+                return item
+        return None
 
     def _strip_task_prefix(self, task_id: str) -> str:
         text = str(task_id or "").strip()
@@ -956,6 +1045,40 @@ class NeoBundPublishAdapter(BasePublishAdapter):
                 if shoppable_error is not None:
                     raise shoppable_error
         return self._parse_task_status(item, scheduled_for)
+
+    @staticmethod
+    def _task_is_terminated(item: Dict[str, Any]) -> bool:
+        status = str(item.get("status") or item.get("taskStatus") or "").strip().lower()
+        error_message = str(
+            item.get("errorMessage") or item.get("failReason") or item.get("message") or ""
+        ).strip().lower()
+        return status in {"800", "terminated", "cancelled", "canceled"} or "terminated" in error_message
+
+    def _load_task_item(self, task_id: str) -> Dict[str, Any]:
+        payload = self.client.list_organic_videos({"id": _maybe_int(task_id)})
+        return self._extract_task_item(payload, task_id)
+
+    def terminate_task(self, *, task_id: str) -> PublishTaskStatus:
+        resolved_task_id = self._strip_task_prefix(task_id)
+        if not resolved_task_id:
+            raise ValueError("NeoBund 终止任务缺少 task_id")
+        item = self._load_task_item(resolved_task_id)
+        if self._task_is_terminated(item):
+            return PublishTaskStatus(state="terminated", result="已终止")
+        try:
+            self.client.terminate_video(resolved_task_id)
+        except requests.HTTPError:
+            item = self._load_task_item(resolved_task_id)
+            if self._task_is_terminated(item):
+                return PublishTaskStatus(state="terminated", result="已终止")
+            raise
+        for delay_seconds in (0, 1, 2):
+            if delay_seconds:
+                time.sleep(delay_seconds)
+            item = self._load_task_item(resolved_task_id)
+            if self._task_is_terminated(item):
+                return PublishTaskStatus(state="terminated", result="已终止")
+        raise RuntimeError(f"NeoBund 终止任务后状态未确认: task_id={task_id}")
 
     def query_task_statuses(self, tasks: Iterable[Any]) -> Dict[str, PublishTaskStatus]:
         statuses: Dict[str, PublishTaskStatus] = {}

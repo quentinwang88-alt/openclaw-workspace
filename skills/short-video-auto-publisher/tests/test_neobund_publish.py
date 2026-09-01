@@ -11,6 +11,8 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
+import requests
+
 
 TESTS_DIR = Path(__file__).resolve().parent
 SKILL_DIR = TESTS_DIR.parent
@@ -253,7 +255,13 @@ class NeoBundPublishAdapterTest(unittest.TestCase):
                 "attachFileId": 789,
                 "isPrecheck": 0,
                 "remark": "manual_rec_1",
-                "isAIGC": False,
+                "postType": 1,
+                "brandContentToggle": 0,
+                "brandOrganicToggle": 0,
+                "disableComment": 0,
+                "disableDuet": 0,
+                "disableStitch": 0,
+                "isAIGC": 0,
             },
         )
 
@@ -504,6 +512,145 @@ class NeoBundPublishAdapterTest(unittest.TestCase):
         self.assertEqual(statuses["geelark-task-1"].state, "pending")
         self.assertEqual(statuses["neobund:2"].state, "success")
         self.assertEqual(client.list_shoppable_videos.call_count, 1)
+
+    def test_terminate_task_is_idempotent_when_already_terminated(self) -> None:
+        client = Mock()
+        client.list_organic_videos.return_value = {
+            "records": [{"id": 701, "status": 800, "errorMessage": "Task terminated"}]
+        }
+        adapter = NeoBundPublishAdapter(client=client)
+
+        status = adapter.terminate_task(task_id="neobund:701")
+
+        self.assertEqual(status.state, "terminated")
+        client.terminate_video.assert_not_called()
+
+    def test_terminate_task_accepts_error_when_remote_became_terminated(self) -> None:
+        client = Mock()
+        client.list_organic_videos.side_effect = [
+            {"records": [{"id": 702, "status": 120}]},
+            {"records": [{"id": 702, "status": 800, "errorMessage": "Task terminated"}]},
+        ]
+        client.terminate_video.side_effect = requests.HTTPError("Current task status does not support termination")
+        adapter = NeoBundPublishAdapter(client=client)
+
+        status = adapter.terminate_task(task_id="neobund:702")
+
+        self.assertEqual(status.state, "terminated")
+        client.terminate_video.assert_called_once_with("702")
+
+    def test_organic_commit_without_music_selection_has_no_music_fields(self) -> None:
+        client = Mock()
+        client.commit_organic_video.return_value = {"id": 710}
+        adapter = NeoBundPublishAdapter(client=client)
+        adapter.upload_video = Mock(
+            return_value=NeoBundUploadResult(file_id="1", key="k", bucket_name="b")
+        )
+        adapter.create_scheduled_task(
+            account_id="5250",
+            video_path="/tmp/o.mp4",
+            title="t",
+            publish_at=datetime(2026, 8, 31, 18, 0, 0),
+            script_id="s1",
+            mark_ai=None,
+        )
+        payload = client.commit_organic_video.call_args.args[0]
+        for field in (
+            "musicId", "musicTitle", "musicAuthor", "musicUrl",
+            "musicCoverUrl", "musicSoundVolume", "videoOriginalSoundVolume",
+        ):
+            self.assertNotIn(field, payload)
+
+    def test_organic_commit_with_music_selection_sends_captured_fields(self) -> None:
+        client = Mock()
+        client.commit_organic_video.return_value = {"id": 711}
+        adapter = NeoBundPublishAdapter(client=client)
+        adapter.upload_video = Mock(
+            return_value=NeoBundUploadResult(file_id="2", key="k", bucket_name="b")
+        )
+        adapter.create_scheduled_task(
+            account_id="5250",
+            video_path="/tmp/o.mp4",
+            title="t",
+            publish_at=datetime(2026, 8, 31, 18, 0, 0),
+            script_id="s2",
+            mark_ai=None,
+            music_selection={
+                "music_id": "7070023995583761178",
+                "music_title": "hot mama",
+                "music_author": "Daniel",
+                "music_url": "https://tkmusic.example/a.mp3",
+                "music_cover_url": "https://tkpic.example/a.webp",
+                "music_sound_volume": 50,
+                "video_original_sound_volume": 50,
+            },
+        )
+        payload = client.commit_organic_video.call_args.args[0]
+        self.assertEqual(payload["musicId"], "7070023995583761178")
+        self.assertEqual(payload["musicTitle"], "hot mama")
+        self.assertEqual(payload["musicAuthor"], "Daniel")
+        self.assertEqual(payload["musicUrl"], "https://tkmusic.example/a.mp3")
+        self.assertEqual(payload["musicCoverUrl"], "https://tkpic.example/a.webp")
+        self.assertEqual(payload["musicSoundVolume"], 50)
+        self.assertEqual(payload["videoOriginalSoundVolume"], 50)
+        self.assertEqual(payload["authType"], 2)
+
+    def test_music_selection_rejected_for_shoppable_task(self) -> None:
+        client = Mock()
+        adapter = NeoBundPublishAdapter(client=client)
+        with self.assertRaises(ValueError):
+            adapter.create_scheduled_task(
+                account_id="1",
+                video_path="/tmp/s.mp4",
+                title="t",
+                publish_at=datetime(2026, 8, 31, 18, 0, 0),
+                script_id="s3",
+                product_id="123",
+                music_selection={"music_id": "x"},
+            )
+        client.commit_shoppable_video.assert_not_called()
+
+    def test_music_selection_requires_core_fields(self) -> None:
+        client = Mock()
+        adapter = NeoBundPublishAdapter(client=client)
+        adapter.upload_video = Mock(
+            return_value=NeoBundUploadResult(file_id="3", key="k", bucket_name="b")
+        )
+        with self.assertRaises(ValueError) as ctx:
+            adapter.create_scheduled_task(
+                account_id="5250",
+                video_path="/tmp/o.mp4",
+                title="t",
+                publish_at=datetime(2026, 8, 31, 18, 0, 0),
+                script_id="s4",
+                music_selection={"music_id": "x", "music_title": "t"},
+            )
+        self.assertIn("缺少必填字段", str(ctx.exception))
+
+    def test_find_organic_task_record_matches_remark(self) -> None:
+        client = Mock()
+        client.list_organic_videos.return_value = {
+            "records": [
+                {"id": 1, "remark": "other", "scheduledReleaseTime": "2026-08-31 18:00:00"},
+                {
+                    "id": 1326683,
+                    "remark": "opv_task_1",
+                    "scheduledReleaseTime": "2026-08-31 18:00:00",
+                    "musicId": "7070023995583761178",
+                    "musicTitle": "hot mama",
+                },
+            ]
+        }
+        adapter = NeoBundPublishAdapter(client=client)
+        record = adapter.find_organic_task_record(
+            script_id="opv_task_1",
+            video_title="whatever",
+            scheduled_for="2026-08-31 18:00:00",
+        )
+        self.assertEqual(record["id"], 1326683)
+        self.assertEqual(record["musicId"], "7070023995583761178")
+        params = client.list_organic_videos.call_args.args[0]
+        self.assertNotIn("authId", params)
 
 
 if __name__ == "__main__":

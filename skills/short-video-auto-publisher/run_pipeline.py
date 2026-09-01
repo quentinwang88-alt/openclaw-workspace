@@ -18,6 +18,7 @@ SKILL_DIR = Path(__file__).parent.absolute()
 sys.path.insert(0, str(SKILL_DIR))
 
 from app.db import AutoPublishDB, default_db_path, default_video_dir  # noqa: E402
+from app.capabilities import reconcile_neobund_account_capabilities  # noqa: E402
 from app.metadata import (  # noqa: E402
     FallbackTitleGenerator,
     HeuristicTitleGenerator,
@@ -63,6 +64,7 @@ from app.scheduler import (  # noqa: E402
     sync_accounts,
     sync_publish_results,
     sync_videos,
+    terminate_and_requeue_tasks,
 )
 
 
@@ -671,6 +673,19 @@ def build_publish_adapter(args: argparse.Namespace):
     return DryRunPublishAdapter()
 
 
+def reconcile_publish_account_capabilities(db: AutoPublishDB, publisher: Any) -> Dict[str, Any]:
+    neobund = None
+    if isinstance(publisher, NeoBundPublishAdapter):
+        neobund = publisher
+    elif isinstance(publisher, RoutedPublishAdapter):
+        candidate = publisher.channel_adapters.get("NeoBund")
+        if isinstance(candidate, NeoBundPublishAdapter):
+            neobund = candidate
+    if neobund is None:
+        return {"skipped": 1, "reason": "neobund_not_enabled"}
+    return reconcile_neobund_account_capabilities(db, neobund)
+
+
 def command_sync_script_db(args: argparse.Namespace) -> None:
     db = AutoPublishDB(Path(args.db_path))
     title_generator = build_title_generator(args.title_mode, args.llm_route)
@@ -785,6 +800,8 @@ def command_schedule(args: argparse.Namespace) -> None:
         sample_paths = [str(row["local_file_path"] or "") for row in db.list_scheduled_tasks()[:10]]
         ensure_video_storage_ready(video_dir, sample_paths=sample_paths)
         publisher = build_publish_adapter(args)
+        capability_stats = reconcile_publish_account_capabilities(db, publisher)
+        print({"account_capabilities": capability_stats}, flush=True)
         stats = schedule_slots(db, publisher)
         print(stats.__dict__)
 
@@ -795,6 +812,26 @@ def command_sync_results(args: argparse.Namespace) -> None:
     publisher = build_publish_adapter(args)
     stats = sync_publish_results(db, publisher)
     print(stats)
+
+
+def command_sync_account_capabilities(args: argparse.Namespace) -> None:
+    db = AutoPublishDB(Path(args.db_path))
+    publisher = build_neobund_publish_adapter(args)
+    stats = reconcile_neobund_account_capabilities(db, publisher)
+    print(json.dumps(stats, ensure_ascii=False, indent=2))
+
+
+def command_requeue_publish_tasks(args: argparse.Namespace) -> None:
+    with exclusive_run_lock("schedule"):
+        db = AutoPublishDB(Path(args.db_path))
+        publisher = build_neobund_publish_adapter(args)
+        stats = terminate_and_requeue_tasks(
+            db,
+            publisher,
+            args.task_id,
+            reason=args.reason,
+        )
+        print(json.dumps(stats, ensure_ascii=False, indent=2))
 
 
 def command_refresh_titles(args: argparse.Namespace) -> None:
@@ -1201,6 +1238,9 @@ def _command_run_all_locked(args: argparse.Namespace) -> None:
     sample_paths = [str(row["local_file_path"] or "") for row in db.list_scheduled_tasks()[:10]]
     ensure_video_storage_ready(video_dir, sample_paths=sample_paths)
     publisher = build_publish_adapter(args)
+    print("[run-all] sync_account_capabilities start", flush=True)
+    summary["sync_account_capabilities"] = reconcile_publish_account_capabilities(db, publisher)
+    print(f"[run-all] sync_account_capabilities done {summary['sync_account_capabilities']}", flush=True)
 
     print("[run-all] sync_results before schedule start", flush=True)
     summary["sync_results_before_schedule"] = sync_publish_results(db, publisher)
@@ -1413,6 +1453,22 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--neobund-organic-list-path", default="/shoppable/video/list", help="NeoBund 非带货视频列表/状态路径")
         command.add_argument("--neobund-ai-generated-field", default="isAIGC", help="NeoBund AI 生成内容标记字段名")
         command.add_argument("--neobund-request-timeout", type=int, default=300, help="NeoBund 请求超时时间秒，默认 300")
+
+    sync_capabilities = subparsers.add_parser(
+        "sync-account-capabilities",
+        help="对账本地账号与 NeoBund Organic/带货发布能力",
+    )
+    add_neobund_args(sync_capabilities)
+    sync_capabilities.set_defaults(func=command_sync_account_capabilities)
+
+    requeue_tasks = subparsers.add_parser(
+        "requeue-publish-tasks",
+        help="幂等终止 NeoBund 任务并将视频重新放回待排期池",
+    )
+    requeue_tasks.add_argument("--task-id", action="append", required=True, help="NeoBund任务ID，可重复传入")
+    requeue_tasks.add_argument("--reason", default="人工终止旧任务并重新进入排期", help="任务审计原因")
+    add_neobund_args(requeue_tasks)
+    requeue_tasks.set_defaults(func=command_requeue_publish_tasks)
 
     schedule = subparsers.add_parser("schedule", help="按 48 小时窗口增量补排")
     schedule.add_argument("--product-report-feishu-url", default=DEFAULT_PRODUCT_PUBLISH_REPORT_FEISHU_URL, help="店铺产品发布汇总表飞书 URL，用于排期策略回读")

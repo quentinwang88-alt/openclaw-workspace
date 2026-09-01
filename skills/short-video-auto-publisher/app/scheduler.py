@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 import hashlib
 import os
@@ -14,13 +14,28 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import requests
 
 from app.db import AutoPublishDB, default_video_dir, is_nurture_candidate
-from app.metadata import sanitize_title
-from app.models import AccountConfig
+from app.metadata import infer_country_from_store_id, localized_template_title, sanitize_title
+from app.models import AccountConfig, ScriptMetadata
 from app.publishers import BasePublishAdapter, DryRunPublishAdapter
 
 RUN_MANAGER_FIELD_ALIASES: Dict[str, List[str]] = {
+    "task_name": ["任务名", "任务名称"],
+    "prompt": ["提示词", "视频提示词"],
     "canonical_script_key": ["内部脚本键", "稳定脚本键", "canonical_script_key"],
     "script_id": ["脚本ID"],
+    "store_id": ["店铺ID", "店铺"],
+    "product_id": ["产品ID", "商品ID"],
+    "canonical_product_id": ["全球产品ID"],
+    "script_type": ["脚本类型"],
+    "script_source": ["任务来源", "脚本来源", "来源"],
+    "publish_purpose": ["发布用途", "用途"],
+    "cart_enabled": ["是否挂车", "挂车"],
+    "content_branch": ["内容分支"],
+    "parent_slot": ["所属母版"],
+    "direction_label": ["母版方向"],
+    "variant_strength": ["变体强度"],
+    "target_country": ["目标国家", "目标语言", "语言"],
+    "product_type": ["产品类型", "品类"],
     "run_video_status": ["跑视频状态", "状态"],
     "publish_enabled": ["是否发布", "是否自动发布"],
     "video_attachment": ["视频附件", "生成视频"],
@@ -130,6 +145,94 @@ def is_short_video_remake_candidate(candidate: Any) -> bool:
         for attr in ("script_source", "publish_purpose", "content_branch")
     )
     return "短视频复刻" in markers
+
+
+def is_non_shoppable_candidate(candidate: Any) -> bool:
+    """Defense in depth: any organic/no-cart marker removes product binding."""
+
+    markers = " ".join(
+        str(getattr(candidate, attr, "") or "").strip()
+        for attr in ("script_source", "publish_purpose", "content_branch")
+    )
+    return (
+        is_nurture_candidate(candidate)
+        or str(getattr(candidate, "cart_enabled", "") or "").strip() == "否"
+        or "种草脚本" in markers
+        or "种草" in markers
+        or "SEEDING_ORGANIC" in markers
+    )
+
+
+def account_can_publish_candidate(account: Any, candidate: Any) -> bool:
+    if account is None:
+        return False
+    if normalize_publish_channel(account["publish_channel"]) != "NeoBund":
+        return True
+    if str(account["capability_status"] or "").strip() != "ok":
+        return False
+    capability_field = "organic_capable" if is_non_shoppable_candidate(candidate) else "shoppable_capable"
+    return bool(int(account[capability_field] or 0))
+
+
+def build_run_manager_seeding_metadata(
+    fields: Dict[str, Any],
+    mapping: Dict[str, Optional[str]],
+    *,
+    record_id: str,
+) -> Optional[ScriptMetadata]:
+    """Build fail-closed metadata for seed scripts that bypass the legacy script table."""
+
+    def value(logical_name: str) -> str:
+        field_name = mapping.get(logical_name)
+        return normalize_text(fields.get(field_name)) if field_name else ""
+
+    markers = " ".join(
+        value(name)
+        for name in ("script_type", "script_source", "publish_purpose", "content_branch")
+    )
+    if not any(marker in markers for marker in ("种草脚本", "种草", "SEEDING_ORGANIC")):
+        return None
+
+    script_id = value("script_id")
+    canonical_key = value("canonical_script_key")
+    store_id = value("store_id")
+    if not script_id or not canonical_key or not store_id:
+        return None
+
+    source_record_id = record_id
+    canonical_parts = canonical_key.split(":", 2)
+    if len(canonical_parts) == 3 and canonical_parts[0] == "seeding":
+        source_record_id = canonical_parts[1] or record_id
+
+    metadata = ScriptMetadata(
+        canonical_script_key=canonical_key,
+        script_id=script_id,
+        source_record_id=source_record_id,
+        script_slot="SEED",
+        task_no=value("task_name") or script_id,
+        store_id=store_id,
+        product_id="",
+        parent_slot=value("parent_slot") or "SEED",
+        direction_label=value("direction_label") or "种草内容",
+        variant_strength=value("variant_strength") or "母版",
+        target_country=value("target_country") or infer_country_from_store_id(store_id),
+        product_type=value("product_type"),
+        content_family_key=canonical_key,
+        script_text=value("prompt"),
+        short_video_title=sanitize_title(fields.get(mapping.get("short_video_title"))),
+        title_source="run_manager_seeding",
+        script_source="种草脚本",
+        publish_purpose="种草",
+        cart_enabled="否",
+        content_branch="SEEDING_ORGANIC",
+    )
+    if metadata.short_video_title:
+        return metadata
+    return replace(
+        metadata,
+        short_video_title=localized_template_title(metadata),
+        title_source="run_manager_seeding_fallback",
+    )
 
 
 def normalize_int(value: Any, default: int = 0) -> int:
@@ -255,6 +358,7 @@ def sync_videos(
         "download_failed": 0,
         "titles_updated": 0,
         "waiting_voiceover": 0,
+        "metadata_created": 0,
     }
     base_dir = _ensure_download_dir(download_dir)
 
@@ -271,6 +375,16 @@ def sync_videos(
             stats["skipped"] += 1
             continue
         metadata = db.get_script_metadata(canonical_script_key or script_id)
+        if metadata is None:
+            seeding_metadata = build_run_manager_seeding_metadata(
+                fields,
+                mapping,
+                record_id=record.record_id,
+            )
+            if seeding_metadata is not None:
+                db.upsert_script_metadata([seeding_metadata])
+                stats["metadata_created"] += 1
+                metadata = db.get_script_metadata(seeding_metadata.canonical_script_key)
         if metadata is None:
             stats["skipped"] += 1
             continue
@@ -417,6 +531,7 @@ def schedule_slots(
         target_time = datetime.strptime(str(slot["scheduled_for"]), "%Y-%m-%d %H:%M:%S")
         candidates = db.list_ready_candidates(str(slot["store_id"] or ""))
         account = db.get_account_config(account_id)
+        candidates = [candidate for candidate in candidates if account_can_publish_candidate(account, candidate)]
         nurture_enabled = bool(account and int(account["nurture_enabled"] or 0))
         nurture_quota = int(account["nurture_daily_count"] or 2) if account else 0
         nurture_only = bool(account and int(account["nurture_only"] or 0))
@@ -427,7 +542,9 @@ def schedule_slots(
         )
         prefer_nurture = nurture_only or (nurture_enabled and nurture_count < nurture_quota)
         has_nurture_candidate = any(is_nurture_candidate(candidate) for candidate in candidates)
-        if nurture_only:
+        if not nurture_enabled and not nurture_only:
+            candidates = [candidate for candidate in candidates if not is_nurture_candidate(candidate)]
+        elif nurture_only:
             candidates = [candidate for candidate in candidates if is_nurture_candidate(candidate)]
         elif prefer_nurture:
             candidates = [candidate for candidate in candidates if is_nurture_candidate(candidate)] + [
@@ -468,7 +585,7 @@ def schedule_slots(
                 title=selected.short_video_title,
                 publish_at=target_time,
                 script_id=selected.script_id,
-                product_id="" if is_nurture_candidate(selected) or str(selected.cart_enabled or "").strip() == "否" else selected.product_id,
+                product_id="" if is_non_shoppable_candidate(selected) else selected.product_id,
                 product_title=selected.product_title,
                 ref_video_id=selected.ref_video_id,
                 mark_ai=should_mark_ai_for_geelark(selected),
@@ -566,3 +683,37 @@ def sync_publish_results(
                 )
             stats["pending"] += 1
     return stats
+
+
+def terminate_and_requeue_tasks(
+    db: AutoPublishDB,
+    publisher: BasePublishAdapter,
+    task_ids: Iterable[str],
+    *,
+    reason: str = "",
+) -> Dict[str, Any]:
+    resolved_task_ids = [str(item or "").strip() for item in task_ids if str(item or "").strip()]
+    results = []
+    for task_id in resolved_task_ids:
+        slot = db.get_publish_slot_by_task_id(task_id)
+        if slot is None:
+            results.append({"task_id": task_id, "status": "not_found"})
+            continue
+        if str(slot["schedule_status"] or "") == "已发布":
+            results.append({"task_id": task_id, "status": "already_published"})
+            continue
+        try:
+            termination = publisher.terminate_task(task_id=task_id)
+            if termination.state != "terminated":
+                raise RuntimeError(f"远端任务未确认终止: {termination.result}")
+            requeue = db.requeue_terminated_task(task_id, reason=reason)
+            results.append({"task_id": task_id, "status": "requeued", **requeue})
+        except Exception as exc:
+            results.append({"task_id": task_id, "status": "failed", "error": str(exc)})
+    return {
+        "requested": len(resolved_task_ids),
+        "requeued": sum(1 for item in results if item["status"] == "requeued"),
+        "failed": sum(1 for item in results if item["status"] == "failed"),
+        "skipped": sum(1 for item in results if item["status"] not in {"requeued", "failed"}),
+        "items": results,
+    }
