@@ -11,10 +11,14 @@ import hashlib
 import json
 import os
 import re
-import sqlite3
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping
 
+from core.product_claim_storage import (
+    claim_store_descriptor,
+    connect_claim_store,
+    table_columns,
+)
 from core.product_type_resolution import normalize_product_type
 
 
@@ -732,10 +736,16 @@ def load_verified_selling_point_catalog(
     """
 
     db_path = _claims_db_path(voiceover_root)
+    descriptor = claim_store_descriptor(
+        db_path,
+        explicit_sqlite=bool(_text(os.environ.get("ORIGINAL_SCRIPT_CLAIMS_DB_PATH"))),
+    )
     base = {
         "catalog_version": SELLING_ARGUMENT_CATALOG_VERSION,
         "source": "CENTRAL_VOICEOVER_OPERATOR_ARGUMENTS",
-        "db_path": str(db_path),
+        "provider": descriptor["provider"],
+        "storage_backend": descriptor["backend"],
+        "db_path": str(db_path) if descriptor["backend"] == "sqlite" else "",
         "product_code": product_code,
         "status": "UNAVAILABLE",
         "catalog": [],
@@ -745,19 +755,15 @@ def load_verified_selling_point_catalog(
         "unmapped_argument_count": 0,
         "available_argument_count": 0,
     }
-    if not db_path.exists():
+    if descriptor["backend"] == "unavailable":
+        base["error"] = descriptor.get("reason", "CLAIM_STORE_UNAVAILABLE")
         base["snapshot_hash"] = _stable_hash(base)
         return base
 
     try:
-        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
-            conn.row_factory = sqlite3.Row
-            source_columns = {
-                str(row[1]) for row in conn.execute("PRAGMA table_info(product_claim_sources)")
-            }
-            claim_columns = {
-                str(row[1]) for row in conn.execute("PRAGMA table_info(product_claims)")
-            }
+        with connect_claim_store(descriptor) as conn:
+            source_columns = table_columns(conn, "product_claim_sources")
+            claim_columns = table_columns(conn, "product_claims")
             operator_rows = []
             if {"claim_source_id", "product_id", "raw_text", "source_type", "source_ref"}.issubset(source_columns):
                 source_priority = (
@@ -806,9 +812,9 @@ def load_verified_selling_point_catalog(
                 """,
                 (product_code,),
             ).fetchall()
-    except sqlite3.Error as exc:
+    except Exception as exc:
         base["status"] = "READ_ERROR"
-        base["error"] = str(exc)[:240]
+        base["error"] = f"{type(exc).__name__}:{exc}"[:240]
         base["snapshot_hash"] = _stable_hash(base)
         return base
 

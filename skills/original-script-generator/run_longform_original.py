@@ -93,90 +93,14 @@ def _parse_scene_entries(values: list[str]) -> dict[str, str]:
     return result
 
 
-def _segment_entry_reference_paths(keyframes: dict, k0_path: str) -> list[str]:
-    """K0 owns composition; raw product/persona references correct identity drift."""
-
-    result = [str(Path(k0_path).resolve())]
-    manifest = dict(keyframes.get("frozen_reference_assets") or {})
-    preferred_roles = {"PRODUCT_REFERENCE", "PERSONA_REFERENCE"}
-    for item in manifest.get("assets") or []:
-        if not isinstance(item, dict) or str(item.get("role") or "") not in preferred_roles:
-            continue
-        path = Path(str(item.get("local_path") or "")).expanduser()
-        resolved = str(path.resolve()) if path.is_file() else ""
-        if resolved and resolved not in result:
-            result.append(resolved)
-    return result
-
-
-def _k0_reference_paths(keyframes: dict) -> list[str]:
-    """Resolve frozen identity references for K0 with legacy-safe fallback."""
-
-    manifest = dict(keyframes.get("frozen_reference_assets") or {})
-    assets = [item for item in manifest.get("assets") or [] if isinstance(item, dict)]
-    product = [item for item in assets if str(item.get("role") or "") == "PRODUCT_REFERENCE"]
-    persona = [item for item in assets if str(item.get("role") or "") == "PERSONA_REFERENCE"]
-    composite = [
-        item for item in assets
-        if str(item.get("role") or "") == "COMPOSITE_FIRST_FRAME"
-    ]
-    # A raw product image owns product appearance. The historical composite is
-    # excluded when raw product evidence exists, otherwise it remains a soft
-    # non-blocking fallback and may be paired with a persona identity image.
-    ordered = product + persona if product else composite + persona
-    result: list[str] = []
-    for item in ordered:
-        path = Path(str(item.get("local_path") or "")).expanduser()
-        resolved = str(path.resolve()) if path.is_file() else ""
-        if resolved and resolved not in result:
-            result.append(resolved)
-    return result
-
-
-def _reference_mode_guidance(keyframes: dict) -> str:
-    manifest = dict(keyframes.get("frozen_reference_assets") or {})
-    mode = str(manifest.get("reference_mode") or "")
-    if not mode:
-        roles = {
-            str(item.get("role") or "")
-            for item in manifest.get("assets") or [] if isinstance(item, dict)
-        }
-        if "PRODUCT_REFERENCE" not in roles and "COMPOSITE_FIRST_FRAME" in roles:
-            mode = "COMPOSITE_FALLBACK"
-    if mode == "COMPOSITE_FALLBACK":
-        return (
-            "当前仅有历史合成首帧作为降级参考：它只提供构图和人物状态，不构成商品结构真值；"
-            "未知的闭合件保持中性，不新增或强化拉链、纽扣、按扣等具体结构。\n"
-        )
-    return ""
-
-
 def _register_initial_keyframes(storage: LongformStorage, row: dict, plan: dict,
                                 job_id: str, k0_path: str,
                                 planned_values: list[str], legacy_end_frame: str = "",
                                 scene_entry_values: list[str] | None = None,
                                 *, auto_generate_scene_entries: bool = False,
-                                auto_generate_k0: bool = False,
                                 asset_root: str = str(DEFAULT_ASSET_ROOT)) -> dict:
-    keyframes = json.loads(row.get("keyframe_package_json") or "{}")
-    if (not k0_path or not Path(k0_path).is_file()) and auto_generate_k0:
-        from scripts.run_first_frame_tasks import _generate_image
-        k0_contract = dict(keyframes.get("K0") or {})
-        prompt = _reference_mode_guidance(keyframes) + str(
-            k0_contract.get("prompt") or ""
-        ).strip()
-        if not prompt:
-            raise SystemExit("缺少 K0 首帧提示词")
-        output_dir = Path(asset_root) / job_id / "first_frame"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        k0_path = str(_generate_image(
-            prompt=prompt,
-            reference_paths=_k0_reference_paths(keyframes),
-            output_dir=output_dir,
-            asset_id=stable_id("LFK0_", {"job_id": job_id, "prompt": prompt}),
-        ))
     if not k0_path or not Path(k0_path).is_file():
-        raise SystemExit("K0 文件不存在；请提供 --start-frame 或使用 --auto-generate-k0")
+        raise SystemExit("K0 文件不存在")
     planned = _parse_planned_frames(planned_values, legacy_end_frame)
     segments = list(plan.get("segments") or [])
     boundaries = list(dict(plan.get("bridge_contract") or {}).get("boundaries") or [])
@@ -193,6 +117,7 @@ def _register_initial_keyframes(storage: LongformStorage, row: dict, plan: dict,
         raise SystemExit("计划桥接帧文件不存在: " + ", ".join(missing_files))
     k0 = str(Path(k0_path).resolve())
     scene_entries = _parse_scene_entries(scene_entry_values or [])
+    keyframes = json.loads(row.get("keyframe_package_json") or "{}")
     for boundary in boundaries:
         if str(boundary.get("boundary_mode") or "CONTINUOUS") != "DISCONTINUOUS_CUT":
             continue
@@ -207,15 +132,13 @@ def _register_initial_keyframes(storage: LongformStorage, row: dict, plan: dict,
             output_dir = Path(asset_root) / job_id / "scene_entries" / target_id
             output_dir.mkdir(parents=True, exist_ok=True)
             generated = _generate_image(
-                prompt=prompt,
-                reference_paths=_segment_entry_reference_paths(keyframes, k0),
-                output_dir=output_dir,
+                prompt=prompt, reference_paths=[k0], output_dir=output_dir,
                 asset_id=stable_id("LFSE_", {"job_id": job_id, "segment": target_id, "prompt": prompt}),
             )
             path = str(generated)
         if not path or not Path(path).is_file():
             raise SystemExit(
-                f"片段{target_id}需要独立片段进入帧；请提供 --scene-entry {target_id}=/路径，"
+                f"片段{target_id}为跨场景进入；请提供 --scene-entry {target_id}=/路径，"
                 "或使用 --auto-generate-scene-entry"
             )
         scene_entries[target_id] = str(Path(path).resolve())
@@ -277,7 +200,7 @@ def _registered_output_video(row: dict, segment_id: str, provided: str = "") -> 
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="隔离的 20-45 秒原创视频可变分段旁路")
+    parser = argparse.ArgumentParser(description="隔离的 25-45 秒原创视频可变分段旁路")
     parser.add_argument("command", choices=(
         "plan", "voiceover", "h3-prepare", "h3-submit", "h3-query", "h3-download",
         "register-keyframes", "extract-bridge", "select-bridge", "merge", "show",
@@ -316,10 +239,6 @@ def main() -> int:
         help="跨场景片段进入帧，可重复使用：B=/abs/scene_b.png、C=/abs/scene_c.png",
     )
     parser.add_argument("--auto-generate-scene-entry", action="store_true")
-    parser.add_argument(
-        "--auto-generate-k0", action="store_true",
-        help="未提供 K0 时，用冻结的商品/人物参考自动生成统一首帧",
-    )
     parser.add_argument("--bridge-frame", default="")
     parser.add_argument("--allow-real-submit", action="store_true")
     parser.add_argument("--allow-external-tts", action="store_true")
@@ -387,15 +306,11 @@ def main() -> int:
             or args.source_script_id
             or ""
         )
-        persona_lock = dict(
-            (master.get("production_world") or {}).get("persona_contract") or {}
-        )
         frozen_assets = freeze_reference_assets(
             job_id=job_id,
             asset_root=args.asset_root,
             source_script_id=source_script_id,
             materials=(source, primary_script or {}),
-            persona_lock=persona_lock,
         )
         master["frozen_reference_assets"] = frozen_assets
         keyframes = build_keyframe_contracts(master, plan)
@@ -437,7 +352,6 @@ def main() -> int:
                 storage, row, plan, args.job_id, args.start_frame,
                 args.planned_frame, args.end_frame, args.scene_entry,
                 auto_generate_scene_entries=args.auto_generate_scene_entry,
-                auto_generate_k0=args.auto_generate_k0,
                 asset_root=args.asset_root,
             )
         elif args.command in {"h3-prepare", "h3-submit"}:
@@ -622,14 +536,7 @@ def main() -> int:
                 args.job_id, "FINAL_READY",
                 final_video_path=finalization["final_video_path"],
             )
-            final_row = storage.get_job(args.job_id) or {}
-            review = export_review_bundle(
-                final_row, Path(args.asset_root) / args.job_id / "text_review"
-            )
-            output = {
-                "job_id": args.job_id, "status": "FINAL_READY",
-                **finalization, "review": review,
-            }
+            output = {"job_id": args.job_id, "status": "FINAL_READY", **finalization}
         elif args.command == "run-to-final":
             first_segment = _ordered_segment_rows(row)[0]
             if str(first_segment.get("status") or "") == "PLANNED" and (
@@ -639,7 +546,6 @@ def main() -> int:
                     storage, row, plan, args.job_id, args.start_frame,
                     args.planned_frame, args.end_frame, args.scene_entry,
                     auto_generate_scene_entries=args.auto_generate_scene_entry,
-                    auto_generate_k0=args.auto_generate_k0,
                     asset_root=args.asset_root,
                 )
             output = run_to_final(

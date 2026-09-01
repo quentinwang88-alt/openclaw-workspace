@@ -39,6 +39,7 @@ def _asset_id(value: Any) -> str:
         return _text(
             value.get("file_token")
             or value.get("asset_id")
+            or value.get("local_path")
             or value.get("cached_path")
             or value.get("path")
             or value.get("url")

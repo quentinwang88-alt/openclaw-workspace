@@ -79,9 +79,10 @@ Git 只管理开发源目录：
 - 边界合同继续区分 `CONTINUOUS` 与 `DISCONTINUOUS_CUT`，但不再把“同场景”自动等同于“必须续尾帧”。只有同一物理动作确实连续时才抽上一片段实际尾帧；跨场景使用 `SCENE_ENTRY`，同场景切到新的商品观察关系使用 `SETUP_ENTRY`。两者复用同一无人工确认的片段进入帧管线，以 K0 为构图与人物血缘，并在可用时追加冻结商品原图和人物参考；人物、商品、穿搭与已完成穿戴状态继续冻结。
 - `longform-original-plan-v6-visual-progression` 为两段视频固定 `CONTEXT_AND_WEAR_RESULT → DETAIL_AND_REAL_USE`，为三段视频固定 `CONTEXT_AND_WEAR_RESULT → DETAIL_AND_PROOF → SECOND_CONTEXT_AND_PAYOFF` 的片段职责。主合同保留全部拍摄单元审计，H3 每段只消费三个有优先级的 `OPENING / CORE / PAYOFF` 执行单元；不再要求四个同权单元全部出现。第二片段的商品细节直接投到进入帧，细节只取现有商品身份锁和已验证事实，最多两项，不建立新规则库。执行单元选择额外使用“商品部位×动作关系×景别”的全片软去重签名；有替代单元时优先不重复，没有时保留原计划并只写软警告，不新增动作池、重试或阻断。
 - H3 提示词继续只包含人物/穿搭、本片段场景、最多 3 项商品身份锚点和紧凑执行单元；所有片段顶部保留通用商品延续指令。完整主合同继续留库审计，不得再次把 authority、information_gain、策略解释或整张 production_world JSON 塞回视频提示词。`visual_progression_report` 只记录场景偏好是否实现、商品细节片段和视觉职责差异；`LOW_VISUAL_PROGRESSION` 不阻断、不修订、不自动重跑。
+- 长视频 H3 不接收口播音频，正式泰语 TTS 在视频生成后叠加，因此视频提示词固定使用画外旁白表演：确定性移除“自然交流、面对手机说话、开口分享”等说话动作，要求人物不说话、嘴唇自然放松，仅以眼神、轻微点头、手势和商品动作表达。不得把后配音误写成需要对口型的达人讲话画面。
 - H3 准备与提交只消费 SQLite 已登记的关键帧：首段必须先到 `KEYFRAMES_READY`，后续片段必须先到 `BRIDGE_READY`；合并前全部片段都必须为 `READY`。付费幂等使用图片内容 SHA256 而不是本地路径，图片同路径换内容必须形成新指纹。
 - `run-to-final` 在任何新的付费 H3 提交前先执行 Edge TTS 实测；每段软目标为本段时长的90%-96%，86%-100%视为可接受。只有实测过短或过长时允许中央口播做一次定向修订，修订不得增加新卖点或重写画面；一次后保留实测更优版本并继续，不循环追求绝对满时长。预检音频按文本哈希、音色、文件路径、实测时长和语速冻结；最终混音命中相同文本哈希时必须直接复用该音频及其已选语速，不得再次计算速度或重复合成。对 10–11 秒短片段，语义段上界会给固定开口延迟预留尾部安全空间；若冻结音频已经接近片段上限，只自动缩短该段开口延迟，不重新加速口播。`h3-submit` 独立调试入口也执行同一预检。H3 与外部 TTS 分别要求显式 `--allow-real-submit / --allow-external-tts`。
-- 最终音频默认叠加现有 CC0 本地轻量 BGM 底床，音量固定为低存在感且不得替代口播；可用 `LONGFORM_BGM_PATH` 指定已批准素材。BGM 不可用只记录软降级，不阻断成片。
+- 最终音频默认只保留口播，把 BGM 交给发布端选择对应国家的热点音乐，避免本地 BGM 与平台 BGM 双重叠加；只有显式设置 `LONGFORM_BGM_PATH` 时才叠加已批准的本地轻量底床，发布端随后不得再挂第二条 BGM。
 - 新产品在首次商品锚点下载时把原始商品参考图持久化到共享缓存；长视频 `plan` 建单时把当前可用的商品原图、人物参考或已经批准的统一首帧复制进本 job 的 `frozen_references/` 并记录 SHA256。冻结清单同时记录 `reference_mode` 和每项 authority：商品原图控制商品结构，人物图控制身份，合成首帧只控制构图。K0 有商品原图时只用“商品原图+人物图”，不再让合成图覆盖商品；历史任务缺商品原图时以 `COMPOSITE_FALLBACK` 自动继续并写明软降级，不增加人工确认或批量阻断。片段进入帧继续使用 K0 做构图，并追加冻结商品原图纠偏。
 - `visible_closure_contract` 原样从 15 秒完整脚本进入长视频主合同、关键帧、H3 提示词和中央口播。闭合方式已经核实时才使用对应的拉链/按扣/纽扣动作词；状态为 `UNAVAILABLE` 时只使用“合上、敞开、调整前襟”等中性语义。该规则只约束闭合件词汇，不建立全局“禁止拉链”黑名单，也不触发整条口播重写。
 - 关键帧登记完成后，`run-to-final` 按 `segments[]` 状态幂等循环提交/下载、处理对应边界、合并和最终混音。中央口播仍是一条连续思想，只按 A/B/C 语义段在对应视频片段开头附近铺设；禁止用负速率把短口播拖满。最终成片就绪后自动刷新 `text_review/`，确保人工审阅看到最终采用的口播、片段计划和状态，而不是预检前旧稿。`--manual-bridge` 仅保留为同场景调试选项，批量默认不使用。
@@ -493,7 +494,7 @@ python3 scripts/run_feishu_operation_tasks.py \
   --record-id <飞书record_id> --resume-failed
 ```
 
-每个新规划批次会先调用中央口播引擎自带的 `sync_feishu_product_claims.py --apply --product-code ...`，把飞书已确认卖点按编号幂等同步到中央 SQLite，再冻结卖点快照。每个已确认段落都是独立卖点；概念映射成功与否必须分别统计，但不得影响原创可用资格。同步后完全没有人工确认卖点时必须明确失败，不能把“计划0条”当作部分完成。需要让已有零计划或旧策略批次重新规划时使用：
+每个新规划批次会先调用中央口播引擎自带的 `sync_feishu_product_claims.py --apply --storage-mode rds --product-code ...`，先在本地工作库完成归一化，再把飞书已确认卖点按编号幂等发布到 RDS `cc__*` 权威表，随后从 RDS 冻结本批卖点快照。本地 SQLite 只保留为可重建缓存和显式测试后端，RDS 连接或发布失败必须终止规划，禁止静默读取较旧缓存。每个已确认段落都是独立卖点；概念映射成功与否必须分别统计，但不得影响原创可用资格。同步后完全没有人工确认卖点时必须明确失败，不能把“计划0条”当作部分完成。需要让已有零计划或旧策略批次重新规划时使用：
 
 ```bash
 python3 scripts/run_feishu_operation_tasks.py \
@@ -695,7 +696,7 @@ python3 skills/original-script-generator/scripts/run_reality_reference_stage0.py
 - 部分失败任务可在显式 `--record-id` 下用一个或多个 `--item-index` 精确补跑。执行槽位选择不进入内容身份哈希，因此补跑更新同一脚本身份，不重复生成已通过槽位。
 - 种草 V3 在同一运营目标下确定性轮换内容子角度、修辞家族、开场机制、收尾方式、场景族、动作族和拍摄模式；这些冻结合同进入视觉意图，商品参考图只控制商品，不控制图中人物、穿搭、背景、姿势或构图。
 - 种草 V7 在上述差异轮换之前增加分支独占的兴趣与留存层：同一运营目标下确定性分配 `VISUAL_SURPRISE / RELATABLE_TENSION / COUNTERINTUITIVE_POSITION / CHOICE_RULE / MOTION_REVEAL` 话题家族，并冻结 `topic_contract + retention_contract`。画面与口播必须共同消费同一话题命题；前段优先1.2至2.2秒的动作中点、构图反差或结果状态，前3秒建立未完成问题，约6至10秒完成回答。该层不进入 `DIRECT_RESPONSE`，可用 `ORGANIC_SEEDING_INTEREST_ENGINE_V1=0` 回退。
-- 种草 V9 用 `central-claim-snapshot-v1` 只读消费中央卖点事实与证据血缘，再由分支独占 `OrganicClaimAdapter` 投影为 `VALUE_TRIGGER / VISIBLE_REASON / CONTEXT_SEED / SOFT_PERSONAL_ONLY / DEFERRED`。`UNRESOLVED` 和强度为 forbidden 的内容只保留审计，不能进入正式商品事实；每条只开放一个核心价值和至多一个同主题支持事实，全目录不得投给模型。
+- 种草 V9 用 `central-claim-snapshot-v1` 从 RDS `cc__*` 权威表只读消费中央卖点事实与证据血缘，再由分支独占 `OrganicClaimAdapter` 投影为 `VALUE_TRIGGER / VISIBLE_REASON / CONTEXT_SEED / SOFT_PERSONAL_ONLY / DEFERRED`。只有显式传入测试数据库时才读取 SQLite；`UNRESOLVED` 和强度为 forbidden 的内容只保留审计，不能进入正式商品事实；每条只开放一个核心价值和至多一个同主题支持事实，全目录不得投给模型。
 - 种草 V9 在模型前生成 8–12 个 `OrganicStorySeed`，按事实可信度、可见性和语义差异软排序，再冻结 `OrganicStorySpine`。同一主线同时驱动画面和口播；话题家族降级为注意力表面标签，不能覆盖观众处境、说话动机和核心价值。候选弱只影响选择与人工审核，不增加末端修订循环。
 - 种草 V9 口播改用 `organic-spoken-brief-v1`：模型只看到目标市场、具体观众、说话动机、一个生活处境、唯一核心价值、至多一个可选支持事实和轻收尾意图。旧四步推进与 86% 最低填充率不再是写作任务或自动重写触发器；有核心价值时建议实测约 70%–96%，普通观察允许更短，均可给 BGM、环境声和画面留白。只有事实、体验、商业、语言和确实不可容纳的时长错误触发一次定向修订。
 - 公共内核继续提供分支中立的商品视觉证据快照、中央卖点只读 Provider、目标语言口播时长估算、视频执行合同和阶段产物存储；`OrganicClaimAdapter`、故事候选、语义主线、提示词、种草质检、批次质检、数据库、飞书表和发布策略由 `SEEDING_ORGANIC` 独占。

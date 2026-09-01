@@ -163,26 +163,7 @@ def _download_references(
 ) -> list[str]:
     paths: list[str] = []
     for index, asset in enumerate(assets, start=1):
-        if not isinstance(asset, Mapping):
-            continue
-        local_text = _text(
-            asset.get("local_path") or asset.get("cached_path") or asset.get("path")
-        )
-        local_path = Path(local_text).expanduser().resolve() if local_text else None
-        if local_path and local_path.is_file():
-            content = local_path.read_bytes()
-            suffix = local_path.suffix or ".jpg"
-            selected = local_path
-            if cache_dir is not None:
-                digest = hashlib.sha256(content).hexdigest()
-                cache_dir.mkdir(parents=True, exist_ok=True)
-                cached = cache_dir / f"ref_{index:02d}_{digest[:10]}{suffix}"
-                if not cached.is_file():
-                    cached.write_bytes(content)
-                selected = cached
-            paths.append(str(selected))
-            continue
-        if not _text(asset.get("file_token")):
+        if not isinstance(asset, Mapping) or not _text(asset.get("file_token")):
             continue
         content, name, content_type, _size = client.download_attachment_bytes(dict(asset))
         suffix = Path(name).suffix or {

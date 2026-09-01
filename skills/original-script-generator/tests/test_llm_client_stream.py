@@ -132,6 +132,21 @@ class LLMClientStreamTests(unittest.TestCase):
         self.assertIn("gpt-5.6-sol", command)
         self.assertIn("model_reasoning_effort=high", command)
 
+    def test_cli_transport_places_prompt_before_variadic_images(self) -> None:
+        client = OriginalScriptLLMClient(primary_api_key="token")
+        result = SimpleNamespace(
+            returncode=0,
+            stderr="",
+            stdout='{"item":{"type":"agent_message","text":"{\\"ok\\":true}"}}\n',
+        )
+        with patch("core.llm_client.subprocess.run", return_value=result) as run:
+            client._call_primary_via_codex_cli(
+                prompt="return json", image_paths=["/tmp/product.jpg"]
+            )
+
+        command = run.call_args.args[0]
+        self.assertLess(command.index("return json"), command.index("-i"))
+
     def test_network_failure_falls_back_to_codex_cli(self) -> None:
         class _BrokenStream(_FakeStream):
             def __iter__(self):

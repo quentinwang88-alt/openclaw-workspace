@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 import json
+import mimetypes
 import sqlite3
 import sys
 from pathlib import Path
@@ -551,6 +552,75 @@ def _db_row_to_feishu(row: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
+def _prepare_reference_attachments(
+    client: FeishuBitableClient,
+    row: Dict[str, Any],
+    existing_fields: Dict[str, Any] | None = None,
+) -> tuple[List[Dict[str, str]], List[Any]]:
+    """Upload local mirrors once and retain both Feishu and local identities.
+
+    Feishu attachment fields only accept file tokens.  The shared SQLite keeps
+    ``local_path`` beside that token so image generation remains independent
+    from Feishu download quota.
+    """
+
+    references = _json(row.get("reference_images"), [])
+    references = references if isinstance(references, list) else []
+    existing = list((existing_fields or {}).get("人物参考图（需上传）") or [])
+    existing_by_signature = {
+        (_text(item.get("name")), int(item.get("size") or 0)): item
+        for item in existing
+        if isinstance(item, dict) and _text(item.get("file_token"))
+    }
+    tokens: List[Dict[str, str]] = []
+    enriched: List[Any] = []
+    seen_tokens = set()
+    for value in references:
+        if isinstance(value, str):
+            value = {"local_path": value, "name": Path(value).name}
+        if not isinstance(value, dict):
+            continue
+        item = dict(value)
+        token = _text(item.get("file_token"))
+        path_text = _text(item.get("local_path") or item.get("path"))
+        path = Path(path_text).expanduser().resolve() if path_text else None
+        if not token and path and path.is_file():
+            name = _text(item.get("name")) or path.name
+            size = int(item.get("size") or path.stat().st_size)
+            matched = existing_by_signature.get((name, size))
+            if matched:
+                token = _text(matched.get("file_token"))
+            else:
+                content = path.read_bytes()
+                uploaded = client.upload_attachment(
+                    content=content,
+                    file_name=name,
+                    content_type=_text(item.get("type"))
+                    or mimetypes.guess_type(name)[0]
+                    or "application/octet-stream",
+                    size=len(content),
+                )
+                token = _text(uploaded.get("file_token"))
+                item.update(uploaded)
+        if token:
+            item["file_token"] = token
+            if token not in seen_tokens:
+                tokens.append({"file_token": token})
+                seen_tokens.add(token)
+        enriched.append(item)
+    return tokens, enriched
+
+
+def _update_local_persona(
+    db: LightTryonDB, persona_id: str, fields: Dict[str, Any]
+) -> None:
+    current = db.get_template("persona", persona_id)
+    if not current:
+        raise KeyError(f"本地人物模板不存在: {persona_id}")
+    current.update(fields)
+    db.upsert_template("persona", current)
+
+
 def ensure_schema(client: FeishuBitableClient) -> None:
     ensure_fields(
         client,
@@ -701,6 +771,7 @@ def sync_from_db(
 ) -> Dict[str, Any]:
     records = _records_by_persona_id(client.list_records(page_size=100))
     created_payloads: List[Dict[str, Any]] = []
+    created_rows: List[tuple[Dict[str, Any], List[Any]]] = []
     updated: List[str] = []
     skipped: List[str] = []
     for row in _db_rows(db_path):
@@ -710,14 +781,39 @@ def sync_from_db(
             continue
         existing = records.get(persona_id)
         if not existing:
+            attachments, enriched = _prepare_reference_attachments(client, row)
+            if attachments:
+                payload["人物参考图（需上传）"] = attachments
             created_payloads.append({"fields": payload})
+            created_rows.append((row, enriched))
             continue
         if update_existing:
+            attachments, enriched = _prepare_reference_attachments(
+                client, row, dict(existing.fields or {})
+            )
+            if attachments:
+                payload["人物参考图（需上传）"] = attachments
             client.update_record_fields(existing.record_id, payload)
+            _update_local_persona(LightTryonDB(db_path), persona_id, {
+                "reference_images": enriched,
+                "feishu_record_id": existing.record_id,
+                "sync_status": "synced",
+                "last_synced_at": datetime.now().astimezone().isoformat(),
+                "sync_error": "",
+            })
             updated.append(persona_id)
         else:
             skipped.append(persona_id)
     created = client.batch_create_records(created_payloads)
+    db = LightTryonDB(db_path)
+    for record_id, (row, enriched) in zip(created, created_rows):
+        _update_local_persona(db, _text(row.get("persona_id")), {
+            "reference_images": enriched,
+            "feishu_record_id": record_id,
+            "sync_status": "synced",
+            "last_synced_at": datetime.now().astimezone().isoformat(),
+            "sync_error": "",
+        })
     return {
         "db_path": str(db_path),
         "created": len(created),

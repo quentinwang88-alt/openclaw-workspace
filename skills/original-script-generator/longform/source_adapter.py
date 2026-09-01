@@ -35,7 +35,6 @@ def _compact_persona(value: Mapping[str, Any]) -> Dict[str, Any]:
         "script_projection": _dict(persona.get("script_projection")),
         "prompt_negative": _text(persona.get("prompt_negative")),
         "reference_strategy": _text(persona.get("reference_strategy")),
-        "structured_snapshot_hash": _text(persona.get("structured_snapshot_hash")),
         # Asset ids/URLs are consumed by first-frame generation, not by the
         # long-form text model. Keeping them out lowers exposure and tokens.
         "reference_assets_available": bool(

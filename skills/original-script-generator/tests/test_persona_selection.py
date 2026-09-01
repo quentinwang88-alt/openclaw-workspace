@@ -87,6 +87,26 @@ class PersonaSelectionTest(unittest.TestCase):
         self.assertEqual("AVAILABLE", contract["availability"])
         self.assertEqual("P_CONFIGURED", contract["persona_id"])
 
+    def test_local_mirror_is_a_valid_persona_reference(self):
+        local = self.db_path.parent / "persona.png"
+        local.write_bytes(b"persona")
+        self._insert(
+            "P_LOCAL",
+            references=[{"local_path": str(local), "name": "persona.png"}],
+            product_types=["outerwear"],
+            categories=["女装"],
+            modes=["GARMENT_WORN"],
+        )
+        contract, _, _ = select_persona_contract(
+            product_type="外套", top_category="女装", country="泰国",
+            presentation_mode="PERSON_ON_CAMERA",
+            capture_mode="CREATOR_SELF_SHOT",
+            demonstration_mode="GARMENT_WORN", seed=11, recent_usage=[],
+            db_path=str(self.db_path),
+        )
+        self.assertEqual("AVAILABLE", contract["availability"])
+        self.assertEqual(str(local), contract["reference_asset_ids"][0])
+
     def test_headscarf_selects_approved_persona_and_requires_composite(self):
         self._insert(
             "P1", references=[{"file_token": "persona_ref_1"}],

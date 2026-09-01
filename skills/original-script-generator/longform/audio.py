@@ -12,6 +12,12 @@ from typing import Any, Dict, Iterable, Mapping
 
 
 DEFAULT_VOICEOVER_ROOT = Path.home() / "voiceover_copy_engine"
+DEFAULT_LONGFORM_BGM = (
+    Path.home() / ".openclaw" / "workspace" / "auto_mixcut" / "assets" / "bgm"
+    / "cc0_opengameart" / "city_loop__wipics__cc0.mp3"
+)
+
+
 def _binary(name: str) -> str:
     value = shutil.which(name)
     if not value:
@@ -132,16 +138,14 @@ def synthesize_segment_preflight(
 
 def _resolve_bgm_path(explicit: str | Path | None = None) -> Path | None:
     configured = str(explicit or os.environ.get("LONGFORM_BGM_PATH") or "").strip()
-    if not configured:
-        return None
-    candidate = Path(configured).expanduser().resolve()
+    candidate = Path(configured).expanduser().resolve() if configured else DEFAULT_LONGFORM_BGM
     return candidate if candidate.is_file() else None
 
 
 def _preflight_audio_for_section(
     voiceover: Mapping[str, Any], section: Mapping[str, Any], segment_id: str,
     *, voice_id: str,
-) -> Dict[str, Any] | None:
+) -> Path | None:
     preflight = voiceover.get("tts_preflight") or {}
     if str(preflight.get("voice_id") or "") != voice_id:
         return None
@@ -153,7 +157,7 @@ def _preflight_audio_for_section(
             continue
         path = Path(str(item.get("audio_path") or ""))
         if str(item.get("text_sha256") or "") == expected_hash and path.is_file():
-            return {**dict(item), "audio_path": str(path)}
+            return path
     return None
 
 
@@ -187,13 +191,11 @@ def finalize_with_voiceover(
         and len(sections) == len(planned_segments)
         and all(str(item.get("target_text") or "").strip() for item in sections)
     )
-    resolved_bgm = _resolve_bgm_path(bgm_path)
     hash_material = {
         "text": text,
         "layout": "SEGMENTED" if segmented else "LEGACY_SINGLE",
         "sections": [item.get("target_text") for item in sections] if segmented else [],
         "durations": [item.get("duration_seconds") for item in planned_segments] if segmented else [],
-        "bgm_path": str(resolved_bgm) if resolved_bgm else "PLATFORM_BGM",
     }
     text_hash = hashlib.sha256(
         json.dumps(hash_material, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -210,7 +212,7 @@ def finalize_with_voiceover(
             voice_id=voice_id, opening_delay_ms=opening_delay_ms,
             voiceover_root=Path(voiceover_root).expanduser().resolve(),
             text_hash=text_hash, video_seconds=video_seconds,
-            voiceover=voiceover, bgm_path=resolved_bgm,
+            voiceover=voiceover, bgm_path=_resolve_bgm_path(bgm_path),
         )
     original_audio = output.parent / "voiceover_th_rate_0.mp3"
     _synthesize_edge(text, original_audio, voice_id=voice_id, rate_percent=0,
@@ -229,7 +231,7 @@ def finalize_with_voiceover(
         )
 
     temp = output.with_suffix(".tmp.mp4")
-    bgm = resolved_bgm
+    bgm = _resolve_bgm_path(bgm_path)
     command = [_binary("ffmpeg"), "-y", "-i", str(video), "-i", str(selected_audio)]
     voice_filter = (
         f"[1:a]loudnorm=I=-16:TP=-1.5:LRA=11,adelay={opening_delay_ms}:all=1,"
@@ -268,7 +270,7 @@ def finalize_with_voiceover(
         "selected_tts_seconds": round(selected_seconds, 3),
         "video_seconds": round(video_seconds, 3),
         "opening_delay_ms": opening_delay_ms,
-        "bgm_policy": "LIGHT_BED_APPLIED" if bgm else "PLATFORM_BGM_EXPECTED",
+        "bgm_policy": "LIGHT_BED_APPLIED" if bgm else "UNAVAILABLE_SOFT_FALLBACK",
         "bgm_path": str(bgm) if bgm else "",
         "audio_path": str(selected_audio),
         "final_video_path": str(output),
@@ -304,37 +306,29 @@ def _finalize_segmented_voiceover(
         segment_id = str(segment.get("segment_id") or chr(64 + index))
         duration = float(segment.get("duration_seconds") or 0)
         section_text = str(section.get("target_text") or "").strip()
-        preflight_report = _preflight_audio_for_section(
+        preflight_audio = _preflight_audio_for_section(
             voiceover, section, segment_id, voice_id=voice_id,
         )
-        original = Path(str(preflight_report.get("audio_path"))) if preflight_report else (
+        original = preflight_audio or (
             output.parent / f"voiceover_{segment_id}_{voiceover_text_hash(section_text)[:12]}_rate_0.mp3"
         )
-        reused_preflight = preflight_report is not None
+        reused_preflight = preflight_audio is not None
         if not reused_preflight:
             _synthesize_edge(
                 section_text, original, voice_id=voice_id, rate_percent=0,
                 voiceover_root=voiceover_root,
             )
         initial_seconds = audio_duration_seconds(original)
-        # Preflight audio is an accepted frozen production asset. Re-running
-        # the rate chooser here created a second, contradictory speed choice.
-        selected_rate = int(preflight_report.get("rate_percent") or 0) if preflight_report else (
-            choose_narration_rate(initial_seconds, duration)
-        )
+        selected_rate = choose_narration_rate(initial_seconds, duration)
         selected = original
-        if selected_rate and not reused_preflight:
+        if selected_rate:
             selected = output.parent / f"voiceover_{segment_id}_rate_{selected_rate:+d}.mp3"
             _synthesize_edge(
                 section_text, selected, voice_id=voice_id, rate_percent=selected_rate,
                 voiceover_root=voiceover_root,
             )
         selected_seconds = audio_duration_seconds(selected)
-        effective_delay_ms = min(
-            opening_delay_ms,
-            max(0, int((duration - 0.08 - selected_seconds) * 1000)),
-        )
-        if selected_seconds + effective_delay_ms / 1000.0 > duration - 0.075:
+        if selected_seconds + opening_delay_ms / 1000.0 > duration - 0.08:
             raise RuntimeError(
                 f"片段{segment_id}口播仍超时: {selected_seconds:.2f}s > {duration:.2f}s"
             )
@@ -345,12 +339,9 @@ def _finalize_segmented_voiceover(
             "initial_tts_seconds": round(initial_seconds, 3),
             "selected_tts_seconds": round(selected_seconds, 3),
             "selected_rate_percent": selected_rate,
-            "opening_delay_ms": effective_delay_ms,
+            "opening_delay_ms": opening_delay_ms,
             "audio_path": str(selected),
             "preflight_audio_reused": reused_preflight,
-            "preflight_text_sha256": (
-                str(preflight_report.get("text_sha256") or "") if preflight_report else ""
-            ),
         })
 
     command = [_binary("ffmpeg"), "-y", "-i", str(video)]
@@ -364,11 +355,10 @@ def _finalize_segmented_voiceover(
     labels = []
     for index, segment in enumerate(segments):
         duration = float(segment.get("duration_seconds") or 0)
-        section_delay_ms = int(section_reports[index].get("opening_delay_ms") or 0)
         label = f"section_{index}"
         filters.append(
             f"[{index + 1}:a]loudnorm=I=-16:TP=-1.5:LRA=11,"
-            f"adelay={section_delay_ms}:all=1,apad,atrim=duration={duration:.3f}[{label}]"
+            f"adelay={opening_delay_ms}:all=1,apad,atrim=duration={duration:.3f}[{label}]"
         )
         labels.append(f"[{label}]")
     filters.append(
@@ -407,7 +397,7 @@ def _finalize_segmented_voiceover(
         "selected_tts_seconds_total": round(
             sum(item["selected_tts_seconds"] for item in section_reports), 3
         ),
-        "bgm_policy": "LIGHT_BED_APPLIED" if bgm_path else "PLATFORM_BGM_EXPECTED",
+        "bgm_policy": "LIGHT_BED_APPLIED" if bgm_path else "UNAVAILABLE_SOFT_FALLBACK",
         "bgm_path": str(bgm_path) if bgm_path else "",
         "final_video_path": str(output),
     }

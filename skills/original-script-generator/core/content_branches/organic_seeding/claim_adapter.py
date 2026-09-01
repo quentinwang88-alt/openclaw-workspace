@@ -10,9 +10,10 @@ from __future__ import annotations
 import json
 import hashlib
 import os
-import sqlite3
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
+
+from core.product_claim_storage import claim_store_descriptor, connect_claim_store
 
 
 ACTIVE_STATUSES = {"VERIFIED", "UNRESOLVED"}
@@ -43,15 +44,20 @@ def default_claim_db_path() -> Path:
 
 
 class CentralClaimProvider:
-    """Load a stable, read-only product claim snapshot from central SQLite."""
+    """Load a stable product-claim snapshot from the central authority."""
 
     def __init__(self, db_path: str | Path | None = None) -> None:
         self.db_path = Path(db_path).expanduser() if db_path else default_claim_db_path()
+        self.descriptor = claim_store_descriptor(
+            self.db_path,
+            explicit_sqlite=db_path is not None,
+        )
 
     def _empty(self, product_code: str, *, status: str, reason: str = "") -> Dict[str, Any]:
         return {
             "schema_version": "central-claim-snapshot-v1",
-            "provider": "CENTRAL_VOICEOVER_SQLITE_READ_ONLY",
+            "provider": self.descriptor["provider"],
+            "storage_backend": self.descriptor["backend"],
             "product_code": product_code,
             "status": status,
             "db_fingerprint": "",
@@ -64,15 +70,16 @@ class CentralClaimProvider:
         product = _text(product_code)
         if not product:
             return self._empty(product, status="UNAVAILABLE", reason="PRODUCT_CODE_REQUIRED")
-        if not self.db_path.is_file():
-            return self._empty(product, status="UNAVAILABLE", reason="CLAIM_DB_NOT_FOUND")
-        try:
-            connection = sqlite3.connect(
-                f"file:{self.db_path.as_posix()}?mode=ro", uri=True
+        if self.descriptor["backend"] == "unavailable":
+            return self._empty(
+                product,
+                status="UNAVAILABLE",
+                reason=str(self.descriptor.get("reason") or "CLAIM_STORE_UNAVAILABLE"),
             )
-            connection.row_factory = sqlite3.Row
-            rows = connection.execute(
-                """
+        try:
+            with connect_claim_store(self.descriptor) as connection:
+                rows = connection.execute(
+                    """
                 SELECT
                     c.claim_id,
                     c.product_id,
@@ -99,13 +106,14 @@ class CentralClaimProvider:
                   AND c.verification_status IN ('VERIFIED', 'UNRESOLVED')
                 ORDER BY c.created_at ASC, c.claim_id ASC
                 """,
-                (product,),
-            ).fetchall()
-        except sqlite3.Error as exc:
-            return self._empty(product, status="UNAVAILABLE", reason=f"CLAIM_DB_READ_FAILED:{exc}")
-        finally:
-            if "connection" in locals():
-                connection.close()
+                    (product,),
+                ).fetchall()
+        except Exception as exc:
+            return self._empty(
+                product,
+                status="UNAVAILABLE",
+                reason=f"CLAIM_DB_READ_FAILED:{type(exc).__name__}:{exc}",
+            )
 
         # Once operator-argument-v2 exists, legacy whole-cell/segment rows are
         # superseded.  This mirrors the central catalogue boundary and prevents
@@ -170,7 +178,8 @@ class CentralClaimProvider:
         )
         return {
             "schema_version": "central-claim-snapshot-v1",
-            "provider": "CENTRAL_VOICEOVER_SQLITE_READ_ONLY",
+            "provider": self.descriptor["provider"],
+            "storage_backend": self.descriptor["backend"],
             "product_code": product,
             "status": "READY" if claims else "EMPTY",
             "db_fingerprint": fingerprint,

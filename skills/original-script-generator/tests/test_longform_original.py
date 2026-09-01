@@ -8,8 +8,8 @@ from pathlib import Path
 from unittest import mock
 
 from core.longform.audio import (
-    choose_narration_rate, finalize_with_voiceover, synthesize_segment_preflight,
-    voiceover_text_hash,
+    _resolve_bgm_path, choose_narration_rate, finalize_with_voiceover,
+    synthesize_segment_preflight, voiceover_text_hash,
 )
 from core.longform.assets import freeze_reference_assets
 from core.longform.contracts import (
@@ -138,6 +138,20 @@ class LongformOriginalTest(unittest.TestCase):
                 "延续参考画面中的同一件商品，不重新设计、增加或删除商品可见结构",
                 segment["video_prompt"],
             )
+
+    def test_postdub_prompt_removes_speaking_cues_and_freezes_quiet_mouth(self):
+        value = fixture(25)
+        value["capture_units"][0]["character_action"] = (
+            "正对自己的手机镜头自然交流，只向前一步并站稳"
+        )
+        plan = compile_longform_plan(validate_master_contract(value))
+        prompt = plan["segments"][0]["video_prompt"]
+        self.assertNotIn("正对自己的手机镜头自然交流", prompt)
+        self.assertIn("自然看向自己的手机镜头", prompt)
+        self.assertIn("声音路由为后期画外旁白", prompt)
+        self.assertIn("人物始终不说话", prompt)
+        self.assertIn("嘴唇自然闭合或放松", prompt)
+        self.assertIn("不要让人物在画面中说话或做口型", prompt)
         self.assertNotIn("每个拍摄单元必须实际出现", plan["segments"][0]["video_prompt"])
         self.assertEqual(len(plan["segments"][0]["execution_units"]), 3)
         self.assertEqual(len(plan["segments"][1]["execution_units"]), 3)
@@ -565,6 +579,33 @@ class LongformOriginalTest(unittest.TestCase):
                 manifest["assets"][0]["authority"], "PRODUCT_APPEARANCE_AUTHORITY"
             )
 
+    def test_reference_freeze_records_stable_persona_id_and_reference_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            product = root / "product.png"
+            persona = root / "persona.png"
+            product.write_bytes(b"product")
+            persona.write_bytes(b"persona")
+            missing_db = root / "missing.sqlite3"
+            with mock.patch("core.longform.assets.default_db_path", return_value=missing_db):
+                manifest = freeze_reference_assets(
+                    job_id="JOB_PERSONA_LOCK",
+                    asset_root=root,
+                    materials=({
+                        "product_reference_assets": [{"local_path": str(product)}],
+                        "persona_reference_assets": [{"local_path": str(persona)}],
+                    },),
+                    persona_lock={
+                        "persona_id": "TH_APPAREL_SELECTED_01_001",
+                        "structured_snapshot_hash": "s" * 64,
+                    },
+                )
+            lock = manifest["persona_lock"]
+            self.assertEqual(lock["status"], "FROZEN")
+            self.assertEqual(lock["persona_id"], "TH_APPAREL_SELECTED_01_001")
+            self.assertEqual(lock["structured_snapshot_hash"], "s" * 64)
+            self.assertEqual(len(lock["reference_asset_sha256s"]), 1)
+
     def test_k0_prefers_raw_product_and_uses_composite_only_as_fallback(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -693,6 +734,10 @@ class LongformOriginalTest(unittest.TestCase):
         self.assertEqual(choose_narration_rate(21.5, 27.9), 0)
         self.assertEqual(choose_narration_rate(25.0, 27.9), 0)
         self.assertEqual(choose_narration_rate(28.0, 27.9), 8)
+
+    def test_longform_does_not_burn_default_bgm_when_platform_owns_music(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(_resolve_bgm_path())
 
     def test_finalization_requires_explicit_external_tts_authority(self):
         with self.assertRaises(ValueError):

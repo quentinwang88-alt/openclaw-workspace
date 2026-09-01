@@ -480,9 +480,12 @@ class OriginalScriptLLMClient:
             "-c",
             f"model_reasoning_effort={self.primary_reasoning_effort}",
         ]
+        # Codex's `--image` accepts a variadic list.  Keep the positional
+        # prompt before it; otherwise the CLI consumes the prompt as another
+        # image path and falls back to waiting for stdin.
+        command.append(prompt)
         for image_path in image_paths:
             command.extend(["-i", image_path])
-        command.append(prompt)
         print(f"    🛣️ 使用 Codex CLI 线路: {PRIMARY_ROUTE}")
         try:
             completed = subprocess.run(

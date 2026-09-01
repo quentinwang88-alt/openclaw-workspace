@@ -265,6 +265,8 @@ def _sync_confirmed_selling_points(
             product_code,
             "--db-path",
             str(db_path),
+            "--storage-mode",
+            "rds",
         ],
         cwd=str(root),
         text=True,

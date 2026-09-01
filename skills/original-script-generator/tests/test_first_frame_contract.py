@@ -8,6 +8,7 @@ from core.first_frame_contract import (
     build_first_frame_contract,
     render_first_frame_prompt,
 )
+from scripts.run_first_frame_tasks import _download_references
 from core.first_frame_storage import FirstFrameStorage
 
 
@@ -79,6 +80,24 @@ def _script():
 
 
 class FirstFrameContractTest(unittest.TestCase):
+    def test_local_persona_reference_needs_no_feishu_download(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "persona.png"
+            source.write_bytes(b"persona-image")
+
+            class NoDownloadClient:
+                def download_attachment_bytes(self, _asset):
+                    raise AssertionError("local reference should not call Feishu")
+
+            paths = _download_references(
+                NoDownloadClient(),
+                [{"local_path": str(source), "name": "persona.png"}],
+                Path(tmp),
+                cache_dir=Path(tmp) / "cache",
+            )
+            self.assertEqual(len(paths), 1)
+            self.assertEqual(Path(paths[0]).read_bytes(), b"persona-image")
+
     def test_stage0_setting_aliases_are_preserved(self):
         script = {
             "video_generation_brief": {
