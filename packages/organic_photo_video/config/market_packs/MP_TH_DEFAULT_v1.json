@@ -1,0 +1,57 @@
+{
+  "schema_version": "opv-market-pack-v1",
+  "market_pack_id": "MP_TH_DEFAULT_V1",
+  "pack_key": "MP_TH_DEFAULT",
+  "pack_version": 1,
+  "target_country": "TH",
+  "target_locale": "th-TH",
+  "climate_zone": "tropical_humid",
+  "season_key": "all_season",
+  "pack_name": "泰国默认 Market Pack V1",
+  "status": "active",
+  "visual_rules": {
+    "aspect_ratio": "9:16",
+    "photographic_style": "realistic smartphone photo, natural handheld framing, no studio backdrop look",
+    "climate_constraints": [
+      "hot and humid year-round; prefer breathable, light fabrics",
+      "heavy winter outerwear only with travel, air-conditioned mall or explicit seasonal themes"
+    ],
+    "preferred_scenes": [
+      "modern_condo_room",
+      "shopping_mall",
+      "street_cafe",
+      "outdoor_market",
+      "bts_skytrain_station"
+    ],
+    "color_grading": "warm natural daylight, consistent tone across the 5-shot group"
+  },
+  "copy_rules": {
+    "locale": "th-TH",
+    "fallback_allowed": false,
+    "fallback_note": "unsupported market/language combos must fail loudly, never silently fall back to Thai",
+    "title_max_chars": 80,
+    "caption_max_chars": 300,
+    "overlay_text_max_chars": 24,
+    "hashtag_count_range": [3, 6],
+    "style": "casual friendly Thai as used by local young women on TikTok, avoid formal written Thai",
+    "must_localize": ["title", "caption", "hashtags", "cover_text"]
+  },
+  "topic_rules": {
+    "posting_windows_local": ["11:30-13:00", "19:00-22:00"],
+    "core_scene_usage_ratio": {"core": 0.7, "exploration": 0.3},
+    "look_source_priority": ["successful_look", "look_template", "ai_exploration"],
+    "daily_content_volume": {"min": 5, "max": 10},
+    "topic_frequency_rule": "avoid repeating the same topic_text within 7 days on one account"
+  },
+  "safety_rules": {
+    "banned": [
+      "politically sensitive landmarks or symbols",
+      "medical or health claims",
+      "visible brand watermarks",
+      "explicit content"
+    ],
+    "tiktok_ui_safe_area_px": {"top": 220, "bottom": 420, "left": 60, "right": 60},
+    "face_visibility": "face must stay natural and unobscured by overlays",
+    "background_music": "never burn licensed BGM into the master when platform_hot_bgm is planned"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "schema_version": "opv-content-recipe-v1",
+  "recipe_id": "RECIPE_PAIN_POINT_SOLUTION_V1",
+  "recipe_key": "RECIPE_PAIN_POINT_SOLUTION",
+  "recipe_version": 1,
+  "content_goal": "pain_point_solution",
+  "anchor_slot": 1,
+  "shot_count": 5,
+  "hook_types": ["pain_point", "before_after", "final_effect", "curiosity", "number_list", "contrast"],
+  "story_structure": [
+    {"slot_index": 1, "narrative_function": "HOOK", "slot_role": "hero", "purpose": "痛点+结果钩子：一眼看出目标人群和改造结果", "camera_hint": "正面全身，结果状态先行"},
+    {"slot_index": 2, "narrative_function": "CONTEXT", "slot_role": "full_look", "purpose": "普通穿法的问题：展示无效穿法或常见错误", "camera_hint": "全身，对比构图"},
+    {"slot_index": 3, "narrative_function": "TRANSFORMATION", "slot_role": "lifestyle", "purpose": "正确搭配方法：展示改造后的穿法", "camera_hint": "自然动作中展示搭配"},
+    {"slot_index": 4, "narrative_function": "PROOF", "slot_role": "detail", "purpose": "关键细节证明：用细节证明技巧有效", "camera_hint": "局部特写，突出比例线/收腰位"},
+    {"slot_index": 5, "narrative_function": "PAYOFF", "slot_role": "second_angle", "purpose": "完整效果：第二角度交付最终结果", "camera_hint": "第二机位全身收尾"}
+  ],
+  "copy_style": {
+    "title_tone": "痛点共鸣 + 结果承诺",
+    "structure": "痛点称呼 + 技巧动作 + 结果",
+    "example_zh": "小个子别再塞衣角了，这样穿直接高5公分"
+  },
+  "suitable_topics": ["petite_proportion", "pear_shape", "cover_flesh", "leg_shape", "proportion"],
+  "render_profile_id": "IMAGE_STORY_VIDEO_V1",
+  "quality_profile_id": "QUALITY_STANDARD_V1",
+  "status": "active"
+}

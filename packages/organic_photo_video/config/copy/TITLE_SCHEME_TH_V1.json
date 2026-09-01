@@ -1,0 +1,112 @@
+{
+  "schema_version": "opv-title-scheme-v1",
+  "scheme_id": "TITLE_SCHEME_TH_V1",
+  "market_locale": "th-TH",
+  "title_rules": {
+    "max_chars": 80,
+    "target_chars": [25, 55],
+    "max_emoji": 2,
+    "tone": "คำเมาท์สาวๆ แบบ TikTok แฟชั่น ไม่เป็นทางการ อ่านสะใจ",
+    "banned_words": ["ถูกที่สุด", "ดีที่สุด", "ขายดีที่สุด", "รักษา", "รับประกัน", "100%", "ถูกแพง"]
+  },
+  "slot_bank": {
+    "product_short": {
+      "default": "ตัวนี้",
+      "by_category": {
+        "outerwear": "เจเก็ตตัวนี้",
+        "puffer_jacket": "เจเก็ตฟูตัวนี้",
+        "dress": "เดรสตัวนี้",
+        "blouse": "เบลาส์ตัวนี้",
+        "skirt": "กระโปรงตัวนี้"
+      }
+    },
+    "scenario": {
+      "travel_departure": "ขึ้นเครื่อง",
+      "cafe": "ไปคาเฟ่",
+      "office": "เข้าออฟฟิศ",
+      "market": "เดินตลาดนัด",
+      "rainy": "สู้ฝน"
+    },
+    "benefit": {
+      "travel_departure": [
+        "ใส่บินได้ทั้งเที่ยว สบายมาก",
+        "อุ่นแต่เบา ถ่ายรูปขึ้น",
+        "หุ่นสวย ไม่พองเกินไป"
+      ],
+      "default": [
+        "ใส่สบาย ชิคสุดๆ",
+        "ตัวเล็กก็สวย",
+        "หุ่นสวย คลุมสวย"
+      ]
+    },
+    "vibe_emoji": {
+      "travel_departure": "✈️",
+      "cafe": "☕",
+      "office": "",
+      "market": "🛍️",
+      "rainy": "🌧️"
+    },
+    "one_liner": {
+      "travel_departure": "เจเก็ตฟูใส่บิน อุ่นแต่เบา ถ่ายรูปขึ้นทุกมุม 🧳",
+      "default": "จัดลุคง่ายๆ ด้วยตัวเดียว ใส่สบายทั้งวัน"
+    },
+    "cover_text": {
+      "travel_departure": "ลุคขึ้นเครื่อง ✈️",
+      "cafe": "ลุคคาเฟ่ ☕",
+      "default": "ป้ายยาตัวนี้เลย"
+    }
+  },
+  "hook_formulas": [
+    {
+      "id": "paeyaa_direct",
+      "weight": 3,
+      "themes": [],
+      "template": "ป้ายยา {product_short} {benefit}"
+    },
+    {
+      "id": "travel_hook",
+      "weight": 3,
+      "themes": ["travel_departure"],
+      "template": "{vibe} ลุค{scenario} {benefit}"
+    },
+    {
+      "id": "question_scenario",
+      "weight": 2,
+      "themes": [],
+      "template": "ใส่ไป{scenario} ได้ไหม? {product_short}จัดให้"
+    },
+    {
+      "id": "realshot_hook",
+      "weight": 2,
+      "themes": [],
+      "template": "ของจริง {product_short} {benefit}"
+    },
+    {
+      "id": "small_body",
+      "weight": 1,
+      "themes": [],
+      "template": "สาวตัวเล็กห้ามพลาด {product_short} {benefit}"
+    }
+  ],
+  "hashtag_strategy": {
+    "count": [3, 6],
+    "seeds_th": ["#ป้ายยา"],
+    "by_theme": {
+      "travel_departure": ["#ลุคสนามบิน", "#ชุดเที่ยว"],
+      "cafe": ["#ชุดเดท", "#คาเฟ่"],
+      "office": ["#ชุดทำงาน"],
+      "market": ["#ตลาดนัด"],
+      "rainy": ["#หน้าฝน"]
+    },
+    "tail": ["#แฟชั่น", "#OOTD"]
+  },
+  "caption_rules": {
+    "structure": ["title", "one_liner", "hashtags"],
+    "one_liner_max_chars": 80
+  },
+  "cover_text_rules": {
+    "max_chars": 24,
+    "one_line": true,
+    "style_hint": "คำสั้น อ่านง่าย มีพลัง ไม่ใช้คำแปลงๆ"
+  }
+}

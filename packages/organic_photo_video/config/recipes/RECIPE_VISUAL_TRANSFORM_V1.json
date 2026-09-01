@@ -1,0 +1,67 @@
+{
+  "schema_version": "opv-content-recipe-v1",
+  "recipe_id": "RECIPE_VISUAL_TRANSFORM_V1",
+  "recipe_key": "RECIPE_VISUAL_TRANSFORM",
+  "recipe_version": 1,
+  "content_goal": "visual_transform",
+  "anchor_slot": 5,
+  "shot_count": 5,
+  "hook_types": [
+    "before_after",
+    "final_effect",
+    "contrast",
+    "curiosity"
+  ],
+  "story_structure": [
+    {
+      "slot_index": 1,
+      "narrative_function": "HOOK",
+      "slot_role": "hero",
+      "purpose": "Before/After 或最终效果先展示",
+      "camera_hint": "改造后效果作为首屏钩子"
+    },
+    {
+      "slot_index": 2,
+      "narrative_function": "CONTEXT",
+      "slot_role": "full_look",
+      "purpose": "产品主色和基础搭配铺垫",
+      "camera_hint": "基础款全身"
+    },
+    {
+      "slot_index": 3,
+      "narrative_function": "TRANSFORMATION",
+      "slot_role": "lifestyle",
+      "purpose": "穿搭变化过程：一件多穿/风格切换",
+      "camera_hint": "换装过程动作"
+    },
+    {
+      "slot_index": 4,
+      "narrative_function": "PROOF",
+      "slot_role": "detail",
+      "purpose": "细节统一：证明是同一件产品的不同造型",
+      "camera_hint": "产品关键结构特写"
+    },
+    {
+      "slot_index": 5,
+      "narrative_function": "PAYOFF",
+      "slot_role": "second_angle",
+      "purpose": "最终完整 Look（视觉锚点，先生成本镜）",
+      "camera_hint": "最终造型第二机位定稿"
+    }
+  ],
+  "copy_style": {
+    "title_tone": "改造前后反差",
+    "structure": "Before 状态 + 动作 + After 惊喜",
+    "example_zh": "同一件外套，换个穿法直接贵3倍"
+  },
+  "suitable_topics": [
+    "one_piece_multiway",
+    "color_pop",
+    "plain_to_elevated",
+    "style_transform"
+  ],
+  "render_profile_id": "IMAGE_STORY_VIDEO_V1",
+  "quality_profile_id": "QUALITY_STANDARD_V1",
+  "status": "active",
+  "_anchor_note": "Before/After 类先生成 P5 最终造型作为视觉锚点，再反向生成前置画面"
+}

@@ -1,0 +1,55 @@
+{
+  "schema_version": "opv-outfit-rules-v1",
+  "rules_id": "OUTFIT_RULES_TH_V1",
+  "market": "TH",
+  "note": "规则式穿搭方案库：按内容键+产品类目给出底装/鞋包/配色基线；planner 负责回答 styling_logic",
+  "by_content_key": {
+    "travel_departure": {
+      "bottom": {"type": "白色直筒宽松牛仔裤", "color": "白色"},
+      "shoes": "小白鞋（可不入镜）",
+      "bag": "小型斜挎包或登机包",
+      "accessories": "极简配饰（最多1件）",
+      "color_palette": ["light blue", "white", "cream"],
+      "style_direction": "复古老钱 × 旅行出发",
+      "occasion": "airport_departure"
+    },
+    "cafe": {
+      "bottom": {"type": "浅色伞裙或阔腿裤", "color": "米白/浅卡其"},
+      "shoes": "乐福鞋或小白鞋",
+      "bag": "手提小包",
+      "accessories": "细项链或耳饰1件",
+      "color_palette": ["light blue", "cream", "soft brown"],
+      "style_direction": "轻淑女咖啡时刻",
+      "occasion": "cafe"
+    },
+    "office": {
+      "bottom": {"type": "高腰直筒西裤", "color": "米色/浅灰"},
+      "shoes": "尖头平底鞋",
+      "bag": "通勤托特",
+      "accessories": "腕表或极简手链",
+      "color_palette": ["light blue", "ivory", "grey"],
+      "style_direction": "清爽通勤",
+      "occasion": "office"
+    },
+    "default": {
+      "bottom": {"type": "白色直筒宽松牛仔裤", "color": "白色"},
+      "shoes": "小白鞋",
+      "bag": "极简小包",
+      "accessories": "极简配饰（最多1件）",
+      "color_palette": ["light blue", "white"],
+      "style_direction": "日常清爽",
+      "occasion": "daily"
+    }
+  },
+  "climate_rules": {
+    "tropical_humid": "轻薄透气面料；厚外套仅限旅行/空调语境并注明",
+    "default": "按当地气候调整层次"
+  },
+  "product_visibility_rules": {
+    "product_is_core": true,
+    "max_cover_ratio": "产品不得被外套/手臂大面积遮挡（目标商品即外套时按其自身穿着形态）",
+    "accessory_priority": "配饰不得抢夺产品主体",
+    "layering": "层次符合当地气候",
+    "consistency": "同组5图穿搭完全一致"
+  }
+}

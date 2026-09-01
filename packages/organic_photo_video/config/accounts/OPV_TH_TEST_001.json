@@ -1,0 +1,76 @@
+{
+  "schema_version": "opv-account-profile-v1",
+  "account_id": "OPV_TH_TEST_001",
+  "account_code": "opv-th-test-001",
+  "account_name": "OPV 泰国测试账号 001（浅蓝蓬松外套试点）",
+  "platform": "tiktok",
+  "target_country": "TH",
+  "default_locale": "th-TH",
+  "timezone": "Asia/Bangkok",
+  "status": "testing",
+  "persona_ref_id": "TH_APPAREL_SELECTED_01_001",
+  "persona_snapshot": {
+    "persona_name": "泰国穿搭人物 01｜黑发轻精致",
+    "source_db": "skills/lightweight-tryon-video/var/light_tryon.sqlite3",
+    "source_table": "persona_templates",
+    "markets": [
+      "TH"
+    ],
+    "reference_image_count": 1,
+    "note": "正式转 active 前需补齐 3-5 张稳定参考图（MODEL_HANDOFF 4.2 要求）"
+  },
+  "visual_identity": {
+    "tone": "warm natural daylight",
+    "wardrobe_palette": [
+      "light blue",
+      "white",
+      "cream"
+    ],
+    "signature": "real handheld phone shots, never studio look",
+    "proportion_rule": "上4下6，短款外套提高腰线"
+  },
+  "allowed_style_refs": [],
+  "allowed_look_refs": [
+    "STYLE_OPV_PUFFER_TRAVEL_001",
+    "STYLE_OPV_PUFFER_PETITE_001",
+    "STYLE_OPV_PUFFER_MULTIWAY_001"
+  ],
+  "allowed_scene_refs": [
+    "ENV_AIRPORT_DEPART_001",
+    "SCENE_A_001",
+    "ENV_CAFE_001"
+  ],
+  "core_scene_refs": [
+    "ENV_AIRPORT_DEPART_001"
+  ],
+  "default_market_pack_id": "MP_TH_DEFAULT_V1",
+  "default_render_preset_id": "RP_STILL_FASTCUT_10S_V1",
+  "operating_rules": {
+    "content_direction": "airport_travel_departure",
+    "pilot_product_ids": [
+      "1737141103233042426"
+    ],
+    "neobund_auth_id": "5250",
+    "daily_publish_window_local": [
+      "11:30-13:00",
+      "19:00-22:00"
+    ],
+    "daily_volume": {
+      "min": 5,
+      "max": 10
+    },
+    "bgm_dedup_days": 3,
+    "bgm_max_uses_per_song_in_window": 2,
+    "human_review_required": true,
+    "visual_qa_required": true,
+    "persona_authority": "original_persona_template_library",
+    "allowed_persona_refs": [
+      "TH_APPAREL_SELECTED_01_001",
+      "TH_APPAREL_SELECTED_02_001",
+      "TH_APPAREL_SELECTED_03_001"
+    ],
+    "persona_min_local_refs_testing": 1,
+    "persona_min_local_refs_active": 3,
+    "note": "SCENE_A_001 现代简约卧室来自轻量试穿视频资产库，作为机场场景失败时的室内备选；neobund_auth_id=5250 来自 2026-08-31 用户抓包确认的 Organic 账号（后续接入自动排班）"
+  }
+}

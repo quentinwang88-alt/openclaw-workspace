@@ -1,0 +1,38 @@
+{
+  "_example_note": "示例文件，禁止直接导入正式环境。正式账号必须由运营提供真实 account_id、persona_ref_id、场景与 Look 引用后，复制本结构生成新文件，并用 scripts/import_account_profile.py 校验导入。",
+  "schema_version": "opv-account-profile-v1",
+  "account_id": "OPV_TH_PILOT_001_EXAMPLE",
+  "account_code": "opv-th-pilot-001",
+  "account_name": "示例：泰国试点账号 001（非正式数据）",
+  "platform": "tiktok",
+  "target_country": "TH",
+  "default_locale": "th-TH",
+  "timezone": "Asia/Bangkok",
+  "status": "testing",
+  "persona_ref_id": "PERSONA_REF_EXAMPLE",
+  "persona_snapshot": {
+    "age_range": "20s",
+    "body_hint": "petite, natural proportions",
+    "style_keywords": ["clean girl", "soft casual"],
+    "reference_image_count": 0,
+    "note": "正式启用前每个正式 Persona 至少补 3-5 张稳定参考图"
+  },
+  "visual_identity": {
+    "tone": "warm natural daylight",
+    "wardrobe_palette": ["cream", "soft blue", "warm beige"],
+    "signature": "real handheld phone shots, never studio look"
+  },
+  "allowed_style_refs": [],
+  "allowed_look_refs": [],
+  "allowed_scene_refs": [],
+  "core_scene_refs": [],
+  "default_market_pack_id": "MP_TH_DEFAULT_V1",
+  "default_render_preset_id": "RP_STILL_VERTICAL_12S_V1",
+  "operating_rules": {
+    "daily_publish_window_local": ["11:30-13:00", "19:00-22:00"],
+    "daily_volume": {"min": 5, "max": 10},
+    "bgm_dedup_days": 3,
+    "bgm_max_uses_per_song_in_window": 2,
+    "human_review_required": true
+  }
+}

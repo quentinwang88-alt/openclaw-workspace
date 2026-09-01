@@ -1,0 +1,34 @@
+{
+  "schema_version": "opv-theme-v1",
+  "theme_id": "THEME_TH_CAMPUS_CASUAL_V1",
+  "theme_key": "THEME_TH_CAMPUS_CASUAL",
+  "theme_version": 1,
+  "theme_name": "校园学生党休闲（Campus Casual）",
+  "description": "面向大学生和刚毕业人群的平价校园穿搭，强调预算内搭出学生感活力。",
+  "status": "active",
+  "applicable_markets": ["TH"],
+  "product_match_rules": {
+    "categories": ["t_shirt", "polo", "denim_skirt", "pleated_skirt", "sneaker_friendly_sets", "hoodie_light"],
+    "size_hint": "常规，活力宽松",
+    "climate": "日常课堂 + 空调教室",
+    "avoid": ["成熟职场感过强", "昂贵面料叙事"]
+  },
+  "content_plan_rules": {
+    "look_source_priority": ["successful_look", "look_template", "ai_exploration"],
+    "copy_tone": "学生党视角，价格友好，泰语学生 slang",
+    "bgm_mood_hints": ["youthful_pop", "jpop_inspired", "energetic"],
+    "overlay_text_hint": "ไปเรียนวันหยุดแต่งยังไงดี",
+    "overlay_instruction": "ข้อความสั้นหนึ่งบรรทัดสำหรับปก",
+    "hashtag_seed": ["#นักศึกษา", "#ชุดเรียน", "#ป้ายยาเสื้อผ้า"]
+  },
+  "default_storyboard": {
+    "topic_template": "ลุคไปเรียน: {product} งบน้อยก็แต่งได้",
+    "slots": [
+      {"slot_index": 1, "slot_role": "hero", "purpose": "教学楼前背包回头钩子", "duration_ms": 2200, "motion": "slow_push", "transition_out": "short_dissolve"},
+      {"slot_index": 2, "slot_role": "full_look", "purpose": "校园路全身 Look", "duration_ms": 2600, "motion": "light_pan", "transition_out": "short_dissolve"},
+      {"slot_index": 3, "slot_role": "lifestyle", "purpose": "自习/奶茶店状态", "duration_ms": 2500, "motion": "static_hold", "transition_out": "short_dissolve"},
+      {"slot_index": 4, "slot_role": "detail", "purpose": "书包、鞋、裙长搭配细节", "duration_ms": 2200, "motion": "detail_zoom", "transition_out": "short_dissolve"},
+      {"slot_index": 5, "slot_role": "second_angle", "purpose": "操场黄昏第二机位收尾", "duration_ms": 3000, "motion": "slow_push", "transition_out": "cut"}
+    ]
+  }
+}

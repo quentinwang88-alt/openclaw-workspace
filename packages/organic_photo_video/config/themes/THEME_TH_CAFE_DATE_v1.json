@@ -1,0 +1,34 @@
+{
+  "schema_version": "opv-theme-v1",
+  "theme_id": "THEME_TH_CAFE_DATE_V1",
+  "theme_key": "THEME_TH_CAFE_DATE",
+  "theme_version": 1,
+  "theme_name": "咖啡店约会轻淑女（Cafe Date）",
+  "description": "曼谷咖啡馆场景的柔感约会穿搭，裙装为主，氛围感和出片率优先。",
+  "status": "active",
+  "applicable_markets": ["TH"],
+  "product_match_rules": {
+    "categories": ["dress", "midi_skirt", "knit_top", "blouse", "cardigan_light"],
+    "size_hint": "S-M，收腰或宽松皆可",
+    "climate": "室内空调场景可加薄开衫",
+    "avoid": ["运动套装", "oversize 工装"]
+  },
+  "content_plan_rules": {
+    "look_source_priority": ["successful_look", "look_template", "ai_exploration"],
+    "copy_tone": "氛围感文案，泰语轻甜口吻",
+    "bgm_mood_hints": ["soft_acoustic", "romantic", "lofi"],
+    "overlay_text_hint": "นัดครั้งแรกใส่อะไรดี",
+    "overlay_instruction": "คำถามสั้นหนึ่งบรรทัดสำหรับปก",
+    "hashtag_seed": ["#นัดเดท", "#คาเฟ่", "#ชุดเดท"]
+  },
+  "default_storyboard": {
+    "topic_template": "ลุคนัดคาเฟ่: {product} หวานไม่ซ้ำใคร",
+    "slots": [
+      {"slot_index": 1, "slot_role": "hero", "purpose": "咖啡馆门口入座瞬间钩子", "duration_ms": 2200, "motion": "slow_push", "transition_out": "short_dissolve"},
+      {"slot_index": 2, "slot_role": "full_look", "purpose": "站姿全身 Look 与裙长比例", "duration_ms": 2600, "motion": "light_pan", "transition_out": "short_dissolve"},
+      {"slot_index": 3, "slot_role": "lifestyle", "purpose": "喝咖啡/翻菜单的自然状态", "duration_ms": 2500, "motion": "static_hold", "transition_out": "short_dissolve"},
+      {"slot_index": 4, "slot_role": "detail", "purpose": "裙摆、袖口、配饰细节", "duration_ms": 2200, "motion": "detail_zoom", "transition_out": "short_dissolve"},
+      {"slot_index": 5, "slot_role": "second_angle", "purpose": "窗边逆光第二机位收尾", "duration_ms": 3000, "motion": "slow_push", "transition_out": "cut"}
+    ]
+  }
+}

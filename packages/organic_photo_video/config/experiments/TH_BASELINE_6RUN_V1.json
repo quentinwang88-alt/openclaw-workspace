@@ -1,0 +1,32 @@
+{
+  "schema_version": "opv-experiment-plan-v1",
+  "experiment_id": "TH_BASELINE_6RUN_V1",
+  "account_id": "OPV_TH_TEST_001",
+  "generation_only_first": true,
+  "publish_top_n_after_review": 2,
+  "shared": {
+    "product_id": "1737141103233042426",
+    "persona_ref_id": "TH_APPAREL_CAFE_001",
+    "look_ref_id": "STYLE_OPV_PUFFER_TRAVEL_001",
+    "theme_id": "THEME_TH_TRAVEL_DEPARTURE_V1",
+    "render_preset_id": "RP_STILL_FASTCUT_10S_V1"
+  },
+  "runs": [
+    {"run_id": "A1", "idempotency_key": "TH_BASELINE_6RUN_V1_A1", "scene_ref_id": "ENV_AIRPORT_DEPART_001", "variable": "generation_seed_1"},
+    {"run_id": "A2", "idempotency_key": "TH_BASELINE_6RUN_V1_A2", "scene_ref_id": "ENV_AIRPORT_DEPART_001", "variable": "generation_seed_2"},
+    {"run_id": "A3", "idempotency_key": "TH_BASELINE_6RUN_V1_A3", "scene_ref_id": "ENV_AIRPORT_DEPART_001", "variable": "generation_seed_3"},
+    {"run_id": "B1", "idempotency_key": "TH_BASELINE_6RUN_V1_B1", "scene_ref_id": "SCENE_A_001", "variable": "bedroom_packing_scene", "blocked_by": "travel_packing_theme_storyboard"},
+    {"run_id": "B2", "idempotency_key": "TH_BASELINE_6RUN_V1_B2", "scene_ref_id": "ENV_AIRPORT_DEPART_001", "look_ref_id": null, "variable": "second_approved_look", "blocked_by": "operator_look_choice"},
+    {"run_id": "B3", "idempotency_key": "TH_BASELINE_6RUN_V1_B3", "product_id": null, "theme_id": null, "variable": "second_product_and_theme", "blocked_by": "operator_product_choice"}
+  ],
+  "scorecard": {
+    "product_fidelity": 30,
+    "persona_consistency": 20,
+    "shot_diversity": 15,
+    "creator_realism": 15,
+    "hero_strength": 10,
+    "video_rhythm": 10,
+    "pass_score": 80,
+    "hard_fail": ["product_fidelity"]
+  }
+}

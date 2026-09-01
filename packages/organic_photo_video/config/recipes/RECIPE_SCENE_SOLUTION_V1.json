@@ -1,0 +1,26 @@
+{
+  "schema_version": "opv-content-recipe-v1",
+  "recipe_id": "RECIPE_SCENE_SOLUTION_V1",
+  "recipe_key": "RECIPE_SCENE_SOLUTION",
+  "recipe_version": 1,
+  "content_goal": "scene_solution",
+  "anchor_slot": 1,
+  "shot_count": 5,
+  "hook_types": ["scene_problem", "final_effect", "curiosity", "contrast"],
+  "story_structure": [
+    {"slot_index": 1, "narrative_function": "HOOK", "slot_role": "hero", "purpose": "场景需求钩子：点出场景+穿搭诉求", "camera_hint": "场景地标前完整 Look"},
+    {"slot_index": 2, "narrative_function": "CONTEXT", "slot_role": "full_look", "purpose": "基础搭配：场景下的基础穿法", "camera_hint": "全身展示上下装关系"},
+    {"slot_index": 3, "narrative_function": "TRANSFORMATION", "slot_role": "lifestyle", "purpose": "增加场景需要的层次：外套/叠穿按场景升级", "camera_hint": "生活动作中展示层次"},
+    {"slot_index": 4, "narrative_function": "PROOF", "slot_role": "detail", "purpose": "鞋包和配饰：细节让场景造型成立", "camera_hint": "配饰与鞋包特写"},
+    {"slot_index": 5, "narrative_function": "PAYOFF", "slot_role": "second_angle", "purpose": "完整场景造型：第二角度交付", "camera_hint": "场景纵深构图收尾"}
+  ],
+  "copy_style": {
+    "title_tone": "场景点名 + 方案感",
+    "structure": "场景 + 穿搭方案 + 舒适/出片承诺",
+    "example_zh": "曼谷机场穿搭这样安排，飞多久都不狼狈"
+  },
+  "suitable_topics": ["travel_departure", "cafe_date", "office_commute", "weekend_market", "rainy_layering", "campus_casual"],
+  "render_profile_id": "IMAGE_STORY_VIDEO_V1",
+  "quality_profile_id": "QUALITY_STANDARD_V1",
+  "status": "active"
+}
