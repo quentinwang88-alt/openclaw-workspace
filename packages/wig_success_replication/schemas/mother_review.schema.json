@@ -147,6 +147,71 @@
       "title": "CoreMechanism",
       "type": "object"
     },
+    "ExecutionSummary": {
+      "additionalProperties": false,
+      "description": "Mechanism is invariant; baseline filming is an example, not a lock.",
+      "properties": {
+        "schema_version": {
+          "const": "1",
+          "default": "1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "core_mechanisms": {
+          "items": {
+            "$ref": "#/$defs/MotherCorePoint"
+          },
+          "maxItems": 5,
+          "minItems": 1,
+          "title": "Core Mechanisms",
+          "type": "array"
+        },
+        "baseline_shooting": {
+          "items": {
+            "maxLength": 600,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 8,
+          "title": "Baseline Shooting",
+          "type": "array"
+        },
+        "variable_expression": {
+          "items": {
+            "maxLength": 600,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 10,
+          "title": "Variable Expression",
+          "type": "array"
+        },
+        "provenance": {
+          "default": "model_extracted",
+          "enum": [
+            "model_extracted",
+            "legacy_derived"
+          ],
+          "title": "Provenance",
+          "type": "string"
+        },
+        "legacy_constraints": {
+          "items": {
+            "maxLength": 320,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 40,
+          "title": "Legacy Constraints",
+          "type": "array"
+        }
+      },
+      "required": [
+        "core_mechanisms"
+      ],
+      "title": "ExecutionSummary",
+      "type": "object"
+    },
     "GlobalRules": {
       "additionalProperties": false,
       "properties": {
@@ -323,6 +388,36 @@
           "minLength": 1,
           "title": "Human Summary",
           "type": "string"
+        },
+        "core_points": {
+          "items": {
+            "$ref": "#/$defs/MotherCorePoint"
+          },
+          "maxItems": 5,
+          "title": "Core Points",
+          "type": "array"
+        },
+        "execution_summary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "processing_provenance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MotherProcessingProvenance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -342,6 +437,64 @@
         "human_summary"
       ],
       "title": "MotherContract",
+      "type": "object"
+    },
+    "MotherCorePoint": {
+      "additionalProperties": false,
+      "properties": {
+        "point_id": {
+          "minLength": 1,
+          "title": "Point Id",
+          "type": "string"
+        },
+        "requirement": {
+          "maxLength": 600,
+          "minLength": 1,
+          "title": "Requirement",
+          "type": "string"
+        },
+        "evidence_source": {
+          "default": "model_extracted",
+          "enum": [
+            "model_extracted",
+            "legacy_derived"
+          ],
+          "title": "Evidence Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "point_id",
+        "requirement"
+      ],
+      "title": "MotherCorePoint",
+      "type": "object"
+    },
+    "MotherProcessingProvenance": {
+      "additionalProperties": false,
+      "properties": {
+        "input_fingerprint": {
+          "minLength": 1,
+          "title": "Input Fingerprint",
+          "type": "string"
+        },
+        "implementation_fingerprint": {
+          "minLength": 1,
+          "title": "Implementation Fingerprint",
+          "type": "string"
+        },
+        "policy_version": {
+          "minLength": 1,
+          "title": "Policy Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "input_fingerprint",
+        "implementation_fingerprint",
+        "policy_version"
+      ],
+      "title": "MotherProcessingProvenance",
       "type": "object"
     },
     "MotherReviewIssue": {
@@ -674,6 +827,15 @@
       "maxLength": 1600,
       "minLength": 1,
       "title": "Human Summary",
+      "type": "string"
+    },
+    "review_status": {
+      "default": "completed",
+      "enum": [
+        "completed",
+        "not_run"
+      ],
+      "title": "Review Status",
       "type": "string"
     }
   },

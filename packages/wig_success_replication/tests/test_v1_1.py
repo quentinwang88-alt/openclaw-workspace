@@ -254,13 +254,13 @@ def test_mother_review_does_not_resend_product_images():
             validation_notes="tested",
             source_product_fact=_fact("source"),
             source_image_urls=("https://example.invalid/wig.jpg",),
-        )
+        ), independent_review=True
     )
     assert llm.calls[0]["image_urls"] == ["https://example.invalid/wig.jpg"]
     assert llm.calls[1]["image_urls"] is None
 
 
-def test_human_selection_policy_rebuilds_legacy_mother_and_reaches_both_stages():
+def test_explicit_refresh_rebuilds_legacy_mother_using_current_policy():
     repository = _seed_repository(["source"])
     current = repository.latest_mother("m")
     fact = _fact("source")
@@ -285,18 +285,20 @@ def test_human_selection_policy_rebuilds_legacy_mother_and_reaches_both_stages()
         validation_notes="tested",
         source_product_fact=fact,
         source_image_urls=("https://example.invalid/wig.jpg",),
-    ))
+    ), refresh=True)
     assert result.created is True
     assert result.record.version == 2
     assert result.record.source_hash != current.source_hash
     assert all("claim_transfer_policy" in call["user_payload"] for call in llm.calls)
+    assert len(llm.calls) == 1
+    assert result.record.review.review_status == "not_run"
 
 
 def test_compile_prompt_delegates_claim_transfer_to_human_selection():
     prompt = load_prompt("replication_compile")
     assert "运营选中目标产品即代表声明迁移已获授权" in prompt
     assert "不得重新分析产品匹配度" in prompt
-    assert "confirmed_selling_points、visual_proof_actions 为空" in prompt
+    assert "confirmed_selling_points、visual_proof_actions为空" in prompt
     assert "严禁出现“条件锁”" in prompt
 
 
@@ -325,6 +327,10 @@ def test_replication_repairs_only_failed_qa_items_once():
     assert llm.calls[1]["task_type"] == "REPLICATION_QA_REPAIR"
     assert llm.calls[1]["user_payload"]["repair_mode"] == "failed_items_only"
     assert len(llm.calls[1]["user_payload"]["variant_plan"]) == 1
+    repaired_payload = llm.calls[1]["user_payload"]
+    assert repaired_payload["failed_items"][0]["full_prompt"] == "缺少资源规则"
+    assert repaired_payload["qa_failures"][0]["issues"] == ["signature_voiceover_not_in_full_prompt"]
+    assert "局部编辑" in repaired_payload["repair_scope"]
 
 
 def test_interrupted_batch_resumes_under_same_idempotency_key():

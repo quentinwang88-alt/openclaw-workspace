@@ -27,3 +27,19 @@ class FeishuOutboxService:
                 self.repository.fail_outbox(row.outbox_id, str(exc))
                 result["failed"] += 1
         return result
+
+    def retry_one(self, outbox_id: str) -> dict[str, Any]:
+        """Deliver only an explicitly exported revision, without draining others."""
+        row = self.repository.get_outbox(outbox_id)
+        if row is None:
+            raise ValueError("outbox record not found")
+        if row.status == "completed":
+            return {"completed": 0, "failed": 0, "status": "already_delivered", "outbox_id": outbox_id}
+        try:
+            delivered = self.writer.apply(row.operation, row.payload)
+            self.repository.complete_outbox(row.outbox_id)
+            return {"completed": 1, "failed": 0, "status": "delivered", "outbox_id": outbox_id,
+                    "delivery": delivered}
+        except Exception as exc:
+            self.repository.fail_outbox(row.outbox_id, str(exc))
+            return {"completed": 0, "failed": 1, "status": "writeback_pending", "outbox_id": outbox_id}

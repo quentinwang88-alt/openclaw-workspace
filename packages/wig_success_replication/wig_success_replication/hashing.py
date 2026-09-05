@@ -49,8 +49,10 @@ def batch_signature(
     special_requirements: str = "",
     per_product_count: int | None = None,
     planner_version: str = "v1",
+    publish_purpose: str = "带货",
+    cart_enabled: bool = True,
 ) -> str:
-    return stable_hash(
+    parts = (
         mother_id,
         mother_version,
         sorted({str(item).strip() for item in product_ids if str(item).strip()}),
@@ -58,6 +60,11 @@ def batch_signature(
         per_product_count,
         planner_version,
     )
+    # Keep historical commercial identifiers stable. Cart affects the frozen
+    # batch snapshot, but never the cumulative sequence namespace.
+    if publish_purpose == "带货" and cart_enabled:
+        return stable_hash(*parts)
+    return stable_hash(*parts, publish_purpose, cart_enabled)
 
 
 def deterministic_id(prefix: str, *parts: Any, size: int = 24) -> str:

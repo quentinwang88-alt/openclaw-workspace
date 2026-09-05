@@ -5,17 +5,12 @@
       "properties": {
         "core_anchors": {
           "items": {
-            "enum": [
-              "conflict",
-              "early_product_reveal",
-              "strong_contrast",
-              "proof",
-              "cta"
-            ],
+            "maxLength": 320,
+            "minLength": 1,
             "type": "string"
           },
-          "maxItems": 5,
-          "minItems": 5,
+          "maxItems": 10,
+          "minItems": 1,
           "title": "Core Anchors",
           "type": "array"
         },
@@ -39,7 +34,6 @@
         },
         "voiceover_text": {
           "maxLength": 1600,
-          "minLength": 1,
           "title": "Voiceover Text",
           "type": "string"
         },
@@ -61,7 +55,6 @@
             "type": "string"
           },
           "maxItems": 8,
-          "minItems": 1,
           "title": "Proof Actions",
           "type": "array"
         },
@@ -72,13 +65,11 @@
             "type": "string"
           },
           "maxItems": 8,
-          "minItems": 1,
           "title": "Proof Order",
           "type": "array"
         },
         "cta_expression": {
           "maxLength": 600,
-          "minLength": 1,
           "title": "Cta Expression",
           "type": "string"
         },
@@ -105,7 +96,6 @@
             "type": "string"
           },
           "maxItems": 5,
-          "minItems": 1,
           "title": "Changed Dimensions",
           "type": "array"
         }
@@ -120,8 +110,7 @@
         "proof_actions",
         "proof_order",
         "cta_expression",
-        "ending_composition",
-        "changed_dimensions"
+        "ending_composition"
       ],
       "title": "CreativeSignature",
       "type": "object"

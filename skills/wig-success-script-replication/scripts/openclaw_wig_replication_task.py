@@ -16,6 +16,7 @@ RUNNER = SCRIPT_DIR / "run_pending_tasks.py"
 OUTBOX = SCRIPT_DIR / "retry_feishu_outbox.py"
 SCHEMA = SCRIPT_DIR / "ensure_feishu_schema.py"
 CHECK_RUNTIME = SCRIPT_DIR / "check_runtime.py"
+REVISION = SCRIPT_DIR / "run_script_revision.py"
 RECORD_ID_RE = re.compile(r"^rec[A-Za-z0-9]+$")
 ACTIONS = (
     "check",
@@ -26,6 +27,7 @@ ACTIONS = (
     "retry-outbox",
     "check-runtime",
     "schema-check",
+    "revise", "compare", "export-revision",
 )
 
 
@@ -40,10 +42,39 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("action", choices=ACTIONS)
     parser.add_argument("--record-id", type=_record_id)
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--prompt-id")
+    parser.add_argument("--instruction-file", type=Path)
+    parser.add_argument("--changes-file", type=Path)
+    parser.add_argument("--snapshot", type=Path)
+    parser.add_argument("--artifact", type=Path)
+    parser.add_argument("--output-dir", type=Path)
+    execution = parser.add_mutually_exclusive_group()
+    execution.add_argument("--apply", action="store_true")
+    execution.add_argument("--dry-run", action="store_true")
     return parser.parse_args(argv)
 
 
 def build_command(args: argparse.Namespace) -> list[str]:
+    revision_options = ("prompt_id", "instruction_file", "changes_file", "snapshot", "artifact", "output_dir", "apply", "dry_run")
+    if args.action in {"revise", "compare", "export-revision"}:
+        if args.record_id or args.limit is not None:
+            raise ValueError("revision actions do not accept task record IDs or cumulative limits")
+        if args.action == "export-revision":
+            if not getattr(args, "artifact", None) or any(getattr(args, name, None) for name in ("prompt_id", "instruction_file", "changes_file", "snapshot")):
+                raise ValueError("export-revision requires only --artifact")
+        elif not getattr(args, "instruction_file", None) or not (getattr(args, "prompt_id", None) or getattr(args, "snapshot", None)) or getattr(args, "artifact", None):
+            raise ValueError("revision requires --instruction-file and --prompt-id/--snapshot")
+        if getattr(args, "prompt_id", None) and not re.fullmatch(r"(?:wsr_)?(?:prompt|revision)_[A-Za-z0-9_-]{1,80}", args.prompt_id):
+            raise ValueError("invalid prompt ID")
+        command = [sys.executable, str(REVISION), args.action]
+        for name in revision_options[:-2]:
+            value = getattr(args, name, None)
+            if value is not None:
+                command.extend(["--" + name.replace("_", "-"), str(value)])
+        command.append("--apply" if getattr(args, "apply", False) else "--dry-run")
+        return command
+    if any(getattr(args, name, None) for name in revision_options):
+        raise ValueError("revision-specific options cannot be used for cumulative task actions")
     if args.action in {"one-click", "process-mother", "confirm-mother", "generate"}:
         if not args.record_id:
             raise ValueError(f"{args.action} requires --record-id")

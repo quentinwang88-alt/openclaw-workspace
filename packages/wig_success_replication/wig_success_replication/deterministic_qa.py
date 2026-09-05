@@ -8,10 +8,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from .hashing import creative_signature_hash, prompt_hash
+from .core_points import obvious_omissions
 from .models import CreativeSignature, ProductFactCard, ReplicationCompileOutput, ReplicationPrompt, VariantPlanItem
 
 
-BASE_REQUIRED_FRAGMENTS = ("只参考脸部", "产品图片", "不上传参考视频")
+# Asset policy belongs to the verified execution manifest, not magic words.
+BASE_REQUIRED_FRAGMENTS: tuple[str, ...] = ()
 NON_SELF_CONTAINED = ("同原脚本", "其余同母版", "参考原脚本", "其他同上", "其余不变")
 INTERNAL_CONTROL_PHRASES = (
     "条件锁",
@@ -31,6 +33,8 @@ class PromptQAResult:
     prompt: ReplicationPrompt
     digest: str
     issues: tuple[str, ...]
+    assessment_scope: str = "mechanical_checks_only"
+    semantic_status: str = "not_evaluated"
 
     @property
     def passed(self) -> bool:
@@ -94,7 +98,9 @@ def _opening_key(signature: CreativeSignature | dict[str, Any]) -> tuple[str, st
             str(signature.get("opening_action") or ""),
             str(signature.get("reveal_method") or ""),
         )
-    return tuple(_normalized_text(value) for value in values)
+    # Signatures are commonly Chinese descriptions, unlike Spanish voiceover.
+    # ASCII-only normalization would collapse every Chinese opening to empty.
+    return tuple(re.sub(r"[\W_]+", "", value.casefold(), flags=re.UNICODE) for value in values)
 
 
 def _order_change_count(reference: list[str], candidate: list[str]) -> int:
@@ -127,6 +133,8 @@ def inspect_prompt(
     for phrase in INTERNAL_CONTROL_PHRASES:
         if phrase.casefold() in folded:
             issues.append(f"internal_control_language:{phrase}")
+    if re.search(r"(?:前|后)[一二两三四五六七八九十0-9]+张.{0,24}(?:人物|产品|脸部|商品)", text):
+        issues.append("fixed_reference_index_in_prompt")
     for claim in product.forbidden_claims:
         if claim.strip() and claim.strip().casefold() in folded:
             issues.append(f"forbidden_claim:{claim.strip()}")
@@ -142,45 +150,19 @@ def inspect_compile_output(
     product: ProductFactCard,
     *,
     existing_prompts: list[Any] | None = None,
+    publish_purpose: str = "带货",
+    mother_contract: Any = None,
 ) -> list[PromptQAResult]:
     existing_prompts = existing_prompts or []
     expected = {(item.variant_key, item.mutation_key): item for item in plan}
-    by_sequence = {item.sequence_no: item for item in output.outputs}
     seen: set[tuple[str, str]] = set()
-    seen_signature_hashes = {
-        creative_signature_hash(value)
-        for row in existing_prompts
-        if (value := _stored_signature(row)) and not value.get("legacy")
-    }
-    seen_general_openings = {
-        _opening_key(value)
-        for row in existing_prompts
-        if getattr(row, "replication_mode", "") == "general"
-        and (value := _stored_signature(row))
-        and all(_opening_key(value))
-    }
-    seen_general_voiceovers = [
-        _stored_voiceover(row)
-        for row in existing_prompts
-        if getattr(row, "replication_mode", "") == "general" and _stored_voiceover(row)
-    ]
-
-    reference_voiceover = ""
-    reference_proof_order: list[str] = []
-    for row in existing_prompts:
-        if getattr(row, "sequence_no", 0) == 1:
-            reference_voiceover = _stored_voiceover(row)
-            reference_proof_order = list(_stored_signature(row).get("proof_order") or [])
-            break
-    if not reference_voiceover and 1 in by_sequence:
-        reference_voiceover = by_sequence[1].creative_signature.voiceover_text
-        reference_proof_order = list(by_sequence[1].creative_signature.proof_order)
-
+    seen_content = {prompt_hash(str(getattr(row, "full_prompt", ""))) for row in existing_prompts}
     results: list[PromptQAResult] = []
     for item in output.outputs:
         key = (item.variant_key, item.mutation_key)
         base = inspect_prompt(item, product)
         issues = list(base.issues)
+        issues.extend(obvious_omissions(item.full_prompt, mother_contract))
         if key in seen:
             issues.append("duplicate_variant_mutation_key")
         seen.add(key)
@@ -188,58 +170,14 @@ def inspect_compile_output(
         if planned is None:
             issues.append("unplanned_variant")
         else:
-            if item.variant_type != planned.variant_type:
-                issues.append("variant_type_mismatch")
-            if item.sequence_no != planned.sequence_no:
-                issues.append("sequence_no_mismatch")
-            if item.replication_mode != planned.replication_mode:
-                issues.append("replication_mode_mismatch")
-            if item.creative_route != planned.creative_route:
-                issues.append("creative_route_mismatch")
-            if not set(planned.change_dimensions).issubset(item.creative_signature.changed_dimensions):
-                issues.append("planned_change_dimensions_missing")
-
-        signature = item.creative_signature
-        if set(signature.core_anchors) != CORE_ANCHORS:
-            issues.append("core_anchors_incomplete")
-        signature_digest = creative_signature_hash(signature)
-        if signature_digest in seen_signature_hashes:
-            issues.append("duplicate_creative_signature")
-        seen_signature_hashes.add(signature_digest)
-
-        if item.replication_mode == "high_fidelity" and item.sequence_no in {2, 3} and reference_voiceover:
-            similarity = _similarity(reference_voiceover, signature.voiceover_text)
-            if similarity >= 0.985:
-                issues.append("high_fidelity_voiceover_is_verbatim")
-            elif similarity < 0.70:
-                issues.append(f"high_fidelity_voiceover_too_different:{similarity:.3f}")
-
-        if item.replication_mode == "general":
-            if len(set(signature.changed_dimensions)) < 3:
-                issues.append("general_changed_dimensions_below_3")
-            if len(signature.proof_actions) < 2:
-                issues.append("general_proof_actions_below_2")
-            if reference_voiceover:
-                similarity = _similarity(reference_voiceover, signature.voiceover_text)
-                if similarity > 0.70:
-                    issues.append(f"general_voiceover_too_similar_to_h1:{similarity:.3f}")
-                elif similarity < 0.40:
-                    issues.append(f"general_voiceover_lost_mother_semantics:{similarity:.3f}")
-            if reference_proof_order and _order_change_count(reference_proof_order, signature.proof_order) < 2:
-                issues.append("general_proof_order_changes_below_2")
-            elif not reference_proof_order and len(signature.proof_order) < 2:
-                issues.append("general_proof_order_below_2")
-            opening = _opening_key(signature)
-            if opening in seen_general_openings:
-                issues.append("duplicate_general_opening_signature")
-            seen_general_openings.add(opening)
-            for prior in seen_general_voiceovers:
-                similarity = _similarity(prior, signature.voiceover_text)
-                if similarity > 0.75:
-                    issues.append(f"general_voiceover_too_similar_to_existing:{similarity:.3f}")
-                    break
-            seen_general_voiceovers.append(signature.voiceover_text)
-
+            for field in ("variant_type", "sequence_no", "replication_mode", "creative_route"):
+                if getattr(item, field) != getattr(planned, field):
+                    issues.append(f"{field}_mismatch")
+        # Exact copied content is a mechanical defect. Semantic variety cannot
+        # be certified by self-reported dimensions, signatures, or percentages.
+        if base.digest in seen_content:
+            issues.append("duplicate_prompt_content")
+        seen_content.add(base.digest)
         results.append(PromptQAResult(item, base.digest, tuple(issues)))
 
     # Missing planned outputs are observed by the caller because their grouped

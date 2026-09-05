@@ -18,6 +18,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -56,6 +57,9 @@ from wig_success_replication.repository import (  # noqa: E402
     ProductFactRecord,
 )
 from wig_success_replication.structured_llm import StructuredResponsesClient  # noqa: E402
+from wig_success_replication.publishing import resolve_publish_settings  # noqa: E402
+from wig_success_replication.reference_manifest import build_reference_manifest, bytes_sha256
+from script_pool_export import ScriptPoolWriter  # noqa: E402
 
 
 API_ROOT = "https://open.feishu.cn/open-apis"
@@ -183,6 +187,7 @@ class FeishuClient:
     app_secret: str
     access_token: str = ""
     _media_cache: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _media_metadata: dict[str, dict[str, Any]] = field(default_factory=dict, init=False, repr=False)
 
     def token(self) -> str:
         if self.access_token:
@@ -222,7 +227,7 @@ class FeishuClient:
             raise RuntimeError(f"Feishu {method} {path} failed: {payload.get('code')} {payload.get('msg')}")
         return payload.get("data") or {}
 
-    def list_records(self, app_token: str, table_id: str, *, page_size: int = 100) -> list[dict[str, Any]]:
+    def list_records(self, app_token: str, table_id: str, *, page_size: int = 500) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         page_token = ""
         while True:
@@ -259,14 +264,62 @@ class FeishuClient:
             body={"fields": fields},
         )
 
-    def attachment_data_urls(self, attachments: Any, *, limit: int = 4) -> list[str]:
+    def copy_attachment_to_base(self, attachment: dict[str, Any], target_app: str) -> dict[str, Any]:
+        """Copy the original image bytes, not an expiring URL or a model thumbnail."""
+        token = str(attachment.get("file_token") or "")
+        data = self.request("GET", "/drive/v1/medias/batch_get_tmp_download_url",
+                            params={"file_tokens": token})
+        urls = data.get("tmp_download_urls") or []
+        url = next((v.get("tmp_download_url") for v in urls if v.get("file_token") == token), None)
+        if not url:
+            raise ValueError("source reference image is no longer accessible")
+        response = requests.get(url, headers={"Authorization": f"Bearer {self.token()}"}, timeout=60)
+        response.raise_for_status()
+        raw = response.content
+        if not raw or len(raw) > 12 * 1024 * 1024:
+            raise ValueError("reference image must be nonempty and no larger than 12 MiB")
+        digest = bytes_sha256(raw)
+        expected = attachment.get("original_sha256")
+        if expected and digest != expected:
+            raise ValueError("reference source bytes changed since compilation")
+        name = str(attachment.get("name") or f"{token}.jpg")
+        mime = response.headers.get("Content-Type", "").split(";", 1)[0]
+        mime = mime if mime.startswith("image/") else (mimetypes.guess_type(name)[0] or "image/jpeg")
+        upload = requests.post(
+            API_ROOT + "/drive/v1/medias/upload_all",
+            headers={"Authorization": f"Bearer {self.token()}"},
+            data={"file_name": name, "parent_type": "bitable_image", "parent_node": target_app,
+                  "size": str(len(raw))}, files={"file": (name, io.BytesIO(raw), mime)}, timeout=60,
+        )
+        result = upload.json()
+        if upload.status_code >= 400 or result.get("code") not in (0, "0"):
+            raise RuntimeError(f"reference upload failed: {result.get('code')} {result.get('msg')}")
+        uploaded = (result.get("data") or {}).get("file_token")
+        if not uploaded:
+            raise RuntimeError("reference upload returned no file token")
+        if expected:
+            # A new token is not proof of identical bytes. Verify the stored copy.
+            data = self.request("GET", "/drive/v1/medias/batch_get_tmp_download_url", params={"file_tokens": str(uploaded)})
+            target_url = next((item.get("tmp_download_url") for item in data.get("tmp_download_urls") or []
+                               if item.get("file_token") == str(uploaded)), None)
+            if not target_url:
+                raise ValueError("copied reference cannot be verified")
+            copied = requests.get(target_url, headers={"Authorization": f"Bearer {self.token()}"}, timeout=60)
+            copied.raise_for_status()
+            if bytes_sha256(copied.content) != digest:
+                raise ValueError("copied reference bytes differ from original")
+        return {"file_token": str(uploaded), "name": name, "size": len(raw), "type": mime, "original_sha256": digest}
+
+    def attachment_data_urls(self, attachments: Any, *, limit: int | None = None) -> list[str]:
         values = attachments if isinstance(attachments, list) else []
+        if limit is not None and len(values) > limit:
+            raise ValueError("reference count exceeds explicit limit; refusing silent truncation")
         direct: dict[str, str] = {}
         names: dict[str, str] = {}
         tokens: list[str] = []
-        for item in values[:limit]:
+        for item in values:
             if not isinstance(item, dict):
-                continue
+                raise ValueError("invalid selected reference attachment")
             token = str(item.get("file_token") or item.get("token") or "").strip()
             url = str(item.get("tmp_download_url") or item.get("tmp_url") or item.get("url") or "").strip()
             if token:
@@ -274,6 +327,8 @@ class FeishuClient:
                 names[token] = str(item.get("name") or "")
                 if url:
                     direct[token] = url
+            else:
+                raise ValueError("selected reference has no stable file token")
         missing_tokens = [token for token in tokens if token not in self._media_cache]
         if missing_tokens:
             params = [("file_tokens", token) for token in missing_tokens]
@@ -293,7 +348,7 @@ class FeishuClient:
                 continue
             url = direct.get(token)
             if not url:
-                continue
+                raise ValueError("selected reference could not be resolved")
             response = requests.get(
                 url,
                 headers={"Authorization": f"Bearer {self.token()}"},
@@ -303,6 +358,7 @@ class FeishuClient:
             if len(response.content) > 12 * 1024 * 1024:
                 raise ValueError(f"product image exceeds 12 MiB: {names.get(token) or token}")
             raw = response.content
+            original_sha256 = bytes_sha256(raw)
             mime = response.headers.get("Content-Type", "").split(";", 1)[0].strip()
             try:
                 from PIL import Image, ImageOps
@@ -313,13 +369,24 @@ class FeishuClient:
                 image.save(output, format="JPEG", quality=85, optimize=True)
                 raw = output.getvalue()
                 mime = "image/jpeg"
-            except Exception:
-                if not mime.startswith("image/"):
-                    mime = mimetypes.guess_type(names.get(token, ""))[0] or "image/jpeg"
+            except Exception as exc:
+                raise ValueError("selected reference is not a decodable image") from exc
+            self._media_metadata[token] = {
+                "original_sha256": original_sha256, "derived_sha256": bytes_sha256(raw),
+                "transform": "compiler-jpeg1024-v1", "width": image.width, "height": image.height,
+            }
             data_url = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
             self._media_cache[token] = data_url
             result.append(data_url)
         return result
+
+    def reference_asset(self, attachment: dict[str, Any], *, role: str, index: int, source_record_id: str) -> dict[str, Any]:
+        token = str(attachment.get("file_token") or attachment.get("token") or "")
+        if token not in self._media_metadata:
+            raise ValueError("reference original/derived hashes were not captured")
+        return {"index": index, "role": role, "file_token": token,
+                "name": str(attachment.get("name") or ""), "source_record_id": source_record_id,
+                **self._media_metadata[token]}
 
 
 def _relation_ids(value: Any) -> list[str]:
@@ -397,6 +464,31 @@ def _notes_parts(notes: str) -> tuple[list[str], list[str], list[str]]:
     return selling_points, proof_actions, forbidden
 
 
+def _split_special_requirements(notes: str) -> tuple[str, str]:
+    """Plain notes affect compilation; only explicitly scoped notes version a mother.
+
+    No new Feishu column is required. A single ``母版要求：...`` line or a
+    ``[母版要求]`` section is supported; unmarked existing notes remain intact
+    as creative requirements, not silently promoted to permanent hard locks.
+    """
+    mother: list[str] = []
+    creative: list[str] = []
+    section = creative
+    for raw in notes.splitlines():
+        line = raw.strip()
+        if line in {"[母版要求]", "【母版要求】"}:
+            section = mother
+        elif line in {"[本次要求]", "【本次要求】"}:
+            section = creative
+        elif line.startswith(("母版要求：", "母版要求:")):
+            mother.append(line[5:].strip())
+        elif line.startswith(("本次要求：", "本次要求:")):
+            creative.append(line[5:].strip())
+        else:
+            section.append(raw)
+    return "\n".join(mother).strip(), "\n".join(creative).strip()
+
+
 VARIANT_LABELS = {
     "high_fidelity_h1": "高保真·H1基准",
     "high_fidelity_h2": "高保真·H2外壳轻变",
@@ -421,8 +513,14 @@ class FeishuPromptWriter:
     client: FeishuClient
     app_token: str
     table_id: str
+    pool_writer: Any = None
+    _prompt_rows: list | None = field(default=None, init=False, repr=False)
 
     def apply(self, operation: str, payload: dict[str, Any]) -> None:
+        if operation == "upsert_script_pool":
+            if self.pool_writer is None:
+                raise RuntimeError("script pool delivery disabled; leave outbox pending")
+            return self.pool_writer.apply(operation, payload)
         if operation != "create_prompt_row":
             raise ValueError(f"unsupported Feishu outbox operation: {operation}")
         fields = {
@@ -435,11 +533,18 @@ class FeishuPromptWriter:
         # The Lite table intentionally has no hidden prompt ID field. Exact field
         # comparison makes an ambiguous network retry idempotent without widening
         # the user-facing schema.
-        for row in self.client.list_records(self.app_token, self.table_id):
+        if self._prompt_rows is None:
+            self._prompt_rows = self.client.list_records(self.app_token, self.table_id)
+        for row in self._prompt_rows:
             existing = row.get("fields") or {}
-            if all(_text(existing.get(key)) == _text(value) for key, value in fields.items()):
+            if all(_text(existing.get(key)) == _text(value) for key, value in fields.items() if key != "状态"):
                 return
-        self.client.create_record(self.app_token, self.table_id, fields)
+        try:
+            self.client.create_record(self.app_token, self.table_id, fields)
+        except Exception:
+            self._prompt_rows = None
+            raise
+        self._prompt_rows.append({"fields": fields})
 
 
 class FeishuTaskRunner:
@@ -470,6 +575,11 @@ class FeishuTaskRunner:
         self.mother_service = mother_service
         self.replication_service = replication_service
         self.outbox_service = outbox_service
+        self._delivery_lock = Lock()
+
+    def _deliver(self, limit: int = 200):
+        with self._delivery_lock:
+            return self.outbox_service.retry(limit=limit)
 
     @staticmethod
     def mother_id(record_id: str) -> str:
@@ -598,18 +708,19 @@ class FeishuTaskRunner:
                 validation = _text(fields.get("验证说明"))
                 source_ids = _relation_ids(fields.get("来源产品"))
                 target_ids = _relation_ids(fields.get("待复刻产品"))
-                if not name or not script or not validation or len(source_ids) != 1:
-                    raise ValueError("请填写母版名称、成功脚本、验证说明，并选择唯一来源产品")
+                if not name or not script or len(source_ids) != 1:
+                    raise ValueError("请填写母版名称、成功脚本，并选择唯一来源产品；验证说明可选填")
                 if not target_ids:
                     raise ValueError("请至少选择一个待复刻产品")
                 if not (fields.get("人物脸部参考图") or []):
                     raise ValueError("请上传人物脸部参考图")
                 _optional_count(fields.get("每产品生成数"))
+                resolve_publish_settings(_text(fields.get("发布用途")), _text(fields.get("挂车设置")))
 
                 self._progress(
                     record_id,
                     "处理母版",
-                    "正在复用或生成母版，并执行独立审查",
+                    "正在复用或解析母版执行摘要；独立审查仅在测试时运行",
                     **{"母版状态": "处理中"},
                 )
                 source, image_urls = self._prepare_product(self._product_row(source_ids[0]))
@@ -622,7 +733,7 @@ class FeishuTaskRunner:
                     validation_notes=validation,
                     source_product_fact=source.fact,
                     source_image_urls=tuple(image_urls),
-                    human_notes=_text(fields.get("特殊要求")),
+                    human_notes=_split_special_requirements(_text(fields.get("特殊要求")))[0],
                 ))
                 mother_record = result.record
                 if mother_record.status != MotherStatus.CONFIRMED:
@@ -715,8 +826,8 @@ class FeishuTaskRunner:
         script = _text(fields.get("成功脚本"))
         validation_notes = _text(fields.get("验证说明"))
         relation = _relation_ids(fields.get("来源产品"))
-        if not name or not script or not validation_notes or len(relation) != 1:
-            raise ValueError("母版名称、成功脚本、验证说明和唯一来源产品均为必填")
+        if not name or not script or len(relation) != 1:
+            raise ValueError("母版名称、成功脚本和唯一来源产品均为必填；验证说明可选填")
         self.client.update_record(self.app_token, self.mother_table, record_id, {"母版状态": "处理中"})
         try:
             source, image_urls = self._prepare_product(self._product_row(relation[0]))
@@ -729,8 +840,8 @@ class FeishuTaskRunner:
                 validation_notes=validation_notes,
                 source_product_fact=source.fact,
                 source_image_urls=tuple(image_urls),
-                human_notes=_text(fields.get("特殊要求")),
-            ))
+                human_notes=_split_special_requirements(_text(fields.get("特殊要求")))[0],
+            ), refresh=True)
             self.client.update_record(self.app_token, self.mother_table, record_id, {
                 "母版状态": "待确认",
                 "母版摘要": result.record.contract.human_summary,
@@ -764,26 +875,54 @@ class FeishuTaskRunner:
     def _generate(self, record_id: str) -> dict[str, Any]:
         row = self._mother_row(record_id)
         fields = row.get("fields") or {}
+        purpose, cart_enabled = resolve_publish_settings(
+            _text(fields.get("发布用途")), _text(fields.get("挂车设置"))
+        )
         if _text(fields.get("母版状态")) != "已确认":
             raise ValueError("mother must be human-confirmed in Feishu")
         product_record_ids = _relation_ids(fields.get("待复刻产品"))
         if not product_record_ids:
             raise ValueError("待复刻产品 is empty")
         face_attachments = fields.get("人物脸部参考图") or []
-        face_reference_images = self.client.attachment_data_urls(face_attachments, limit=2)
+        face_reference_images = self.client.attachment_data_urls(face_attachments)
         if not face_reference_images:
             raise ValueError("人物脸部参考图 is required before generation")
         per_product_count = _optional_count(fields.get("每产品生成数"))
+        mother_snapshot = self.repository.latest_mother(self.mother_id(record_id))
+        if mother_snapshot is None:
+            raise ValueError("confirmed mother contract missing")
+        video_duration = sum(segment.duration_seconds for segment in mother_snapshot.contract.segments)
         self._progress(record_id, "生成提示词", "正在读取目标产品并生成完整提示词")
         try:
             products: list[str] = []
             images: dict[str, list[str]] = {}
+            handoff_contexts: dict[str, dict[str, Any]] = {}
             preparation_errors: list[str] = []
             for product_record_id in product_record_ids:
                 try:
-                    product, image_urls = self._prepare_product(self._product_row(product_record_id))
+                    product_row = self._product_row(product_record_id)
+                    product, image_urls = self._prepare_product(product_row)
                     products.append(product.product_id)
                     images[product.product_id] = image_urls
+                    product_fields = product_row.get("fields") or {}
+                    reference_assets = [self.client.reference_asset(item, role="person_identity", index=index,
+                                        source_record_id=record_id) for index, item in enumerate(face_attachments, 1)]
+                    reference_assets.extend(self.client.reference_asset(item, role="product", index=len(face_attachments) + index,
+                                            source_record_id=product_record_id)
+                                            for index, item in enumerate(product_fields.get("产品图片") or [], 1))
+                    handoff_contexts[product.product_id] = {
+                        "reference_manifest": build_reference_manifest(reference_assets),
+                        "mother_name": _text(fields.get("母版名称")),
+                        "source_mother_record_id": record_id,
+                        "source_product_record_id": product_record_id,
+                        "product_images": product_fields.get("产品图片") or [],
+                        "persona_images": face_attachments,
+                        "target_product_fact": product.fact.model_dump(mode="json"),
+                        "relationship": "same_product" if product.product_id == mother_snapshot.source_product_id else "cross_product",
+                        "store_id": _text(fields.get("店铺ID") or product_fields.get("店铺ID")),
+                        "target_country": "墨西哥", "target_language": "西班牙语", "product_type": "假发",
+                        "video_duration": video_duration,
+                    }
                 except Exception as exc:
                     preparation_errors.append(f"{product_record_id}: {exc}")
             if not products:
@@ -791,13 +930,16 @@ class FeishuTaskRunner:
             result = self.replication_service.generate(
                 mother_id=self.mother_id(record_id),
                 product_ids=products,
-                special_requirements=_text(fields.get("特殊要求")),
+                special_requirements=_split_special_requirements(_text(fields.get("特殊要求")))[1],
                 product_image_urls=images,
                 face_reference_image_urls=face_reference_images,
                 per_product_count=per_product_count,
+                publish_purpose=purpose, cart_enabled=cart_enabled,
+                handoff_context_by_product=handoff_contexts,
+                on_prompts_persisted=lambda: self._deliver(limit=40),
             )
-            self._progress(record_id, "写入结果", f"本轮新增{result.saved_prompts}条，正在写入复刻提示词表")
-            delivery = self.outbox_service.retry(limit=200)
+            self._progress(record_id, "写入结果", f"{purpose}本轮新增{result.saved_prompts}条，正在写入提示词表和脚本总库")
+            delivery = self._deliver(limit=200)
             errors = [*preparation_errors, *result.errors]
             if delivery["failed"]:
                 errors.append(f"Feishu待重试写回={delivery['failed']}")
@@ -818,6 +960,8 @@ class FeishuTaskRunner:
             )
             if errors:
                 summary += "；原因：" + " | ".join(errors)[:1200]
+            elif result.saved_prompts == 0:
+                summary += "；累计目标已满足，已有脚本保留；新要求用于后续补生成，修改已有稿请使用修订入口"
             self.client.update_record(self.app_token, self.mother_table, record_id, {
                 "复刻状态": feishu_status,
                 "结果摘要": summary,
@@ -861,6 +1005,7 @@ class ProductionApplication(WigReplicationApplication):
             "database": False,
             "required_tables": False,
             "replication_v12_columns": False,
+            "script_pool_v1_schema": False,
         }
         errors: list[str] = []
         try:
@@ -889,6 +1034,17 @@ class ProductionApplication(WigReplicationApplication):
                     "'creative_signature_json','planner_version')"
                 )
                 checks["replication_v12_columns"] = len(cursor.fetchall()) == 5
+                cursor.execute(
+                    "SELECT table_name,column_name FROM information_schema.columns "
+                    "WHERE table_schema=DATABASE() AND table_name IN ('wsr_replication_prompt','wsr_replication_batch') "
+                    "AND column_name IN ('publish_purpose','cart_enabled','handoff_context_json')"
+                )
+                purpose_columns_present = len(cursor.fetchall()) == 6
+                cursor.execute(
+                    "SELECT COUNT(*) AS count FROM information_schema.tables "
+                    "WHERE table_schema=DATABASE() AND table_name='wsr_script_pool_binding'"
+                )
+                checks["script_pool_v1_schema"] = purpose_columns_present and int((cursor.fetchone() or {}).get("count") or 0) == 1
         except Exception as exc:
             errors.append(f"RDS: {exc}")
         checks["ok"] = all(
@@ -899,25 +1055,44 @@ class ProductionApplication(WigReplicationApplication):
                 "database",
                 "required_tables",
                 "replication_v12_columns",
+                "script_pool_v1_schema",
             )
         )
         checks["errors"] = errors
         return checks
 
 
+class DeferredModelClient:
+    """Read model credentials only when generation is actually needed."""
+
+    def __init__(self, factory):
+        self._factory = factory
+        self._client = None
+        self._lock = Lock()
+
+    def call(self, **kwargs):
+        if self._client is None:
+            with self._lock:
+                if self._client is None:
+                    self._client = self._factory()
+        return self._client.call(**kwargs)
+
+
 def build_application() -> ProductionApplication:
     app_id, app_secret = _feishu_credentials()
     connection_factory = _connection_factory(_database_url())
     repository = MySQLRepository(connection_factory)
-    llm = StructuredResponsesClient.from_openai_client(
+    llm = DeferredModelClient(lambda: StructuredResponsesClient.from_openai_client(
         _openai_client(), logger=ModelRunLogger(repository), max_retries=1
-    )
+    ))
     feishu = FeishuClient(app_id, app_secret)
     app_token = os.environ.get("WIG_REPLICATION_APP_TOKEN", DEFAULT_APP_TOKEN).strip() or DEFAULT_APP_TOKEN
     writer = FeishuPromptWriter(
         feishu,
         app_token,
         os.environ.get("WIG_REPLICATION_PROMPT_TABLE_ID", DEFAULT_PROMPT_TABLE).strip() or DEFAULT_PROMPT_TABLE,
+        pool_writer=(ScriptPoolWriter(feishu, repository)
+                     if os.environ.get("WIG_REPLICATION_SCRIPT_POOL_ENABLED", "1") != "0" else None),
     )
     outbox = FeishuOutboxService(repository, writer)
     runner = FeishuTaskRunner(

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import re
 import sys
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -53,10 +54,30 @@ def connect(url: str):
     )
 
 
+def adopted_migrations(cursor) -> set[str]:
+    """Recognize already-deployed pre-ledger schemas without replaying data UPDATEs."""
+    cursor.execute("SELECT table_name FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name LIKE 'wsr\\_%'")
+    tables = {row[0] for row in cursor.fetchall()}
+    adopted = set()
+    # Take exact names from the shipped initial migration, not a fuzzy table count.
+    initial = (MIGRATION_DIR / "001_create_wsr_tables_mysql.sql").read_text(encoding="utf-8")
+    required = set(re.findall(r"CREATE TABLE IF NOT EXISTS\s+(wsr_\w+)", initial, flags=re.I))
+    if required <= tables:
+        adopted.add("001_create_wsr_tables_mysql.sql")
+    cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='wsr_replication_prompt'")
+    columns = {row[0] for row in cursor.fetchall()}
+    if {"sequence_no", "replication_mode", "creative_route", "creative_signature_json", "planner_version"} <= columns:
+        cursor.execute("SELECT COUNT(*) FROM wsr_replication_prompt WHERE sequence_no IS NULL OR replication_mode IS NULL OR creative_signature_json IS NULL OR planner_version IS NULL")
+        if cursor.fetchone()[0] == 0:
+            adopted.add("002_add_replication_modes_mysql.sql")
+    return adopted
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Apply the idempotent WSR RDS migration")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--confirm-sha256", default="")
+    parser.add_argument("--inspect", action="store_true", help="Read deployed schema without writing")
     args = parser.parse_args()
     migrations = sorted(MIGRATION_DIR.glob("*.sql"))
     if not migrations:
@@ -79,22 +100,41 @@ def main() -> int:
     print(f"statement_count={len(statements)}")
     if not args.apply:
         print("mode=dry-run")
+        if args.inspect:
+            with connect(database_url()) as connection, connection.cursor() as cursor:
+                print("existing_migrations=" + ",".join(sorted(adopted_migrations(cursor))))
         return 0
     if args.confirm_sha256 != digest:
         raise RuntimeError("--confirm-sha256 must exactly match the dry-run hash")
     skipped = 0
     with connect(database_url()) as connection, connection.cursor() as cursor:
-        for path, statement in statements:
-            try:
-                cursor.execute(statement)
-            except pymysql.MySQLError as exc:
-                # Reapplying migration 002 is safe: duplicate columns/indexes
-                # mean the corresponding schema object already exists. The
-                # data backfill and NOT NULL normalization still run.
-                if exc.args and int(exc.args[0]) in {1060, 1061}:
-                    skipped += 1
-                    continue
-                raise RuntimeError(f"migration failed in {path.name}: {exc}") from exc
+        adopted = adopted_migrations(cursor)
+        cursor.execute("CREATE TABLE IF NOT EXISTS wsr_schema_migration (name VARCHAR(191) PRIMARY KEY, sha256 CHAR(64) NOT NULL, applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+        cursor.execute("SELECT name, sha256 FROM wsr_schema_migration")
+        applied = dict(cursor.fetchall())
+        for path, sql in sources:
+            source_digest = hashlib.sha256(sql.encode()).hexdigest()
+            if path.name in applied:
+                if applied[path.name] != source_digest:
+                    raise RuntimeError(f"applied migration changed: {path.name}")
+                skipped += 1
+                continue
+            if path.name not in adopted:
+                for _, statement in (item for item in statements if item[0] == path):
+                    try:
+                        cursor.execute(statement)
+                    except pymysql.MySQLError as exc:
+                        code = int(exc.args[0]) if exc.args else 0
+                        duplicate_add = code in {1060, 1061}
+                        already_dropped = code == 1091 and "DROP INDEX" in statement.upper()
+                        if duplicate_add or already_dropped:
+                            skipped += 1
+                            continue
+                        raise RuntimeError(f"migration failed in {path.name}: {exc}") from exc
+            cursor.execute("INSERT INTO wsr_schema_migration (name,sha256) VALUES (%s,%s)", (path.name, source_digest))
+            # DDL auto-commits in MySQL; record each completed migration so a
+            # failed later migration never replays the legacy data backfill.
+            connection.commit()
         connection.commit()
         cursor.execute(
             "SELECT table_name FROM information_schema.tables "

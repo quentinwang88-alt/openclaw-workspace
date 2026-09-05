@@ -5,9 +5,10 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from .models import VariantPlanItem
+from .publishing import resolve_publish_settings
 
 
-PLANNER_VERSION = "v1.2.1-fidelity-general"
+PLANNER_VERSION = "v1.3-mechanism-first"
 
 
 class VariantPlanner:
@@ -72,14 +73,49 @@ class VariantPlanner:
         count: int | None = None,
         *,
         existing_sequences: Iterable[int] = (),
+        publish_purpose: str = "带货",
     ) -> list[VariantPlanItem]:
         target = self.target_count(relationship, count)
         existing = {int(value) for value in existing_sequences if int(value) > 0}
+        purpose, _ = resolve_publish_settings(publish_purpose)
         return [
-            self._item(sequence_no, relationship)
+            self._nurture_item(sequence_no, relationship) if purpose == "养号"
+            else self._item(sequence_no, relationship)
             for sequence_no in range(1, target + 1)
             if sequence_no not in existing
         ]
+
+    def _nurture_item(self, sequence_no: int, relationship: str) -> VariantPlanItem:
+        item = self._item(sequence_no, relationship)
+        if sequence_no == 1:
+            dimensions = ["baseline"]
+            mutations = ["保留母版开场、关键动作、视觉变化或内容回报"]
+        elif sequence_no == 2:
+            dimensions = ["visual_shell", "timing"]
+            mutations = ["人物场景外壳轻变", "动作停顿与节奏轻变"]
+        elif sequence_no == 3:
+            dimensions = ["hook", "reveal", "ending"]
+            mutations = ["开场动作轻变", "视觉变化呈现轻变", "结尾构图轻变"]
+        else:
+            routes = (
+                (["hook", "visual_shell", "ending"], ["重构开场", "更换场景外壳", "重构结尾"]),
+                (["reveal", "timing", "visual_shell"], ["重构变化揭晓", "重排节奏", "更换场景外壳"]),
+                (["hook", "timing", "ending"], ["重构关键动作开场", "改变动作节奏", "更换回报构图"]),
+                (["visual_shell", "reveal", "ending"], ["重构场景", "改变变化呈现", "重构非销售结尾"]),
+                (["hook", "reveal", "timing"], ["更换开场动作", "改变视觉揭晓", "重构镜头节奏"]),
+            )
+            dimensions, mutations = routes[(sequence_no - 4) % len(routes)]
+        return item.model_copy(update={
+            "change_dimensions": dimensions,
+            "core_mutations": mutations,
+            "instruction": (
+                "养号用途：继承母版自身的开场、关键动作、视觉变化或内容回报，不套用带货五锚点；"
+                "不强制销售CTA、商品证明或口播，原母版无口播时保持无口播。"
+                f"本条变化：{'、'.join(mutations)}；"
+                + ("高保真保留核心机制与主要结构，可简化基准拍法。" if sequence_no <= 3 else "一般复刻默认结合多个相关维度改变表达，不凑维度数。")
+                + "产品外观以人工选定产品图为准，不做产品匹配复核。"
+            ),
+        })
 
     def _item(self, sequence_no: int, relationship: str) -> VariantPlanItem:
         relationship_rule = (
@@ -97,7 +133,7 @@ class VariantPlanner:
                 mutation_key="h1_baseline",
                 change_dimensions=["baseline"],
                 core_mutations=["基准高保真复刻"],
-                instruction=f"基准复刻母版结构、原口播与关键动作；{relationship_rule}",
+                instruction=f"保留核心机制、叙事顺序与口播主要语义；基准拍法可作等效简化，不硬锁微动作与小数秒；{relationship_rule}",
             )
         if sequence_no == 2:
             return VariantPlanItem(
@@ -110,8 +146,8 @@ class VariantPlanner:
                 change_dimensions=["visual_shell", "voiceover"],
                 core_mutations=["人物与场景外壳轻变", "局部口播改写"],
                 instruction=(
-                    "保持核心顺序、商品利益和证明链；更换场景/服装/机位，并改写15%-25%口播，"
-                    f"不得与H1整段逐字相同；{relationship_rule}"
+                    "保持母版本身的核心机制和主要回报；优先轻变场景/服装/机位及已有口播措辞，"
+                    f"不为凑变化补口播或新证明；{relationship_rule}"
                 ),
             )
         if sequence_no == 3:
@@ -125,8 +161,8 @@ class VariantPlanner:
                 change_dimensions=["hook", "reveal", "voiceover"],
                 core_mutations=["钩子动作轻变", "揭晓方向轻变", "局部口播改写"],
                 instruction=(
-                    "保持成功机制和主要证明链；改变首镜问题展示、揭晓运动方向及部分口播，"
-                    f"不得与H1/H2整段逐字相同；{relationship_rule}"
+                    "保持成功机制与因果关系；优先轻变开场、揭晓拍法及已有口播表达，"
+                    f"不以字面改写比例判定质量；{relationship_rule}"
                 ),
             )
 
@@ -141,7 +177,7 @@ class VariantPlanner:
             change_dimensions=list(dimensions),
             core_mutations=list(mutations),
             instruction=(
-                "只锁定冲突、前段产品揭晓、强反差、至少两个证明动作和CTA五个成功机制；"
-                f"本条必须真实改变{len(dimensions)}个维度：{'、'.join(mutations)}；{relationship_rule}"
+                "只保留母版本身的核心吸引机制、因果与内容回报，不强套商业五锚点；"
+                f"默认从相关维度调整：{'、'.join(mutations)}，无对应机制时跳过，不为凑数新增内容；{relationship_rule}"
             ),
         )

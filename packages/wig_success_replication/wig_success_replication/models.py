@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -136,6 +136,28 @@ class VariantPolicy(StrictModel):
     cross_product_default_count: int = Field(default=4, ge=1)
 
 
+class MotherCorePoint(StrictModel):
+    point_id: NonEmpty
+    requirement: CompactText
+    evidence_source: Literal["model_extracted", "legacy_derived"] = "model_extracted"
+
+
+class ExecutionSummary(StrictModel):
+    """Mechanism is invariant; baseline filming is an example, not a lock."""
+    schema_version: Literal["1"] = "1"
+    core_mechanisms: list[MotherCorePoint] = Field(min_length=1, max_length=5)
+    baseline_shooting: list[CompactText] = Field(default_factory=list, max_length=8)
+    variable_expression: list[CompactText] = Field(default_factory=list, max_length=10)
+    provenance: Literal["model_extracted", "legacy_derived"] = "model_extracted"
+    legacy_constraints: list[RuleText] = Field(default_factory=list, max_length=40)
+
+
+class MotherProcessingProvenance(StrictModel):
+    input_fingerprint: NonEmpty
+    implementation_fingerprint: NonEmpty
+    policy_version: NonEmpty
+
+
 class MotherContract(StrictModel):
     schema_version: Literal["1.0"] = "1.0"
     mother_id: NonEmpty
@@ -156,6 +178,18 @@ class MotherContract(StrictModel):
     variant_policy: VariantPolicy
     risks: list[RuleText] = Field(max_length=20)
     human_summary: SummaryText
+    # Empty keeps previously persisted contracts loadable without rewriting them.
+    core_points: list[MotherCorePoint] = Field(default_factory=list, max_length=5)
+    execution_summary: Optional[ExecutionSummary] = None
+    processing_provenance: Optional[MotherProcessingProvenance] = None
+
+    @model_validator(mode="after")
+    def core_point_count(self):
+        if self.core_points and not 3 <= len(self.core_points) <= 5:
+            raise ValueError("mother core_points must contain 3-5 entries when present")
+        if len({point.point_id for point in self.core_points}) != len(self.core_points):
+            raise ValueError("mother core point IDs must be unique")
+        return self
 
 
 class MotherReviewIssue(StrictModel):
@@ -170,6 +204,9 @@ class MotherReview(StrictModel):
     final_contract: MotherContract
     issues: list[MotherReviewIssue] = Field(max_length=20)
     human_summary: SummaryText
+    # Historical persisted reviews were actually run. New default production
+    # explicitly writes not_run rather than fabricating a successful review.
+    review_status: Literal["completed", "not_run"] = "completed"
 
 
 class Appearance(StrictModel):
@@ -233,21 +270,17 @@ class PromptQA(StrictModel):
 
 
 class CreativeSignature(StrictModel):
-    core_anchors: list[Literal[
-        "conflict",
-        "early_product_reveal",
-        "strong_contrast",
-        "proof",
-        "cta",
-    ]] = Field(min_length=5, max_length=5)
+    # Commercial anchors are checked by purpose-aware QA. Nurture scripts
+    # describe their own mother-derived visual/action/payoff anchors instead.
+    core_anchors: list[RuleText] = Field(min_length=1, max_length=10)
     hook_type: CompactText
     opening_action: CompactText
     reveal_method: CompactText
-    voiceover_text: SummaryText
+    voiceover_text: str = Field(max_length=1600)
     timing_pattern: list[CompactText] = Field(min_length=1, max_length=12)
-    proof_actions: list[CompactText] = Field(min_length=1, max_length=8)
-    proof_order: list[CompactText] = Field(min_length=1, max_length=8)
-    cta_expression: CompactText
+    proof_actions: list[CompactText] = Field(max_length=8)
+    proof_order: list[CompactText] = Field(max_length=8)
+    cta_expression: str = Field(max_length=600)
     ending_composition: CompactText
     changed_dimensions: list[Literal[
         "baseline",
@@ -260,7 +293,7 @@ class CreativeSignature(StrictModel):
         "voiceover",
         "cta",
         "ending",
-    ]] = Field(min_length=1, max_length=5)
+    ]] = Field(default_factory=list, max_length=5)
 
 
 class ReplicationPrompt(StrictModel):
