@@ -1,6 +1,8 @@
 """One-row-one-script source adapter for the original production workbench."""
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any, Dict, List, Optional, Sequence
 
 from core.bitable import TableRecord
@@ -23,10 +25,12 @@ ORIGINAL_BATCH_SOURCE_FIELD_ALIASES: Dict[str, List[str]] = {
     "batch_item_id": ["批次ItemID"],
     "item_index": ["批次序号"],
     "script_title": ["脚本标题"],
+    "publish_title": ["发布标题", "短视频标题"],
     "product_type": ["产品类型"],
     "target_language": ["目标语言"],
     "business_category": ["一级类目"],
     "video_duration": ["视频时长"],
+    "video_format": ["视频形态（系统）", "视频形态"],
     "complete_script": ["完整生产脚本"],
     # The production runner must consume the short-video generation prompt,
     # never the human-readable complete script.  Prefer the new explicit
@@ -46,7 +50,66 @@ ORIGINAL_BATCH_SOURCE_FIELD_ALIASES: Dict[str, List[str]] = {
     "publish_purpose": ["发布用途"],
     "cart_enabled": ["是否挂车"],
     "content_branch": ["内容分支"],
+    "script_source": ["脚本来源"],
+    "person_images": ["人物参考图（系统）"],
+    "source_voiceover": ["口播_目标语言"],
+    "source_voiceover_zh": ["口播_中文", "口播_中文对照"],
+    "target_country": ["目标国家"],
 }
+
+POOL_SOURCES = {"成功脚本复刻", "原创生成", "视频复刻", "人工编写"}
+
+
+def _pool_policy(fields: Dict[str, Any], mapping: Dict[str, Optional[str]], script_id: str) -> dict:
+    def value(key: str) -> str:
+        return normalize_text(fields.get(mapping.get(key))) if mapping.get(key) else ""
+
+    source = value("script_source")
+    if not source or source == "原创脚本":
+        if script_id.startswith("wsr_"):
+            raise ValueError("SCRIPT_POOL_SOURCE_MISSING:成功脚本复刻必须标明脚本来源")
+        return {"script_pool_entry": False, "script_source": "原创脚本",
+                "source_script_type": "原创脚本", "publish_purpose": value("publish_purpose") or "带货",
+                "cart_enabled": value("cart_enabled") or "是", "content_branch": value("content_branch") or "DIRECT_RESPONSE"}
+    if source not in POOL_SOURCES:
+        raise ValueError(f"SCRIPT_POOL_SOURCE_UNREGISTERED:{source}")
+    if source == "成功脚本复刻" and not script_id.startswith("wsr_"):
+        raise ValueError("SCRIPT_POOL_SOURCE_ID_MISMATCH:成功脚本复刻需使用wsr_脚本ID")
+    for key in ("publish_purpose", "cart_enabled"):
+        if not mapping.get(key):
+            raise ValueError(f"SCRIPT_POOL_FIELD_MISSING:{key}")
+    purpose = value("publish_purpose")
+    if purpose not in {"带货", "养号", "种草"}:
+        raise ValueError("SCRIPT_POOL_PURPOSE_INVALID:请选择带货、养号或种草")
+    cart = value("cart_enabled") or ("是" if purpose == "带货" else "否")
+    if cart not in {"是", "否"}:
+        raise ValueError("SCRIPT_POOL_CART_INVALID:是否挂车必须是或否")
+    branch = value("content_branch") or {"带货": "DIRECT_RESPONSE", "养号": "NURTURE", "种草": "SEEDING_ORGANIC"}[purpose]
+    if branch == "SEEDING_ORGANIC" and (purpose != "种草" or cart != "否"):
+        raise ValueError("SEEDING_CART_GUARD_MISSING:种草专线保持不挂车")
+    return {"script_pool_entry": True, "script_source": source,
+            "source_script_type": "短视频复刻脚本" if source in {"成功脚本复刻", "视频复刻"} else "原创脚本",
+            "source_remake_record_id": script_id if source in {"成功脚本复刻", "视频复刻"} else "",
+            "publish_purpose": purpose, "cart_enabled": cart, "content_branch": branch}
+
+
+def _pool_voiceover(fields: Dict[str, Any], mapping: Dict[str, Optional[str]], duration: int) -> dict:
+    text = normalize_text(fields.get(mapping.get("source_voiceover"))) if mapping.get("source_voiceover") else ""
+    if text in {"无", "无口播", "无旁白", "纯音乐"}:
+        text = ""
+    if not text:
+        return {"source_voiceover_managed": True, "voiceover_requested": False}
+    translation = normalize_text(fields.get(mapping.get("source_voiceover_zh"))) if mapping.get("source_voiceover_zh") else ""
+    contract = {"schema_version": "voiceover-expression-contract-v2", "source_kind": "script_pool_approved_script",
+                "speech_policy": {"preserve_source_wording": True, "rewrite_allowed": False, "generic_cta_required": False}}
+    plan = {"schema_version": "voiceover-execution-plan-v1", "mode": "PRESERVE_SOURCE_COPY",
+            "source_kind": "script_pool_approved_script", "reuse_source_copy": True,
+            "copy_authority": "SOURCE_APPROVED_REUSE", "target_text": text, "chinese_translation": translation,
+            "lines": [{"start_ms": 0, "end_ms": duration * 1000,
+                       "voiceover_text_target_language": text, "voiceover_text_zh": translation}]}
+    return {"source_voiceover_managed": True, "voiceover_requested": True, "voiceover_status": "待处理",
+            "voiceover_expression_contract": json.dumps(contract, ensure_ascii=False),
+            "voiceover_execution_plan": json.dumps(plan, ensure_ascii=False)}
 
 
 def resolve_original_batch_field_mapping(field_names: Sequence[str]) -> Dict[str, Optional[str]]:
@@ -54,7 +117,7 @@ def resolve_original_batch_field_mapping(field_names: Sequence[str]) -> Dict[str
 
 
 def _reference_handoff(
-    fields: Dict[str, Any], mapping: Dict[str, Optional[str]]
+    fields: Dict[str, Any], mapping: Dict[str, Optional[str]], *, script_pool_entry: bool = False
 ) -> tuple[List[Dict[str, Any]], str]:
     product_images = (
         extract_attachments(fields.get(mapping.get("product_images")))
@@ -82,7 +145,8 @@ def _reference_handoff(
     # The operator owns this decision.  A REQUIRED/PREFERRED strategy is
     # informative until the user explicitly selects first-frame generation.
     if not requested:
-        return product_images, ""
+        person_images = extract_attachments(fields.get(mapping.get("person_images"))) if script_pool_entry and mapping.get("person_images") else []
+        return person_images + product_images, ""
     if ready:
         return composite, ""
     return product_images, (
@@ -98,12 +162,21 @@ def build_original_batch_sync_tasks(
     product_code: Optional[str] = None,
     record_id: Optional[str] = None,
     limit: Optional[int] = None,
+    errors: Optional[Dict[str, str]] = None,
 ) -> List[ScriptSyncTask]:
     tasks: List[ScriptSyncTask] = []
     for record in records:
         if record_id and record.record_id != record_id:
             continue
         fields = record.fields
+        video_format = (
+            normalize_text(fields.get(mapping.get("video_format")))
+            if mapping.get("video_format") else ""
+        )
+        # Long-form rows are executed by the isolated H3 workflow and must
+        # never be copied into the stable short-video run-manager table.
+        if video_format == "长视频":
+            continue
         enabled = normalize_checkbox(fields.get(mapping.get("sync_enabled"))) if mapping.get("sync_enabled") else False
         if not enabled:
             continue
@@ -115,7 +188,16 @@ def build_original_batch_sync_tasks(
         # Deliberately do not fall back to 完整生产脚本.  A missing video
         # prompt must keep the row out of production rather than send the
         # wrong content to the video model.
-        if not code or not script_id or not prompt:
+        try:
+            if not script_id or not prompt:
+                raise ValueError("SCRIPT_POOL_HANDOFF_INCOMPLETE:缺少脚本ID或短视频提示词，不能回退完整生产脚本")
+            policy = _pool_policy(fields, mapping, script_id)
+            if not code and not policy["script_pool_entry"]:
+                raise ValueError("ORIGINAL_PRODUCT_CODE_MISSING:历史原创记录缺少产品编码")
+        except ValueError as exc:
+            if errors is None:
+                raise
+            errors[record.record_id] = str(exc)
             continue
         index_text = normalize_text(fields.get(mapping.get("item_index"))) if mapping.get("item_index") else ""
         try:
@@ -126,44 +208,57 @@ def build_original_batch_sync_tasks(
         batch_item_id = normalize_text(fields.get(mapping.get("batch_item_id"))) if mapping.get("batch_item_id") else ""
         title = normalize_text(fields.get(mapping.get("script_title"))) if mapping.get("script_title") else ""
         reference_images, reference_preparation_error = _reference_handoff(
-            fields, mapping
+            fields, mapping, script_pool_entry=policy["script_pool_entry"]
         )
+        duration = normalize_video_duration(fields.get(mapping.get("video_duration")) if mapping.get("video_duration") else None)
+        persona_contract = normalize_text(fields.get(mapping.get("persona_contract"))) if mapping.get("persona_contract") else ""
+        if policy["script_pool_entry"] and reference_images:
+            # These one-based indices describe the exact outgoing attachment order.
+            try:
+                contract = json.loads(persona_contract) if persona_contract else {}
+                if not isinstance(contract, dict):
+                    contract = {"source_contract": contract}
+            except ValueError:
+                contract = {"source_contract": persona_contract}
+            composite_used = normalize_checkbox(fields.get(mapping.get("first_frame_requested"))) and not reference_preparation_error
+            person_count = len(extract_attachments(fields.get(mapping.get("person_images")))) if mapping.get("person_images") else 0
+            contract["reference_assets"] = [
+                {"index": i + 1, "role": "composite_first_frame" if composite_used else ("person_identity" if i < person_count else "product")}
+                for i in range(len(reference_images))
+            ]
+            contract["reference_handoff_policy"] = "ordered_assets_all_required; never_drop_person_or_product_silently"
+            contract["source_reference_fingerprint"] = hashlib.sha256(
+                json.dumps([image["file_token"] for image in reference_images]).encode()
+            ).hexdigest()
+            persona_contract = json.dumps(contract, ensure_ascii=False)
+        voiceover = _pool_voiceover(fields, mapping, duration) if policy["script_pool_entry"] and policy["script_source"] != "原创生成" else {}
         tasks.append(
             ScriptSyncTask(
                 source_record_id=record.record_id,
                 product_code=code,
                 script_slot=slot,
-                task_name=f"{code}.{script_id}",
+                task_name=f"{code}.{script_id}" if code else script_id,
                 prompt_text=prompt,
                 reference_images=reference_images,
-                internal_script_key=batch_item_id or f"{record.record_id}:{script_id}",
+                internal_script_key=script_id if policy["script_pool_entry"] else batch_item_id or f"{record.record_id}:{script_id}",
                 product_type=normalize_text(fields.get(mapping.get("product_type"))) if mapping.get("product_type") else "",
                 target_language=normalize_text(fields.get(mapping.get("target_language"))) if mapping.get("target_language") else "",
                 business_category=normalize_text(fields.get(mapping.get("business_category"))) if mapping.get("business_category") else "",
                 script_id=script_id,
-                short_video_title=title,
+                short_video_title=(normalize_text(fields.get(mapping.get("publish_title"))) if mapping.get("publish_title") else "") if policy["script_pool_entry"] else title,
                 store_id=normalize_text(fields.get(mapping.get("store_id"))) if mapping.get("store_id") else "",
-                product_id=code,
+                # An internal SKU is not a platform listing. New pool sources
+                # resolve platform bindings later; legacy originals stay compatible.
+                product_id="" if policy["script_pool_entry"] else code,
                 parent_slot=slot,
                 direction_label=title,
                 variant_strength="母版",
-                script_source="原创脚本",
-                source_script_type="原创脚本",
-                publish_purpose=(
-                    normalize_text(fields.get(mapping.get("publish_purpose")))
-                    if mapping.get("publish_purpose") else ""
-                ) or "带货",
-                cart_enabled=(
-                    normalize_text(fields.get(mapping.get("cart_enabled")))
-                    if mapping.get("cart_enabled") else ""
-                ) or "是",
-                content_branch=(
-                    normalize_text(fields.get(mapping.get("content_branch")))
-                    if mapping.get("content_branch") else ""
-                ) or "DIRECT_RESPONSE",
-                video_duration=normalize_video_duration(fields.get(mapping.get("video_duration")) if mapping.get("video_duration") else None),
+                **policy,
+                **voiceover,
+                video_duration=duration,
+                target_country=normalize_text(fields.get(mapping.get("target_country"))) if mapping.get("target_country") else "",
                 persona_id=normalize_text(fields.get(mapping.get("persona_id"))) if mapping.get("persona_id") else "",
-                persona_contract=normalize_text(fields.get(mapping.get("persona_contract"))) if mapping.get("persona_contract") else "",
+                persona_contract=persona_contract,
                 first_frame_strategy=normalize_text(fields.get(mapping.get("first_frame_strategy"))) if mapping.get("first_frame_strategy") else "",
                 reference_preparation_error=reference_preparation_error,
             )

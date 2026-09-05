@@ -33,6 +33,30 @@ class OpenClawOriginalBatchSyncTest(unittest.TestCase):
         )
         self.assertEqual(command[command.index("--product-code") + 1], "1734482585843304442")
 
+    def test_internal_sku_selector_is_safe_and_supported(self):
+        command = adapter.build_sync_command(action="check", product_code="S260724029604")
+        self.assertEqual(command[command.index("--product-code") + 1], "S260724029604")
+        for code in ("S260;id", "$(id)", "--help", "a b", "x" * 31):
+            with self.assertRaisesRegex(ValueError, "product_code"):
+                adapter.build_sync_command(action="sync", product_code=code)
+
+    def test_longform_check_is_read_only(self):
+        command = adapter.build_longform_command(action="check", limit=20)
+        self.assertIn("--dry-run", command)
+        self.assertNotIn("--allow-real-submit", command)
+        self.assertNotIn("--allow-external-tts", command)
+
+    def test_longform_sync_uses_unattended_paid_branch(self):
+        command = adapter.build_longform_command(
+            action="sync", product_code="1737141103233042426", limit=3
+        )
+        self.assertIn("--allow-real-submit", command)
+        self.assertIn("--allow-external-tts", command)
+        self.assertEqual(
+            command[command.index("--product-code") + 1],
+            "1737141103233042426",
+        )
+
     def test_rejects_invalid_identifiers_and_limit(self):
         with self.assertRaisesRegex(ValueError, "record_id"):
             adapter.build_sync_command(action="sync", record_id="wrong")

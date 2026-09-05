@@ -161,6 +161,9 @@ class ScriptSyncTask:
     reference_preparation_error: str = ""
     voiceover_requested: bool = False
     voiceover_status: str = ""
+    script_pool_entry: bool = False
+    source_voiceover_managed: bool = False
+    target_country: str = ""
 
 
 def is_variant_slot(task_suffix: str) -> bool:
@@ -269,7 +272,7 @@ def normalize_run_manager_script_type(
     # 原始脚本表中的“脚本类型”可能被复制/导入时误带。只有复刻流水线
     # 同时留下来源记录 ID，或同时留下来源+用途，才把上游记录认定为复刻。
     # 运行管理表自身的任务来源仍可作为直接、权威的分类依据。
-    short_markers = {"短视频复刻", SCRIPT_TYPE_SHORT_VIDEO_REMAKE}
+    short_markers = {"短视频复刻", SCRIPT_TYPE_SHORT_VIDEO_REMAKE, "成功脚本复刻", "视频复刻"}
     if task_source_text in short_markers:
         return SCRIPT_TYPE_SHORT_VIDEO_REMAKE
     if source_remake_record_id_text and {script_source_text, source_script_type_text} & short_markers:
@@ -393,6 +396,10 @@ def prepend_script_id_header(prompt_text: Any, script_id: str) -> str:
 
 
 def build_prompt_with_anchor(task: ScriptSyncTask) -> str:
+    if task.script_pool_entry and task.script_source != "原创生成":
+        # Completed source copy is authoritative; do not inject an original
+        # product anchor or any instruction to rewrite/translate its speech.
+        return prepend_script_id_header(task.prompt_text, task.script_id)
     anchor_parts: List[str] = []
     product_type = compact_anchor_text(task.product_type, max_length=24)
     business_category = compact_anchor_text(task.business_category, max_length=16)
@@ -617,12 +624,17 @@ def build_target_fields(
         fields[mapping["script_id"]] = task.script_id
     if mapping.get("store_id") and task.store_id:
         fields[mapping["store_id"]] = task.store_id
-    if mapping.get("product_id") and task.product_id:
-        fields[mapping["product_id"]] = task.product_id
+    if mapping.get("product_id"):
+        if task.cart_enabled == "否" or (task.script_pool_entry and not task.product_id):
+            fields[mapping["product_id"]] = None
+        elif task.product_id:
+            fields[mapping["product_id"]] = task.product_id
     if mapping.get("canonical_product_id"):
-        canonical_product_id = task.product_id or task.product_code
+        canonical_product_id = task.product_code if task.script_pool_entry else task.product_id or task.product_code
         if canonical_product_id:
             fields[mapping["canonical_product_id"]] = canonical_product_id
+        elif task.script_pool_entry:
+            fields[mapping["canonical_product_id"]] = None
     if mapping.get("internal_script_key"):
         internal_key = task.internal_script_key or task.task_name
         if internal_key:
@@ -655,17 +667,21 @@ def build_target_fields(
         fields[mapping["voiceover_expression_contract"]] = task.voiceover_expression_contract
     if mapping.get("voiceover_execution_plan") and task.voiceover_execution_plan:
         fields[mapping["voiceover_execution_plan"]] = task.voiceover_execution_plan
-    if mapping.get("voiceover_requested") and task.voiceover_requested:
-        fields[mapping["voiceover_requested"]] = True
+    if mapping.get("voiceover_requested") and (task.voiceover_requested or task.source_voiceover_managed):
+        fields[mapping["voiceover_requested"]] = task.voiceover_requested
     if mapping.get("voiceover_status") and task.voiceover_status:
         fields[mapping["voiceover_status"]] = task.voiceover_status
-    if mapping.get("persona_id") and task.persona_id:
-        fields[mapping["persona_id"]] = task.persona_id
-    if mapping.get("persona_contract") and task.persona_contract:
-        fields[mapping["persona_contract"]] = task.persona_contract
-    if mapping.get("first_frame_strategy") and task.first_frame_strategy:
-        fields[mapping["first_frame_strategy"]] = task.first_frame_strategy
-    if mapping.get("reference_free") and is_nurture_task(task):
+    if task.source_voiceover_managed and not task.voiceover_requested:
+        for key in ("voiceover_expression_contract", "voiceover_execution_plan", "voiceover_status"):
+            if mapping.get(key):
+                fields[mapping[key]] = None
+    if mapping.get("persona_id") and (task.persona_id or task.script_pool_entry):
+        fields[mapping["persona_id"]] = task.persona_id or None
+    if mapping.get("persona_contract") and (task.persona_contract or task.script_pool_entry):
+        fields[mapping["persona_contract"]] = task.persona_contract or None
+    if mapping.get("first_frame_strategy") and (task.first_frame_strategy or task.script_pool_entry):
+        fields[mapping["first_frame_strategy"]] = task.first_frame_strategy or None
+    if mapping.get("reference_free") and (is_nurture_task(task) or task.script_pool_entry):
         fields[mapping["reference_free"]] = "否" if task.reference_images else "是"
     return fields
 

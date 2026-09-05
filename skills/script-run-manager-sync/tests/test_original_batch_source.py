@@ -30,6 +30,7 @@ class OriginalBatchSourceTest(unittest.TestCase):
         self.assertEqual(tasks[0].prompt_text, "正确的短视频提示词")
 
     def test_missing_video_prompt_never_falls_back_to_complete_script(self):
+        errors = {}
         mapping = resolve_original_batch_field_mapping(
             ["脚本ID", "产品编码", "视频生成提示词", "完整生产脚本", "进入生产"]
         )
@@ -42,8 +43,10 @@ class OriginalBatchSourceTest(unittest.TestCase):
                 "进入生产": True,
             })],
             mapping,
+            errors=errors,
         )
         self.assertEqual(tasks, [])
+        self.assertIn("SCRIPT_POOL_HANDOFF_INCOMPLETE", errors["rec"])
 
     def test_one_row_becomes_one_sync_task(self):
         fields = [
@@ -98,6 +101,25 @@ class OriginalBatchSourceTest(unittest.TestCase):
         )
         tasks = build_original_batch_sync_tasks(
             [TableRecord("rec", {"脚本ID": "S1", "产品编码": "P", "视频生成提示词": "x"})],
+            mapping,
+        )
+        self.assertEqual(tasks, [])
+
+    def test_longform_row_is_not_sent_to_short_video_run_manager(self):
+        mapping = resolve_original_batch_field_mapping(
+            [
+                "脚本ID", "产品编码", "短视频提示词", "进入生产",
+                "视频形态（系统）",
+            ]
+        )
+        tasks = build_original_batch_sync_tasks(
+            [TableRecord("rec", {
+                "脚本ID": "LONGFORM_1",
+                "产品编码": "1737141103233042426",
+                "短视频提示词": "这是一条长视频提示词",
+                "进入生产": True,
+                "视频形态（系统）": "长视频",
+            })],
             mapping,
         )
         self.assertEqual(tasks, [])

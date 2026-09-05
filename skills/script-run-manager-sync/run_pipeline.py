@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import fcntl
 import os
 import sqlite3
@@ -30,6 +31,14 @@ from core.original_batch_source import (  # noqa: E402
     build_original_batch_sync_tasks,
     resolve_original_batch_field_mapping,
 )
+from core.first_frame_handoff import (  # noqa: E402
+    apply_composite_reference_handoff,
+    complete_wsr_reference_handoff,
+    first_frame_preview_action,
+    first_frame_source_supported,
+    generate_first_frame_from_snapshot,
+)
+from core.reference_manifest_handoff import bind_transferred_wsr_references, load_frozen_wsr_context
 from core.seeding_batch_source import (  # noqa: E402
     build_seeding_sync_tasks,
     resolve_seeding_batch_field_mapping,
@@ -288,6 +297,10 @@ def build_existing_target_updates(
     *,
     allow_full_patch: bool,
 ) -> Dict[str, object]:
+    # Once execution has started, even missing metadata is part of the frozen
+    # snapshot. Do not silently change a scheduled/submitted production task.
+    if not can_update_existing_target(existing_target, mapping):
+        return {}
     updates: Dict[str, object] = {}
     prompt_field = mapping.get("prompt")
     if prompt_field and (
@@ -300,11 +313,16 @@ def build_existing_target_updates(
         "script_id", "store_id", "internal_script_key", "task_name", "script_type",
         "short_video_title", "parent_slot", "direction_label", "variant_strength",
         "script_source", "publish_purpose", "cart_enabled", "content_branch",
+        "product_id", "canonical_product_id", "target_language", "persona_id", "persona_contract", "first_frame_strategy",
+        "voiceover_expression_contract", "voiceover_execution_plan", "voiceover_requested", "voiceover_status",
     ):
         field_name = mapping.get(logical_name)
-        if field_name and fields.get(field_name) and (allow_full_patch or not existing_target.fields.get(field_name)):
+        if field_name and field_name in fields and (allow_full_patch or (fields[field_name] and not existing_target.fields.get(field_name))):
             updates[field_name] = fields[field_name]
 
+    reference_free_field = mapping.get("reference_free")
+    if allow_full_patch and reference_free_field in fields:
+        updates[reference_free_field] = fields[reference_free_field]
     if fields.get(mapping.get("reference_free")) == "是" and can_patch_reference_free(existing_target, mapping):
         updates[mapping["reference_free"]] = "是"
 
@@ -312,6 +330,58 @@ def build_existing_target_updates(
     if duration_field and fields.get(duration_field) and (allow_full_patch or not existing_target.fields.get(duration_field)):
         updates[duration_field] = fields[duration_field]
     return updates
+
+
+def frozen_pool_target_conflict(task, record: object, fields: Dict[str, object], mapping: Dict[str, object]) -> str:
+    if not task.script_pool_entry or can_update_existing_target(record, mapping):
+        return ""
+    for logical in ("prompt", "script_source", "publish_purpose", "cart_enabled", "content_branch", "product_id", "canonical_product_id", "voiceover_execution_plan", "persona_contract"):
+        # A blank new-source platform ID means "resolve from the binding",
+        # not a requested clear, unless the operator explicitly disabled cart.
+        if logical == "product_id" and task.cart_enabled == "是" and not task.product_id:
+            continue
+        field_name = mapping.get(logical)
+        if field_name in fields and (record.fields.get(field_name) or "") != (fields[field_name] or ""):
+            return f"SCRIPT_POOL_EXECUTION_FROZEN:任务已开始或排期，{field_name}修改未应用；需另建生产任务"
+    return ""
+
+
+def register_pool_task_metadata(task, db_path: str) -> Dict[str, object]:
+    """Freeze the operator's selected settings in the existing publish DB.
+
+    Import lazily: previews and unrelated legacy sources never open this DB.
+    """
+    publisher_dir = SKILL_DIR.parent / "short-video-auto-publisher"
+    if str(publisher_dir) not in sys.path:
+        sys.path.insert(0, str(publisher_dir))
+    from app.db import AutoPublishDB
+    from app.script_pool import register_script_pool_metadata
+
+    return register_script_pool_metadata(
+        AutoPublishDB(Path(db_path)), script_id=task.script_id,
+        source_record_id=task.source_record_id, prompt=task.prompt_text,
+        product_id=task.product_code, platform_product_id=task.product_id or None,
+        store_id=task.store_id, publish_purpose=task.publish_purpose,
+        cart_enabled=task.cart_enabled, target_country=task.target_country,
+        target_language=task.target_language, short_video_title=task.short_video_title,
+        parent_slot=task.parent_slot, direction_label=task.direction_label,
+        variant_strength=task.variant_strength, product_type=task.product_type,
+        task_name=task.task_name, script_source=task.script_source,
+        content_branch=task.content_branch,
+    )
+
+
+def validate_pool_target_mapping(task, mapping: Dict[str, object]) -> None:
+    if not task.script_pool_entry:
+        return
+    required = ["script_source", "script_type", "publish_purpose", "cart_enabled", "content_branch", "product_id", "canonical_product_id", "reference_free"]
+    if task.persona_contract:
+        required.append("persona_contract")
+    if task.source_voiceover_managed:
+        required.extend(["voiceover_requested", "voiceover_status", "voiceover_execution_plan", "voiceover_expression_contract"])
+    missing = [key for key in required if not mapping.get(key)]
+    if missing:
+        raise ValueError("SCRIPT_POOL_TARGET_FIELDS_MISSING:" + ",".join(missing))
 
 
 def remember_target_fields(indexes: Dict[str, Dict[str, object]], record: object, fields: Dict[str, object], mapping: Dict[str, object]) -> None:
@@ -324,6 +394,9 @@ def remember_target_fields(indexes: Dict[str, Dict[str, object]], record: object
 
 
 def resolve_task_action(task, indexes: Dict[str, Dict[str, object]], mapping: Dict[str, object]) -> str:
+    waiting_action = first_frame_preview_action(task)
+    if waiting_action:
+        return waiting_action
     existing_target, reason = find_existing_target(task, indexes)
     if existing_target is None:
         return "create"
@@ -370,7 +443,7 @@ def transfer_reference_images(
             continue
         cached = cache.get(source_file_token)
         if cached:
-            transferred.append(dict(cached))
+            transferred.append({key: value for key, value in cached.items() if not key.startswith("_")})
             continue
 
         content, file_name, content_type, size = source_client.download_attachment_bytes(attachment)
@@ -380,9 +453,37 @@ def transfer_reference_images(
             content_type=content_type,
             size=size,
         )
-        cache[source_file_token] = uploaded
+        cache[source_file_token] = {**uploaded, "_transfer_sha256": hashlib.sha256(content).hexdigest()}
         transferred.append(dict(uploaded))
     return transferred
+
+
+def prepare_selected_first_frame(task, record, source_mapping, source_url, target_indexes, target_mapping):
+    """Generate exactly this already-selected short row, then rebuild in memory.
+
+    Called only under the production process lock, after schema/policy checks
+    and target indexing. A check/dry-run never reaches this function.
+    """
+    verify_wsr_ready = task.script_source == "成功脚本复刻" and normalize_checkbox(
+        record.fields.get(source_mapping.get("first_frame_requested")))
+    if not task.reference_preparation_error and not verify_wsr_ready:
+        return task
+    if not first_frame_source_supported(task):
+        raise RuntimeError(f"FIRST_FRAME_SOURCE_UNSUPPORTED:暂不支持此来源生成首帧：{task.script_source}")
+    existing, _ = find_existing_target(task, target_indexes)
+    if existing is not None and not can_update_existing_target(existing, target_mapping):
+        raise RuntimeError("FIRST_FRAME_EXECUTION_FROZEN:运行任务已提交或排期，不重新生成首帧；已保留进入生产勾选")
+    record.execution_target_snapshot = {"record_id": existing.record_id, "fields": dict(existing.fields)} if existing is not None else None
+    print(f"   🖼️ 同轮准备首帧 | source_record_id={record.record_id} | script_id={task.script_id}", flush=True)
+    fields = generate_first_frame_from_snapshot(record, source_url)
+    record.fields.update(fields)
+    errors = {}
+    rebuilt = build_original_batch_sync_tasks([record], source_mapping, record_id=record.record_id, limit=1, errors=errors)
+    if errors or len(rebuilt) != 1 or rebuilt[0].reference_preparation_error:
+        raise RuntimeError(f"FIRST_FRAME_HANDOFF_INVALID:首帧处理后记录仍不可交接：{errors or '参考附件未就绪'}")
+    prepared = complete_wsr_reference_handoff(rebuilt[0], record, source_mapping)
+    validate_pool_target_mapping(prepared, target_mapping)
+    return prepared
 
 
 def main() -> None:
@@ -434,7 +535,9 @@ def _main_with_lock(args: argparse.Namespace) -> None:
     target_client = FeishuBitableClient(app_token=target_app_token, table_id=target_table_id)
 
     source_field_names = source_client.list_field_names()
-    target_field_names = ensure_target_default_fields(target_client, target_client.list_field_names())
+    target_field_names = target_client.list_field_names()
+    if not args.dry_run:
+        target_field_names = ensure_target_default_fields(target_client, target_field_names)
     if args.source_kind == "manual":
         source_mapping = resolve_manual_field_mapping(source_field_names)
     elif args.source_kind == "original-batch":
@@ -450,7 +553,7 @@ def _main_with_lock(args: argparse.Namespace) -> None:
     elif args.source_kind == "original-batch":
         validate_required_fields(
             source_mapping,
-            ["script_id", "product_code", "product_images", "video_prompt", "sync_enabled"],
+            ["script_id", "video_prompt", "sync_enabled"],
         )
     elif args.source_kind == "seeding-batch":
         validate_required_fields(
@@ -501,6 +604,7 @@ def _main_with_lock(args: argparse.Namespace) -> None:
             product_code=args.product_code,
             record_id=args.record_id,
             limit=args.limit,
+            errors=preflight_errors,
         )
     elif args.source_kind == "seeding-batch":
         sync_tasks = build_seeding_sync_tasks(
@@ -520,8 +624,19 @@ def _main_with_lock(args: argparse.Namespace) -> None:
             metadata_lookup=metadata_lookup,
         )
     tasks_by_source: Dict[str, List] = defaultdict(list)
+    valid_tasks = []
+    source_by_id = {record.record_id: record for record in source_records}
     for task in sync_tasks:
+        if args.source_kind == "original-batch":
+            task = complete_wsr_reference_handoff(task, source_by_id[task.source_record_id], source_mapping)
+        try:
+            validate_pool_target_mapping(task, target_mapping)
+        except ValueError as exc:
+            preflight_errors[task.source_record_id] = str(exc)
+            continue
+        valid_tasks.append(task)
         tasks_by_source[task.source_record_id].append(task)
+    sync_tasks = valid_tasks
 
     # The target table is the large table in this flow.  Do not read it during
     # an idle poll or when the selected source record fails preflight checks.
@@ -559,8 +674,13 @@ def _main_with_lock(args: argparse.Namespace) -> None:
                     source_mapping,
                     error_message=message,
                     synced_at=now_text(),
-                    sync_scope="人工脚本",
+                    sync_scope="人工脚本" if args.source_kind == "manual" else "视频脚本总库",
                 )
+                if args.source_kind == "original-batch":
+                    if source_mapping.get("sync_time"):
+                        failure_fields[source_mapping["sync_time"]] = int(time.time() * 1000)
+                    if source_mapping.get("processing_status"):
+                        failure_fields[source_mapping["processing_status"]] = "同步失败"
                 script_id_field = source_mapping.get("script_id")
                 if script_id_field and manual_script_ids.get(failed_record_id):
                     failure_fields[script_id_field] = manual_script_ids[failed_record_id]
@@ -580,6 +700,7 @@ def _main_with_lock(args: argparse.Namespace) -> None:
         print(f"   ✅ 已登记人工脚本主数据: {registered} 条")
 
     image_cache: Dict[str, dict] = {}
+    wsr_context_cache: Dict[str, dict] = {}
     created = 0
 
     for source_record_id, source_tasks in tasks_by_source.items():
@@ -591,6 +712,18 @@ def _main_with_lock(args: argparse.Namespace) -> None:
             existing_for_source = 0
             unresolved_tasks = []
             for task in source_tasks:
+                verify_wsr_ready = task.script_source == "成功脚本复刻" and normalize_checkbox(
+                    source_fields.get(source_mapping.get("first_frame_requested")))
+                if args.source_kind == "original-batch" and (task.reference_preparation_error or verify_wsr_ready):
+                    existing_frame_target, _ = find_existing_target(task, target_indexes)
+                    if task.script_source == "成功脚本复刻" and (existing_frame_target is None or can_update_existing_target(existing_frame_target, target_mapping)):
+                        if task.script_id not in wsr_context_cache:
+                            wsr_context_cache[task.script_id] = load_frozen_wsr_context(task.script_id)
+                        source_record.fields["_wsr_reference_manifest"] = wsr_context_cache[task.script_id].get("reference_manifest")
+                    task = prepare_selected_first_frame(
+                        task, source_record, source_mapping, source_feishu_url,
+                        target_indexes, target_mapping,
+                    )
                 if task.reference_preparation_error:
                     unresolved_tasks.append(
                         f"{task.script_id}: {task.reference_preparation_error}"
@@ -605,7 +738,24 @@ def _main_with_lock(args: argparse.Namespace) -> None:
                     target_mapping,
                     include_publish_metadata=include_publish_metadata,
                 )
+                fields = apply_composite_reference_handoff(task, fields, target_mapping)
                 existing_target, existing_reason = find_existing_target(task, target_indexes)
+                if task.script_pool_entry:
+                    frozen_reason = frozen_pool_target_conflict(task, existing_target, fields, target_mapping) if existing_target is not None else ""
+                    if frozen_reason:
+                        unresolved_tasks.append(f"{task.script_id}: {frozen_reason}")
+                        continue
+                    if existing_target is None or can_update_existing_target(existing_target, target_mapping):
+                        metadata_result = register_pool_task_metadata(task, args.metadata_db_path)
+                        if metadata_result.get("status") == "frozen":
+                            unresolved_tasks.append(f"{task.script_id}: SCRIPT_POOL_EXECUTION_FROZEN:发布数据已排期或提交，修改未应用")
+                            continue
+                        if metadata_result.get("status") not in {"created", "updated", "unchanged"}:
+                            raise RuntimeError(f"SCRIPT_POOL_METADATA_REGISTRATION_FAILED:{metadata_result.get('status')}")
+                        if "platform_product_id" in metadata_result and target_mapping.get("product_id"):
+                            fields[target_mapping["product_id"]] = metadata_result["platform_product_id"] or None
+                        if metadata_result.get("canonical_script_key") and target_mapping.get("internal_script_key"):
+                            fields[target_mapping["internal_script_key"]] = metadata_result["canonical_script_key"]
                 if existing_target is not None:
                     if not getattr(existing_target, "record_id", ""):
                         print(f"   🔁 本轮内已准备创建，跳过重复创建 | task={task.task_name} | script_id={task.script_id}")
@@ -629,7 +779,6 @@ def _main_with_lock(args: argparse.Namespace) -> None:
                     if (
                         args.source_kind in {"manual", "original-batch", "seeding-batch"}
                         and allow_full_patch
-                        and task.reference_images
                         and target_mapping.get("reference_images")
                     ):
                         existing_updates[target_mapping["reference_images"]] = transfer_reference_images(
@@ -638,6 +787,10 @@ def _main_with_lock(args: argparse.Namespace) -> None:
                             task.reference_images,
                             image_cache,
                         )
+                        if task.script_source == "成功脚本复刻":
+                            if task.script_id not in wsr_context_cache:
+                                wsr_context_cache[task.script_id] = load_frozen_wsr_context(task.script_id)
+                            existing_updates = bind_transferred_wsr_references(task, existing_updates, target_mapping, image_cache, wsr_context_cache[task.script_id])
                     if existing_updates:
                         target_client.update_record_fields(existing_target.record_id, existing_updates)
                         patched_names = "、".join(existing_updates.keys())
@@ -655,6 +808,10 @@ def _main_with_lock(args: argparse.Namespace) -> None:
                         task.reference_images,
                         image_cache,
                     )
+                    if task.script_source == "成功脚本复刻":
+                        if task.script_id not in wsr_context_cache:
+                            wsr_context_cache[task.script_id] = load_frozen_wsr_context(task.script_id)
+                        fields = bind_transferred_wsr_references(task, fields, target_mapping, image_cache, wsr_context_cache[task.script_id])
                 prepared_creates.append({"fields": fields})
                 remember_target_fields(target_indexes, None, fields, target_mapping)
 

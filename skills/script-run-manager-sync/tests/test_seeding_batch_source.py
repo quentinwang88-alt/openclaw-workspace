@@ -36,7 +36,7 @@ class SeedingBatchSourceTest(unittest.TestCase):
             TARGET_FIELD_ALIASES,
         )
         fields = build_target_fields(tasks[0], target_mapping)
-        self.assertNotIn("产品ID", fields)
+        self.assertIsNone(fields["产品ID"])
         self.assertEqual(fields["全球产品ID"], "P1")
         self.assertEqual(fields["脚本类型"], "种草脚本")
         plan = json.loads(tasks[0].voiceover_execution_plan)

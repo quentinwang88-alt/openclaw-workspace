@@ -39,6 +39,21 @@ def _is_transient_feishu_response(response: requests.Response) -> bool:
     return any(marker in message for marker in TRANSIENT_FEISHU_MESSAGES)
 
 
+def _is_invalid_access_token_response(response: requests.Response) -> bool:
+    try:
+        payload = response.json()
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(payload, dict) or payload.get("code") in (None, 0, "0"):
+        return False
+    message = str(payload.get("msg") or payload.get("message") or "").lower()
+    return (
+        "invalid access token" in message
+        or "access token is invalid" in message
+        or str(payload.get("code")) in {"99991663", "99991664"}
+    )
+
+
 @dataclass
 class TableField:
     field_id: str
@@ -143,6 +158,16 @@ class FeishuBitableClient:
                 self.request_count += 1
                 response = requests.request(method, url, timeout=30, **kwargs)
                 last_response = response
+                if _is_invalid_access_token_response(response) and attempt < 3:
+                    self.access_token = None
+                    self.token_expires_at = 0
+                    refreshed_headers = dict(kwargs.get("headers") or {})
+                    refreshed_headers["Authorization"] = (
+                        f"Bearer {self._get_access_token()}"
+                    )
+                    kwargs["headers"] = refreshed_headers
+                    self.retry_count += 1
+                    continue
                 if not _is_transient_feishu_response(response):
                     return response
                 last_error = FeishuAPIError(

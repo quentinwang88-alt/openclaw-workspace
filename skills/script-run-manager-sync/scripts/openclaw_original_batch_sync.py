@@ -17,8 +17,12 @@ from typing import Iterable
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 RUNNER = SKILL_ROOT / "run_pipeline.py"
+LONGFORM_RUNNER = (
+    Path("/Users/likeu3/.openclaw/workspace/skills/original-script-generator")
+    / "scripts" / "run_feishu_longform_production_tasks.py"
+)
 RECORD_ID_RE = re.compile(r"^rec[A-Za-z0-9]+$")
-PRODUCT_CODE_RE = re.compile(r"^\d{8,30}$")
+PRODUCT_CODE_RE = re.compile(r"^[A-Za-z0-9]{1,30}$")
 
 
 def _validate_record_id(value: str) -> str:
@@ -29,7 +33,7 @@ def _validate_record_id(value: str) -> str:
 
 def _validate_product_code(value: str) -> str:
     if not PRODUCT_CODE_RE.fullmatch(value or ""):
-        raise ValueError("product_code 必须是 8 至 30 位数字产品编码")
+        raise ValueError("product_code 必须是 1 至 30 位字母或数字产品编码")
     return value
 
 
@@ -70,6 +74,35 @@ def build_sync_command(
     return command
 
 
+def build_longform_command(
+    *,
+    action: str,
+    record_id: str | None = None,
+    product_code: str | None = None,
+    limit: int | None = None,
+) -> list[str]:
+    """Build the isolated paid-media branch for checked long-form rows."""
+
+    if action not in {"check", "sync"}:
+        raise ValueError(f"未知 action: {action}")
+    command = [sys.executable, str(LONGFORM_RUNNER)]
+    if action == "check":
+        command.append("--dry-run")
+    else:
+        # The user's single `进入生产` decision authorizes the uninterrupted
+        # H3 + Edge TTS path; there is no per-segment confirmation.
+        command.extend(["--allow-real-submit", "--allow-external-tts"])
+    if record_id:
+        command.extend(["--record-id", _validate_record_id(record_id)])
+    if product_code:
+        command.extend(["--product-code", _validate_product_code(product_code)])
+    if limit is not None:
+        if not 1 <= limit <= 20:
+            raise ValueError("一次最多处理 20 条已勾选的生产脚本")
+        command.extend(["--limit", str(limit)])
+    return command
+
+
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="OpenClaw 原创生产脚本同步适配器（只同步勾选进入生产的脚本）"
@@ -95,9 +128,23 @@ def main(argv: Iterable[str] | None = None) -> int:
         print(f"参数错误: {exc}", file=sys.stderr)
         return 2
 
-    print(f"OpenClaw 原创生产脚本同步动作: {args.action}")
-    completed = subprocess.run(command, cwd=str(SKILL_ROOT), check=False)
-    return completed.returncode
+    try:
+        longform_command = build_longform_command(
+            action=args.action,
+            record_id=args.record_id,
+            product_code=args.product_code,
+            limit=args.limit,
+        )
+    except ValueError as exc:
+        print(f"参数错误: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"OpenClaw 原创生产脚本分流动作: {args.action}")
+    print("1/2 长视频旁路")
+    longform = subprocess.run(longform_command, cwd=str(LONGFORM_RUNNER.parent.parent), check=False)
+    print("2/2 15秒短视频同步")
+    shortform = subprocess.run(command, cwd=str(SKILL_ROOT), check=False)
+    return longform.returncode or shortform.returncode
 
 
 if __name__ == "__main__":

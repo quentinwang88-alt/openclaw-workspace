@@ -86,6 +86,28 @@ class BitableClientCompatibilityTest(unittest.TestCase):
         self.assertEqual(request.call_count, 2)
         self.assertEqual(sleep.call_count, 1)
 
+    @patch("core.bitable.get_tenant_access_token", return_value="fresh-token")
+    @patch("core.bitable.requests.request")
+    def test_request_refreshes_invalid_access_token(self, request, get_token) -> None:
+        request.side_effect = [
+            DummyResponse({"code": 99991663, "msg": "Invalid access token for authorization"}),
+            DummyResponse({"code": 0, "data": {"items": []}}),
+        ]
+        client = FeishuBitableClient(app_token="app_token", table_id="tbl_token")
+        client.access_token = "stale-token"
+        client.token_expires_at = 99999999999
+
+        records = client.list_records()
+
+        self.assertEqual(records, [])
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(get_token.call_count, 1)
+        self.assertEqual(
+            request.call_args_list[1].kwargs["headers"]["Authorization"],
+            "Bearer fresh-token",
+        )
+        self.assertEqual(client.retry_count, 1)
+
     def test_list_fields_returns_table_field_objects(self) -> None:
         client = FakeClient()
 
