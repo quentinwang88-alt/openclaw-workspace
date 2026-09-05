@@ -1,0 +1,168 @@
+{
+  "schema_version": "opv-feishu-production-presets-v1",
+  "default_overlay_profile_id": "OVERLAY_LIGHT_V1",
+  "presets": [
+    {
+      "name": "TH｜五套穿搭｜拆解首图",
+      "tasks": [{
+        "account_id": "OPV_TH_TEST_001",
+        "market": "TH",
+        "language": "th-TH",
+        "recipe_id": "RECIPE_MULTI_LOOK_V1",
+        "theme_id": "THEME_TH_OUTFIT_BREAKDOWN_V1",
+        "hook_strategy": "multi_look",
+        "persona_ref": "TH_APPAREL_SELECTED_01_001",
+        "look_ref": "",
+        "scene_ref": ""
+      }]
+    },
+    {
+      "name": "TH｜小个子显高｜轻文字",
+      "tasks": [
+        {
+          "account_id": "OPV_TH_TEST_001",
+          "market": "TH",
+          "language": "th-TH",
+          "recipe_id": "RECIPE_PAIN_POINT_SOLUTION_V1",
+          "theme_id": "THEME_TH_PETITE_PROPORTION_V1",
+          "hook_strategy": "pain_point",
+          "persona_ref": "TH_APPAREL_SELECTED_01_001",
+          "look_ref": "STYLE_OPV_PUFFER_PETITE_001",
+          "scene_ref": "SCENE_A_001"
+        }
+      ]
+    },
+    {
+      "name": "TH｜咖啡约会｜轻文字",
+      "tasks": [
+        {
+          "account_id": "OPV_TH_TEST_001",
+          "market": "TH",
+          "language": "th-TH",
+          "recipe_id": "RECIPE_SCENE_SOLUTION_V1",
+          "theme_id": "THEME_TH_CAFE_DATE_V1",
+          "hook_strategy": "scene_problem",
+          "persona_ref": "TH_APPAREL_SELECTED_02_001",
+          "look_ref": "STYLE_OPV_PUFFER_TRAVEL_001",
+          "scene_ref": "ENV_CAFE_001"
+        }
+      ]
+    },
+    {
+      "name": "TH｜一衣多穿｜轻文字",
+      "tasks": [
+        {
+          "account_id": "OPV_TH_TEST_001",
+          "market": "TH",
+          "language": "th-TH",
+          "recipe_id": "RECIPE_VISUAL_TRANSFORM_V1",
+          "theme_id": "THEME_TH_ONE_PIECE_MULTIWAY_V1",
+          "hook_strategy": "before_after",
+          "persona_ref": "TH_APPAREL_SELECTED_03_001",
+          "look_ref": "STYLE_OPV_PUFFER_MULTIWAY_001",
+          "scene_ref": "SCENE_A_001"
+        }
+      ]
+    },
+    {
+      "name": "TH｜三配方套装｜轻文字",
+      "tasks": [
+        {
+          "account_id": "OPV_TH_TEST_001",
+          "market": "TH",
+          "language": "th-TH",
+          "recipe_id": "RECIPE_PAIN_POINT_SOLUTION_V1",
+          "theme_id": "THEME_TH_PETITE_PROPORTION_V1",
+          "hook_strategy": "pain_point",
+          "persona_ref": "TH_APPAREL_SELECTED_01_001",
+          "look_ref": "STYLE_OPV_PUFFER_PETITE_001",
+          "scene_ref": "SCENE_A_001"
+        },
+        {
+          "account_id": "OPV_TH_TEST_001",
+          "market": "TH",
+          "language": "th-TH",
+          "recipe_id": "RECIPE_SCENE_SOLUTION_V1",
+          "theme_id": "THEME_TH_CAFE_DATE_V1",
+          "hook_strategy": "scene_problem",
+          "persona_ref": "TH_APPAREL_SELECTED_02_001",
+          "look_ref": "STYLE_OPV_PUFFER_TRAVEL_001",
+          "scene_ref": "ENV_CAFE_001"
+        },
+        {
+          "account_id": "OPV_TH_TEST_001",
+          "market": "TH",
+          "language": "th-TH",
+          "recipe_id": "RECIPE_VISUAL_TRANSFORM_V1",
+          "theme_id": "THEME_TH_ONE_PIECE_MULTIWAY_V1",
+          "hook_strategy": "before_after",
+          "persona_ref": "TH_APPAREL_SELECTED_03_001",
+          "look_ref": "STYLE_OPV_PUFFER_MULTIWAY_001",
+          "scene_ref": "SCENE_A_001"
+        }
+      ]
+    },
+    {
+      "name": "TH｜自动匹配穿搭组合｜轻文字",
+      "tasks": [
+        {
+          "account_id": "OPV_TH_TEST_001",
+          "market": "TH",
+          "language": "th-TH",
+          "recipe_id": "RECIPE_PAIN_POINT_SOLUTION_V1",
+          "theme_id": "THEME_TH_PETITE_PROPORTION_V1",
+          "hook_strategy": "pain_point",
+          "persona_ref": "TH_APPAREL_SELECTED_01_001",
+          "look_ref": "",
+          "scene_ref": "SCENE_A_001"
+        },
+        {
+          "account_id": "OPV_TH_TEST_001",
+          "market": "TH",
+          "language": "th-TH",
+          "recipe_id": "RECIPE_SCENE_SOLUTION_V1",
+          "theme_id": "THEME_TH_CAFE_DATE_V1",
+          "hook_strategy": "scene_problem",
+          "persona_ref": "TH_APPAREL_SELECTED_02_001",
+          "look_ref": "",
+          "scene_ref": "ENV_CAFE_001"
+        },
+        {
+          "account_id": "OPV_TH_TEST_001",
+          "market": "TH",
+          "language": "th-TH",
+          "recipe_id": "RECIPE_VISUAL_TRANSFORM_V1",
+          "theme_id": "THEME_TH_ONE_PIECE_MULTIWAY_V1",
+          "hook_strategy": "before_after",
+          "persona_ref": "TH_APPAREL_SELECTED_03_001",
+          "look_ref": "",
+          "scene_ref": "SCENE_A_001"
+        }
+      ]
+    },
+    {
+      "name": "TH｜穿搭拆解首图｜均衡变体",
+      "tasks": [
+        {
+          "account_id": "OPV_TH_TEST_001",
+          "market": "TH",
+          "language": "th-TH",
+          "recipe_id": "RECIPE_OUTFIT_BREAKDOWN_V1",
+          "theme_id": "THEME_TH_OUTFIT_BREAKDOWN_V1",
+          "hook_strategy": "",
+          "persona_ref": "TH_APPAREL_SELECTED_01_001",
+          "look_ref": "",
+          "scene_ref": ""
+        }
+      ]
+    },
+    {
+      "name": "TH｜随机养号组合｜轻文字",
+      "selection": "deterministic_one",
+      "routing_policy": "multi_look_6s_v2",
+      "tasks_from": [
+        "TH｜五套穿搭｜拆解首图"
+      ]
+    }
+  ]
+}

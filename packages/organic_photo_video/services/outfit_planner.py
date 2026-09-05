@@ -9,6 +9,7 @@ the ``unknown`` holes without changing the contracts.
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -76,6 +77,75 @@ def _content_key_from_theme(theme_id: str) -> str:
     return THEME_CONTENT_KEY.get(match.group(1).rstrip("_"), "default")
 
 
+def _look_fields(look: Dict[str, Any], base: Dict[str, Any]) -> Dict[str, Any]:
+    """Only fill absent fields; explicit template values (including 'none') win."""
+    recipe = deepcopy(look.get("recipe") or {})
+    declared_sources = look.get("recipe_field_sources") or {}
+    sources = {}
+
+    def choose(name: str, *aliases: str, default: Any = "") -> Any:
+        for key in (name, *aliases):
+            if key in recipe and recipe[key] is not None and recipe[key] != "":
+                sources[name] = declared_sources.get(key) or f"look.recipe.{key}"
+                return deepcopy(recipe[key])
+        sources[name] = f"rule.{name}"
+        return deepcopy(base.get(name, default))
+
+    bottom = choose("bottom", default={})
+    if not isinstance(bottom, dict):
+        bottom = {"type": str(bottom)}
+    for field in ("type", "fit", "color", "material", "length"):
+        key = f"bottom_{field}"
+        if key in recipe and recipe[key] not in (None, ""):
+            target_field = "kind" if field == "type" and bottom.get("type") else field
+            bottom[target_field] = deepcopy(recipe[key])
+            sources[f"bottom.{target_field}"] = declared_sources.get(key) or f"look.recipe.{key}"
+    # Never import a rule's white colour into an explicitly supplied skirt/pants.
+    bottom.setdefault("color", "按选中 Look 单品描述，不额外改色")
+    result = {
+        "top_inner": choose("top_inner"),
+        "onepiece": choose("onepiece", "dress"),
+        "bottom": bottom,
+        "shoes": choose("shoes", "footwear"),
+        "socks": choose("socks"),
+        "bag": choose("bag"),
+        "accessories": choose("accessories"),
+        "color_palette": choose("color_palette", "palette", default=[]),
+        "style_direction": choose("style_direction", "overall_style"),
+        "silhouette": choose("silhouette", "bottom_fit"),
+        "target_wear_mode": choose("target_wear_mode", "wear_mode", default="按模板最终穿法，完整展示目标商品"),
+        "tucking": choose("tucking"),
+        "item_reference_images": choose("item_reference_images", "item_refs", "reference_images", default={}),
+        "field_sources": sources,
+        "source_look_id": str(look.get("look_id") or look.get("ref_id") or look.get("id") or ""),
+        "source_recipe": recipe,
+    }
+    palette = result["color_palette"]
+    result["color_palette"] = [palette] if isinstance(palette, str) else list(palette or [])
+    if not result["item_reference_images"]:
+        for key in ("item_reference_images", "item_refs"):
+            if look.get(key):
+                result["item_reference_images"] = deepcopy(look[key])
+                sources["item_reference_images"] = f"look.{key}"
+                break
+    # A single frozen item, not a fresh choice on every image page. Do not
+    # split '/' or accessory lists: those can describe colours/layering.
+    for field in ("top_inner", "shoes"):
+        value = result[field]
+        if not isinstance(value, str) or "或" not in value:
+            continue
+        candidates = [part.strip() for part in re.split(r"或者|或", value) if part.strip()]
+        if len(candidates) > 1:
+            result[field] = candidates[0]
+            prior = sources[field]
+            sources[field] = {
+                "source": deepcopy(prior),
+                "choice": {"policy": "first_explicit_alternative", "selected_index": 0,
+                           "selected": candidates[0], "original": value},
+            }
+    return result
+
+
 def build_outfit_plan(
     *,
     outfit_plan_id: str,
@@ -83,6 +153,8 @@ def build_outfit_plan(
     product_facts: Dict[str, Any],
     market_pack: Optional[Dict[str, Any]] = None,
     persona: Optional[Dict[str, Any]] = None,
+    look: Optional[Dict[str, Any]] = None,
+    content_goal: str = "",
     rules: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Compose the structured outfit plan (opv-outfit-plan-v1).
@@ -94,23 +166,48 @@ def build_outfit_plan(
     content_key = _content_key_from_theme(theme_id)
     by_key = rules.get("by_content_key") or {}
     base = by_key.get(content_key) or by_key.get("default") or {}
+    selected = _look_fields(look or {}, base)
     climate_zone = str((market_pack or {}).get("climate_zone") or "default")
     climate_note = (rules.get("climate_rules") or {}).get(
         climate_zone
     ) or (rules.get("climate_rules") or {}).get("default") or ""
 
     category = str(product_facts.get("category") or "unknown")
-    color = (product_facts.get("facts") or {}).get("color") or "unknown"
-    palette = list(base.get("color_palette") or [])
-    if color not in ("unknown", "") and color not in palette:
-        palette.insert(0, color)
+    color = str((product_facts.get("facts") or {}).get("color") or "").strip()
+    explicit_color = color if color.lower() not in {"", "unknown", "product_color"} else ""
+    palette = []
+    for raw_value in selected.get("color_palette") or []:
+        value = str(raw_value or "").strip()
+        if not value or value.lower() == "unknown":
+            continue
+        if value.lower() == "product_color":
+            if explicit_color and explicit_color not in palette:
+                palette.append(explicit_color)
+            continue
+        if value not in palette:
+            palette.append(value)
+    if explicit_color and explicit_color not in palette:
+        palette.insert(0, explicit_color)
 
-    styling_logic = (
-        f"产品是造型核心单品，配色围绕产品主色({color})展开：{('、'.join(palette))}；"
-        f"下装选择「{base.get('bottom', {}).get('type', '')}」形成上下比例；"
-        f"场景={base.get('occasion', content_key)}，气候({climate_zone})约束：{climate_note}；"
-        f"风格方向：{base.get('style_direction', '')}"
+    selected_bottom = selected["bottom"]
+    selected_style = str(selected["style_direction"])
+    color_logic = (
+        f"产品显式主色={explicit_color}"
+        if explicit_color else "产品主色只按商品参考图，不从模板猜测"
     )
+    styling_logic = (
+        f"产品是造型核心单品，{color_logic}；配套色：{('、'.join(palette))}；"
+        f"选中 Look={str((look or {}).get('name') or '规则基线')}；"
+        f"下装选择「{selected_bottom.get('type', '')}」形成上下比例；"
+        f"场景={base.get('occasion', content_key)}，气候({climate_zone})约束：{climate_note}；"
+        f"风格方向：{selected_style}"
+    )
+
+    visibility_rules = dict(rules.get("product_visibility_rules") or {})
+    if content_goal in {"pain_point_solution", "visual_transform", "multi_look"}:
+        visibility_rules["consistency"] = (
+            "目标商品与人物始终一致；补充单品严格按 outfit_state 变化"
+        )
 
     payload = {
         "schema_version": contracts.OUTFIT_PLAN_SCHEMA_VERSION,
@@ -130,13 +227,25 @@ def build_outfit_plan(
         ),
         "occasion": str(base.get("occasion") or content_key),
         "climate": climate_zone,
-        "style_direction": str(base.get("style_direction") or ""),
+        "style_direction": selected_style,
         "color_palette": palette,
-        "bottom": base.get("bottom") or {},
+        "top_inner": selected["top_inner"],
+        "onepiece": selected["onepiece"],
+        "bottom": selected_bottom,
         "outerwear": "目标商品本身（外套类时不再叠加外层）",
-        "shoes": str(base.get("shoes") or ""),
-        "bag": str(base.get("bag") or ""),
-        "accessories": str(base.get("accessories") or ""),
+        "shoes": selected["shoes"],
+        "socks": selected["socks"],
+        "bag": selected["bag"],
+        "accessories": selected["accessories"],
+        "silhouette": selected["silhouette"],
+        "target_wear_mode": selected["target_wear_mode"],
+        "tucking": selected["tucking"],
+        "item_reference_images": selected["item_reference_images"],
+        "item_refs": deepcopy(selected["item_reference_images"]),
+        "field_sources": selected["field_sources"],
+        "source_look_id": selected["source_look_id"],
+        "source_recipe": selected["source_recipe"],
+        "rule_defaults": deepcopy(base),
         "hair_style": str(
             (persona or {}).get("hair_hint")
             or (persona or {}).get("hair_style")
@@ -145,9 +254,7 @@ def build_outfit_plan(
         "scene": content_key,
         "styling_logic": styling_logic,
         "product_is_core": True,
-        "product_visibility_rules": dict(
-            rules.get("product_visibility_rules") or {}
-        ),
+        "product_visibility_rules": visibility_rules,
         "product_role_note": (
             f"产品类目={category}，作为 TARGET_GARMENT 全程穿着；"
             "补充单品是否跨图变化由内容配方的 outfit_state 决定"
@@ -161,7 +268,8 @@ def build_outfit_plan(
 
 
 def build_outfit_states(
-    outfit_plan: Dict[str, Any], *, content_goal: str
+    outfit_plan: Dict[str, Any], *, content_goal: str,
+    alternate_look: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Build the explicit outfit states a recipe is allowed to execute.
 
@@ -171,42 +279,81 @@ def build_outfit_states(
     contradicting the global continuity lock.
     """
 
+    from services.styling_normalizer import outfit_fingerprint
+
     final_state = {
         "state_purpose": "optimized_final_look",
+        "top_inner": outfit_plan.get("top_inner") or "",
+        "onepiece": outfit_plan.get("onepiece") or "",
         "bottom": deepcopy(outfit_plan.get("bottom") or {}),
         "shoes": outfit_plan.get("shoes") or "",
+        "socks": outfit_plan.get("socks") or "",
         "bag": outfit_plan.get("bag") or "",
         "accessories": outfit_plan.get("accessories") or "",
         "color_palette": list(outfit_plan.get("color_palette") or []),
         "style_direction": outfit_plan.get("style_direction") or "",
+        "silhouette": outfit_plan.get("silhouette") or "",
+        "tucking": outfit_plan.get("tucking") or "",
+        "item_reference_images": deepcopy(outfit_plan.get("item_reference_images") or {}),
+        "item_refs": deepcopy(outfit_plan.get("item_reference_images") or outfit_plan.get("item_refs") or {}),
+        "source_look_id": outfit_plan.get("source_look_id") or "",
+        "field_sources": deepcopy(outfit_plan.get("field_sources") or {}),
+        "target_wear_mode": outfit_plan.get("target_wear_mode") or "按模板最终穿法，完整展示目标商品",
         "change_permissions": [],
     }
-    if content_goal == "scene_solution":
+    final_state["outfit_fingerprint"] = outfit_fingerprint(final_state, include_accessories=False)
+    if content_goal in {"scene_solution", "outfit_breakdown"}:
         return {"FINAL": final_state}
 
-    palette = list(outfit_plan.get("color_palette") or [])
-    neutral = palette[-1] if palette else "neutral"
-    base_state = {
-        "state_purpose": "basic_before_optimization",
-        "bottom": {"type": "基础中性直筒下装", "color": neutral},
-        "shoes": "基础平底鞋",
-        "bag": "无",
-        "accessories": "无",
-        "color_palette": palette,
-        "style_direction": "基础日常穿法",
-        "change_permissions": ["bottom", "shoes", "bag", "accessories"],
-    }
+    base_state = deepcopy(final_state)
+    base_state.update({
+        "state_purpose": "same_outfit_basic_wearing",
+        "target_wear_mode": "同一套单品的自然基础穿法；保持人物真实身材，不通过压缩身体制造前后差异",
+        "tucking": "自然垂放；不新增单品，不改变服装版型",
+        "change_permissions": ["target_wear_mode", "tucking"],
+        "same_look": True,
+    })
     states = {"BASE": base_state, "FINAL": final_state}
     if content_goal == "visual_transform":
-        alternate = deepcopy(final_state)
-        alternate.update(
-            {
-                "state_purpose": "controlled_alternate_look",
-                "bag": "与最终造型同色系的替代小包",
-                "accessories": "替换一件极简配饰",
-                "style_direction": "同一目标商品的轻量风格切换",
-                "change_permissions": ["bag", "accessories"],
-            }
-        )
-        states["ALT_1"] = alternate
+        # Exactly two library outfits, never a third rule-invented white look.
+        base_state = deepcopy(final_state)
+        if alternate_look:
+            alternate = _look_fields(alternate_look, outfit_plan.get("rule_defaults") or {})
+            alternate.pop("source_recipe", None)
+            candidate = {**deepcopy(final_state), **alternate}
+            candidate["item_refs"] = deepcopy(candidate["item_reference_images"])
+            candidate["outfit_fingerprint"] = outfit_fingerprint(candidate, include_accessories=False)
+            if candidate["outfit_fingerprint"] != final_state["outfit_fingerprint"]:
+                base_state = candidate
+        same_look = base_state["outfit_fingerprint"] == final_state["outfit_fingerprint"]
+        base_state.update(state_purpose="library_look_a" if not same_look else "same_look_detail", same_look=same_look)
+        final_state.update(state_purpose="library_look_b" if not same_look else "same_look_detail", same_look=same_look)
+        states["BASE"] = base_state
+        states["ALT_1"] = deepcopy(final_state)
     return states
+
+
+def freeze_multi_look_state(look: Dict[str, Any], *, index: int = 1, base: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Freeze one real template as one page, without before/after inventions."""
+    from services.styling_normalizer import outfit_fingerprint, outfit_visual_features
+
+    state = _look_fields(look, base or {})
+    state.pop("source_recipe", None)
+    state.update({
+        "state_id": f"LOOK_{index:02d}", "look_index": index,
+        "state_purpose": "independent_library_full_look",
+        "item_refs": deepcopy(state.get("item_reference_images") or {}),
+        "label_i18n": deepcopy(look.get("label_i18n") or {}),
+        "change_permissions": ["top_inner", "onepiece", "bottom", "shoes", "socks", "bag", "accessories"],
+        "identity_constraints": ["same_persona", "same_target_product", "same_product_color", "same_background"],
+    })
+    state["outfit_fingerprint"] = outfit_fingerprint(state, include_accessories=False)
+    state["full_outfit_fingerprint"] = outfit_fingerprint(state)
+    state["visible_silhouette"] = outfit_visual_features(state)["silhouette"]
+    return state
+
+
+def build_multi_look_states(outfit_plan: Dict[str, Any], look_snapshots) -> Dict[str, Dict[str, Any]]:
+    return {f"LOOK_{index:02d}": freeze_multi_look_state(
+        snapshot, index=index, base=outfit_plan.get("rule_defaults") or {}
+    ) for index, snapshot in enumerate(look_snapshots, start=1)}

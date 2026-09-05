@@ -1,0 +1,35 @@
+{
+  "schema_version": "opv-theme-v1",
+  "theme_id": "THEME_TH_OUTFIT_BREAKDOWN_V1",
+  "theme_key": "THEME_TH_OUTFIT_BREAKDOWN",
+  "theme_version": 1,
+  "theme_name": "穿搭拆解卡（Outfit Breakdown）",
+  "description": "第一张使用真人上身、目标商品和搭配清单拼贴卡，后续用真人图证明完整穿搭。",
+  "status": "active",
+  "applicable_markets": ["TH"],
+  "product_match_rules": {
+    "categories": ["outerwear", "dress", "shirt", "top", "bottom", "top_bottom_sets", "versatile_blazer"],
+    "size_hint": "按真实商品版型与 Look 模板执行",
+    "climate": "同 Market Pack 气候约束",
+    "avoid": ["虚构购买记录", "虚构价格", "穿搭清单与真人上身不一致"]
+  },
+  "content_plan_rules": {
+    "look_source_priority": ["successful_look", "look_template", "ai_exploration"],
+    "copy_tone": "自然、可收藏、像创作者分享自己的穿搭公式",
+    "bgm_mood_hints": ["mid_tempo_pop", "clean_fashion_beat"],
+    "overlay_text_hint": "สูตรแต่งตัวลุคนี้",
+    "overlay_instruction": "首图文字由拼贴卡程序化渲染，视频层不重复叠字",
+    "hashtag_seed": ["#ไอเดียแต่งตัว", "#แต่งตัวตาม", "#ลุควันนี้"],
+    "cross_image_rule": "P1 清单、P2-P5 真人上身和目标商品必须属于同一 FINAL Outfit Plan"
+  },
+  "default_storyboard": {
+    "topic_template": "วันนี้ใส่อะไรบ้าง: {product}",
+    "slots": [
+      {"slot_index": 1, "slot_role": "hero", "purpose": "穿搭拆解首图", "duration_ms": 2800, "motion": "static_hold", "transition_out": "cut"},
+      {"slot_index": 2, "slot_role": "full_look", "purpose": "完整真人上身", "duration_ms": 1900, "motion": "slow_push", "transition_out": "cut"},
+      {"slot_index": 3, "slot_role": "lifestyle", "purpose": "层次和穿法", "duration_ms": 1700, "motion": "light_pan", "transition_out": "cut"},
+      {"slot_index": 4, "slot_role": "detail", "purpose": "商品和比例细节", "duration_ms": 1700, "motion": "detail_zoom", "transition_out": "cut"},
+      {"slot_index": 5, "slot_role": "second_angle", "purpose": "第二机位完整效果", "duration_ms": 1900, "motion": "slow_push", "transition_out": "cut"}
+    ]
+  }
+}

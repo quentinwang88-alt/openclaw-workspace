@@ -107,12 +107,12 @@ class FakeAdapter:
 
 
 class PendingMusicSource(NeoBundTrendingMusicSource):
-    def fetch(self, account_id, country, *, language=None):
+    def fetch(self, account_id, country, *, language=None, mood_hints=None):
         raise NeoBundMusicFieldsPendingError()
 
 
 class OkMusicSource(NeoBundTrendingMusicSource):
-    def fetch(self, account_id, country, *, language=None):
+    def fetch(self, account_id, country, *, language=None, mood_hints=None):
         return [
             BgmCandidate(
                 "music_1", "Bright Pop", rank=1, mood_tags=("bright",),
@@ -129,10 +129,22 @@ class OkMusicSource(NeoBundTrendingMusicSource):
         ]
 
 
+class CountingMusicSource(OkMusicSource):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def fetch(self, account_id, country, *, language=None, mood_hints=None):
+        self.calls += 1
+        return super().fetch(
+            account_id, country, language=language, mood_hints=mood_hints
+        )
+
+
 class RotatingMusicSource(NeoBundTrendingMusicSource):
     """Song music_1 has rotated out of the hot list at submit time."""
 
-    def fetch(self, account_id, country, *, language=None):
+    def fetch(self, account_id, country, *, language=None, mood_hints=None):
         return [BgmCandidate("music_9", "New Hit", rank=1, duration_ms=30000)]
 
 
@@ -241,6 +253,29 @@ class PreparePublishTest(unittest.TestCase):
         self.flow.prepare_publish("opv_task_1", operator="老板")
         with self.assertRaises(PublishFlowError):
             self.flow.prepare_publish("opv_task_1", operator="老板")
+
+    def test_far_schedule_defers_bgm_search_until_window(self) -> None:
+        now = datetime(2026, 9, 1, 0, 0, 0)
+        repo = FakeRepository()
+        task, adapter, _flow = build_world(repo, PendingMusicSource())
+        source = CountingMusicSource()
+        flow = OpvPublishFlow(
+            repo, adapter=adapter, music_source=source, clock=lambda: now
+        )
+        planned = datetime(2026, 9, 1, 4, 0, 0)
+        record = flow.prepare_publish(
+            task.task_id,
+            operator="老板",
+            planned_publish_at=planned,
+            publish_mode="auto_schedule",
+        )
+        self.assertEqual(source.calls, 0)
+        self.assertEqual(
+            record.platform_metadata_json["audio"]["status"],
+            "awaiting_selection_window",
+        )
+        self.assertEqual(record.planned_publish_at, planned)
+        self.assertEqual(record.publish_mode, "auto_schedule")
 
     def test_refresh_bgm_selection_upgrades_pending_record(self) -> None:
         self.flow.prepare_publish("opv_task_1", operator="老板")
@@ -372,6 +407,8 @@ class TrendingMusicSourceTest(unittest.TestCase):
         self.assertIn("dance", by_id["d1"].mood_tags)
         self.assertIn("high_energy", by_id["d1"].mood_tags)
         self.assertIn("soft", by_id["d2"].mood_tags)
+        self.assertGreater(by_id["h1"].hot_score, by_id["d1"].hot_score)
+        self.assertEqual(by_id["d1"].raw["pool_rank"], 1)
 
 
 class SubmitAndConfirmTest(unittest.TestCase):
@@ -409,7 +446,8 @@ class SubmitAndConfirmTest(unittest.TestCase):
         # captured commit contract: the selection rides on the organic commit
         self.assertEqual(call["music_selection"]["music_id"], "music_1")
         self.assertEqual(call["music_selection"]["music_url"], "https://cdn/music_1.mp3")
-        self.assertEqual(call["music_selection"]["music_sound_volume"], 50)
+        self.assertEqual(call["music_selection"]["music_sound_volume"], 70)
+        self.assertEqual(call["music_selection"]["video_original_sound_volume"], 0)
         self.assertEqual(self.task.task_status, TASK_PUBLISHING)
         record = self.repo.get_publish_record_by_render("render_1")
         self.assertEqual(record.publish_status, PUBLISH_SUBMITTED)
@@ -423,6 +461,13 @@ class SubmitAndConfirmTest(unittest.TestCase):
         self.assertEqual(self.task.task_status, TASK_PUBLISHED)
         self.assertEqual(record.publish_status, PUBLISH_PUBLISHED)
         self.assertIsNotNone(record.published_at)
+
+    def test_submit_uses_the_publish_caption_snapshot(self) -> None:
+        record = self.repo.get_publish_record_by_render("render_1")
+        record.caption_snapshot_json["caption"] = "frozen caption #one"
+        self.task.copy_json["caption"] = "later mutable caption #two"
+        self.flow.submit("opv_task_1", publish_at=datetime(2026, 8, 31, 12, 0, 0))
+        self.assertEqual(self.adapter.calls[0]["title"], "frozen caption #one")
 
     def test_submit_legacy_no_url_and_unfindable_refuses(self) -> None:
         repo2 = FakeRepository()

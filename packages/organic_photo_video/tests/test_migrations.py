@@ -18,6 +18,8 @@ class MigrationInstallerTest(unittest.TestCase):
             by_name.setdefault(path.name, []).append(statement)
         self.assertEqual(len(by_name["003_enforce_package_and_outfit_state.sql"]), 1)
         self.assertEqual(len(by_name["004_unique_content_package_per_task.sql"]), 1)
+        self.assertEqual(len(by_name["005_publish_schedule_queue.sql"]), 1)
+        self.assertEqual(len(by_name["006_product_reference_pack.sql"]), 1)
         digests = {
             path.name: apply_rds_migration.source_digest(path.name, sql)
             for path, sql in sources

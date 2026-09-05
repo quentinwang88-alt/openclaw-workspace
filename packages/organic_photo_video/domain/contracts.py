@@ -28,6 +28,8 @@ BGM_SCHEMA_VERSION = "opv-bgm-v1"
 PLAN_SHOT_COUNT = 5
 PLAN_DURATION_MIN_MS = 10000
 PLAN_DURATION_MAX_MS = 15000
+SHOT_KINDS = ("generated_photo", "composite_board")
+FIT_MODES = ("cover", "contain")
 
 AUDIO_STRATEGIES = ("platform_hot_bgm", "embedded_bgm", "no_bgm")
 LOOK_SOURCE_TYPES = ("successful_look", "look_template", "ai_exploration")
@@ -44,6 +46,31 @@ class ContractViolationError(ValueError):
 def ensure_valid(errors: List[str], label: str) -> None:
     if errors:
         raise ContractViolationError(f"{label} invalid: " + "; ".join(errors))
+
+
+def is_multi_look_plan(plan: Mapping[str, Any]) -> bool:
+    recipe = plan.get("recipe") or {}
+    execution = plan.get("recipe_execution") or {}
+    return (recipe.get("id") == "RECIPE_MULTI_LOOK_V1"
+            or execution.get("recipe_id") == "RECIPE_MULTI_LOOK_V1"
+            or plan.get("content_goal") == "multi_look"
+            or recipe.get("content_goal") == "multi_look"
+            or execution.get("content_goal") == "multi_look")
+
+
+def expected_plan_shot_count(plan: Mapping[str, Any]) -> int:
+    """Legacy stays five; multi-look count is explicit and frozen, never inferred."""
+    if not is_multi_look_plan(plan):
+        return PLAN_SHOT_COUNT
+    count = plan.get("actual_shot_count")
+    shots = plan.get("shots")
+    if not _is_int(count) or not 1 <= count <= 5:
+        raise ContractViolationError("multi_look actual_shot_count must be an integer in 1..5")
+    if (not isinstance(shots, list) or len(shots) != count
+            or any(not isinstance(s, dict) or not _is_int(s.get("slot_index")) for s in shots)
+            or [s["slot_index"] for s in shots] != list(range(1, count + 1))):
+        raise ContractViolationError("multi_look shots must match frozen actual_shot_count in order 1..N")
+    return count
 
 
 # --------------------------------------------------------------------------
@@ -377,35 +404,47 @@ def validate_plan_json(plan: Mapping[str, Any]) -> List[str]:
             errors.append("render_contract must be an object")
         else:
             _require_str(errors, render_contract, "preset_id")
+            duration_minimum = 6000 if is_multi_look_plan(plan) else PLAN_DURATION_MIN_MS
+            duration_maximum = 6000 if is_multi_look_plan(plan) else PLAN_DURATION_MAX_MS
             _require_int(
                 errors,
                 render_contract,
                 "target_duration_ms",
-                minimum=PLAN_DURATION_MIN_MS,
-                maximum=PLAN_DURATION_MAX_MS,
+                minimum=duration_minimum,
+                maximum=duration_maximum,
             )
 
     shots = plan.get("shots")
-    if not _is_list(shots) or len(shots) != PLAN_SHOT_COUNT:
+    try:
+        expected_count = expected_plan_shot_count(plan)
+    except ContractViolationError as exc:
+        errors.append(str(exc))
+        return errors
+    if not _is_list(shots) or len(shots) != expected_count:
         errors.append(
-            f"shots must contain exactly {PLAN_SHOT_COUNT} entries for V1"
+            f"shots must contain exactly {expected_count} entries for this recipe"
         )
         return errors
 
     seen_slots: set = set()
     total_ms = 0
     for shot in shots:
-        shot_errors = validate_shot_payload(shot)
+        shot_errors = validate_shot_payload(shot, max_duration_ms=10000 if is_multi_look_plan(plan) else 8000)
         errors.extend(shot_errors)
         if not shot_errors and _is_dict(shot):
             seen_slots.add(shot["slot_index"])
             total_ms += shot["duration_ms"]
-    if len(seen_slots) != PLAN_SHOT_COUNT:
-        errors.append("shots slot_index must cover 1..5 exactly once")
-    if not PLAN_DURATION_MIN_MS <= total_ms <= PLAN_DURATION_MAX_MS:
+    if seen_slots != set(range(1, expected_count + 1)):
+        errors.append(f"shots slot_index must cover 1..{expected_count} exactly once")
+    expected_multi_duration = 6000 if is_multi_look_plan(plan) else None
+    if expected_multi_duration is not None and total_ms != expected_multi_duration:
+        errors.append(f"multi_look shots must total exactly {expected_multi_duration}ms")
+    minimum = expected_multi_duration if expected_multi_duration is not None else PLAN_DURATION_MIN_MS
+    maximum = expected_multi_duration if expected_multi_duration is not None else PLAN_DURATION_MAX_MS
+    if not minimum <= total_ms <= maximum:
         errors.append(
             f"shots total duration {total_ms}ms outside "
-            f"{PLAN_DURATION_MIN_MS}-{PLAN_DURATION_MAX_MS}ms"
+            f"{minimum}-{maximum}ms"
         )
     if _is_dict(render_contract) and _is_int(render_contract.get("target_duration_ms")):
         target_ms = render_contract["target_duration_ms"]
@@ -416,7 +455,7 @@ def validate_plan_json(plan: Mapping[str, Any]) -> List[str]:
     return errors
 
 
-def validate_shot_payload(shot: Any) -> List[str]:
+def validate_shot_payload(shot: Any, *, max_duration_ms: int = 8000) -> List[str]:
     if not _is_dict(shot):
         return [f"shot must be an object, got {type(shot).__name__}"]
     errors: List[str] = []
@@ -425,12 +464,18 @@ def validate_shot_payload(shot: Any) -> List[str]:
         {"hero", "full_look", "lifestyle", "detail", "second_angle"}
     )))
     _require_str(errors, shot, "purpose")
-    _require_int(errors, shot, "duration_ms", minimum=500, maximum=8000)
+    _require_int(errors, shot, "duration_ms", minimum=500, maximum=max_duration_ms)
     _require_str(errors, shot, "motion_preset")
     _require_str(errors, shot, "transition_out")
     _require_str(errors, shot, "overlay_text", allow_empty=True)
     _require_str(errors, shot, "generation_prompt", allow_empty=True)
     _require_list(errors, shot, "source_refs")
+    if shot.get("shot_kind") is not None:
+        _require_enum(errors, shot, "shot_kind", SHOT_KINDS)
+    if shot.get("fit_mode") is not None:
+        _require_enum(errors, shot, "fit_mode", FIT_MODES)
+    if shot.get("shot_kind") == "composite_board":
+        _require_dict(errors, shot, "board_spec")
     if shot.get("narrative_function") is not None:
         _require_enum(errors, shot, "narrative_function", NARRATIVE_FUNCTIONS)
     return errors
@@ -535,6 +580,8 @@ def validate_content_recipe_payload(payload: Mapping[str, Any]) -> List[str]:
         _require_enum(errors, slot, "narrative_function", NARRATIVE_FUNCTIONS)
         _require_str(errors, slot, "slot_role")
         _require_str(errors, slot, "purpose")
+        if slot.get("shot_kind") is not None:
+            _require_enum(errors, slot, "shot_kind", SHOT_KINDS)
         function_value = slot.get("narrative_function")
         if _is_str(function_value):
             functions_seen.append(function_value)
@@ -630,7 +677,7 @@ def validate_quality_profile_payload(payload: Mapping[str, Any]) -> List[str]:
                 continue
             scopes = rule.get("scope")
             if not _is_list(scopes) or not scopes or any(
-                scope not in ("single", "group") for scope in scopes
+                scope not in ("anchor", "single", "cutout", "board", "group", "render") for scope in scopes
             ):
                 errors.append(
                     f"quality dimension {key}.scope must use single/group"

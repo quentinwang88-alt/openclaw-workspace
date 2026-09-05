@@ -78,6 +78,13 @@ def generate_product_image_story(
     product_snapshot: Optional[Dict[str, Any]] = None,
     operator: str = "story_api",
     asset_reader=None,
+    source_type: str = "story_api",
+    source_record_id_prefix: Optional[str] = None,
+    feishu_record_id: Optional[str] = None,
+    persona_ref: Optional[str] = None,
+    look_ref: Optional[str] = None,
+    scene_ref: Optional[str] = None,
+    variant_index_offset: int = 0,
 ) -> List[Dict[str, Any]]:
     if variant_count < 1 or variant_count > 9:
         raise StoryGenerationError("variant_count must be 1..9")
@@ -95,19 +102,31 @@ def generate_product_image_story(
     planner = ContentPlannerService(repository, asset_reader=asset_reader)
 
     results: List[Dict[str, Any]] = []
-    for variant_index in range(1, variant_count + 1):
+    for local_variant_index in range(1, variant_count + 1):
+        variant_index = int(variant_index_offset) + local_variant_index
         snapshot = dict(product_snapshot)
         snapshot.setdefault("product_id", str(product_id))
+        if persona_ref:
+            snapshot["planned_persona_ref"] = persona_ref
+        if look_ref:
+            snapshot["planned_look_ref"] = look_ref
+        if scene_ref:
+            snapshot["planned_scene_ref"] = scene_ref
+        source_record_id = (
+            f"{source_record_id_prefix}:{local_variant_index}"
+            if source_record_id_prefix
+            else f"{product_id}:{recipe_id}:{theme_id or 'auto'}:"
+                 f"{hook_strategy or 'auto'}:{variant_index}"
+        )
         request = TaskRequest(
             account_id=account.account_id,
             product_id=str(product_id),
             product_snapshot=snapshot,
             theme_id=theme_id,
-            source_type="story_api",
-            source_record_id=(
-                f"{product_id}:{recipe_id}:{theme_id or 'auto'}:"
-                f"{hook_strategy or 'auto'}:{variant_index}"
-            ),
+            source_type=source_type,
+            source_record_id=source_record_id,
+            feishu_record_id=feishu_record_id,
+            idempotency_key=f"{source_type}:{source_record_id}",
             created_by=operator,
         )
         intake_result = intake.create_task(request)
@@ -144,11 +163,11 @@ def generate_product_image_story(
                 "hook_strategy": ((plan.get("recipe_execution") or {}).get(
                     "hook_strategy"
                 )),
-                "variation_plan": {
+                "variation_plan": dict(plan.get("variation_plan") or {
                     "variant_index": variant_index,
                     "changed_axes": ["hook_strategy"],
                     "fixed_axes": ["product", "persona", "theme", "scene"],
-                },
+                }),
                 "outfit_plan_id": (plan.get("outfit_plan") or {}).get(
                     "outfit_plan_id"
                 ),

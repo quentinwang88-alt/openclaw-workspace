@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create, plan, generate, and visually review one OPV five-image task."""
+"""Create/continue OPV production through technical QC and an unpublished video."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from services.content_planner import ContentPlannerService  # noqa: E402
 from services.hero_first import HeroFirstProducer  # noqa: E402
 from services.image_generator import OpenAIImageGenerator  # noqa: E402
 from services.task_intake import TaskIntakeService, TaskRequest  # noqa: E402
-from services.visual_qa import CreatorCrmVisualQaAdapter, VisualQaService  # noqa: E402
+from services.workflow_v2 import ScopedReviewService, workflow_v2_enabled  # noqa: E402
 
 
 def main() -> int:
@@ -41,8 +41,19 @@ def main() -> int:
     parser.add_argument("--hook-strategy", default="")
     parser.add_argument("--topic", default="")
     parser.add_argument("--idempotency-key", required=True)
-    parser.add_argument("--skip-visual-qa", action="store_true")
+    parser.add_argument(
+        "--run-visual-qa",
+        action="store_true",
+        help="deprecated: independent visual review is now a separate diagnostic command",
+    )
+    parser.add_argument(
+        "--skip-visual-qa",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args()
+    if args.run_visual_qa and not args.skip_visual_qa:
+        parser.error("生产主链不再调用独立视觉审核；如需诊断请单独使用 run_visual_qa.py")
 
     references = [str(Path(value).expanduser().resolve()) for value in args.reference_image]
     missing = [value for value in references if not Path(value).is_file()]
@@ -81,7 +92,15 @@ def main() -> int:
             hook_strategy=args.hook_strategy or None,
         )
     task = repository.get_task(task_id)
-    if task and task.task_status in {"planned", "hero_generating", "image_generating", "failed"}:
+    report = None
+    if task and workflow_v2_enabled(task):
+        from services.technical_production import TechnicalProductionFlow
+        from services.video_render_flow import VideoRenderFlow
+        from services.video_renderer import FFmpegStillRenderer
+        TechnicalProductionFlow(repository,
+            HeroFirstProducer(repository, OpenAIImageGenerator(), technical_only=True),
+            VideoRenderFlow(repository, FFmpegStillRenderer())).run(task_id)
+    elif task and task.task_status in {"planned", "hero_generating", "image_generating", "failed"}:
         report = HeroFirstProducer(
             repository, OpenAIImageGenerator()
         ).produce(task_id)
@@ -89,17 +108,13 @@ def main() -> int:
         report = None
 
     visual = None
-    task = repository.get_task(task_id)
-    if task and task.task_status == "image_review" and not args.skip_visual_qa:
-        visual = VisualQaService(
-            repository, CreatorCrmVisualQaAdapter()
-        ).review_task(task_id)
 
     shots = HeroFirstProducer._latest_per_slot(repository.list_shots(task_id))
+    current_status = (repository.get_task(task_id) or intake.task).task_status
     output = {
         "task_id": task_id,
         "created": intake.created,
-        "task_status": (repository.get_task(task_id) or intake.task).task_status,
+        "task_status": current_status,
         "persona_ref": args.persona_ref,
         "generation": {
             "hero_ok": report.hero_ok if report else None,
@@ -119,7 +134,11 @@ def main() -> int:
             "group_dimensions": visual.group.dimensions,
             "reason_codes": visual.group.reason_codes,
         } if visual else None,
-        "next_gate": "human_group_approval_before_video_render",
+        "next_gate": (
+            "explicit_publish_confirmation" if workflow_v2_enabled(repository.get_task(task_id))
+            else "anchor_visual_review" if current_status == "anchor_review"
+            else "human_group_approval_before_video_render"
+        ),
     }
     print(json.dumps(output, ensure_ascii=False, indent=2))
     return 0

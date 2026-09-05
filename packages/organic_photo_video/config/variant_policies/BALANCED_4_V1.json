@@ -1,0 +1,11 @@
+{
+  "schema_version": "opv-variant-policy-v1",
+  "variant_policy_id": "BALANCED_4_V1",
+  "policy_version": 1,
+  "mode": "balanced",
+  "layout_variants": ["LEFT_HERO", "RIGHT_HERO", "CENTER_HERO", "BOTTOM_GRID"],
+  "copy_variants": ["outfit_formula", "save_this_look", "what_i_wore", "three_piece_formula"],
+  "palette_variants": ["WARM_WHITE", "COOL_WHITE"],
+  "layout_variants_per_content": 2,
+  "status": "active"
+}

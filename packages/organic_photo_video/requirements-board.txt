@@ -1,0 +1,5 @@
+# Additional local board-processing dependencies; acceptance-tested on Python 3.9.
+# No model weights/downloads or independent vision-review service.
+numpy==2.0.2
+scipy==1.13.1
+Pillow==11.3.0

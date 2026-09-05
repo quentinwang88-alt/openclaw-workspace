@@ -1,0 +1,48 @@
+{
+  "schema_version": "opv-board-layout-v1",
+  "layout_id": "LAYOUT_OUTFIT_BREAKDOWN_V2",
+  "layout_version": 2,
+  "canvas": {"width": 1080, "height": 1920, "background": "#FAFAF7"},
+  "safe_area": {"top": 150, "bottom": 250, "left": 50, "right": 50},
+  "composition_style": "freeform_cutout",
+  "variants": {
+    "LEFT_HERO": {
+      "hero": {"x": 35, "y": 285, "width": 500, "height": 1300},
+      "target_product": {"x": 570, "y": 265, "width": 420, "height": 430},
+      "companion_1": {"x": 555, "y": 685, "width": 270, "height": 300},
+      "companion_2": {"x": 765, "y": 700, "width": 250, "height": 410},
+      "item_list": {"x": 570, "y": 1160, "width": 420, "height": 300}
+    },
+    "RIGHT_HERO": {
+      "hero": {"x": 545, "y": 285, "width": 500, "height": 1300},
+      "target_product": {"x": 60, "y": 265, "width": 420, "height": 430},
+      "companion_1": {"x": 55, "y": 685, "width": 270, "height": 300},
+      "companion_2": {"x": 265, "y": 700, "width": 250, "height": 410},
+      "item_list": {"x": 65, "y": 1160, "width": 420, "height": 300}
+    },
+    "CENTER_HERO": {
+      "hero": {"x": 290, "y": 300, "width": 500, "height": 1260},
+      "target_product": {"x": 25, "y": 300, "width": 330, "height": 390},
+      "companion_1": {"x": 750, "y": 320, "width": 300, "height": 300},
+      "companion_2": {"x": 770, "y": 690, "width": 250, "height": 430},
+      "item_list": {"x": 45, "y": 1110, "width": 300, "height": 330}
+    },
+    "BOTTOM_GRID": {
+      "hero": {"x": 35, "y": 270, "width": 500, "height": 940},
+      "target_product": {"x": 570, "y": 260, "width": 420, "height": 420},
+      "companion_1": {"x": 570, "y": 680, "width": 220, "height": 260},
+      "companion_2": {"x": 790, "y": 675, "width": 210, "height": 350},
+      "item_list": {"x": 90, "y": 1260, "width": 900, "height": 220}
+    }
+  },
+  "text": {
+    "title_box": {"x": 60, "y": 165, "width": 900, "height": 90},
+    "footer_box": {"x": 60, "y": 1530, "width": 900, "height": 100},
+    "font_candidates": ["/System/Library/Fonts/ThonburiUI.ttc"],
+    "title_size": 54,
+    "item_size": 34,
+    "footer_size": 32,
+    "color": "#171717"
+  },
+  "status": "active"
+}

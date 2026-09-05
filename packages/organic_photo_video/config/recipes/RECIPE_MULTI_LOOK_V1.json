@@ -1,0 +1,22 @@
+{
+  "schema_version": "opv-content-recipe-v1",
+  "recipe_id": "RECIPE_MULTI_LOOK_V1",
+  "recipe_key": "RECIPE_MULTI_LOOK",
+  "recipe_version": 1,
+  "content_goal": "multi_look",
+  "anchor_slot": 1,
+  "shot_count": 5,
+  "hook_types": ["multi_look"],
+  "story_structure": [
+    {"slot_index": 1, "narrative_function": "HOOK", "slot_role": "hero", "shot_kind": "composite_board", "purpose": "Look A 左大人物、右侧单品拆解；原图独立生成，不借用下一页", "camera_hint": "Look A 正面完整全身原图，程序化首图拼贴，不加大标题清单页脚"},
+    {"slot_index": 2, "narrative_function": "CONTEXT", "slot_role": "full_look", "shot_kind": "generated_photo", "purpose": "Look B 完整全身穿搭", "camera_hint": "正面完整全身，腰部水平机位，头顶鞋底完整"},
+    {"slot_index": 3, "narrative_function": "TRANSFORMATION", "slot_role": "full_look", "shot_kind": "generated_photo", "purpose": "Look C 完整全身穿搭", "camera_hint": "正面或轻微三分之四侧身完整全身"},
+    {"slot_index": 4, "narrative_function": "PROOF", "slot_role": "full_look", "shot_kind": "generated_photo", "purpose": "Look D 完整全身穿搭，不做局部细节页", "camera_hint": "正面完整全身，腰线、裤脚和鞋履可见"},
+    {"slot_index": 5, "narrative_function": "PAYOFF", "slot_role": "full_look", "shot_kind": "generated_photo", "purpose": "Look E 完整全身穿搭，不回到Look A，不做背面收尾", "camera_hint": "正面完整全身，轻微重心变化"}
+  ],
+  "copy_style": {"title_tone": "一件单品，多套真实穿搭", "structure": "实际N套穿搭 + LOOK编号；候选不足时减少页数和文案套数", "count_policy": "actual_distinct_look_count", "example_zh": "同一件外套的不同穿搭"},
+  "suitable_topics": ["outfit_breakdown"],
+  "render_profile_id": "IMAGE_MULTI_LOOK_V1",
+  "quality_profile_id": "QUALITY_STANDARD_V1",
+  "status": "active"
+}

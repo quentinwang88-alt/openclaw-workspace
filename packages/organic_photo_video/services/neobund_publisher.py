@@ -40,7 +40,7 @@ from domain.statuses import (
     TASK_READY_TO_PUBLISH,
     TASK_VIDEO_REVIEW,
 )
-from services import neobund_music
+from services import bgm_audio, neobund_music
 
 # Captured 2026-08-31 from real traffic (HAR, POST /np/shoppable/video/commit
 # with a hot-list song attached): the organic commit carries
@@ -51,7 +51,9 @@ from services import neobund_music
 # Also observed: isAigc spelling, postType/brandContentToggle/
 # brandOrganicToggle/disableComment/disableDuet/disableStitch (all 0).
 MUSIC_FIELDS_CAPTURED = True
-DEFAULT_MUSIC_VOLUME = 50
+DEFAULT_MUSIC_VOLUME = 70
+DEFAULT_VIDEO_ORIGINAL_SOUND_VOLUME = 0
+BGM_SELECTION_MAX_LEAD_MINUTES = 120
 
 
 class PublishFlowError(RuntimeError):
@@ -89,6 +91,12 @@ TRENDING_MAX_PAGES = 3
 # Search pools for a rhythm-strong shortlist (operator feedback 2026-08-31):
 # the generic hot list plus an explicit dance pool, (keyword, max_pages) pairs.
 SEARCH_POOLS = (("hot", 2), ("dance", 1))
+POOL_MOOD_TAGS = {
+    "dance": ("dance", "high_energy"),
+    "pop": ("bright", "high_energy"),
+    "lofi": ("soft", "calm"),
+    "romantic": ("soft", "calm"),
+}
 
 # Title-keyword lexicon -> mood tags used by the selection policy. Titles are
 # the only signal NeoBund exposes (no BPM field), so strong-beat candidates
@@ -120,6 +128,7 @@ class NeoBundTrendingMusicSource:
         country: str,
         *,
         language: Optional[str] = None,
+        mood_hints: Optional[List[str]] = None,
     ) -> List[neobund_music.BgmCandidate]:
         if self._client is None:
             raise PublishFlowError(
@@ -129,10 +138,10 @@ class NeoBundTrendingMusicSource:
         region = str(country or "").strip().upper()
         locale = language or LOCALE_BY_COUNTRY.get(region, DEFAULT_LOCALE)
         candidates: List[neobund_music.BgmCandidate] = []
-        seen_ids: set = set()
-        for keyword, max_pages in SEARCH_POOLS:
+        by_id: Dict[str, neobund_music.BgmCandidate] = {}
+        for keyword, max_pages in self._pools_for_hints(mood_hints):
             self._search_pool(
-                region, locale, keyword, max_pages, candidates, seen_ids
+                region, locale, keyword, max_pages, candidates, by_id
             )
         return candidates
 
@@ -151,11 +160,27 @@ class NeoBundTrendingMusicSource:
         region = str(country or "").strip().upper()
         locale = language or LOCALE_BY_COUNTRY.get(region, DEFAULT_LOCALE)
         candidates: List[neobund_music.BgmCandidate] = []
-        seen_ids: set = set()
+        by_id: Dict[str, neobund_music.BgmCandidate] = {}
         self._search_pool(
-            region, locale, str(keyword or "").strip(), int(pages), candidates, seen_ids
+            region, locale, str(keyword or "").strip(), int(pages), candidates, by_id
         )
         return candidates
+
+    @staticmethod
+    def _pools_for_hints(mood_hints: Optional[List[str]]):
+        if not mood_hints:
+            return SEARCH_POOLS
+        moods = neobund_music.canonical_moods(mood_hints)
+        pools = [("hot", 2)]
+        if moods & {"soft", "calm"}:
+            pools.extend([("lofi", 1), ("romantic", 1)])
+        elif moods & {"dance"}:
+            pools.append(("dance", 1))
+        elif moods & {"bright", "high_energy"}:
+            pools.append(("pop", 1))
+        else:
+            pools.append(("dance", 1))
+        return tuple(pools)
 
     def _search_pool(
         self,
@@ -164,10 +189,11 @@ class NeoBundTrendingMusicSource:
         keyword: str,
         max_pages: int,
         candidates: List[neobund_music.BgmCandidate],
-        seen_ids: set,
+        by_id: Dict[str, neobund_music.BgmCandidate],
     ) -> None:
         page_token: Optional[str] = None
         search_id = self._new_search_id()
+        pool_position = 0
         for _page in range(max(1, int(max_pages))):
             payload: Dict[str, Any] = {
                 "type": 2,
@@ -188,16 +214,38 @@ class NeoBundTrendingMusicSource:
                     continue
                 music_id = str(item.get("id") or "").strip()
                 title = str(item.get("title") or "").strip()
-                if not music_id or not title or music_id in seen_ids:
+                if not music_id or not title:
                     continue
-                seen_ids.add(music_id)
+                title_tags = list(self._mood_tags(title))
+                for tag in POOL_MOOD_TAGS.get(keyword, ()):
+                    if tag not in title_tags:
+                        title_tags.append(tag)
+                if music_id in by_id:
+                    existing = by_id[music_id]
+                    existing.mood_tags = tuple(dict.fromkeys(
+                        list(existing.mood_tags) + title_tags
+                    ))
+                    matched = list(existing.raw.get("matched_pools") or [])
+                    if keyword not in matched:
+                        matched.append(keyword)
+                    existing.raw["matched_pools"] = matched
+                    continue
+                pool_position += 1
+                pool_hot_score = max(
+                    0.0, 1.0 - (pool_position - 1) / 50.0
+                )
+                if keyword != "hot":
+                    # A targeted rhythm search is useful for mood matching but
+                    # is not equivalent to the country's hot ranking.
+                    pool_hot_score *= 0.70
                 candidates.append(
                     neobund_music.BgmCandidate(
                         music_id=music_id,
                         title=title,
                         rank=len(candidates) + 1,
                         duration_ms=self._duration_ms(item.get("duration")),
-                        mood_tags=self._mood_tags(title),
+                        mood_tags=tuple(title_tags),
+                        hot_score=pool_hot_score,
                         # Signed CDN urls live only in raw (memory); they
                         # are never persisted into publish payloads.
                         raw={
@@ -205,9 +253,12 @@ class NeoBundTrendingMusicSource:
                             "play_url": self._first_url(item.get("play_url")),
                             "cover_url": self._first_url(item.get("cover_thumb")),
                             "pool": keyword,
+                            "pool_rank": pool_position,
+                            "matched_pools": [keyword],
                         },
                     )
                 )
+                by_id[music_id] = candidates[-1]
             has_more = str(response.get("has_more", "")).strip().lower() == "true"
             next_token = str(response.get("next_page_token") or "").strip()
             if not has_more or not next_token:
@@ -269,6 +320,7 @@ class OpvPublishFlow:
         *,
         operator: str,
         planned_publish_at: Optional[datetime] = None,
+        publish_mode: str = "manual",
     ) -> PublishRecord:
         if not operator or not operator.strip():
             raise PublishFlowError("operator is required (human publish gate)")
@@ -282,6 +334,16 @@ class OpvPublishFlow:
         if render is None or not render.publish_ready:
             raise PublishFlowError(
                 f"task {task_id} has no publish-ready render; run Phase 2 first"
+            )
+        from services.workflow_v2 import workflow_v2_enabled
+        if workflow_v2_enabled(task) and (
+            not task.released_revision_id
+            or task.active_revision_id != task.released_revision_id
+            or task.released_revision_id != render.origin_revision_id
+            or task.selected_render_id != render.render_id
+        ):
+            raise PublishFlowError(
+                "Workflow V2 render has not passed the frozen revision release gate"
             )
         existing = self._repository.get_publish_record_by_render(render.render_id)
         if existing is not None:
@@ -308,14 +370,51 @@ class OpvPublishFlow:
             render_id=render.render_id,
             account_id=task.account_id,
             caption_snapshot_json=caption_snapshot,
-            cover_shot_id=self._cover_shot_id(task_id),
+            # V2 must use the exact P1 that entered the released render, not
+            # whichever physical shot row was selected most recently.
+            cover_shot_id=self._cover_shot_id(task_id, render=render),
             operator_name=operator,
+            planned_publish_at=planned_publish_at,
+            publish_mode=publish_mode,
         )
         self._repository.insert_publish_record(record)
         record = self._repository.get_publish_record(record.publish_id) or record
 
-        self._refresh_bgm_selection(record, planned_publish_at=planned_publish_at)
+        if self._inside_bgm_selection_window(planned_publish_at):
+            self._refresh_bgm_selection(record, planned_publish_at=planned_publish_at)
+        else:
+            self._defer_bgm_selection(record, planned_publish_at=planned_publish_at)
         return self._repository.get_publish_record(record.publish_id) or record
+
+    def _inside_bgm_selection_window(
+        self, planned_publish_at: Optional[datetime]
+    ) -> bool:
+        if planned_publish_at is None:
+            return True
+        return planned_publish_at <= self._clock() + timedelta(
+            minutes=BGM_SELECTION_MAX_LEAD_MINUTES
+        )
+
+    def _defer_bgm_selection(
+        self, record: PublishRecord, *, planned_publish_at: Optional[datetime]
+    ) -> None:
+        task = self._require_task(record.task_id)
+        audio = neobund_music.pending_capture_payload(
+            country=task.target_country, auth_id=task.account_id
+        )
+        audio["status"] = "awaiting_selection_window"
+        metadata = dict(record.platform_metadata_json or {})
+        metadata["audio"] = audio
+        metadata["planned_publish_at"] = (
+            planned_publish_at.isoformat(timespec="seconds")
+            if planned_publish_at else None
+        )
+        self._repository.update_publish_result(
+            record.publish_id,
+            publish_status=record.publish_status,
+            planned_publish_at=planned_publish_at,
+            platform_metadata_json=metadata,
+        )
 
     def _refresh_bgm_selection(
         self, record: PublishRecord, *, planned_publish_at: Optional[datetime]
@@ -330,16 +429,24 @@ class OpvPublishFlow:
         country = task.target_country
         auth_id = task.account_id
         try:
+            profile = self._bgm_profile(task)
+            mood_hints = profile["mood_hints"]
             candidates = self._music_source.fetch(
-                auth_id, country, language=task.target_locale
+                auth_id,
+                country,
+                language=task.target_locale,
+                mood_hints=mood_hints,
             )
+            if profile["rhythm_preference"] == "strong":
+                candidates = bgm_audio.enrich_candidates(candidates)
             video_ms = self._render_duration(record.render_id)
-            mood_hints = self._mood_hints(task)
             ranked = neobund_music.select_top(
                 candidates,
                 mood_hints=mood_hints,
                 video_duration_ms=video_ms,
                 use_counts=self._recent_use_counts(auth_id),
+                rhythm_preference=profile["rhythm_preference"],
+                require_audio_analysis=profile["rhythm_preference"] == "strong",
             )
             if not ranked:
                 raise PublishFlowError(
@@ -350,6 +457,12 @@ class OpvPublishFlow:
                 country=country,
                 auth_id=auth_id,
                 selected_at=self._clock().isoformat(timespec="seconds"),
+            )
+            selected = ranked[0][0]
+            audio_payload["profile"] = profile
+            audio_payload["audio_analysis"] = selected.raw.get("audio_analysis") or {}
+            audio_payload["timing_plan"] = self._timing_plan(
+                selected, profile=profile, video_ms=video_ms
             )
         except NeoBundMusicFieldsPendingError:
             audio_payload = neobund_music.pending_capture_payload(
@@ -402,6 +515,7 @@ class OpvPublishFlow:
         unresolved = audio.get("status") in (
             "pending_field_capture",
             "selection_failed",
+            "awaiting_selection_window",
         )
         if not resolved:
             if unresolved and not allow_without_bgm:
@@ -476,7 +590,9 @@ class OpvPublishFlow:
 
         # NeoBund videoTitle is the TikTok post caption: send the full
         # caption (title + one-liner + hashtags) composed by copy_writer.
-        copy_block = task.copy_json or {}
+        # Publish records are immutable release snapshots. A later copy
+        # rewrite must never silently alter an already armed post.
+        copy_block = record.caption_snapshot_json or {}
         video_title = (
             str(copy_block.get("caption") or copy_block.get("title") or "").strip()
             or task.task_id
@@ -522,11 +638,14 @@ class OpvPublishFlow:
             self._record_id_for_task(task_id),
             publish_status=PUBLISH_SUBMITTED,
             external_post_id=external_task_id or None,
+            submitted_at=self._clock(),
             platform_metadata_json=metadata,
         )
         return external_task_id
 
-    def _merge_actual_music(self, task, metadata: Dict[str, Any]) -> None:
+    def _merge_actual_music(
+        self, task, metadata: Dict[str, Any], *, record: Optional[PublishRecord] = None
+    ) -> None:
         """Best-effort actual-music回读 (opv-bgm-v1 requires plan vs actual).
 
         The NeoBund task list record is the source of truth for what was
@@ -538,7 +657,7 @@ class OpvPublishFlow:
         try:
             item = finder(
                 script_id=task.task_id,
-                video_title=(task.copy_json or {}).get("title", ""),
+                video_title=((record.caption_snapshot_json if record else {}) or {}).get("title", ""),
                 scheduled_for=str(metadata.get("scheduled_release_time") or ""),
             ) or {}
         except Exception:  # noqa: BLE001 - requery is best-effort
@@ -576,7 +695,10 @@ class OpvPublishFlow:
                     audio.get("music_sound_volume", DEFAULT_MUSIC_VOLUME)
                 ),
                 "video_original_sound_volume": int(
-                    audio.get("video_original_sound_volume", DEFAULT_MUSIC_VOLUME)
+                    audio.get(
+                        "video_original_sound_volume",
+                        DEFAULT_VIDEO_ORIGINAL_SOUND_VOLUME,
+                    )
                 ),
             }
 
@@ -585,7 +707,10 @@ class OpvPublishFlow:
         match = None
         try:
             fresh = self._music_source.fetch(
-                task.account_id, task.target_country, language=task.target_locale
+                task.account_id,
+                task.target_country,
+                language=task.target_locale,
+                mood_hints=self._mood_hints(task),
             )
             match = next(
                 (c for c in fresh if c.music_id == selected_music_id), None
@@ -624,7 +749,10 @@ class OpvPublishFlow:
                 audio.get("music_sound_volume", DEFAULT_MUSIC_VOLUME)
             ),
             "video_original_sound_volume": int(
-                audio.get("video_original_sound_volume", DEFAULT_MUSIC_VOLUME)
+                audio.get(
+                    "video_original_sound_volume",
+                    DEFAULT_VIDEO_ORIGINAL_SOUND_VOLUME,
+                )
             ),
         }
 
@@ -640,7 +768,7 @@ class OpvPublishFlow:
         record = self._require_record_for_task(task_id)
         metadata = dict(record.platform_metadata_json or {})
         external_task_id = str(metadata.get("neobund_task_id") or "")
-        self._merge_actual_music(task, metadata)
+        self._merge_actual_music(task, metadata, record=record)
         # submit stores scheduled_release_time as a string; the adapter needs
         # a datetime (used for matching and as the published_at fallback).
         scheduled_for = None
@@ -725,13 +853,54 @@ class OpvPublishFlow:
             return []
         return list(theme.content_plan_rules_json.get("bgm_mood_hints", []))
 
+    def _bgm_profile(self, task) -> Dict[str, Any]:
+        theme_id = ((task.plan_json or {}).get("theme") or {}).get("id")
+        theme = self._repository.get_theme(theme_id) if theme_id else None
+        rules = theme.content_plan_rules_json if theme is not None else {}
+        markers = " ".join((str(theme_id or ""), str(getattr(theme, "theme_name", "") or ""), str(rules)))
+        task_inputs = neobund_music.task_content_profile_inputs(task)
+        return neobund_music.derive_content_profile(
+            markers,
+            list(rules.get("bgm_mood_hints") or []),
+            content_template=task_inputs["content_template"],
+            rhythm_preference=task_inputs["rhythm_preference"],
+        )
+
+    @staticmethod
+    def _timing_plan(candidate, *, profile: Dict[str, Any], video_ms: int) -> Dict[str, Any]:
+        analysis = candidate.raw.get("audio_analysis") or {}
+        beats = list(analysis.get("beat_times_ms") or []) if isinstance(analysis, dict) else []
+        mode = profile["sync_mode"]
+        if mode == "slideshow" and beats:
+            return {
+                "mode": "slideshow",
+                "status": "planned",
+                "cut_candidates_ms": [beat for beat in beats if 500 <= beat < video_ms],
+            }
+        if mode == "reveal" and beats:
+            return {
+                "mode": "reveal",
+                # NeoBund's commit contract currently contains no observed
+                # music-start offset.  Do not invent one in the request.
+                "status": "platform_offset_unverified",
+                "beat_candidates_ms": [beat for beat in beats if beat < video_ms],
+            }
+        return {"mode": mode, "status": "not_applicable" if mode == "none" else "no_reliable_beat"}
+
     def _render_duration(self, render_id: str) -> int:
         render = self._repository.get_render(render_id)
         if render is None or not render.duration_ms:
             return 12500  # preset default
         return int(render.duration_ms)
 
-    def _cover_shot_id(self, task_id: str) -> Optional[str]:
+    def _cover_shot_id(self, task_id: str, *, render=None) -> Optional[str]:
+        if render is not None:
+            frozen = sorted(
+                [item for item in (render.shot_selection_json or []) if isinstance(item, dict)],
+                key=lambda item: int(item.get("slot_index") or 9999),
+            )
+            if frozen:
+                return str(frozen[0].get("shot_id") or "") or None
         shots = self._repository.list_shots(task_id)
         selected = [s for s in shots if s.is_selected]
         return selected[0].shot_id if selected else None

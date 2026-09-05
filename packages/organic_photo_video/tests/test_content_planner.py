@@ -22,6 +22,7 @@ from domain.models import (
 )
 from domain.statuses import TASK_DRAFT, TASK_IMAGE_REVIEW, TASK_PLANNED
 from services.content_planner import ContentPlannerError, ContentPlannerService
+from config import loader
 
 
 class FakeRepository:
@@ -31,6 +32,9 @@ class FakeRepository:
         self.packs = {}
         self.presets = {}
         self.themes = {}
+        self.recipes = {}
+        self.render_profiles = {}
+        self.quality_profiles = {}
         self.transitions = []
 
     def get_task(self, task_id):
@@ -50,6 +54,15 @@ class FakeRepository:
 
     def list_themes(self, status=None):
         return [t for t in self.themes.values() if status is None or t.status == status]
+
+    def get_content_recipe(self, recipe_id):
+        return self.recipes.get(recipe_id)
+
+    def get_render_profile(self, profile_id):
+        return self.render_profiles.get(profile_id)
+
+    def get_quality_profile(self, profile_id):
+        return self.quality_profiles.get(profile_id)
 
     def update_task_plan(self, task_id, **fields):
         task = self.tasks[task_id]
@@ -129,7 +142,7 @@ def travel_theme() -> ThemeCatalog:
 
 def account() -> AccountProfile:
     return AccountProfile(
-        account_id="OPV_TH_TEST_001",
+        account_id="OPV_UNIT_TEST_001",
         account_code="opv-th-test-001",
         account_name="test",
         target_country="TH",
@@ -143,6 +156,7 @@ def account() -> AccountProfile:
         default_market_pack_id="MP_TH_DEFAULT_V1",
         default_render_preset_id="RP_STILL_VERTICAL_12S_V1",
         operating_rules_json={
+            "human_review_required": False,
             "allowed_persona_refs": [
                 "TH_APPAREL_CAFE_001", "TH_APPAREL_BRIGHT_B1_001"
             ]
@@ -154,7 +168,7 @@ def task(task_id="opv_task_1", status=TASK_DRAFT) -> ContentTask:
     return ContentTask(
         task_id=task_id,
         idempotency_key="a" * 64,
-        account_id="OPV_TH_TEST_001",
+        account_id="OPV_UNIT_TEST_001",
         product_id="1737141103233042426",
         target_country="TH",
         target_locale="th-TH",
@@ -213,7 +227,7 @@ class PlannerHappyPathTest(unittest.TestCase):
         self.repo.packs["MP_TH_DEFAULT_V1"] = market_pack()
         self.repo.presets["RP_STILL_VERTICAL_12S_V1"] = render_preset()
         self.repo.themes["THEME_TH_TRAVEL_DEPARTURE_V1"] = travel_theme()
-        self.repo.accounts["OPV_TH_TEST_001"] = account()
+        self.repo.accounts["OPV_UNIT_TEST_001"] = account()
         self.repo.tasks["opv_task_1"] = task()
         self.service = build_service(self.repo)
 
@@ -227,6 +241,8 @@ class PlannerHappyPathTest(unittest.TestCase):
         errors = contracts.validate_plan_json(result.plan)
         self.assertEqual(errors, [])
         plan = result.plan
+
+        self.assertEqual(len(plan["content_signature"]["sha256"]), 64)
         self.assertEqual(plan["theme"]["id"], "THEME_TH_TRAVEL_DEPARTURE_V1")
         self.assertEqual(len(plan["shots"]), 5)
         self.assertEqual(
@@ -236,6 +252,19 @@ class PlannerHappyPathTest(unittest.TestCase):
             [s["slot_role"] for s in plan["shots"]],
             ["hero", "full_look", "lifestyle", "detail", "second_angle"],
         )
+        contracts_by_slot = [s["composition_contract"] for s in plan["shots"]]
+        self.assertEqual(
+            [item["camera_angle"] for item in contracts_by_slot],
+            [
+                "front_eye_level",
+                "front_eye_level",
+                "three_quarter_dynamic",
+                "front_or_three_quarter_close",
+                "rear_three_quarter",
+            ],
+        )
+        self.assertEqual(plan["shots"][3]["motion_preset"], "upper_body_focus")
+        self.assertIn("full_body", contracts_by_slot[3]["forbidden"])
         self.assertEqual(plan["audio_policy"], {"strategy": "platform_hot_bgm", "fallback": "no_bgm"})
         self.assertIn("product_image:/tmp/ref_01.jpg", plan["shots"][0]["source_refs"])
         self.assertEqual(
@@ -254,6 +283,29 @@ class PlannerHappyPathTest(unittest.TestCase):
         self.assertEqual(
             plan["render_contract"]["target_duration_ms"], 12500
         )
+
+    def test_batch_grammar_changes_first_shot_scene_zone_and_safe_title(self) -> None:
+        product = self.repo.tasks["opv_task_1"].product_snapshot_json["product"]
+        product.update({
+            "product_name": "1737141103233042426",
+            "planned_shot_grammar": "G2",
+            "planned_scene_zone": "玻璃幕墙",
+            "planned_title_suffix": "ดูดีเทลชัดๆ",
+        })
+        self.repo.themes["THEME_TH_TRAVEL_DEPARTURE_V1"].default_storyboard_json[
+            "topic_template"
+        ] = "เดรสตัวเดียว 3 ลุค: {product}"
+        result = self.service.plan_task("opv_task_1")
+        self.assertEqual(result.plan["shot_grammar"]["id"], "G2")
+        self.assertEqual(
+            result.plan["shots"][0]["composition_contract"]["framing"],
+            "waist_up_product",
+        )
+        self.assertIn("整理领口", result.plan["shots"][0]["purpose"])
+        self.assertEqual(result.plan["scene"]["snapshot"]["selected_zone"], "玻璃幕墙")
+        self.assertNotIn("1737141103233042426", result.plan["copy"]["title"])
+        self.assertNotIn("เดรส", result.plan["copy"]["title"])
+        self.assertIn("ดูดีเทลชัดๆ", result.plan["copy"]["title"])
 
     def test_task_can_freeze_an_allowed_persona(self) -> None:
         self.repo.tasks["opv_task_1"].product_snapshot_json["product"][
@@ -318,8 +370,89 @@ class PlannerHappyPathTest(unittest.TestCase):
         self.assertEqual(copy["title"], result.task.topic_text)
         self.assertEqual(copy["hashtags"], ["#ป้ายยา", "#ชุดเที่ยว"])
         self.assertEqual(copy["cover_text"], "ไปเที่ยวแล้ว")
-        self.assertEqual(copy["copy_status"], "draft_needs_human_review")
+        self.assertEqual(copy["copy_status"], "ready_for_auto_render")
         self.assertEqual(result.task.copy_json, copy)
+
+    def test_real_detail_reference_keeps_detail_zoom(self) -> None:
+        product = self.repo.tasks["opv_task_1"].product_snapshot_json["product"]
+        product["reference_roles"] = {"front": ["/tmp/ref_01.jpg"], "detail": ["/tmp/ref_02.jpg"]}
+        result = self.service.plan_task("opv_task_1")
+        self.assertEqual(result.plan["shots"][3]["motion_preset"], "detail_zoom")
+
+    def test_outfit_breakdown_plan_puts_board_on_p1_and_anchor_on_p2(self) -> None:
+        recipe = loader.load_content_recipe_file(
+            PACKAGE_ROOT / "config" / "recipes" / "RECIPE_OUTFIT_BREAKDOWN_V1.json"
+        )
+        theme = loader.load_theme_file(
+            PACKAGE_ROOT / "config" / "themes" / "THEME_TH_OUTFIT_BREAKDOWN_v1.json"
+        )
+        render_profile = loader.load_render_profile_file(
+            PACKAGE_ROOT / "config" / "profiles" / "IMAGE_STORY_VIDEO_V1.json"
+        )
+        quality_profile = loader.load_quality_profile_file(
+            PACKAGE_ROOT / "config" / "profiles" / f"{recipe.quality_profile_id}.json"
+        )
+        self.repo.recipes[recipe.recipe_id] = recipe
+        self.repo.themes[theme.theme_id] = theme
+        self.repo.render_profiles[render_profile.render_profile_id] = render_profile
+        self.repo.quality_profiles[quality_profile.quality_profile_id] = quality_profile
+        product = self.repo.tasks["opv_task_1"].product_snapshot_json["product"]
+        product["planned_theme_id"] = theme.theme_id
+        result = self.service.plan_task(
+            "opv_task_1", recipe_id=recipe.recipe_id, theme_id=theme.theme_id,
+            variant_index=2,
+        )
+        plan = result.plan
+        self.assertEqual(contracts.validate_plan_json(plan), [])
+        self.assertEqual(plan["anchor_slot"], 2)
+        self.assertEqual(plan["quality_contract"]["assessment_schema_version"], 2)
+        self.assertEqual(plan["quality_contract"]["decision_policy"], "hard_gates_only")
+        self.assertEqual(plan["recipe_execution"]["content_goal"], "outfit_breakdown")
+        self.assertEqual(plan["shots"][0]["shot_kind"], "composite_board")
+        self.assertEqual(plan["shots"][0]["fit_mode"], "contain")
+        self.assertEqual(plan["shots"][0]["generation_prompt"], "")
+        self.assertEqual(plan["shots"][0]["board_spec"]["source_person_slot"], 2)
+        self.assertEqual(
+            plan["shots"][0]["board_spec"]["layout_variant"],
+            plan["variation_plan"]["layout_variant"],
+        )
+        self.assertTrue(all(
+            shot["outfit_state_ref"] == "FINAL" for shot in plan["shots"]
+        ))
+
+    def test_pure_color_account_profile_locks_reference_cover_layout(self) -> None:
+        recipe = loader.load_content_recipe_file(
+            PACKAGE_ROOT / "config" / "recipes" / "RECIPE_OUTFIT_BREAKDOWN_V1.json"
+        )
+        theme = loader.load_theme_file(
+            PACKAGE_ROOT / "config" / "themes" / "THEME_TH_OUTFIT_BREAKDOWN_v1.json"
+        )
+        render_profile = loader.load_render_profile_file(
+            PACKAGE_ROOT / "config" / "profiles" / "IMAGE_STORY_VIDEO_V1.json"
+        )
+        quality_profile = loader.load_quality_profile_file(
+            PACKAGE_ROOT / "config" / "profiles" / f"{recipe.quality_profile_id}.json"
+        )
+        self.repo.recipes[recipe.recipe_id] = recipe
+        self.repo.themes[theme.theme_id] = theme
+        self.repo.render_profiles[render_profile.render_profile_id] = render_profile
+        self.repo.quality_profiles[quality_profile.quality_profile_id] = quality_profile
+        self.repo.accounts["OPV_UNIT_TEST_001"].operating_rules_json["presentation_profile"] = {
+            "profile_id": "TH_PURE_COLOR_FASHION_V1",
+            "background_mode": "solid_color",
+            "background_color": "#F6F5F2",
+        }
+        product = self.repo.tasks["opv_task_1"].product_snapshot_json["product"]
+        product["planned_theme_id"] = theme.theme_id
+        plan = self.service.plan_task(
+            "opv_task_1", recipe_id=recipe.recipe_id, theme_id=theme.theme_id
+        ).plan
+        self.assertEqual(plan["presentation_profile"]["background_mode"], "solid_color")
+        self.assertEqual(
+            plan["shots"][0]["board_spec"]["layout_id"],
+            "LAYOUT_OUTFIT_REFERENCE_LEFT_V1",
+        )
+        self.assertEqual(plan["shots"][0]["board_spec"]["layout_variant"], "REF_LEFT_HERO")
 
 
 class PlannerResolutionTest(unittest.TestCase):
@@ -328,7 +461,7 @@ class PlannerResolutionTest(unittest.TestCase):
         self.repo.packs["MP_TH_DEFAULT_V1"] = market_pack()
         self.repo.presets["RP_STILL_VERTICAL_12S_V1"] = render_preset()
         self.repo.themes["THEME_TH_TRAVEL_DEPARTURE_V1"] = travel_theme()
-        self.repo.accounts["OPV_TH_TEST_001"] = account()
+        self.repo.accounts["OPV_UNIT_TEST_001"] = account()
         self.service = build_service(self.repo)
 
     def test_theme_resolved_by_product_category(self) -> None:
@@ -360,6 +493,41 @@ class PlannerResolutionTest(unittest.TestCase):
         result = self.service.plan_task("t")
         self.assertIn("浅蓝色短款蓬松外套", result.plan["theme"]["topic"])
 
+    def test_internal_product_placeholder_is_localized_in_thai_copy(self) -> None:
+        task_fixture = task("t")
+        task_fixture.topic_text = None
+        task_fixture.product_snapshot_json["product"]["product_name"] = "目标外套"
+        task_fixture.product_snapshot_json["product"]["category"] = "outerwear"
+        self.repo.tasks["t"] = task_fixture
+        result = self.service.plan_task("t")
+        topic = result.plan["theme"]["topic"]
+        copy = result.plan["copy"]
+        self.assertIn("เสื้อตัวนอกตัวนี้", topic)
+        self.assertIn("เสื้อตัวนอกตัวนี้", copy["caption"])
+        for placeholder in (
+            "目标外套", "目标连衣裙", "目标上装", "目标下装", "目标商品",
+        ):
+            self.assertNotIn(placeholder, topic)
+            self.assertNotIn(placeholder, copy["title"])
+            self.assertNotIn(placeholder, copy["caption"])
+
+    def test_all_internal_placeholders_use_category_localized_display(self) -> None:
+        cases = {
+            "outerwear": ("目标外套", "เสื้อตัวนอกตัวนี้"),
+            "dress": ("目标连衣裙", "เดรสตัวนี้"),
+            "top": ("目标上装", "เสื้อตัวนี้"),
+            "bottom": ("目标下装", "กางเกงตัวนี้"),
+            "unknown": ("目标商品", "ไอเทมชิ้นนี้"),
+        }
+        for category, (placeholder, expected) in cases.items():
+            with self.subTest(category=category):
+                self.assertEqual(
+                    self.service._safe_product_display_name({
+                        "product_name": placeholder, "category": category,
+                    }),
+                    expected,
+                )
+
     def test_planned_look_outside_allowlist_rejected(self) -> None:
         task_fixture = task("t")
         task_fixture.product_snapshot_json["product"]["planned_look_ref"] = "STYLE_NOT_ALLOWED"
@@ -368,10 +536,65 @@ class PlannerResolutionTest(unittest.TestCase):
             self.service.plan_task("t")
         self.assertIn("allow-list", str(ctx.exception))
 
+    def test_automatic_look_filters_product_and_rotates_compatible_candidates(self) -> None:
+        acct = self.repo.accounts["OPV_UNIT_TEST_001"]
+        acct.allowed_look_refs_json = ["STYLE_A", "STYLE_WRONG", "STYLE_B"]
+        assets = fake_assets()
+        assets.looks.update({
+            "STYLE_A": {
+                "ref_id": "STYLE_A",
+                "applicable_product_codes": ["1737141103233042426"],
+                "compatibility": {"product_types": ["outerwear"]},
+                "recipe": {"top_inner": "白色背心", "bottom": "白色长裤"},
+            },
+            "STYLE_WRONG": {
+                "ref_id": "STYLE_WRONG",
+                "applicable_product_codes": ["another_product"],
+                "compatibility": {"product_types": ["outerwear"]},
+                "recipe": {"bottom": "黑色短裙"},
+            },
+            "STYLE_B": {
+                "ref_id": "STYLE_B",
+                "applicable_product_codes": ["1737141103233042426"],
+                "compatibility": {"product_types": ["outerwear"]},
+                "recipe": {"top_inner": "针织连衣裙", "bottom": "连衣裙"},
+            },
+        })
+        service = build_service(self.repo, assets=assets)
+        product_snapshot = task("t").product_snapshot_json["product"]
+        product_snapshot.pop("planned_look_ref")
+
+        first, _ = service._resolve_look(
+            acct, product_snapshot, theme=travel_theme(), variant_index=1
+        )
+        second, _ = service._resolve_look(
+            acct, product_snapshot, theme=travel_theme(), variant_index=2
+        )
+
+        self.assertEqual({first, second}, {"STYLE_A", "STYLE_B"})
+        self.assertNotEqual(first, second)
+
+    def test_explicit_incompatible_look_is_rejected(self) -> None:
+        acct = self.repo.accounts["OPV_UNIT_TEST_001"]
+        acct.allowed_look_refs_json = ["STYLE_WRONG"]
+        assets = fake_assets()
+        assets.looks["STYLE_WRONG"] = {
+            "ref_id": "STYLE_WRONG",
+            "applicable_product_codes": ["another_product"],
+            "compatibility": {"product_types": ["outerwear"]},
+            "recipe": {"bottom": "黑色短裙"},
+        }
+        service = build_service(self.repo, assets=assets)
+        product_snapshot = task("t").product_snapshot_json["product"]
+        product_snapshot["planned_look_ref"] = "STYLE_WRONG"
+
+        with self.assertRaisesRegex(ContentPlannerError, "incompatible"):
+            service._resolve_look(acct, product_snapshot, theme=travel_theme())
+
     def test_account_without_persona_rejected(self) -> None:
         acct = account()
         acct.persona_ref_id = None
-        self.repo.accounts["OPV_TH_TEST_001"] = acct
+        self.repo.accounts["OPV_UNIT_TEST_001"] = acct
         self.repo.tasks["t"] = task("t")
         with self.assertRaises(ContentPlannerError):
             self.service.plan_task("t")
@@ -392,7 +615,7 @@ class PlannerWithoutAssetReaderTest(unittest.TestCase):
         repo.packs["MP_TH_DEFAULT_V1"] = market_pack()
         repo.presets["RP_STILL_VERTICAL_12S_V1"] = render_preset()
         repo.themes["THEME_TH_TRAVEL_DEPARTURE_V1"] = travel_theme()
-        repo.accounts["OPV_TH_TEST_001"] = account()
+        repo.accounts["OPV_UNIT_TEST_001"] = account()
         repo.tasks["t"] = task("t")
         service = ContentPlannerService(repo, asset_reader=None)
         result = service.plan_task("t")

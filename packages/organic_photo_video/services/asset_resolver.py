@@ -14,6 +14,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from services.styling_normalizer import normalize_product_id, normalize_styling_recipe, outfit_fingerprint, outfit_visual_features
+
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE_ROOT = PACKAGE_ROOT.parents[1]
 DEFAULT_DB_PATH = (
@@ -120,23 +122,100 @@ class LightTryonAssetReader:
     def get_look(self, ref_id: str) -> Dict[str, Any]:
         row = self._fetch(
             "SELECT styling_id, styling_name, status, vibe_tag, prompt_core, "
-            "outfit_recipe, silhouette_key, applicable_product_codes "
+            "outfit_recipe, silhouette_key, applicable_product_codes, "
+            "applicable_product_type, product_fit, supported_demonstration_modes, "
+            "scene_families, style_intensity, climate_profile, priority, "
+            "inner_type, inner_color, bottom_type, bottom_color, bottom_fit, accessory_level, "
+            "footwear_visibility, base_outfit_direction, target_role, "
+            "preferred_persona_ids, feishu_record_id, sync_status, last_synced_at "
             "FROM styling_templates WHERE styling_id=?",
             (ref_id,),
         )
         if row["status"] not in READABLE_STATUSES:
             raise AssetNotFoundError(f"look {ref_id} is {row['status']!r}")
+        explicit_recipe = self._json_object(row["outfit_recipe"])
+        recipe, field_sources = normalize_styling_recipe(dict(row), explicit_recipe)
+        raw_codes = self._json_list(row["applicable_product_codes"])
+        codes = list(dict.fromkeys(normalize_product_id(v) for v in raw_codes if normalize_product_id(v)))
+        item_refs = dict(recipe.get("item_refs") or {})
+        if item_refs:
+            recipe = {key: value for key, value in recipe.items() if key != "item_refs"}
         return {
             "ref_id": row["styling_id"],
             "name": row["styling_name"],
-            "vibe_tag": json.loads(row["vibe_tag"] or "[]"),
+            "status": row["status"],
+            "vibe_tag": self._json_list(row["vibe_tag"]),
             "prompt_core": row["prompt_core"],
-            "recipe": json.loads(row["outfit_recipe"] or "{}"),
+            "recipe": recipe,
+            "item_refs": item_refs,
+            "recipe_source": "outfit_recipe" if explicit_recipe else "normalized_columns",
+            "recipe_field_sources": field_sources,
+            "recipe_normalization_version": 2,
+            "outfit_fingerprint": outfit_fingerprint(recipe),
+            "visual_features": outfit_visual_features(recipe),
             "silhouette_key": row["silhouette_key"],
-            "applicable_product_codes": json.loads(
-                row["applicable_product_codes"] or "[]"
-            ),
+            "applicable_product_codes": codes,
+            "raw_applicable_product_codes": raw_codes,
+            "compatibility": {
+                "raw_product_codes": raw_codes,
+                "normalized_product_codes": codes,
+                "product_types": self._json_list(row["applicable_product_type"]),
+                "product_fits": self._json_list(row["product_fit"]),
+                "demonstration_modes": self._json_list(row["supported_demonstration_modes"]),
+                "scene_families": self._json_list(row["scene_families"]),
+                "style_intensity": str(row["style_intensity"] or ""),
+                "climate_profile": str(row["climate_profile"] or ""),
+                "target_role": str(row["target_role"] or ""),
+                "preferred_persona_ids": self._json_list(row["preferred_persona_ids"]),
+            },
+            "priority": int(row["priority"] or 0),
+            "source": {
+                "feishu_record_id": str(row["feishu_record_id"] or ""),
+                "sync_status": str(row["sync_status"] or ""),
+                "last_synced_at": str(row["last_synced_at"] or ""),
+                "normalization_notes": ["product_code_formatting_artifacts_removed"] if codes != raw_codes else [],
+            },
         }
+
+    def list_look_ids(self, statuses=None) -> List[str]:
+        """Discover readable library rows without mutating the underlying library."""
+        statuses = tuple(READABLE_STATUSES if statuses is None else statuses)
+        if not statuses:
+            return []
+        if any(status not in READABLE_STATUSES for status in statuses):
+            raise ValueError("only enabled/testing styling rows are readable")
+        if not self._db_path.exists():
+            raise AssetNotFoundError(f"asset database missing: {self._db_path}")
+        with sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True) as connection:
+            rows = connection.execute(
+                "SELECT styling_id FROM styling_templates WHERE status IN ("
+                + ",".join("?" for _ in statuses) + ") ORDER BY styling_id", statuses,
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def list_looks(self, statuses=None) -> List[Dict[str, Any]]:
+        return [self.get_look(ref) for ref in self.list_look_ids(statuses)]
+
+    @staticmethod
+    def _json_list(value: Any) -> List[Any]:
+        try:
+            parsed = json.loads(value or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
+        return parsed if isinstance(parsed, list) else []
+
+    @staticmethod
+    def _json_object(value: Any) -> Dict[str, Any]:
+        try:
+            parsed = json.loads(value or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    @classmethod
+    def _normalized_look_recipe(cls, row: sqlite3.Row) -> Dict[str, Any]:
+        """Make legacy Feishu styling rows executable by the OPV planner."""
+        return normalize_styling_recipe(dict(row))[0]
 
     def get_scene(self, ref_id: str) -> Dict[str, Any]:
         row = self._fetch(
@@ -150,6 +229,7 @@ class LightTryonAssetReader:
         return {
             "ref_id": row["scene_id"],
             "name": row["scene_name"],
+            "status": row["status"],
             "prompt_core": row["prompt_core"],
             "prompt_negative": row["prompt_negative"],
             "required_anchors": json.loads(row["required_anchors"] or "[]"),

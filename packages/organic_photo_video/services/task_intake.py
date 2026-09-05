@@ -47,6 +47,7 @@ class TaskRequest:
     topic_text: Optional[str] = None
     source_type: str = "manual"
     source_record_id: Optional[str] = None
+    feishu_record_id: Optional[str] = None
     requested_shot_count: int = DEFAULT_SHOT_COUNT
     priority: str = "normal"
     created_by: str = "manual"
@@ -184,8 +185,25 @@ class TaskIntakeService:
             priority=request.priority,
             requested_shot_count=request.requested_shot_count,
             created_by=request.created_by,
+            feishu_record_id=request.feishu_record_id,
         )
         task, created = self._repository.create_task_idempotent(task)
+        if (
+            not created
+            and task.task_status == TASK_DRAFT
+            and task.current_stage == STAGE_INTAKE
+        ):
+            # A planner failure can leave an idempotent row at intake with a
+            # stale product pack snapshot.  Refresh only this untouched state;
+            # planned/rendered tasks remain immutable for reproducibility.
+            updater = getattr(
+                self._repository, "update_task_product_snapshot", None
+            )
+            if callable(updater):
+                updater(task.task_id, snapshot)
+                refreshed = self._repository.get_task(task.task_id)
+                if refreshed is not None:
+                    task = refreshed
         return IntakeResult(
             task=task,
             created=created,

@@ -1,0 +1,66 @@
+{
+  "schema_version": "opv-content-recipe-v1",
+  "recipe_id": "RECIPE_OUTFIT_BREAKDOWN_V1",
+  "recipe_key": "RECIPE_OUTFIT_BREAKDOWN",
+  "recipe_version": 3,
+  "content_goal": "outfit_breakdown",
+  "anchor_slot": 2,
+  "shot_count": 5,
+  "hook_types": [
+    "outfit_formula",
+    "save_this_look",
+    "what_i_wore",
+    "three_piece_formula"
+  ],
+  "story_structure": [
+    {
+      "slot_index": 1,
+      "narrative_function": "HOOK",
+      "slot_role": "hero",
+      "shot_kind": "composite_board",
+      "purpose": "真人上身、目标商品和搭配清单同屏，作为第一张封面",
+      "camera_hint": "程序化拼贴卡，不调用图片模型生成文字"
+    },
+    {
+      "slot_index": 2,
+      "narrative_function": "CONTEXT",
+      "slot_role": "full_look",
+      "shot_kind": "generated_photo",
+      "purpose": "完整真人上身图，同时作为人物、商品、穿搭和光线锚点及首图人物提取源",
+      "camera_hint": "最终穿搭正面完整全身；相机腰部高度、水平拍摄并保留足够距离，避免俯拍；人物轮廓无遮挡、手脚不出画，腰线、裤脚和鞋履完整可见"
+    },
+    {
+      "slot_index": 3,
+      "narrative_function": "TRANSFORMATION",
+      "slot_role": "lifestyle",
+      "shot_kind": "generated_photo",
+      "purpose": "自然动作中展示内搭、层次和目标商品穿法",
+      "camera_hint": "斜侧自然动作，保持同一套 FINAL 穿搭"
+    },
+    {
+      "slot_index": 4,
+      "narrative_function": "PROOF",
+      "slot_role": "detail",
+      "shot_kind": "generated_photo",
+      "purpose": "展示商品结构、腰线或材质观感，证明搭配成立",
+      "camera_hint": "商品主体中景，从颈部至大腿上段展示完整衣领、肩袖、门襟、衣摆和腰线；脸可出画，禁止美妆自拍、脸部主导和磨皮。只展示参考可验证的结构，无细节参考时不得虚构微距细节"
+    },
+    {
+      "slot_index": 5,
+      "narrative_function": "PAYOFF",
+      "slot_role": "second_angle",
+      "shot_kind": "generated_photo",
+      "purpose": "第二机位交付完整穿搭效果并形成自然收尾",
+      "camera_hint": "侧后四十五度或另一站位，保持同一套 FINAL 穿搭"
+    }
+  ],
+  "copy_style": {
+    "title_tone": "可收藏的穿搭公式",
+    "structure": "短标题 + 三件单品清单 + 轻互动",
+    "example_zh": "这套怎么搭：外套、内搭、下装一次看清"
+  },
+  "suitable_topics": ["outfit_breakdown"],
+  "render_profile_id": "IMAGE_STORY_VIDEO_V1",
+  "quality_profile_id": "QUALITY_OUTFIT_BREAKDOWN_V2",
+  "status": "active"
+}

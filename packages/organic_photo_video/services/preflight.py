@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List
 
+from domain.contracts import ContractViolationError, expected_plan_shot_count, is_multi_look_plan
+
 from services.content_planner import normalize_storyboard_for_preset
 from services.locale_quality import copy_locale_issues, visible_text_issues
 
@@ -71,6 +73,15 @@ class PreflightService:
         refs = list(product.get("reference_images") or [])
         local_refs = [str(value) for value in refs if isinstance(value, str) and Path(value).is_file()]
         facts["product_reference_images"] = {"configured": len(refs), "local": len(local_refs)}
+        if product.get("reference_pack_id"):
+            facts["product_reference_pack"] = {
+                "id": product.get("reference_pack_id"),
+                "version": product.get("reference_pack_version"),
+                "variant": product.get("variant_key"),
+                "status": product.get("reference_status"),
+                "selection_reason": product.get("selection_reason"),
+                "visual_qa_policy": product.get("visual_qa_policy"),
+            }
         if not local_refs:
             issues.append(PreflightIssue("error", "product_refs_missing_local", "no local product reference image"))
         elif len(local_refs) < 3:
@@ -83,9 +94,16 @@ class PreflightService:
                 issues.append(PreflightIssue("error", "theme_product_mismatch", f"{category} not matched by {theme.theme_id}"))
             if preset is not None:
                 try:
-                    normalized = normalize_storyboard_for_preset(
-                        theme.default_storyboard_json.get("slots") or [], preset
-                    )
+                    plan = task.plan_json or {}
+                    if is_multi_look_plan(plan):
+                        expected_plan_shot_count(plan)
+                        normalized = plan["shots"]
+                        if sum(s["duration_ms"] for s in normalized) != 10000:
+                            raise ValueError("multi_look frozen timeline must total 10000ms")
+                    else:
+                        normalized = normalize_storyboard_for_preset(
+                            theme.default_storyboard_json.get("slots") or [], preset
+                        )
                     facts["timeline"] = {
                         "target_ms": preset.target_duration_ms,
                         "durations_ms": [s["duration_ms"] for s in normalized],
@@ -95,10 +113,11 @@ class PreflightService:
                     issues.append(PreflightIssue("error", "timeline_invalid", str(exc)))
 
         try:
-            persona = self._assets.get_persona(account.persona_ref_id or "")
+            selected_persona = ((task.plan_json or {}).get("persona") or {}).get("ref_id") or account.persona_ref_id
+            persona = self._assets.get_persona(selected_persona or "")
             local_persona_refs = list(persona.get("local_reference_images") or [])
             facts["persona"] = {
-                "id": account.persona_ref_id,
+                "id": selected_persona,
                 "authority": ((persona.get("source") or {}).get("authority")),
                 "status": persona.get("status"),
                 "configured_refs": len(persona.get("reference_images") or []),
@@ -132,18 +151,23 @@ class PreflightService:
 
         shots = self._repository.list_shots(task_id)
         latest = self._latest(shots)
+        try:
+            count = expected_plan_shot_count(task.plan_json or {})
+        except ContractViolationError as exc:
+            issues.append(PreflightIssue("error", "shot_plan_invalid", str(exc)))
+            count = 0
         if shots:
             facts["shots"] = {
                 "rows": len(shots),
                 "latest_slots": len(latest),
                 "selected_slots": sum(1 for shot in latest if shot.is_selected),
             }
-            if len(latest) != 5:
-                issues.append(PreflightIssue("error", "shot_set_incomplete", f"latest set has {len(latest)}/5 slots"))
+            if len(latest) != count or {s.slot_index for s in latest} != set(range(1, count + 1)):
+                issues.append(PreflightIssue("error", "shot_set_incomplete", f"latest set has {len(latest)}/{count} slots"))
             if any(shot.image_url and not Path(shot.image_url).is_file() for shot in latest):
                 issues.append(PreflightIssue("error", "shot_file_missing", "one or more selected shot files are missing"))
-            if len(latest) == 5 and any(not shot.is_selected for shot in latest):
-                issues.append(PreflightIssue("warning", "shot_selection_incomplete", "latest P1-P5 are not all selected"))
+            if len(latest) == count and any(not shot.is_selected for shot in latest):
+                issues.append(PreflightIssue("warning", "shot_selection_incomplete", f"latest P1-P{count} are not all selected"))
 
         publications = []
         list_by_task = getattr(self._repository, "list_publish_records_by_task", None)

@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 TESTS_DIR = Path(__file__).resolve().parent
 PACKAGE_ROOT = TESTS_DIR.parent
@@ -128,7 +129,7 @@ class FakeRunner:
 
     def __call__(self, argv):
         self.commands.append(list(argv))
-        if argv[0] == "ffprobe":
+        if Path(argv[0]).name == "ffprobe":
             return 0, json.dumps(self.probe_payload), ""
         if any("blackdetect" in str(arg) for arg in argv):
             return 0, "", ""
@@ -253,6 +254,22 @@ class TimelineAndGraphTest(unittest.TestCase):
         self.assertIn("s=1080x1920", graph)
         self.assertIn("format=yuv420p[vout]", graph)
 
+    def test_contain_mode_preserves_the_full_board(self) -> None:
+        plan = plan_shots()
+        plan[0]["fit_mode"] = "contain"
+        shots = {
+            i: ContentShot(
+                shot_id=f"s{i}", task_id="t", slot_index=i,
+                slot_role="hero", duration_ms=plan[i - 1]["duration_ms"],
+            )
+            for i in range(1, 6)
+        }
+        timeline = build_timeline(plan, shots, {i: f"/p{i}" for i in range(1, 6)})
+        self.assertEqual(timeline[0].fit_mode, "contain")
+        graph = build_filter_graph(timeline)
+        self.assertIn("force_original_aspect_ratio=decrease", graph)
+        self.assertIn("pad=2160:3840", graph)
+
     def test_cut_transition_uses_concat(self) -> None:
         plan = plan_shots()
         plan[1]["transition_out"] = "cut"  # between P2 and P3
@@ -265,8 +282,25 @@ class TimelineAndGraphTest(unittest.TestCase):
         self.assertEqual(graph.count("xfade"), 3)
         self.assertIn("concat=n=2:v=1:a=0", graph)
 
+    def test_upper_body_focus_uses_stronger_upward_biased_crop(self) -> None:
+        plan = plan_shots()
+        plan[3]["motion_preset"] = "upper_body_focus"
+        shots = {
+            i: ContentShot(
+                shot_id=f"s{i}", task_id="t", slot_index=i,
+                slot_role=plan[i - 1]["slot_role"], duration_ms=plan[i - 1]["duration_ms"],
+                shot_version=1,
+            )
+            for i in range(1, 6)
+        }
+        graph = build_filter_graph(
+            build_timeline(plan, shots, {i: f"/tmp/P{i}.png" for i in range(1, 6)})
+        )
+        self.assertIn("1.28+0.07*on/", graph)
+        self.assertIn("(ih-ih/zoom)*0.30", graph)
+
     def test_build_command_flags(self) -> None:
-        renderer = FFmpegStillRenderer()
+        renderer = FFmpegStillRenderer(ffmpeg_bin="ffmpeg", ffprobe_bin="ffprobe")
         argv = renderer.build_command(self._slots(), Path("/tmp/out.mp4"))
         self.assertEqual(argv[0], "ffmpeg")
         self.assertEqual(argv.count("-i"), 5)
@@ -275,8 +309,50 @@ class TimelineAndGraphTest(unittest.TestCase):
         self.assertIn("yuv420p", argv)
         self.assertIn("1080x1920", " ".join(argv))
 
+    @patch("services.video_renderer.shutil.which", return_value=None)
+    @patch("services.video_renderer.Path.is_file", return_value=True)
+    def test_default_binary_falls_back_to_user_local_bin(self, _is_file, _which) -> None:
+        renderer = FFmpegStillRenderer()
+        self.assertTrue(renderer._ffmpeg.endswith("/.local/bin/ffmpeg"))
+        self.assertTrue(renderer._ffprobe.endswith("/.local/bin/ffprobe"))
+
+    def test_missing_ffmpeg_becomes_render_failure_instead_of_exception(self) -> None:
+        def missing(_argv):
+            raise FileNotFoundError("ffmpeg")
+
+        renderer = FFmpegStillRenderer(
+            ffmpeg_bin="missing-ffmpeg", ffprobe_bin="missing-ffprobe", runner=missing
+        )
+        ok, error = renderer.render(self._slots(), Path("/tmp/not-created.mp4"))
+        self.assertFalse(ok)
+        self.assertIn("ffmpeg launch failed", error)
+
 
 class VideoQcTest(unittest.TestCase):
+    def test_qc_rejects_low_or_missing_fps(self):
+        for rate in ("15/1", "0/1"):
+            payload = json.loads(json.dumps(PROBE_OK))
+            payload["streams"][0]["avg_frame_rate"] = rate
+            with tempfile.TemporaryDirectory() as tmp:
+                output = Path(tmp) / "out.mp4"
+                output.write_bytes(b"fixture")
+                qc = FFmpegStillRenderer(runner=FakeRunner(output, payload)).qc_video(output, 12500)
+                self.assertFalse(qc["passed"])
+                self.assertFalse(qc["checks"]["fps_30"])
+
+    def test_decode_failure_is_a_failed_qc_not_a_clean_black_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "out.mp4"
+            output.write_bytes(b"fixture")
+            def runner(argv):
+                if Path(argv[0]).name == "ffprobe":
+                    return 0, json.dumps(PROBE_OK), ""
+                self.assertIn("-xerror", argv)
+                return 1, "", "decode failed"
+            qc = FFmpegStillRenderer(runner=runner).qc_video(output, 12500)
+            self.assertFalse(qc["passed"])
+            self.assertFalse(qc["checks"]["video_decodable"])
+
     def test_qc_passes_on_clean_probe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "out.mp4"
@@ -342,6 +418,26 @@ class RenderFlowTest(unittest.TestCase):
         self.assertEqual(
             task.group_qa_json["stage_d"]["decision"], "group_approved"
         )
+
+    def test_operator_auto_release_is_not_recorded_as_human_review(self) -> None:
+        task = self.flow.approve_group(
+            "opv_task_1",
+            reviewer="feishu_operator_auto_render",
+            approval_mode="operator_auto",
+        )
+        self.assertEqual(task.task_status, TASK_RENDERING)
+        self.assertEqual(
+            task.group_qa_json["stage_d"]["decision"],
+            "auto_released_for_render",
+        )
+        self.assertEqual(
+            task.group_qa_json["stage_d"]["approval_mode"], "operator_auto"
+        )
+        self.assertEqual(self.repo.feedback[0].feedback_type, "automatic_technical_gate")
+        self.assertEqual(
+            self.repo.feedback[0].reason_codes_json,
+            ["operator_owned_source_auto_render"],
+        )
         with self.assertRaises(VideoRenderFlowError):
             self.flow.approve_group("opv_task_1", reviewer="老板")  # not image_review
 
@@ -359,7 +455,10 @@ class RenderFlowTest(unittest.TestCase):
         self.assertIn("video_review", [t for _, t in self.repo.transitions])
         task = self.repo.tasks["opv_task_1"]
         self.assertEqual(task.task_status, TASK_VIDEO_REVIEW)
-        render_cmds = [c for c in self.runner.commands if c[0] == "ffmpeg" and "blackdetect" not in " ".join(c)]
+        render_cmds = [
+            c for c in self.runner.commands
+            if Path(c[0]).name == "ffmpeg" and "blackdetect" not in " ".join(c)
+        ]
         self.assertEqual(len(render_cmds), 1)
         self.assertIn("-an", render_cmds[0])
 
@@ -391,6 +490,24 @@ class RenderFlowTest(unittest.TestCase):
         self.flow.approve_group("opv_task_1", reviewer="老板")
         row = self.flow.render("opv_task_1")
         self.assertEqual(row.render_preset_id, "RP_RECIPE_V1")
+
+    def test_overlay_rerender_creates_v2_and_ass_filter(self) -> None:
+        self.task.recipe_id = "RECIPE_SCENE_SOLUTION_V1"
+        self.flow.approve_group("opv_task_1", reviewer="老板")
+        first = self.flow.render("opv_task_1")
+        self.assertEqual(first.render_version, 1)
+        self.repo.transition_task(
+            "opv_task_1", TASK_VIDEO_REVIEW, TASK_RENDERING
+        )
+        second = self.flow.render(
+            "opv_task_1", overlay_profile_id="OVERLAY_LIGHT_V1"
+        )
+        self.assertEqual(second.render_version, 2)
+        render_commands = [
+            command for command in self.runner.commands
+            if Path(command[0]).name == "ffmpeg" and "blackdetect" not in " ".join(command)
+        ]
+        self.assertIn("ass=filename=", " ".join(render_commands[-1]))
 
 
 if __name__ == "__main__":

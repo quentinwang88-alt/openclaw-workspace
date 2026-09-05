@@ -36,6 +36,8 @@ THEME_DIR = CONFIG_DIR / "themes"
 RENDER_PRESET_DIR = CONFIG_DIR / "render_presets"
 RECIPE_DIR = CONFIG_DIR / "recipes"
 PROFILE_DIR = CONFIG_DIR / "profiles"
+LAYOUT_DIR = CONFIG_DIR / "layouts"
+VARIANT_POLICY_DIR = CONFIG_DIR / "variant_policies"
 EXAMPLES_DIR = CONFIG_DIR / "examples"
 
 
@@ -119,6 +121,28 @@ def load_quality_profiles(directory: Path = PROFILE_DIR) -> List[QualityProfile]
     return [load_quality_profile_file(p) for p in sorted(directory.glob("QUALITY_*.json"))]
 
 
+def load_board_layouts(directory: Path = LAYOUT_DIR) -> List[dict]:
+    from services.board_layout import validate_board_layout
+
+    output = []
+    for path in sorted(directory.glob("*.json")):
+        payload = _load_json(path)
+        contracts.ensure_valid(validate_board_layout(payload), f"board layout {path.name}")
+        output.append(payload)
+    return output
+
+
+def load_variant_policies(directory: Path = VARIANT_POLICY_DIR) -> List[dict]:
+    from services.board_layout import validate_variant_policy
+
+    output = []
+    for path in sorted(directory.glob("*.json")):
+        payload = _load_json(path)
+        contracts.ensure_valid(validate_variant_policy(payload), f"variant policy {path.name}")
+        output.append(payload)
+    return output
+
+
 def load_account_import_file(path: Path) -> AccountProfile:
     return _load_validated(
         Path(path),
@@ -148,6 +172,8 @@ class SeedBundle:
     content_recipes: List[ContentRecipe] = field(default_factory=list)
     render_profiles: List[RenderProfile] = field(default_factory=list)
     quality_profiles: List[QualityProfile] = field(default_factory=list)
+    board_layouts: List[dict] = field(default_factory=list)
+    variant_policies: List[dict] = field(default_factory=list)
     # The example account is documentation, never seed data; it is loaded for
     # contract tests only and must not be upserted by seed scripts.
     account_example: Optional[AccountProfile] = None
@@ -158,6 +184,8 @@ class SeedBundle:
             f"themes={len(self.themes)}",
             f"render_presets={len(self.render_presets)}",
             f"account_example={'yes' if self.account_example else 'no'}",
+            f"board_layouts={len(self.board_layouts)}",
+            f"variant_policies={len(self.variant_policies)}",
         ]
         for pack in self.market_packs:
             lines.append(f"pack {pack.market_pack_id} v{pack.pack_version} ({pack.status})")
@@ -186,6 +214,8 @@ def load_seed_bundle(config_dir: Path = CONFIG_DIR) -> SeedBundle:
         content_recipes=load_content_recipes(config_dir / "recipes"),
         render_profiles=load_render_profiles(config_dir / "profiles"),
         quality_profiles=load_quality_profiles(config_dir / "profiles"),
+        board_layouts=load_board_layouts(config_dir / "layouts"),
+        variant_policies=load_variant_policies(config_dir / "variant_policies"),
     )
     examples = config_dir / "examples"
     if examples.is_dir():

@@ -1,0 +1,39 @@
+{
+  "schema_version": "opv-board-layout-v1",
+  "layout_id": "LAYOUT_OUTFIT_REFERENCE_LEFT_V1",
+  "layout_version": 1,
+  "canvas": {"width": 1080, "height": 1920, "background": "#FFFFFF"},
+  "background_policy": "fixed",
+  "composition_style": "freeform_cutout",
+  "default_variant": "REF_LEFT_HERO",
+  "default_palette": "REFERENCE_WHITE",
+  "same_background_hero_override": {"x": 0, "width": 730, "shadow": false},
+  "two_item_overrides": {
+    "REF_LEFT_HERO": {
+      "target_product": {"x": 650, "y": 100, "width": 405, "height": 680, "trim_alpha": true, "align_y": "top", "shadow": false},
+      "companion_1": {"x": 665, "y": 830, "width": 385, "height": 980, "trim_alpha": true, "align_y": "bottom", "shadow": false}
+    }
+  },
+  "variants": {
+    "REF_LEFT_HERO": {
+      "hero": {
+        "x": 16, "y": 42, "width": 610, "height": 1836,
+        "trim_alpha": true, "align_y": "bottom", "shadow": false
+      },
+      "target_product": {
+        "x": 632, "y": 80, "width": 424, "height": 600,
+        "trim_alpha": true, "align_y": "top", "shadow": false
+      },
+      "companion_1": {
+        "x": 640, "y": 660, "width": 400, "height": 590,
+        "trim_alpha": true, "align_y": "center", "shadow": false
+      },
+      "companion_2": {
+        "x": 724, "y": 1270, "width": 326, "height": 565,
+        "trim_alpha": true, "align_y": "bottom", "shadow": false
+      }
+    }
+  },
+  "text": {"enabled": false},
+  "status": "active"
+}

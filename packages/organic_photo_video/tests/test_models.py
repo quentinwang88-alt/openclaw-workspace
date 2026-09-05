@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round-trip tests for domain/models.py (all 11 opv_ tables)."""
+"""Round-trip tests for domain/models.py OPV table mappings."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from domain.models import (
     MarketPack,
     MetricSnapshot,
     PublishRecord,
+    ProductReferencePack,
     RenderPreset,
     ThemeCatalog,
     VideoRender,
@@ -112,6 +113,23 @@ class ModelRoundTripTest(unittest.TestCase):
         self._assert_round_trip(render_preset(), RenderPreset.from_row)
         self._assert_round_trip(account(), AccountProfile.from_row)
 
+    def test_product_reference_pack_round_trip(self) -> None:
+        pack = ProductReferencePack(
+            pack_id="opv_prp_1",
+            product_id="P1",
+            variant_key="light_blue",
+            product_name="coat",
+            status="limited",
+            is_default=True,
+            assets_json=[{
+                "local_path": "/tmp/ref.jpg", "role": "front", "usable": True,
+            }],
+            asset_fingerprint="a" * 64,
+        )
+        row = pack.to_row()
+        self.assertEqual(row["is_default"], 1)
+        self._assert_round_trip(pack, ProductReferencePack.from_row)
+
     def test_content_task_round_trip_with_optional_plan(self) -> None:
         task = ContentTask(
             task_id="opv_task_20260830_abcdef123456",
@@ -170,6 +188,8 @@ class ModelRoundTripTest(unittest.TestCase):
             account_id="OPV_TEST_1",
             caption_snapshot_json={"caption": "c"},
             platform_metadata_json={"audio_strategy": "platform_hot_bgm"},
+            planned_publish_at=datetime(2026, 9, 1, 4, 0, 0),
+            submitted_at=datetime(2026, 9, 1, 2, 0, 0),
         )
         self._assert_round_trip(record, PublishRecord.from_row)
 

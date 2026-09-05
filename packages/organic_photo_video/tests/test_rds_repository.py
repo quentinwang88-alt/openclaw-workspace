@@ -27,6 +27,7 @@ from domain.models import (
     FeishuOutbox,
     MetricSnapshot,
     LookFeedback,
+    ProductReferencePack,
     generate_prefixed_id,
 )
 from repositories import rds_repository
@@ -200,6 +201,8 @@ class AtomicApprovalTest(unittest.TestCase):
         self.assertEqual(connection.commits, 1)
         self.assertEqual(connection.rollbacks, 0)
         self.assertEqual(len(connection.statements), 6)
+        approval_sql = next(sql for sql, _ in connection.statements if "SET is_selected=1" in sql)
+        self.assertIn("qa_status=%s", approval_sql)  # legacy V1 condition is unchanged
 
     def test_group_approval_rolls_back_when_package_is_stale(self) -> None:
         connection = FakeConnection([
@@ -279,6 +282,76 @@ class GuardedTransitionTest(unittest.TestCase):
         self.assertIn("failure_code=%s", update_sql)
         self.assertIn("retry_count=retry_count+1", update_sql)
         self.assertIn("image_provider_timeout", update_params)
+
+
+class FeishuWorkbenchQueryTest(unittest.TestCase):
+    def test_latest_product_snapshot_returns_nested_product(self) -> None:
+        connection = FakeConnection([("rows", [{
+            "product_snapshot_json": '{"product":{"product_name":"coat","reference_images":["/tmp/a.jpg"]}}'
+        }])])
+        repo = RdsRepository(lambda: connection)
+        snapshot = repo.get_latest_product_snapshot("P1")
+        self.assertEqual(snapshot["product_name"], "coat")
+        sql, params = connection.statements[0]
+        self.assertIn("ORDER BY created_at DESC LIMIT 1", sql)
+        self.assertEqual(params, ["P1"])
+
+    def test_latest_product_snapshot_requires_references(self) -> None:
+        connection = FakeConnection([("rows", [{
+            "product_snapshot_json": '{"product":{"reference_images":[]}}'
+        }])])
+        self.assertIsNone(RdsRepository(lambda: connection).get_latest_product_snapshot("P1"))
+
+    def test_tasks_are_scoped_by_source_prefix(self) -> None:
+        first = sample_task(task_id="t1")
+        first.source_type = "feishu_opv"
+        first.source_record_id = "rec1:1:R:1"
+        connection = FakeConnection([("rows", [task_row(first)])])
+        rows = RdsRepository(lambda: connection).list_tasks_by_source_prefix(
+            "feishu_opv", "rec1:"
+        )
+        self.assertEqual([item.task_id for item in rows], ["t1"])
+        _, params = connection.statements[0]
+        self.assertEqual(params, ["feishu_opv", "rec1:%"])
+
+
+class ProductReferencePackRepositoryTest(unittest.TestCase):
+    def test_default_upsert_clears_old_default_in_same_transaction(self) -> None:
+        pack = ProductReferencePack(
+            pack_id="prp1", product_id="P1", variant_key="blue",
+            is_default=True, assets_json=[], asset_fingerprint="a" * 64,
+        )
+        connection = FakeConnection([("rowcount", 1), ("rowcount", 1)])
+        RdsRepository(lambda: connection).upsert_product_reference_pack(pack)
+        self.assertIn("SET is_default=0", connection.statements[0][0])
+        self.assertTrue(connection.statements[1][0].startswith(
+            "INSERT INTO opv_product_reference_pack"
+        ))
+        self.assertEqual(connection.commits, 1)
+
+    def test_list_packs_orders_default_then_version(self) -> None:
+        pack = ProductReferencePack(
+            pack_id="prp1", product_id="P1", variant_key="blue",
+            assets_json=[], asset_fingerprint="a" * 64,
+        )
+        row = pack.to_row()
+        connection = FakeConnection([("rows", [row])])
+        result = RdsRepository(lambda: connection).list_product_reference_packs("P1")
+        self.assertEqual(result[0].pack_id, "prp1")
+        self.assertIn("is_default DESC, pack_version DESC", connection.statements[0][0])
+
+
+class PublishScheduleQueryTest(unittest.TestCase):
+    def test_due_query_uses_status_time_index_contract(self) -> None:
+        connection = FakeConnection([("rows", [])])
+        due = datetime(2026, 9, 1, 4, 0, 0)
+        rows = RdsRepository(lambda: connection).list_publish_records_due(
+            statuses.PUBLISH_READY, due_before=due, limit=20
+        )
+        self.assertEqual(rows, [])
+        sql, params = connection.statements[0]
+        self.assertIn("planned_publish_at<=%s", sql)
+        self.assertEqual(params, [statuses.PUBLISH_READY, due, 20])
 
 
 class UpsertAndOutboxTest(unittest.TestCase):

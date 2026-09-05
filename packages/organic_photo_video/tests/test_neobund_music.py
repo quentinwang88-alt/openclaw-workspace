@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 import unittest
 
@@ -38,6 +39,22 @@ class ScoringTest(unittest.TestCase):
 
     def test_weights_sum_to_one(self) -> None:
         self.assertAlmostEqual(sum(neobund_music.SCORE_WEIGHTS.values()), 1.0)
+
+    def test_theme_aliases_match_music_taxonomy(self) -> None:
+        self.assertEqual(
+            neobund_music.mood_score(
+                candidate("m1", tags=("soft", "calm")),
+                ["soft_acoustic", "romantic", "lofi"],
+            ),
+            1.0,
+        )
+        self.assertGreater(
+            neobund_music.mood_score(
+                candidate("m2", tags=("dance", "high_energy")),
+                ["mid_tempo_pop", "transformation_beat"],
+            ),
+            0.9,
+        )
 
     def test_hot_score_defaults_from_rank(self) -> None:
         self.assertGreater(candidate("a", rank=1).hot_score, candidate("b", rank=30).hot_score)
@@ -79,6 +96,57 @@ class ScoringTest(unittest.TestCase):
         self.assertEqual(top[0][0].music_id, "m1")
         scores = [s for _, s in top]
         self.assertEqual(scores, sorted(scores, reverse=True))
+
+    def test_strong_rhythm_requires_audio_signal_analysis(self) -> None:
+        unverified = candidate("m1", rank=1, tags=("dance",))
+        verified = candidate("m2", rank=2, tags=("dance",))
+        verified.raw["audio_analysis"] = {
+            "status": "ready",
+            "strong_rhythm": True,
+            "features": {"rhythm_strength": 0.82},
+        }
+        ranked = neobund_music.select_top(
+            [unverified, verified],
+            mood_hints=["dance"],
+            video_duration_ms=10_000,
+            use_counts={},
+            rhythm_preference="strong",
+            require_audio_analysis=True,
+        )
+        self.assertEqual([item.music_id for item, _score in ranked], ["m2"])
+
+    def test_content_profile_keeps_calm_content_out_of_strong_rhythm(self) -> None:
+        calm = neobund_music.derive_content_profile("咖啡生活图文 cafe")
+        makeover = neobund_music.derive_content_profile("成功脚本复刻 假发变装揭晓")
+        self.assertEqual(calm["rhythm_preference"], "soft")
+        self.assertEqual(makeover["rhythm_preference"], "strong")
+
+    def test_outfit_breakdown_uses_frozen_contract_not_localized_title(self) -> None:
+        task = SimpleNamespace(
+            recipe_id="RECIPE_OUTFIT_BREAKDOWN_V1",
+            content_goal="",
+            outfit_plan_json={"layers": ["jacket"]},
+            plan_json={"recipe": {"id": "RECIPE_OUTFIT_BREAKDOWN_V1"}},
+        )
+        inputs = neobund_music.task_content_profile_inputs(task)
+        profile = neobund_music.derive_content_profile(
+            "", content_template=inputs["content_template"],
+            rhythm_preference=inputs["rhythm_preference"],
+        )
+        self.assertEqual(profile["rhythm_preference"], "strong")
+        self.assertEqual(profile["sync_mode"], "slideshow")
+
+    def test_explicit_bgm_rhythm_overrides_template_inference(self) -> None:
+        task = SimpleNamespace(
+            recipe_id="RECIPE_OUTFIT_BREAKDOWN_V1", content_goal="",
+            outfit_plan_json={}, plan_json={"bgm_rhythm_preference": "soft"},
+        )
+        inputs = neobund_music.task_content_profile_inputs(task)
+        profile = neobund_music.derive_content_profile(
+            "", content_template=inputs["content_template"],
+            rhythm_preference=inputs["rhythm_preference"],
+        )
+        self.assertEqual(profile["rhythm_preference"], "soft")
 
 
 class BgmPayloadTest(unittest.TestCase):

@@ -1,4 +1,4 @@
-"""OPV domain models mapped one-to-one onto the 11 ``opv_*`` RDS tables.
+"""OPV domain models mapped one-to-one onto the ``opv_*`` RDS tables.
 
 Conventions
 -----------
@@ -382,6 +382,64 @@ class AccountProfile:
         )
 
 
+@dataclass
+class ProductReferencePack:
+    """Operator-owned, versioned product images used as appearance authority."""
+
+    pack_id: str
+    product_id: str
+    variant_key: str = "default"
+    pack_version: int = 1
+    product_name: Optional[str] = None
+    category: Optional[str] = None
+    status: str = "limited"
+    is_default: bool = False
+    assets_json: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
+    asset_fingerprint: str = ""
+    source_type: Optional[str] = None
+    source_ref: Optional[str] = None
+    selection_reason: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    def to_row(self) -> Dict[str, Any]:
+        return {
+            "pack_id": self.pack_id,
+            "product_id": self.product_id,
+            "variant_key": self.variant_key,
+            "pack_version": self.pack_version,
+            "product_name": self.product_name,
+            "category": self.category,
+            "status": self.status,
+            "is_default": 1 if self.is_default else 0,
+            "assets_json": dump_json(self.assets_json),
+            "asset_fingerprint": self.asset_fingerprint,
+            "source_type": self.source_type,
+            "source_ref": self.source_ref,
+            "selection_reason": self.selection_reason,
+        }
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> "ProductReferencePack":
+        return cls(
+            pack_id=row["pack_id"],
+            product_id=row["product_id"],
+            variant_key=row.get("variant_key") or "default",
+            pack_version=int(row.get("pack_version") or 1),
+            product_name=row.get("product_name"),
+            category=row.get("category"),
+            status=row.get("status") or "limited",
+            is_default=to_bool(row.get("is_default")),
+            assets_json=load_json_value(row.get("assets_json"), []),
+            asset_fingerprint=row.get("asset_fingerprint") or "",
+            source_type=row.get("source_type"),
+            source_ref=row.get("source_ref"),
+            selection_reason=row.get("selection_reason"),
+            created_at=row.get("created_at"),
+            updated_at=row.get("updated_at"),
+        )
+
+
 # --------------------------------------------------------------------------
 # Business flow
 # --------------------------------------------------------------------------
@@ -418,6 +476,12 @@ class ContentTask:
     storyboard_version: Optional[str] = None
     content_package_id: Optional[str] = None
     product_facts_json: Optional[Dict[str, Any]] = None
+    # Workflow V2 keeps a mutable working revision and a separately frozen
+    # released revision.  Null values deliberately preserve historical rows.
+    workflow_version: int = 1
+    active_revision_id: Optional[str] = None
+    released_revision_id: Optional[str] = None
+    row_version: int = 1
     failure_code: Optional[str] = None
     failure_detail: Optional[str] = None
     feishu_record_id: Optional[str] = None
@@ -469,6 +533,10 @@ class ContentTask:
                 if self.product_facts_json is not None
                 else None
             ),
+            "workflow_version": self.workflow_version,
+            "active_revision_id": self.active_revision_id,
+            "released_revision_id": self.released_revision_id,
+            "row_version": self.row_version,
             "failure_code": self.failure_code,
             "failure_detail": self.failure_detail,
             "feishu_record_id": self.feishu_record_id,
@@ -512,6 +580,10 @@ class ContentTask:
             storyboard_version=row.get("storyboard_version"),
             content_package_id=row.get("content_package_id"),
             product_facts_json=load_json_value(row.get("product_facts_json")),
+            workflow_version=int(row.get("workflow_version") or 1),
+            active_revision_id=row.get("active_revision_id"),
+            released_revision_id=row.get("released_revision_id"),
+            row_version=int(row.get("row_version") or 1),
             failure_code=row.get("failure_code"),
             failure_detail=row.get("failure_detail"),
             feishu_record_id=row.get("feishu_record_id"),
@@ -520,6 +592,113 @@ class ContentTask:
             completed_at=row.get("completed_at"),
             created_at=row.get("created_at"),
             updated_at=row.get("updated_at"),
+        )
+
+
+@dataclass
+class TaskRevision:
+    """Frozen planning inputs plus the working selection for one production pass.
+
+    ``asset_manifest_json`` is intentionally the authoritative selection
+    manifest for a revision.  Existing shot/render tables remain the physical
+    artifact history, so a second asset graph is not introduced prematurely.
+    """
+
+    revision_id: str
+    task_id: str
+    revision_no: int
+    plan_snapshot_json: Dict[str, Any]
+    input_snapshot_hash: str
+    parent_revision_id: Optional[str] = None
+    asset_manifest_json: Dict[str, Any] = dataclasses.field(default_factory=dict)
+    selection_hash: str = ""
+    rework_spec_json: Dict[str, Any] = dataclasses.field(default_factory=dict)
+    revision_status: str = "working"
+    lock_version: int = 1
+    created_by: str = "system"
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    def to_row(self) -> Dict[str, Any]:
+        return {
+            "revision_id": self.revision_id,
+            "task_id": self.task_id,
+            "revision_no": self.revision_no,
+            "parent_revision_id": self.parent_revision_id,
+            "plan_snapshot_json": dump_json(self.plan_snapshot_json),
+            "input_snapshot_hash": self.input_snapshot_hash,
+            "asset_manifest_json": dump_json(self.asset_manifest_json),
+            "selection_hash": self.selection_hash,
+            "rework_spec_json": dump_json(self.rework_spec_json),
+            "revision_status": self.revision_status,
+            "lock_version": self.lock_version,
+            "created_by": self.created_by,
+        }
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> "TaskRevision":
+        return cls(
+            revision_id=row["revision_id"], task_id=row["task_id"],
+            revision_no=int(row["revision_no"]),
+            parent_revision_id=row.get("parent_revision_id"),
+            plan_snapshot_json=load_json_value(row.get("plan_snapshot_json"), {}),
+            input_snapshot_hash=row.get("input_snapshot_hash") or "",
+            asset_manifest_json=load_json_value(row.get("asset_manifest_json"), {}),
+            selection_hash=row.get("selection_hash") or "",
+            rework_spec_json=load_json_value(row.get("rework_spec_json"), {}),
+            revision_status=row.get("revision_status") or "working",
+            lock_version=int(row.get("lock_version") or 1),
+            created_by=row.get("created_by") or "system",
+            created_at=row.get("created_at"), updated_at=row.get("updated_at"),
+        )
+
+
+@dataclass
+class QualityReview:
+    """Append-only, scoped review bound to the exact reviewed inputs."""
+
+    review_id: str
+    revision_id: str
+    scope: str
+    target_id: str
+    input_fingerprint: str
+    quality_profile_id: str
+    quality_profile_version: int
+    decision: str
+    reviewer_type: str
+    dimensions_json: Dict[str, Any] = dataclasses.field(default_factory=dict)
+    reason_codes_json: List[str] = dataclasses.field(default_factory=list)
+    evidence_json: Dict[str, Any] = dataclasses.field(default_factory=dict)
+    reviewer: str = "system"
+    created_at: Optional[datetime] = None
+
+    def to_row(self) -> Dict[str, Any]:
+        return {
+            "review_id": self.review_id, "revision_id": self.revision_id,
+            "scope": self.scope, "target_id": self.target_id,
+            "input_fingerprint": self.input_fingerprint,
+            "quality_profile_id": self.quality_profile_id,
+            "quality_profile_version": self.quality_profile_version,
+            "decision": self.decision, "reviewer_type": self.reviewer_type,
+            "dimensions_json": dump_json(self.dimensions_json),
+            "reason_codes_json": dump_json(self.reason_codes_json),
+            "evidence_json": dump_json(self.evidence_json), "reviewer": self.reviewer,
+        }
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> "QualityReview":
+        return cls(
+            review_id=row["review_id"], revision_id=row["revision_id"],
+            scope=row["scope"], target_id=row["target_id"],
+            input_fingerprint=row["input_fingerprint"],
+            quality_profile_id=row.get("quality_profile_id") or "",
+            quality_profile_version=int(row.get("quality_profile_version") or 1),
+            decision=row.get("decision") or "failed",
+            reviewer_type=row.get("reviewer_type") or "system",
+            dimensions_json=load_json_value(row.get("dimensions_json"), {}),
+            reason_codes_json=load_json_value(row.get("reason_codes_json"), []),
+            evidence_json=load_json_value(row.get("evidence_json"), {}),
+            reviewer=row.get("reviewer") or "system", created_at=row.get("created_at"),
         )
 
 
@@ -557,6 +736,8 @@ class ContentShot:
     transition_hint: Optional[str] = None
     continuity_constraints_json: List[Any] = dataclasses.field(default_factory=list)
     outfit_state_ref: Optional[str] = None
+    origin_revision_id: Optional[str] = None
+    input_fingerprint: str = ""
     failure_detail: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
@@ -599,6 +780,8 @@ class ContentShot:
             "transition_hint": self.transition_hint,
             "continuity_constraints_json": dump_json(self.continuity_constraints_json),
             "outfit_state_ref": self.outfit_state_ref,
+            "origin_revision_id": self.origin_revision_id,
+            "input_fingerprint": self.input_fingerprint,
             "failure_detail": self.failure_detail,
         }
 
@@ -643,6 +826,8 @@ class ContentShot:
                 row.get("continuity_constraints_json"), []
             ),
             outfit_state_ref=row.get("outfit_state_ref"),
+            origin_revision_id=row.get("origin_revision_id"),
+            input_fingerprint=row.get("input_fingerprint") or "",
             failure_detail=row.get("failure_detail"),
             created_at=row.get("created_at"),
             updated_at=row.get("updated_at"),
@@ -671,6 +856,8 @@ class VideoRender:
     qc_status: str = "pending"
     qc_json: Optional[Dict[str, Any]] = None
     publish_ready: bool = False
+    origin_revision_id: Optional[str] = None
+    input_fingerprint: str = ""
     failure_detail: Optional[str] = None
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
@@ -703,6 +890,8 @@ class VideoRender:
             "qc_status": self.qc_status,
             "qc_json": dump_json(self.qc_json) if self.qc_json is not None else None,
             "publish_ready": 1 if self.publish_ready else 0,
+            "origin_revision_id": self.origin_revision_id,
+            "input_fingerprint": self.input_fingerprint,
             "failure_detail": self.failure_detail,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
@@ -733,6 +922,8 @@ class VideoRender:
             qc_status=row.get("qc_status") or "pending",
             qc_json=load_json_value(row.get("qc_json")),
             publish_ready=to_bool(row.get("publish_ready")),
+            origin_revision_id=row.get("origin_revision_id"),
+            input_fingerprint=row.get("input_fingerprint") or "",
             failure_detail=row.get("failure_detail"),
             started_at=row.get("started_at"),
             completed_at=row.get("completed_at"),
@@ -755,6 +946,8 @@ class PublishRecord:
     external_post_url: Optional[str] = None
     cover_shot_id: Optional[str] = None
     operator_name: Optional[str] = None
+    planned_publish_at: Optional[datetime] = None
+    submitted_at: Optional[datetime] = None
     published_at: Optional[datetime] = None
     platform_metadata_json: Optional[Dict[str, Any]] = None
     failure_detail: Optional[str] = None
@@ -775,6 +968,8 @@ class PublishRecord:
             "caption_snapshot_json": dump_json(self.caption_snapshot_json),
             "cover_shot_id": self.cover_shot_id,
             "operator_name": self.operator_name,
+            "planned_publish_at": self.planned_publish_at,
+            "submitted_at": self.submitted_at,
             "published_at": self.published_at,
             "platform_metadata_json": (
                 dump_json(self.platform_metadata_json)
@@ -799,6 +994,8 @@ class PublishRecord:
             caption_snapshot_json=load_json_value(row.get("caption_snapshot_json"), {}),
             cover_shot_id=row.get("cover_shot_id"),
             operator_name=row.get("operator_name"),
+            planned_publish_at=row.get("planned_publish_at"),
+            submitted_at=row.get("submitted_at"),
             published_at=row.get("published_at"),
             platform_metadata_json=load_json_value(row.get("platform_metadata_json")),
             failure_detail=row.get("failure_detail"),
@@ -1232,4 +1429,44 @@ class ContentPackage:
             status=row.get("status") or "planning",
             created_at=row.get("created_at"),
             updated_at=row.get("updated_at"),
+        )
+
+
+@dataclass
+class ProductionBatch:
+    """Frozen workbench batch intent plus recoverable run/projection metadata."""
+
+    batch_id: str
+    source_record_id: str
+    expected_count: int
+    manifest_json: Dict[str, Any] = dataclasses.field(default_factory=dict)
+    source_type: str = "feishu_opv"
+    pending_fields_json: Optional[Dict[str, Any]] = None
+    batch_status: str = "planned"
+    lock_version: int = 1
+    run_owner: Optional[str] = None
+    lease_until: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    def to_row(self) -> Dict[str, Any]:
+        return {
+            "batch_id": self.batch_id, "source_type": self.source_type,
+            "source_record_id": self.source_record_id, "expected_count": self.expected_count,
+            "manifest_json": dump_json(self.manifest_json),
+            "pending_fields_json": dump_json(self.pending_fields_json) if self.pending_fields_json is not None else None,
+            "batch_status": self.batch_status, "lock_version": self.lock_version,
+            "run_owner": self.run_owner, "lease_until": self.lease_until,
+        }
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> "ProductionBatch":
+        return cls(
+            batch_id=row["batch_id"], source_record_id=row["source_record_id"],
+            expected_count=int(row["expected_count"]), source_type=row.get("source_type") or "feishu_opv",
+            manifest_json=load_json_value(row.get("manifest_json"), {}),
+            pending_fields_json=load_json_value(row.get("pending_fields_json")),
+            batch_status=row.get("batch_status") or "planned", lock_version=int(row.get("lock_version") or 1),
+            run_owner=row.get("run_owner"), lease_until=row.get("lease_until"),
+            created_at=row.get("created_at"), updated_at=row.get("updated_at"),
         )

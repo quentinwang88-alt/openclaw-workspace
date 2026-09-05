@@ -93,6 +93,29 @@ class ProductFactsTest(unittest.TestCase):
 
 
 class OutfitPlanTest(unittest.TestCase):
+    def test_default_palette_uses_only_explicit_product_color(self) -> None:
+        unknown_product = product()
+        unknown_product.pop("color")
+        unknown_plan = build_outfit_plan(
+            outfit_plan_id="unknown-color",
+            theme_id=travel_plan_theme_id(),
+            product_facts=build_product_facts(unknown_product),
+        )
+        normalized = [str(value).lower() for value in unknown_plan["color_palette"]]
+        self.assertNotIn("product_color", normalized)
+        self.assertNotIn("unknown", normalized)
+        self.assertNotIn("light blue", normalized)
+
+        brown_product = product()
+        brown_product["color"] = "brown"
+        brown_plan = build_outfit_plan(
+            outfit_plan_id="brown-color",
+            theme_id=travel_plan_theme_id(),
+            product_facts=build_product_facts(brown_product),
+        )
+        self.assertEqual(brown_plan["color_palette"][0], "brown")
+        self.assertNotIn("light blue", brown_plan["color_palette"])
+
     def test_plan_answers_styling_logic(self) -> None:
         rules = {
             "by_content_key": {
@@ -137,9 +160,39 @@ class OutfitPlanTest(unittest.TestCase):
             {"FINAL"},
         )
         self.assertEqual(
+            set(build_outfit_states(plan, content_goal="outfit_breakdown")),
+            {"FINAL"},
+        )
+        self.assertEqual(
             set(build_outfit_states(plan, content_goal="visual_transform")),
             {"BASE", "FINAL", "ALT_1"},
         )
+
+    def test_selected_look_drives_final_outfit_state(self) -> None:
+        facts = build_product_facts(product())
+        plan = build_outfit_plan(
+            outfit_plan_id="opv_outfit_look",
+            theme_id=travel_plan_theme_id(),
+            product_facts=facts,
+            look={
+                "name": "一衣多穿",
+                "recipe": {
+                    "top_inner": "白色针织连衣裙",
+                    "bottom": "连衣裙（无独立下装）",
+                    "footwear": "小白鞋",
+                    "accessories": "细腰带",
+                    "overall_style": "一衣多穿",
+                },
+            },
+            content_goal="visual_transform",
+        )
+        states = build_outfit_states(plan, content_goal="visual_transform")
+        self.assertEqual(states["FINAL"]["top_inner"], "白色针织连衣裙")
+        self.assertEqual(states["FINAL"]["bottom"]["type"], "连衣裙（无独立下装）")
+        self.assertEqual(states["BASE"]["bottom"], states["FINAL"]["bottom"])
+        self.assertEqual(states["ALT_1"]["top_inner"], states["FINAL"]["top_inner"])
+        self.assertEqual(states["ALT_1"]["bottom"], states["FINAL"]["bottom"])
+        self.assertIn("outfit_state", plan["product_visibility_rules"]["consistency"])
 
 
 class FakeRepo:
@@ -252,7 +305,7 @@ class FakeRepo:
 def world():
     repo = FakeRepo()
     account = AccountProfile(
-        account_id="OPV_TH_TEST_001",
+        account_id="OPV_UNIT_TEST_001",
         account_code="c",
         account_name="n",
         target_country="TH",
@@ -269,7 +322,7 @@ def world():
     task = ContentTask(
         task_id="opv_task_story_1",
         idempotency_key="a" * 64,
-        account_id="OPV_TH_TEST_001",
+        account_id="OPV_UNIT_TEST_001",
         product_id="P1",
         target_country="TH",
         target_locale="th-TH",
@@ -403,11 +456,11 @@ class StoryFacadeTest(unittest.TestCase):
             pack_name="p",
             status="active",
         )
-        account = repo.accounts["OPV_TH_TEST_001"]
+        account = repo.accounts["OPV_UNIT_TEST_001"]
         account.default_market_pack_id = "MP_TH_DEFAULT_V1"
         account.default_render_preset_id = "RP_STILL_FASTCUT_10S_V1"
         # re-register account so profile list is fresh
-        repo.accounts["OPV_TH_TEST_001"] = account
+        repo.accounts["OPV_UNIT_TEST_001"] = account
 
         class NullAssets:
             def get_persona(self, ref):
@@ -466,7 +519,7 @@ class StoryFacadeTest(unittest.TestCase):
 
     def test_account_selection_requires_explicit_id_when_ambiguous(self) -> None:
         repo, _task = world()
-        second = repo.accounts["OPV_TH_TEST_001"]
+        second = repo.accounts["OPV_UNIT_TEST_001"]
         import copy
 
         second = copy.deepcopy(second)

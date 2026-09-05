@@ -29,8 +29,10 @@ class InvalidTransitionError(ValueError):
 TASK_DRAFT = "draft"
 TASK_PLANNED = "planned"
 TASK_HERO_GENERATING = "hero_generating"
+TASK_ANCHOR_REVIEW = "anchor_review"
 TASK_IMAGE_GENERATING = "image_generating"
 TASK_IMAGE_REVIEW = "image_review"
+TASK_REWORK_PENDING = "rework_pending"
 TASK_RENDERING = "rendering"
 TASK_VIDEO_REVIEW = "video_review"
 TASK_PUBLISH_PREPARING = "publish_preparing"
@@ -46,8 +48,10 @@ TASK_STATUSES: FrozenSet[str] = frozenset(
         TASK_DRAFT,
         TASK_PLANNED,
         TASK_HERO_GENERATING,
+        TASK_ANCHOR_REVIEW,
         TASK_IMAGE_GENERATING,
         TASK_IMAGE_REVIEW,
+        TASK_REWORK_PENDING,
         TASK_RENDERING,
         TASK_VIDEO_REVIEW,
         TASK_PUBLISH_PREPARING,
@@ -63,16 +67,19 @@ TASK_STATUSES: FrozenSet[str] = frozenset(
 TASK_STATUS_TRANSITIONS: Dict[str, FrozenSet[str]] = {
     TASK_DRAFT: frozenset({TASK_PLANNED, TASK_FAILED}),
     TASK_PLANNED: frozenset({TASK_HERO_GENERATING, TASK_FAILED}),
-    TASK_HERO_GENERATING: frozenset({TASK_IMAGE_GENERATING, TASK_FAILED}),
+    # V1 plans retain the direct hero -> image generation path.  V2 plans
+    # stop here until the selected anchor has passed a scoped content review.
+    TASK_HERO_GENERATING: frozenset({TASK_ANCHOR_REVIEW, TASK_IMAGE_GENERATING, TASK_FAILED}),
+    TASK_ANCHOR_REVIEW: frozenset({TASK_HERO_GENERATING, TASK_IMAGE_GENERATING, TASK_REWORK_PENDING, TASK_FAILED}),
     TASK_IMAGE_GENERATING: frozenset({TASK_IMAGE_REVIEW, TASK_FAILED}),
     # image_review may loop back to image_generating when a single slot is redone.
     TASK_IMAGE_REVIEW: frozenset(
-        {TASK_RENDERING, TASK_IMAGE_GENERATING, TASK_FAILED}
+        {TASK_RENDERING, TASK_IMAGE_GENERATING, TASK_REWORK_PENDING, TASK_FAILED}
     ),
     TASK_RENDERING: frozenset({TASK_VIDEO_REVIEW, TASK_FAILED}),
     # video_review may loop back to rendering when the group is re-rendered.
     TASK_VIDEO_REVIEW: frozenset(
-        {TASK_PUBLISH_PREPARING, TASK_RENDERING, TASK_FAILED}
+        {TASK_PUBLISH_PREPARING, TASK_RENDERING, TASK_REWORK_PENDING, TASK_FAILED}
     ),
     TASK_PUBLISH_PREPARING: frozenset({TASK_READY_TO_PUBLISH, TASK_FAILED}),
     TASK_READY_TO_PUBLISH: frozenset({TASK_PUBLISHING, TASK_FAILED}),
@@ -96,6 +103,12 @@ TASK_STATUS_TRANSITIONS: Dict[str, FrozenSet[str]] = {
             TASK_PUBLISHING,
         }
     ),
+    # A rework is always explicit.  The caller selects the narrowest safe
+    # recovery stage instead of pretending every failure is a new task.
+    TASK_REWORK_PENDING: frozenset(
+        {TASK_PLANNED, TASK_HERO_GENERATING, TASK_IMAGE_GENERATING,
+         TASK_IMAGE_REVIEW, TASK_RENDERING, TASK_FAILED}
+    ),
 }
 
 # --------------------------------------------------------------------------
@@ -118,8 +131,10 @@ STAGE_FOR_STATUS: Dict[str, str] = {
     TASK_DRAFT: STAGE_INTAKE,
     TASK_PLANNED: STAGE_PLANNING,
     TASK_HERO_GENERATING: STAGE_HERO_GENERATION,
+    TASK_ANCHOR_REVIEW: STAGE_IMAGE_REVIEW,
     TASK_IMAGE_GENERATING: STAGE_IMAGE_GENERATION,
     TASK_IMAGE_REVIEW: STAGE_IMAGE_REVIEW,
+    TASK_REWORK_PENDING: STAGE_PLANNING,
     TASK_RENDERING: STAGE_RENDERING,
     TASK_VIDEO_REVIEW: STAGE_VIDEO_REVIEW,
     TASK_PUBLISH_PREPARING: STAGE_PUBLISH_PREPARATION,
@@ -292,7 +307,7 @@ PACKAGE_STATUS_TRANSITIONS: Dict[str, FrozenSet[str]] = {
     PACKAGE_GENERATING: frozenset({PACKAGE_QA_REVIEW, PACKAGE_INVALID}),
     PACKAGE_QA_REVIEW: frozenset({PACKAGE_READY, PACKAGE_GENERATING, PACKAGE_INVALID}),
     PACKAGE_READY: frozenset({PACKAGE_RENDERED, PACKAGE_INVALID}),
-    PACKAGE_RENDERED: frozenset(),
+    PACKAGE_RENDERED: frozenset({PACKAGE_QA_REVIEW}),
     PACKAGE_INVALID: frozenset(),
 }
 

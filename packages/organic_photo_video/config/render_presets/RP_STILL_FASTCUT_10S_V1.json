@@ -12,7 +12,7 @@
   "codec": "h264",
   "render_mode": "still_slideshow",
   "motion_rules": {
-    "allowed_presets": ["slow_push", "light_pan", "detail_zoom", "static_hold"],
+    "allowed_presets": ["slow_push", "light_pan", "detail_zoom", "upper_body_focus", "static_hold"],
     "intensity": "punchy; visible motion within the first second of each shot, under 5% of frame width over a shot",
     "per_shot_single_motion": true,
     "pace_note": "2s per shot on average; motion starts immediately, no static lead-in"
@@ -45,11 +45,11 @@
     "pixel_format": "yuv420p",
     "color": "bt709",
     "timeline_defaults_ms": {
-      "1": 2000,
-      "2": 2000,
+      "1": 1400,
+      "2": 1800,
       "3": 2000,
-      "4": 2000,
-      "5": 2000
+      "4": 1800,
+      "5": 3000
     },
     "qc_checks": [
       "resolution_1080x1920",

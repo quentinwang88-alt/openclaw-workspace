@@ -25,12 +25,40 @@ class ShippedConfigTest(unittest.TestCase):
 
     def test_bundle_counts_match_phase0_plan(self) -> None:
         self.assertEqual(len(self.bundle.market_packs), 1)
-        self.assertEqual(len(self.bundle.themes), 9)  # 8 pilot themes + travel departure
+        self.assertEqual(len(self.bundle.themes), 10)
         self.assertEqual(len(self.bundle.render_presets), 1)
-        self.assertEqual(len(self.bundle.content_recipes), 3)
-        self.assertEqual(len(self.bundle.render_profiles), 1)
-        self.assertEqual(len(self.bundle.quality_profiles), 1)
+        self.assertEqual(len(self.bundle.content_recipes), 5)
+        self.assertEqual(len(self.bundle.render_profiles), 2)
+        self.assertEqual(len(self.bundle.quality_profiles), 3)
+        self.assertEqual(len(self.bundle.board_layouts), 3)
+        self.assertEqual(len(self.bundle.variant_policies), 1)
         self.assertIsNotNone(self.bundle.account_example)
+
+    def test_outfit_breakdown_recipe_uses_p2_anchor_and_p1_board(self) -> None:
+        recipe = next(
+            item
+            for item in self.bundle.content_recipes
+            if item.recipe_id == "RECIPE_OUTFIT_BREAKDOWN_V1"
+        )
+        self.assertEqual(recipe.content_goal, "outfit_breakdown")
+        self.assertEqual(recipe.anchor_slot, 2)
+        self.assertEqual(recipe.story_structure_json[0]["slot_index"], 1)
+        self.assertEqual(recipe.story_structure_json[0]["shot_kind"], "composite_board")
+        self.assertEqual(recipe.recipe_version, 3)
+        self.assertEqual(recipe.quality_profile_id, "QUALITY_OUTFIT_BREAKDOWN_V2")
+
+    def test_multi_look_recipe_is_additive_with_independent_p1_anchor(self) -> None:
+        recipe = next(item for item in self.bundle.content_recipes if item.recipe_id == "RECIPE_MULTI_LOOK_V1")
+        self.assertEqual(recipe.content_goal, "multi_look")
+        self.assertEqual(recipe.anchor_slot, 1)
+        self.assertEqual(recipe.story_structure_json[0]["shot_kind"], "composite_board")
+        self.assertTrue(all(slot["slot_role"] == "full_look" for slot in recipe.story_structure_json[1:]))
+        profile = next(p for p in self.bundle.render_profiles if p.render_profile_id == recipe.render_profile_id)
+        self.assertEqual(profile.motion_rules_json["allowed"], ["static_hold"])
+        raw_presets = json.loads((PACKAGE_ROOT / "config" / "feishu_production_presets.json").read_text())["presets"]
+        name = "TH｜五套穿搭｜拆解首图"
+        self.assertEqual(next(p for p in raw_presets if p["name"] == name)["tasks"][0]["recipe_id"], recipe.recipe_id)
+        self.assertEqual([name], next(p for p in raw_presets if "随机养号组合" in p["name"])["tasks_from"])
 
     def test_recipe_profiles_are_active_and_linked(self) -> None:
         render_ids = {p.render_profile_id for p in self.bundle.render_profiles}
@@ -106,11 +134,20 @@ class ShippedConfigTest(unittest.TestCase):
         self.assertEqual(
             sum(int(v) for v in timeline.values()), preset.target_duration_ms
         )
+        self.assertLess(int(timeline["1"]), int(timeline["5"]))
+        self.assertGreater(len({int(v) for v in timeline.values()}), 1)
 
     def test_example_account_is_testing_not_active(self) -> None:
         example = self.bundle.account_example
         self.assertEqual(example.status, "testing")
         self.assertEqual(example.default_market_pack_id, "MP_TH_DEFAULT_V1")
+
+    def test_test_account_defaults_to_auto_render_without_model_qa(self) -> None:
+        account = loader.load_account_import_file(
+            PACKAGE_ROOT / "config" / "accounts" / "OPV_TH_TEST_001.json"
+        )
+        self.assertFalse(account.operating_rules_json["human_review_required"])
+        self.assertFalse(account.operating_rules_json["visual_qa_required"])
 
 
 class LoaderFailureTest(unittest.TestCase):

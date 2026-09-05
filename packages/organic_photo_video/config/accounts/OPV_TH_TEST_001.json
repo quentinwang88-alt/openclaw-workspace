@@ -26,14 +26,17 @@
       "white",
       "cream"
     ],
-    "signature": "real handheld phone shots, never studio look",
-    "proportion_rule": "上4下6，短款外套提高腰线"
+    "signature": "pure-color fashion creator portraits with natural phone realism",
+    "proportion_rule": "自然修长比例，短款外套提高腰线，鞋履和裤脚完整可见"
   },
   "allowed_style_refs": [],
   "allowed_look_refs": [
     "STYLE_OPV_PUFFER_TRAVEL_001",
     "STYLE_OPV_PUFFER_PETITE_001",
-    "STYLE_OPV_PUFFER_MULTIWAY_001"
+    "STYLE_OPV_PUFFER_MULTIWAY_001",
+    "STYLE_001",
+    "STYLE_002",
+    "STYLE_004"
   ],
   "allowed_scene_refs": [
     "ENV_AIRPORT_DEPART_001",
@@ -46,6 +49,10 @@
   "default_market_pack_id": "MP_TH_DEFAULT_V1",
   "default_render_preset_id": "RP_STILL_FASTCUT_10S_V1",
   "operating_rules": {
+    "look_selection_mode": "auto_library",
+    "exclude_look_refs": [],
+    "required_presentation_profile": "TH_PURE_COLOR_FASHION_V1",
+    "item_count_policy": "dynamic_2_or_3",
     "content_direction": "airport_travel_departure",
     "pilot_product_ids": [
       "1737141103233042426"
@@ -61,8 +68,8 @@
     },
     "bgm_dedup_days": 3,
     "bgm_max_uses_per_song_in_window": 2,
-    "human_review_required": true,
-    "visual_qa_required": true,
+    "human_review_required": false,
+    "visual_qa_required": false,
     "persona_authority": "original_persona_template_library",
     "allowed_persona_refs": [
       "TH_APPAREL_SELECTED_01_001",
@@ -71,6 +78,16 @@
     ],
     "persona_min_local_refs_testing": 1,
     "persona_min_local_refs_active": 3,
+    "presentation_profile": {
+      "profile_id": "TH_PURE_COLOR_FASHION_V1",
+      "revision": 2,
+      "item_count_policy": "dynamic_2_or_3",
+      "background_mode": "solid_color",
+      "background_color": "#F1F3F5",
+      "background_alternates": [],
+      "full_body_occupancy": "85-92%",
+      "proportion_direction": "自然修长时装比例，约7.6-8头身；腿部线条连贯、腰线清楚；不得机械拉伸身体或改变真实商品版型"
+    },
     "note": "SCENE_A_001 现代简约卧室来自轻量试穿视频资产库，作为机场场景失败时的室内备选；neobund_auth_id=5250 来自 2026-08-31 用户抓包确认的 Organic 账号（后续接入自动排班）"
   }
 }

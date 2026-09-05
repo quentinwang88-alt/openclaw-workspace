@@ -1,4 +1,4 @@
-"""RDS (MySQL 8) repository for the 11 ``opv_*`` tables.
+"""RDS (MySQL 8) repository for the OPV tables.
 
 Design rules
 ------------
@@ -32,15 +32,20 @@ from domain.models import (
     ContentTask,
     FeishuOutbox,
     QualityProfile,
+    QualityReview,
     RenderProfile,
     LookFeedback,
     MarketPack,
     MetricSnapshot,
     PublishRecord,
+    ProductReferencePack,
+    ProductionBatch,
     RenderPreset,
     ThemeCatalog,
+    TaskRevision,
     VideoRender,
     dump_json,
+    load_json_value,
 )
 
 DUPLICATE_KEY_ERROR = 1062
@@ -251,6 +256,51 @@ class RdsRepository:
         return [AccountProfile.from_row(row) for row in rows]
 
     # ------------------------------------------------------------------
+    # Product reference packs
+    # ------------------------------------------------------------------
+
+    def upsert_product_reference_pack(self, pack: ProductReferencePack) -> None:
+        row = pack.to_row()
+        connection = self._connect_fn()
+        try:
+            with connection.cursor() as cursor:
+                if pack.is_default:
+                    cursor.execute(
+                        "UPDATE opv_product_reference_pack SET is_default=0 "
+                        "WHERE product_id=%s",
+                        [pack.product_id],
+                    )
+                update_columns = [column for column in row if column != "pack_id"]
+                cursor.execute(
+                    f"INSERT INTO opv_product_reference_pack ({','.join(row)}) "
+                    f"VALUES ({_placeholders(len(row))}) ON DUPLICATE KEY UPDATE "
+                    + ",".join(f"{column}=%s" for column in update_columns),
+                    [row[column] for column in row]
+                    + [row[column] for column in update_columns],
+                )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def get_product_reference_pack(
+        self, pack_id: str
+    ) -> Optional[ProductReferencePack]:
+        row = self._fetch_one(
+            "SELECT * FROM opv_product_reference_pack WHERE pack_id=%s", [pack_id]
+        )
+        return ProductReferencePack.from_row(row) if row else None
+
+    def list_product_reference_packs(
+        self, product_id: str
+    ) -> List[ProductReferencePack]:
+        rows = self._fetch_all(
+            "SELECT * FROM opv_product_reference_pack WHERE product_id=%s "
+            "ORDER BY is_default DESC, pack_version DESC, pack_id",
+            [product_id],
+        )
+        return [ProductReferencePack.from_row(row) for row in rows]
+
+    # ------------------------------------------------------------------
     # Content task: idempotent creation and guarded transitions
     # ------------------------------------------------------------------
 
@@ -289,6 +339,77 @@ class RdsRepository:
             "SELECT * FROM opv_content_task WHERE idempotency_key=%s", [idempotency_key]
         )
         return ContentTask.from_row(row) if row else None
+
+    def update_task_product_snapshot(
+        self, task_id: str, product_snapshot_json: Dict[str, Any]
+    ) -> None:
+        """Refresh an intake-only draft's product snapshot before planning.
+
+        Idempotency normally freezes the product block.  The sole exception is
+        an untouched ``draft``/``intake`` row left by a failed first planning
+        attempt: it has no plan or generated media yet, so retrying with the
+        current authoritative image-pack snapshot is safe and prevents stale
+        compatibility metadata from surviving a repair.
+        """
+        self._run(
+            "UPDATE opv_content_task SET product_snapshot_json=%s "
+            "WHERE task_id=%s AND task_status='draft' AND current_stage='intake'",
+            [dump_json(product_snapshot_json), task_id],
+            commit=True,
+        )
+
+    def list_tasks_by_source_prefix(
+        self, source_type: str, source_record_prefix: str
+    ) -> List[ContentTask]:
+        """Return tasks owned by one external workbench record."""
+        rows = self._fetch_all(
+            "SELECT * FROM opv_content_task WHERE source_type=%s "
+            "AND source_record_id LIKE %s ORDER BY created_at, task_id",
+            [source_type, f"{source_record_prefix}%"],
+        )
+        return [ContentTask.from_row(row) for row in rows]
+
+    def get_latest_product_snapshot(self, product_id: str) -> Optional[Dict[str, Any]]:
+        """Reuse the latest immutable product block as the Feishu intake source."""
+        row = self._fetch_one(
+            "SELECT product_snapshot_json FROM opv_content_task "
+            "WHERE product_id=%s ORDER BY created_at DESC LIMIT 1",
+            [product_id],
+        )
+        if not row:
+            return None
+        snapshot = load_json_value(row.get("product_snapshot_json"), {})
+        product = snapshot.get("product") if isinstance(snapshot, dict) else None
+        if not isinstance(product, dict) or not product.get("reference_images"):
+            return None
+        return product
+
+    def list_product_snapshot_candidates(
+        self, product_id: str, *, limit: int = 20
+    ) -> List[Dict[str, Any]]:
+        """Return non-failed historical product blocks for one-time pack bootstrap."""
+        rows = self._fetch_all(
+            "SELECT task_id, task_status, source_type, source_record_id, "
+            "product_snapshot_json, created_at FROM opv_content_task "
+            "WHERE product_id=%s AND task_status<>%s "
+            "ORDER BY created_at DESC LIMIT %s",
+            [product_id, statuses.TASK_FAILED, int(limit)],
+        )
+        results: List[Dict[str, Any]] = []
+        for row in rows:
+            snapshot = load_json_value(row.get("product_snapshot_json"), {})
+            product = snapshot.get("product") if isinstance(snapshot, dict) else None
+            if not isinstance(product, dict) or not product.get("reference_images"):
+                continue
+            results.append({
+                "task_id": row.get("task_id"),
+                "task_status": row.get("task_status"),
+                "source_type": row.get("source_type"),
+                "source_record_id": row.get("source_record_id"),
+                "created_at": row.get("created_at"),
+                "product": product,
+            })
+        return results
 
     def transition_task(
         self,
@@ -359,6 +480,7 @@ class RdsRepository:
         storyboard_version: Optional[str] = None,
         content_package_id: Optional[str] = None,
         product_facts_json: Optional[Dict[str, Any]] = None,
+        workflow_version: Optional[int] = None,
     ) -> None:
         sets: List[str] = []
         params: List[Any] = []
@@ -407,6 +529,9 @@ class RdsRepository:
         if product_facts_json is not None:
             sets.append("product_facts_json=%s")
             params.append(dump_json(product_facts_json))
+        if workflow_version is not None:
+            sets.append("workflow_version=%s")
+            params.append(int(workflow_version))
         if not sets:
             return
         params.append(task_id)
@@ -415,6 +540,297 @@ class RdsRepository:
             params,
             commit=True,
         )
+
+    # ------------------------------------------------------------------
+    # Workflow V2: immutable planning revisions and scoped quality reviews
+    # ------------------------------------------------------------------
+
+    def get_task_revision(self, revision_id: str) -> Optional[TaskRevision]:
+        row = self._fetch_one(
+            "SELECT * FROM opv_task_revision WHERE revision_id=%s", [revision_id]
+        )
+        return TaskRevision.from_row(row) if row else None
+
+    def list_task_revisions(self, task_id: str) -> List[TaskRevision]:
+        rows = self._fetch_all(
+            "SELECT * FROM opv_task_revision WHERE task_id=%s ORDER BY revision_no",
+            [task_id],
+        )
+        return [TaskRevision.from_row(row) for row in rows]
+
+    def list_recent_diversity_axes(self, account_id: str, *, exclude_source_record_id: str = "", limit: int = 100) -> List[Dict[str, Any]]:
+        from services.styling_normalizer import outfit_fingerprint, outfit_visual_features
+        clauses, params = ["t.account_id=%s", "t.plan_json IS NOT NULL",
+                           "(t.task_status NOT IN ('failed','cancelled','canceled') OR EXISTS "
+                           "(SELECT 1 FROM opv_video_render r WHERE r.task_id=t.task_id AND r.qc_status='passed'))"], [account_id]
+        if exclude_source_record_id:
+            clauses.append("(t.source_record_id IS NULL OR (t.source_record_id<>%s AND t.source_record_id NOT LIKE %s))")
+            params.extend([exclude_source_record_id.rstrip(":"), exclude_source_record_id.rstrip(":") + ":%"])
+        rows = self._fetch_all(
+            "SELECT t.task_id,t.source_record_id,t.task_status,t.plan_json,t.created_at FROM opv_content_task t WHERE "
+            + " AND ".join(clauses) + " ORDER BY t.created_at DESC LIMIT %s", [*params, min(max(int(limit), 1), 1000)],
+        )
+        output = []
+        for row in rows:
+            plan = load_json_value(row.get("plan_json"), {})
+            axes = {**((plan.get("batch_diversity") or {}).get("axes") or {}),
+                    **((plan.get("content_signature") or {}).get("axes") or {})}
+            snapshot = (plan.get("look") or {}).get("snapshot") or {}
+            if plan.get("outfit_sequence"):
+                from services.multi_look_planner import sequence_axes
+                axes.setdefault("look_sequence", sequence_axes(plan["outfit_sequence"]))
+                axes.setdefault("actual_look_count", len(plan["outfit_sequence"]))
+            if not axes and not snapshot.get("recipe"):
+                continue
+            if snapshot.get("recipe"):
+                axes.setdefault("outfit_fingerprint", outfit_fingerprint(snapshot))
+                axes.setdefault("silhouette_key", outfit_visual_features(snapshot)["silhouette"])
+            else:
+                axes.setdefault("silhouette_key", axes.get("visible_silhouette", ""))
+            alternate = (plan.get("product_snapshot") or {}).get("planned_alternate_look_snapshot") or {}
+            if alternate.get("recipe"):
+                axes.setdefault("alternate_look_ref", alternate.get("ref_id", ""))
+                axes.setdefault("alternate_outfit_fingerprint", outfit_fingerprint(alternate))
+                axes.setdefault("alternate_silhouette_key", outfit_visual_features(alternate)["silhouette"])
+            if axes:
+                output.append({"task_id": row["task_id"], "source_record_id": row.get("source_record_id"),
+                               "created_at": row.get("created_at"), "task_status": row.get("task_status"), **axes})
+        return output
+
+    def get_production_batch(self, source_record_id: str, source_type: str = "feishu_opv") -> Optional[ProductionBatch]:
+        row = self._fetch_one("SELECT * FROM opv_production_batch WHERE source_type=%s AND source_record_id=%s", [source_type, source_record_id])
+        return ProductionBatch.from_row(row) if row else None
+
+    def create_production_batch_idempotent(self, batch: ProductionBatch) -> ProductionBatch:
+        row = batch.to_row()
+        try:
+            self._run(f"INSERT INTO opv_production_batch ({','.join(row)}) VALUES ({_placeholders(len(row))})", [row[k] for k in row], commit=True)
+        except Exception as exc:
+            if not self._is_duplicate(exc):
+                raise
+        result = self.get_production_batch(batch.source_record_id, batch.source_type)
+        if result is None:
+            raise RepositoryError("batch disappeared after creation")
+        return result
+
+    def update_batch_manifest(self, batch_id: str, *, expected_lock_version: int, manifest_json: Dict[str, Any]) -> None:
+        _, count = self._run_scoped(
+            "UPDATE opv_production_batch SET manifest_json=%s,lock_version=lock_version+1 WHERE batch_id=%s AND lock_version=%s",
+            [dump_json(manifest_json), batch_id, expected_lock_version], commit=True,
+        )
+        if count != 1:
+            raise StaleStatusError("batch manifest changed")
+
+    def queue_batch_projection(self, batch_id: str, fields: Dict[str, Any]) -> None:
+        self._run("UPDATE opv_production_batch SET pending_fields_json=%s WHERE batch_id=%s", [dump_json(fields), batch_id], commit=True)
+
+    def acknowledge_batch_projection(self, batch_id: str, fields: Dict[str, Any]) -> None:
+        self._run("UPDATE opv_production_batch SET pending_fields_json=NULL WHERE batch_id=%s AND pending_fields_json=CAST(%s AS JSON)", [batch_id, dump_json(fields)], commit=True)
+
+    def claim_batch_run(self, batch_id: str, *, owner: str, lease_seconds: int = 120) -> bool:
+        _, count = self._run_scoped(
+            "UPDATE opv_production_batch SET run_owner=%s,lease_until=DATE_ADD(UTC_TIMESTAMP(6),INTERVAL %s SECOND),batch_status='running' "
+            "WHERE batch_id=%s AND (run_owner IS NULL OR lease_until<UTC_TIMESTAMP(6))",
+            [owner, lease_seconds, batch_id], commit=True,
+        )
+        return count == 1
+
+    def heartbeat_batch_run(self, batch_id: str, *, owner: str, lease_seconds: int = 120) -> bool:
+        _, count = self._run_scoped(
+            "UPDATE opv_production_batch SET lease_until=DATE_ADD(UTC_TIMESTAMP(6),INTERVAL %s SECOND) WHERE batch_id=%s AND run_owner=%s",
+            [lease_seconds, batch_id, owner], commit=True,
+        )
+        return count == 1
+
+    def finish_batch_run(self, batch_id: str, *, owner: str, status: str = "waiting") -> None:
+        self._run("UPDATE opv_production_batch SET run_owner=NULL,lease_until=NULL,batch_status=%s WHERE batch_id=%s AND run_owner=%s", [status, batch_id, owner], commit=True)
+
+    def create_revision_and_activate(
+        self, revision: TaskRevision, *, expected_task_row_version: int,
+        transition_to: Optional[str] = None,
+    ) -> ContentTask:
+        """Atomically create a working revision and move the task pointer.
+
+        The task row version is a fencing token: a stale planner or a late
+        rework result cannot quietly replace the current working revision.
+        """
+        connection = self._connect_fn()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT row_version,task_status,active_revision_id,content_package_id FROM opv_content_task WHERE task_id=%s FOR UPDATE",
+                    [revision.task_id],
+                )
+                task_row = cursor.fetchone()
+                if not task_row:
+                    raise RepositoryError(f"task {revision.task_id} not found")
+                actual = int(task_row.get("row_version") or 1)
+                if actual != int(expected_task_row_version):
+                    raise StaleStatusError(
+                        f"task {revision.task_id} expected row_version "
+                        f"{expected_task_row_version}, got {actual}"
+                    )
+                if transition_to:
+                    statuses.task_ensure_transition(task_row["task_status"], transition_to)
+                    if task_row.get("active_revision_id") != revision.parent_revision_id:
+                        raise StaleStatusError("rework parent is no longer active")
+                row = revision.to_row()
+                cursor.execute(
+                    f"INSERT INTO opv_task_revision ({','.join(row)}) "
+                    f"VALUES ({_placeholders(len(row))})",
+                    [row[key] for key in row],
+                )
+                fields = "workflow_version=2,active_revision_id=%s,row_version=row_version+1"
+                params = [revision.revision_id]
+                if transition_to:
+                    fields += ",task_status=%s,current_stage=%s,plan_json=%s,group_qa_json=%s"
+                    params.extend([transition_to, statuses.STAGE_FOR_STATUS[transition_to],
+                                   dump_json(revision.plan_snapshot_json.get("plan") or {}), dump_json({})])
+                cursor.execute("UPDATE opv_content_task SET " + fields + " WHERE task_id=%s AND row_version=%s", [*params, revision.task_id, actual])
+                if cursor.rowcount != 1:
+                    raise StaleStatusError("task revision pointer changed during creation")
+                if transition_to and task_row.get("content_package_id"):
+                    selected = revision.asset_manifest_json.get("selected") or {}
+                    cursor.execute(
+                        "UPDATE opv_content_package SET status='generating',qa_summary_json=%s,selected_image_ids_json=%s WHERE content_package_id=%s",
+                        [dump_json({}), dump_json([v for k, v in sorted(selected.items()) if k.startswith("shot:")]), task_row["content_package_id"]],
+                    )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        task = self.get_task(revision.task_id)
+        if task is None:  # pragma: no cover - defensive
+            raise RepositoryError(f"task {revision.task_id} disappeared after revision creation")
+        return task
+
+    def update_revision_manifest(
+        self,
+        revision_id: str,
+        *,
+        expected_lock_version: int,
+        asset_manifest_json: Dict[str, Any],
+        selection_hash: str,
+    ) -> TaskRevision:
+        _, rowcount = self._run_scoped(
+            "UPDATE opv_task_revision SET asset_manifest_json=%s, selection_hash=%s, "
+            "lock_version=lock_version+1 WHERE revision_id=%s AND lock_version=%s "
+            "AND revision_status='working'",
+            [
+                dump_json(asset_manifest_json), selection_hash, revision_id,
+                int(expected_lock_version),
+            ],
+            commit=True,
+        )
+        if rowcount != 1:
+            raise StaleStatusError(
+                f"revision {revision_id} selection changed or is no longer working"
+            )
+        revision = self.get_task_revision(revision_id)
+        if revision is None:  # pragma: no cover - defensive
+            raise RepositoryError(f"revision {revision_id} disappeared after update")
+        return revision
+
+    def insert_quality_review(self, review: QualityReview) -> None:
+        row = review.to_row()
+        connection = self._connect_fn()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT task_id FROM opv_task_revision WHERE revision_id=%s", [review.revision_id])
+                owner = cursor.fetchone()
+                if not owner:
+                    raise StaleStatusError("review revision is missing")
+                cursor.execute("SELECT active_revision_id FROM opv_content_task WHERE task_id=%s FOR UPDATE", [owner["task_id"]])
+                active = cursor.fetchone()
+                cursor.execute("SELECT revision_status FROM opv_task_revision WHERE revision_id=%s FOR UPDATE", [review.revision_id])
+                revision = cursor.fetchone()
+                if not active or active.get("active_revision_id") != review.revision_id or not revision or revision.get("revision_status") != "working":
+                    raise StaleStatusError("review revision is no longer active and working")
+                cursor.execute(f"INSERT INTO opv_quality_review ({','.join(row)}) VALUES ({_placeholders(len(row))})", [row[key] for key in row])
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def list_quality_reviews(
+        self, revision_id: str, *, scope: Optional[str] = None,
+        target_id: Optional[str] = None,
+    ) -> List[QualityReview]:
+        clauses = ["revision_id=%s"]
+        params: List[Any] = [revision_id]
+        if scope is not None:
+            clauses.append("scope=%s")
+            params.append(scope)
+        if target_id is not None:
+            clauses.append("target_id=%s")
+            params.append(target_id)
+        rows = self._fetch_all(
+            "SELECT * FROM opv_quality_review WHERE " + " AND ".join(clauses)
+            + " ORDER BY created_at, review_id",
+            params,
+        )
+        return [QualityReview.from_row(row) for row in rows]
+
+    def release_revision(
+        self, task_id: str, revision_id: str, *, expected_task_row_version: int,
+        render_id: Optional[str] = None, review_id: Optional[str] = None,
+        expected_selection_hash: Optional[str] = None, expected_input_snapshot_hash: Optional[str] = None,
+    ) -> ContentTask:
+        """Freeze the revision and pin it as the only releasable task output."""
+        connection = self._connect_fn()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT active_revision_id,row_version FROM opv_content_task "
+                    "WHERE task_id=%s FOR UPDATE", [task_id]
+                )
+                row = cursor.fetchone()
+                if not row or row.get("active_revision_id") != revision_id:
+                    raise StaleStatusError("active revision changed before release")
+                if int(row.get("row_version") or 1) != int(expected_task_row_version):
+                    raise StaleStatusError("task row_version changed before release")
+                if expected_selection_hash is not None or expected_input_snapshot_hash is not None:
+                    cursor.execute("SELECT selection_hash,input_snapshot_hash FROM opv_task_revision WHERE revision_id=%s FOR UPDATE", [revision_id])
+                    selected = cursor.fetchone()
+                    if not selected or selected.get("selection_hash") != expected_selection_hash or selected.get("input_snapshot_hash") != expected_input_snapshot_hash:
+                        raise StaleStatusError("revision inputs changed during terminal review")
+                cursor.execute(
+                    "UPDATE opv_task_revision SET revision_status='released' "
+                    "WHERE revision_id=%s AND revision_status='working'", [revision_id]
+                )
+                if cursor.rowcount != 1:
+                    raise StaleStatusError("revision is not releasable")
+                if review_id:
+                    cursor.execute("SELECT * FROM opv_quality_review WHERE revision_id=%s AND scope='render' AND target_id=%s ORDER BY created_at DESC,review_id DESC LIMIT 1 FOR UPDATE", [revision_id, render_id])
+                    latest = cursor.fetchone()
+                    from services.release_gate import trusted_review
+                    if not latest or latest.get("review_id") != review_id or latest.get("decision") not in {"passed", "waived"} or not trusted_review(QualityReview.from_row(latest)):
+                        raise StaleStatusError("terminal review changed before release")
+                if render_id:
+                    cursor.execute("UPDATE opv_video_render SET publish_ready=1 WHERE render_id=%s AND origin_revision_id=%s AND qc_status='passed'", [render_id, revision_id])
+                    if cursor.rowcount != 1:
+                        raise StaleStatusError("render is not releasable")
+                cursor.execute(
+                    "UPDATE opv_content_task SET released_revision_id=%s, selected_render_id=COALESCE(%s, selected_render_id), "
+                    "row_version=row_version+1 WHERE task_id=%s AND row_version=%s",
+                    [revision_id, render_id, task_id, int(expected_task_row_version)],
+                )
+                if cursor.rowcount != 1:
+                    raise StaleStatusError("task changed while releasing revision")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        task = self.get_task(task_id)
+        if task is None:  # pragma: no cover - defensive
+            raise RepositoryError(f"task {task_id} disappeared after release")
+        return task
 
     # ------------------------------------------------------------------
     # Content shots
@@ -633,6 +1049,12 @@ class RdsRepository:
             commit=True,
         )
 
+    def set_render_publish_ready(self, render_id: str, publish_ready: bool) -> None:
+        self._run(
+            "UPDATE opv_video_render SET publish_ready=%s WHERE render_id=%s",
+            [1 if publish_ready else 0, render_id], commit=True,
+        )
+
     # ------------------------------------------------------------------
     # Publish records
     # ------------------------------------------------------------------
@@ -676,6 +1098,21 @@ class RdsRepository:
         )
         return [PublishRecord.from_row(row) for row in rows]
 
+    def list_publish_records_due(
+        self,
+        publish_status: str,
+        *,
+        due_before: Any,
+        limit: int = 100,
+    ) -> List[PublishRecord]:
+        rows = self._fetch_all(
+            "SELECT * FROM opv_publish_record WHERE publish_status=%s "
+            "AND planned_publish_at IS NOT NULL AND planned_publish_at<=%s "
+            "ORDER BY planned_publish_at LIMIT %s",
+            [publish_status, due_before, int(limit)],
+        )
+        return [PublishRecord.from_row(row) for row in rows]
+
     _UNSET = object()
 
     def update_publish_result(
@@ -685,6 +1122,8 @@ class RdsRepository:
         publish_status: Any = _UNSET,
         external_post_id: Any = _UNSET,
         external_post_url: Any = _UNSET,
+        planned_publish_at: Any = _UNSET,
+        submitted_at: Any = _UNSET,
         published_at: Any = _UNSET,
         platform_metadata_json: Any = _UNSET,
         failure_detail: Any = _UNSET,
@@ -696,6 +1135,8 @@ class RdsRepository:
             "publish_status": publish_status,
             "external_post_id": external_post_id,
             "external_post_url": external_post_url,
+            "planned_publish_at": planned_publish_at,
+            "submitted_at": submitted_at,
             "published_at": published_at,
             "platform_metadata_json": (
                 dump_json(platform_metadata_json)
@@ -781,6 +1222,9 @@ class RdsRepository:
         feedback: LookFeedback,
         group_qa_json: Dict[str, Any],
         package_fields: Dict[str, Any],
+        expected_revision_id: Optional[str] = None,
+        expected_selection_hash: Optional[str] = None,
+        group_review_id: Optional[str] = None,
     ) -> None:
         """Atomically approve a five-shot group and advance task/package.
 
@@ -796,7 +1240,7 @@ class RdsRepository:
         try:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT task_status, content_package_id FROM opv_content_task "
+                    "SELECT task_status, content_package_id, workflow_version, active_revision_id FROM opv_content_task "
                     "WHERE task_id=%s FOR UPDATE",
                     [task_id],
                 )
@@ -807,20 +1251,74 @@ class RdsRepository:
                         f"task {task_id} expected image_review but is {actual!r}"
                     )
 
+                v2 = int(task_row.get("workflow_version") or 1) >= 2 or bool(task_row.get("active_revision_id"))
+                if v2:
+                    if (not expected_revision_id or not expected_selection_hash or not group_review_id
+                            or task_row.get("active_revision_id") != expected_revision_id):
+                        raise StaleStatusError("V2 group approval requires the current revision and review guards")
+                    cursor.execute("SELECT * FROM opv_task_revision WHERE revision_id=%s FOR UPDATE", [expected_revision_id])
+                    revision_row = cursor.fetchone()
+                    if not revision_row:
+                        raise StaleStatusError("V2 approval revision is missing")
+                    revision = TaskRevision.from_row(revision_row)
+                    from services.workflow_v2 import RevisionAssetResolver, canonical_hash, review_actor
+                    selected = revision.asset_manifest_json.get("selected") or {}
+                    if (revision.task_id != task_id or revision.revision_status != "working"
+                            or revision.selection_hash != expected_selection_hash
+                            or canonical_hash(selected) != expected_selection_hash
+                            or canonical_hash(revision.plan_snapshot_json) != revision.input_snapshot_hash):
+                        raise StaleStatusError("V2 approval inputs or selection changed")
+                    keys = [f"shot:{index}" for index in range(1, 6)]
+                    selected_ids = [selected.get(key) for key in keys]
+                    if len(set(selected_ids)) != 5 or set(selected_ids) != set(shot_ids):
+                        raise StaleStatusError("V2 approval does not match the selected shot set")
+                    fingerprint = RevisionAssetResolver.fingerprint(revision, keys, extra={
+                        "quality_contract": (revision.plan_snapshot_json.get("plan") or {}).get("quality_contract") or {}})
+                    cursor.execute(
+                        "SELECT * FROM opv_quality_review WHERE revision_id=%s AND scope=%s AND target_id=%s "
+                        "AND input_fingerprint=%s ORDER BY created_at DESC, review_id DESC LIMIT 1 FOR UPDATE",
+                        [expected_revision_id, "group", "group", fingerprint],
+                    )
+                    review_row = cursor.fetchone()
+                    from services.release_gate import trusted_review
+                    if (not review_row or review_row.get("review_id") != group_review_id
+                            or review_row.get("decision") not in {"passed", "waived"}
+                            or not trusted_review(QualityReview.from_row(review_row))):
+                        raise StaleStatusError("V2 approval group review is missing, superseded or not passed")
+                    cursor.execute(
+                        f"SELECT * FROM opv_content_shot WHERE task_id=%s AND shot_id IN ({_placeholders(len(shot_ids))}) FOR UPDATE",
+                        [task_id, *shot_ids],
+                    )
+                    locked = {row["shot_id"]: ContentShot.from_row(row) for row in cursor.fetchall()}
+                    if set(locked) != set(shot_ids):
+                        raise StaleStatusError("V2 approval shot rows changed")
+                    from services.media_qc import MediaQcError, require_shot_media_qc
+                    for index, asset_id in enumerate(selected_ids, 1):
+                        shot = locked[asset_id]
+                        asset = RevisionAssetResolver.selected(revision, f"shot:{index}")
+                        if shot.slot_index != index or shot.image_sha256 != asset.get("sha256"):
+                            raise StaleStatusError("V2 approval shot hash or slot changed")
+                        try:
+                            require_shot_media_qc(shot)
+                        except (MediaQcError, OSError) as exc:
+                            raise StaleStatusError("V2 approval technical media QC is missing or stale") from exc
+
                 cursor.execute(
                     "UPDATE opv_content_shot SET is_selected=0 WHERE task_id=%s",
                     [task_id],
                 )
+                qa_clause = "" if v2 else " AND qa_status=%s"
                 cursor.execute(
                     "UPDATE opv_content_shot SET is_selected=1, shot_status=%s "
                     f"WHERE task_id=%s AND shot_id IN ({_placeholders(len(shot_ids))}) "
-                    "AND shot_status=%s AND qa_status=%s",
+                    "AND shot_status IN (%s,%s)" + qa_clause,
                     [
                         statuses.SHOT_APPROVED,
                         task_id,
                         *shot_ids,
                         statuses.SHOT_GENERATED,
-                        statuses.QC_PASSED,
+                        statuses.SHOT_APPROVED,
+                        *([] if v2 else [statuses.QC_PASSED]),
                     ],
                 )
                 if cursor.rowcount != len(shot_ids):

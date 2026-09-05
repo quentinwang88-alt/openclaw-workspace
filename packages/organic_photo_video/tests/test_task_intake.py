@@ -51,6 +51,17 @@ class FakeRepository:
         self.inserted.append(task)
         return task, True
 
+    def get_task(self, task_id):
+        for task in self.tasks_by_key.values():
+            if task.task_id == task_id:
+                return task
+        return None
+
+    def update_task_product_snapshot(self, task_id, product_snapshot_json):
+        task = self.get_task(task_id)
+        if task and task.task_status == "draft" and task.current_stage == "intake":
+            task.product_snapshot_json = product_snapshot_json
+
 
 def market_pack() -> MarketPack:
     return MarketPack(
@@ -111,7 +122,7 @@ class TaskIntakeTest(unittest.TestCase):
         self.service = TaskIntakeService(self.repo)
 
     def test_happy_path_creates_draft_task_with_snapshot_context(self) -> None:
-        result = self.service.create_task(request())
+        result = self.service.create_task(request(feishu_record_id="rec_1"))
         self.assertTrue(result.created)
         self.assertIsInstance(result, IntakeResult)
         task = result.task
@@ -119,6 +130,7 @@ class TaskIntakeTest(unittest.TestCase):
         self.assertEqual(task.current_stage, "intake")
         self.assertEqual(task.target_country, "TH")
         self.assertEqual(task.market_pack_id, "MP_TH_DEFAULT_V1")
+        self.assertEqual(task.feishu_record_id, "rec_1")
         context = task.product_snapshot_json["intake_context"]
         self.assertEqual(context["market_pack_version"], 1)
         self.assertEqual(context["persona_ref_id"], "PERSONA_1")
@@ -135,6 +147,20 @@ class TaskIntakeTest(unittest.TestCase):
         self.assertFalse(second.created)
         self.assertEqual(first.task.task_id, second.task.task_id)
         self.assertEqual(len(self.repo.inserted), 1)
+
+    def test_intake_draft_refreshes_stale_product_snapshot_on_retry(self) -> None:
+        first = self.service.create_task(request(
+            product_snapshot={"reference_images": ["/old.jpg"], "category": "old"}
+        ))
+        second = self.service.create_task(request(
+            product_snapshot={"reference_images": ["/new.jpg"], "category": "outerwear"}
+        ))
+        self.assertFalse(second.created)
+        self.assertEqual(
+            second.task.product_snapshot_json["product"]["reference_images"],
+            ["/new.jpg"],
+        )
+        self.assertEqual(first.task.task_id, second.task.task_id)
 
     def test_same_product_next_day_creates_fresh_content_task(self) -> None:
         first = self.service.create_task(request())

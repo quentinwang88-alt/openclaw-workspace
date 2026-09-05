@@ -1,0 +1,44 @@
+{
+  "schema_version": "opv-batch-diversity-v1",
+  "profile_id": "OPV_BATCH_DIVERSITY_V1",
+  "shot_grammars": {
+    "G1": {
+      "name": "result_first",
+      "title_suffixes_th": ["ดูทั้งลุค", "เน้นสัดส่วน", "ลุคพร้อมออกจากบ้าน"],
+      "shots": [
+        {"framing": "near_full", "camera_angle": "front_eye_level", "pose": "result_first_natural", "action": "先完整交付穿搭结果，自然站立并轻微转身", "camera_hint": "正面平视近全身，商品和整体比例第一眼清楚"},
+        {"framing": "medium_full", "camera_angle": "front_three_quarter", "pose": "show_proportion", "action": "轻扶衣摆或自然垂手，展示腰线和上下装比例", "camera_hint": "正面三分之四中全身，构图不得复刻首镜"},
+        {"framing": "full_body", "camera_angle": "side_tracking", "pose": "natural_walk", "action": "在场景中自然走动一两步", "camera_hint": "侧向全身生活动作，保留商品清晰度"},
+        {"framing": "waist_up_detail", "camera_angle": "front_close", "pose": "show_product_detail", "action": "轻触领口或门襟，只展示参考图确认的商品细节", "camera_hint": "腰部以上安全近景"},
+        {"framing": "near_full", "camera_angle": "rear_three_quarter", "pose": "look_back_payoff", "action": "侧后四十五度自然回看", "camera_hint": "第二机位完整造型收尾"}
+      ]
+    },
+    "G2": {
+      "name": "detail_first",
+      "title_suffixes_th": ["ดูดีเทลชัดๆ", "ซูมทรงเสื้อ", "ดีเทลที่ชอบ"],
+      "shots": [
+        {"framing": "waist_up_product", "camera_angle": "front_close", "pose": "adjust_collar_or_placket", "action": "轻整理领口或门襟，以商品细节作为首镜", "camera_hint": "腰部以上近景开场，商品轮廓、领口和门襟优先"},
+        {"framing": "medium_full", "camera_angle": "front_eye_level", "pose": "upper_body_fit", "action": "自然放下手，展示上身版型和衣长", "camera_hint": "半身至中全身，明确不同于首镜近景"},
+        {"framing": "full_body", "camera_angle": "three_quarter", "pose": "complete_look", "action": "三分之四站姿交付完整搭配", "camera_hint": "完整全身穿搭，腰线和下装可见"},
+        {"framing": "medium_full", "camera_angle": "side_eye_level", "pose": "scene_interaction", "action": "在当前场景区域做轻量生活动作", "camera_hint": "侧向生活状态，不新增无关道具"},
+        {"framing": "near_full", "camera_angle": "rear_or_side", "pose": "second_angle", "action": "侧面或背面第二角度自然收尾", "camera_hint": "与前四镜不同机位"}
+      ]
+    },
+    "G3": {
+      "name": "lifestyle_action_first",
+      "title_suffixes_th": ["ใส่จริงในวันสบายๆ", "ลุคออกไปข้างนอก", "แต่งง่ายในชีวิตจริง"],
+      "shots": [
+        {"framing": "medium_full", "camera_angle": "handheld_three_quarter", "pose": "enter_or_adjust", "action": "自然入镜、拿包或整理衣领，动作只从场景允许元素中选择", "camera_hint": "生活动作首镜，手机抓拍感，不用正面静态站姿"},
+        {"framing": "near_full", "camera_angle": "front_eye_level", "pose": "result_after_action", "action": "动作后停下展示完整穿搭结果", "camera_hint": "近全身正面结果镜"},
+        {"framing": "medium_full", "camera_angle": "side_eye_level", "pose": "standing_side_pause", "action": "侧身站立并轻微错脚停留，保持下半身长线条", "camera_hint": "侧向站姿中全身，避免复刻前两镜，不使用坐姿"},
+        {"framing": "waist_up_detail", "camera_angle": "front_or_three_quarter_close", "pose": "show_product_detail", "action": "轻触商品边缘，展示确认过的版型或材质观感", "camera_hint": "腰部以上安全近景，不编造结构"},
+        {"framing": "full_body", "camera_angle": "rear_three_quarter", "pose": "walk_away_look_back", "action": "自然走开并轻微回看", "camera_hint": "全身离场动作收尾"}
+      ]
+    }
+  },
+  "scene_zones": {
+    "ENV_AIRPORT_DEPART_001": ["值机区", "玻璃幕墙", "候机座位"],
+    "SCENE_A_001": ["窗边", "床边", "入口或衣柜旁"],
+    "ENV_CAFE_001": ["吧台", "窗边桌", "入口或走道"]
+  }
+}
