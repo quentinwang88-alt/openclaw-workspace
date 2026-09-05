@@ -53,6 +53,28 @@ def is_nurture_candidate(candidate: PublishCandidate) -> bool:
     )
 
 
+def is_opv_initialization_candidate(candidate: PublishCandidate) -> bool:
+    """Return whether a candidate belongs to the OPV organic nurture pool."""
+    return (
+        str(candidate.canonical_script_key or "").strip().startswith("opv:")
+        and str(candidate.script_source or "").strip() == "图文养号"
+        and str(candidate.publish_purpose or "").strip() == "养号"
+    )
+
+
+def _candidate_context(script_text: str) -> Dict[str, str]:
+    try:
+        payload = json.loads(str(script_text or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        key: str(payload.get(key) or "").strip()
+        for key in ("recipe_id", "theme_id", "source_product_id")
+    }
+
+
 class AutoPublishDB:
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = Path(db_path) if db_path else default_db_path()
@@ -98,6 +120,16 @@ class AutoPublishDB:
 
     def _initialize(self) -> None:
         with self._connect() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS publish_candidate_retries (
+                    canonical_script_key TEXT PRIMARY KEY,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    next_retry_at TEXT,
+                    blocked INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    updated_at TEXT
+                )
+            """)
             tables = {
                 str(row["name"] or "")
                 for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
@@ -117,9 +149,11 @@ class AutoPublishDB:
             self._ensure_column(conn, "script_metadata", "publish_purpose", "TEXT")
             self._ensure_column(conn, "script_metadata", "cart_enabled", "TEXT")
             self._ensure_column(conn, "script_metadata", "content_branch", "TEXT")
+            self._ensure_column(conn, "script_metadata", "audio_mode", "TEXT")
             self._ensure_column(conn, "account_configs", "nurture_enabled", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "account_configs", "nurture_daily_count", "INTEGER NOT NULL DEFAULT 2")
             self._ensure_column(conn, "account_configs", "nurture_only", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "account_configs", "initialization_enabled", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "account_configs", "publish_channel", "TEXT NOT NULL DEFAULT 'GeeLark'")
             self._ensure_column(conn, "account_configs", "organic_capable", "INTEGER")
             self._ensure_column(conn, "account_configs", "shoppable_capable", "INTEGER")
@@ -128,6 +162,8 @@ class AutoPublishDB:
             self._ensure_column(conn, "account_configs", "capability_status", "TEXT NOT NULL DEFAULT 'unknown'")
             self._ensure_column(conn, "account_configs", "capability_checked_at", "TEXT")
             self._ensure_column(conn, "account_configs", "capability_error", "TEXT")
+            self._ensure_column(conn, "publish_slots", "bgm_json", "TEXT")
+            self._ensure_column(conn, "publish_slots", "submission_context_json", "TEXT")
             self._ensure_column(conn, "publish_slots", "error_message", "TEXT")
             self._ensure_column(conn, "publish_slots", "slot_source", "TEXT NOT NULL DEFAULT 'auto'")
             self._ensure_column(conn, "publish_slots", "manual_request_record_id", "TEXT")
@@ -138,6 +174,7 @@ class AutoPublishDB:
             self._ensure_notification_log_table(conn)
             self._ensure_manual_publish_requests_table(conn)
             self._ensure_publish_task_history_table(conn)
+            self._ensure_script_pool_bindings_table(conn)
             self._ensure_indexes(conn)
 
     def _ensure_column(self, conn: sqlite3.Connection, table_name: str, column_name: str, column_def: str) -> None:
@@ -172,6 +209,7 @@ class AutoPublishDB:
                 publish_purpose TEXT,
                 cart_enabled TEXT,
                 content_branch TEXT,
+                audio_mode TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE(source_record_id, script_slot)
@@ -211,6 +249,7 @@ class AutoPublishDB:
                 nurture_enabled INTEGER NOT NULL DEFAULT 0,
                 nurture_daily_count INTEGER NOT NULL DEFAULT 2,
                 nurture_only INTEGER NOT NULL DEFAULT 0,
+                initialization_enabled INTEGER NOT NULL DEFAULT 0,
                 organic_capable INTEGER,
                 shoppable_capable INTEGER,
                 organic_auth_id TEXT,
@@ -230,8 +269,10 @@ class AutoPublishDB:
                 scheduled_for TEXT NOT NULL,
                 canonical_script_key TEXT,
                 script_id TEXT,
+                submission_context_json TEXT,
                 schedule_status TEXT NOT NULL DEFAULT '待排期',
                 publish_task_id TEXT,
+                bgm_json TEXT,
                 error_message TEXT,
                 slot_source TEXT NOT NULL DEFAULT 'auto',
                 manual_request_record_id TEXT,
@@ -248,7 +289,18 @@ class AutoPublishDB:
         self._ensure_notification_log_table(conn)
         self._ensure_manual_publish_requests_table(conn)
         self._ensure_publish_task_history_table(conn)
+        self._ensure_script_pool_bindings_table(conn)
         self._ensure_indexes(conn)
+
+    def _ensure_script_pool_bindings_table(self, conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS script_pool_bindings (
+                canonical_script_key TEXT PRIMARY KEY,
+                platform_product_id TEXT NOT NULL DEFAULT '',
+                target_language TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            )
+        """)
 
     def _ensure_disabled_products_table(self, conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -533,8 +585,8 @@ class AutoPublishDB:
                     canonical_script_key, script_id, source_record_id, script_slot, task_no, store_id, product_id,
                     parent_slot, direction_label, variant_strength, target_country, product_type,
                     content_family_key, script_text, short_video_title, title_source,
-                    script_source, publish_purpose, cart_enabled, content_branch, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    script_source, publish_purpose, cart_enabled, content_branch, audio_mode, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(canonical_script_key) DO UPDATE SET
                     script_id = excluded.script_id,
                     source_record_id = excluded.source_record_id,
@@ -555,6 +607,7 @@ class AutoPublishDB:
                     publish_purpose = excluded.publish_purpose,
                     cart_enabled = excluded.cart_enabled,
                     content_branch = excluded.content_branch,
+                    audio_mode = excluded.audio_mode,
                     updated_at = excluded.updated_at
                 """,
                 [
@@ -579,6 +632,7 @@ class AutoPublishDB:
                         item.publish_purpose,
                         item.cart_enabled,
                         item.content_branch,
+                        item.audio_mode,
                         now,
                         now,
                     )
@@ -594,7 +648,7 @@ class AutoPublishDB:
                 SELECT canonical_script_key, source_record_id, script_slot, script_id, store_id, product_id,
                        parent_slot, direction_label, variant_strength, short_video_title,
                        title_source, script_text, target_country, product_type, content_family_key, task_no,
-                       script_source, publish_purpose, cart_enabled, content_branch
+                       script_source, publish_purpose, cart_enabled, content_branch, audio_mode
                 FROM script_metadata
                 """
             ).fetchall()
@@ -618,6 +672,7 @@ class AutoPublishDB:
                 "publish_purpose": str(row["publish_purpose"] or ""),
                 "cart_enabled": str(row["cart_enabled"] or ""),
                 "content_branch": str(row["content_branch"] or ""),
+                "audio_mode": str(row["audio_mode"] or ""),
             }
             for row in rows
         }
@@ -646,7 +701,7 @@ class AutoPublishDB:
             SELECT canonical_script_key, script_id, source_record_id, script_slot, task_no, store_id, product_id,
                    parent_slot, direction_label, variant_strength, target_country, product_type,
                    content_family_key, script_text, short_video_title, title_source,
-                   script_source, publish_purpose, cart_enabled, content_branch
+                   script_source, publish_purpose, cart_enabled, content_branch, audio_mode
             FROM script_metadata
             ORDER BY updated_at ASC, script_id ASC, canonical_script_key ASC
         """
@@ -678,6 +733,7 @@ class AutoPublishDB:
                 publish_purpose=str(row["publish_purpose"] or ""),
                 cart_enabled=str(row["cart_enabled"] or ""),
                 content_branch=str(row["content_branch"] or ""),
+                audio_mode=str(row["audio_mode"] or ""),
             )
             for row in rows
         ]
@@ -735,7 +791,7 @@ class AutoPublishDB:
                     download_status = excluded.download_status,
                     run_video_status = excluded.run_video_status,
                     publish_status = CASE
-                        WHEN video_assets.publish_status IN ('已排期', '已发布', '发布失败', '已跳过') THEN video_assets.publish_status
+                        WHEN video_assets.publish_status IN ('提交中', '提交结果不明', '已排期', '已发布', '发布失败', '已跳过') THEN video_assets.publish_status
                         ELSE excluded.publish_status
                     END,
                     updated_at = excluded.updated_at
@@ -1377,8 +1433,9 @@ class AutoPublishDB:
                 INSERT INTO account_configs (
                     account_id, account_name, store_id, account_status,
                     publish_channel, publish_time_1, publish_time_2, publish_time_3,
-                    nurture_enabled, nurture_daily_count, nurture_only, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    nurture_enabled, nurture_daily_count, nurture_only, initialization_enabled,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(account_id) DO UPDATE SET
                     account_name = excluded.account_name,
                     store_id = excluded.store_id,
@@ -1390,6 +1447,7 @@ class AutoPublishDB:
                     nurture_enabled = excluded.nurture_enabled,
                     nurture_daily_count = excluded.nurture_daily_count,
                     nurture_only = excluded.nurture_only,
+                    initialization_enabled = excluded.initialization_enabled,
                     updated_at = excluded.updated_at
                 """,
                 [
@@ -1405,6 +1463,7 @@ class AutoPublishDB:
                         1 if item.nurture_enabled else 0,
                         int(item.nurture_daily_count or 2),
                         1 if item.nurture_only else 0,
+                        1 if item.initialization_enabled else 0,
                         now,
                         now,
                     )
@@ -1550,11 +1609,14 @@ class AutoPublishDB:
                 SELECT sm.canonical_script_key, sm.script_id, sm.store_id, sm.product_id, sm.content_family_key,
                        sm.short_video_title, va.local_file_path, va.video_source_type, va.video_source_value,
                        sm.source_record_id, sm.script_slot,
-                       sm.script_source, sm.publish_purpose, sm.cart_enabled, sm.content_branch,
+                       sm.script_source, sm.publish_purpose, sm.cart_enabled, sm.content_branch, sm.audio_mode,
+                       sm.target_country, sm.script_text,
+                       pool.platform_product_id, pool.canonical_script_key AS pool_key,
                        COALESCE(psp.schedule_strategy, '普通') AS schedule_strategy,
                        COALESCE(psp.priority_updated_at, '') AS priority_updated_at
                 FROM script_metadata sm
                 INNER JOIN video_assets va ON va.canonical_script_key = sm.canonical_script_key
+                LEFT JOIN script_pool_bindings pool ON pool.canonical_script_key = sm.canonical_script_key
                 LEFT JOIN product_schedule_preferences psp
                     ON psp.store_id = sm.store_id AND psp.product_id = sm.product_id
                 WHERE sm.store_id = ?
@@ -1584,8 +1646,13 @@ class AutoPublishDB:
                       SELECT 1
                       FROM publish_slots active
                       WHERE active.canonical_script_key = sm.canonical_script_key
-                        AND active.schedule_status = '已排期'
-                        AND COALESCE(active.publish_task_id, '') <> ''
+                        AND (
+                            active.schedule_status = '提交中'
+                            OR (
+                                active.schedule_status = '已排期'
+                                AND COALESCE(active.publish_task_id, '') <> ''
+                            )
+                        )
                   )
                   AND NOT EXISTS (
                       SELECT 1
@@ -1615,30 +1682,260 @@ class AutoPublishDB:
                 """,
                 (store_id, pause_mixcut),
             ).fetchall()
-        return [
-            PublishCandidate(
-                canonical_script_key=str(row["canonical_script_key"] or ""),
-                script_id=str(row["script_id"] or ""),
-                store_id=str(row["store_id"] or ""),
-                product_id=str(row["product_id"] or ""),
-                content_family_key=str(row["content_family_key"] or ""),
-                short_video_title=str(row["short_video_title"] or ""),
-                local_file_path=str(row["local_file_path"] or ""),
-                publish_video_value=(
-                    str(row["video_source_value"] or "").strip()
-                    if str(row["video_source_type"] or "").strip() == "link"
-                    and str(row["video_source_value"] or "").strip().startswith(("http://", "https://"))
-                    else str(row["local_file_path"] or "")
-                ),
-                source_record_id=str(row["source_record_id"] or ""),
-                script_slot=str(row["script_slot"] or ""),
-                script_source=str(row["script_source"] or ""),
-                publish_purpose=str(row["publish_purpose"] or ""),
-                cart_enabled=str(row["cart_enabled"] or ""),
-                content_branch=str(row["content_branch"] or ""),
+        candidates: List[PublishCandidate] = []
+        for row in rows:
+            context = _candidate_context(str(row["script_text"] or ""))
+            candidates.append(
+                PublishCandidate(
+                    canonical_script_key=str(row["canonical_script_key"] or ""),
+                    script_id=str(row["script_id"] or ""),
+                    store_id=str(row["store_id"] or ""),
+                    product_id=str(row["product_id"] or ""),
+                    content_family_key=str(row["content_family_key"] or ""),
+                    short_video_title=str(row["short_video_title"] or ""),
+                    local_file_path=str(row["local_file_path"] or ""),
+                    publish_video_value=(
+                        str(row["video_source_value"] or "").strip()
+                        if str(row["video_source_type"] or "").strip() == "link"
+                        and str(row["video_source_value"] or "").strip().startswith(("http://", "https://"))
+                        else str(row["local_file_path"] or "")
+                    ),
+                    source_record_id=str(row["source_record_id"] or ""),
+                    script_slot=str(row["script_slot"] or ""),
+                    script_source=str(row["script_source"] or ""),
+                    publish_purpose=str(row["publish_purpose"] or ""),
+                    cart_enabled=str(row["cart_enabled"] or ""),
+                    content_branch=str(row["content_branch"] or ""),
+                    audio_mode=str(row["audio_mode"] or ""),
+                    schedule_strategy=str(row["schedule_strategy"] or "普通"),
+                    priority_updated_at=str(row["priority_updated_at"] or ""),
+                    platform_product_id=str(row["platform_product_id"] or ""),
+                    script_pool_registered=bool(row["pool_key"]),
+                    target_country=str(row["target_country"] or ""),
+                    script_text=str(row["script_text"] or ""),
+                    recipe_id=context.get("recipe_id", ""),
+                    theme_id=context.get("theme_id", ""),
+                    source_product_id=(
+                        context.get("source_product_id", "")
+                        or str(row["product_id"] or "")
+                    ),
+                )
             )
+        return candidates
+
+    def get_account_initialization_progress(
+        self, account_id: str, target_count: int = 3
+    ) -> Dict[str, Any]:
+        """Compute initialization progress from existing OPV publish records."""
+        resolved_account_id = str(account_id or "").strip()
+        target = max(1, int(target_count or 3))
+        with self._connect() as conn:
+            account = conn.execute(
+                "SELECT * FROM account_configs WHERE account_id = ?",
+                (resolved_account_id,),
+            ).fetchone()
+            rows = conn.execute(
+                """
+                SELECT ps.canonical_script_key, ps.schedule_status, ps.publish_task_id,
+                       COALESCE(va.published_at, ps.scheduled_for) AS published_at
+                FROM publish_slots ps
+                INNER JOIN script_metadata sm
+                    ON sm.canonical_script_key = ps.canonical_script_key
+                LEFT JOIN video_assets va
+                    ON va.canonical_script_key = ps.canonical_script_key
+                WHERE ps.account_id = ?
+                  AND ps.canonical_script_key LIKE 'opv:%'
+                  AND sm.script_source = '图文养号'
+                  AND sm.publish_purpose = '养号'
+                  AND ps.schedule_status IN ('已排期', '已发布')
+                ORDER BY ps.scheduled_for, ps.slot_id
+                """,
+                (resolved_account_id,),
+            ).fetchall()
+
+        published_keys = {
+            str(row["canonical_script_key"] or "").strip()
             for row in rows
+            if str(row["schedule_status"] or "").strip() == "已发布"
+        }
+        scheduled_keys = {
+            str(row["canonical_script_key"] or "").strip()
+            for row in rows
+            if str(row["schedule_status"] or "").strip() == "已排期"
+            and str(row["publish_task_id"] or "").strip()
+        } - published_keys
+        published_times = [
+            str(row["published_at"] or "").strip()
+            for row in rows
+            if str(row["schedule_status"] or "").strip() == "已发布"
+            and str(row["published_at"] or "").strip()
         ]
+        published_count = len(published_keys)
+        scheduled_count = len(scheduled_keys)
+        remaining_count = max(0, target - published_count - scheduled_count)
+        enabled = bool(account and int(account["initialization_enabled"] or 0))
+        if published_count >= target:
+            status = "COMPLETED"
+        elif not enabled:
+            status = "DISABLED"
+        elif published_count or scheduled_count:
+            status = "RUNNING"
+        else:
+            status = "PENDING"
+        return {
+            "account_id": resolved_account_id,
+            "enabled": enabled,
+            "target_count": target,
+            "published_count": published_count,
+            "scheduled_count": scheduled_count,
+            "remaining_count": remaining_count,
+            "status": status,
+            "first_published_at": min(published_times) if published_times else "",
+            "last_published_at": max(published_times) if published_times else "",
+        }
+
+    def list_initializing_accounts(
+        self, *, target_count: int = 3, store_id: str = "", include_completed: bool = False
+    ) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            sql = """
+                SELECT account_id, account_name, store_id
+                FROM account_configs
+                WHERE initialization_enabled = 1
+            """
+            params: List[Any] = []
+            if str(store_id or "").strip():
+                sql += " AND store_id = ?"
+                params.append(str(store_id).strip())
+            sql += " ORDER BY store_id, account_name, account_id"
+            accounts = conn.execute(sql, params).fetchall()
+        output: List[Dict[str, Any]] = []
+        for account in accounts:
+            progress = self.get_account_initialization_progress(
+                str(account["account_id"] or ""), target_count=target_count
+            )
+            if not include_completed and progress["status"] == "COMPLETED":
+                continue
+            progress.update(
+                {
+                    "account_name": str(account["account_name"] or ""),
+                    "store_id": str(account["store_id"] or ""),
+                }
+            )
+            output.append(progress)
+        return output
+
+    def list_account_initialization_recipe_ids(self, account_id: str) -> set[str]:
+        """Return recipes already reserved or published for an initializing account."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT sm.script_text
+                FROM publish_slots ps
+                INNER JOIN script_metadata sm
+                    ON sm.canonical_script_key = ps.canonical_script_key
+                WHERE ps.account_id = ?
+                  AND ps.canonical_script_key LIKE 'opv:%'
+                  AND sm.script_source = '图文养号'
+                  AND sm.publish_purpose = '养号'
+                  AND (
+                      ps.schedule_status = '已发布'
+                      OR (
+                          ps.schedule_status = '已排期'
+                          AND COALESCE(ps.publish_task_id, '') <> ''
+                      )
+                  )
+                """,
+                (str(account_id or "").strip(),),
+            ).fetchall()
+        return {
+            recipe_id
+            for row in rows
+            if (recipe_id := _candidate_context(str(row["script_text"] or "")).get("recipe_id", ""))
+        }
+
+    def count_scheduled_initialization_for_account_day(
+        self, account_id: str, target_time: datetime
+    ) -> int:
+        """Count OPV initialization reservations on the account's local calendar day."""
+        day_start = datetime.combine(target_time.date(), time.min).strftime("%Y-%m-%d %H:%M:%S")
+        day_end = datetime.combine(target_time.date(), time.max).strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(DISTINCT ps.canonical_script_key) AS count
+                FROM publish_slots ps
+                INNER JOIN script_metadata sm
+                    ON sm.canonical_script_key = ps.canonical_script_key
+                WHERE ps.account_id = ?
+                  AND ps.scheduled_for >= ?
+                  AND ps.scheduled_for <= ?
+                  AND ps.canonical_script_key LIKE 'opv:%'
+                  AND sm.script_source = '图文养号'
+                  AND sm.publish_purpose = '养号'
+                  AND (
+                      ps.schedule_status = '已发布'
+                      OR (
+                          ps.schedule_status = '已排期'
+                          AND COALESCE(ps.publish_task_id, '') <> ''
+                      )
+                  )
+                """,
+                (str(account_id or "").strip(), day_start, day_end),
+            ).fetchone()
+        return int(row["count"] or 0) if row else 0
+
+    def count_available_initialization_content(self, *, store_id: str = "") -> int:
+        """Count unassigned, render-ready OPV nurture videos."""
+        params: List[Any] = []
+        store_filter = ""
+        if str(store_id or "").strip():
+            store_filter = " AND sm.store_id = ?"
+            params.append(str(store_id).strip())
+        with self._connect() as conn:
+            row = conn.execute(
+                f"""
+                SELECT COUNT(DISTINCT sm.canonical_script_key) AS count
+                FROM script_metadata sm
+                INNER JOIN video_assets va
+                    ON va.canonical_script_key = sm.canonical_script_key
+                WHERE sm.canonical_script_key LIKE 'opv:%'
+                  AND sm.script_source = '图文养号'
+                  AND sm.publish_purpose = '养号'
+                  AND COALESCE(sm.short_video_title, '') <> ''
+                  AND COALESCE(va.local_file_path, '') <> ''
+                  AND va.download_status = '下载成功'
+                  AND va.publish_status = '待排期'
+                  {store_filter}
+                  AND NOT EXISTS (
+                      SELECT 1 FROM publish_slots ps
+                      WHERE ps.canonical_script_key = sm.canonical_script_key
+                        AND ps.schedule_status IN ('已排期', '已发布')
+                  )
+                """,
+                params,
+            ).fetchone()
+        return int(row["count"] or 0) if row else 0
+
+    def initialization_supply_summary(
+        self, *, target_count: int = 3, store_id: str = ""
+    ) -> Dict[str, int]:
+        accounts = self.list_initializing_accounts(
+            target_count=target_count, store_id=store_id, include_completed=True
+        )
+        required_items = sum(int(item["remaining_count"] or 0) for item in accounts)
+        scheduled_items = sum(int(item["scheduled_count"] or 0) for item in accounts)
+        ready_pool_items = self.count_available_initialization_content(store_id=store_id)
+        completed = sum(1 for item in accounts if item["status"] == "COMPLETED")
+        return {
+            "initialization_accounts": len(accounts),
+            "initialization_pending": len(accounts) - completed,
+            "initialization_completed": completed,
+            "required_items": required_items,
+            "scheduled_items": scheduled_items,
+            "ready_pool_items": ready_pool_items,
+            "content_gap": max(0, required_items - ready_pool_items),
+        }
 
     def get_account_config(self, account_id: str) -> Optional[sqlite3.Row]:
         with self._connect() as conn:
@@ -1953,11 +2250,13 @@ class AutoPublishDB:
         with self._connect() as conn:
             return conn.execute(
                 """
-                SELECT slot_id, account_id, account_name, scheduled_for, schedule_status, publish_task_id
+                SELECT slot_id, account_id, account_name, scheduled_for, schedule_status,
+                       publish_task_id, bgm_json, error_message
                 FROM publish_slots
                 WHERE canonical_script_key = ?
                   AND (
                       schedule_status = '已发布'
+                      OR schedule_status = '提交中'
                       OR (
                           schedule_status = '已排期'
                           AND COALESCE(publish_task_id, '') <> ''
@@ -1973,6 +2272,203 @@ class AutoPublishDB:
     def has_active_script_assignment(self, canonical_script_key: str, *, exclude_slot_id: int = 0) -> bool:
         return self.get_active_script_assignment(canonical_script_key, exclude_slot_id=exclude_slot_id) is not None
 
+    def reserve_slot_for_submission(
+        self,
+        *,
+        slot_id: int,
+        canonical_script_key: str,
+        script_id: str,
+        account_id: str,
+        account_name: str,
+        planned_publish_at: datetime,
+        submission_context: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Atomically reserve content before calling a remote publisher.
+
+        The immediate transaction serializes competing scheduler processes, so
+        only one of them can move a canonical content item into ``提交中``.
+        """
+        resolved_key = self._resolve_canonical_for_write(
+            canonical_script_key=canonical_script_key,
+            script_id=script_id,
+        )
+        if not resolved_key:
+            return False
+        now = self._now_text()
+        planned_text = planned_publish_at.strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            slot = conn.execute(
+                "SELECT schedule_status FROM publish_slots WHERE slot_id = ?",
+                (int(slot_id),),
+            ).fetchone()
+            if not slot or str(slot["schedule_status"] or "") != "待排期":
+                return False
+            duplicate = conn.execute(
+                """
+                SELECT slot_id
+                FROM publish_slots
+                WHERE canonical_script_key = ?
+                  AND slot_id <> ?
+                  AND (
+                      schedule_status IN ('提交中', '已发布')
+                      OR (
+                          schedule_status = '已排期'
+                          AND COALESCE(publish_task_id, '') <> ''
+                      )
+                  )
+                LIMIT 1
+                """,
+                (resolved_key, int(slot_id)),
+            ).fetchone()
+            if duplicate:
+                return False
+            updated = conn.execute(
+                """
+                UPDATE publish_slots
+                SET canonical_script_key = ?, script_id = ?, schedule_status = '提交中',
+                    publish_task_id = NULL, error_message = NULL, updated_at = ?,
+                    submission_context_json = ?
+                WHERE slot_id = ? AND schedule_status = '待排期'
+                """,
+                (resolved_key, script_id, now,
+                 json.dumps(submission_context or {}, ensure_ascii=False, sort_keys=True), int(slot_id)),
+            ).rowcount
+            if not updated:
+                return False
+            conn.execute(
+                """
+                UPDATE video_assets
+                SET publish_status = '提交中', account_id = ?, account_name = ?,
+                    planned_publish_at = ?, publish_task_id = NULL,
+                    error_message = NULL, updated_at = ?
+                WHERE canonical_script_key = ?
+                """,
+                (account_id, account_name, planned_text, now, resolved_key),
+            )
+        return True
+
+    def mark_submission_ambiguous(self, slot_id: int, reason: str) -> None:
+        """Retain the submitting state so every existing duplicate guard applies."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE publish_slots SET error_message=?, updated_at=? "
+                "WHERE slot_id=? AND schedule_status='提交中'",
+                (f"提交结果不明；仅对账，禁止自动重发：{reason}", self._now_text(), int(slot_id)),
+            )
+            conn.execute(
+                "UPDATE video_assets SET error_message=?, updated_at=? WHERE canonical_script_key="
+                "(SELECT canonical_script_key FROM publish_slots WHERE slot_id=? AND schedule_status='提交中')",
+                (f"提交结果不明；仅对账，禁止自动重发：{reason}", self._now_text(), int(slot_id)),
+            )
+
+    def record_confirmed_submission(self, slot_id: int, task_id: str) -> None:
+        """Keep the remote receipt in the reservation until assignment commits."""
+        if not str(task_id or "").strip():
+            raise ValueError("远端创建返回空任务ID，保留占位待对账")
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT submission_context_json FROM publish_slots WHERE slot_id=? AND schedule_status='提交中'",
+                (int(slot_id),),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("远端已创建，但本地提交占位不存在，禁止重发")
+            context = json.loads(row["submission_context_json"] or "{}")
+            context["confirmed_task_id"] = str(task_id)
+            conn.execute(
+                "UPDATE publish_slots SET submission_context_json=?, updated_at=? WHERE slot_id=?",
+                (json.dumps(context, ensure_ascii=False, sort_keys=True), self._now_text(), int(slot_id)),
+            )
+
+    def candidate_retry_ready(self, canonical_key: str, now: datetime) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT blocked, next_retry_at FROM publish_candidate_retries WHERE canonical_script_key=?",
+                (canonical_key,),
+            ).fetchone()
+        return row is None or (
+            not row["blocked"] and str(row["next_retry_at"] or "") <= now.strftime("%Y-%m-%d %H:%M:%S")
+        )
+
+    def record_candidate_failure(self, canonical_key: str, now: datetime, error: str, *, retryable: bool) -> None:
+        """Bound pre-submit failures to three rounds, independently per content."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT attempts FROM publish_candidate_retries WHERE canonical_script_key=?", (canonical_key,),
+            ).fetchone()
+            attempts = int(row["attempts"] or 0) + 1 if row else 1
+            blocked = not retryable or attempts >= 3
+            next_retry = (now + timedelta(hours=2 ** min(attempts - 1, 2))).strftime("%Y-%m-%d %H:%M:%S")
+            conn.execute("""
+                INSERT INTO publish_candidate_retries
+                    (canonical_script_key, attempts, next_retry_at, blocked, last_error, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(canonical_script_key) DO UPDATE SET
+                    attempts=excluded.attempts, next_retry_at=excluded.next_retry_at,
+                    blocked=excluded.blocked, last_error=excluded.last_error, updated_at=excluded.updated_at
+            """, (canonical_key, attempts, next_retry, int(blocked), str(error)[:1000], now.strftime("%Y-%m-%d %H:%M:%S")))
+            summary = (
+                f"已停止自动重试（{attempts}/3）：{error}"
+                if blocked else f"等待自动重试（{attempts}/3，下次 {next_retry}）：{error}"
+            )
+            conn.execute(
+                "UPDATE video_assets SET error_message=?, updated_at=? "
+                "WHERE canonical_script_key=? AND COALESCE(publish_task_id,'')=''",
+                (summary[:1000], now.strftime("%Y-%m-%d %H:%M:%S"), canonical_key),
+            )
+
+    def reset_candidate_retry(self, canonical_key: str) -> None:
+        """Explicit operator action only; normal scans never reset failures."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM publish_candidate_retries WHERE canonical_script_key=?", (canonical_key,))
+            conn.execute(
+                "UPDATE video_assets SET error_message=NULL WHERE canonical_script_key=? "
+                "AND (error_message LIKE '等待自动重试%' OR error_message LIKE '已停止自动重试%')",
+                (canonical_key,),
+            )
+
+    def list_unresolved_submissions(self) -> List[sqlite3.Row]:
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT * FROM publish_slots WHERE schedule_status='提交中' "
+                "AND COALESCE(publish_task_id,'')='' ORDER BY slot_id"
+            ).fetchall()
+
+    def release_slot_submission_reservation(self, slot_id: int, reason: str = "") -> int:
+        """Release a local reservation after a confirmed remote-create failure."""
+        now = self._now_text()
+        message = str(reason or "创建发布任务失败，已释放本地占位").strip()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT canonical_script_key FROM publish_slots WHERE slot_id = ? AND schedule_status = '提交中'",
+                (int(slot_id),),
+            ).fetchone()
+            if not row:
+                return 0
+            canonical_key = str(row["canonical_script_key"] or "")
+            updated = conn.execute(
+                """
+                UPDATE publish_slots
+                SET canonical_script_key = NULL, script_id = NULL,
+                    schedule_status = '待排期', publish_task_id = NULL,
+                    bgm_json = NULL, error_message = ?, updated_at = ?
+                WHERE slot_id = ? AND schedule_status = '提交中'
+                """,
+                (message, now, int(slot_id)),
+            ).rowcount
+            if updated and canonical_key:
+                conn.execute(
+                    """
+                    UPDATE video_assets
+                    SET publish_status = '待排期', account_id = NULL,
+                        account_name = NULL, planned_publish_at = NULL,
+                        publish_task_id = NULL, error_message = ?, updated_at = ?
+                    WHERE canonical_script_key = ? AND publish_status = '提交中'
+                    """,
+                    (message, now, canonical_key),
+                )
+        return int(updated or 0)
+
     def assign_slot(
         self,
         *,
@@ -1984,6 +2480,7 @@ class AutoPublishDB:
         planned_publish_at: datetime,
         canonical_script_key: str = "",
         allow_duplicate: bool = False,
+        bgm_json: str = "",
     ) -> bool:
         now = self._now_text()
         planned_text = planned_publish_at.strftime("%Y-%m-%d %H:%M:%S")
@@ -2000,6 +2497,7 @@ class AutoPublishDB:
                     WHERE canonical_script_key = ?
                       AND (
                           schedule_status = '已发布'
+                          OR schedule_status = '提交中'
                           OR (
                               schedule_status = '已排期'
                               AND COALESCE(publish_task_id, '') <> ''
@@ -2033,10 +2531,10 @@ class AutoPublishDB:
                 """
                 UPDATE publish_slots
                 SET canonical_script_key = ?, script_id = ?, schedule_status = '已排期',
-                    publish_task_id = ?, error_message = NULL, updated_at = ?
+                    publish_task_id = ?, bgm_json = ?, error_message = NULL, updated_at = ?
                 WHERE slot_id = ?
                 """,
-                (resolved_key, script_id, publish_task_id, now, slot_id),
+                (resolved_key, script_id, publish_task_id, bgm_json or None, now, slot_id),
             )
             conn.execute(
                 """
@@ -2061,6 +2559,40 @@ class AutoPublishDB:
                 ),
             )
         return True
+
+    def recent_bgm_use_counts(
+        self, account_id: str, *, since: datetime
+    ) -> Dict[str, int]:
+        """Count active/published BGM reservations; cancelled slots release use."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT bgm_json
+                FROM publish_slots
+                WHERE account_id = ?
+                  AND scheduled_for >= ?
+                  AND schedule_status IN ('已排期', '已发布')
+                  AND COALESCE(bgm_json, '') <> ''
+                """,
+                (account_id, since.strftime("%Y-%m-%d %H:%M:%S")),
+            ).fetchall()
+        counts: Dict[str, int] = {}
+        for row in rows:
+            try:
+                payload = json.loads(str(row["bgm_json"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            music_id = str(payload.get("music_id") or "").strip()
+            if music_id:
+                counts[music_id] = counts.get(music_id, 0) + 1
+        return counts
+
+    def update_slot_bgm_json(self, slot_id: int, bgm_json: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE publish_slots SET bgm_json = ?, updated_at = ? WHERE slot_id = ?",
+                (str(bgm_json or "") or None, self._now_text(), int(slot_id)),
+            )
 
     def cancel_slot(self, slot_id: int, reason: str = "") -> int:
         now = self._now_text()
@@ -2202,7 +2734,7 @@ class AutoPublishDB:
                 SELECT ps.slot_id, ps.publish_task_id, ps.scheduled_for, ps.account_id, ps.account_name,
                        ps.schedule_status,
                        ps.store_id, ps.canonical_script_key, ps.script_id, va.local_file_path,
-                       sm.short_video_title, sm.product_id, sm.content_family_key,
+                       sm.short_video_title, sm.product_id, sm.content_family_key, ps.bgm_json,
                        COALESCE(ac.publish_channel, '') AS publish_channel
                 FROM publish_slots ps
                 INNER JOIN video_assets va ON va.canonical_script_key = ps.canonical_script_key
@@ -2229,6 +2761,33 @@ class AutoPublishDB:
                 ORDER BY ps.scheduled_for ASC
                 """,
                 (self._now_text(),),
+            ).fetchall()
+
+    def list_bgm_run_manager_rows(self) -> List[sqlite3.Row]:
+        """Rows requiring BGM observability in the source run-manager table."""
+        with self._connect() as conn:
+            return conn.execute(
+                """
+                SELECT va.run_manager_record_id, sm.audio_mode,
+                       COALESCE(ps.bgm_json, '') AS bgm_json,
+                       COALESCE(ps.schedule_status, '') AS schedule_status,
+                       COALESCE(ps.error_message, '') AS error_message
+                FROM video_assets va
+                INNER JOIN script_metadata sm ON sm.canonical_script_key = va.canonical_script_key
+                LEFT JOIN publish_slots ps ON ps.slot_id = (
+                    SELECT latest.slot_id
+                    FROM publish_slots latest
+                    WHERE latest.canonical_script_key = va.canonical_script_key
+                    ORDER BY latest.updated_at DESC, latest.slot_id DESC
+                    LIMIT 1
+                )
+                WHERE COALESCE(va.run_manager_record_id, '') <> ''
+                  AND (
+                    COALESCE(sm.audio_mode, '') IN ('silent_source_platform_bgm', 'generated_nonvoice', 'clean_voice')
+                    OR COALESCE(ps.bgm_json, '') <> ''
+                  )
+                ORDER BY va.updated_at DESC, va.run_manager_record_id ASC
+                """
             ).fetchall()
 
     def cleanup_published_videos(

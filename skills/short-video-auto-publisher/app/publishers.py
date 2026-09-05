@@ -15,6 +15,7 @@ from urllib.parse import parse_qsl, urlparse, urlunparse
 import requests
 
 from app.models import PublishTaskStatus
+from app.script_pool import reject_internal_product_id
 
 
 class BasePublishAdapter(ABC):
@@ -31,6 +32,7 @@ class BasePublishAdapter(ABC):
         product_title: str = "",
         ref_video_id: str = "",
         mark_ai: Optional[bool] = None,
+        music_selection: Optional[Dict[str, Any]] = None,
     ) -> str:
         raise NotImplementedError
 
@@ -63,6 +65,7 @@ class DryRunPublishAdapter(BasePublishAdapter):
         product_title: str = "",
         ref_video_id: str = "",
         mark_ai: Optional[bool] = None,
+        music_selection: Optional[Dict[str, Any]] = None,
     ) -> str:
         digest = hashlib.md5(f"{account_id}:{script_id}:{publish_at.isoformat()}".encode("utf-8")).hexdigest()[:10]
         return f"dryrun-{digest}"
@@ -99,6 +102,7 @@ class HttpPublishAdapter(BasePublishAdapter):
         product_title: str = "",
         ref_video_id: str = "",
         mark_ai: Optional[bool] = None,
+        music_selection: Optional[Dict[str, Any]] = None,
     ) -> str:
         response = requests.post(
             f"{self.base_url}/scheduled-tasks",
@@ -113,6 +117,7 @@ class HttpPublishAdapter(BasePublishAdapter):
                 "product_title": product_title,
                 "ref_video_id": ref_video_id,
                 "mark_ai": mark_ai,
+                "music_selection": music_selection,
             },
             timeout=60,
         )
@@ -435,7 +440,9 @@ class GeeLarkPublishAdapter(BasePublishAdapter):
         product_title: str = "",
         ref_video_id: str = "",
         mark_ai: Optional[bool] = None,
+        music_selection: Optional[Dict[str, Any]] = None,
     ) -> str:
+        reject_internal_product_id(product_id)
         resolved_video_path = str(video_path or "").strip()
         if resolved_video_path.startswith(("http://", "https://")):
             video_url = resolved_video_path
@@ -460,6 +467,12 @@ class GeeLarkPublishAdapter(BasePublishAdapter):
         if str(ref_video_id or "").strip():
             item_payload[self.ref_video_id_field] = str(ref_video_id).strip()
         item_payload.update(item_level)
+        # A per-task no-cart decision must also clear stale configured bindings.
+        if str(product_id or "").strip():
+            item_payload[self.product_id_field] = str(product_id).strip()
+        else:
+            item_payload.pop(self.product_id_field, None)
+            item_payload.pop(self.product_title_field, None)
         payload: Dict[str, Any] = {
             self.plan_name_field: title[:100] if title else f"publish-{script_id}",
             self.remark_field: script_id[:200],
@@ -637,6 +650,10 @@ class RoutedPublishAdapter(BasePublishAdapter):
                 return adapter
         return self.default_adapter
 
+    def actual_music_for_task(self, task_id: str) -> Optional[Dict[str, str]]:
+        reader = getattr(self._adapter_for_task_id(task_id), "actual_music_for_task", None)
+        return reader(task_id) if callable(reader) else None
+
     def create_scheduled_task(
         self,
         *,
@@ -649,9 +666,10 @@ class RoutedPublishAdapter(BasePublishAdapter):
         product_title: str = "",
         ref_video_id: str = "",
         mark_ai: Optional[bool] = None,
+        music_selection: Optional[Dict[str, Any]] = None,
     ) -> str:
         adapter = self._adapter_for_account(account_id)
-        return adapter.create_scheduled_task(
+        kwargs = dict(
             account_id=account_id,
             video_path=video_path,
             title=title,
@@ -662,6 +680,9 @@ class RoutedPublishAdapter(BasePublishAdapter):
             ref_video_id=ref_video_id,
             mark_ai=mark_ai,
         )
+        if music_selection is not None:
+            kwargs["music_selection"] = music_selection
+        return adapter.create_scheduled_task(**kwargs)
 
     def create_scheduled_task_for_channel(
         self,
@@ -676,9 +697,10 @@ class RoutedPublishAdapter(BasePublishAdapter):
         product_title: str = "",
         ref_video_id: str = "",
         mark_ai: Optional[bool] = None,
+        music_selection: Optional[Dict[str, Any]] = None,
     ) -> str:
         adapter = self._adapter_for_channel(channel)
-        return adapter.create_scheduled_task(
+        kwargs = dict(
             account_id=account_id,
             video_path=video_path,
             title=title,
@@ -689,6 +711,9 @@ class RoutedPublishAdapter(BasePublishAdapter):
             ref_video_id=ref_video_id,
             mark_ai=mark_ai,
         )
+        if music_selection is not None:
+            kwargs["music_selection"] = music_selection
+        return adapter.create_scheduled_task(**kwargs)
 
     def query_task_status(self, *, task_id: str, scheduled_for: datetime) -> PublishTaskStatus:
         adapter = self._adapter_for_task_id(task_id)

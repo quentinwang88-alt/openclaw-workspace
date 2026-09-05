@@ -16,17 +16,39 @@ import string
 import subprocess
 import time
 import unicodedata
-from typing import Any, Dict, Iterable, Optional
-from urllib.parse import quote
+from typing import Any, Callable, Dict, Iterable, Optional
+from urllib.parse import quote, urlparse
 import uuid
 
 import requests
 
 from app.models import PublishTaskStatus
 from app.publishers import BasePublishAdapter, _deep_get
+from app.neobund_auth import TRUSTED_HOSTS, NeoBundAuthError, persist_validated_credentials
 
 
 NEOBUND_TASK_PREFIX = "neobund:"
+
+
+class AmbiguousPublishError(RuntimeError):
+    """Commit may have reached the platform; never release/retry automatically."""
+
+    submission_ambiguous = True
+
+
+class PreCommitUploadError(ValueError):
+    """Asset upload failed before any publishing commit could be called."""
+
+    submission_not_sent = True
+
+    def __init__(self, exc: Exception):
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        self.retryable = isinstance(exc, (TimeoutError, ConnectionError, requests.Timeout,
+                                         requests.ConnectionError)) or status in {408, 429, 500, 502, 503, 504}
+        # Upload exceptions may embed signed URLs/temporary credentials.
+        super().__init__(f"NeoBund 上传阶段失败（{type(exc).__name__}"
+                         + (f", HTTP {status}" if isinstance(status, int) else "")
+                         + "）；发布提交尚未调用，未发送发布请求")
 
 
 def _first_value(payload: Any, paths: Iterable[str], default: Any = None) -> Any:
@@ -88,6 +110,8 @@ class NeoBundClient:
         organic_list_path: str = "/shoppable/video/list",
         timeout: int = 300,
         session: Optional[requests.Session] = None,
+        auth_refresh_provider: Optional[Callable[[], Dict[str, str]]] = None,
+        auth_config_path: str = "",
     ):
         self.base_url = str(base_url or "https://www.neobund.ai/np").rstrip("/")
         self.access_token = str(access_token or "").strip()
@@ -100,6 +124,11 @@ class NeoBundClient:
         self.organic_list_path = str(organic_list_path or "/shoppable/video/list").strip()
         self.timeout = max(1, int(timeout or 300))
         self.session = session or requests.Session()
+        self.auth_refresh_provider = auth_refresh_provider
+        self.auth_config_path = str(auth_config_path or "")
+        self._auth_refresh_attempted = False
+        self.auth_failed = False
+        self.auth_persistence_error = ""
 
     def _url(self, path: str) -> str:
         text = str(path or "").strip()
@@ -136,15 +165,75 @@ class NeoBundClient:
                 raise requests.HTTPError(f"{context}: {exc}; response_body={body[:1000]}", response=response) from exc
             raise requests.HTTPError(f"{context}: {exc}", response=response) from exc
 
-    def request(self, method: str, path: str, *, params: Optional[Dict[str, Any]] = None, json_body: Any = None) -> Any:
-        response = self.session.request(
-            method.upper(),
-            self._url(path),
-            headers=self._headers(),
-            params=params,
-            json=json_body,
-            timeout=self.timeout,
+    @staticmethod
+    def _auth_rejected(response: requests.Response) -> bool:
+        if response.status_code == 401:
+            return True
+        try:
+            payload = response.json()
+        except (ValueError, TypeError):
+            return False
+        if not isinstance(payload, dict):
+            return False
+        # Only explicit auth rejection permits replaying a POST. Timeouts/5xx do not.
+        code = str(payload.get("code", payload.get("status", "")))
+        return code == "401"
+
+    def _request_once(self, method: str, path: str, *, params=None, json_body=None):
+        return self.session.request(
+            method.upper(), self._url(path), headers=self._headers(), params=params,
+            json=json_body, timeout=self.timeout, allow_redirects=False,
         )
+
+    def _refresh_auth_once(self) -> None:
+        if self._auth_refresh_attempted or self.auth_refresh_provider is None:
+            self.auth_failed = True
+            raise NeoBundAuthError("NeoBund 登录失效，本轮已暂停，请在专用窗口重新登录")
+        self._auth_refresh_attempted = True
+        previous = (self.access_token, self.cookie)
+        try:
+            endpoint = urlparse(self.base_url)
+            if endpoint.scheme != "https" or endpoint.hostname not in TRUSTED_HOSTS:
+                raise ValueError("untrusted refresh endpoint")
+            credentials = self.auth_refresh_provider()
+            self.access_token = str(credentials.get("access_token") or "").strip()
+            self.cookie = str(credentials.get("cookie") or "").strip()
+            if not self.access_token and not self.cookie:
+                raise ValueError("empty credentials")
+            # Use a non-recursive read-only probe before either persistence or replay.
+            response = self._request_once("GET", "/tk/auth/list", params={"current": 1, "size": 1, "queryScope": 1})
+            if self._auth_rejected(response):
+                raise ValueError("auth rejected")
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict) or not payload:
+                raise ValueError("invalid auth probe")
+            code = str(payload.get("code", "200"))
+            if code not in {"0", "200", "00000"} or payload.get("success") is False:
+                raise ValueError("auth probe unsuccessful")
+        except Exception:
+            self.access_token, self.cookie = previous
+            self.auth_failed = True
+            # Never include browser/provider/HTTP exception data: it may contain credentials.
+            raise NeoBundAuthError("NeoBund 登录同步或验证失败，本轮已暂停，请重新登录") from None
+        if self.auth_config_path:
+            try:
+                persist_validated_credentials(self.auth_config_path, credentials)
+            except Exception:
+                # Session is valid now; a disk error must not turn a rejected POST into
+                # an uncertain submission or cause an unnecessary second refresh.
+                self.auth_persistence_error = "NeoBund 凭证已验证，但本机配置保存失败"
+
+    def request(self, method: str, path: str, *, params: Optional[Dict[str, Any]] = None, json_body: Any = None) -> Any:
+        if self.auth_failed:
+            raise NeoBundAuthError("NeoBund 登录失效，本轮已暂停，请在专用窗口重新登录")
+        response = self._request_once(method, path, params=params, json_body=json_body)
+        if self._auth_rejected(response):
+            self._refresh_auth_once()
+            response = self._request_once(method, path, params=params, json_body=json_body)
+            if self._auth_rejected(response):
+                self.auth_failed = True
+                raise NeoBundAuthError("NeoBund 刷新登录后仍被拒绝，本轮已暂停")
         self._raise_for_status_with_body(response, f"NeoBund {method.upper()} {path} 失败")
         if not str(response.text or "").strip():
             return {}
@@ -353,6 +442,8 @@ class NeoBundPublishAdapter(BasePublishAdapter):
         client: Optional[NeoBundClient] = None,
         uploader: Optional[NeoBundS3Uploader] = None,
         task_id_prefix: str = NEOBUND_TASK_PREFIX,
+        auth_refresh_provider: Optional[Callable[[], Dict[str, str]]] = None,
+        auth_config_path: str = "",
     ):
         self.client = client or NeoBundClient(
             base_url=base_url,
@@ -363,6 +454,8 @@ class NeoBundPublishAdapter(BasePublishAdapter):
             organic_commit_path=organic_commit_path,
             organic_list_path=organic_list_path,
             timeout=timeout,
+            auth_refresh_provider=auth_refresh_provider,
+            auth_config_path=auth_config_path,
         )
         self.uploader = uploader or NeoBundS3Uploader(timeout=timeout)
         self.account_id_map = account_id_map or {}
@@ -654,6 +747,14 @@ class NeoBundPublishAdapter(BasePublishAdapter):
             url=url,
         )
 
+    def _upload_before_commit(self, video_path: str) -> NeoBundUploadResult:
+        try:
+            return self.upload_video(video_path)
+        except NeoBundAuthError:
+            raise
+        except Exception as exc:
+            raise PreCommitUploadError(exc) from None
+
     @staticmethod
     def _extract_commit_task_id(result: Any) -> str:
         return str(
@@ -687,6 +788,8 @@ class NeoBundPublishAdapter(BasePublishAdapter):
         mark_ai: Optional[bool] = None,
         music_selection: Optional[Dict[str, Any]] = None,
     ) -> str:
+        from app.script_pool import reject_internal_product_id
+        reject_internal_product_id(product_id)
         tt_product_id = str(product_id or "").strip()
         if music_selection and tt_product_id:
             raise ValueError(
@@ -767,7 +870,7 @@ class NeoBundPublishAdapter(BasePublishAdapter):
         if not tt_product_id:
             raise RuntimeError(f"NeoBund 发布缺少 TikTok Shop 商品 ID: script_id={script_id}")
 
-        upload_result = self.upload_video(video_path)
+        upload_result = self._upload_before_commit(video_path)
         resolved_product_title = self._resolve_product_title(auth_id=auth_id, product_id=tt_product_id, product_title=product_title)
         payload: Dict[str, Any] = {
             "authId": _maybe_int(auth_id),
@@ -782,20 +885,7 @@ class NeoBundPublishAdapter(BasePublishAdapter):
         }
         if mark_ai is not None and self.ai_generated_field:
             payload[self.ai_generated_field] = bool(mark_ai)
-        result = self.client.commit_shoppable_video(payload)
-        task_id = self._extract_commit_task_id(result)
-        if not task_id:
-            task_id = self._find_committed_task_id_with_retry(
-                auth_id=auth_id,
-                script_id=script_id,
-                video_title=str(title or "").strip(),
-                product_id=tt_product_id,
-                scheduled_for=payload["scheduledReleaseTime"],
-                content_type="shoppable",
-            )
-        if not task_id:
-            raise RuntimeError(f"NeoBund 发布接口未返回任务 ID: {result}")
-        return f"{self.task_id_prefix}{task_id}"
+        return self._commit_once(payload, content_type="shoppable")
 
     def _create_organic_scheduled_task(
         self,
@@ -808,7 +898,7 @@ class NeoBundPublishAdapter(BasePublishAdapter):
         mark_ai: Optional[bool],
         music_selection: Optional[Dict[str, Any]] = None,
     ) -> str:
-        upload_result = self.upload_video(video_path)
+        upload_result = self._upload_before_commit(video_path)
         payload: Dict[str, Any] = {
             "authId": _maybe_int(auth_id),
             "authType": 2,
@@ -829,20 +919,51 @@ class NeoBundPublishAdapter(BasePublishAdapter):
         if mark_ai is not None and self.ai_generated_field:
             payload[self.ai_generated_field] = 1 if mark_ai else 0
         payload.update(self._music_commit_fields(music_selection))
-        result = self.client.commit_organic_video(payload)
-        task_id = self._extract_commit_task_id(result)
-        if not task_id:
+        return self._commit_once(payload, content_type="organic")
+
+    def _commit_once(self, payload: Dict[str, Any], *, content_type: str) -> str:
+        commit = (self.client.commit_organic_video if content_type == "organic"
+                  else self.client.commit_shoppable_video)
+        error = "接口未返回任务 ID"
+        try:
+            task_id = self._extract_commit_task_id(commit(payload))
+            if task_id:
+                return f"{self.task_id_prefix}{task_id}"
+        except NeoBundAuthError:
+            # HTTP/JSON 401 means the platform explicitly rejected the submission.
+            raise
+        except Exception as exc:
+            # A transport or server exception after send is not proof of rejection.
+            error = str(exc)
+        try:
             task_id = self._find_committed_task_id_with_retry(
-                auth_id=auth_id,
-                script_id=script_id,
-                video_title=str(title or "").strip(),
-                product_id="",
-                scheduled_for=payload["scheduledReleaseTime"],
-                content_type="organic",
+                auth_id=str(payload["authId"]), script_id=str(payload["remark"]),
+                video_title=str(payload["videoTitle"]),
+                product_id=str(payload.get("ttProductId") or ""),
+                scheduled_for=payload["scheduledReleaseTime"], content_type=content_type,
             )
-        if not task_id:
-            raise RuntimeError(f"NeoBund 非带货发布接口未返回任务 ID: {result}")
-        return f"{self.task_id_prefix}{task_id}"
+            if task_id:
+                return f"{self.task_id_prefix}{task_id}"
+        except Exception as exc:
+            error = f"{error}; 对账失败: {exc}"
+        raise AmbiguousPublishError(f"NeoBund 提交结果不明，保留占位，禁止自动重发: {error}")
+
+    def reconcile_scheduled_task(self, context: Dict[str, Any]) -> str:
+        """Read-only lookup using the frozen request identity; empty means unknown."""
+        content_type = "shoppable" if context.get("product_id") else "organic"
+        auth_id = str(context.get("auth_id") or self._resolve_auth_id(
+            str(context["account_id"]), content_type=content_type))
+        task_id = self._find_committed_task_id(
+            auth_id=auth_id, script_id=str(context["script_id"]),
+            video_title=str(context["title"]), product_id=str(context.get("product_id") or ""),
+            scheduled_for=str(context["scheduled_for"]), content_type=content_type,
+        )
+        return f"{self.task_id_prefix}{task_id}" if task_id else ""
+
+    def submission_identity(self, *, account_id: str, product_id: str) -> Dict[str, str]:
+        content_type = "shoppable" if product_id else "organic"
+        return {"auth_id": self._resolve_auth_id(account_id, content_type=content_type),
+                "content_type": content_type}
 
     def _find_committed_task_id_with_retry(
         self,
@@ -892,6 +1013,7 @@ class NeoBundPublishAdapter(BasePublishAdapter):
         else:
             payload = self.client.list_shoppable_videos(params)
         records = payload.get("records", []) if isinstance(payload, dict) else []
+        matches = set()
         for item in records:
             if not isinstance(item, dict):
                 continue
@@ -904,9 +1026,11 @@ class NeoBundPublishAdapter(BasePublishAdapter):
                 continue
             remark = str(item.get("remark") or "").strip()
             item_title = str(item.get("videoTitle") or item.get("postTitle") or "").strip()
-            if remark == str(script_id or "").strip() or item_title == video_title:
-                return item_id
-        return ""
+            if (remark == str(script_id).strip() if script_id else item_title == video_title):
+                matches.add(item_id)
+        if len(matches) > 1:
+            raise AmbiguousPublishError("平台存在多个相同业务标识的任务，需要人工核对")
+        return next(iter(matches), "")
 
     def find_organic_task_record(
         self,
@@ -943,6 +1067,29 @@ class NeoBundPublishAdapter(BasePublishAdapter):
                 return item
         return None
 
+    def actual_music_for_task(self, task_id: str) -> Optional[Dict[str, str]]:
+        """Read back the music actually attached to an organic NeoBund task.
+
+        No inferred start offset is returned because the captured platform
+        record does not expose one.  Callers use this only to verify that the
+        selected song was not silently replaced after submission.
+        """
+        resolved = self._strip_task_prefix(task_id)
+        if not resolved:
+            return None
+        item = self._load_task_item(resolved)
+        returned_id = str(item.get("id") or item.get("taskId") or item.get("videoId") or "").strip()
+        if returned_id and returned_id != resolved:
+            return None
+        music_id = str(item.get("musicId") or "").strip()
+        if not music_id:
+            return None
+        return {
+            "music_id": music_id,
+            "title": str(item.get("musicTitle") or ""),
+            "author": str(item.get("musicAuthor") or ""),
+        }
+
     def _strip_task_prefix(self, task_id: str) -> str:
         text = str(task_id or "").strip()
         if text.startswith(self.task_id_prefix):
@@ -951,6 +1098,7 @@ class NeoBundPublishAdapter(BasePublishAdapter):
 
     @staticmethod
     def _extract_task_item(payload: Any, task_id: str) -> Dict[str, Any]:
+        requested_id = str(task_id or "").strip()
         if isinstance(payload, dict):
             records = payload.get("records") or _deep_get(payload, "data.records")
             if isinstance(records, list):
@@ -958,14 +1106,20 @@ class NeoBundPublishAdapter(BasePublishAdapter):
                     if not isinstance(item, dict):
                         continue
                     item_id = str(item.get("id") or item.get("taskId") or item.get("task_id") or "").strip()
-                    if not task_id or item_id == task_id:
+                    if not requested_id or item_id == requested_id:
                         return item
-                return records[0] if records and isinstance(records[0], dict) else {}
+                # List endpoints may ignore an id filter.  Returning a different
+                # record here can permanently mark the requested task published.
+                return {}
             if any(key in payload for key in ("id", "taskId", "task_id", "status")):
-                return payload
+                item_id = str(payload.get("id") or payload.get("taskId") or payload.get("task_id") or "").strip()
+                return payload if not requested_id or item_id == requested_id else {}
         if isinstance(payload, list):
             for item in payload:
-                if isinstance(item, dict):
+                if not isinstance(item, dict):
+                    continue
+                item_id = str(item.get("id") or item.get("taskId") or item.get("task_id") or "").strip()
+                if not requested_id or item_id == requested_id:
                     return item
         return {}
 
@@ -1018,12 +1172,32 @@ class NeoBundPublishAdapter(BasePublishAdapter):
             numeric_status = int(float(status_text))
         except (TypeError, ValueError):
             numeric_status = 0
+        if numeric_status == 800:
+            return PublishTaskStatus(
+                state="failed", result="发布失败",
+                error_message=error_message or "NeoBund 任务已终止",
+            )
         if 0 < numeric_status < 350:
             return PublishTaskStatus(state="pending", result="待执行")
-        if numeric_status >= 350:
+        if numeric_status == 350:
             if error_message:
                 return PublishTaskStatus(state="failed", result="发布失败", error_message=error_message)
             return PublishTaskStatus(state="success", result="发布成功", published_at=published_at or scheduled_for.strftime("%Y-%m-%d %H:%M:%S"))
+        remote_video_id = str(
+            _first_value(item, ("videoId", "ttVideoId", "platformVideoId"), "") or ""
+        ).strip()
+        if numeric_status == 500 and remote_video_id and not error_message:
+            # Completed organic tasks expose the TikTok video id even though
+            # the NeoBund row does not expose a separate published timestamp.
+            return PublishTaskStatus(
+                state="success", result="发布成功",
+                published_at=published_at or scheduled_for.strftime("%Y-%m-%d %H:%M:%S"),
+            )
+        if numeric_status > 350:
+            return PublishTaskStatus(
+                state="unknown", result="状态待核实",
+                error_message=error_message or f"NeoBund 未知任务状态: {numeric_status}",
+            )
         return PublishTaskStatus(state="pending", result="待执行")
 
     def query_task_status(self, *, task_id: str, scheduled_for: datetime) -> PublishTaskStatus:
@@ -1041,9 +1215,10 @@ class NeoBundPublishAdapter(BasePublishAdapter):
             try:
                 payload = self.client.list_organic_videos({"id": _maybe_int(resolved_task_id)})
                 item = self._extract_task_item(payload, resolved_task_id)
-            except Exception:
+            except Exception as organic_error:
                 if shoppable_error is not None:
                     raise shoppable_error
+                raise organic_error
         return self._parse_task_status(item, scheduled_for)
 
     @staticmethod
@@ -1084,9 +1259,13 @@ class NeoBundPublishAdapter(BasePublishAdapter):
         statuses: Dict[str, PublishTaskStatus] = {}
         for task in tasks:
             task_id = str(task["publish_task_id"] or "").strip()
-            scheduled_for = datetime.strptime(str(task["scheduled_for"]), "%Y-%m-%d %H:%M:%S")
             if not task_id.startswith(self.task_id_prefix):
                 statuses[task_id] = PublishTaskStatus(state="pending", result="待执行")
                 continue
-            statuses[task_id] = self.query_task_status(task_id=task_id, scheduled_for=scheduled_for)
+            try:
+                scheduled_for = datetime.strptime(str(task["scheduled_for"]), "%Y-%m-%d %H:%M:%S")
+                statuses[task_id] = self.query_task_status(task_id=task_id, scheduled_for=scheduled_for)
+            except Exception as exc:
+                statuses[task_id] = PublishTaskStatus(
+                    state="unknown", result="查询暂不可用", error_message=str(exc))
         return statuses

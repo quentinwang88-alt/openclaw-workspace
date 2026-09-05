@@ -30,6 +30,7 @@ class ScriptMetadata:
     publish_purpose: str = ""
     cart_enabled: str = ""
     content_branch: str = ""
+    audio_mode: str = ""
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,7 @@ class AccountConfig:
     nurture_enabled: bool = False
     nurture_daily_count: int = 2
     nurture_only: bool = False
+    initialization_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,16 @@ class PublishCandidate:
     publish_purpose: str = ""
     cart_enabled: str = ""
     content_branch: str = ""
+    target_country: str = ""
+    script_text: str = ""
+    recipe_id: str = ""
+    theme_id: str = ""
+    source_product_id: str = ""
+    platform_product_id: str = ""
+    script_pool_registered: bool = False
+    audio_mode: str = ""
+    schedule_strategy: str = "普通"
+    priority_updated_at: str = ""
 
 
 @dataclass(frozen=True)

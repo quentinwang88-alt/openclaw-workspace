@@ -498,6 +498,66 @@ class NeoBundPublishAdapterTest(unittest.TestCase):
         client.list_shoppable_videos.assert_called_once_with({"id": 701})
         client.list_organic_videos.assert_called_once_with({"id": 701})
 
+    def test_query_status_ignores_different_shoppable_record_and_checks_organic(self) -> None:
+        client = Mock()
+        adapter = NeoBundPublishAdapter(client=client)
+        scheduled_for = datetime(2026, 6, 29, 20, 0, 0)
+        client.list_shoppable_videos.return_value = {"records": [{"id": 999, "status": 350}]}
+        client.list_organic_videos.return_value = {"records": [{"id": 701, "status": 120}]}
+
+        status = adapter.query_task_status(task_id="neobund:701", scheduled_for=scheduled_for)
+
+        self.assertEqual(status.state, "pending")
+        client.list_organic_videos.assert_called_once_with({"id": 701})
+
+    def test_query_status_treats_terminated_numeric_state_as_failure(self) -> None:
+        client = Mock()
+        adapter = NeoBundPublishAdapter(client=client)
+        client.list_shoppable_videos.return_value = {"records": [{"id": 701, "status": 800}]}
+
+        status = adapter.query_task_status(
+            task_id="neobund:701", scheduled_for=datetime(2026, 6, 29, 20, 0, 0)
+        )
+
+        self.assertEqual(status.state, "failed")
+        self.assertIn("终止", status.error_message)
+
+    def test_query_status_does_not_hide_organic_query_failure(self) -> None:
+        client = Mock()
+        adapter = NeoBundPublishAdapter(client=client)
+        client.list_shoppable_videos.return_value = {"records": []}
+        client.list_organic_videos.side_effect = requests.ConnectionError("temporary")
+
+        with self.assertRaises(requests.ConnectionError):
+            adapter.query_task_status(
+                task_id="neobund:701", scheduled_for=datetime(2026, 6, 29, 20, 0, 0)
+            )
+
+    def test_query_status_does_not_guess_unknown_numeric_terminal_state(self) -> None:
+        client = Mock()
+        adapter = NeoBundPublishAdapter(client=client)
+        client.list_shoppable_videos.return_value = {"records": [{"id": 701, "status": 500}]}
+
+        status = adapter.query_task_status(
+            task_id="neobund:701", scheduled_for=datetime(2026, 6, 29, 20, 0, 0)
+        )
+
+        self.assertEqual(status.state, "unknown")
+
+    def test_query_status_accepts_completed_500_only_with_remote_video_id(self) -> None:
+        client = Mock()
+        adapter = NeoBundPublishAdapter(client=client)
+        scheduled_for = datetime(2026, 6, 29, 20, 0, 0)
+        client.list_shoppable_videos.return_value = {
+            "records": [{"id": 701, "status": 500, "videoId": "7680558647591603476"}]
+        }
+
+        status = adapter.query_task_status(
+            task_id="neobund:701", scheduled_for=scheduled_for
+        )
+
+        self.assertEqual(status.state, "success")
+
     def test_batch_status_skips_non_neobund_task_ids(self) -> None:
         client = Mock()
         adapter = NeoBundPublishAdapter(client=client)
@@ -651,6 +711,20 @@ class NeoBundPublishAdapterTest(unittest.TestCase):
         self.assertEqual(record["musicId"], "7070023995583761178")
         params = client.list_organic_videos.call_args.args[0]
         self.assertNotIn("authId", params)
+
+    def test_actual_music_readback_never_uses_another_task_record(self) -> None:
+        client = Mock()
+        client.list_organic_videos.return_value = {
+            "records": [{"id": 702, "musicId": "wrong-song", "musicTitle": "wrong task"}]
+        }
+        adapter = NeoBundPublishAdapter(client=client)
+        self.assertIsNone(adapter.actual_music_for_task("neobund:701"))
+
+        client.list_organic_videos.return_value = {
+            "records": [{"id": 701, "musicId": "right-song", "musicTitle": "right task"}]
+        }
+        observed = adapter.actual_music_for_task("neobund:701")
+        self.assertEqual(observed["music_id"], "right-song")
 
 
 if __name__ == "__main__":

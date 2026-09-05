@@ -88,6 +88,18 @@ TITLE_LABEL_PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 
+MEXICO_COUNTRY_ALIASES = {"mx", "mexico", "méxico", "墨西哥", "es-mx", "西班牙语（墨西哥）"}
+
+# Conservative local check: Latin letters alone do not establish Spanish.
+# This intentionally rejects short ambiguous/English fallback captions rather
+# than treating a missing language signal as permission to publish.
+SPANISH_TITLE_SIGNAL_RE = re.compile(
+    r"(?:[¿¡ñáéíóú]|\b(?:un|una|unos|unas|el|la|los|las|este|esta|estos|estas|"
+    r"ese|esa|que|para|por|con|sin|hoy|tu|tus|te|del|al|de|en|y|es|"
+    r"mira|mirada|detalle|detalles|momento|cambio|cerca|guardar)\b)",
+    re.IGNORECASE,
+)
+
 COUNTRY_LANGUAGE_HINTS = {
     "th": ("泰国", "泰语"),
     "thailand": ("泰国", "泰语"),
@@ -131,10 +143,12 @@ COUNTRY_LANGUAGE_HINTS = {
     "新加坡": ("新加坡", "英语或当地主要使用语言"),
     "china": ("中国", "中文"),
     "中国": ("中国", "中文"),
+    **{alias: ("墨西哥", "墨西哥西班牙语") for alias in MEXICO_COUNTRY_ALIASES},
 }
 
 
 STORE_COUNTRY_PREFIXES = {
+    "MX": "墨西哥",
     "TH": "泰国",
     "VN": "越南",
     "MY": "马来西亚",
@@ -336,6 +350,17 @@ def localized_template_title(metadata: ScriptMetadata) -> str:
             "Nampak ringkas tapi manis dipakai",
             "Sentuhan kecil untuk gaya harian",
         )
+    elif country in MEXICO_COUNTRY_ALIASES:
+        # Neutral captions: no assumed product type, promise, offer or CTA.
+        templates = (
+            "Un momento sencillo para guardar",
+            "Un pequeño detalle de hoy",
+            "Así se ve este momento",
+        ) if is_nurture else (
+            "Un vistazo al detalle",
+            "Una mirada más de cerca",
+            "Un detalle para mirar de cerca",
+        )
     else:
         templates = (
             "A small everyday moment worth saving",
@@ -382,6 +407,8 @@ def is_title_compatible_with_country(title: str, target_country: str) -> bool:
         return False
     if TITLE_LABEL_PREFIX_RE.match(str(title or "").strip()):
         return False
+    if normalized_country in MEXICO_COUNTRY_ALIASES:
+        return not contains_cjk(text) and bool(SPANISH_TITLE_SIGNAL_RE.search(text))
     if normalized_country in {"th", "thailand", "thai", "泰国"}:
         return contains_thai(text) and not contains_cjk(text)
     if normalized_country in {"jp", "japan", "japanese", "日本"}:

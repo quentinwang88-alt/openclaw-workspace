@@ -6,6 +6,7 @@ from __future__ import annotations
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 
 
@@ -23,6 +24,9 @@ from app.metadata import (
     build_script_metadata_records,
     build_title_prompt,
     is_title_compatible_with_country,
+    language_hint_for_country,
+    localized_template_title,
+    infer_country_from_store_id,
     resolve_field_mapping,
     sanitize_title,
 )
@@ -36,6 +40,32 @@ class Record:
 
 
 class MetadataTest(unittest.TestCase):
+    def test_mexico_aliases_have_explicit_spanish_language_and_store_route(self):
+        for country in ("MX", "墨西哥", "Mexico", "México", "es-MX"):
+            self.assertEqual(language_hint_for_country(country), ("墨西哥", "墨西哥西班牙语"))
+        self.assertEqual(infer_country_from_store_id("MX-01"), "墨西哥")
+
+    def test_mexico_titles_reject_english_fallback_and_empty_text(self):
+        for country in ("MX", "墨西哥", "es-MX"):
+            for title in ("", "A small everyday moment worth saving", "Simple details that feel natural",
+                          "An easy little detail for today", "New look", "墨西哥｜养号｜管理标题"):
+                self.assertFalse(is_title_compatible_with_country(title, country), (title, country))
+            for title in ("Un cambio de look", "Una mirada más de cerca", "Así se ve hoy"):
+                self.assertTrue(is_title_compatible_with_country(title, country), (title, country))
+
+    def test_mexico_deterministic_templates_are_spanish_neutral_and_stable(self):
+        for purpose in ("带货", "养号"):
+            for country in ("MX", "墨西哥", "es-MX"):
+                for index in range(6):
+                    metadata = SimpleNamespace(target_country=country, script_source="成功脚本复刻",
+                                               publish_purpose=purpose, content_branch="SUCCESS_SCRIPT_REPLICATION",
+                                               canonical_script_key=f"wsr_{index}", script_id=f"wsr_{index}", script_text="")
+                    title = localized_template_title(metadata)
+                    self.assertEqual(title, localized_template_title(metadata))
+                    self.assertTrue(is_title_compatible_with_country(title, country))
+                    for forbidden in ("peluca", "cabello", "descuento", "compra", "garantía", "100%"):
+                        self.assertNotIn(forbidden, title.lower())
+
     def test_specs_cover_24_slots(self) -> None:
         self.assertEqual(len(SCRIPT_FIELD_SPECS), 24)
 

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -261,7 +262,202 @@ class SchedulerTest(unittest.TestCase):
             run_video_status="成功",
             publish_status="待排期",
         )
-    def test_schedule_slots_respects_recent_product_rule(self) -> None:
+
+    def _enable_initialization(self) -> None:
+        self.db.upsert_account_configs(
+            [
+                AccountConfig(
+                    account_id="acc-1",
+                    account_name="账号1",
+                    store_id="SHOP-01",
+                    account_status="可用",
+                    publish_time_1="12:00",
+                    publish_time_2="17:00",
+                    publish_time_3="20:00",
+                    initialization_enabled=True,
+                )
+            ]
+        )
+
+    def _upsert_opv_script(self, script_id: str, recipe_id: str, theme_id: str = "THEME-1") -> None:
+        canonical_key = f"opv:{script_id}"
+        self.db.upsert_script_metadata(
+            [
+                ScriptMetadata(
+                    canonical_script_key=canonical_key,
+                    script_id=script_id,
+                    source_record_id=f"rec-{script_id}",
+                    script_slot="OPV",
+                    task_no=script_id,
+                    store_id="SHOP-01",
+                    product_id="",
+                    parent_slot="OPV",
+                    direction_label="图文养号",
+                    variant_strength="成片",
+                    target_country="Thailand",
+                    product_type="穿搭",
+                    content_family_key=canonical_key,
+                    script_text=json.dumps(
+                        {
+                            "recipe_id": recipe_id,
+                            "theme_id": theme_id,
+                            "source_product_id": "P-SOURCE",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    short_video_title=f"title-{script_id}",
+                    title_source="opv_copy",
+                    script_source="图文养号",
+                    publish_purpose="养号",
+                    cart_enabled="否",
+                    content_branch="非商品展示型",
+                )
+            ]
+        )
+        self.db.upsert_video_asset(
+            canonical_script_key=canonical_key,
+            script_id=script_id,
+            run_manager_record_id=f"run-{script_id}",
+            video_source_type="opv_render",
+            video_source_value=f"/tmp/{script_id}.mp4",
+            local_file_path=f"/tmp/{script_id}.mp4",
+            download_status="下载成功",
+            run_video_status="成功",
+            publish_status="待排期",
+        )
+
+    def test_account_initialization_syncs_from_account_table(self) -> None:
+        records = [
+            DummyRecord(
+                "rec-init",
+                {
+                    "账号ID": "acc-init",
+                    "账号名称": "初始化账号",
+                    "店铺ID": "SHOP-01",
+                    "账号状态": "可用",
+                    "发布时间1": "12:00",
+                    "是否账号初始化": True,
+                },
+            )
+        ]
+        fields = list(records[0].fields)
+        mapping = resolve_field_mapping(fields, ACCOUNT_FIELD_ALIASES)
+
+        sync_accounts(records, mapping, self.db)
+
+        self.assertEqual(int(self.db.get_account_config("acc-init")["initialization_enabled"]), 1)
+
+    @patch("app.scheduler.bgm.requires_platform_bgm", return_value=False)
+    def test_initialization_schedules_only_one_opv_per_account_day(self, _requires_bgm) -> None:
+        self._enable_initialization()
+        for index in range(1, 5):
+            self._upsert_opv_script(f"OPV-{index}", f"RECIPE-{index}")
+
+        stats = schedule_slots(
+            self.db,
+            DryRunPublishAdapter(),
+            now=datetime(2026, 9, 1, 11, 0, 0),
+            window_hours=48,
+        )
+
+        scheduled = self.db._connect().execute(
+            "SELECT scheduled_for FROM publish_slots WHERE schedule_status = '已排期' ORDER BY scheduled_for"
+        ).fetchall()
+        self.assertEqual(stats.scheduled, 2)
+        self.assertEqual([row["scheduled_for"][:10] for row in scheduled], ["2026-09-01", "2026-09-02"])
+        self.assertEqual(stats.initialization_scheduled_items, 2)
+        self.assertEqual(stats.initialization_required_items, 1)
+
+    @patch("app.scheduler.bgm.requires_platform_bgm", return_value=False)
+    def test_initialization_never_falls_back_to_regular_content(self, _requires_bgm) -> None:
+        self._enable_initialization()
+        self._upsert_script("REGULAR-1", "P-REGULAR", "FAMILY-REGULAR")
+
+        stats = schedule_slots(
+            self.db,
+            DryRunPublishAdapter(),
+            now=datetime(2026, 9, 1, 11, 0, 0),
+            window_hours=2,
+        )
+
+        row = self.db._connect().execute(
+            "SELECT schedule_status, error_message FROM publish_slots ORDER BY slot_id LIMIT 1"
+        ).fetchone()
+        self.assertEqual(stats.scheduled, 0)
+        self.assertEqual(row["schedule_status"], "待排期")
+        self.assertIn("初始化内容池不足", row["error_message"])
+
+    @patch("app.scheduler.bgm.requires_platform_bgm", return_value=False)
+    def test_initialization_prefers_an_unused_recipe(self, _requires_bgm) -> None:
+        self._enable_initialization()
+        self._upsert_opv_script("OPV-A1", "RECIPE-A")
+        first = schedule_slots(
+            self.db,
+            DryRunPublishAdapter(),
+            now=datetime(2026, 9, 1, 11, 0, 0),
+            window_hours=2,
+        )
+        self.assertEqual(first.scheduled, 1)
+        self._upsert_opv_script("OPV-A2", "RECIPE-A")
+        self._upsert_opv_script("OPV-B1", "RECIPE-B")
+
+        second = schedule_slots(
+            self.db,
+            DryRunPublishAdapter(),
+            now=datetime(2026, 9, 2, 11, 0, 0),
+            window_hours=2,
+        )
+
+        self.assertEqual(second.scheduled, 1)
+        selected = self.db._connect().execute(
+            "SELECT script_id FROM publish_slots WHERE scheduled_for = '2026-09-02 12:00:00'"
+        ).fetchone()
+        self.assertEqual(selected["script_id"], "OPV-B1")
+
+    @patch("app.scheduler.bgm.requires_platform_bgm", return_value=False)
+    def test_completed_initialization_returns_to_regular_scheduling(self, _requires_bgm) -> None:
+        self._enable_initialization()
+        for index in range(1, 4):
+            self._upsert_opv_script(f"OPV-DONE-{index}", f"RECIPE-{index}")
+        initial = schedule_slots(
+            self.db,
+            DryRunPublishAdapter(),
+            now=datetime(2026, 9, 1, 11, 0, 0),
+            window_hours=72,
+        )
+        self.assertEqual(initial.scheduled, 3)
+        rows = self.db._connect().execute(
+            "SELECT script_id, publish_task_id, scheduled_for FROM publish_slots WHERE schedule_status = '已排期'"
+        ).fetchall()
+        for row in rows:
+            self.db.mark_publish_result(
+                script_id=str(row["script_id"]),
+                publish_task_id=str(row["publish_task_id"]),
+                schedule_status="已发布",
+                publish_status="已发布",
+                publish_result="发布成功",
+                published_at=str(row["scheduled_for"]),
+            )
+        self.assertEqual(
+            self.db.get_account_initialization_progress("acc-1")["status"],
+            "COMPLETED",
+        )
+        self._upsert_script("REGULAR-AFTER-INIT", "P-REGULAR", "FAMILY-AFTER-INIT")
+
+        resumed = schedule_slots(
+            self.db,
+            DryRunPublishAdapter(),
+            now=datetime(2026, 9, 4, 11, 0, 0),
+            window_hours=2,
+        )
+
+        self.assertEqual(resumed.scheduled, 1)
+        selected = self.db._connect().execute(
+            "SELECT script_id FROM publish_slots WHERE scheduled_for = '2026-09-04 12:00:00'"
+        ).fetchone()
+        self.assertEqual(selected["script_id"], "REGULAR-AFTER-INIT")
+
+    def test_schedule_slots_prefers_product_diversity_without_blocking_supply(self) -> None:
         self._upsert_script("001_M1_M", "P1001", "P1001_M1")
         self._upsert_script("002_M1_M", "P1001", "P1001_M1")
         self._upsert_script("003_M2_M", "P1002", "P1002_M2")
@@ -272,7 +468,12 @@ class SchedulerTest(unittest.TestCase):
             DryRunPublishAdapter(),
             now=datetime(2026, 4, 9, 11, 0, 0),
         )
-        self.assertEqual(first_run.scheduled, 3)
+        self.assertEqual(first_run.scheduled, 4)
+        with self.db._connect() as conn:
+            order = [row[0] for row in conn.execute(
+                "SELECT script_id FROM publish_slots WHERE schedule_status='已排期' ORDER BY scheduled_for"
+            )]
+        self.assertEqual(order, ["001_M1_M", "003_M2_M", "004_M3_M", "002_M1_M"])
 
         second_run = schedule_slots(
             self.db,
@@ -345,7 +546,7 @@ class SchedulerTest(unittest.TestCase):
         self.assertEqual(created, 0)
         self.assertEqual(pending, [])
 
-    def test_schedule_slots_allows_two_same_product_per_account_in_24h(self) -> None:
+    def test_schedule_slots_allows_same_product_when_no_alternative(self) -> None:
         self._upsert_script("021_M1_M", "P1021", "P1021_M1")
         self._upsert_script("021_M2_M", "P1021", "P1021_M2")
         self._upsert_script("021_M3_M", "P1021", "P1021_M3")
@@ -357,7 +558,7 @@ class SchedulerTest(unittest.TestCase):
             window_hours=24,
         )
 
-        self.assertEqual(stats.scheduled, 2)
+        self.assertEqual(stats.scheduled, 3)
 
     def test_schedule_slots_keeps_running_when_one_account_env_is_missing(self) -> None:
         self.db.upsert_account_configs(
@@ -668,7 +869,7 @@ class SchedulerTest(unittest.TestCase):
         self.assertIn("内部脚本键已被其他发布槽位占用", second["error_message"])
         self.assertEqual(asset["publish_task_id"], "task-first")
 
-    def test_schedule_slots_blocks_same_family_at_same_time_across_accounts(self) -> None:
+    def test_schedule_slots_allows_distinct_scripts_of_same_family_across_accounts(self) -> None:
         self.db.upsert_account_configs(
             [
                 AccountConfig(
@@ -691,7 +892,7 @@ class SchedulerTest(unittest.TestCase):
             now=datetime(2026, 4, 9, 11, 0, 0),
         )
 
-        self.assertEqual(stats.scheduled, 1)
+        self.assertEqual(stats.scheduled, 2)
         with self.db._connect() as conn:
             scheduled = conn.execute(
                 """
@@ -701,7 +902,7 @@ class SchedulerTest(unittest.TestCase):
                   AND scheduled_for = '2026-04-09 12:00:00'
                 """
             ).fetchone()
-        self.assertEqual(int(scheduled["count"]), 1)
+        self.assertEqual(int(scheduled["count"]), 2)
 
     def test_sync_videos_accepts_light_run_manager_fields(self) -> None:
         self._upsert_script("005_M1_M", "P1005", "P1005_M1")
@@ -1276,6 +1477,21 @@ class SchedulerTest(unittest.TestCase):
             "neobund:task-requeue",
             [str(row["publish_task_id"]) for row in self.db.list_scheduled_tasks()],
         )
+
+    def test_scheduled_task_keeps_bgm_audit_for_platform_readback(self) -> None:
+        self._upsert_script("BGM_READBACK", "P1001", "P1001_BGM")
+        now = datetime(2026, 4, 15, 11, 0, 0)
+        self.db.generate_future_slots(now, 24)
+        slot = self.db.list_pending_slots(now, 24)[0]
+        audit = json.dumps({"music_id": "selected-song", "actual": {}})
+        self.db.assign_slot(
+            slot_id=int(slot["slot_id"]), script_id="BGM_READBACK", publish_task_id="neobund:701",
+            account_id=str(slot["account_id"]), account_name=str(slot["account_name"]),
+            planned_publish_at=datetime.strptime(str(slot["scheduled_for"]), "%Y-%m-%d %H:%M:%S"),
+            bgm_json=audit,
+        )
+        tasks = self.db.list_scheduled_tasks()
+        self.assertEqual(str(tasks[0]["bgm_json"]), audit)
 
     def test_stale_task_result_does_not_overwrite_current_asset_assignment(self) -> None:
         self._upsert_script("STALE_RESULT_1", "P1001", "P1001_STALE")

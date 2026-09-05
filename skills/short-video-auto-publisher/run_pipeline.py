@@ -37,7 +37,9 @@ from app.manual_publish import (  # noqa: E402
 )
 from app.models import ScriptMetadata  # noqa: E402
 from app.mixcut import sync_mixcut_publish_results, sync_mixcut_videos  # noqa: E402
+from app.bgm_reporting import sync_bgm_statuses  # noqa: E402
 from app.neobund_publish import NeoBundPublishAdapter  # noqa: E402
+from app.neobund_auth import read_browser_credentials  # noqa: E402
 from app.notifications import (  # noqa: E402
     default_queue_date,
     default_summary_date,
@@ -577,6 +579,20 @@ def ensure_account_nurture_fields(client: FeishuBitableClient, field_names: list
                 ui_type="SingleSelect",
                 property={"options": [{"name": "是"}, {"name": "否"}]},
             )
+    if "是否账号初始化" not in existing:
+        create_optional_field(
+            "是否账号初始化",
+            field_type=7,
+            ui_type="Checkbox",
+            fallback_to_text=False,
+        )
+        if "是否账号初始化" not in existing:
+            create_optional_field(
+                "是否账号初始化",
+                field_type=3,
+                ui_type="SingleSelect",
+                property={"options": [{"name": "是"}, {"name": "否"}]},
+            )
     return client.list_field_names()
 
 
@@ -628,7 +644,12 @@ def build_geelark_publish_adapter(args: argparse.Namespace) -> GeeLarkPublishAda
 
 
 def build_neobund_publish_adapter(args: argparse.Namespace) -> NeoBundPublishAdapter:
-    return NeoBundPublishAdapter(
+    config_path = str(getattr(args, "config_path", DEFAULT_CONFIG_PATH))
+    config = load_local_config(config_path)
+    # Browser credential access is enabled only after the operator explicitly
+    # authorizes it; code deployment must not bypass a denied credential read.
+    allow_browser_refresh = config.get("neobund_browser_auth_refresh_enabled") is True
+    adapter = NeoBundPublishAdapter(
         base_url=args.neobund_base_url,
         access_token=resolve_neobund_access_token(args),
         cookie=resolve_neobund_cookie(args),
@@ -640,7 +661,15 @@ def build_neobund_publish_adapter(args: argparse.Namespace) -> NeoBundPublishAda
         organic_list_path=args.neobund_organic_list_path,
         ai_generated_field=args.neobund_ai_generated_field,
         timeout=args.neobund_request_timeout,
+        auth_refresh_provider=read_browser_credentials if allow_browser_refresh else None,
+        auth_config_path=config_path,
     )
+    proxy_url = str(config.get("neobund_proxy_url") or "").strip()
+    if proxy_url:
+        for session in (adapter.client.session, adapter.uploader.session):
+            session.proxies = {"http": proxy_url, "https": proxy_url}
+            session.trust_env = False
+    return adapter
 
 
 def build_publish_adapter(args: argparse.Namespace):
@@ -695,7 +724,7 @@ def command_sync_script_db(args: argparse.Namespace) -> None:
     client = FeishuBitableClient(app_token=app_token, table_id=table_id)
     field_names = client.list_field_names()
     mapping = resolve_script_mapping(field_names, SCRIPT_SOURCE_FIELD_ALIASES)
-    records = client.list_records(page_size=100, limit=args.limit)
+    records = client.list_records(page_size=500, limit=args.limit)
 
     def emit_progress(payload: Dict[str, int]) -> None:
         print({"step": "sync_script_db_progress", **payload}, flush=True)
@@ -721,7 +750,7 @@ def command_sync_videos(args: argparse.Namespace) -> None:
     client = FeishuBitableClient(app_token=app_token, table_id=table_id)
     field_names = client.list_field_names()
     mapping = resolve_table_mapping(field_names, RUN_MANAGER_FIELD_ALIASES)
-    records = client.list_records(page_size=100, limit=args.limit)
+    records = client.list_records(page_size=500, limit=args.limit)
     stats = sync_videos(
         records,
         mapping,
@@ -729,7 +758,15 @@ def command_sync_videos(args: argparse.Namespace) -> None:
         download_dir=Path(args.video_dir),
         client=client,
     )
+    stats["publish_observability"] = sync_publish_observability(db, args, client=client, records=records)
     print(stats)
+
+
+def command_sync_bgm_status(args: argparse.Namespace) -> None:
+    db = AutoPublishDB(Path(args.db_path))
+    app_token, table_id = resolve_feishu_config(args.run_manager_feishu_url)
+    client = FeishuBitableClient(app_token=app_token, table_id=table_id)
+    print(sync_bgm_statuses(client, db))
 
 
 def command_sync_mixcut_videos(args: argparse.Namespace) -> None:
@@ -761,7 +798,7 @@ def command_sync_accounts(args: argparse.Namespace) -> None:
     client = FeishuBitableClient(app_token=app_token, table_id=table_id)
     field_names = ensure_account_nurture_fields(client, client.list_field_names())
     mapping = resolve_table_mapping(field_names, ACCOUNT_FIELD_ALIASES)
-    records = client.list_records(page_size=100, limit=args.limit)
+    records = client.list_records(page_size=500, limit=args.limit)
     account_override_stats = apply_account_id_overrides_to_records(records, mapping, args)
     count = sync_accounts(records, mapping, db)
     publish_channel_override_stats = apply_account_publish_channel_overrides(db, args)
@@ -788,6 +825,29 @@ def sync_product_schedule_preferences_before_schedule(db: AutoPublishDB, args: a
         return {"failed": 1, "error": str(exc)}
 
 
+def recoverable_stage(operation, *args, **kwargs) -> Dict[str, Any]:
+    """Projection/query failures never roll back a committed publish task.
+
+    The publish DB is the durable source of truth. A later run rebuilds the
+    desired projection, so a Feishu outage needs no second remote commit.
+    """
+    try:
+        return operation(*args, **kwargs)
+    except Exception as exc:
+        return {"deferred": 1, "error": str(exc)[:600]}
+
+
+def sync_publish_observability(db, args, *, client=None, records=None):
+    def project():
+        from app.publish_writeback import sync_run_manager_statuses
+        target_client = client
+        if target_client is None:
+            app_token, table_id = resolve_feishu_config(args.run_manager_feishu_url)
+            target_client = FeishuBitableClient(app_token=app_token, table_id=table_id)
+        return sync_run_manager_statuses(target_client, db, records=records)
+    return recoverable_stage(project)
+
+
 def command_schedule(args: argparse.Namespace) -> None:
     with exclusive_run_lock("schedule"):
         video_dir = ensure_video_storage_ready(args.video_dir)
@@ -802,7 +862,16 @@ def command_schedule(args: argparse.Namespace) -> None:
         publisher = build_publish_adapter(args)
         capability_stats = reconcile_publish_account_capabilities(db, publisher)
         print({"account_capabilities": capability_stats}, flush=True)
-        stats = schedule_slots(db, publisher)
+        requested_keys = {
+            str(value or "").strip() for value in (args.canonical_key or [])
+            if str(value or "").strip()
+        }
+        stats = schedule_slots(
+            db, publisher, canonical_keys=requested_keys or None
+        )
+        # Always retry prior failed projections, including runs with zero new
+        # remote submissions. Never gate writeback on this run's create count.
+        print({"publish_observability": sync_publish_observability(db, args)}, flush=True)
         print(stats.__dict__)
 
 
@@ -810,7 +879,8 @@ def command_sync_results(args: argparse.Namespace) -> None:
     ensure_video_storage_ready(args.video_dir)
     db = AutoPublishDB(Path(args.db_path))
     publisher = build_publish_adapter(args)
-    stats = sync_publish_results(db, publisher)
+    stats = recoverable_stage(sync_publish_results, db, publisher)
+    print({"publish_observability": sync_publish_observability(db, args)}, flush=True)
     print(stats)
 
 
@@ -1162,6 +1232,14 @@ def _command_run_all_locked(args: argparse.Namespace) -> None:
         print(summary)
         return
 
+    # Reconcile already-created remote tasks before any Feishu source-table
+    # collection.  A transient failure in an unrelated input table must not
+    # prevent publication truth from advancing in the local database.
+    publisher = build_publish_adapter(args)
+    print("[run-all] sync_existing_results start", flush=True)
+    summary["sync_results"] = recoverable_stage(sync_publish_results, db, publisher)
+    print(f"[run-all] sync_existing_results done {summary['sync_results']}", flush=True)
+
     title_generator = build_title_generator(args.title_mode, args.llm_route)
     existing_lookup = db.build_metadata_lookup()
 
@@ -1194,7 +1272,7 @@ def _command_run_all_locked(args: argparse.Namespace) -> None:
     account_client = FeishuBitableClient(app_token=account_app_token, table_id=account_table_id)
     account_field_names = ensure_account_nurture_fields(account_client, account_client.list_field_names())
     account_mapping = resolve_table_mapping(account_field_names, ACCOUNT_FIELD_ALIASES)
-    account_records = account_client.list_records(page_size=100, limit=args.limit)
+    account_records = account_client.list_records(page_size=500, limit=args.limit)
     summary["account_id_overrides"] = apply_account_id_overrides_to_records(account_records, account_mapping, args)
     summary["sync_accounts"] = {"accounts_upserted": sync_accounts(account_records, account_mapping, db)}
     summary["publish_channel_overrides"] = apply_account_publish_channel_overrides(db, args)
@@ -1212,7 +1290,7 @@ def _command_run_all_locked(args: argparse.Namespace) -> None:
     run_manager_client = FeishuBitableClient(app_token=run_manager_app_token, table_id=run_manager_table_id)
     run_manager_field_names = run_manager_client.list_field_names()
     run_manager_mapping = resolve_table_mapping(run_manager_field_names, RUN_MANAGER_FIELD_ALIASES)
-    run_manager_records = run_manager_client.list_records(page_size=100, limit=args.limit)
+    run_manager_records = run_manager_client.list_records(page_size=500, limit=args.limit)
     summary["sync_videos"] = sync_videos(
         run_manager_records,
         run_manager_mapping,
@@ -1237,14 +1315,12 @@ def _command_run_all_locked(args: argparse.Namespace) -> None:
 
     sample_paths = [str(row["local_file_path"] or "") for row in db.list_scheduled_tasks()[:10]]
     ensure_video_storage_ready(video_dir, sample_paths=sample_paths)
-    publisher = build_publish_adapter(args)
     print("[run-all] sync_account_capabilities start", flush=True)
     summary["sync_account_capabilities"] = reconcile_publish_account_capabilities(db, publisher)
     print(f"[run-all] sync_account_capabilities done {summary['sync_account_capabilities']}", flush=True)
 
-    print("[run-all] sync_results before schedule start", flush=True)
-    summary["sync_results_before_schedule"] = sync_publish_results(db, publisher)
-    print(f"[run-all] sync_results before schedule done {summary['sync_results_before_schedule']}", flush=True)
+    # Existing task IDs/reservations already protect occupied slots. Historical
+    # result reads are not a prerequisite for creating unrelated future tasks.
 
     if not args.no_sync_manual_publish:
         print("[run-all] sync_manual_publish_requests start", flush=True)
@@ -1285,9 +1361,9 @@ def _command_run_all_locked(args: argparse.Namespace) -> None:
     summary["schedule"] = schedule_slots(db, publisher).__dict__
     print(f"[run-all] schedule done {summary['schedule']}", flush=True)
 
-    print("[run-all] sync_results start", flush=True)
-    summary["sync_results"] = sync_publish_results(db, publisher)
-    print(f"[run-all] sync_results done {summary['sync_results']}", flush=True)
+    summary["publish_observability"] = sync_publish_observability(
+        db, args, client=run_manager_client, records=run_manager_records,
+    )
     summary["enforce_retry_limit_after_results"] = db.enforce_retry_limit(
         max_auto_retries=args.max_auto_retries,
     )
@@ -1305,9 +1381,11 @@ def _command_run_all_locked(args: argparse.Namespace) -> None:
     print(f"[run-all] cleanup_videos done {summary['cleanup_videos']}", flush=True)
 
     print("[run-all] sync_report_table start", flush=True)
-    report_app_token, report_table_id = resolve_feishu_config(args.report_feishu_url)
-    report_client = FeishuBitableClient(app_token=report_app_token, table_id=report_table_id)
-    summary["sync_report_table"] = sync_publish_report_table(db, report_client)
+    def project_report():
+        report_app_token, report_table_id = resolve_feishu_config(args.report_feishu_url)
+        report_client = FeishuBitableClient(app_token=report_app_token, table_id=report_table_id)
+        return sync_publish_report_table(db, report_client)
+    summary["sync_report_table"] = recoverable_stage(project_report)
     print(f"[run-all] sync_report_table done {summary['sync_report_table']}", flush=True)
     print(summary)
 
@@ -1334,6 +1412,10 @@ def build_parser() -> argparse.ArgumentParser:
     sync_video.add_argument("--run-manager-feishu-url", default=DEFAULT_RUN_MANAGER_FEISHU_URL, help="运行管理表飞书 URL")
     sync_video.add_argument("--limit", type=int, help="限制处理数量")
     sync_video.set_defaults(func=command_sync_videos)
+
+    sync_bgm = subparsers.add_parser("sync-bgm-status", help="将自动 BGM 状态回写运行管理表")
+    sync_bgm.add_argument("--run-manager-feishu-url", default=DEFAULT_RUN_MANAGER_FEISHU_URL, help="运行管理表飞书 URL")
+    sync_bgm.set_defaults(func=command_sync_bgm_status)
 
     sync_mixcut = subparsers.add_parser("sync-mixcut-videos", help="从 auto_mixcut RDS 同步人工通过的混剪成片到发布池")
     sync_mixcut.add_argument("--product-id", help="只同步指定商品 ID")
@@ -1471,6 +1553,8 @@ def build_parser() -> argparse.ArgumentParser:
     requeue_tasks.set_defaults(func=command_requeue_publish_tasks)
 
     schedule = subparsers.add_parser("schedule", help="按 48 小时窗口增量补排")
+    schedule.add_argument("--canonical-key", action="append", default=[], help="仅排指定内部脚本键，可重复传入")
+    schedule.add_argument("--run-manager-feishu-url", default=DEFAULT_RUN_MANAGER_FEISHU_URL, help="运行管理表飞书 URL，用于回写 BGM 状态")
     schedule.add_argument("--product-report-feishu-url", default=DEFAULT_PRODUCT_PUBLISH_REPORT_FEISHU_URL, help="店铺产品发布汇总表飞书 URL，用于排期策略回读")
     schedule.add_argument("--publish-mode", choices=["dry-run", "http", "geelark", "neobund", "auto"], default="dry-run")
     schedule.add_argument("--publish-api-base-url", default="", help="自动发布 API Base URL")
@@ -1508,6 +1592,7 @@ def build_parser() -> argparse.ArgumentParser:
     schedule.set_defaults(func=command_schedule)
 
     sync_results = subparsers.add_parser("sync-results", help="同步定时发布结果")
+    sync_results.add_argument("--run-manager-feishu-url", default=DEFAULT_RUN_MANAGER_FEISHU_URL, help="运行管理表飞书 URL，用于回写 BGM 状态")
     sync_results.add_argument("--publish-mode", choices=["dry-run", "http", "geelark", "neobund", "auto"], default="dry-run")
     sync_results.add_argument("--publish-api-base-url", default="", help="自动发布 API Base URL")
     sync_results.add_argument("--publish-api-token", default="", help="自动发布 API Token")

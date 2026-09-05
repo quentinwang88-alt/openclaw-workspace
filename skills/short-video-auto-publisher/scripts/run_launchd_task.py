@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import os
 import shutil
 import subprocess
@@ -15,6 +16,15 @@ from pathlib import Path
 
 def now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def runtime_environment() -> dict:
+    """launchd has no interactive shell PATH; expose installed media tools."""
+    env = dict(os.environ)
+    paths = [str(Path.home() / ".local/bin"), "/opt/homebrew/bin", "/usr/local/bin"]
+    paths.extend(env.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin").split(os.pathsep))
+    env["PATH"] = os.pathsep.join(dict.fromkeys(paths))
+    return env
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,15 +42,29 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+def acquire_process_lock(path: Path):
+    """Acquire a crash-safe, non-blocking lock and return its open handle."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    return handle
+
+
 def main() -> int:
     args = parse_args()
     stamp = now_text()
-    lock_dir = Path(args.lock_dir)
+    # Keep the existing CLI argument for launchd compatibility, but use a
+    # sidecar file lock.  The file may remain after SIGKILL; the kernel lock
+    # cannot, so a crash never blocks all future scheduled runs.
+    lock_file = Path(f"{args.lock_dir}.flock")
     workdir = Path(args.workdir)
 
-    try:
-        lock_dir.mkdir()
-    except FileExistsError:
+    lock_handle = acquire_process_lock(lock_file)
+    if lock_handle is None:
         print(f"\n[{stamp}] {args.name} skipped: previous run still active")
         return 0
 
@@ -60,6 +84,7 @@ def main() -> int:
                 stdout=handle,
                 stderr=subprocess.STDOUT,
                 check=False,
+                env=runtime_environment(),
             )
 
         output_stream = sys.stdout if result.returncode == 0 else sys.stderr
@@ -76,9 +101,9 @@ def main() -> int:
         except FileNotFoundError:
             pass
         try:
-            lock_dir.rmdir()
-        except OSError:
-            pass
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            lock_handle.close()
 
 
 if __name__ == "__main__":
