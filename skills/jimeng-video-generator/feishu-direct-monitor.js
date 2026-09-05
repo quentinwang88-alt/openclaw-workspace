@@ -36,6 +36,7 @@ try {
 }
 const { resolveChannel } = require('./channel-router');
 const { processIminiTask } = require('./platforms/imini/adapter');
+const { prepareWsrReferenceExecution } = require('./lib/script-pool-reference-contract');
 
 const STATUS = {
   PENDING: '待处理',
@@ -3149,6 +3150,26 @@ async function main() {
       }
 
       const channelDecision = resolveChannel(context, config);
+      try {
+        const execution = prepareWsrReferenceExecution(context, {
+          channel: channelDecision.channel,
+          mode: context.mode || config.defaultMode
+        });
+        if (execution.guarded) {
+          // Only the local submission copy receives role notes. Feishu's
+          // authoritative script field is never rewritten by this worker.
+          context.wsrSourcePrompt = execution.sourcePrompt;
+          context.prompt = execution.prompt;
+        }
+      } catch (error) {
+        await updateStatus(config, token, context.recordId, STATUS.BLOCKED, {
+          [config.fields.result]: error.message,
+          [config.fields.errorMessage]: error.message,
+          [config.fields.resultSyncStatus]: 'blocked'
+        });
+        console.log(`  🛡️ ${error.message}`);
+        continue;
+      }
       const baselineObservation = channelDecision.channel === 'imini'
         ? {
             baseline: generatingCount,

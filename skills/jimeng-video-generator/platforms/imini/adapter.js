@@ -4,6 +4,7 @@ const { runFirstFramePipeline, submitToImini } = require('./submitter');
 const { formatProductLockCard } = require('./product-lock');
 const { recordChannelSuccess, recordChannelFailure } = require('../../channel-health');
 const { uploadFileToFeishu, updateRecord } = require('../../lib/feishu-client');
+const { assertWsrChannel } = require('../../lib/script-pool-reference-contract');
 
 function compactFields(fields) {
   return Object.fromEntries(
@@ -22,6 +23,11 @@ function shouldUseDirectReferenceFirstFrame(context) {
 }
 
 async function processIminiTask({ page, context, config, token, traceId }) {
+  try {
+    assertWsrChannel(context, 'imini', '', (context.attachments || []).length);
+  } catch (error) {
+    return { success: false, error: error.message, code: error.code, shouldBlock: true, shouldFallBack: false };
+  }
   const resolved = resolveChannel(context, config);
 
   if (resolved.channel !== 'imini') {

@@ -8,6 +8,7 @@ const { checkFirstFrameConsistency } = require('./consistency-checker');
 const { detectCategory } = require('./category-rules');
 const { extractHardConstraints } = require('./product-lock');
 const { expandHome } = require('../../trace-state');
+const { assertWsrChannel } = require('../../lib/script-pool-reference-contract');
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -21,6 +22,11 @@ function isIminiVideoPage(url) {
 }
 
 async function submitToImini(page, context, productLock, firstFrameImagePath, config) {
+  try {
+    assertWsrChannel(context, 'imini', '', (context.attachments || []).length);
+  } catch (error) {
+    return { success: false, error: error.message, code: error.code, shouldBlock: true, shouldFallBack: false };
+  }
   // No retry: once we click 创建, a submission may have gone through.
   // Retrying would create duplicate tasks and waste credits.
   _createButtonAlreadyClicked = false;
@@ -1322,6 +1328,11 @@ async function checkSubmitResult(page, context) {
 }
 
 async function runFirstFramePipeline(context, config, originalImagePaths) {
+  try {
+    assertWsrChannel(context, 'imini', '', (originalImagePaths || []).length);
+  } catch (error) {
+    return { success: false, error: error.message, code: error.code, shouldBlock: true, shouldFallBack: false };
+  }
   const iminiConfig = (config.channels || {}).imini || {};
   const firstFrameConfig = iminiConfig.firstFrame || {};
   const maxAutoRetry = firstFrameConfig.maxAutoRetry === undefined ? 1 : Math.max(0, Number(firstFrameConfig.maxAutoRetry) || 0);

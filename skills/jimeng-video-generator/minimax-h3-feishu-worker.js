@@ -4,6 +4,8 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { prepareWsrReferenceExecution } = require('./lib/script-pool-reference-contract');
+const { materializeAuditedReferences } = require('./lib/h3-reference-audit');
 
 const { buildGenerationPayload, normalizeMode } = require('./platforms/minimax-h3/adapter');
 const {
@@ -77,6 +79,8 @@ const DEFAULT_FIELDS = {
   platformTaskId: '平台任务ID',
   platformTaskStatus: '平台任务状态',
   submitFingerprint: '提交指纹',
+  contentReviewResult: '内容检查结果',
+  contentReviewSummary: '内容检查说明',
   referenceMode: 'MiniMax参考模式'
 };
 
@@ -123,7 +127,8 @@ function loadConfig(configPath) {
       maxSubmitsPerRun: Math.max(1, Number(h3.maxSubmitsPerRun || 2)),
       requestTimeoutMs: Math.max(30_000, Number(h3.requestTimeoutMs || 90_000)),
       maxDownloadBytes: Math.max(20 * 1024 * 1024, Number(h3.maxDownloadBytes || 500 * 1024 * 1024)),
-      watermark: Boolean(h3.watermark)
+      watermark: Boolean(h3.watermark),
+      referenceUploadCacheTtlMs: Math.max(0, Number(h3.referenceUploadCacheTtlMs) || 0)
     },
     stateRoot: path.join(runtimeRoot, '_state', 'minimax-h3'),
     h3DownloadRoot: path.join(runtimeRoot, 'minimax-h3-downloads')
@@ -280,7 +285,9 @@ async function ensureSchema(config, token, dryRun = false) {
     { name: config.fields.platformTaskStatus, type: 3, property: { options: ['queued', 'running', 'succeeded', 'failed', 'cancelled'].map(name => ({ name })) } },
     { name: config.fields.submitFingerprint, type: 1 },
     { name: config.fields.referenceMode, type: 3, property: { options: ['文生视频', '首帧', '首尾帧', '多参考图'].map(name => ({ name })) } },
-    { name: config.fields.lastFrameImage, type: 17 }
+    { name: config.fields.lastFrameImage, type: 17 },
+    { name: config.fields.contentReviewResult, type: 3, property: { options: ['通过', '有偏差', '检查异常'].map(name => ({ name })) } },
+    { name: config.fields.contentReviewSummary, type: 1 }
   ];
   for (const spec of required) {
     if (map.has(spec.name)) continue;
@@ -298,6 +305,7 @@ async function ensureSchema(config, token, dryRun = false) {
   changes.push(...await mergeSelectOptions(config, token, map, config.fields.ratio, ['21:9', '16:9', '4:3', '1:1', '3:4', '9:16', 'adaptive']));
   changes.push(...await mergeSelectOptions(config, token, map, config.fields.referenceMode, ['文生视频', '首帧', '首尾帧', '多参考图']));
   changes.push(...await mergeSelectOptions(config, token, map, config.fields.platformTaskStatus, ['queued', 'running', 'succeeded', 'failed', 'cancelled']));
+  changes.push(...await mergeSelectOptions(config, token, map, config.fields.contentReviewResult, ['通过', '有偏差', '检查异常']));
   return changes;
 }
 
@@ -362,8 +370,15 @@ async function submitRecord(context, config, feishuToken, apiKey) {
     return { status: 'blocked' };
   }
   let referenceSelection;
+  let executionPrompt = context.prompt;
+  let referenceExecution;
   try {
     referenceSelection = resolveReferenceSelection(context);
+    referenceExecution = prepareWsrReferenceExecution(context, {
+      channel: 'minimax_h3', mode: referenceSelection.mode,
+      attachments: referenceSelection.attachments
+    });
+    executionPrompt = referenceExecution.prompt;
   } catch (error) {
     await failBeforeSubmission(context, config, feishuToken, error, '阻塞', 'blocked');
     return { status: 'blocked' };
@@ -371,6 +386,7 @@ async function submitRecord(context, config, feishuToken, apiKey) {
 
   const fingerprint = buildFingerprint({
     ...context,
+    prompt: executionPrompt,
     referenceMode: referenceSelection.mode,
     attachments: referenceSelection.attachments
   });
@@ -385,21 +401,49 @@ async function submitRecord(context, config, feishuToken, apiKey) {
     record_id: context.recordId,
     task_name: context.taskName,
     submit_fingerprint: fingerprint,
+    script_id: normalizeTextField(context.fields?.['脚本ID']),
+    source_prompt: context.prompt,
+    execution_prompt: executionPrompt,
+    reference_manifest: referenceExecution.manifest || null,
+    mother_checkpoints: referenceExecution.motherCheckpoints || [],
+    frozen_mother_core_points: referenceExecution.frozenMotherCheckpoints || [],
+    effective_checkpoints: referenceExecution.motherCheckpoints || [],
+    allowed_changes: referenceExecution.allowedChanges || [],
+    execution_summary: referenceExecution.executionSummary || null,
+    generation_provenance: referenceExecution.generationProvenance || null,
+    revision_kind: referenceExecution.revisionKind || '',
+    parent_prompt_id: referenceExecution.parentPromptId || '',
+    reference_execution_policy_version: referenceExecution.executionPolicyVersion || '',
+    mother_core_provenance: referenceExecution.motherCoreProvenance || '',
     status: 'submitting',
     state_updated_at: new Date().toISOString()
   };
   writeSubmissionRecord(stateConfig(config), traceId, baseState);
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metaso-h3-input-'));
   try {
-    const imageUrls = await materializeAndUploadReferences(referenceSelection.attachments, config, feishuToken, apiKey, tempDir);
+    const materialized = referenceExecution.guarded ? await materializeAuditedReferences({
+      attachments: referenceSelection.attachments, assets: referenceExecution.roles,
+      cacheRoot: path.join(config.stateRoot, 'reference-cache'), tempDir,
+      baseUrl: config.metasoH3.baseUrl, apiKey,
+      remoteCacheTtlMs: config.metasoH3.referenceUploadCacheTtlMs,
+      download: (fileToken, localPath) => downloadFile(feishuToken, fileToken, localPath),
+      upload: filePath => uploadFile({ baseUrl: config.metasoH3.baseUrl, token: apiKey, filePath })
+    }) : { imageUrls: await materializeAndUploadReferences(referenceSelection.attachments, config, feishuToken, apiKey, tempDir), referenceAssets: [] };
+    const imageUrls = materialized.imageUrls;
     const { mode, payload } = buildGenerationPayload({
-      prompt: context.prompt,
+      prompt: executionPrompt,
       imageUrls,
       mode: referenceSelection.mode,
       resolution: context.resolution,
       duration: context.duration,
       ratio: context.ratio,
       watermark: config.metasoH3.watermark
+    });
+    // Persist the exact non-secret request and immutable references before the paid POST.
+    updateSubmissionRecord(stateConfig(config), traceId, {
+      reference_assets: materialized.referenceAssets, execution_prompt: executionPrompt,
+      generation_request: payload, request_sha256: crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex'),
+      state_updated_at: new Date().toISOString()
     });
     const taskId = await createTask({
       baseUrl: config.metasoH3.baseUrl,
@@ -586,10 +630,15 @@ async function run(argv = process.argv.slice(2)) {
     return { schemaChanges: changes };
   }
 
-  let records = await listAllRecords(config, feishuToken);
+  const readRecords = async () => {
+    if (!args.recordId) return listAllRecords(config, feishuToken);
+    const record = await getRecord(config, feishuToken, args.recordId);
+    return record ? [record] : [];
+  };
+  let records = await readRecords();
   if (!args.dryRun) {
     const reconciled = await reconcileLocalStates(records, config, feishuToken);
-    if (reconciled) records = await listAllRecords(config, feishuToken);
+    if (reconciled) records = await readRecords();
   }
   let contexts = records.map(record => getContext(record, config))
     .filter(context => isH3Channel(context.channel, config))
