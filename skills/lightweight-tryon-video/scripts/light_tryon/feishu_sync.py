@@ -18,6 +18,7 @@ from .prompting import PROMPT_BUILDER_VERSION, build_prompt
 from .review_video_processing import process_review_videos
 from .visual_plans import create_confirmed_video_jobs
 from .utils import json_dumps, json_loads, normalized_list, now_iso, stable_hash
+from .product_codes import normalize_product_codes
 
 
 TEMPLATE_ROLES = ("persona", "scene", "action", "shot_plan", "styling", "subtitle")
@@ -239,7 +240,7 @@ def _to_feishu_value(backend: str, value: Any, spec: dict[str, Any]) -> Any:
     if backend == "run_manager_sync_status":
         return RUN_MANAGER_STATUS_TO_FEISHU.get(str(value), str(value))
     if backend == "applicable_product_codes":
-        return "\n".join(normalized_list(value)) or None
+        return "\n".join(normalize_product_codes(normalized_list(value))) or None
     if backend == "scene_families":
         return [
             SCENE_FAMILY_TO_FEISHU.get(str(item).upper(), str(item))
@@ -305,6 +306,8 @@ def _from_feishu_value(backend: str, value: Any, spec: dict[str, Any]) -> Any:
         return VALUE_TO_BACKEND[backend].get(str(value), str(value))
     if backend in {"applicable_categories", "applicable_category", "applicable_product_type"}:
         return [CATEGORY_TO_BACKEND.get(str(item), str(item)) for item in normalized_list(value)] or ["*"]
+    if backend == "applicable_product_codes":
+        return normalize_product_codes(normalized_list(value))
     if backend in LIST_BACKENDS:
         if isinstance(value, list):
             return value

@@ -136,6 +136,16 @@ def template_clients():
 
 
 class FeishuSyncTestCase(unittest.TestCase):
+    def test_product_code_clipboard_cleanup_roundtrip(self):
+        spec = {"type": 1}
+        cleaned = _from_feishu_value(
+            "applicable_product_codes", "1737141103233042426\ufffc, SKU-1/2\u200b", spec,
+        )
+        self.assertEqual(["1737141103233042426", "SKU-1/2"], cleaned)
+        self.assertEqual("1737141103233042426\nSKU-1/2", _to_feishu_value(
+            "applicable_product_codes", ["1737141103233042426\ufffc", "SKU-1/2"], spec,
+        ))
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.db = LightTryonDB(Path(self.tmp.name) / "test.sqlite3")
