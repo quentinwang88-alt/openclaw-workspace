@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Any, Dict, Mapping
 
 from .contracts import VOICEOVER_SCHEMA_VERSION, text
-from .audio import synthesize_segment_preflight, voiceover_text_hash
+from .audio import (
+    synthesize_segment_preflight, voiceover_text_hash, measure_speech_window,
+    audio_asset_hash, LAYOUT_VERSION, EDGE_TRIM_VERSION,
+)
+from .voiceover_resources import resolve_longform_voiceover_resources
 
 
 DEFAULT_MODEL_COMMAND = (
@@ -61,8 +65,14 @@ def build_longform_voiceover_payload(master: Mapping[str, Any], plan: Mapping[st
     argument_bundle = dict(master.get("longform_argument_bundle") or {})
     primary_argument = dict(argument_bundle.get("primary_argument") or semantic.get("selling_argument") or {})
     supporting_arguments = list(argument_bundle.get("supporting_arguments") or [])
+    world = dict(master.get("production_world") or {})
+    persona = dict(world.get("persona_contract") or {})
+    identity = dict(persona.get("identity_lock") or {})
+    persona_projection = dict(persona.get("script_projection") or {})
+    character = dict(world.get("character") or {})
+    scene = dict(world.get("scene_contract") or {})
     return {
-        "schema_version": "longform-voiceover-input-v2-content-capacity",
+        "schema_version": "longform-voiceover-input-v3-spoken-context",
         "product_code": text(master.get("product_code")),
         "target_country": text(master.get("target_country")),
         "target_language": text(master.get("target_language")),
@@ -77,7 +87,14 @@ def build_longform_voiceover_payload(master: Mapping[str, Any], plan: Mapping[st
         "relationship_language": dict(master.get("relationship_language") or {}),
         "approved_style_references": list(master.get("approved_style_references") or []),
         "native_rhetoric_contract": dict(master.get("native_rhetoric_contract") or {}),
-        "production_world": dict(master.get("production_world") or {}),
+        "production_world": {
+            "persona": text(character.get("identity") or world.get("person_state")
+                            or persona_projection.get("identity") or world.get("persona")),
+            "speaking_personality": text(persona_projection.get("speaking_personality")
+                                         or character.get("speaking_personality") or identity.get("speaking_personality")),
+            "outfit": text(world.get("outfit")),
+            "scene": text(world.get("scene") or scene.get("location")),
+        },
         "closure_language_contract": _closure_language_contract(master),
         "semantic_sections": [
             {
@@ -87,12 +104,9 @@ def build_longform_voiceover_payload(master: Mapping[str, Any], plan: Mapping[st
                     segment["duration_seconds"]
                 ),
                 "scene_id": segment.get("scene_id"),
-                "scene_narrative_role": dict(segment.get("scene_block") or {}).get("narrative_role"),
-                "capture_units": [
-                    {"unit_id": unit["unit_id"], "beat": unit["beat"],
-                     "information_gain": unit["information_gain"]}
-                    for unit in segment["capture_units"]
-                ],
+                "scene_location": dict(segment.get("scene_block") or {}).get("location"),
+                # Speech uses the scene as context, not a shot-by-shot writing brief.
+                # Full capture units and narrative roles remain in the frozen plan.
             }
             for segment in plan.get("segments") or []
         ],
@@ -101,7 +115,8 @@ def build_longform_voiceover_payload(master: Mapping[str, Any], plan: Mapping[st
             "no_rehook_after_first_segment": True,
             "no_sentence_to_shot_lock": True,
             "tts_after_video_merge": True,
-            "tts_layout": "SEMANTIC_SECTION_AT_SEGMENT_START",
+            "tts_layout": LAYOUT_VERSION,
+            "segment_boundaries_are_soft": True,
             "target_coverage_ratio": [0.90, 0.96],
             "natural_rate_first": True,
         },
@@ -122,7 +137,7 @@ def _estimated_spoken_seconds(target_text: str, target_language: str) -> float:
 
 def _invoke_voiceover_model(request: Dict[str, Any], model_command: str) -> Dict[str, Any]:
     completed = subprocess.run(
-        shlex.split(model_command), input=json.dumps(request, ensure_ascii=False),
+        shlex.split(model_command), input=json.dumps(request, ensure_ascii=False, default=str),
         text=True, capture_output=True, timeout=600, check=False,
     )
     if completed.returncode != 0:
@@ -187,6 +202,9 @@ def _duration_fit_penalty(total_estimate: float, target_duration: int,
 def run_longform_voiceover(master: Mapping[str, Any], plan: Mapping[str, Any],
                            model_command: str = DEFAULT_MODEL_COMMAND) -> Dict[str, Any]:
     payload = build_longform_voiceover_payload(master, plan)
+    resources = resolve_longform_voiceover_resources(master)
+    for key in ("hook_guidance", "relationship_language", "approved_style_references", "native_rhetoric_contract"):
+        payload[key] = resources[key]
     request = {
         "contract_name": "creative_longform_single_v1",
         "payload": payload,
@@ -219,6 +237,7 @@ def run_longform_voiceover(master: Mapping[str, Any], plan: Mapping[str, Any],
         "authority": "TEXT_ESTIMATE_ADVISORY_ONLY",
     }
     result["schema_version"] = VOICEOVER_SCHEMA_VERSION
+    result["central_resource_snapshot"] = resources
     if not isinstance(result.get("argument_usage"), list):
         usage = []
         primary_id = text(payload.get("selling_argument", {}).get("argument_id"))
@@ -247,13 +266,17 @@ def _actual_fit_penalty(preflight: Mapping[str, Any]) -> float:
     return penalty
 
 
-def _preflight_reusable(voiceover: Mapping[str, Any]) -> bool:
+def _preflight_reusable(voiceover: Mapping[str, Any], voice_id: str = "", plan: Mapping[str, Any] | None = None) -> bool:
     preflight = voiceover.get("tts_preflight") or {}
+    if voice_id and preflight.get("voice_id") != voice_id:
+        return False
     sections = [item for item in voiceover.get("semantic_sections") or [] if isinstance(item, Mapping)]
     measured = [item for item in preflight.get("sections") or [] if isinstance(item, Mapping)]
     if len(sections) != len(measured) or not sections:
         return False
     by_id = {text(item.get("segment_id")).upper(): item for item in measured}
+    planned = {text(item.get("segment_id")).upper(): float(item.get("duration_seconds") or 0)
+               for item in (plan or {}).get("segments") or []}
     for section in sections:
         item = by_id.get(text(section.get("segment_id")).upper()) or {}
         path = Path(text(item.get("audio_path")))
@@ -261,6 +284,9 @@ def _preflight_reusable(voiceover: Mapping[str, Any]) -> bool:
             text(item.get("text_sha256"))
             != voiceover_text_hash(text(section.get("target_text")))
             or not path.is_file()
+            or (item.get("audio_sha256") and item["audio_sha256"] != audio_asset_hash(path))
+            or (planned and float(item.get("planned_segment_seconds") or 0)
+                != planned.get(text(section.get("segment_id")).upper()))
         ):
             return False
     return True
@@ -283,7 +309,33 @@ def calibrate_longform_voiceover_with_edge(
     """
 
     result = dict(voiceover)
-    if _preflight_reusable(result):
+    if _preflight_reusable(result, voice_id, plan):
+        # Older frozen assets remain reusable without TTS or a second revision.
+        preflight = dict(result["tts_preflight"])
+        measured = []
+        for item in preflight.get("sections") or []:
+            updated = dict(item)
+            if updated.get("trim_version") != EDGE_TRIM_VERSION:
+                updated.update(measure_speech_window(updated["audio_path"]))
+                updated["audio_sha256"] = audio_asset_hash(updated["audio_path"])
+                updated["actual_tts_seconds"] = updated["effective_tts_seconds"]
+                duration = float(updated.get("planned_segment_seconds") or 0)
+                updated["coverage_ratio"] = round(updated["effective_tts_seconds"] / duration, 4) if duration else 0
+                ratio = updated["coverage_ratio"]
+                updated["status"] = ("TARGET_FIT" if .90 <= ratio <= .96 else "ACCEPTABLE"
+                                     if .86 <= ratio <= 1 else "TOO_SHORT" if ratio < .86 else "TOO_LONG")
+            measured.append(updated)
+        preflight["sections"] = measured
+        preflight["actual_tts_seconds_total"] = round(sum(item["actual_tts_seconds"] for item in measured), 3)
+        preflight["all_acceptable"] = all(item.get("status") in {"TARGET_FIT", "ACCEPTABLE"} for item in measured)
+        preflight["readiness"] = "READY" if preflight["all_acceptable"] else "READY_WITH_SOFT_DURATION_WARNING"
+        result["tts_preflight"] = preflight
+        result["duration_fit"] = {
+            **dict(result.get("duration_fit") or {}),
+            "method": "EDGE_TTS_EFFECTIVE_SPEECH_V2", "authority": "ACTUAL_AUDIO",
+            "actual_tts_seconds": preflight["actual_tts_seconds_total"],
+            "audio_readiness": preflight["readiness"],
+        }
         return result
     sections = [dict(item) for item in result.get("semantic_sections") or [] if isinstance(item, Mapping)]
     preflight = synthesize_segment_preflight(
@@ -300,6 +352,10 @@ def calibrate_longform_voiceover_with_edge(
     if needs_revision:
         revision_attempted = True
         payload = build_longform_voiceover_payload(master, plan)
+        resources = result.get("central_resource_snapshot") or resolve_longform_voiceover_resources(master)
+        for key in ("hook_guidance", "relationship_language", "approved_style_references", "native_rhetoric_contract"):
+            payload[key] = resources.get(key, payload.get(key))
+        result["central_resource_snapshot"] = resources
         payload["actual_tts_revision"] = {
             "schema_version": "longform-edge-duration-revision-v1",
             "revision_limit": 1,
@@ -347,7 +403,7 @@ def calibrate_longform_voiceover_with_edge(
     }
     duration_fit = dict(selected.get("duration_fit") or {})
     duration_fit.update({
-        "method": "EDGE_TTS_ACTUAL_V1",
+        "method": "EDGE_TTS_EFFECTIVE_SPEECH_V2",
         "authority": "ACTUAL_AUDIO",
         "audio_readiness": selected["tts_preflight"]["readiness"],
         "revision_used": revision_selected,

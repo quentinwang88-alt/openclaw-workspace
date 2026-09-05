@@ -44,7 +44,8 @@ def _local_paths(value: Any, *, role: str = "SUPPORTING_REFERENCE") -> list[Dict
         for key in ("local_path", "cached_path", "path"):
             candidate = Path(_text(value.get(key))).expanduser()
             if candidate.is_file() and candidate.suffix.lower() in IMAGE_SUFFIXES:
-                results.append({"role": local_role, "source_path": str(candidate.resolve())})
+                results.append({"role": local_role, "source_path": str(candidate.resolve()),
+                                "expected_sha256": _text(value.get("sha256"))})
         for key, nested in value.items():
             normalized = str(key).lower()
             nested_role = local_role
@@ -136,6 +137,9 @@ def freeze_reference_assets(
         path = Path(item["source_path"])
         if path.is_file():
             digest = _sha256(path)
+            expected = _text(item.get("expected_sha256"))
+            if expected and item.get("role") in {"PRODUCT_REFERENCE", "PERSONA_REFERENCE"} and digest != expected:
+                raise ValueError("REFERENCE_CONTENT_CHANGED: 冻结参考图与已分析图片指纹不一致，请恢复原图或replan")
             previous = unique.get(digest)
             if previous is None or ROLE_PRIORITY.get(
                 item.get("role") or "SUPPORTING_REFERENCE", 99

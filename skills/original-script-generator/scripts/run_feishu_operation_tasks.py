@@ -28,6 +28,16 @@ from core.original_batch_executor import (  # noqa: E402
 from core.original_batch_models import BatchRequest  # noqa: E402
 from core.original_batch_storage import BatchStorage  # noqa: E402
 from core.operation_product_bootstrap import build_operation_product_context  # noqa: E402
+from core.longform.feishu_workbench import (  # noqa: E402
+    build_longform_text_batch,
+    export_longform_projections,
+    longform_batch_id,
+    load_longform_source_snapshot,
+    SOURCE_POLICY_VERSION,
+    task_input_snapshot,
+)
+from core.longform.storage import LongformStorage  # noqa: E402
+from core.longform.source_adapter import source_from_product_plan  # noqa: E402
 from core.production_script_feishu import (  # noqa: E402
     OPERATION_TASK_FIELD_RENAMES,
     OPERATION_TASK_FIELD_NAMES,
@@ -35,8 +45,10 @@ from core.production_script_feishu import (  # noqa: E402
     OPERATION_TASK_STATUS_OPTIONS,
     PRODUCT_TYPE_OPTIONS,
     PRODUCTION_SCRIPT_FIELDS,
+    LONGFORM_SCENE_MODE_OPTIONS,
     TEST_PHASE_OPTIONS,
     TOP_CATEGORY_OPTIONS,
+    VIDEO_SPEC_OPTIONS,
     ensure_fields,
     ensure_single_select_options,
     export_ready_batch,
@@ -132,6 +144,8 @@ def _request_id(record_id: str, task: dict, *, replan: bool = False) -> str:
         str(task.get("product_code") or ""),
         str(task.get("random_seed") or 0),
         str(task.get("test_phase") or "INITIAL"),
+        str(task.get("video_spec") or "15秒原创"),
+        str(task.get("longform_scene_mode") or "auto"),
         "simplified_v1",
     ]
     if replan:
@@ -164,6 +178,13 @@ def _validate_task(task: dict) -> None:
     duration = float(task.get("duration_seconds") or 0)
     if duration <= 0:
         raise ValueError("视频时长必须大于0")
+    if task.get("video_spec") not in VIDEO_SPEC_OPTIONS:
+        raise ValueError("视频规格必须从飞书枚举中选择")
+    if task.get("video_format") == "LONGFORM":
+        if int(duration) not in {20, 25, 30, 35, 40, 45}:
+            raise ValueError("长视频首版仅支持20/25/30/35/40/45秒")
+        if count > 3:
+            raise ValueError("长视频单个运营任务首版最多生成3条")
     if task.get("top_category") not in TOP_CATEGORY_OPTIONS:
         raise ValueError("一级类目必须从飞书枚举中选择：女装 / 配饰")
     if task.get("product_type") not in PRODUCT_TYPE_OPTIONS:
@@ -296,6 +317,157 @@ def _sync_confirmed_selling_points(
     return report
 
 
+def _load_or_bootstrap_operation_context(
+    *,
+    operation_client: FeishuBitableClient,
+    task: dict,
+    record_id: str,
+    output_dir: Path,
+    voiceover_root: str,
+) -> dict:
+    """Resolve the same product authority for short and long-form planning."""
+
+    try:
+        return load_product_context(
+            task["product_code"],
+            target_country=task["target_country"],
+            target_language=task["target_language"],
+            top_category=task["top_category"],
+            product_type=task["product_type"],
+            voiceover_root=voiceover_root,
+            allow_missing_structure_route=True,
+        )
+    except RuntimeError as exc:
+        missing_context_markers = (
+            "找不到产品",
+            "只有 stage0 测试记录",
+            "存在正式生产 run，但缺少 anchor_card",
+        )
+        if not any(marker in str(exc) for marker in missing_context_markers):
+            raise
+        print("新 SKU 无历史锚点，使用运营任务产品图建立 P1 锚点卡")
+        return build_operation_product_context(
+            operation_client=operation_client,
+            task=task,
+            record_id=record_id,
+            output_dir=output_dir,
+            voiceover_root=voiceover_root,
+        )
+
+
+def _build_direct_longform_sources(
+    *,
+    operation_client: FeishuBitableClient,
+    task: dict,
+    record_id: str,
+    output_dir: Path,
+    voiceover_root: str,
+    voiceover_db_path: str,
+    replan: bool,
+    longform_batch_id_value: str = "",
+) -> list[dict]:
+    """Use the stable planner without generating a hidden 15-second script."""
+
+    if task.get("product_images"):
+        product_context = build_operation_product_context(
+            operation_client=operation_client, task=task, record_id=record_id,
+            output_dir=output_dir, voiceover_root=voiceover_root,
+            require_current_references=True,
+        )
+    else:
+        product_context = _load_or_bootstrap_operation_context(
+            operation_client=operation_client, task=task, record_id=record_id,
+            output_dir=output_dir, voiceover_root=voiceover_root,
+        )
+    product_context["longform_outfit_color_matching"] = True
+    material = "|".join((
+        longform_batch_id_value or _request_id(record_id, task, replan=replan),
+        json.dumps(task_input_snapshot(task), ensure_ascii=False, sort_keys=True),
+        str(product_context.get("input_hash") or ""),
+        SOURCE_POLICY_VERSION,
+    ))
+    source_request = BatchRequest(
+        request_id="OP_LF_SOURCE_" + hashlib.sha256(
+            material.encode("utf-8")
+        ).hexdigest()[:20].upper(),
+        product_code=task["product_code"],
+        requested_count=task["requested_count"],
+        test_phase=task["test_phase"],
+        # The shared planner selects product/structure/creative assets.  The
+        # long-form compiler owns the real duration and segment count.
+        duration_seconds=15.0,
+        execution_mode="PLAN_ONLY",
+        random_seed=task["random_seed"],
+        target_country=task["target_country"],
+        target_language=task["target_language"],
+        top_category=task["top_category"],
+        product_type=task["product_type"],
+        source_record_id=record_id,
+        script_mode="simplified_v1",
+    )
+    source_batch, source_items, _ = run_plan_only(
+        source_request,
+        output_dir=str(output_dir),
+        voiceover_root=voiceover_root,
+        voiceover_db_path=voiceover_db_path,
+        product_context_override=product_context,
+    )
+    if not source_items:
+        raise RuntimeError("DIRECT_PRODUCT_PLAN 没有形成任何可用冻结方向")
+    sources = []
+    for item in source_items[: int(task["requested_count"])]:
+        frozen = json.loads(item.frozen_direction_package_json or "{}")
+        persona_assets = _cache_longform_persona_references(
+            operation_client, frozen, output_dir / "persona_references",
+        )
+        sources.append({
+            "source_reference_id": item.batch_item_id,
+            "source_plan_item_id": item.batch_item_id,
+            "source_plan_batch_id": source_batch.batch_id,
+            "product_context": product_context,
+            "frozen_package": frozen,
+            "persona_reference_assets": persona_assets,
+            "source": source_from_product_plan(
+                product_context,
+                frozen,
+                duration_seconds=int(task["duration_seconds"]),
+                product_code=task["product_code"],
+                source_plan_item_id=item.batch_item_id,
+            ),
+        })
+    return sources
+
+
+def _cache_longform_persona_references(client: FeishuBitableClient, frozen: dict,
+                                      root: Path) -> list[dict]:
+    """Reuse the existing reference downloader; never borrow a product model's face."""
+    from scripts.run_first_frame_tasks import _download_references
+    creative = frozen.get("creative_diversity_contract") or (
+        (frozen.get("simplified_creative_seed") or {}).get("diversity_context") or {}
+    )
+    persona = creative.get("persona_selection_contract") or {}
+    references = persona.get("reference_images") or []
+    if not references:
+        return []
+    reference_key = hashlib.sha256(json.dumps(
+        references, sort_keys=True, default=str,
+    ).encode()).hexdigest()[:20]
+    target = root / reference_key
+    target.mkdir(parents=True, exist_ok=True)
+    manifest = target / "references.json"
+    if manifest.exists():
+        assets = json.loads(manifest.read_text(encoding="utf-8"))
+        if assets and all(Path(item["local_path"]).is_file() and hashlib.sha256(
+            Path(item["local_path"]).read_bytes()).hexdigest() == item["sha256"] for item in assets):
+            return assets
+    paths = _download_references(client, references, target, cache_dir=target / "cache")
+    assets = [{"role": "PERSONA_REFERENCE", "local_path": str(path),
+               "sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest()}
+              for path in paths]
+    manifest.write_text(json.dumps(assets, ensure_ascii=False), encoding="utf-8")
+    return assets
+
+
 def main() -> int:
     _enable_production_category_extensions()
     parser = argparse.ArgumentParser(description="短视频运营任务表 -> 原创视频生产脚本")
@@ -361,6 +533,8 @@ def main() -> int:
             "一级类目（需填写）": TOP_CATEGORY_OPTIONS,
             "产品类型（需填写）": PRODUCT_TYPE_OPTIONS,
             "测试阶段（可选，默认初测）": TEST_PHASE_OPTIONS,
+            "视频规格（需填写）": VIDEO_SPEC_OPTIONS,
+            "长视频场景模式（可选）": LONGFORM_SCENE_MODE_OPTIONS,
             "任务状态（需填写，仅选择待执行）": OPERATION_TASK_STATUS_OPTIONS,
         },
     )
@@ -400,7 +574,8 @@ def main() -> int:
     for record, task in candidates:
         print(
             f"- {record.record_id} | {task['product_code']} × {task['requested_count']} "
-            f"| {task['test_phase']} | {task['duration_seconds']:g}s"
+            f"| {task['test_phase']} | {task['video_spec']} "
+            f"| scene={task['longform_scene_mode']}"
         )
     if args.dry_run:
         return 0
@@ -417,6 +592,115 @@ def main() -> int:
             output_dir = runtime_root / task_id.replace("/", "_")
             output_dir.mkdir(parents=True, exist_ok=True)
             voiceover_db = str(output_dir / "voiceover.sqlite3")
+
+            if task["video_format"] == "LONGFORM":
+                if args.export_ready_only:
+                    raise RuntimeError("长视频任务暂不使用export-ready-only；请直接续跑原任务")
+                _update(
+                    operation_client,
+                    record.record_id,
+                    status="执行中-规划",
+                    error="",
+                    last_run_at=now_millis(),
+                )
+                _sync_confirmed_selling_points(
+                    product_code=task["product_code"],
+                    voiceover_root=args.voiceover_root,
+                )
+                previous_batch_id = str(task.get("batch_id") or "").strip()
+                lf_batch_id = (
+                    longform_batch_id(record.record_id, task, replan=True)
+                    if args.replan
+                    else (
+                        previous_batch_id
+                        if previous_batch_id.startswith("LFB_")
+                        else longform_batch_id(record.record_id, task)
+                    )
+                )
+                # Resume exact sources before reading current template/anchor
+                # state. New/replan always uses the current task, even when
+                # the SKU already has many successful short scripts.
+                direct_sources = load_longform_source_snapshot(lf_batch_id, task)
+                lf_storage = LongformStorage()
+                lf_storage.ensure_schema()
+                frozen_jobs = lf_storage.list_batch_jobs(lf_batch_id)
+                if not direct_sources and not frozen_jobs:
+                    print("从当前任务商品图与最新共享资产规划长视频，不继承旧脚本穿搭")
+                    direct_sources = _build_direct_longform_sources(
+                        operation_client=operation_client,
+                        task=task,
+                        record_id=record.record_id,
+                        output_dir=output_dir,
+                        voiceover_root=args.voiceover_root,
+                        voiceover_db_path=voiceover_db,
+                        replan=bool(args.replan),
+                        longform_batch_id_value=lf_batch_id,
+                    )
+                result = build_longform_text_batch(
+                    record_id=record.record_id,
+                    task=task,
+                    batch_id=lf_batch_id,
+                    blueprint_model=args.blueprint_model,
+                    blueprint_reasoning=args.blueprint_reasoning,
+                    voiceover_model_command=args.voiceover_model_command,
+                    include_voiceover=not args.plan_only,
+                    direct_sources=direct_sources,
+                )
+                _update(
+                    operation_client,
+                    record.record_id,
+                    batch_id=lf_batch_id,
+                    planned_count=result["planned_count"],
+                    ready_count=result["ready_count"],
+                    failed_count=result["failed_count"],
+                    status="执行中-规划" if args.plan_only else "执行中-脚本生成",
+                    last_run_at=now_millis(),
+                )
+                if args.plan_only:
+                    print(
+                        f"长视频规划完成: {lf_batch_id} | planned={result['planned_count']}"
+                    )
+                    continue
+                transferred_images = transfer_attachments(
+                    operation_client, script_client, task["product_images"]
+                ) if task["product_images"] else []
+                export_summary = export_longform_projections(
+                    target_client=script_client,
+                    projections=result["projections"],
+                    product_images=transferred_images,
+                    store_id=task["store_id"],
+                )
+                if result["ready_count"] >= result["requested_count"]:
+                    final_status = "已完成"
+                elif result["ready_count"] > 0:
+                    final_status = "部分完成"
+                else:
+                    final_status = "失败"
+                errors = "；".join(
+                    f"#{item['item_index']} {item['error']}"
+                    for item in result["failures"][:3]
+                )
+                summary = (
+                    f"长视频{task['video_spec']}；请求{result['requested_count']}条；"
+                    f"完成{result['ready_count']}条；失败{result['failed_count']}条；"
+                    f"脚本表新增{export_summary['created']}条、更新{export_summary['updated']}条"
+                )
+                _update(
+                    operation_client,
+                    record.record_id,
+                    status=final_status,
+                    batch_id=lf_batch_id,
+                    planned_count=result["planned_count"],
+                    ready_count=result["ready_count"],
+                    failed_count=result["failed_count"],
+                    summary=summary,
+                    error=errors,
+                    last_run_at=now_millis(),
+                )
+                print(f"长视频文本任务完成: {lf_batch_id} | {summary}")
+                if final_status != "已完成":
+                    had_failures = True
+                continue
 
             batch = (
                 storage.get_batch(task["batch_id"])
@@ -476,33 +760,13 @@ def main() -> int:
                     source_record_id=record.record_id,
                     script_mode="simplified_v1",
                 )
-                product_context_override = None
-                try:
-                    load_product_context(
-                        task["product_code"],
-                        target_country=task["target_country"],
-                        target_language=task["target_language"],
-                        top_category=task["top_category"],
-                        product_type=task["product_type"],
-                        voiceover_root=args.voiceover_root,
-                        allow_missing_structure_route=True,
-                    )
-                except RuntimeError as exc:
-                    missing_context_markers = (
-                        "找不到产品",
-                        "只有 stage0 测试记录",
-                        "存在正式生产 run，但缺少 anchor_card",
-                    )
-                    if not any(marker in str(exc) for marker in missing_context_markers):
-                        raise
-                    print("新 SKU 无历史锚点，使用运营任务产品图建立 P1 锚点卡")
-                    product_context_override = build_operation_product_context(
-                        operation_client=operation_client,
-                        task=task,
-                        record_id=record.record_id,
-                        output_dir=output_dir,
-                        voiceover_root=args.voiceover_root,
-                    )
+                product_context_override = _load_or_bootstrap_operation_context(
+                    operation_client=operation_client,
+                    task=task,
+                    record_id=record.record_id,
+                    output_dir=output_dir,
+                    voiceover_root=args.voiceover_root,
+                )
                 batch, items, _ = run_plan_only(
                     request,
                     output_dir=str(output_dir),

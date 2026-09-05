@@ -52,6 +52,8 @@ REFRESH_ACTIONS = {
 }
 FIRST_FRAME_ACTIONS = {"first-frame-check", "first-frame-run", "first-frame-retry"}
 ALL_ACTIONS = {*ACTION_STATUSES, *REFRESH_ACTIONS, *FIRST_FRAME_ACTIONS}
+BLUEPRINT_MODELS = {"gpt-5.6-sol", "gpt-5.6-terra"}
+BLUEPRINT_REASONING = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 
 
 def _validate_record_id(value: str) -> str:
@@ -101,10 +103,22 @@ def build_runner_command(
     action: str,
     record_id: str | None = None,
     limit: int | None = None,
+    blueprint_model: str | None = None,
+    blueprint_reasoning: str | None = None,
 ) -> list[str]:
     """Build the fixed runner invocation; no user text becomes shell text."""
     if action not in ALL_ACTIONS:
         raise ValueError(f"未知 action: {action}")
+    if blueprint_model is not None and blueprint_model not in BLUEPRINT_MODELS:
+        raise ValueError(
+            "blueprint_model 仅允许 gpt-5.6-sol 或 gpt-5.6-terra"
+        )
+    if blueprint_reasoning is not None and blueprint_reasoning not in BLUEPRINT_REASONING:
+        raise ValueError("blueprint_reasoning 不是支持的推理强度")
+    if (blueprint_model is not None or blueprint_reasoning is not None) and action not in {
+        "run", "plan", "resume", "replan"
+    }:
+        raise ValueError("模型参数只适用于原创脚本任务动作")
     if action == "refresh-production-config":
         raise ValueError(
             "refresh-production-config 是组合动作，请通过本适配器 main 执行"
@@ -171,6 +185,10 @@ def build_runner_command(
 
     if limit is not None:
         command.extend(["--limit", str(limit)])
+    if blueprint_model is not None:
+        command.extend(["--blueprint-model", blueprint_model])
+    if blueprint_reasoning is not None:
+        command.extend(["--blueprint-reasoning", blueprint_reasoning])
     return command
 
 
@@ -200,6 +218,18 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         type=int,
         default=None,
         help="运营任务动作处理1-5行；首帧动作处理1-20条脚本行",
+    )
+    parser.add_argument(
+        "--blueprint-model",
+        choices=sorted(BLUEPRINT_MODELS),
+        default=None,
+        help="长视频/完整蓝图模型；不传则使用当前默认线路",
+    )
+    parser.add_argument(
+        "--blueprint-reasoning",
+        choices=sorted(BLUEPRINT_REASONING),
+        default=None,
+        help="蓝图模型推理强度；不传则使用当前默认值",
     )
     return parser.parse_args(argv)
 
@@ -275,6 +305,8 @@ def main(argv: Iterable[str] | None = None) -> int:
             action=args.action,
             record_id=record_id,
             limit=limit,
+            blueprint_model=args.blueprint_model,
+            blueprint_reasoning=args.blueprint_reasoning,
         )
         if args.product_code and args.action in FIRST_FRAME_ACTIONS:
             command.extend(["--product-code", _validate_product_code(args.product_code)])

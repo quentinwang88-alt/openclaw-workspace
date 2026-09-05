@@ -223,16 +223,13 @@ def _opening_focus_contract(
     }
 
 
-def _visual_saliency_contract(
+def build_subject_visibility_guidance(
     *,
-    canonical_type: str,
     presentation_mode: str,
-    outfit_contract: Mapping[str, Any],
     scene_card: Mapping[str, Any],
     product_truth: Mapping[str, Any] | None,
-    opening_visual_job: Mapping[str, Any] | None,
-    action_design: Mapping[str, Any] | None,
 ) -> Dict[str, Any]:
+    """Shared exposure/separation only; no action or framing decisions."""
     if not visual_saliency_v1_enabled():
         return {}
     lighting = _text(scene_card.get("lighting"))
@@ -243,7 +240,6 @@ def _visual_saliency_contract(
     if "窗" in lighting or "自然光" in lighting:
         exposure_guidance += "人物或商品面向、侧向现场主要自然光，不让明亮窗口在主体身后形成灰脸或剪影。"
     return {
-        "authority": "SOFT_FINAL_COMPOSITION",
         "exposure": {
             "profile": "BRIGHT_NATIVE",
             "subject_priority": {
@@ -253,6 +249,28 @@ def _visual_saliency_contract(
             "guidance": exposure_guidance,
         },
         "separation": _separation_contract(product_truth),
+    }
+
+
+def _visual_saliency_contract(
+    *,
+    canonical_type: str,
+    presentation_mode: str,
+    outfit_contract: Mapping[str, Any],
+    scene_card: Mapping[str, Any],
+    product_truth: Mapping[str, Any] | None,
+    opening_visual_job: Mapping[str, Any] | None,
+    action_design: Mapping[str, Any] | None,
+) -> Dict[str, Any]:
+    visibility = build_subject_visibility_guidance(
+        presentation_mode=presentation_mode, scene_card=scene_card,
+        product_truth=product_truth,
+    )
+    if not visibility:
+        return {}
+    return {
+        "authority": "SOFT_FINAL_COMPOSITION",
+        **visibility,
         "opening_focus": _opening_focus_contract(
             canonical_type=canonical_type,
             presentation_mode=presentation_mode,

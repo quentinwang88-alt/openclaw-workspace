@@ -1622,6 +1622,7 @@ def _select_outfit_contract(
         target_role=target_role,
         demonstration_mode=demonstration_mode,
         scene_family=scene_family,
+        product_colors=(direction.get("outfit_variant_context") or {}).get("product_colors"),
     )
 
 

@@ -331,13 +331,16 @@ def render_first_frame_prompt(
     """Render one still-image prompt while keeping reference roles explicit.
 
     ``OPENING`` remains the backward-compatible default used by the existing
-    15-second pipeline. ``BRIDGE`` and ``SCENE_ENTRY`` are isolated long-form
-    projections; adding them does not change OPENING rendering.
+    15-second pipeline. Explicit long-form roles preserve the selected
+    segment's framing and post-dub audio mode without changing OPENING.
     """
 
     frame_role = _text(frame_role).upper() or "OPENING"
-    if frame_role not in {"OPENING", "BRIDGE", "SCENE_ENTRY"}:
+    if frame_role not in {
+        "OPENING", "LONGFORM_OPENING", "BRIDGE", "SCENE_ENTRY", "SETUP_ENTRY",
+    }:
         raise ValueError(f"不支持的帧角色: {frame_role}")
+    longform_frame = frame_role != "OPENING"
 
     identity = _dict(contract.get("product_identity_lock"))
     truth = _dict(contract.get("product_truth"))
@@ -386,8 +389,9 @@ def render_first_frame_prompt(
     opening_visual = _text(opening.get("visual_content"))
     presentation = _text(contract.get("presentation_mode")).upper()
     persona_reference_assets = _list(contract.get("persona_reference_assets"))
-    opening_action = _project_first_frame_opening_action(
-        opening.get("character_action"), presentation
+    opening_action = (
+        _text(opening.get("character_action")) if longform_frame else
+        _project_first_frame_opening_action(opening.get("character_action"), presentation)
     )
     dense_prop_tokens = ("书", "货架", "陈列", "收据", "招牌", "文字牌")
     if dense_opening and any(token in opening_visual for token in dense_prop_tokens):
@@ -405,7 +409,12 @@ def render_first_frame_prompt(
         or outfit.get("product_type")
     ).lower()
     if canonical_type in {"outerwear", "top", "dress"}:
-        category_extension = "服装：目标服装必须完整可辨，衣长、领型、门襟、袖口与参考图一致，内搭和下装不得遮挡关键结构。"
+        category_extension = (
+            "服装：按本段景别保留实际入画的商品结构，局部细节可以单独入画；"
+            "入画的领型、门襟、袖口等结构与商品参考图一致。"
+            if longform_frame else
+            "服装：目标服装必须完整可辨，衣长、领型、门襟、袖口与参考图一致，内搭和下装不得遮挡关键结构。"
+        )
     elif canonical_type in {"silk_scarf", "scarf", "winter_scarf"}:
         category_extension = "丝巾/围巾：保持图案、边框、垂端和已冻结佩戴方式，只呈现一个连续佩戴状态。"
     elif canonical_type == "headscarf":
@@ -431,6 +440,9 @@ def render_first_frame_prompt(
         )
     ):
         proportion_framing = (
+            "人物比例与取景：保持自然肩宽、躯干和四肢比例，使用正常手机透视；"
+            "入画范围由本段冻结景别决定，商品近景无需补全脸部、膝部或全身。"
+            if longform_frame else
             "首帧人物比例构图：使用正常手机主摄与普通生活拍摄距离，至少覆盖头部至膝部，"
             "优先膝上或近全身平视构图；保持自然肩宽、躯干长度和腿部比例。"
             "不要贴脸广角，不要头大身小，也不要复制人物参考图的半身裁切比例。"
@@ -458,12 +470,22 @@ def render_first_frame_prompt(
             f"首帧承载方式：{opening_carrier or presentation or '按冻结开场'}。"
         )
 
-    if frame_role == "SCENE_ENTRY":
-        opening_prompt = render_first_frame_prompt(contract, frame_role="OPENING")
-        return (
+    if frame_role in {"SCENE_ENTRY", "SETUP_ENTRY"}:
+        opening_prompt = render_first_frame_prompt(contract, frame_role="LONGFORM_OPENING")
+        entry_description = (
+            "这是同一条长视频在同一场景中切到新手机机位和商品观察关系的片段进入帧。"
+            if frame_role == "SETUP_ENTRY" else
             "这是同一条长视频跨场景硬切后的片段进入帧，不是第二条视频的新钩子。"
-            "保持同一人物身份、同一商品、同一冻结穿搭和已经完成的穿戴状态；"
+        )
+        scene_guidance = (
+            "保持当前场景，只按本合同切换机位和取景，不模仿上一片段的姿势。\n"
+            if frame_role == "SETUP_ENTRY" else
             "只按本合同切换生活场景，不模仿上一片段的姿势或机位。\n"
+        )
+        return (
+            entry_description
+            + "保持同一人物身份、同一商品、同一冻结穿搭和已经完成的穿戴状态；"
+            + scene_guidance
             + opening_prompt
             .replace("统一首帧", "场景进入帧")
             .replace("首帧", "场景进入帧")
@@ -584,8 +606,12 @@ def render_first_frame_prompt(
             f"首帧画面：{opening_visual}",
             f"动作瞬间：{opening_action}",
             (
-                "首帧口型：人物刚准备开口，嘴唇自然放松或仅轻微分开；"
-                "不要定格在明显发声、夸张张嘴或不自然抿嘴的瞬间。"
+                (
+                    "首帧口型：使用后期画外旁白，人物不说话，嘴唇自然闭合或放松。"
+                    if longform_frame else
+                    "首帧口型：人物刚准备开口，嘴唇自然放松或仅轻微分开；"
+                    "不要定格在明显发声、夸张张嘴或不自然抿嘴的瞬间。"
+                )
                 if opening_person_visible
                 and presentation in {"PERSON_ON_CAMERA", "WEARER_ACTIVE", "MIXED"}
                 else "首帧口型：不适用。"

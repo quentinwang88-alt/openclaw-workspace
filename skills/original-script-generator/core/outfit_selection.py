@@ -403,6 +403,7 @@ def select_outfit_candidate(
     target_role: str,
     demonstration_mode: str,
     scene_family: str,
+    product_colors: Sequence[str] | None = None,
 ) -> Tuple[Dict[str, Any], int, int]:
     """Choose one compatible contract without adding a quality gate."""
 
@@ -416,10 +417,28 @@ def select_outfit_candidate(
     pool = compatible or [dict(item) for item in candidates]
     if not pool:
         return {}, 0, 0
+    color_report: Dict[str, Any] = {}
+    if product_colors:
+        requested_colors = set(product_colors)
+        color_report = {
+            "policy_version": "outfit-product-color-v2-soft-preference",
+            "product_colors": sorted(requested_colors),
+            # Retained for existing reports: a preference mismatch is not an
+            # explicit ban and must not shrink the operator-authorized pool.
+            "explicit_conflict_count": 0,
+            "preference_mismatch_count": sum(
+                bool(item.get("product_color_preferences"))
+                and not requested_colors.intersection(item["product_color_preferences"])
+                for item in pool
+            ),
+            "authority": "SOFT_RANKING_ONLY",
+        }
     best_source_tier = min(_candidate_source_tier(item) for item in pool)
     pool = [
         item for item in pool if _candidate_source_tier(item) == best_source_tier
     ]
+    if product_colors:
+        color_report["eligible_template_ids"] = [item.get("template_id") for item in pool]
 
     historical_counts: Counter = Counter()
     batch_counts: Counter = Counter()
@@ -431,7 +450,7 @@ def select_outfit_candidate(
         target[key] += 1
 
     ranked: List[
-        Tuple[int, int, int, int, int, int, int, Dict[str, Any]]
+        Tuple[int, int, int, int, int, int, int, int, Dict[str, Any]]
     ] = []
     selected_scene = _text(scene_family).upper()
     for index, candidate in enumerate(pool):
@@ -446,6 +465,9 @@ def select_outfit_candidate(
         tie_break = int(hashlib.sha256(tie_material.encode("utf-8")).hexdigest()[:8], 16)
         ranked.append((
             batch_counts[key],
+            int(bool(product_colors) and not set(product_colors or []).intersection(
+                candidate.get("product_color_preferences") or []
+            )),
             int(candidate.get("source_preference") or 0),
             int(candidate.get("style_preference_rank") or 0),
             scene_mismatch,
@@ -467,5 +489,13 @@ def select_outfit_candidate(
         else "INTERNAL_FALLBACK"
     )
     selected["source_tier_policy"] = "HIGHEST_AVAILABLE_TIER_THEN_SOFT_ROTATION"
+    if color_report:
+        color_report["match_status"] = (
+            "MATCHED" if set(product_colors or []).intersection(
+                selected.get("product_color_preferences") or []
+            ) else "UNMATCHED_SOFT_PREFERENCE"
+            if selected.get("product_color_preferences") else "UNSPECIFIED_FALLBACK"
+        )
+        selected["product_color_affinity"] = color_report
     key = outfit_selection_key(selected)
     return selected, historical_counts[key], batch_counts[key]

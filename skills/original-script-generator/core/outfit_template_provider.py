@@ -9,15 +9,18 @@ structured snapshot and model-visible creative seed.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
+import re
 import sqlite3
+from functools import lru_cache
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
 
-PROVIDER_VERSION = "shared-outfit-provider-v6-display-metadata"
+PROVIDER_VERSION = "shared-outfit-provider-v7-identity-color-affinity"
 DEFAULT_DB_PATH = (
     Path(__file__).resolve().parents[2]
     / "lightweight-tryon-video"
@@ -62,6 +65,8 @@ OPTIONAL_STRUCTURED_COLUMNS = (
     "visibility_requirement",
     "finish_direction",
 )
+# Selection-only operator metadata; never send raw free-form rules to a model.
+SELECTION_ONLY_COLUMNS = ("suitable_color_rules",)
 STRUCTURED_COLUMNS = (*BASE_STRUCTURED_COLUMNS, *OPTIONAL_STRUCTURED_COLUMNS)
 DISPLAY_ONLY_COLUMNS = ("styling_name",)
 DISPLAY_ONLY_CONTRACT_FIELDS = frozenset({"template_display_name"})
@@ -134,6 +139,64 @@ _ONE_PIECE_TOKENS = ("连衣裙", "连体", "jumpsuit", "romper", "dress")
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+@lru_cache(maxsize=1)
+def _product_code_normalizer():
+    relative = Path("lightweight-tryon-video/scripts/light_tryon/product_codes.py")
+    candidates = (
+        Path(__file__).resolve().parents[2] / relative,
+        Path.home() / ".openclaw/workspace/skills" / relative,
+    )
+    for path in candidates:
+        if not path.is_file():
+            continue
+        spec = importlib.util.spec_from_file_location("shared_outfit_product_codes", path)
+        if spec and spec.loader:
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module.normalize_product_code
+    # Standalone historical installations still read valid old IDs normally.
+    return _text
+
+
+def normalize_outfit_product_code(value: Any) -> str:
+    return _product_code_normalizer()(value)
+
+
+def outfit_product_color_tokens(value: Any, *, strict: bool = False) -> List[str]:
+    """Reuse the existing colour vocabulary, narrowing its neutral bucket.
+
+    Operator preferences accept only explicit colour lists. Product anchors
+    may contain descriptive text, but only their already-observed fields are
+    supplied by the caller. Unknown prose never becomes a new constraint.
+    """
+    from .original_batch_allocator import _COLOR_TOKEN_GROUPS, _semantic_text
+
+    aliases = {
+        token.lower(): group
+        for group, tokens in _COLOR_TOKEN_GROUPS.items() for token in tokens
+    }
+    for group, tokens in {
+        "WHITE": ("白色", "纯白", "正白", "white", "สีขาว"),
+        "IVORY": ("米白", "奶白", "象牙白", "ivory", "cream", "สีครีม"),
+        "BEIGE": ("米色", "杏色", "beige", "สีเบจ"),
+        "KHAKI": ("卡其", "卡其色", "khaki", "สีกากี"),
+        "YELLOW": ("黄色", "yellow", "สีเหลือง"),
+    }.items():
+        aliases.update({token: group for token in tokens})
+    material = _semantic_text(value).strip().lower()
+    if not material:
+        return []
+    if strict:
+        parts = [part.strip() for part in re.split(r"[,，、/;；|\n]+", material) if part.strip()]
+        if not parts or any(part not in aliases for part in parts):
+            return []
+        return sorted({aliases[part] for part in parts})
+    # Longest matches prevent e.g. 卡其色 being split or 白色 within another
+    # explicitly named shade from becoming an additional variant.
+    pattern = "|".join(re.escape(token) for token in sorted(aliases, key=len, reverse=True))
+    return sorted({aliases[match.group()] for match in re.finditer(pattern, material)})
 
 
 def without_outfit_display_metadata(value: Any) -> Any:
@@ -459,7 +522,7 @@ def load_structured_outfit_templates(
     """
     if not _provider_enabled():
         return []
-    code = _text(product_code)
+    code = normalize_outfit_product_code(product_code)
     if not code:
         return []
     path = _resolve_db_path(db_path)
@@ -478,6 +541,7 @@ def load_structured_outfit_templates(
         selected_columns = [
             *structured_columns,
             *(name for name in DISPLAY_ONLY_COLUMNS if name in existing),
+            *(name for name in SELECTION_ONLY_COLUMNS if name in existing),
         ]
         sql = (
             "SELECT " + ", ".join(selected_columns)
@@ -491,7 +555,10 @@ def load_structured_outfit_templates(
     requested_type = _canonical_product_type(product_type)
     candidates: List[Dict[str, Any]] = []
     for row in rows:
-        codes = _list(row.get("applicable_product_codes"))
+        codes = list(dict.fromkeys(
+            normalize_outfit_product_code(value)
+            for value in _list(row.get("applicable_product_codes"))
+        ))
         if code in codes:
             match_scope = "EXACT_PRODUCT_CODE"
             match_rank = 0
@@ -518,6 +585,12 @@ def load_structured_outfit_templates(
             } else row.get(key))
             for key in structured_columns
         }
+        structured_payload["applicable_product_codes"] = codes
+        color_preferences = outfit_product_color_tokens(
+            row.get("suitable_color_rules"), strict=True,
+        )
+        if color_preferences:
+            structured_payload["product_color_preferences"] = color_preferences
         style_family = (_list(row.get("vibe_tag")) or ["STRUCTURED_TEMPLATE"])[0]
         outfit_structure = (
             "ONE_PIECE"
@@ -536,6 +609,7 @@ def load_structured_outfit_templates(
             "match_scope": match_scope,
             "match_rank": match_rank,
             "priority": int(row.get("priority") or 0),
+            "product_color_preferences": color_preferences,
             "applicable_product_codes": codes,
             "applicable_product_type": product_types,
             "product_fit": _list(row.get("product_fit")),

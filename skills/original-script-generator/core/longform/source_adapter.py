@@ -3,8 +3,10 @@ from __future__ import annotations
 from typing import Any, Dict, Mapping
 
 from core.product_selling_argument_adapter import load_verified_selling_point_catalog
+from core.simplified_complete_script import build_product_identity_lock, _outfit_prompt_projection
 
 from .contracts import recommended_argument_range
+from .visual_guidance import segment_visibility
 
 
 def _dict(value: Any) -> Dict[str, Any]:
@@ -45,18 +47,9 @@ def _compact_persona(value: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def _compact_outfit(value: Mapping[str, Any]) -> Dict[str, Any]:
-    outfit = _dict(value)
-    return {
-        "template_id": _text(outfit.get("template_id")),
-        "template_display_name": _text(outfit.get("template_display_name")),
-        "outfit_recipe": _dict(outfit.get("outfit_recipe")),
-        "target_role": _text(outfit.get("target_role")),
-        "style_family": _text(outfit.get("style_family")),
-        "style_intensity": _text(outfit.get("style_intensity")),
-        "climate_profile": _text(outfit.get("climate_profile")),
-        "visibility_zones": list(outfit.get("visibility_zones") or []),
-        "base_outfit_direction": _text(outfit.get("base_outfit_direction")),
-    }
+    # Keep the selected contract and its version/hash for replay and audit.
+    # Only _outfit_prompt_projection is consumed by the video renderer.
+    return _dict(value)
 
 
 def _argument_role(item: Mapping[str, Any]) -> str:
@@ -255,6 +248,210 @@ def source_from_complete_script(raw: Mapping[str, Any], *, duration_seconds: int
                 script.get("complete_script_id") or script.get("script_id")
             ),
             "source_mode": "READ_ONLY_15S_AUTHORITY_PROJECTION",
+        },
+    }
+
+
+def source_from_product_plan(
+    product_context: Mapping[str, Any],
+    frozen_package: Mapping[str, Any],
+    *,
+    duration_seconds: int,
+    product_code: str = "",
+    source_plan_item_id: str = "",
+) -> Dict[str, Any]:
+    """Build long-form authority directly from a frozen product plan.
+
+    This is the first-class new-SKU path.  It reuses the stable planner's
+    product, claim, structure, persona, outfit and scene choices without
+    generating a hidden 15-second script first.  A completed short script is
+    therefore an optional quality asset, never an admission requirement.
+    """
+
+    context = _dict(product_context)
+    package = _dict(frozen_package)
+    seed = _dict(package.get("simplified_creative_seed"))
+    product_truth = _dict(seed.get("product_truth"))
+    if not product_truth:
+        raise RuntimeError("DIRECT_PRODUCT_PLAN 缺少冻结商品事实")
+    # The 15-second model-facing seed intentionally omits routing metadata.
+    # Long-form identity compilation still needs the already-authoritative
+    # product type, so restore it from the operation context without asking a
+    # model to infer anything.
+    product_truth.setdefault(
+        "canonical_product_type", _text(context.get("product_type"))
+    )
+    product_truth.setdefault(
+        "product_code", _text(product_code or context.get("product_code"))
+    )
+
+    diversity = _dict(seed.get("diversity_context"))
+    creative = _dict(package.get("creative_diversity_contract"))
+    persona = (
+        _dict(diversity.get("persona_selection_contract"))
+        or _dict(package.get("persona_selection_contract"))
+        or _dict(creative.get("persona_selection_contract"))
+    )
+    outfit = (
+        _dict(diversity.get("outfit_selection_contract"))
+        or _dict(creative.get("outfit_selection_contract"))
+    )
+    outfit_recipe = _dict(outfit.get("outfit_recipe"))
+    scene_reference = _dict(diversity.get("scene_reference"))
+    scene_card = _dict(scene_reference.get("execution_card"))
+    scene_space = _dict(scene_card.get("space"))
+    scene_recipe = _dict(scene_card.get("visual_scene_recipe"))
+    scene_location = _text(
+        scene_space.get("location")
+        or creative.get("scene_motif")
+        or creative.get("scene_family_key")
+        or "普通生活空间"
+    )
+    scene_contract = {
+        "location": scene_location,
+        "subspace": _text(scene_space.get("subspace")),
+        "moment": _text(creative.get("persona_state")),
+        "lighting": _text(scene_card.get("lighting")),
+        "background": _text(
+            scene_recipe.get("space_relationship")
+            or scene_space.get("background_depth")
+        ),
+        "material_palette": _text(scene_recipe.get("material_palette")),
+        "lighting_texture": _text(scene_recipe.get("lighting_texture")),
+        "lived_in_detail": _text(
+            scene_recipe.get("lived_in_detail") or scene_card.get("lived_in_trace")
+        ),
+        "source": "FROZEN_PRODUCT_PLAN",
+    }
+    character = _dict(persona.get("script_projection"))
+    presentation = _text(
+        _dict(seed.get("creative_direction")).get("preferred_presentation")
+        or creative.get("required_presentation_mode")
+    )
+    capture_mode = _text(
+        _dict(seed.get("creative_direction")).get("capture_mode")
+        or creative.get("capture_mode")
+    )
+    outfit_projection = _outfit_prompt_projection(outfit)
+    color_affinity = _dict(outfit.get("product_color_affinity"))
+    world = {
+        "character": character or {
+            "identity": (
+                "不适用，无人物出镜"
+                if presentation == "STATIC_PRODUCT"
+                else _text(creative.get("persona_role")) or "自然分享者"
+            )
+        },
+        "persona_contract": _compact_persona(persona),
+        "outfit": _text(
+            outfit_projection.get("frozen_outfit")
+            or outfit_recipe.get("one_piece")
+            or outfit_recipe.get("top")
+        ),
+        "outfit_contract": _compact_outfit(outfit),
+        "outfit_prompt_projection": outfit_projection,
+        "outfit_selection_report": {
+            "template_id": _text(outfit.get("template_id")),
+            "template_version": _text(outfit.get("template_version")),
+            "structured_snapshot_hash": _text(outfit.get("structured_snapshot_hash")),
+            "color_affinity": color_affinity,
+            "eligible_count": len(color_affinity.get("eligible_template_ids") or []),
+            "recent_use_count": int(creative.get("outfit_silhouette_recent_count") or 0),
+            "batch_use_count": int(creative.get("outfit_silhouette_batch_count") or 0),
+            "reuse_reason": "COMPATIBLE_POOL_REUSE" if creative.get("outfit_silhouette_batch_count") else "BATCH_FIRST_USE",
+        },
+        "outfit_persona_affinity_contract": _dict(creative.get("outfit_persona_affinity_contract")),
+        "outfit_scene_affinity_contract": _dict(creative.get("outfit_scene_affinity_contract")),
+        "scene": scene_location,
+        "scene_contract": scene_contract,
+        "lighting": _text(scene_contract.get("lighting")),
+        "person_state": _text(creative.get("persona_state")) or _text(character.get("identity")),
+        "product_wear_state": "沿用冻结展示方式并保持全片连续",
+        "camera": "普通手机竖屏原生记录，按长视频片段连续推进",
+        "carrier_mode": _text(
+            _dict(
+                _dict(package.get("structure_contract")).get("hard_constraints")
+            ).get("content_carrier")
+        ),
+        "presentation_mode": presentation,
+        "capture_mode": capture_mode,
+        "visual_saliency": {},
+        "opening_scene_projection": {},
+    }
+
+    world["visual_saliency"] = segment_visibility(
+        {"production_world": world, "product_truth": product_truth}, scene_contract,
+    )
+
+    content_bundle = _dict(package.get("content_bundle_brief"))
+    semantic_contract = (
+        _dict(package.get("semantic_spine_contract"))
+        or _dict(seed.get("semantic_spine_contract"))
+        or _dict(content_bundle.get("semantic_spine_contract"))
+    )
+    thesis = _dict(semantic_contract.get("script_thesis"))
+    argument = _dict(content_bundle.get("selling_argument"))
+    verified = [
+        dict(item) for item in product_truth.get("approved_claims") or []
+        if isinstance(item, Mapping)
+        and (_text(item.get("claim_key")) or _text(item.get("fact_text")))
+    ]
+    product_code_value = _text(
+        product_code or context.get("product_code") or product_truth.get("product_code")
+    )
+    product_type = _text(
+        context.get("product_type") or product_truth.get("canonical_product_type")
+    )
+    argument_bundle = _build_argument_bundle(
+        product_code_value,
+        product_type,
+        int(duration_seconds),
+        semantic_contract,
+        argument,
+        verified,
+    )
+    requested_hook_id = _text(
+        package.get("requested_hook_id")
+        or _dict(seed.get("creative_direction")).get("requested_hook_id")
+    )
+    return {
+        "product_code": product_code_value,
+        "target_country": _text(context.get("target_country") or "泰国"),
+        "target_language": _text(context.get("target_language") or "泰语"),
+        "target_duration_seconds": int(duration_seconds),
+        "product_identity_lock": build_product_identity_lock(product_truth),
+        "product_truth": product_truth,
+        "production_world": world,
+        "semantic_spine": {
+            "hook_id": requested_hook_id,
+            "primary_narrative_context": _text(
+                thesis.get("primary_narrative_context")
+                or thesis.get("audience_situation")
+                or _dict(semantic_contract.get("product_market_context")).get(
+                    "primary_usage_world"
+                )
+            ),
+            "core_buying_reason": _text(
+                thesis.get("core_buying_reason")
+                or argument.get("creative_core_value")
+                or argument.get("primary_selling_point")
+                or argument.get("operator_expression")
+            ),
+            "selling_argument": argument,
+            "source_semantic_spine_contract": semantic_contract,
+        },
+        "verified_facts": verified,
+        "approved_supporting_arguments": argument_bundle["supporting_arguments"],
+        "longform_argument_bundle": argument_bundle,
+        "scene_mode": "auto",
+        "requested_hook_id": requested_hook_id,
+        "relationship_language": {},
+        "approved_style_references": [],
+        "native_rhetoric_contract": {},
+        "source_lineage": {
+            "source_script_id": "",
+            "source_plan_item_id": _text(source_plan_item_id),
+            "source_mode": "DIRECT_PRODUCT_PLAN",
         },
     }
 

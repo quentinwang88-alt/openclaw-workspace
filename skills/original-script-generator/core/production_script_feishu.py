@@ -15,6 +15,19 @@ PRODUCT_TYPE_OPTIONS: Tuple[str, ...] = tuple(
     definition.display_name for definition in load_type_registry().type_definitions
 )
 TEST_PHASE_OPTIONS: Tuple[str, ...] = ("初测", "复测", "终测", "放大观察")
+VIDEO_SPEC_OPTIONS: Tuple[str, ...] = (
+    "15秒原创", "20秒", "25秒", "30秒", "35秒", "40秒", "45秒",
+)
+LONGFORM_SCENE_MODE_OPTIONS: Tuple[str, ...] = ("自动", "单场景", "双场景")
+LONGFORM_SCENE_MODE_TO_CODE = {
+    "自动": "auto",
+    "单场景": "single",
+    "双场景": "multi",
+}
+VIDEO_FORMAT_OPTIONS: Tuple[str, ...] = ("15秒原创", "长视频")
+LONGFORM_STATUS_OPTIONS: Tuple[str, ...] = (
+    "不适用", "待审核", "待生产", "生成中", "已完成", "生成失败",
+)
 OPERATION_TASK_STATUS_OPTIONS: Tuple[str, ...] = (
     "待执行",
     "执行中-规划",
@@ -58,6 +71,8 @@ OPERATION_TASK_FIELD_NAMES = {
     "target_language": "目标语言",
     "requested_count": "生成数量（需填写）",
     "test_phase": "测试阶段（可选，默认初测）",
+    "video_spec": "视频规格（需填写）",
+    "longform_scene_mode": "长视频场景模式（可选）",
     "duration_seconds": "视频时长",
     "random_seed": "随机种子（系统，可留空）",
     "status": "任务状态（需填写，仅选择待执行）",
@@ -96,6 +111,12 @@ PRODUCTION_SCRIPT_FIELD_NAMES = {
     "item_index": "批次序号",
     "script_title": "脚本标题",
     "duration_seconds": "视频时长",
+    "video_format": "视频形态（系统）",
+    "segment_plan": "分段计划（系统）",
+    "longform_job_id": "长视频任务ID（系统）",
+    "longform_status": "长视频执行状态（系统）",
+    "longform_video": "长视频成片（系统）",
+    "longform_error": "长视频错误信息（系统）",
     "top_category": "一级类目",
     "product_type": "产品类型",
     "target_country": "目标国家",
@@ -169,6 +190,10 @@ OPERATION_TASK_FIELDS: Tuple[FieldSpec, ...] = (
     FieldSpec("目标语言"),
     FieldSpec("生成数量（需填写）", 2, "Number"),
     _single("测试阶段（可选，默认初测）", TEST_PHASE_OPTIONS),
+    _single("视频规格（需填写）", VIDEO_SPEC_OPTIONS),
+    _single("长视频场景模式（可选）", LONGFORM_SCENE_MODE_OPTIONS),
+    # Kept as a hidden compatibility value for historical task rows and
+    # downstream snapshots.  New operator input is the controlled 视频规格.
     FieldSpec("视频时长", 2, "Number"),
     FieldSpec("随机种子（系统，可留空）", 2, "Number"),
     _single(
@@ -276,6 +301,40 @@ def normalize_operation_test_phase(value: Any) -> str:
         return text
     return "INITIAL"
 
+
+def normalize_operation_video_spec(value: Any, legacy_duration: Any = None) -> Tuple[str, int]:
+    """Return the controlled display value and its exact duration.
+
+    Historical rows only have the numeric ``视频时长`` field.  They continue to
+    resolve safely without requiring a table migration, while all new rows use
+    the single-select field and cannot enter arbitrary unsupported durations.
+    """
+
+    text = str(value or "").strip()
+    if text in VIDEO_SPEC_OPTIONS:
+        if text == "15秒原创":
+            return text, 15
+        return text, int(text.removesuffix("秒"))
+    try:
+        duration = int(round(float(legacy_duration or 15)))
+    except (TypeError, ValueError):
+        duration = 15
+    if duration == 15:
+        return "15秒原创", 15
+    candidate = f"{duration}秒"
+    if candidate in VIDEO_SPEC_OPTIONS:
+        return candidate, duration
+    return candidate, duration
+
+
+def normalize_longform_scene_mode(value: Any) -> str:
+    text = str(value or "").strip()
+    if text in LONGFORM_SCENE_MODE_TO_CODE:
+        return LONGFORM_SCENE_MODE_TO_CODE[text]
+    if text in LONGFORM_SCENE_MODE_TO_CODE.values():
+        return text
+    return "auto"
+
 PRODUCTION_SCRIPT_FIELDS: Tuple[FieldSpec, ...] = (
     FieldSpec("产品编码"),
     FieldSpec("产品图片", 17, "Attachment"),
@@ -285,6 +344,12 @@ PRODUCTION_SCRIPT_FIELDS: Tuple[FieldSpec, ...] = (
     FieldSpec("批次序号", 2, "Number"),
     FieldSpec("脚本标题"),
     FieldSpec("视频时长", 2, "Number"),
+    _single("视频形态（系统）", VIDEO_FORMAT_OPTIONS),
+    FieldSpec("分段计划（系统）"),
+    FieldSpec("长视频任务ID（系统）"),
+    _single("长视频执行状态（系统）", LONGFORM_STATUS_OPTIONS),
+    FieldSpec("长视频成片（系统）", 17, "Attachment"),
+    FieldSpec("长视频错误信息（系统）"),
     FieldSpec("一级类目"),
     FieldSpec("产品类型"),
     FieldSpec("目标国家"),
@@ -454,6 +519,11 @@ def projection_to_feishu_fields(
         f["item_index"]: projection.get("item_index", 0),
         f["script_title"]: projection.get("script_title", ""),
         f["duration_seconds"]: projection.get("duration_seconds", 15),
+        f["video_format"]: projection.get("video_format", "15秒原创"),
+        f["segment_plan"]: projection.get("segment_plan", ""),
+        f["longform_job_id"]: projection.get("longform_job_id", ""),
+        f["longform_status"]: projection.get("longform_status", "不适用"),
+        f["longform_error"]: projection.get("longform_error", ""),
         f["top_category"]: projection.get("top_category", ""),
         f["product_type"]: projection.get("product_type", ""),
         f["target_country"]: projection.get("target_country", ""),
@@ -527,6 +597,9 @@ def export_ready_batch(
         PRODUCTION_SCRIPT_FIELD_NAMES["sync_result"],
         PRODUCTION_SCRIPT_FIELD_NAMES["sync_time"],
         PRODUCTION_SCRIPT_FIELD_NAMES["run_task_id"],
+        PRODUCTION_SCRIPT_FIELD_NAMES["longform_status"],
+        PRODUCTION_SCRIPT_FIELD_NAMES["longform_video"],
+        PRODUCTION_SCRIPT_FIELD_NAMES["longform_error"],
     }
 
     for item in items:
@@ -568,6 +641,9 @@ def operation_record_values(record: TaskRecord) -> Dict[str, Any]:
     f = OPERATION_TASK_FIELD_NAMES
     fields = record.fields
     top_category = normalize_operation_top_category(fields.get(f["top_category"]))
+    video_spec, duration_seconds = normalize_operation_video_spec(
+        fields.get(f["video_spec"]), fields.get(f["duration_seconds"]),
+    )
     return {
         "task_id": str(fields.get(f["task_id"]) or record.record_id).strip(),
         "product_code": str(fields.get(f["product_code"]) or "").strip(),
@@ -581,7 +657,12 @@ def operation_record_values(record: TaskRecord) -> Dict[str, Any]:
         "target_language": str(fields.get(f["target_language"]) or "").strip(),
         "requested_count": int(float(fields.get(f["requested_count"]) or 6)),
         "test_phase": normalize_operation_test_phase(fields.get(f["test_phase"])),
-        "duration_seconds": float(fields.get(f["duration_seconds"]) or 15),
+        "video_spec": video_spec,
+        "video_format": "SHORT_15S" if duration_seconds == 15 else "LONGFORM",
+        "duration_seconds": float(duration_seconds),
+        "longform_scene_mode": normalize_longform_scene_mode(
+            fields.get(f["longform_scene_mode"])
+        ),
         "random_seed": int(float(fields.get(f["random_seed"]) or 0)),
         "status": str(fields.get(f["status"]) or "").strip(),
         "batch_id": str(fields.get(f["batch_id"]) or "").strip(),

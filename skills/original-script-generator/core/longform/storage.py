@@ -105,6 +105,17 @@ class LongformStorage:
             )]
             return result
 
+    def list_batch_jobs(self, batch_id: str) -> list[Dict[str, Any]]:
+        """Resume the frozen jobs, never rediscover sources by product recency."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM longform_job
+                   WHERE json_extract(master_contract_json, '$.workbench_request.batch_id')=?
+                   ORDER BY CAST(json_extract(master_contract_json,
+                     '$.workbench_request.item_index') AS INTEGER)""", (batch_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def update_segment(self, job_id: str, segment_id: str, **fields: Any) -> None:
         allowed = {
             "status", "start_frame_path", "end_frame_path", "platform_task_id",

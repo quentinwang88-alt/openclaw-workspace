@@ -92,6 +92,14 @@ def fixture(duration=27):
 
 
 class LongformOriginalTest(unittest.TestCase):
+    def setUp(self):
+        resolver = mock.patch("core.longform.voiceover.resolve_longform_voiceover_resources", return_value={
+            "hook_guidance": {}, "relationship_language": {},
+            "approved_style_references": [], "native_rhetoric_contract": {},
+        })
+        resolver.start()
+        self.addCleanup(resolver.stop)
+
     def test_duration_split(self):
         self.assertEqual(split_duration(20), (10, 10))
         self.assertEqual(plan_segment_durations(21), [11, 10])
@@ -449,7 +457,7 @@ class LongformOriginalTest(unittest.TestCase):
         self.assertTrue(payload["speech_policy"]["no_sentence_to_shot_lock"])
         self.assertEqual(len(payload["semantic_sections"]), 2)
         self.assertTrue(payload["speech_policy"]["no_rehook_after_first_segment"])
-        self.assertEqual(payload["speech_policy"]["tts_layout"], "SEMANTIC_SECTION_AT_SEGMENT_START")
+        self.assertEqual(payload["speech_policy"]["tts_layout"], "bounded-semantic-continuation-v1")
         self.assertIn("longform_argument_bundle", payload)
         self.assertEqual(
             payload["semantic_sections"][0]["target_spoken_seconds_range"], [12.6, 13.4]
@@ -558,7 +566,7 @@ class LongformOriginalTest(unittest.TestCase):
         self.assertEqual(invoke.call_count, 1)
         self.assertEqual(result["target_text"], "ฉบับใหม่")
         self.assertTrue(result["tts_preflight"]["revision_selected"])
-        self.assertEqual(result["duration_fit"]["method"], "EDGE_TTS_ACTUAL_V1")
+        self.assertEqual(result["duration_fit"]["method"], "EDGE_TTS_EFFECTIVE_SPEECH_V2")
 
     def test_plan_time_reference_freeze_is_local_and_hashed(self):
         with tempfile.TemporaryDirectory() as directory:

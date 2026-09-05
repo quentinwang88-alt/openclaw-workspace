@@ -362,6 +362,47 @@ class BatchStorage:
             ).fetchall()
         return [self._row_to_item(r) for r in rows]
 
+    def list_ready_script_results_for_product(
+        self, product_code: str, *, limit: int = 20
+    ) -> List[Dict[str, Any]]:
+        """Return recent completed-script payloads for read-only downstream reuse.
+
+        Long-form planning uses these rows as frozen production-world authority;
+        it never changes the completed 15-second batches.  Keeping this query in
+        the storage adapter avoids Feishu scans and makes the dependency explicit.
+        """
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT i.result_json, i.batch_item_id, i.batch_id, i.item_index,
+                          i.updated_at
+                   FROM original_content_item i
+                   JOIN original_content_batch b ON b.batch_id=i.batch_id
+                   WHERE b.product_code=? AND i.status='SCRIPT_READY'
+                         AND i.result_json IS NOT NULL AND i.result_json!=''
+                   ORDER BY i.updated_at DESC, i.item_index ASC
+                   LIMIT ?""",
+                (str(product_code), max(1, int(limit))),
+            ).fetchall()
+        results: List[Dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(str(row["result_json"] or "{}"))
+            except (TypeError, json.JSONDecodeError):
+                continue
+            script = payload.get("script") if isinstance(payload, dict) else None
+            if not isinstance(script, dict) or not script.get("complete_script_id"):
+                continue
+            results.append({
+                "result": payload,
+                "script": script,
+                "batch_item_id": str(row["batch_item_id"] or ""),
+                "batch_id": str(row["batch_id"] or ""),
+                "item_index": int(row["item_index"] or 0),
+                "updated_at": str(row["updated_at"] or ""),
+            })
+        return results
+
     def get_recent_cluster_usage(
         self,
         product_code: str,

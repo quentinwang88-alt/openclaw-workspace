@@ -32,6 +32,24 @@ class OpenClawOriginalScriptTaskTest(unittest.TestCase):
             command[-3:], ["--record-id", "recAbc123", "--resume-failed"]
         )
 
+    def test_blueprint_model_override_is_limited_and_forwarded(self):
+        command = adapter.build_runner_command(
+            action="resume",
+            record_id="recAbc123",
+            blueprint_model="gpt-5.6-terra",
+            blueprint_reasoning="high",
+        )
+        self.assertEqual(
+            command[-4:],
+            ["--blueprint-model", "gpt-5.6-terra", "--blueprint-reasoning", "high"],
+        )
+        with self.assertRaisesRegex(ValueError, "仅允许"):
+            adapter.build_runner_command(
+                action="resume",
+                record_id="recAbc123",
+                blueprint_model="gpt-5.5",
+            )
+
     def test_plan_requires_selector(self):
         with self.assertRaisesRegex(ValueError, "必须指定"):
             adapter.build_runner_command(action="plan")

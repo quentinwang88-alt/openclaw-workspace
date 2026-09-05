@@ -378,6 +378,17 @@ class FeishuBitableClient:
 
         return records
 
+    def get_record(self, record_id: str) -> TaskRecord:
+        """Read one known record without scanning the table."""
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.table_id}/records/{record_id}"
+        result = self._request("GET", url, headers=self._headers()).json()
+        if result.get("code") != 0:
+            raise FeishuAPIError(f"读取记录失败: {result.get('msg')}")
+        record = (result.get("data") or {}).get("record") or {}
+        if record.get("record_id") != record_id:
+            raise FeishuAPIError("读取记录身份不一致")
+        return TaskRecord(record_id=record_id, fields=record.get("fields") or {})
+
     def update_record_fields(self, record_id: str, fields: Dict[str, Any]) -> None:
         if not fields:
             return
@@ -459,10 +470,11 @@ class FeishuBitableClient:
         file_name: str,
         content_type: str,
         size: Optional[int] = None,
+        parent_type: str = "bitable_image",
     ) -> Dict[str, Any]:
         payload = {
             "file_name": file_name,
-            "parent_type": "bitable_image",
+            "parent_type": str(parent_type or "bitable_image"),
             "parent_node": self.app_token,
             "size": str(size or len(content)),
         }

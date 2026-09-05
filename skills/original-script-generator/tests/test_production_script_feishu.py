@@ -10,6 +10,8 @@ from core.production_script_feishu import (
     PRODUCT_TYPE_OPTIONS,
     TEST_PHASE_OPTIONS,
     TOP_CATEGORY_OPTIONS,
+    VIDEO_SPEC_OPTIONS,
+    LONGFORM_SCENE_MODE_OPTIONS,
     _records_by_batch_item_id,
     export_ready_batch,
     operation_record_values,
@@ -23,6 +25,9 @@ class ProductionScriptFeishuTest(unittest.TestCase):
         self.assertEqual(("初测", "复测", "终测", "放大观察"), TEST_PHASE_OPTIONS)
         self.assertEqual("待执行", OPERATION_TASK_STATUS_OPTIONS[0])
         self.assertIn("已完成", OPERATION_TASK_STATUS_OPTIONS)
+        self.assertEqual("15秒原创", VIDEO_SPEC_OPTIONS[0])
+        self.assertIn("45秒", VIDEO_SPEC_OPTIONS)
+        self.assertEqual(("自动", "单场景", "双场景"), LONGFORM_SCENE_MODE_OPTIONS)
         self.assertEqual("用户未选择", FIRST_FRAME_STATUS_OPTIONS[0])
         self.assertIn("已就绪", FIRST_FRAME_STATUS_OPTIONS)
         self.assertEqual(
@@ -57,6 +62,27 @@ class ProductionScriptFeishuTest(unittest.TestCase):
     def test_blank_test_phase_defaults_to_initial(self):
         record = TaskRecord(record_id="rec-default", fields={})
         self.assertEqual("INITIAL", operation_record_values(record)["test_phase"])
+
+    def test_video_spec_routes_longform_without_using_legacy_number(self):
+        record = TaskRecord(
+            record_id="rec-longform",
+            fields={
+                "视频规格（需填写）": "35秒",
+                "视频时长": 15,
+                "长视频场景模式（可选）": "双场景",
+            },
+        )
+        task = operation_record_values(record)
+        self.assertEqual("35秒", task["video_spec"])
+        self.assertEqual(35.0, task["duration_seconds"])
+        self.assertEqual("LONGFORM", task["video_format"])
+        self.assertEqual("multi", task["longform_scene_mode"])
+
+    def test_blank_video_spec_keeps_legacy_15_second_task_compatible(self):
+        record = TaskRecord(record_id="rec-short", fields={"视频时长": 15})
+        task = operation_record_values(record)
+        self.assertEqual("15秒原创", task["video_spec"])
+        self.assertEqual("SHORT_15S", task["video_format"])
 
     def test_accessory_alias_normalizes_to_registered_display_name(self):
         record = TaskRecord(

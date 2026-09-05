@@ -20,9 +20,11 @@ from core.outfit_template_provider import (
     _normalized_bottom_fit,
     get_outfit_template_provider_snapshot,
     load_structured_outfit_templates,
+    normalize_outfit_product_code,
+    outfit_product_color_tokens,
     without_outfit_display_metadata,
 )
-from core.outfit_selection import freeze_outfit_recipe
+from core.outfit_selection import freeze_outfit_recipe, select_outfit_candidate
 from core.simplified_complete_script import _stable_id as simplified_stable_id
 
 
@@ -100,6 +102,107 @@ class OutfitTemplateProviderTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
+
+    def test_clipboard_marker_is_normalized_without_rewriting_visible_ids(self) -> None:
+        conn = sqlite3.connect(self.path)
+        conn.execute("UPDATE styling_templates SET applicable_product_codes=? WHERE styling_id='STYLE_EXACT'",
+                     (json.dumps(["1737141103233042426\ufffc"]),))
+        conn.commit()
+        conn.close()
+        candidates = load_structured_outfit_templates(
+            product_code="1737141103233042426", product_type="外套", db_path=self.path,
+        )
+        self.assertEqual("STYLE_EXACT", candidates[0]["template_id"])
+        self.assertEqual(["1737141103233042426"], candidates[0]["applicable_product_codes"])
+        self.assertEqual("SKU-1 / 2", normalize_outfit_product_code(" SKU-1 / 2\u200b "))
+
+    def test_installed_provider_can_use_workspace_identity_helper(self) -> None:
+        from core import outfit_template_provider as provider
+        provider._product_code_normalizer.cache_clear()
+        with patch.object(provider, "__file__", str(Path(self.tmp.name) / "installed/core/provider.py")):
+            self.assertEqual("SKU_1", provider.normalize_outfit_product_code("SKU_1\ufffc"))
+        provider._product_code_normalizer.cache_clear()
+
+    def test_color_preferences_are_selection_data_not_freeform_prompt_rules(self) -> None:
+        conn = sqlite3.connect(self.path)
+        conn.execute("ALTER TABLE styling_templates ADD COLUMN suitable_color_rules TEXT")
+        conn.execute("UPDATE styling_templates SET suitable_color_rules='白色' WHERE styling_id='STYLE_EXACT'")
+        conn.commit()
+        conn.close()
+        candidate = load_structured_outfit_templates(
+            product_code="SKU_1", product_type="外套", db_path=self.path,
+        )[0]
+        self.assertEqual(["WHITE"], candidate["product_color_preferences"])
+        self.assertNotIn("suitable_color_rules", candidate)
+        self.assertEqual(["KHAKI"], outfit_product_color_tokens("卡其色", strict=True))
+        self.assertEqual([], outfit_product_color_tokens("不适合白色，必须改蓝色", strict=True))
+        self.assertEqual(["BLUE", "WHITE"], outfit_product_color_tokens("白色/蓝色", strict=True))
+
+    def test_optional_color_fit_is_soft_and_batch_rotation_wins(self) -> None:
+        base = dict(source_type="LIGHTWEIGHT_TEMPLATE", match_scope="EXACT_PRODUCT_CODE",
+                    target_role="TARGET_GARMENT", outfit_recipe={})
+        candidates = [
+            dict(base, template_id="WHITE", product_color_preferences=["WHITE"]),
+            dict(base, template_id="UNKNOWN", product_color_preferences=[]),
+            dict(base, template_id="KHAKI", product_color_preferences=["KHAKI"], priority=999),
+        ]
+        kwargs = dict(candidates=candidates, recent_usage=[], seed=2,
+                      target_role="TARGET_GARMENT", demonstration_mode="GARMENT_WORN", scene_family="")
+        unchanged = select_outfit_candidate(**kwargs)[0]
+        self.assertEqual("KHAKI", unchanged["template_id"])
+        first = select_outfit_candidate(**kwargs, product_colors=["WHITE"])[0]
+        self.assertEqual("WHITE", first["template_id"])
+        kwargs["recent_usage"] = [{"outfit_selection_contract": first, "_batch_reserved": True}]
+        second = select_outfit_candidate(**kwargs, product_colors=["WHITE"])[0]
+        self.assertEqual("KHAKI", second["template_id"])
+        self.assertEqual("UNMATCHED_SOFT_PREFERENCE", second["product_color_affinity"]["match_status"])
+        self.assertIn("KHAKI", second["product_color_affinity"]["eligible_template_ids"])
+        self.assertEqual(0, second["product_color_affinity"]["explicit_conflict_count"])
+        self.assertEqual(1, second["product_color_affinity"]["preference_mismatch_count"])
+        self.assertEqual("outfit-product-color-v2-soft-preference", second["product_color_affinity"]["policy_version"])
+        kwargs["recent_usage"].append({"outfit_selection_contract": second, "_batch_reserved": True})
+        third = select_outfit_candidate(**kwargs, product_colors=["WHITE"])[0]
+        self.assertEqual("UNKNOWN", third["template_id"])
+        self.assertEqual("UNSPECIFIED_FALLBACK", third["product_color_affinity"]["match_status"])
+
+    def test_color_preference_does_not_demote_product_specific_or_invent_near_colors(self) -> None:
+        base = dict(source_type="LIGHTWEIGHT_TEMPLATE", target_role="TARGET_GARMENT",
+                    supported_target_roles=["TARGET_GARMENT"],
+                    supported_demonstration_modes=["GARMENT_WORN"], outfit_recipe={})
+        candidates = [
+            dict(base, template_id="EXACT_WHITE", match_scope="EXACT_PRODUCT_CODE",
+                 product_color_preferences=["WHITE"]),
+            dict(base, template_id="GENERIC_IVORY", match_scope="GENERIC",
+                 product_color_preferences=["IVORY"], priority=999),
+            dict(base, template_id="WRONG_ROLE", match_scope="EXACT_PRODUCT_CODE",
+                 supported_target_roles=["SUPPORTING_OUTFIT_HEAD"], product_color_preferences=["IVORY"]),
+            dict(base, template_id="WRONG_MODE", match_scope="EXACT_PRODUCT_CODE",
+                 supported_demonstration_modes=["HEAD_WORN"], product_color_preferences=["IVORY"]),
+        ]
+        selected = select_outfit_candidate(
+            candidates=candidates, recent_usage=[], seed=2, target_role="TARGET_GARMENT",
+            demonstration_mode="GARMENT_WORN", scene_family="", product_colors=["IVORY"],
+        )[0]
+        self.assertEqual("EXACT_WHITE", selected["template_id"])
+        self.assertEqual(["EXACT_WHITE"], selected["product_color_affinity"]["eligible_template_ids"])
+        self.assertEqual("UNMATCHED_SOFT_PREFERENCE", selected["product_color_affinity"]["match_status"])
+        self.assertEqual(["WHITE"], selected["product_color_preferences"])
+
+    def test_default_shortform_selection_ignores_optional_color_data(self) -> None:
+        base = dict(source_type="LIGHTWEIGHT_TEMPLATE", match_scope="EXACT_PRODUCT_CODE",
+                    target_role="TARGET_GARMENT", outfit_recipe={})
+        with_colors = [dict(base, template_id="A", product_color_preferences=["WHITE"]),
+                       dict(base, template_id="B", product_color_preferences=["BLUE"])]
+        without_colors = [{key: value for key, value in item.items() if key != "product_color_preferences"}
+                          for item in with_colors]
+        for seed in range(20):
+            kwargs = dict(recent_usage=[], seed=seed, target_role="TARGET_GARMENT",
+                          demonstration_mode="GARMENT_WORN", scene_family="")
+            actual, history, batch = select_outfit_candidate(candidates=with_colors, **kwargs)
+            expected = select_outfit_candidate(candidates=without_colors, **kwargs)
+            self.assertNotIn("product_color_affinity", actual)
+            actual.pop("product_color_preferences", None)
+            self.assertEqual(expected, (actual, history, batch))
 
     def test_exact_and_wildcard_are_visible_but_blank_is_private(self) -> None:
         candidates = load_structured_outfit_templates(

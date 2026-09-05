@@ -20,8 +20,12 @@ from core.production_script_feishu import (  # noqa: E402
     PRODUCT_TYPE_OPTIONS,
     PRODUCTION_SCRIPT_FIELDS,
     FIRST_FRAME_STATUS_OPTIONS,
+    LONGFORM_SCENE_MODE_OPTIONS,
+    LONGFORM_STATUS_OPTIONS,
     TEST_PHASE_OPTIONS,
     TOP_CATEGORY_OPTIONS,
+    VIDEO_FORMAT_OPTIONS,
+    VIDEO_SPEC_OPTIONS,
     ensure_fields,
     ensure_single_select_options,
     rename_known_fields,
@@ -62,6 +66,8 @@ def main() -> int:
             "一级类目（需填写）": TOP_CATEGORY_OPTIONS,
             "产品类型（需填写）": PRODUCT_TYPE_OPTIONS,
             "测试阶段（可选，默认初测）": TEST_PHASE_OPTIONS,
+            "视频规格（需填写）": VIDEO_SPEC_OPTIONS,
+            "长视频场景模式（可选）": LONGFORM_SCENE_MODE_OPTIONS,
             "任务状态（需填写，仅选择待执行）": OPERATION_TASK_STATUS_OPTIONS,
         },
     )
@@ -84,6 +90,8 @@ def main() -> int:
         {
             "首帧准备状态（系统）": FIRST_FRAME_STATUS_OPTIONS,
             "穿搭场景匹配（系统）": OUTFIT_SCENE_MATCH_OPTIONS,
+            "视频形态（系统）": VIDEO_FORMAT_OPTIONS,
+            "长视频执行状态（系统）": LONGFORM_STATUS_OPTIONS,
         },
     )
     if script_enum_updated:

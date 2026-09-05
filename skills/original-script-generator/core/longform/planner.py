@@ -7,6 +7,7 @@ import re
 from typing import Any, Dict, List, Mapping, Tuple
 
 from .contracts import PLAN_SCHEMA_VERSION, stable_id, text, validate_master_contract
+from .visual_guidance import segment_visibility
 
 
 def plan_segment_durations(total_seconds: int) -> List[int]:
@@ -316,10 +317,8 @@ def _compact_world(master: Mapping[str, Any], scene_block: Mapping[str, Any] | N
     persona = dict(world.get("persona_contract") or {})
     persona_projection = dict(persona.get("script_projection") or {})
     outfit_projection = dict(world.get("outfit_prompt_projection") or {})
-    scene = dict(world.get("scene_contract") or {})
-    if scene_block:
-        scene.update({key: value for key, value in dict(scene_block).items() if value})
-    saliency = dict(world.get("visual_saliency") or {})
+    scene = dict(scene_block) if scene_block else dict(world.get("scene_contract") or {})
+    saliency = segment_visibility(master, scene)
     exposure = dict(saliency.get("exposure") or {})
     separation = dict(saliency.get("separation") or {})
     return {
@@ -331,6 +330,8 @@ def _compact_world(master: Mapping[str, Any], scene_block: Mapping[str, Any] | N
             persona_projection.get("hair_makeup") or character.get("hair_makeup")
         ),
         "frozen_outfit": text(outfit_projection.get("frozen_outfit") or world.get("outfit")),
+        "outfit_detail": text(outfit_projection.get("hair_neckline_outer")),
+        "outfit_finish": text(outfit_projection.get("palette_visibility_finish")),
         "same_scene": text(scene.get("location") or scene.get("description") or world.get("scene")),
         "scene_moment": text(scene.get("moment")),
         "lighting": text(scene.get("lighting") or world.get("lighting")),

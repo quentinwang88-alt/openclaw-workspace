@@ -62,6 +62,7 @@ def build_operation_product_context(
     output_dir: Path,
     voiceover_root: str,
     llm_client: Optional[OriginalScriptLLMClient] = None,
+    require_current_references: bool = False,
 ) -> Dict[str, Any]:
     """Create the minimum P1 context needed by PLAN_ONLY for a new SKU.
 
@@ -110,7 +111,19 @@ def build_operation_product_context(
             if isinstance(item, Mapping)
             and Path(_text(item.get("local_path"))).expanduser().is_file()
         ]
-    else:
+        if require_current_references:
+            expected_tokens = [_text(item.get("file_token")) for item in attachments[:4]]
+            valid_assets = (
+                [_text(item.get("file_token")) for item in product_reference_assets] == expected_tokens
+                and all(item.get("sha256") == hashlib.sha256(
+                    Path(item["local_path"]).read_bytes()
+                ).hexdigest() for item in product_reference_assets)
+            )
+            if not valid_assets:
+                # A missing/mutated image must not silently turn a current
+                # task into historical-composite fallback.
+                anchor_card = {}
+    if not anchor_card:
         image_root = (
             _reference_cache_root() / _text(task.get("product_code")) / anchor_cache_key
         )

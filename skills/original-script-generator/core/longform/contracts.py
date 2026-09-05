@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterable, List, Mapping
 
 
 LONGFORM_SCHEMA_VERSION = "longform-original-master-v4-visual-progression"
-PLAN_SCHEMA_VERSION = "longform-original-plan-v6-visual-progression"
+PLAN_SCHEMA_VERSION = "longform-original-plan-v7-shared-visibility"
 VOICEOVER_SCHEMA_VERSION = "creative-longform-segmented-v2"
 MIN_DURATION_SECONDS = 20
 MAX_DURATION_SECONDS = 45

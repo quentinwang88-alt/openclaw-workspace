@@ -713,6 +713,20 @@ def run_plan_only(
         allow_structure_only=request.script_mode == "simplified_v1",
     )
     directions = packages.get("directions", [])
+    if ctx.get("longform_outfit_color_matching"):
+        from core.outfit_template_provider import outfit_product_color_tokens
+
+        # Only current task's observed anchors supply the product variant;
+        # titles, historical outfits and selling-copy colours have no authority.
+        card = ctx["anchor_card"]
+        colors = outfit_product_color_tokens({
+            key: card.get(key)
+            for key in ("identity_anchors", "hard_anchors", "color_anchors")
+        })
+        for direction in directions:
+            direction["outfit_variant_context"] = {
+                "enabled": True, "product_colors": colors,
+            }
 
     active_hooks = _load_active_hook_ids(
         voiceover_root=voiceover_root,

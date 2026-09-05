@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -12,6 +13,8 @@ from typing import Any, Dict, Iterable, Mapping
 
 
 DEFAULT_VOICEOVER_ROOT = Path.home() / "voiceover_copy_engine"
+EDGE_TRIM_VERSION = "edge-boundary-silence-v1"
+LAYOUT_VERSION = "bounded-semantic-continuation-v1"
 def _binary(name: str) -> str:
     value = shutil.which(name)
     if not value:
@@ -61,6 +64,70 @@ def voiceover_text_hash(value: str) -> str:
     return hashlib.sha256(str(value or "").strip().encode("utf-8")).hexdigest()
 
 
+def audio_asset_hash(path: str | Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def measure_speech_window(path: str | Path, duration: float | None = None) -> Dict[str, Any]:
+    """Trim only confidently quiet file edges, retaining 60ms of safety.
+
+    Interior pauses remain untouched. Detection failure is observable but
+    falls back to the complete asset, including old cached assets.
+    """
+    duration = audio_duration_seconds(path) if duration is None else duration
+    report = {"trim_version": EDGE_TRIM_VERSION, "raw_tts_seconds": duration,
+              "trim_start_seconds": 0.0, "trim_end_seconds": duration,
+              "effective_tts_seconds": duration, "trim_status": "UNAVAILABLE"}
+    try:
+        result = subprocess.run([
+            _binary("ffmpeg"), "-hide_banner", "-i", str(path), "-af",
+            "silencedetect=noise=-50dB:d=0.12", "-f", "null", "-",
+        ], capture_output=True, text=True, check=False)
+        if result.returncode:
+            return report
+        events = re.findall(r"silence_(start|end):\s*([0-9.]+)", result.stderr or "")
+        start, end = 0.0, duration
+        if events and events[0][0] == "start" and float(events[0][1]) <= 0.03:
+            if len(events) > 1 and events[1][0] == "end":
+                start = max(0.0, float(events[1][1]) - 0.06)
+        if len(events) >= 2 and events[-1][0] == "end" and float(events[-1][1]) >= duration - 0.10:
+            if events[-2][0] == "start":
+                end = min(duration, float(events[-2][1]) + 0.06)
+        if end - start < 0.15:  # never turn a quiet/ambiguous file into nothing
+            return {**report, "trim_status": "AMBIGUOUS_KEEP_FULL"}
+        return {**report, "trim_start_seconds": round(start, 4),
+                "trim_end_seconds": round(end, 4),
+                "effective_tts_seconds": round(end - start, 4), "trim_status": "MEASURED"}
+    except (OSError, RuntimeError, ValueError):
+        return report
+
+
+def plan_semantic_audio_starts(durations: list[float], spoken: list[float],
+                               opening_delay: float = 0.35) -> list[float]:
+    """Bounded placement, not global gap packing or sentence-to-shot locking."""
+    total = sum(durations)
+    starts, cursor = [], 0.0
+    for index, (duration, length) in enumerate(zip(durations, spoken)):
+        nominal = cursor + min(opening_delay, max(0.0, duration - length - 0.08))
+        lower = max(0.0, cursor - 0.75)
+        upper = min(cursor + 0.75, total - length - 0.075)
+        if index:
+            previous_end = starts[-1] + spoken[index - 1]
+            lower = max(lower, previous_end + 0.12)
+            candidate = min(nominal, max(lower, previous_end + 0.22))
+            # Do not improve an internal gap by creating a worse terminal gap.
+            if index == len(spoken) - 1:
+                old_gap = max(nominal - previous_end, total - nominal - length)
+                candidate = max(candidate, total - length - old_gap)
+        else:
+            candidate = nominal
+        if lower > upper + 0.001:
+            raise RuntimeError("口播在有限跨段范围内无法完整容纳；不截断语句")
+        starts.append(round(max(lower, min(upper, candidate)), 4))
+        cursor += duration
+    return starts
+
+
 def synthesize_segment_preflight(
     sections: Iterable[Mapping[str, Any]],
     segment_plan: Iterable[Mapping[str, Any]],
@@ -89,13 +156,16 @@ def synthesize_segment_preflight(
         if not section_text:
             raise ValueError(f"片段{segment_id}缺少口播文本")
         text_hash = voiceover_text_hash(section_text)
-        target = root / f"voiceover_{segment_id}_{text_hash[:12]}_rate_0.mp3"
+        voice_key = hashlib.sha256(voice_id.encode()).hexdigest()[:8]
+        target = root / f"voiceover_{segment_id}_{text_hash[:12]}_{voice_key}_rate_0.mp3"
         if not target.is_file():
             _synthesize_edge(
                 section_text, target, voice_id=voice_id, rate_percent=0,
                 voiceover_root=Path(voiceover_root).expanduser().resolve(),
             )
         measured = audio_duration_seconds(target)
+        window = measure_speech_window(target, measured)
+        measured = float(window["effective_tts_seconds"])
         duration = float(segment.get("duration_seconds") or 0)
         ratio = measured / duration if duration else 0.0
         if 0.90 <= ratio <= 0.96:
@@ -107,6 +177,8 @@ def synthesize_segment_preflight(
         else:
             status = "TOO_LONG"
         reports.append({
+            **window,
+            "audio_sha256": audio_asset_hash(target),
             "segment_id": segment_id,
             "text_sha256": text_hash,
             "target_text": section_text,
@@ -120,7 +192,7 @@ def synthesize_segment_preflight(
             "audio_path": str(target),
         })
     return {
-        "schema_version": "longform-edge-tts-preflight-v1",
+        "schema_version": "longform-edge-tts-preflight-v2-effective-speech",
         "provider": "edge",
         "voice_id": voice_id,
         "sections": reports,
@@ -152,7 +224,8 @@ def _preflight_audio_for_section(
         if str(item.get("segment_id") or "").upper() != segment_id.upper():
             continue
         path = Path(str(item.get("audio_path") or ""))
-        if str(item.get("text_sha256") or "") == expected_hash and path.is_file():
+        if (str(item.get("text_sha256") or "") == expected_hash and path.is_file()
+                and (not item.get("audio_sha256") or item["audio_sha256"] == audio_asset_hash(path))):
             return {**dict(item), "audio_path": str(path)}
     return None
 
@@ -189,6 +262,10 @@ def finalize_with_voiceover(
     )
     resolved_bgm = _resolve_bgm_path(bgm_path)
     hash_material = {
+        "layout_version": LAYOUT_VERSION,
+        "voice_id": voice_id,
+        "opening_delay_ms": opening_delay_ms,
+        "preflight_audio": voiceover.get("tts_preflight") or {},
         "text": text,
         "layout": "SEGMENTED" if segmented else "LEGACY_SINGLE",
         "sections": [item.get("target_text") for item in sections] if segmented else [],
@@ -250,7 +327,7 @@ def finalize_with_voiceover(
     command.extend([
         "-filter_complex", ";".join(filters),
         "-map", "0:v:0", "-map", "[a]", "-c:v", "copy", "-c:a", "aac",
-        "-b:a", "192k", "-ar", "44100", "-movflags", "+faststart", "-shortest", str(temp),
+        "-b:a", "192k", "-ar", "44100", "-movflags", "+faststart", "-t", f"{video_seconds:.3f}", "-shortest", str(temp),
     ])
     completed = subprocess.run(command, capture_output=True, text=True, check=False)
     if completed.returncode != 0:
@@ -330,16 +407,28 @@ def _finalize_segmented_voiceover(
                 voiceover_root=voiceover_root,
             )
         selected_seconds = audio_duration_seconds(selected)
+        window = (
+            {key: preflight_report[key] for key in (
+                "trim_version", "raw_tts_seconds", "trim_start_seconds", "trim_end_seconds",
+                "effective_tts_seconds", "trim_status",
+            )}
+            if preflight_report and preflight_report.get("trim_version") == EDGE_TRIM_VERSION
+            and all(key in preflight_report for key in (
+                "raw_tts_seconds", "trim_start_seconds", "trim_end_seconds", "effective_tts_seconds", "trim_status",
+            )) else measure_speech_window(selected, selected_seconds)
+        )
+        selected_seconds = float(window["effective_tts_seconds"])
         effective_delay_ms = min(
             opening_delay_ms,
             max(0, int((duration - 0.08 - selected_seconds) * 1000)),
         )
-        if selected_seconds + effective_delay_ms / 1000.0 > duration - 0.075:
+        if selected_seconds > duration + 0.65:
             raise RuntimeError(
                 f"片段{segment_id}口播仍超时: {selected_seconds:.2f}s > {duration:.2f}s"
             )
         audio_paths.append(selected)
         section_reports.append({
+            **window,
             "segment_id": segment_id,
             "planned_segment_seconds": duration,
             "initial_tts_seconds": round(initial_seconds, 3),
@@ -353,6 +442,15 @@ def _finalize_segmented_voiceover(
             ),
         })
 
+    starts = plan_semantic_audio_starts(
+        [float(row.get("duration_seconds") or 0) for row in segments],
+        [row["selected_tts_seconds"] for row in section_reports], opening_delay_ms / 1000.0,
+    )
+    cursor = 0.0
+    for report, start in zip(section_reports, starts):
+        report["timeline_start_seconds"] = start
+        report["segment_boundary_offset_seconds"] = round(start - cursor, 4)
+        cursor += report["planned_segment_seconds"]
     command = [_binary("ffmpeg"), "-y", "-i", str(video)]
     for path in audio_paths:
         command.extend(["-i", str(path)])
@@ -363,17 +461,19 @@ def _finalize_segmented_voiceover(
     filters = []
     labels = []
     for index, segment in enumerate(segments):
-        duration = float(segment.get("duration_seconds") or 0)
-        section_delay_ms = int(section_reports[index].get("opening_delay_ms") or 0)
+        report = section_reports[index]
+        section_delay_ms = round(starts[index] * 1000)
         label = f"section_{index}"
         filters.append(
-            f"[{index + 1}:a]loudnorm=I=-16:TP=-1.5:LRA=11,"
-            f"adelay={section_delay_ms}:all=1,apad,atrim=duration={duration:.3f}[{label}]"
+            f"[{index + 1}:a]atrim=start={report['trim_start_seconds']}:end={report['trim_end_seconds']},"
+            f"asetpts=PTS-STARTPTS,loudnorm=I=-16:TP=-1.5:LRA=11,"
+            f"adelay={section_delay_ms}:all=1[{label}]"
         )
         labels.append(f"[{label}]")
     filters.append(
         "".join(labels)
-        + f"concat=n={len(labels)}:v=0:a=1,apad,atrim=duration={video_seconds:.3f}[voice]"
+        + f"amix=inputs={len(labels)}:duration=longest:normalize=0:dropout_transition=0,"
+        f"apad,atrim=duration={video_seconds:.3f}[voice]"
     )
     if bgm_input_index is not None:
         filters.extend([
@@ -389,19 +489,19 @@ def _finalize_segmented_voiceover(
     command.extend([
         "-filter_complex", ";".join(filters),
         "-map", "0:v:0", "-map", "[a]", "-c:v", "copy", "-c:a", "aac",
-        "-b:a", "192k", "-ar", "44100", "-movflags", "+faststart", "-shortest", str(temp),
+        "-b:a", "192k", "-ar", "44100", "-movflags", "+faststart", "-t", f"{video_seconds:.3f}", "-shortest", str(temp),
     ])
     completed = subprocess.run(command, capture_output=True, text=True, check=False)
     if completed.returncode != 0:
         raise RuntimeError("长视频分段口播混音失败: " + completed.stderr[-1200:])
     temp.replace(output)
     result = {
-        "schema_version": "longform-finalization-v2-segmented-voiceover",
+        "schema_version": "longform-finalization-v3-bounded-continuation",
         "action": "FINALIZED",
         "text_sha256": text_hash,
         "provider": "edge",
         "voice_id": voice_id,
-        "tts_layout": "SEMANTIC_SECTION_AT_SEGMENT_START",
+        "tts_layout": LAYOUT_VERSION,
         "video_seconds": round(video_seconds, 3),
         "sections": section_reports,
         "selected_tts_seconds_total": round(
