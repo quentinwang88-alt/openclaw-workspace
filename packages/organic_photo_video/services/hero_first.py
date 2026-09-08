@@ -128,7 +128,10 @@ class HeroFirstProducer:
                     task_id=task_id,
                     slot_index=int(plan_shot["slot_index"]),
                     slot_role=plan_shot["slot_role"],
-                    duration_ms=int(plan_shot["duration_ms"]),
+                    duration_ms=(
+                        int(plan_shot["duration_ms"])
+                        if plan_shot.get("duration_ms") is not None else None
+                    ),
                     shot_status=SHOT_PLANNED,
                     narrative_purpose=plan_shot.get("purpose"),
                     motion_preset=plan_shot.get("motion_preset", "slow_push"),
@@ -176,7 +179,9 @@ class HeroFirstProducer:
             row = ContentShot(
                 shot_id=generate_prefixed_id("opv_shot"), task_id=task.task_id,
                 slot_index=slot, slot_role=spec["slot_role"],
-                duration_ms=int(spec["duration_ms"]), shot_version=version,
+                duration_ms=(int(spec["duration_ms"])
+                             if spec.get("duration_ms") is not None else None),
+                shot_version=version,
                 origin_revision_id=task.active_revision_id,
                 narrative_purpose=spec.get("purpose"),
                 motion_preset=spec.get("motion_preset", "slow_push"),
@@ -259,6 +264,8 @@ class HeroFirstProducer:
         if any(s.shot_status == SHOT_GENERATING and (not v2 or s.origin_revision_id == task.active_revision_id)
                for s in self._repository.list_shots(task_id)):
             raise HeroFirstError("generation outcome unknown; refusing duplicate submission")
+        if v2 and self._reuse_only_photo(task):
+            return self._produce_reused_photo(task)
         if v2 and status == TASK_ANCHOR_REVIEW:
             hero = next(
                 (shot for shot in self._latest_per_slot(self._repository.list_shots(task_id))
@@ -642,6 +649,73 @@ class HeroFirstProducer:
             )
         service.select(revision, selection_key=f"shot:{shot.slot_index}", asset_id=shot.shot_id)
         self._select_version(shot)
+
+    @staticmethod
+    def _reuse_only_photo(task: ContentTask) -> bool:
+        shots = list((task.plan_json or {}).get("shots") or [])
+        return (
+            str(getattr(task, "media_kind", "video") or "video") == "native_photo"
+            and bool(shots)
+            and all(item.get("shot_kind") == "reused_asset" for item in shots)
+        )
+
+    def _produce_reused_photo(self, task: ContentTask) -> ProduceReport:
+        """Copy and freeze reusable sources without an artificial anchor gate."""
+        task_id = task.task_id
+        if task.task_status == TASK_PLANNED:
+            self._repository.transition_task(task_id, TASK_PLANNED, TASK_IMAGE_GENERATING)
+        elif task.task_status == TASK_IMAGE_REVIEW:
+            shots = self.ensure_shots(task_id)
+            return ProduceReport(
+                task_id=task_id, task_status=TASK_IMAGE_REVIEW, hero_ok=True,
+                slots=[SlotReport(
+                    slot_index=item.slot_index, shot_version=item.shot_version,
+                    status=item.shot_status, image_path=item.image_url,
+                ) for item in shots],
+            )
+        elif task.task_status != TASK_IMAGE_GENERATING:
+            raise HeroFirstError(
+                f"reused photo task {task_id} status {task.task_status!r} is not producible"
+            )
+        from services.content_package import advance_package_for_task
+        advance_package_for_task(
+            self._repository, task_id, _statuses_module.PACKAGE_GENERATING
+        )
+        task = self._ensure_v2_revision(self._require_task(task_id))
+        rows = self.ensure_shots(task_id)
+        reports = []
+        for shot in sorted(rows, key=lambda item: item.slot_index):
+            if shot.shot_status in {SHOT_GENERATED, "approved"} and shot.image_url:
+                self._register_slot_selection(task, shot, shot.image_url)
+                reports.append(SlotReport(
+                    slot_index=shot.slot_index, shot_version=shot.shot_version,
+                    status=shot.shot_status, image_path=shot.image_url,
+                ))
+                continue
+            report = self._generate_slot(task, shot)
+            reports.append(report)
+            if report.status != SHOT_GENERATED or not report.image_path:
+                self._repository.transition_task(
+                    task_id, TASK_IMAGE_GENERATING, TASK_FAILED,
+                    failure_code="asset_reuse_failed", failure_detail=report.error,
+                    increment_retry=True,
+                )
+                return ProduceReport(
+                    task_id=task_id, task_status=TASK_FAILED,
+                    hero_ok=False, slots=reports,
+                )
+            self._register_slot_selection(task, shot, report.image_path)
+        self._repository.transition_task(
+            task_id, TASK_IMAGE_GENERATING, TASK_IMAGE_REVIEW
+        )
+        advance_package_for_task(
+            self._repository, task_id, _statuses_module.PACKAGE_QA_REVIEW,
+            selected_image_ids_json=[item.shot_id for item in rows],
+        )
+        return ProduceReport(
+            task_id=task_id, task_status=TASK_IMAGE_REVIEW,
+            hero_ok=True, slots=reports,
+        )
 
     def _select_version(self, shot: ContentShot) -> None:
         selector = getattr(self._repository, "select_shot_version", None)

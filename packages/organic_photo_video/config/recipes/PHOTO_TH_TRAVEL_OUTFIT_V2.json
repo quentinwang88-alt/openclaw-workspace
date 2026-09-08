@@ -1,0 +1,419 @@
+{
+  "schema_version": "opv-content-recipe-v1",
+  "recipe_id": "PHOTO_TH_TRAVEL_OUTFIT_V2",
+  "recipe_key": "TH_TRAVEL_OUTFIT",
+  "recipe_version": 5,
+  "content_goal": "travel_look_choice",
+  "anchor_slot": 2,
+  "shot_count": 5,
+  "hook_types": [
+    "destination_temperature",
+    "pick_one_of_four"
+  ],
+  "story_structure": [
+    {
+      "slot_index": 1,
+      "role": "choice_grid",
+      "source_slots": [],
+      "layout_variant": "GRID_FOUR",
+      "purpose": "四宫格展示四套旅行造型并提出选择问题",
+      "source_roles": [
+        "look_a",
+        "look_b",
+        "look_c",
+        "look_d"
+      ]
+    },
+    {
+      "slot_index": 2,
+      "role": "look_a",
+      "source_slots": [],
+      "layout_variant": "CHOICE_DETAIL",
+      "purpose": "展示第一套旅行完整造型（该 Look 的 travel_moment 场景）",
+      "source_roles": [
+        "look_a"
+      ]
+    },
+    {
+      "slot_index": 3,
+      "role": "look_b",
+      "source_slots": [],
+      "layout_variant": "CHOICE_DETAIL",
+      "purpose": "展示第二套旅行完整造型（该 Look 的 travel_moment 场景），为下一页保留比较参照",
+      "source_roles": [
+        "look_b"
+      ]
+    },
+    {
+      "slot_index": 4,
+      "role": "look_c",
+      "source_slots": [],
+      "layout_variant": "CHOICE_DETAIL",
+      "purpose": "展示第三套旅行完整造型（该 Look 的 travel_moment 场景）",
+      "source_roles": [
+        "look_c"
+      ]
+    },
+    {
+      "slot_index": 5,
+      "role": "look_d_with_cta",
+      "source_slots": [],
+      "layout_variant": "CHOICE_DETAIL",
+      "purpose": "展示第四套旅行完整造型（该 Look 的 travel_moment 场景）并请读者选择",
+      "source_roles": [
+        "look_d"
+      ]
+    }
+  ],
+  "copy_style": {
+    "locale": "th-TH",
+    "tone": "short_interactive",
+    "max_lines_per_block": 2,
+    "example": "ทริปนี้คุณเลือกลุคไหน?",
+    "language_review_status": "pending_native_review"
+  },
+  "suitable_topics": [
+    "travel_outfit_choice"
+  ],
+  "quality_profile_id": "QUALITY_STANDARD_V1",
+  "recipe_spec": {
+    "schema_version": "opv-photo-recipe-v1",
+    "media_kind": "native_photo",
+    "category_key": "womenswear",
+    "markets": [
+      "TH"
+    ],
+    "theme_types": [
+      "CHOICE"
+    ],
+    "product_modes": [
+      "NO_PRODUCT"
+    ],
+    "variables_schema": {
+      "choice_axis": {
+        "type": "enum",
+        "values": [
+          "pants_or_skirt"
+        ],
+        "required": true
+      },
+      "destination": {
+        "type": "enum",
+        "values": [
+          "generic_cool_city",
+          "seoul",
+          "tokyo",
+          "osaka",
+          "shanghai",
+          "beijing"
+        ],
+        "required": true
+      },
+      "temperature_band": {
+        "type": "enum",
+        "values": [
+          "15_22c",
+          "10_15c",
+          "5_10c",
+          "0_5c"
+        ],
+        "required": true
+      },
+      "season": {
+        "type": "enum",
+        "values": [
+          "autumn",
+          "spring",
+          "winter"
+        ],
+        "required": true
+      },
+      "style": {
+        "type": "enum",
+        "values": [
+          "french_vintage",
+          "korean_clean",
+          "japanese_casual",
+          "minimal_commuter"
+        ],
+        "required": true
+      },
+      "body_profile": {
+        "type": "enum",
+        "values": [
+          "regular",
+          "petite_150",
+          "petite_155",
+          "petite_160"
+        ],
+        "required": true
+      },
+      "travel_goal": {
+        "type": "enum",
+        "values": [
+          "light_layering_city_trip"
+        ],
+        "required": true
+      }
+    },
+    "template_id": "PHOTO_CHOICE_CARD_V2",
+    "template_version": 2,
+    "supported_presentations": [
+      "FLAT_LAY",
+      "MODEL_FULL_BODY",
+      "SCENE_MODEL"
+    ],
+    "visual_rules": {
+      "distinct_looks": 4
+    },
+    "asset_policy": {
+      "default": "ASSET_REUSE",
+      "on_missing": "NEEDS_ASSET"
+    },
+    "asset_match_keys": [
+      "choice_axis"
+    ],
+    "asset_requirements": {
+      "required_roles": [
+        "look_a",
+        "look_b",
+        "look_c",
+        "look_d"
+      ],
+      "required_tags": {
+        "use_cases": "travel_outfit_choice"
+      },
+      "required_pairs": []
+    },
+    "execution_profiles": [
+      {
+        "profile_id": "travel_scene_four_looks",
+        "label": "旅行场景：四套完整 Look 选一",
+        "variables": {
+          "choice_axis": "pants_or_skirt",
+          "destination": "generic_cool_city",
+          "temperature_band": "15_22c",
+          "season": "autumn",
+          "style": "french_vintage",
+          "body_profile": "regular",
+          "travel_goal": "light_layering_city_trip"
+        },
+        "asset_set_keys": [
+          "TH_WOMENSWEAR_CHOICE"
+        ],
+        "copy_pack_id": "TH_TRAVEL_OUTFIT_V2"
+      }
+    ],
+    "travel_contract": {
+      "schema_version": "opv-photo-travel-contract-v1",
+      "moments_per_post": 4,
+      "moments": [
+        {
+          "key": "airport_departure",
+          "label_zh": "机场出发",
+          "label_th": "ลุคไปสนามบิน",
+          "evidence_zh": "航站楼、行李箱、登机区域等机场线索",
+          "mobility_level": "HIGH",
+          "allowed_footwear_types": [
+            "SNEAKER",
+            "LOAFER",
+            "FLAT",
+            "MARY_JANE",
+            "LOW_BOOT"
+          ],
+          "forbidden_footwear_types": [
+            "HIGH_HEEL",
+            "STILETTO"
+          ]
+        },
+        {
+          "key": "old_town_walk",
+          "label_zh": "老城街拍",
+          "label_th": "ลุคเดินเล่นในเมืองเก่า",
+          "evidence_zh": "老城街道、建筑立面、步行场景",
+          "mobility_level": "HIGH",
+          "allowed_footwear_types": [
+            "SNEAKER",
+            "LOAFER",
+            "FLAT",
+            "MARY_JANE",
+            "LOW_BOOT"
+          ],
+          "forbidden_footwear_types": [
+            "HIGH_HEEL",
+            "STILETTO"
+          ]
+        },
+        {
+          "key": "cafe_visit",
+          "label_zh": "咖啡店",
+          "label_th": "ลุคไปคาเฟ่",
+          "evidence_zh": "咖啡店座位、杯子、店铺环境",
+          "mobility_level": "LOW",
+          "allowed_footwear_types": [],
+          "forbidden_footwear_types": [
+            "STILETTO"
+          ]
+        },
+        {
+          "key": "evening_stroll",
+          "label_zh": "傍晚散步",
+          "label_th": "ลุคเดินเล่นช่วงเย็น",
+          "evidence_zh": "傍晚光线、街灯或落日氛围",
+          "mobility_level": "HIGH",
+          "allowed_footwear_types": [
+            "SNEAKER",
+            "LOAFER",
+            "FLAT",
+            "MARY_JANE",
+            "LOW_BOOT"
+          ],
+          "forbidden_footwear_types": [
+            "HIGH_HEEL",
+            "STILETTO"
+          ]
+        },
+        {
+          "key": "shopping_day",
+          "label_zh": "购物日",
+          "label_th": "ลุควันช้อปปิ้ง",
+          "evidence_zh": "商场橱窗、免税店、购物袋",
+          "mobility_level": "HIGH",
+          "allowed_footwear_types": [
+            "SNEAKER",
+            "LOAFER",
+            "FLAT",
+            "MARY_JANE",
+            "LOW_BOOT"
+          ],
+          "forbidden_footwear_types": [
+            "HIGH_HEEL",
+            "STILETTO"
+          ]
+        },
+        {
+          "key": "photo_spot",
+          "label_zh": "拍照打卡",
+          "label_th": "ลุคถ่ายรูปสถานที่สวย",
+          "evidence_zh": "标志性建筑、城墙、取景拍照姿态",
+          "mobility_level": "MEDIUM",
+          "allowed_footwear_types": [
+            "SNEAKER",
+            "LOAFER",
+            "FLAT",
+            "MARY_JANE",
+            "LOW_BOOT",
+            "LOW_HEEL"
+          ],
+          "forbidden_footwear_types": [
+            "STILETTO"
+          ]
+        },
+        {
+          "key": "night_walk",
+          "label_zh": "夜间散步",
+          "label_th": "ลุคเดินเล่นกลางคืน",
+          "evidence_zh": "夜晚灯串、夜市灯光、暖色路灯",
+          "mobility_level": "HIGH",
+          "allowed_footwear_types": [
+            "SNEAKER",
+            "LOAFER",
+            "FLAT",
+            "MARY_JANE",
+            "LOW_BOOT"
+          ],
+          "forbidden_footwear_types": [
+            "HIGH_HEEL",
+            "STILETTO"
+          ]
+        }
+      ],
+      "look_required_fields": [
+        "travel_moment",
+        "scene_prompt",
+        "weather_logic",
+        "footwear_type"
+      ],
+      "destination_labels_th": {
+        "generic_cool_city": "เมืองอากาศเย็น",
+        "seoul": "โซล",
+        "tokyo": "โตเกียว",
+        "osaka": "โอซาก้า",
+        "shanghai": "เซี่ยงไฮ้",
+        "beijing": "ปักกิ่ง"
+      },
+      "temperature_labels_th": {
+        "15_22c": "15-22°C",
+        "10_15c": "10-15°C",
+        "5_10c": "5-10°C",
+        "0_5c": "0-5°C"
+      },
+      "footwear_types": [
+        "SNEAKER",
+        "LOAFER",
+        "FLAT",
+        "MARY_JANE",
+        "LOW_BOOT",
+        "LOW_HEEL",
+        "HIGH_HEEL",
+        "STILETTO",
+        "SANDAL"
+      ]
+    },
+    "content_card": {
+      "schema_version": "opv-photo-content-card-v1",
+      "summary_zh": "四套旅行场景完整 Look 选一",
+      "audience_zh": "计划去凉爽城市旅行、需要轻层搭灵感的泰国女装用户",
+      "question_zh": "这趟旅行 A/B/C/D 四套完整造型里最喜欢哪一套？",
+      "comparison_basis_zh": "只比较画面中可见的完整造型、场景适配度与整体风格；允许把执行预设的温度区间（如 15–22°C）作为整篇穿搭条件展示，不生成具体地点、室内、机舱或某个时段的精确温度，不宣称保暖效果或保证穿着体验。",
+      "logic_key": "travel_scene_outfit_choice",
+      "asset_gaps": [],
+      "pages": [
+        {
+          "index": 1,
+          "purpose_zh": "四宫格展示 A/B/C/D，提出旅行四套完整 Look 选择问题",
+          "layout": "grid_2x2",
+          "source_roles": [
+            "look_a",
+            "look_b",
+            "look_c",
+            "look_d"
+          ]
+        },
+        {
+          "index": 2,
+          "purpose_zh": "A：{{label_a}}（本 Look 独立旅行场景）",
+          "layout": "single",
+          "source_roles": [
+            "look_a"
+          ]
+        },
+        {
+          "index": 3,
+          "purpose_zh": "B：{{label_b}}（本 Look 独立旅行场景）",
+          "layout": "single",
+          "source_roles": [
+            "look_b"
+          ]
+        },
+        {
+          "index": 4,
+          "purpose_zh": "C：{{label_c}}（本 Look 独立旅行场景）",
+          "layout": "single",
+          "source_roles": [
+            "look_c"
+          ]
+        },
+        {
+          "index": 5,
+          "purpose_zh": "D：{{label_d}}（本 Look 独立旅行场景），收束并请读者选择 A/B/C/D",
+          "layout": "single",
+          "source_roles": [
+            "look_d"
+          ]
+        }
+      ]
+    }
+  },
+  "status": "active"
+}

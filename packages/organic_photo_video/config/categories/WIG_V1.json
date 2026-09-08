@@ -1,0 +1,33 @@
+{
+  "schema_version": "opv-category-profile-v1",
+  "category_key": "wig",
+  "category_name": "假发",
+  "status": "active",
+  "interest_drivers": [
+    "快速换造型",
+    "改变气质",
+    "修饰脸型",
+    "长度与卷度选择",
+    "发色选择",
+    "场景适配",
+    "改造前后反差"
+  ],
+  "visual_dimensions": [
+    "发际线自然度",
+    "头顶和分缝",
+    "长度卷度与发色",
+    "脸型匹配",
+    "同人前后配对"
+  ],
+  "asset_requirements": [
+    "头发边缘和发际线清晰",
+    "Before与After必须可验证为同一人物",
+    "发型选择素材需明确区分长度卷度或颜色",
+    "素材具备竖版裁切空间"
+  ],
+  "content_rules": {
+    "allowed_product_modes": ["NO_PRODUCT", "SOFT_PRODUCT"],
+    "default_asset_mode": "ASSET_REUSE",
+    "avoid": ["虚假真人头发声明", "医疗或生发承诺", "价格和促销信息", "过度磨皮导致发际线失真"]
+  }
+}

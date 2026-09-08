@@ -22,7 +22,7 @@ from repositories.rds_repository import RdsRepository  # noqa: E402
 from services.asset_resolver import LightTryonAssetReader  # noqa: E402
 from services.content_planner import ContentPlannerService  # noqa: E402
 from services.hero_first import HeroFirstProducer  # noqa: E402
-from services.image_generator import OpenAIImageGenerator  # noqa: E402
+from services.image_generator import build_default_photo_generator  # noqa: E402
 from services.task_intake import TaskIntakeService, TaskRequest  # noqa: E402
 from services.workflow_v2 import ScopedReviewService, workflow_v2_enabled  # noqa: E402
 
@@ -98,11 +98,11 @@ def main() -> int:
         from services.video_render_flow import VideoRenderFlow
         from services.video_renderer import FFmpegStillRenderer
         TechnicalProductionFlow(repository,
-            HeroFirstProducer(repository, OpenAIImageGenerator(), technical_only=True),
+            HeroFirstProducer(repository, build_default_photo_generator(), technical_only=True),
             VideoRenderFlow(repository, FFmpegStillRenderer())).run(task_id)
     elif task and task.task_status in {"planned", "hero_generating", "image_generating", "failed"}:
         report = HeroFirstProducer(
-            repository, OpenAIImageGenerator()
+            repository, build_default_photo_generator()
         ).produce(task_id)
     else:
         report = None

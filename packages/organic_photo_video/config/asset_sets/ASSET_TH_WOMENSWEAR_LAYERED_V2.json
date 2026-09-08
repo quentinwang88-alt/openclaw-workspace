@@ -1,0 +1,58 @@
+{
+  "schema_version": "opv-asset-set-v1",
+  "asset_set_id": "ASSET_TH_WOMENSWEAR_LAYERED_V2",
+  "asset_set_key": "TH_WOMENSWEAR_LAYERED",
+  "asset_set_version": 2,
+  "category_key": "womenswear",
+  "market": "TH",
+  "status": "disabled",
+  "tags": {
+    "use_cases": [
+      "unqualified_visual_reference"
+    ],
+    "source": "content_rejected_for_temperature_and_travel"
+  },
+  "assets": [
+    {
+      "asset_id": "th_layered_a",
+      "path": "../../../../shared/data/organic_photo_video/asset_sets/th_layered/look_a.png",
+      "role": "look_a",
+      "tags": {
+        "bottom": "beige_wide_leg"
+      }
+    },
+    {
+      "asset_id": "th_layered_b",
+      "path": "../../../../shared/data/organic_photo_video/asset_sets/th_layered/look_b.png",
+      "role": "look_b",
+      "tags": {
+        "bottom": "black_wide_leg"
+      }
+    },
+    {
+      "asset_id": "th_layered_c",
+      "path": "../../../../shared/data/organic_photo_video/asset_sets/th_layered/look_c.png",
+      "role": "look_c",
+      "tags": {
+        "bottom": "black_straight"
+      }
+    },
+    {
+      "asset_id": "th_layered_d",
+      "path": "../../../../shared/data/organic_photo_video/asset_sets/th_layered/look_d.png",
+      "role": "look_d",
+      "tags": {
+        "bottom": "blue_straight"
+      }
+    },
+    {
+      "asset_id": "th_layered_e",
+      "path": "../../../../shared/data/organic_photo_video/asset_sets/th_layered/look_e.png",
+      "role": "alternate",
+      "tags": {
+        "bottom": "white_skirt"
+      }
+    }
+  ],
+  "pairs": []
+}

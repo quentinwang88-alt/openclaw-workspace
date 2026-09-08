@@ -3,6 +3,9 @@
   "routes": {
     "TH": {
       "default_store_id": "THFZ01"
+    },
+    "MX": {
+      "default_store_id": "MXJF01"
     }
   }
 }

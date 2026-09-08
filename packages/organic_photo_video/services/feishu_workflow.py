@@ -10,16 +10,17 @@ from __future__ import annotations
 import hashlib
 import json
 import mimetypes
+import os
 from dataclasses import asdict, dataclass, replace
 from domain.models import ProductionBatch
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from services.asset_resolver import LightTryonAssetReader
 from services.batch_diversity_planner import BatchDiversityPlanner
 from services.content_story import generate_product_image_story
 from services.hero_first import HeroFirstProducer
-from services.image_generator import OpenAIImageGenerator
+from services.image_generator import build_default_photo_generator
 from services.product_reference_resolver import (
     ProductReferenceResolutionError,
     ProductReferenceResolver,
@@ -42,11 +43,29 @@ FIELD_PROGRESS = "进度"
 FIELD_OUTPUT = "预览/成片"
 FIELD_REVIEW = "审核"
 FIELD_NOTES = "备注"
-FIELD_QUANTITY = "生成数量"
+FIELD_QUANTITY = "生成篇数"
+FIELD_QUANTITY_LEGACY = "生成数量"
 FIELD_CONFIRM_PUBLISH = "确认发布"
+FIELD_PHOTO_REQUEST = "图文任务JSON"  # optional legacy override; never required
+FIELD_PHOTO_SUMMARY = "内容方案摘要"
+FIELD_PHOTO_INPUT = "完整穿搭素材（可选）"
+FIELD_PHOTO_INPUT_LEGACY = "图文参考图"
+FIELD_PRODUCT_REFERENCE = "商品参考图（可选）"
+FIELD_REFERENCE = "参考图（可选）"
+FIELD_REFERENCE_TYPE = "参考图类型"
+FIELD_CONTENT_THEME = "图文主题"
+FIELD_CONTENT_REQUIREMENT = "内容要求（可选）"
+FIELD_TRAVEL_PLACE = "旅行地点（可选）"
+FIELD_MUSIC_MODE = "配乐方式"
+FIELD_PHOTO_ASSET_STATUS = "素材状态"
 
 PROGRESS_PENDING = "待执行"
 PROGRESS_RUNNING = "生成中"
+PROGRESS_PLANNING = "规划中"
+PROGRESS_PREPARING_ASSETS = "准备素材"
+PROGRESS_QA = "质检中"
+PROGRESS_REPAIR = "待修复"
+PROGRESS_RETRYABLE = "失败可重试"
 PROGRESS_REVIEW = "待审核"
 PROGRESS_DONE = "已完成"
 PROGRESS_ACTION = "需处理"
@@ -55,6 +74,11 @@ PROGRESS_SCHEDULED = "已排期"
 PROGRESS_PUBLISHING = "发布中"
 PROGRESS_PUBLISHED = "已发布"
 PROGRESS_PUBLISH_FAILED = "发布失败"
+
+IN_FLIGHT_PROGRESS = {
+    PROGRESS_RUNNING, PROGRESS_PLANNING, PROGRESS_PREPARING_ASSETS,
+    PROGRESS_QA, PROGRESS_REPAIR,
+}
 
 REVIEW_PENDING = "待审核"
 REVIEW_APPROVED = "通过"
@@ -65,6 +89,37 @@ REVIEW_SCHEDULE = "排期发布"
 
 class FeishuWorkflowError(RuntimeError):
     pass
+
+
+class _RecordFlock:
+    """Non-blocking per-record advisory lock (kernel-owned, death-safe).
+
+    Scanner slots run in parallel; this guarantees two workers never process
+    the same row. ``with _RecordFlock(rid) as locked:`` — locked is False when
+    another worker owns the record.
+    """
+
+    def __init__(self, record_id: str, directory: str = "/tmp"):
+        import fcntl
+
+        self._fcntl = fcntl
+        self.path = f"{directory}/opv_record_{record_id}.flock"
+        self.fd: Optional[int] = None
+
+    def __enter__(self) -> bool:
+        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            self._fcntl.flock(self.fd, self._fcntl.LOCK_EX | self._fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(self.fd)
+            self.fd = None
+        return self.fd is not None
+
+    def __exit__(self, *args) -> bool:
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+        return False
 
 
 def dependent_redo_slots(plan: Dict[str, Any], requested_slots: Iterable[int]) -> List[int]:
@@ -93,6 +148,14 @@ def text_value(value: Any) -> str:
     return str(value).strip()
 
 
+def task_quantity(fields: Mapping[str, Any]) -> int:
+    """Prefer the operator-friendly name while keeping historical rows readable."""
+    value = fields.get(FIELD_QUANTITY)
+    if value in (None, ""):
+        value = fields.get(FIELD_QUANTITY_LEGACY)
+    return quantity_value(value)
+
+
 @dataclass(frozen=True)
 class PresetTask:
     account_id: str
@@ -118,9 +181,24 @@ class ProductionPresetCatalog:
 
     @property
     def names(self) -> List[str]:
-        return list(self._raw)
+        return [name for name, raw in self._raw.items() if raw.get("status", "active") == "active"]
+
+    def _require_enabled(self, name: str) -> None:
+        raw = self.metadata(name)
+        if raw.get("status", "active") != "active":
+            raise FeishuWorkflowError("NEEDS_CONTENT: 该生产预设已停用，缺少通过内容验收的方案：" + name)
+
+    def metadata(self, name: str) -> Dict[str, Any]:
+        raw = self._raw.get(name)
+        if raw is None:
+            raise FeishuWorkflowError(f"未知生产预设：{name}")
+        return dict(raw)
+
+    def is_native_photo(self, name: str) -> bool:
+        return self.metadata(name).get("media_kind") == "native_photo"
 
     def resolve(self, name: str, record_id: str) -> List[PresetTask]:
+        self._require_enabled(name)
         raw = self._raw.get(name)
         if raw is None:
             raise FeishuWorkflowError(f"未知生产预设：{name}")
@@ -139,8 +217,9 @@ class ProductionPresetCatalog:
         self, name: str, record_id: str, quantity: int
     ) -> List[PresetTask]:
         """Expand one operator row to exactly ``quantity`` deterministic units."""
+        self._require_enabled(name)
         if quantity < 1 or quantity > 9:
-            raise FeishuWorkflowError("生成数量必须是 1 到 9")
+            raise FeishuWorkflowError("生成篇数必须是 1 到 9")
         raw = self._raw.get(name)
         if raw is None:
             raise FeishuWorkflowError(f"未知生产预设：{name}")
@@ -195,9 +274,9 @@ def quantity_value(value: Any) -> int:
     try:
         result = int(float(value))
     except (TypeError, ValueError) as exc:
-        raise FeishuWorkflowError("生成数量必须是 1 到 9 的整数") from exc
+        raise FeishuWorkflowError("生成篇数必须是 1 到 9 的整数") from exc
     if result < 1 or result > 9 or float(value) != result:
-        raise FeishuWorkflowError("生成数量必须是 1 到 9 的整数")
+        raise FeishuWorkflowError("生成篇数必须是 1 到 9 的整数")
     return result
 
 
@@ -215,20 +294,27 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
         visual_qa_adapter=None,
         output_root=None,
         asset_readiness_gate=None,
+        photo_reference_vision=None,
     ):
         self.repository = repository
         self.client = client
         self.catalog = catalog or ProductionPresetCatalog()
-        self.generator = generator or OpenAIImageGenerator()
+        self.generator = generator or build_default_photo_generator()
         self.renderer = renderer or FFmpegStillRenderer()
         self.publish_scheduler = publish_scheduler
         self.visual_qa_adapter = visual_qa_adapter
         self.output_root = output_root
         self.asset_readiness_gate = asset_readiness_gate
+        self.photo_reference_vision = photo_reference_vision
         self._run_lease = None
+        self._photo_quality_summaries: Dict[str, str] = {}
         self.product_reference_resolver = (
             product_reference_resolver or ProductReferenceResolver(repository)
         )
+
+    @staticmethod
+    def _complete_look_attachments(fields: Dict[str, Any]) -> List[Dict[str, Any]]:
+        return list(fields.get(FIELD_PHOTO_INPUT) or fields.get(FIELD_PHOTO_INPUT_LEGACY) or [])
 
     def scan(
         self,
@@ -245,8 +331,41 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
         report = {"scanned": len(records), "eligible": 0, "processed": [], "errors": []}
         for record in records:
             fields = record.fields or {}
+            # Complete a committed photo projection before interpreting any
+            # retained command. This includes terminal-review writeback failure.
+            pending_batch = self._batch(record.record_id) if not dry_run else None
+            if (pending_batch and pending_batch.manifest_json.get("media_kind") == "native_photo"
+                    and pending_batch.pending_fields_json):
+                try:
+                    self._claim_batch(pending_batch)
+                    pending = pending_batch.pending_fields_json
+                    self.client.update_record_fields(record.record_id, pending)
+                    self.repository.acknowledge_batch_projection(pending_batch.batch_id, pending)
+                    report["processed"].append({"record_id": record.record_id, "action": "recover_projection"})
+                except BatchLeaseBusy as exc:
+                    report["processed"].append({"record_id": record.record_id, "action": "leased_skip", "reason": str(exc)})
+                except Exception as exc:
+                    report["errors"].append({"record_id": record.record_id, "error": f"恢复工作台失败：{exc}"})
+                finally:
+                    if self._run_lease:
+                        self._run_lease.close()
+                        self._run_lease = None
+                continue
             action = self._action(fields)
-            if action in {"approve", "retry_review"} and self._v2_tasks(record.record_id):
+            v2_tasks = (
+                self._v2_tasks(record.record_id)
+                if action in {"approve", "retry_review"} else []
+            )
+            all_photo = bool(v2_tasks) and all(
+                str(getattr(task, "media_kind", "video") or "video") == "native_photo"
+                for task in v2_tasks
+            )
+            if (action == "approve" and not v2_tasks
+                    and text_value(fields.get(FIELD_PHOTO_ASSET_STATUS)) == "待内容审核"):
+                action = "approve_photo_assets"
+            if action in {"approve", "retry_review"} and v2_tasks and not (
+                action == "approve" and all_photo
+            ):
                 # A retained legacy review command is not permission to start
                 # fresh media work under the new technical-only workflow.
                 action = "generate" if bool(fields.get(FIELD_EXECUTE)) else ""
@@ -306,33 +425,46 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                             else:
                                 result["production_preview"] = self.catalog.preview(
                                     text_value(fields.get(FIELD_PRESET)), record.record_id,
-                                    quantity_value(fields.get(FIELD_QUANTITY)))
+                                    task_quantity(fields))
                     except Exception as exc:
                         result["preview_error"] = str(exc)
                 report["processed"].append(result)
                 continue
             try:
-                batch = self._batch(record.record_id)
-                if batch:
-                    self._claim_batch(batch)
-                if action == "generate":
-                    result = self._generate(record)
-                elif action == "auto_render":
-                    result = self._approve_and_render(
-                        record, approval_mode="operator_auto"
-                    )
-                elif action == "approve":
-                    result = self._approve_and_render(record)
-                elif action == "retry_review":
-                    tasks = self._v2_tasks(record.record_id)
-                    if not tasks:
-                        raise FeishuWorkflowError("重试审核仅适用于 V2 分阶段任务")
-                    result = self._advance_v2(record, tasks, automatic=self._review_mode(record) == MODE_AUTO, resume_generation=False)
-                elif action == "schedule":
-                    result = self._schedule_publish(record)
-                else:
-                    result = self._redo(record, action)
-                report["processed"].append(result)
+                with _RecordFlock(record.record_id) as record_locked:
+                    if not record_locked:
+                        # Another scanner slot owns this row; it will project
+                        # the final fields when it finishes.
+                        report["processed"].append({
+                            "record_id": record.record_id,
+                            "action": "record_locked_skip",
+                        })
+                        continue
+                    batch = self._batch(record.record_id)
+                    if batch:
+                        self._claim_batch(batch)
+                    if action == "generate":
+                        result = self._generate(record)
+                    elif action == "auto_render":
+                        result = self._approve_and_render(
+                            record, approval_mode="operator_auto"
+                        )
+                    elif action == "approve":
+                        result = self._approve_and_render(record)
+                    elif action == "approve_photo_assets":
+                        result = self._approve_staged_photo_assets(record)
+                    elif action == "retry_review":
+                        tasks = self._v2_tasks(record.record_id)
+                        if not tasks:
+                            raise FeishuWorkflowError("重试审核仅适用于 V2 分阶段任务")
+                        result = self._advance_v2(record, tasks, automatic=self._review_mode(record) == MODE_AUTO, resume_generation=False)
+                    elif action == "confirm_publish":
+                        result = self._confirm_photo_publish(record)
+                    elif action == "schedule":
+                        result = self._schedule_publish(record)
+                    else:
+                        result = self._redo(record, action)
+                    report["processed"].append(result)
             except BatchLeaseBusy as exc:
                 # A losing worker must not consume commands or overwrite the
                 # active owner's workbench projection.
@@ -348,14 +480,30 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     FIELD_RETRY_REVIEW: False,
                     FIELD_REVIEW: REVIEW_PENDING,
                 }
-                if action == "schedule":
+                try:
+                    prior_progress = text_value(
+                        self.client.get_record(record.record_id).fields.get(FIELD_PROGRESS))
+                except Exception:
+                    prior_progress = ""
+                if action == "generate" and (
+                        prior_progress in IN_FLIGHT_PROGRESS
+                        or prior_progress.startswith("素材生成 ")):
+                    # Paid work already started; resume reuses completed assets
+                    # instead of regenerating them, so mark it retryable.
+                    failure_fields[FIELD_PROGRESS] = PROGRESS_RETRYABLE
+                    failure_fields[FIELD_NOTES] = (
+                        message + "；已生成素材已保留，重新勾选执行将从断点续跑，不重复生成已完成角色"
+                    )
+                if action in {"schedule", "confirm_publish"}:
                     failure_fields[FIELD_CONFIRM_PUBLISH] = False
                 try:
                     current_batch = self._batch(record.record_id)
                     if self._v2_tasks(record.record_id) or (
                         current_batch and int(current_batch.manifest_json.get("workflow_version") or 1) >= 2
                     ):
-                        failure_fields.update({FIELD_REVIEW: REVIEW_NOT_REQUIRED, FIELD_REVIEW_MODE: None})
+                        is_photo = current_batch and current_batch.manifest_json.get("media_kind") == "native_photo"
+                        failure_fields.update({FIELD_REVIEW: REVIEW_NOT_REQUIRED,
+                                               FIELD_REVIEW_MODE: None})
                     self._write_fields(record.record_id, failure_fields)
                 except Exception as projection_error:
                     message += f"；飞书回写失败，RDS 状态保留：{projection_error}"
@@ -399,13 +547,19 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
         batch = self._batch(record_id)
         if batch and (len(tasks) != batch.expected_count or len({t.source_record_id for t in tasks}) != batch.expected_count):
             raise FeishuWorkflowError(f"批次只建成 {len(tasks)}/{batch.expected_count} 条，勾选执行补齐冻结清单后再审核或发布")
+        if batch and batch.manifest_json.get("media_kind") == "native_photo":
+            entries = self._photo_batch_entries(batch)
+            if {entry["source_record_id"] for entry in entries} != {task.source_record_id for task in tasks}:
+                raise FeishuWorkflowError("图文任务与冻结批次清单不一致，禁止放行")
 
     @staticmethod
     def _action(fields: Dict[str, Any]) -> str:
         review = text_value(fields.get(FIELD_REVIEW))
         progress = text_value(fields.get(FIELD_PROGRESS))
-        if bool(fields.get(FIELD_CONFIRM_PUBLISH)) and progress == PROGRESS_DONE:
-            return "schedule"
+        if bool(fields.get(FIELD_CONFIRM_PUBLISH)) and progress not in {
+            PROGRESS_QUEUED, PROGRESS_SCHEDULED, PROGRESS_PUBLISHING, PROGRESS_PUBLISHED,
+        }:
+            return "confirm_publish"
         if review == REVIEW_SCHEDULE and progress not in {
             PROGRESS_QUEUED, PROGRESS_SCHEDULED, PROGRESS_PUBLISHING, PROGRESS_PUBLISHED,
         }:
@@ -430,20 +584,33 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
     def _generate(self, record) -> Dict[str, Any]:
         batch = self._batch(record.record_id)
         existing = self._tasks(record.record_id)
+        from services.release_gate import require_photo_content_allowed
+        for task in existing:
+            require_photo_content_allowed(self.repository, task)
+        if (existing and batch is None
+                and all(workflow_v2_enabled(task) for task in existing)
+                and all(str(getattr(task, "media_kind", "video") or "video") != "native_photo"
+                        for task in existing)):
+            if len(existing) != task_quantity(record.fields):
+                raise FeishuWorkflowError("历史批次缺少冻结清单且任务数量不足；请人工核对，不能按当前配置猜测补单")
+            return self._advance_v2(record, existing)
+        preset_name = batch.manifest_json["preset"] if batch else text_value(record.fields.get(FIELD_PRESET))
+        if not preset_name:
+            raise FeishuWorkflowError("请选择生产预设")
+        quantity = batch.expected_count if batch else task_quantity(record.fields)
+        if ((batch and batch.manifest_json.get("media_kind") == "native_photo")
+                or (batch is None and self.catalog.is_native_photo(preset_name))):
+            return self._generate_native_photo(record, preset_name, quantity, existing, batch=batch)
         if existing and batch is None:
-            if len(existing) != quantity_value(record.fields.get(FIELD_QUANTITY)):
+            if len(existing) != task_quantity(record.fields):
                 raise FeishuWorkflowError("历史批次缺少冻结清单且任务数量不足；请人工核对，不能按当前配置猜测补单")
             if all(workflow_v2_enabled(task) for task in existing):
                 return self._advance_v2(record, existing)
             if any(workflow_v2_enabled(task) for task in existing):
                 raise FeishuWorkflowError("历史混合 V1/V2 批次需要人工拆分，不能遗漏子任务")
         product_id = batch.manifest_json["product_id"] if batch else text_value(record.fields.get(FIELD_PRODUCT))
-        preset_name = batch.manifest_json["preset"] if batch else text_value(record.fields.get(FIELD_PRESET))
         if not product_id:
             raise FeishuWorkflowError("请填写产品编码")
-        if not preset_name:
-            raise FeishuWorkflowError("请选择生产预设")
-        quantity = batch.expected_count if batch else quantity_value(record.fields.get(FIELD_QUANTITY))
         specs = ([PresetTask(**entry["spec"]) for entry in batch.manifest_json["entries"]]
                  if batch else self.catalog.resolve_batch(preset_name, record.record_id, quantity))
         allowed_source_ids = {
@@ -584,11 +751,684 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
             "videos": rendered,
         }
 
+    def _generate_native_photo(self, record, preset_name: str, quantity: int, existing, *, batch=None) -> Dict[str, Any]:
+        """Freeze the entire row before task creation; retry only its frozen entries."""
+        if batch and batch.batch_status == "cancelled":
+            raise FeishuWorkflowError("该图文批次已取消；请新增一行重新发起，历史记录保持只读")
+        from config.loader import load_board_layouts
+        from services.photo_package import NativePhotoProductionFlow
+        from services.photo_planner import PhotoReusePlannerService
+        from services.photo_request_factory import PhotoRequestFactory, fingerprint, validate_frozen_request
+        from services.task_intake import TaskIntakeService, TaskRequest
+
+        style_product: dict[str, Any] = {}
+
+        if batch is None:
+            if existing:
+                raise FeishuWorkflowError("历史图文缺少冻结批次；请先核对原任务，不能按当前预设自动补单")
+            overrides = []
+            raw = text_value(record.fields.get(FIELD_PHOTO_REQUEST))
+            if raw:
+                try:
+                    payload = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise FeishuWorkflowError("图文任务JSON不是有效 JSON") from exc
+                if not isinstance(payload, dict):
+                    raise FeishuWorkflowError("图文任务JSON必须是对象")
+                overrides = payload.get("items") if "items" in payload else [payload]
+                if (not isinstance(overrides, list) or len(overrides) != quantity
+                        or any(not isinstance(item, dict) for item in overrides)):
+                    raise FeishuWorkflowError("图文任务JSON.items 数量必须与生成篇数一致")
+            specs = self.catalog.resolve_batch(preset_name, record.record_id, quantity)
+            if any(not spec.account_id for spec in specs):
+                raise FeishuWorkflowError("该图文预设尚未绑定 OPV 生产账号")
+            preset = self.catalog.metadata(preset_name)
+            product_id = text_value(record.fields.get(FIELD_PRODUCT))
+            unified_attachments = list(record.fields.get(FIELD_REFERENCE) or [])
+            legacy_complete = self._complete_look_attachments(record.fields)
+            legacy_product = list(record.fields.get(FIELD_PRODUCT_REFERENCE) or [])
+            recipe_ids = {spec.recipe_id for spec in specs}
+            recipe_for_input = (
+                self.repository.get_content_recipe(specs[0].recipe_id)
+                if len(recipe_ids) == 1 else None
+            )
+            roles = list((((recipe_for_input.recipe_spec_json or {}).get("asset_requirements") or {}).get("required_roles") or [])) if recipe_for_input else []
+            from services.photo_theme import resolve_photo_theme, build_theme_copy
+            from services.photo_reference import (
+                REFERENCE_MODE_COMPLETE_LOOK, REFERENCE_MODE_PRODUCT, REFERENCE_MODE_STYLE,
+                resolve_reference_mode,
+            )
+            try:
+                theme = resolve_photo_theme(text_value(record.fields.get(FIELD_CONTENT_THEME)))
+            except ValueError as exc:
+                raise FeishuWorkflowError(str(exc)) from exc
+            reference_mode = ""
+            reference_attachments = []
+            if unified_attachments:
+                reference_attachments = unified_attachments
+                try:
+                    reference_mode = resolve_reference_mode(
+                        selected_type=text_value(record.fields.get(FIELD_REFERENCE_TYPE)),
+                        attachments=reference_attachments, product_id=product_id,
+                        required_role_count=len(roles), requested_count=quantity,
+                    )
+                except ValueError as exc:
+                    raise FeishuWorkflowError(str(exc)) from exc
+            elif legacy_complete:
+                reference_mode, reference_attachments = REFERENCE_MODE_COMPLETE_LOOK, legacy_complete
+            elif legacy_product or product_id:
+                reference_mode, reference_attachments = REFERENCE_MODE_PRODUCT, legacy_product
+            # Explicit STYLE + product code is a supported combination: the
+            # product pack remains the identity lock, while uploaded images are
+            # inspiration only and must never be written into that pack.
+            if reference_mode == REFERENCE_MODE_STYLE and product_id:
+                try:
+                    style_product = self.product_reference_resolver.resolve_snapshot(
+                        product_id, selection_key=record.record_id,
+                        account_id=specs[0].account_id,
+                    )
+                except ProductReferenceResolutionError as exc:
+                    raise FeishuWorkflowError(
+                        f"指定商品 {product_id} 缺少可用商品参考包：{exc}"
+                    ) from exc
+            product_context = ({
+                key: style_product.get(key)
+                for key in ("product_id", "product_name", "category", "variant_key",
+                            "reference_pack_id", "reference_pack_version")
+                if style_product.get(key) not in (None, "")
+            } if style_product else {})
+            requires_product_supply = bool(
+                recipe_for_input and (recipe_for_input.recipe_spec_json or {}).get("outfit_supply")
+            )
+            asset_status = text_value(record.fields.get(FIELD_PHOTO_ASSET_STATUS))
+            if (requires_product_supply and not reference_attachments and not product_id
+                    and asset_status not in {"已确认，正在生成", "已匹配可用素材"}):
+                raise FeishuWorkflowError(
+                    "该图文预设需要填写产品编码或上传参考图"
+                )
+            from services.photo_batch_variation import plan_batch_variations
+            from services.photo_content_planner import (
+                PhotoContentPlanStore, get_planning_flow, plan_th_choice_batch,
+                recipe_has_planning_policy,
+            )
+            variation_theme = theme or {
+                "theme_key": "AUTO", "label_zh": "自动差异化穿搭",
+                "visual_brief": "保持同一商品或参考风格，变化场景、配色和穿搭组合",
+            }
+            staging_root = (Path(self.output_root) if self.output_root else
+                            Path.home() / ".openclaw/shared/data/organic_photo_video")
+            style_reference_paths: list[str] = []
+            style_profile: dict[str, Any] = {}
+            content_requirement = text_value(record.fields.get(FIELD_CONTENT_REQUIREMENT))
+            travel_place = text_value(record.fields.get(FIELD_TRAVEL_PLACE))
+            travel_contract: dict[str, Any] = {}
+            travel_variables: dict[str, Any] = {}
+            travel_copy_templates = None
+            travel_topic: dict[str, Any] = {}
+            planning_flow = get_planning_flow(recipe_for_input.recipe_id) if recipe_for_input else ""
+            if planning_flow == "travel_two_step":
+                recipe_spec_input = recipe_for_input.recipe_spec_json or {}
+                travel_contract = dict(recipe_spec_input.get("travel_contract") or {})
+                profiles_input = list(recipe_spec_input.get("execution_profiles") or [])
+                travel_variables = dict((profiles_input[0].get("variables") or {})
+                                        if profiles_input else {})
+                travel_copy_templates = list(
+                    (profiles_input[0].get("copy_variants") or [])
+                    if profiles_input else []
+                ) or None
+                if theme and theme.get("travel_theme_type"):
+                    travel_topic = {
+                        "theme_type": str(theme.get("travel_theme_type")),
+                        "theme_version": int(theme.get("travel_theme_version") or 1),
+                        "theme_label_zh": str(theme.get("label_zh") or ""),
+                        "planning_focus": str(theme.get("visual_brief") or ""),
+                        "topic_patterns": list(theme.get("topic_patterns") or []),
+                        "body_copy_focus": str(theme.get("body_copy_focus") or ""),
+                        "cta_patterns": list(theme.get("cta_patterns") or []),
+                        "place": travel_place,
+                        "temperature_band": str(travel_variables.get("temperature_band") or ""),
+                        "temperature_context": {
+                            "value": str(travel_variables.get("temperature_band") or ""),
+                            "source": "execution_profile",
+                        },
+                        "thai_fallback": {
+                            "title": str(theme.get("title") or ""),
+                            "cover": str(theme.get("cover") or ""),
+                            "caption": str(theme.get("caption") or ""),
+                            "hashtags": list(theme.get("hashtags") or []),
+                            "cta": str(theme.get("cta") or ""),
+                        },
+                        "content_requirement": content_requirement,
+                    }
+            if reference_mode == REFERENCE_MODE_STYLE and recipe_for_input:
+                if theme is None:
+                    raise FeishuWorkflowError("风格参考模式需要选择图文主题")
+                from services.photo_asset_supply import PhotoAssetSupplyService
+                from services.photo_reference_vision import PhotoReferenceVisionService
+                style_reference_paths = PhotoAssetSupplyService(
+                    self.client, root=staging_root,
+                ).stage_reference_images(
+                    record_id=record.record_id, attachments=reference_attachments,
+                    reference_kind="style",
+                )
+                reference_vision = self.photo_reference_vision or PhotoReferenceVisionService(
+                    root=staging_root
+                )
+                self.photo_reference_vision = reference_vision
+                if planning_flow == "travel_two_step":
+                    self._write_fields(record.record_id, {FIELD_PROGRESS: PROGRESS_PLANNING})
+                    reference_analysis = reference_vision.analyze_reference(
+                        record_id=record.record_id, paths=style_reference_paths,
+                        theme=theme or variation_theme,
+                        category_key=str((recipe_for_input.recipe_spec_json or {}).get("category_key") or ""),
+                        content_requirement=content_requirement,
+                    )
+                    travel_plan = reference_vision.plan_travel_content(
+                        record_id=record.record_id, analysis=reference_analysis,
+                        travel_contract=travel_contract, variables=travel_variables,
+                        content_requirement=content_requirement, count=quantity,
+                        travel_topic=travel_topic or None,
+                        product_context=product_context,
+                    )
+                    style_profile = reference_vision.build_travel_style_profile(
+                        reference_analysis, travel_plan, count=quantity,
+                    )
+                    if travel_topic:
+                        style_profile["travel_topic"] = dict(travel_topic)
+                else:
+                    style_profile = reference_vision.analyze(
+                        record_id=record.record_id, paths=style_reference_paths,
+                        theme=theme or variation_theme,
+                        category_key=str((recipe_for_input.recipe_spec_json or {}).get("category_key") or ""),
+                        content_requirement=content_requirement, count=quantity,
+                        product_context=product_context,
+                    )
+                if product_context:
+                    style_profile["product_context"] = dict(product_context)
+            content_plan = None
+            if (recipe_for_input
+                    and recipe_has_planning_policy(recipe_for_input.recipe_id)
+                    and theme is not None
+                    and reference_mode in {
+                        REFERENCE_MODE_COMPLETE_LOOK, REFERENCE_MODE_PRODUCT,
+                        REFERENCE_MODE_STYLE,
+                    }):
+                input_contract = {
+                    "recipe_id": recipe_for_input.recipe_id,
+                    "recipe_version": recipe_for_input.recipe_version,
+                    "theme_key": theme["theme_key"],
+                    "reference_mode": reference_mode,
+                    "quantity": quantity,
+                    "product_id": product_id,
+                    "reference_tokens": [
+                        str(item.get("file_token") or item.get("name") or "")
+                        for item in reference_attachments if isinstance(item, Mapping)
+                    ],
+                    "style_profile": style_profile,
+                    "content_requirement": content_requirement,
+                    "travel_topic": travel_topic or {},
+                    "travel_place": travel_place,
+                }
+                content_plan = PhotoContentPlanStore(staging_root).load_or_create(
+                    record_id=record.record_id, input_contract=input_contract,
+                    create=lambda: plan_th_choice_batch(
+                        record_id=record.record_id,
+                        recipe_id=recipe_for_input.recipe_id,
+                        theme=theme, reference_mode=reference_mode, count=quantity,
+                        style_profile=style_profile,
+                        travel_contract=travel_contract or None,
+                        copy_templates=travel_copy_templates,
+                    ),
+                )
+                variations = list(content_plan["items"])
+            else:
+                variations = plan_batch_variations(
+                    record_id=record.record_id, theme=variation_theme, count=quantity,
+                )
+            if reference_mode == REFERENCE_MODE_COMPLETE_LOOK and content_plan is None:
+                variations = [
+                    {
+                        "variation_id": f"complete_look_set_{index}", "index": index,
+                        "theme_key": str(variation_theme.get("theme_key") or ""),
+                        "angle_zh": f"完整穿搭素材第 {index} 组",
+                        "scene_zh": "沿用上传素材", "palette_zh": "沿用上传素材",
+                        "style_modifier": "不得改写上传的完整穿搭事实",
+                    }
+                    for index in range(1, quantity + 1)
+                ]
+            pinned_asset_set_ids: list[str] = []
+            prepared_source_groups: list[list[dict[str, Any]]] = []
+            if (reference_mode == REFERENCE_MODE_COMPLETE_LOOK and recipe_for_input
+                    and asset_status not in {
+                        "已确认，正在生成", "已匹配可用素材",
+                    }):
+                recipe = recipe_for_input
+                from services.photo_asset_supply import PhotoAssetSupplyService
+                asset_supply = PhotoAssetSupplyService(self.client, root=staging_root)
+                for index in range(quantity):
+                    item_id = f"{record.record_id}_item_{index + 1}"
+                    begin, end = index * len(roles), (index + 1) * len(roles)
+                    staged = asset_supply.stage(
+                        record_id=item_id, attachments=reference_attachments[begin:end],
+                        required_roles=roles,
+                    )
+                    prepared_source_groups.append(list(staged["files"]))
+                    saved = asset_supply.qualify(
+                        record_id=item_id, recipe=recipe, repository=self.repository,
+                        reviewer="feishu_operator_execution", reviewer_type="technical",
+                        source="feishu_complete_look_input",
+                    )
+                    pinned_asset_set_ids.append(saved.asset_set_id)
+            if (reference_mode == REFERENCE_MODE_STYLE and recipe_for_input
+                    and asset_status not in {"已确认，正在生成", "已匹配可用素材"}):
+                if theme is None:
+                    raise FeishuWorkflowError("风格参考模式需要选择图文主题")
+                recipe = recipe_for_input
+                from services.photo_asset_supply import PhotoAssetSupplyService
+                from services.photo_style_reference_supply import PhotoStyleReferenceSupplyService
+                asset_supply = PhotoAssetSupplyService(self.client, root=staging_root)
+                paths = style_reference_paths
+                account = self.repository.get_account_profile(specs[0].account_id)
+                if account is None:
+                    raise FeishuWorkflowError("图文生产账号不存在")
+                if style_profile.get("presentation_type") == "FLAT_LAY":
+                    persona = {}
+                else:
+                    if not getattr(account, "persona_ref_id", None):
+                        raise FeishuWorkflowError("真人参考模式需要图文生产账号绑定人物模板")
+                    persona = LightTryonAssetReader().get_persona(account.persona_ref_id)
+                for index, variation in enumerate(variations, 1):
+                    item_id = f"{record.record_id}_item_{index}"
+                    self._write_fields(record.record_id, {
+                        FIELD_PROGRESS: PROGRESS_PREPARING_ASSETS,
+                    })
+                    asset_counter = {"done": 0}
+                    total_assets = len(variations) * 4
+
+                    def _asset_progress(event: str, **data: Any) -> None:
+                        if event == "asset_generated":
+                            asset_counter["done"] += 1
+                            self._write_fields(record.record_id, {
+                                FIELD_PROGRESS: f"素材生成 {asset_counter['done']}/{total_assets}",
+                            })
+                        elif event == "qa_started":
+                            self._write_fields(record.record_id, {FIELD_PROGRESS: PROGRESS_QA})
+                        elif event == "human_qa_started":
+                            self._write_fields(record.record_id, {
+                                FIELD_PROGRESS: "人物表现质检中",
+                                FIELD_REVIEW_STAGE: "人物表现质检",
+                            })
+                        elif event == "repair_scheduled":
+                            note = str(data.get("notes") or "")
+                            self._write_fields(record.record_id, {
+                                FIELD_PROGRESS: PROGRESS_REPAIR,
+                                **({
+                                    FIELD_NOTES: (
+                                        f"人物质检修复 {len(data.get('roles') or [])} 张：{note}"[:180]
+                                        if data.get("reason") == "human_presentation"
+                                        else f"风格质检修复 {len(data.get('roles') or [])} 张"[:180]
+                                    )
+                                } if note or data.get("reason") else {}),
+                            })
+
+                    prepared = PhotoStyleReferenceSupplyService(
+                        generator=self.generator, root=staging_root,
+                        vision_service=self.photo_reference_vision,
+                    ).prepare(
+                        record_id=item_id, reference_paths=paths, theme=theme,
+                        account=account, persona=persona, variation=variation,
+                        progress=_asset_progress, product=style_product,
+                    )
+                    from services.photo_content_check import validate_prepared_sources
+                    validate_prepared_sources(variation, prepared["sources"])
+                    quality_summary = str(
+                        (prepared.get("quality") or {}).get("quality_summary_zh") or ""
+                    )
+                    if quality_summary:
+                        # 非阻塞质量提示：并入最终完成摘要展示，不影响生成与发布。
+                        self._photo_quality_summaries[record.record_id] = quality_summary
+                    prepared_source_groups.append(list(prepared["sources"]))
+                    asset_supply.stage_existing(
+                        record_id=item_id, sources=prepared["sources"], required_roles=roles,
+                        metadata={"theme_key": theme["theme_key"],
+                                  "reference_mode": reference_mode,
+                                  "product_id": str(style_product.get("product_id") or ""),
+                                  "product_reference_pack_id": str(
+                                      style_product.get("reference_pack_id") or ""
+                                  ),
+                                  "batch_variation": variation},
+                    )
+                    saved = asset_supply.qualify(
+                        record_id=item_id, recipe=recipe, repository=self.repository,
+                        reviewer="system_style_reference_generation", reviewer_type="technical",
+                        source="feishu_style_reference_generated",
+                    )
+                    pinned_asset_set_ids.append(saved.asset_set_id)
+            if (reference_mode == REFERENCE_MODE_PRODUCT and recipe_for_input
+                    and asset_status not in {
+                        "已确认，正在生成", "已匹配可用素材",
+                    }):
+                recipe = recipe_for_input
+                if recipe is None or recipe.status != "active":
+                    raise FeishuWorkflowError("图文 Recipe 不存在或已停用")
+                from services.photo_asset_supply import PhotoAssetSupplyService
+                from services.photo_outfit_supply import PhotoOutfitSupplyService
+                asset_supply = PhotoAssetSupplyService(self.client, root=staging_root)
+                if reference_attachments:
+                    references = asset_supply.stage_product_references(
+                        record_id=record.record_id, attachments=reference_attachments,
+                    )
+                    effective_product_id = product_id or f"FEISHU_PHOTO_{record.record_id}"
+                    variant_key = f"photo_{record.record_id}"[:96]
+                    self.product_reference_resolver.build_pack(
+                        product_id=effective_product_id, product_name=effective_product_id,
+                        category="outerwear", references=references, variant_key=variant_key,
+                        is_default=not bool(product_id), source_type="feishu_photo_product_input",
+                        source_ref=record.record_id, persist=True,
+                    )
+                    product = self.product_reference_resolver.resolve_snapshot(
+                        effective_product_id, selection_key=record.record_id,
+                        variant_key=variant_key, account_id=specs[0].account_id,
+                    )
+                    product_id = effective_product_id
+                else:
+                    product = self.product_reference_resolver.resolve_snapshot(
+                        product_id, selection_key=record.record_id,
+                        account_id=specs[0].account_id,
+                    )
+                source_reader = getattr(self.repository, "list_reusable_outfit_sources", None)
+                existing_sources = (source_reader(product_id, limit=30)
+                                    if callable(source_reader) else [])
+                account = self.repository.get_account_profile(specs[0].account_id)
+                if account is None:
+                    raise FeishuWorkflowError("图文生产账号不存在")
+                remaining_existing_sources = list(existing_sources)
+                for index, variation in enumerate(variations, 1):
+                    item_id = f"{record.record_id}_item_{index}"
+                    prepared = PhotoOutfitSupplyService(
+                        generator=self.generator, asset_reader=LightTryonAssetReader(), root=staging_root,
+                    ).prepare(
+                        record_id=item_id, recipe=recipe, product=product,
+                        account=account,
+                        existing_sources=remaining_existing_sources,
+                        variation=variation,
+                    )
+                    if variation.get("looks"):
+                        from services.photo_content_check import validate_prepared_sources
+                        validate_prepared_sources(variation, prepared["sources"])
+                    prepared_source_groups.append(list(prepared["sources"]))
+                    reused_refs = {
+                        str(item.get("look_ref") or "")
+                        for item in prepared["sources"]
+                        if item.get("source_kind") == "existing_outfit"
+                    }
+                    if reused_refs:
+                        remaining_existing_sources = [
+                            item for item in remaining_existing_sources
+                            if str(item.get("look_ref") or "") not in reused_refs
+                        ]
+                    item_roles = [item["role"] for item in prepared["role_plan"]]
+                    asset_supply.stage_existing(
+                        record_id=item_id, sources=prepared["sources"], required_roles=item_roles,
+                        metadata={"theme_key": str(variation_theme.get("theme_key") or ""),
+                                  "reference_mode": reference_mode,
+                                  "batch_variation": variation},
+                    )
+                    saved = asset_supply.qualify(
+                        record_id=item_id, recipe=recipe, repository=self.repository,
+                        reviewer="system_product_outfit_generation", reviewer_type="technical",
+                        source="feishu_product_outfit_generated",
+                    )
+                    pinned_asset_set_ids.append(saved.asset_set_id)
+            if len(prepared_source_groups) > 1:
+                from services.photo_content_check import validate_batch_sources
+                validate_batch_sources(prepared_source_groups)
+            if pinned_asset_set_ids:
+                if len(pinned_asset_set_ids) != quantity:
+                    raise FeishuWorkflowError("批次素材集数量与生成篇数不一致")
+                if overrides:
+                    overrides = [
+                        {**dict(item), "asset_set_id": asset_set_id}
+                        for item, asset_set_id in zip(overrides, pinned_asset_set_ids)
+                    ]
+                else:
+                    overrides = [
+                        {"asset_set_id": asset_set_id} for asset_set_id in pinned_asset_set_ids
+                    ]
+            try:
+                requests = PhotoRequestFactory(self.repository, layouts=load_board_layouts()).build_batch(
+                    record_id=record.record_id, specs=specs,
+                    category_key=str(preset.get("category_key") or ""),
+                    product_mode=str(preset.get("default_product_mode") or "NO_PRODUCT"),
+                    overrides=overrides,
+                )
+                if style_product:
+                    for request in requests:
+                        request["product_id"] = str(style_product.get("product_id") or product_id)
+                        request["product_snapshot"] = dict(style_product)
+                        request["request_sha256"] = fingerprint({
+                            key: value for key, value in request.items()
+                            if key != "request_sha256"
+                        })
+                        validate_frozen_request(request)
+                if theme or reference_mode:
+                    for index, request in enumerate(requests):
+                        frozen_manifest = request["asset_snapshot"].get("manifest_json") or {}
+                        if isinstance(frozen_manifest, str):
+                            frozen_manifest = json.loads(frozen_manifest)
+                        if theme:
+                            request["copy"] = build_theme_copy(
+                                theme, frozen_manifest.get("assets") or [], variations[index]
+                            )
+                        request["theme_brief"] = {
+                            **dict(variation_theme), "reference_mode": reference_mode,
+                            "reference_count": len(reference_attachments),
+                            "batch_variation": variations[index],
+                            **({
+                                "travel_theme_type": str(theme.get("travel_theme_type") or ""),
+                                "travel_theme_version": int(theme.get("travel_theme_version") or 1),
+                                "place": str(travel_topic.get("place") or travel_place or ""),
+                                "topic_zh": str(variations[index].get("topic_zh") or ""),
+                                "temperature_context": dict(travel_topic.get("temperature_context") or {}),
+                            } if theme and theme.get("travel_theme_type") else {}),
+                        }
+                        request["request_sha256"] = fingerprint({
+                            key: value for key, value in request.items() if key != "request_sha256"
+                        })
+                        validate_frozen_request(request)
+            except Exception as exc:
+                from services.asset_set_service import AssetSetError
+                attachments = self._complete_look_attachments(record.fields)
+                if not attachments and (isinstance(exc, AssetSetError) or "NEEDS_CONTENT" in str(exc)):
+                    product_id = text_value(record.fields.get(FIELD_PRODUCT))
+                    source_reader = getattr(self.repository, "list_reusable_outfit_sources", None)
+                    recipe = self.repository.get_content_recipe(specs[0].recipe_id) if len(specs) == 1 else None
+                    roles = list((((recipe.recipe_spec_json or {}).get("asset_requirements") or {}).get("required_roles") or [])) if recipe else []
+                    sources = (source_reader(product_id, limit=max(4, len(roles)))
+                               if product_id and roles and callable(source_reader) else [])
+                    if len(sources) >= len(roles) and roles:
+                        from services.photo_asset_supply import PhotoAssetSupplyService
+                        staging_root = (Path(self.output_root) if self.output_root else
+                                        Path.home() / ".openclaw/shared/data/organic_photo_video")
+                        staged = PhotoAssetSupplyService(self.client, root=staging_root).stage_existing(
+                            record_id=record.record_id, sources=sources, required_roles=roles,
+                        )
+                        summary = (
+                            f"已从产品 {product_id} 的旧穿搭任务选出 {len(roles)} 套不同 Look，"
+                            "按 A/B/C/D 暂存。请确认图片满足当前主题后，将审核改为“通过”；"
+                            "确认前不会入库、生成或发布。"
+                        )
+                        self._write_fields(record.record_id, {
+                            FIELD_EXECUTE: False, FIELD_PROGRESS: PROGRESS_ACTION,
+                            FIELD_REVIEW: REVIEW_NOT_REQUIRED, FIELD_REVIEW_STAGE: "素材已准备",
+                            FIELD_PHOTO_ASSET_STATUS: "待内容审核", FIELD_PHOTO_SUMMARY: summary,
+                            FIELD_NOTES: "来源为旧穿搭任务的已选中、技术通过图片；勾选确认发布后继续生成并入队。",
+                        })
+                        return {"record_id": record.record_id, "action": "stage_existing_outfit_assets",
+                                "staging_manifest": staged["manifest_path"], "photo_count": len(staged["files"])}
+                    raise FeishuWorkflowError(
+                        f"{exc}；可从现有穿搭模板流程生成完整造型图后，"
+                        "在“图文参考图”按 A/B/C/D 顺序上传。系统不会要求运营填写 JSON。"
+                    ) from exc
+                raise
+            manifest = {
+                "schema_version": "opv-photo-batch-v1", "workflow_version": 2,
+                "media_kind": "native_photo", "preset": preset_name,
+                "entries": [{"spec": asdict(spec), "request": request,
+                             "source_record_id": f"{record.record_id}:{index}:{spec.recipe_id}:1"}
+                            for index, (spec, request) in enumerate(zip(specs, requests), 1)],
+            }
+            if content_plan is not None:
+                manifest["content_plan"] = content_plan
+            manifest["manifest_sha256"] = fingerprint(manifest)
+            batch = self.repository.create_production_batch_idempotent(ProductionBatch(
+                batch_id="opv_batch_" + fingerprint(record.record_id)[:32],
+                source_record_id=record.record_id, expected_count=quantity,
+                manifest_json=manifest,
+            ))
+        self._claim_batch(batch)
+        entries = self._photo_batch_entries(batch)
+        expected_sources = {entry["source_record_id"] for entry in entries}
+        if any(task.source_record_id not in expected_sources for task in self._tasks(record.record_id)):
+            raise FeishuWorkflowError("该行存在冻结批次以外的任务，禁止混组")
+        requests = [entry["request"] for entry in entries]
+        summary = PhotoRequestFactory.summary(requests)
+        frozen_content_plan = (batch.manifest_json or {}).get("content_plan")
+        if frozen_content_plan:
+            from services.photo_content_planner import summarize_batch_plan
+            summary += "\n具体内容计划：\n" + summarize_batch_plan(frozen_content_plan)
+        output_root = (Path(self.output_root) if self.output_root else
+                       Path.home() / ".openclaw/shared/data/organic_photo_video/photo_packages")
+        producer = HeroFirstProducer(
+            self.repository, self.generator, output_root=output_root,
+            asset_readiness_gate=self.asset_readiness_gate, technical_only=True,
+        )
+        self._write_fields(record.record_id, {
+            FIELD_EXECUTE: False, FIELD_PROGRESS: PROGRESS_RUNNING,
+            FIELD_REVIEW: REVIEW_PENDING, FIELD_NOTES: "", FIELD_PHOTO_SUMMARY: summary,
+            FIELD_PHOTO_ASSET_STATUS: "已匹配可用素材",
+        })
+        task_ids, paths, failures = [], [], []
+        for entry in entries:
+            if self._run_lease:
+                self._run_lease.check()
+            item = entry["request"]
+            validate_frozen_request(item)
+            source_record_id = entry["source_record_id"]
+            try:
+                found = [task for task in self._tasks(record.record_id) if task.source_record_id == source_record_id]
+                if len(found) > 1:
+                    raise FeishuWorkflowError("冻结条目存在重复任务，禁止继续")
+                task = found[0] if found else TaskIntakeService(self.repository).create_task(TaskRequest(
+                    account_id=item["account_id"],
+                    product_id=(str(item.get("product_id") or "") or None),
+                    product_snapshot=dict(item.get("product_snapshot") or {}),
+                    media_kind="native_photo", category_key=item["category_key"],
+                    product_mode=item["product_mode"], source_type=SOURCE_TYPE,
+                    source_record_id=source_record_id, feishu_record_id=record.record_id,
+                    requested_shot_count=5, created_by="feishu_opv_photo", idempotency_key=source_record_id,
+                )).task
+                if task.target_country != item["market"] or task.target_locale != item["locale"]:
+                    raise FeishuWorkflowError("生产账号市场/语言已变化，与冻结批次不一致")
+                if task.task_status == "draft":
+                    PhotoReusePlannerService(self.repository).plan_task(
+                        task.task_id, recipe_id=item["recipe_id"], variables=item["variables"],
+                        copy_block=item["copy"], layout=item["layout_snapshot"],
+                        asset_set_id=item["asset_set_id"], recipe_snapshot=item["recipe_snapshot"],
+                        asset_snapshot=item["asset_snapshot"], execution_profile_id=item["profile_id"],
+                        copy_variant_id=item["copy_variant_id"], content_card=item.get("content_card"),
+                        theme_brief=item.get("theme_brief"), operator="feishu_opv_photo",
+                    )
+                flow = NativePhotoProductionFlow(
+                    self.repository, producer, output_root=output_root,
+                    vision_service=getattr(self, "photo_reference_vision", None),
+                )
+                result = flow.prepare(task.task_id, template=item["layout_snapshot"])
+                manifest = result.get("photo_manifest") or {}
+                if len(manifest.get("slides") or []) != 5:
+                    raise FeishuWorkflowError(f"图文任务 {task.task_id} 没有完整成品页")
+                task_ids.append(task.task_id)
+                paths.extend(str(slide["path"]) for slide in manifest["slides"])
+            except Exception as exc:
+                failures.append(f"{source_record_id}: {exc}")
+        attachments = self._upload_files(paths, parent_type="bitable_image") if paths else []
+        self._write_fields(record.record_id, {
+            FIELD_PROGRESS: PROGRESS_ACTION if failures else PROGRESS_DONE,
+            FIELD_OUTPUT: attachments, FIELD_REVIEW: REVIEW_NOT_REQUIRED,
+            FIELD_REVIEW_STAGE: "处理中" if failures else "技术完成", FIELD_PHOTO_SUMMARY: summary,
+            FIELD_NOTES: (f"已完成 {len(task_ids)}/{batch.expected_count} 篇原生图文，共 {len(paths)} 张；"
+                          + ("勾选执行后沿用冻结方案补齐。" + "；".join(failures) if failures
+                             else "技术检查已通过；勾选确认发布后冻结当前五页并进入发布队列。")
+                          + "｜" + self._photo_quality_summaries.get(record.record_id, "")
+                          )[:1500],
+        })
+        return {"record_id": record.record_id, "action": "generate_native_photo",
+                "task_ids": task_ids, "photo_count": len(paths), "failures": failures}
+
+    def _approve_staged_photo_assets(self, record) -> Dict[str, Any]:
+        """Turn an ordered upload into reusable inventory, then produce its package."""
+        if self._batch(record.record_id) or self._tasks(record.record_id):
+            raise FeishuWorkflowError("已有冻结任务时不能改用暂存素材")
+        preset_name = text_value(record.fields.get(FIELD_PRESET))
+        preset = self.catalog.metadata(preset_name)
+        if preset.get("media_kind") != "native_photo":
+            raise FeishuWorkflowError("暂存素材审核只适用于原生图文预设")
+        if task_quantity(record.fields) != 1:
+            raise FeishuWorkflowError("人工上传素材首版一次只审核并生成 1 篇")
+        spec = self.catalog.resolve_batch(preset_name, record.record_id, 1)[0]
+        recipe = self.repository.get_content_recipe(spec.recipe_id)
+        if recipe is None or recipe.status != "active":
+            raise FeishuWorkflowError("图文 Recipe 不存在或已停用")
+        from services.photo_asset_supply import PhotoAssetSupplyService
+        staging_root = (Path(self.output_root) if self.output_root else
+                        Path.home() / ".openclaw/shared/data/organic_photo_video")
+        saved = PhotoAssetSupplyService(self.client, root=staging_root).qualify(
+            record_id=record.record_id, recipe=recipe, repository=self.repository,
+        )
+        self._write_fields(record.record_id, {
+            FIELD_REVIEW: REVIEW_NOT_REQUIRED, FIELD_PHOTO_ASSET_STATUS: "已确认，正在生成",
+            FIELD_NOTES: f"已按确认发布冻结素材集 {saved.asset_set_id} V{saved.asset_set_version}；开始生成原生图文。",
+        })
+        record.fields[FIELD_PHOTO_ASSET_STATUS] = "已确认，正在生成"
+        record.fields[FIELD_REVIEW] = REVIEW_PENDING
+        # Pin this run to the exact human-confirmed upload without asking the
+        # operator to maintain the compatibility JSON field.
+        record.fields[FIELD_PHOTO_REQUEST] = json.dumps({"asset_set_id": saved.asset_set_id})
+        result = self._generate(record)
+        result["qualified_asset_set_id"] = saved.asset_set_id
+        return result
+
+    @staticmethod
+    def _photo_batch_entries(batch):
+        from services.photo_request_factory import fingerprint, validate_frozen_request
+        manifest = batch.manifest_json
+        unsigned = {key: value for key, value in manifest.items() if key != "manifest_sha256"}
+        if (manifest.get("schema_version") != "opv-photo-batch-v1"
+                or manifest.get("manifest_sha256") != fingerprint(unsigned)):
+            raise FeishuWorkflowError("冻结图文批次指纹损坏，禁止继续")
+        entries = manifest.get("entries") or []
+        if not entries or len(entries) != batch.expected_count:
+            raise FeishuWorkflowError("冻结批次清单数量损坏，禁止创建或放行")
+        sources = []
+        for index, entry in enumerate(entries, 1):
+            request = entry["request"]
+            validate_frozen_request(request)
+            expected = f"{batch.source_record_id}:{index}:{request['recipe_id']}:1"
+            if entry.get("source_record_id") != expected:
+                raise FeishuWorkflowError("冻结图文批次条目身份损坏")
+            sources.append(expected)
+        if len(set(sources)) != batch.expected_count:
+            raise FeishuWorkflowError("冻结图文批次包含重复条目")
+        return entries
+
     @staticmethod
     def _production_plan_note(tasks) -> str:
         entries = []
         for index, task in enumerate(tasks, 1):
             plan = task.plan_json or {}
+            if str(getattr(task, "media_kind", "video") or "video") == "native_photo":
+                entries.append(f"第{index}条：{len(plan.get('slides') or [])}张原生图文/无视频渲染")
+                continue
             shots = plan.get("shots") or []
             sequence = plan.get("outfit_sequence") or []
             # BASE/FINAL may be different wearing states of the same outfit.
@@ -598,6 +1438,8 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
             seconds = sum(int(s.get("duration_ms") or 0) for s in shots) / 1000
             count = f"{looks}套穿搭" if looks is not None else "穿搭套数未标注"
             entries.append(f"第{index}条：{count}/{len(shots)}页/{seconds:g}秒")
+        if tasks and all(str(getattr(task, "media_kind", "video")) == "native_photo" for task in tasks):
+            return "生成前冻结计划：" + "；".join(entries) + "。有效内容库存不足时整批停止，不减少篇数。"
         return "生成前冻结计划：" + "；".join(entries) + "。按实际兼容模板编排；数量不足会减少页数，不用同套换角度冒充多套。"
 
     @staticmethod
@@ -627,6 +1469,11 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
         if not tasks:
             raise FeishuWorkflowError("找不到该飞书记录对应的 RDS 任务")
         self._assert_batch_complete(record.record_id, tasks)
+        if all(
+            str(getattr(task, "media_kind", "video") or "video") == "native_photo"
+            for task in tasks
+        ):
+            return self._approve_photo_packages(record, tasks)
         if any(workflow_v2_enabled(task) for task in tasks):
             if not all(workflow_v2_enabled(task) for task in tasks):
                 raise FeishuWorkflowError("混合工作流版本需分开处理")
@@ -660,6 +1507,150 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
             "action": "auto_render" if auto else "approve",
             "videos": render_paths,
         }
+
+    def _require_travel_copy_release_allowed(self, tasks) -> None:
+        """Validate the actual frozen travel package selected for publishing.
+
+        Topic-linked travel copy is generated per task, so a static copy-pack
+        status cannot prove that the final title and five overlays are safe.
+        The publish checkbox binds the operator decision to this exact package;
+        this gate checks its topic binding, locale purity and placeholders.
+        """
+        from domain.photo_contracts import placeholder_errors
+        from services.locale_quality import copy_locale_issues
+
+        for task in tasks:
+            recipe_id = str(getattr(task, "recipe_id", "") or "")
+            if not recipe_id.startswith("PHOTO_TH_TRAVEL"):
+                continue
+            package = self.repository.get_content_package(
+                str(getattr(task, "content_package_id", "") or "")
+            )
+            revision = self.repository.get_task_revision(
+                str(getattr(task, "active_revision_id", "") or "")
+            )
+            manifest = dict(getattr(package, "photo_manifest_json", None) or {})
+            copy_block = dict(manifest.get("copy") or {})
+            theme_brief = dict(manifest.get("theme_brief") or {})
+            frozen_theme = dict(
+                ((revision.plan_snapshot_json or {}).get("plan") or {}).get("theme_brief") or {}
+            ) if revision else {}
+            slide_texts = list(copy_block.get("slide_texts") or [])
+            if package is None or revision is None or len(slide_texts) != 5 or not all(
+                str(value or "").strip() for value in slide_texts
+            ):
+                raise FeishuWorkflowError("旅行图文缺少完整的最终五页文案")
+            if (not theme_brief.get("travel_theme_type")
+                    or theme_brief.get("travel_theme_type") != frozen_theme.get("travel_theme_type")
+                    or theme_brief.get("theme_key") != frozen_theme.get("theme_key")):
+                raise FeishuWorkflowError("旅行图文的主题与最终发布包没有正确绑定")
+            issues = placeholder_errors(copy_block)
+            issues.extend(copy_locale_issues(copy_block, "th-TH"))
+            if issues:
+                raise FeishuWorkflowError(
+                    "旅行图文最终泰语文案未通过发布检查：" + "；".join(issues)
+                )
+
+    def _approve_photo_packages(
+        self, record, tasks, *, approval_mode: str = "content_review"
+    ) -> Dict[str, Any]:
+        from services.workflow_v2 import PhotoPackageReviewService
+        from services.release_gate import require_photo_content_allowed
+        if approval_mode == "publish_confirmation":
+            self._require_travel_copy_release_allowed(tasks)
+        review_ids = []
+        # Do not partially approve a batch that still has missing/failed media.
+        for task in tasks:
+            require_photo_content_allowed(self.repository, task)
+            if task.task_status == "photo_ready":
+                if not self._v2_released(task):
+                    raise FeishuWorkflowError("已验收图文的冻结 release 已失效")
+            elif task.task_status != "photo_packaging":
+                raise FeishuWorkflowError("图文批次尚未全部完成，请先勾选执行补齐")
+        for task in tasks:
+            if self._run_lease:
+                self._run_lease.check()
+            if task.task_status == "photo_ready":
+                continue  # Previous review committed; retry only its projection.
+            compact = approval_mode == "publish_confirmation"
+            review = PhotoPackageReviewService(self.repository).record(
+                task.task_id, decision="passed",
+                dimensions=(
+                    {"publish_confirmation": True, "technical_package": True}
+                    if compact else {
+                        "operator_preview": True,
+                        "content_alignment": True,
+                        "language_confirmed": True,
+                    }
+                ),
+                evidence=(
+                    {
+                        "authorization": "feishu_confirm_publish_checkbox",
+                        "visual_review_performed": False,
+                    }
+                    if compact else None
+                ),
+                reviewer_type="human",
+                reviewer=(
+                    "feishu_publish_confirmation" if compact
+                    else "feishu_human_operator"
+                ),
+            )
+            review_ids.append(review.review_id)
+        self._write_fields(record.record_id, {
+            FIELD_PROGRESS: PROGRESS_DONE,
+            FIELD_REVIEW: REVIEW_NOT_REQUIRED if approval_mode == "publish_confirmation" else REVIEW_APPROVED,
+            FIELD_REVIEW_STAGE: "技术完成" if approval_mode == "publish_confirmation" else "已验收",
+            FIELD_CONFIRM_PUBLISH: approval_mode == "publish_confirmation",
+            FIELD_NOTES: (
+                f"已按确认发布冻结 {len(tasks)} 篇原生图文，正在进入主排班池。"
+                if approval_mode == "publish_confirmation"
+                else f"已人工验收 {len(tasks)} 篇原生图文；勾选确认发布后进入主排班池。"
+            ),
+        })
+        return {
+            "record_id": record.record_id, "action": "approve_native_photo",
+            "task_ids": [task.task_id for task in tasks], "review_ids": review_ids,
+        }
+
+    def _confirm_photo_publish(self, record) -> Dict[str, Any]:
+        """Use 确认发布 as the only operator gate for native-photo content."""
+        preset_name = text_value(record.fields.get(FIELD_PRESET))
+        tasks = self._tasks(record.record_id)
+        photo_flow = bool(tasks) and all(
+            str(getattr(task, "media_kind", "video") or "video") == "native_photo"
+            for task in tasks
+        )
+        if not tasks and preset_name and self.catalog.is_native_photo(preset_name):
+            generated = self._generate(record)
+            if generated.get("action") in {
+                "stage_photo_assets", "stage_existing_outfit_assets",
+                "prepare_product_outfit_assets",
+            }:
+                record.fields[FIELD_PHOTO_ASSET_STATUS] = "待内容审核"
+                generated = self._approve_staged_photo_assets(record)
+            tasks = self._tasks(record.record_id)
+            photo_flow = bool(tasks) and all(
+                str(getattr(task, "media_kind", "video") or "video") == "native_photo"
+                for task in tasks
+            )
+        elif not tasks:
+            raise FeishuWorkflowError("找不到该飞书记录对应的 RDS 任务")
+        if not photo_flow:
+            # Existing video behavior remains unchanged.
+            if text_value(record.fields.get(FIELD_PROGRESS)) != PROGRESS_DONE:
+                raise FeishuWorkflowError("视频尚未完成技术生产，不能确认发布")
+            return self._schedule_publish(record)
+
+        self._assert_batch_complete(record.record_id, tasks)
+        if any(task.task_status == "photo_packaging" for task in tasks):
+            self._approve_photo_packages(
+                record, tasks, approval_mode="publish_confirmation"
+            )
+            tasks = self._tasks(record.record_id)
+        if any(task.task_status != "photo_ready" for task in tasks):
+            raise FeishuWorkflowError("图文尚未完成技术生产，不能确认发布")
+        return self._schedule_publish(record)
 
     def _render_tasks(
         self,
@@ -710,10 +1701,14 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
         self._assert_batch_complete(record.record_id, tasks)
         slots = []
         confirmed_by_checkbox = bool(record.fields.get(FIELD_CONFIRM_PUBLISH))
+        photo_only = all(
+            str(getattr(task, "media_kind", "video") or "video") == "native_photo"
+            for task in tasks
+        )
         # Preflight every task before enqueuing any member of this row.
         for task in tasks:
             if workflow_v2_enabled(task) and not self._v2_released(task):
-                raise FeishuWorkflowError("当前 V2 版本尚未通过成片终审，不能确认发布")
+                raise FeishuWorkflowError("当前 V2 版本尚未通过终审，不能确认发布")
         enqueue_main = callable(getattr(self.publish_scheduler, "enqueue_task", None))
         for task in tasks:
             if enqueue_main:
@@ -737,11 +1732,13 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 })
         if enqueue_main:
             progress = PROGRESS_QUEUED
-            note = (
-                f"已进入短视频主排班池，共 {len(slots)} 条。"
-                "按店铺养号配额自动分配账号和时间，非带货/不挂车；"
-                "在未来 48 小时排期窗口内提前选择当地 NeoBund BGM 并创建定时任务。"
-            )
+            note = (f"已进入主排班池，共 {len(slots)} 篇原生图文；"
+                    "按店铺养号配额分配具备图文直发能力的账号和时间，不挂商品；"
+                    "CreatOK 原生图文由 TikTok 自动添加推荐音乐，不承诺具体曲目。"
+                    if photo_only else
+                    f"已进入短视频主排班池，共 {len(slots)} 条。"
+                    "按店铺养号配额自动分配账号和时间，非带货/不挂车；"
+                    "在未来 48 小时排期窗口内提前选择当地 NeoBund BGM 并创建定时任务。")
             action = "enqueue_main_schedule"
         else:
             progress = PROGRESS_SCHEDULED
@@ -753,6 +1750,10 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
         self._write_fields(record.record_id, {
             FIELD_PROGRESS: progress,
             FIELD_CONFIRM_PUBLISH: False,
+            FIELD_MUSIC_MODE: (
+                "TikTok 平台自动推荐" if photo_only and enqueue_main
+                else "发布窗口自动选曲"
+            ),
             FIELD_NOTES: note,
         })
         return {"record_id": record.record_id, "action": action, "slots": slots}

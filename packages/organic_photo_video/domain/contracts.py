@@ -23,13 +23,24 @@ THEME_SCHEMA_VERSION = "opv-theme-v1"
 RENDER_PRESET_SCHEMA_VERSION = "opv-render-preset-v1"
 ACCOUNT_PROFILE_SCHEMA_VERSION = "opv-account-profile-v1"
 PLAN_SCHEMA_VERSION = "opv-plan-v1"
+PHOTO_PLAN_SCHEMA_VERSION = "opv-photo-plan-v1"
+PHOTO_RECIPE_SPEC_SCHEMA_VERSION = "opv-photo-recipe-v1"
 BGM_SCHEMA_VERSION = "opv-bgm-v1"
 
 PLAN_SHOT_COUNT = 5
 PLAN_DURATION_MIN_MS = 10000
 PLAN_DURATION_MAX_MS = 15000
 SHOT_KINDS = ("generated_photo", "composite_board")
+PHOTO_SOURCE_KINDS = (
+    "generated_photo",
+    "reused_asset",
+    "template_card",
+    "composite_board",
+)
 FIT_MODES = ("cover", "contain")
+MEDIA_KINDS = ("video", "native_photo")
+PRODUCT_MODES = ("NO_PRODUCT", "SOFT_PRODUCT", "PRODUCT_LED")
+PHOTO_ASSET_MODES = ("TEMPLATE_ONLY", "ASSET_REUSE", "AI_GENERATE")
 
 AUDIO_STRATEGIES = ("platform_hot_bgm", "embedded_bgm", "no_bgm")
 LOOK_SOURCE_TYPES = ("successful_look", "look_template", "ai_exploration")
@@ -351,7 +362,152 @@ def validate_account_profile_payload(payload: Mapping[str, Any]) -> List[str]:
 # Plan / shot / BGM contracts (docs/MODEL_HANDOFF.md section 8)
 # --------------------------------------------------------------------------
 
+def validate_photo_plan_payload(plan: Mapping[str, Any]) -> List[str]:
+    """Validate a native-photo plan without inventing video-only fields.
+
+    The MVP deliberately freezes five ordered slides.  A slide may depend on
+    other slides (for example a four-choice cover), but dependencies must form
+    an acyclic graph so the exporter always has a deterministic build order.
+    """
+    errors: List[str] = []
+    _check_schema_version(errors, plan, PHOTO_PLAN_SCHEMA_VERSION)
+    _require_enum(errors, plan, "media_kind", ("native_photo",))
+    _require_str(errors, plan, "category_key")
+    _require_enum(errors, plan, "product_mode", PRODUCT_MODES)
+
+    market_pack = plan.get("market_pack")
+    if not _is_dict(market_pack):
+        errors.append("market_pack must be an object")
+    else:
+        _require_str(errors, market_pack, "id")
+        _require_int(errors, market_pack, "version", minimum=1)
+        _require_country(errors, market_pack, "country")
+        _require_locale(errors, market_pack, "locale")
+
+    recipe = plan.get("recipe")
+    if not _is_dict(recipe):
+        errors.append("recipe must be an object")
+    else:
+        _require_str(errors, recipe, "id")
+        _require_int(errors, recipe, "version", minimum=1)
+
+    template = plan.get("template")
+    if not _is_dict(template):
+        errors.append("template must be an object")
+    else:
+        _require_str(errors, template, "id")
+        _require_int(errors, template, "version", minimum=1)
+
+    _require_dict(errors, plan, "variables", non_empty=False)
+    _require_int(errors, plan, "cover_index", minimum=1, maximum=PLAN_SHOT_COUNT)
+
+    copy_block = plan.get("copy")
+    if not _is_dict(copy_block):
+        errors.append("copy must be an object")
+    else:
+        _require_str(errors, copy_block, "title", allow_empty=True)
+        _require_str(errors, copy_block, "caption")
+        _require_list(errors, copy_block, "hashtags")
+
+    product_mode = plan.get("product_mode")
+    product = plan.get("product")
+    if product_mode in {"SOFT_PRODUCT", "PRODUCT_LED"}:
+        if not _is_dict(product):
+            errors.append(f"product must be an object for {product_mode}")
+        else:
+            _require_str(errors, product, "id")
+    elif product is not None and not _is_dict(product):
+        errors.append("product must be an object or null")
+
+    slides = plan.get("slides")
+    if not _is_list(slides) or len(slides) != PLAN_SHOT_COUNT:
+        errors.append(
+            f"slides must contain exactly {PLAN_SHOT_COUNT} entries for the photo MVP"
+        )
+        return errors
+
+    role_bound = plan.get("source_binding") == "roles-v1"
+    source_roles = plan.get("source_roles") or []
+    shots = plan.get("shots") or []
+    if role_bound and (not isinstance(source_roles, list) or not source_roles or len(set(source_roles)) != len(source_roles)
+                       or len(shots) != len(source_roles)
+                       or [shot.get("slot_role") for shot in shots] != source_roles
+                       or [shot.get("slot_index") for shot in shots] != list(range(1, len(shots) + 1))):
+        errors.append("role-bound source shots must match ordered unique source_roles")
+    seen_slots: set = set()
+    dependencies: Dict[int, List[int]] = {}
+    for slide in slides:
+        if not _is_dict(slide):
+            errors.append(f"slide must be an object, got {slide!r}")
+            continue
+        _require_int(
+            errors, slide, "slot_index", minimum=1, maximum=PLAN_SHOT_COUNT
+        )
+        _require_str(errors, slide, "slot_role")
+        _require_enum(errors, slide, "source_kind", PHOTO_SOURCE_KINDS)
+        _require_list(errors, slide, "source_refs")
+        _require_str(errors, slide, "overlay_text", allow_empty=True)
+        _require_dict(errors, slide, "layout_snapshot", non_empty=False)
+        slot_index = slide.get("slot_index")
+        if _is_int(slot_index):
+            if slot_index in seen_slots:
+                errors.append(f"slides duplicate slot_index {slot_index}")
+            seen_slots.add(slot_index)
+            dependencies[slot_index] = []
+        source_slots = slide.get("source_slots", [])
+        if not _is_list(source_slots):
+            errors.append("source_slots must be a list")
+            continue
+        if role_bound:
+            count = {"single": 1, "split_vertical": 2, "grid_2x2": 4}.get(slide.get("layout_snapshot", {}).get("layout"))
+            if len(source_slots) != count or len(set(source_slots)) != len(source_slots):
+                errors.append("role-bound slide layout requires an exact source count")
+            refs = [shots[value - 1].get("source_asset_id") for value in source_slots if _is_int(value) and 1 <= value <= len(shots)]
+            if refs != slide.get("source_refs"):
+                errors.append("role-bound source refs mismatch")
+        for source_slot in source_slots:
+            if not _is_int(source_slot) or not 1 <= source_slot <= (len(shots) if role_bound else PLAN_SHOT_COUNT):
+                errors.append(f"source_slots contains invalid slot {source_slot!r}")
+                continue
+            if role_bound:
+                continue
+            if source_slot == slot_index:
+                errors.append(f"slide {slot_index} cannot depend on itself")
+                continue
+            if _is_int(slot_index):
+                dependencies[slot_index].append(source_slot)
+
+    expected_slots = set(range(1, PLAN_SHOT_COUNT + 1))
+    if seen_slots != expected_slots:
+        errors.append(f"slides slot_index must cover 1..{PLAN_SHOT_COUNT} exactly once")
+    if _photo_dependencies_have_cycle(dependencies):
+        errors.append("slides source_slots must not contain a dependency cycle")
+    return errors
+
+
+def _photo_dependencies_have_cycle(dependencies: Mapping[int, List[int]]) -> bool:
+    visiting: set = set()
+    visited: set = set()
+
+    def visit(slot: int) -> bool:
+        if slot in visiting:
+            return True
+        if slot in visited:
+            return False
+        visiting.add(slot)
+        for dependency in dependencies.get(slot, []):
+            if visit(dependency):
+                return True
+        visiting.remove(slot)
+        visited.add(slot)
+        return False
+
+    return any(visit(slot) for slot in dependencies)
+
+
 def validate_plan_json(plan: Mapping[str, Any]) -> List[str]:
+    if plan.get("schema_version") == PHOTO_PLAN_SCHEMA_VERSION:
+        return validate_photo_plan_payload(plan)
     errors: List[str] = []
     _check_schema_version(errors, plan, PLAN_SCHEMA_VERSION)
 
@@ -550,6 +706,38 @@ def validate_product_facts(payload: Mapping[str, Any]) -> List[str]:
     return errors
 
 
+def validate_photo_recipe_spec_payload(payload: Mapping[str, Any]) -> List[str]:
+    """Validate the stable business rules nested in a photo recipe."""
+    errors: List[str] = []
+    _check_schema_version(errors, payload, PHOTO_RECIPE_SPEC_SCHEMA_VERSION)
+    _require_enum(errors, payload, "media_kind", ("native_photo",))
+    _require_str(errors, payload, "category_key")
+    _require_list(errors, payload, "markets", non_empty=True)
+    for market in payload.get("markets") or []:
+        if not _is_str(market) or not _COUNTRY_RE.match(market):
+            errors.append(f"markets contains bad code {market!r}")
+    _require_list(errors, payload, "theme_types", non_empty=True)
+    _require_list(errors, payload, "product_modes", non_empty=True)
+    for product_mode in payload.get("product_modes") or []:
+        if product_mode not in PRODUCT_MODES:
+            errors.append(
+                f"product_modes contains {product_mode!r}; expected one of {list(PRODUCT_MODES)}"
+            )
+    _require_dict(errors, payload, "variables_schema", non_empty=False)
+    from domain.photo_contracts import validate_execution_profiles
+    errors.extend(validate_execution_profiles(payload, require_profiles=False))
+    _require_str(errors, payload, "template_id")
+    _require_int(errors, payload, "template_version", minimum=1)
+    _require_dict(errors, payload, "visual_rules", non_empty=False)
+    asset_policy = payload.get("asset_policy")
+    if not _is_dict(asset_policy):
+        errors.append("asset_policy must be an object")
+    else:
+        _require_enum(errors, asset_policy, "default", PHOTO_ASSET_MODES)
+        _require_str(errors, asset_policy, "on_missing")
+    return errors
+
+
 def validate_content_recipe_payload(payload: Mapping[str, Any]) -> List[str]:
     errors: List[str] = []
     _check_schema_version(errors, payload, CONTENT_RECIPE_SCHEMA_VERSION)
@@ -565,6 +753,18 @@ def validate_content_recipe_payload(payload: Mapping[str, Any]) -> List[str]:
     if _is_int(anchor) and _is_int(shot_count) and anchor > shot_count:
         errors.append("anchor_slot must be <= shot_count")
     _require_list(errors, payload, "hook_types", non_empty=True)
+    recipe_spec = payload.get("recipe_spec")
+    if recipe_spec is None:
+        recipe_spec = payload.get("recipe_spec_json")
+    is_photo_recipe = (
+        _is_dict(recipe_spec)
+        and recipe_spec.get("schema_version") == PHOTO_RECIPE_SPEC_SCHEMA_VERSION
+    )
+    if recipe_spec is not None:
+        if not _is_dict(recipe_spec):
+            errors.append("recipe_spec must be an object")
+        else:
+            errors.extend(validate_photo_recipe_spec_payload(recipe_spec))
     structure = payload.get("story_structure")
     if not _is_list(structure) or len(structure) != payload.get("shot_count"):
         errors.append(
@@ -572,28 +772,55 @@ def validate_content_recipe_payload(payload: Mapping[str, Any]) -> List[str]:
         )
         return errors
     functions_seen: List[str] = []
+    slots_seen: set = set()
     for slot in structure:
         if not _is_dict(slot):
             errors.append(f"story slot must be an object, got {slot!r}")
             continue
         _require_int(errors, slot, "slot_index", minimum=1, maximum=shot_count or 10)
-        _require_enum(errors, slot, "narrative_function", NARRATIVE_FUNCTIONS)
-        _require_str(errors, slot, "slot_role")
-        _require_str(errors, slot, "purpose")
-        if slot.get("shot_kind") is not None:
-            _require_enum(errors, slot, "shot_kind", SHOT_KINDS)
-        function_value = slot.get("narrative_function")
-        if _is_str(function_value):
-            functions_seen.append(function_value)
-    expected = list(NARRATIVE_FUNCTIONS)[: len(structure)]
-    if functions_seen and functions_seen != expected:
-        errors.append(
-            f"narrative functions must follow the {expected} arc, got {functions_seen}"
-        )
+        slot_index = slot.get("slot_index")
+        if _is_int(slot_index):
+            if slot_index in slots_seen:
+                errors.append(f"story_structure duplicate slot_index {slot_index}")
+            slots_seen.add(slot_index)
+        if is_photo_recipe:
+            _require_str(errors, slot, "role")
+            source_slots = slot.get("source_slots", [])
+            if not _is_list(source_slots):
+                errors.append("story slot source_slots must be a list")
+            else:
+                for source_slot in source_slots:
+                    if not _is_int(source_slot) or not 1 <= source_slot <= (shot_count or 10):
+                        errors.append(
+                            f"story slot source_slots contains invalid slot {source_slot!r}"
+                        )
+        else:
+            _require_enum(errors, slot, "narrative_function", NARRATIVE_FUNCTIONS)
+            _require_str(errors, slot, "slot_role")
+            _require_str(errors, slot, "purpose")
+            if slot.get("shot_kind") is not None:
+                _require_enum(errors, slot, "shot_kind", SHOT_KINDS)
+            function_value = slot.get("narrative_function")
+            if _is_str(function_value):
+                functions_seen.append(function_value)
+    if _is_int(shot_count) and slots_seen != set(range(1, shot_count + 1)):
+        errors.append(f"story_structure slot_index must cover 1..{shot_count} exactly once")
+    if not is_photo_recipe:
+        expected = list(NARRATIVE_FUNCTIONS)[: len(structure)]
+        if functions_seen and functions_seen != expected:
+            errors.append(
+                f"narrative functions must follow the {expected} arc, got {functions_seen}"
+            )
     _require_dict(errors, payload, "copy_style")
     _require_list(errors, payload, "suitable_topics", non_empty=True)
-    _require_str(errors, payload, "render_profile_id")
-    _require_str(errors, payload, "quality_profile_id")
+    if is_photo_recipe:
+        if payload.get("render_profile_id") is not None:
+            _require_str(errors, payload, "render_profile_id")
+        if payload.get("quality_profile_id") is not None:
+            _require_str(errors, payload, "quality_profile_id")
+    else:
+        _require_str(errors, payload, "render_profile_id")
+        _require_str(errors, payload, "quality_profile_id")
     return errors
 
 

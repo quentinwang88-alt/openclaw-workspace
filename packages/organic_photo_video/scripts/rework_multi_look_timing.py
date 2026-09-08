@@ -11,7 +11,7 @@ for value in (ROOT.parents[1], ROOT): sys.path.insert(0, str(value))
 from workspace_support import load_repo_env
 from repositories.rds_repository import RdsRepository
 from services.hero_first import HeroFirstProducer
-from services.image_generator import OpenAIImageGenerator
+from services.image_generator import build_default_photo_generator
 from services.multi_look_planner import multi_look_durations
 from services.technical_production import TechnicalProductionFlow
 from services.video_render_flow import VideoRenderFlow
@@ -51,7 +51,7 @@ def main():
             reason="Shorten five-look reading cadence to six seconds; reuse all selected images",
             idempotency_key="multi-look-six-seconds-v1", operator="user_requested_timing_rework")
         advance_package_for_task(repo, args.task_id, PACKAGE_QA_REVIEW)
-    TechnicalProductionFlow(repo, HeroFirstProducer(repo, OpenAIImageGenerator(), technical_only=True),
+    TechnicalProductionFlow(repo, HeroFirstProducer(repo, build_default_photo_generator(), technical_only=True),
         VideoRenderFlow(repo, FFmpegStillRenderer())).run(args.task_id, overlay_profile_id="OVERLAY_LIGHT_V1")
     task = repo.get_task(args.task_id); render = repo.get_render(task.selected_render_id)
     result = {"task_id": task.task_id, "video": render.output_url, "duration_ms": render.qc_json.get("duration_ms"),

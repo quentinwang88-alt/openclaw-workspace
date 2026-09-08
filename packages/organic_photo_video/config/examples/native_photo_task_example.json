@@ -1,0 +1,20 @@
+{
+  "account_id": "OPV_TH_TEST_001",
+  "recipe_id": "PHOTO_TH_PICK_YOUR_LOOK_V1",
+  "category_key": "womenswear",
+  "product_mode": "NO_PRODUCT",
+  "asset_set_id": "aset_th_womenswear_travel_001",
+  "variables": {
+    "choice_axis": "outerwear",
+    "scene": "Photo",
+    "style": "korean_clean"
+  },
+  "copy": {
+    "title": "วันนี้เลือก A, B, C หรือ D?",
+    "caption": "ถ้าไปโซล ลุคไหนเป็นคุณที่สุด?",
+    "hashtags": ["#ไอเดียแต่งตัว", "#เที่ยวเกาหลี", "#OOTD"],
+    "slide_texts": ["A, B, C หรือ D?", "A", "B", "C", "D — เลือกอะไรดี?"]
+  },
+  "idempotency_key": "replace-with-business-key",
+  "operator": "replace-with-operator-name"
+}

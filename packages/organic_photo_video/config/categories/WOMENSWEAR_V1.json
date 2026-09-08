@@ -1,0 +1,33 @@
+{
+  "schema_version": "opv-category-profile-v1",
+  "category_key": "womenswear",
+  "category_name": "女装",
+  "status": "active",
+  "interest_drivers": [
+    "显高显瘦",
+    "好搭配",
+    "场景适配",
+    "拍照好看",
+    "温度适配",
+    "配色与风格",
+    "旅行需求"
+  ],
+  "visual_dimensions": [
+    "完整人物比例",
+    "腰线与衣长",
+    "上下装和鞋履关系",
+    "同一人物与拍摄风格",
+    "目的地和温度语义"
+  ],
+  "asset_requirements": [
+    "人物全身清晰且手脚不出画",
+    "服装轮廓与颜色可辨认",
+    "同组素材人物身份和画面风格可控",
+    "素材具备竖版裁切空间"
+  ],
+  "content_rules": {
+    "allowed_product_modes": ["NO_PRODUCT", "SOFT_PRODUCT"],
+    "default_asset_mode": "ASSET_REUSE",
+    "avoid": ["价格和促销信息", "购买链接", "夸张身材承诺", "不可验证的保暖性能"]
+  }
+}

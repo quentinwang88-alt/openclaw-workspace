@@ -1,0 +1,35 @@
+{
+  "schema_version": "opv-photo-layout-v2",
+  "layout_id": "PHOTO_CHOICE_CARD_V2",
+  "layout_version": 2,
+  "layout_kind": "CHOICE_GRID",
+  "status": "active",
+  "render_options": {
+    "width": 1080,
+    "height": 1920,
+    "background": "#F7F5F0",
+    "jpeg_quality": 90,
+    "font_candidates": [
+      "/System/Library/Fonts/Thonburi.ttc",
+      "/System/Library/Fonts/Supplemental/Arial Unicode.ttf"
+    ],
+    "font_size": 42,
+    "cover_font_size": 44,
+    "detail_font_size": 38,
+    "cta_font_size": 36,
+    "min_font_size": 26,
+    "text_color": "#171717",
+    "text_background": "#F7F3EACC",
+    "cta_text_color": "#F7F3EA",
+    "cta_background": "#3B2B23D9",
+    "text_radius": 18,
+    "max_lines": 2,
+    "cover_index": 1,
+    "choice_badges": true,
+    "padding_x": 24,
+    "padding_y": 20,
+    "line_spacing": 10,
+    "text_position": "top",
+    "split_last_line_to_bottom": true
+  }
+}

@@ -42,4 +42,14 @@ def copy_locale_issues(copy_block: Dict[str, Any], locale: str) -> List[str]:
                 require_locale_script=False,
             )
         )
+    for index, text in enumerate(copy_block.get("slide_texts") or []):
+        issues.extend(
+            # A slide may intentionally be only "A · OOTD" or another
+            # short Latin label.  Title/caption already establish the locale;
+            # here we only prevent a foreign script from leaking on-image.
+            visible_text_issues(
+                text, locale, f"slide_texts[{index}]",
+                require_locale_script=False,
+            )
+        )
     return issues

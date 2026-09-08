@@ -1,0 +1,92 @@
+{
+  "schema_version": "opv-asset-set-v1",
+  "asset_set_id": "ASSET_TH_WOMENSWEAR_CHOICE_V2",
+  "asset_set_key": "TH_WOMENSWEAR_CHOICE",
+  "asset_set_version": 2,
+  "category_key": "womenswear",
+  "market": "TH",
+  "status": "disabled",
+  "tags": {
+    "use_cases": [
+      "pick_your_look",
+      "occasion",
+      "style_match"
+    ],
+    "choice_axis": [
+      "outerwear",
+      "style",
+      "color"
+    ],
+    "scene": [
+      "Cafe",
+      "Shopping",
+      "Photo"
+    ],
+    "style": [
+      "korean_clean",
+      "minimal",
+      "casual",
+      "sweet"
+    ],
+    "source": "approved_existing_generation"
+  },
+  "assets": [
+    {
+      "asset_id": "th_choice_cover_seed",
+      "path": "../../../../shared/data/organic_photo_video/asset_sets/th_choice/look_e.png",
+      "role": "cover_seed",
+      "tags": {
+        "note": "slot 1 cover is composed from slots 2-5"
+      }
+    },
+    {
+      "asset_id": "th_choice_a",
+      "path": "../../../../shared/data/organic_photo_video/asset_sets/th_choice/look_a.png",
+      "role": "look_a",
+      "tags": {
+        "outerwear": "brown_jacket",
+        "bottom": "black_shorts"
+      },
+      "display_label": {
+        "th-TH": "แจ็กเก็ตน้ำตาล + ขาสั้น"
+      }
+    },
+    {
+      "asset_id": "th_choice_b",
+      "path": "../../../../shared/data/organic_photo_video/asset_sets/th_choice/look_b.png",
+      "role": "look_b",
+      "tags": {
+        "outerwear": "black_jacket",
+        "bottom": "black_shorts"
+      },
+      "display_label": {
+        "th-TH": "เสื้อคลุมเทา + ขาสั้น"
+      }
+    },
+    {
+      "asset_id": "th_choice_c",
+      "path": "../../../../shared/data/organic_photo_video/asset_sets/th_choice/look_c.png",
+      "role": "look_c",
+      "tags": {
+        "outerwear": "black_jacket",
+        "bottom": "pleated_skirt"
+      },
+      "display_label": {
+        "th-TH": "เสื้อคลุมเทา + กระโปรงพลีต"
+      }
+    },
+    {
+      "asset_id": "th_choice_d",
+      "path": "../../../../shared/data/organic_photo_video/asset_sets/th_choice/look_d.png",
+      "role": "look_d",
+      "tags": {
+        "outerwear": "tan_jacket",
+        "bottom": "black_skirt"
+      },
+      "display_label": {
+        "th-TH": "แจ็กเก็ตน้ำตาล + กระโปรง"
+      }
+    }
+  ],
+  "pairs": []
+}

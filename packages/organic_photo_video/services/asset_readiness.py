@@ -7,6 +7,7 @@ from typing import Any, Mapping
 
 from services.asset_compatibility import compatibility_errors, uses_pure_color, scene_preference_mismatch
 from services.look_selection import supports_dynamic_items, is_dress_recipe
+from services.persona_pack import build_persona_pack, evaluate_persona_pack
 
 
 class AssetReadinessError(ValueError):
@@ -35,6 +36,23 @@ def check_generation_assets(account, product, plan):
         issues.append({"code": code, "message": message, "severity": severity})
     if account.status not in {"testing", "active"}:
         issue("account_inactive", "账户不在可生产或试生产状态")
+    if plan.get("media_kind") == "native_photo":
+        shots = list(plan.get("shots") or [])
+        if shots and all(item.get("shot_kind") == "reused_asset" for item in shots):
+            for shot in shots:
+                path = Path(str(shot.get("asset_path") or "")).expanduser()
+                expected = str(shot.get("asset_sha256") or "")
+                if (not path.is_file() or not expected
+                        or hashlib.sha256(path.read_bytes()).hexdigest() != expected):
+                    issue("reused_asset_changed", "冻结复用素材缺失或哈希已变化")
+            return {
+                "version": "asset-admission-v2", "ready": not any(
+                    item["severity"] == "error" for item in issues
+                ),
+                "mode": "asset_reuse", "issues": issues,
+                "selected_persona_ref": None,
+                "capabilities": {"ai_image_calls": 0, "product_reference_required": False},
+            }
     persona = (plan.get("persona") or {}).get("snapshot") or {}
     look = (plan.get("look") or {}).get("snapshot") or {}
     scene = (plan.get("scene") or {}).get("snapshot") or {}
@@ -52,6 +70,11 @@ def check_generation_assets(account, product, plan):
         issue("persona_not_production_enabled", "正式生产人物必须在原素材库标记 enabled")
     if not active and len(persona_refs) < 3:
         issue("persona_testing_only", "人物参考不足 3 张，仅适合受控试生产", "warning")
+    if str(plan.get("presentation_type") or "") == "SCENE_MODEL" and persona:
+        # Human-scene production needs typed identity evidence; a single
+        # close-up selfie can no longer pass admission.
+        for item in evaluate_persona_pack(build_persona_pack(persona))["issues"]:
+            issue(item["code"], item["message"])
     for owner, assets in (("persona", persona.get("reference_assets")),
                           ("product", product.get("reference_assets"))):
         for asset in assets or []:

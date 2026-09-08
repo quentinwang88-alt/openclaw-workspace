@@ -14,7 +14,7 @@ for entry in (str(PACKAGE_ROOT.parents[1]), str(PACKAGE_ROOT)):
         sys.path.insert(0, entry)
 
 from workspace_support import load_repo_env
-from services.release_gate import freeze_release, ReleaseGateError
+from services.release_gate import freeze_photo_release, freeze_release, ReleaseGateError
 
 
 SAFE_RELEASE_REASONS = {
@@ -26,6 +26,11 @@ SAFE_RELEASE_REASONS = {
     "成片检查缺失、过期或检查来源无效": "render_review_invalid",
     "已验收成片文件 SHA256 已变化": "render_file_changed",
     "已验收版本没有镜头选择清单": "shot_selection_missing",
+    "Workflow V2 没有当前版本的已验收图文包": "current_photo_release_missing",
+    "已验收图文 revision 或内容包不存在或归属不匹配": "photo_revision_ownership_mismatch",
+    "图文输入或选图与当前冻结 revision 不一致": "photo_selection_mismatch",
+    "已验收图文包清单缺失或版本不匹配": "photo_package_mismatch",
+    "图文包检查缺失、过期或检查来源无效": "photo_review_invalid",
 }
 
 
@@ -47,6 +52,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task-id", required=True)
     parser.add_argument("--manifest-sha256", required=True)
+    parser.add_argument("--media-kind", choices=("video", "native_photo"), default="video")
     args = parser.parse_args()
     stage = "repository_import"
     try:
@@ -57,12 +63,18 @@ def main() -> int:
         repository = RdsRepository.from_env()
         stage = "task_lookup"
         task = repository.get_task(args.task_id)
-        if task is None or not task.selected_render_id:
+        if task is None:
             raise ReleaseGateError("发布前任务或选中成片不存在")
-        stage = "render_lookup"
-        render = repository.get_render(task.selected_render_id)
-        stage = "release_freeze"
-        manifest = freeze_release(repository, task, render)
+        if args.media_kind == "native_photo":
+            stage = "photo_release_freeze"
+            manifest = freeze_photo_release(repository, task)
+        else:
+            if not task.selected_render_id:
+                raise ReleaseGateError("发布前任务或选中成片不存在")
+            stage = "render_lookup"
+            render = repository.get_render(task.selected_render_id)
+            stage = "release_freeze"
+            manifest = freeze_release(repository, task, render)
         stage = "manifest_compare"
         if manifest["manifest_sha256"] != args.manifest_sha256:
             raise ReleaseGateError("当前验收版本与队列冻结清单不同，禁止上传")

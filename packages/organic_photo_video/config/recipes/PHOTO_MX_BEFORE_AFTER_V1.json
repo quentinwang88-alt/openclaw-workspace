@@ -1,0 +1,320 @@
+{
+  "schema_version": "opv-content-recipe-v1",
+  "recipe_id": "PHOTO_MX_BEFORE_AFTER_V1",
+  "recipe_key": "MX_WIG_BEFORE_AFTER",
+  "recipe_version": 1,
+  "content_goal": "wig_before_after",
+  "anchor_slot": 3,
+  "shot_count": 5,
+  "hook_types": [
+    "antes_despues",
+    "look_transformation"
+  ],
+  "story_structure": [
+    {
+      "slot_index": 1,
+      "role": "before_after_hook",
+      "source_slots": [
+        2,
+        3
+      ],
+      "layout_variant": "SPLIT_TWO",
+      "purpose": "ANTES/DESPUÉS 同人对比封面"
+    },
+    {
+      "slot_index": 2,
+      "role": "before",
+      "source_slots": [],
+      "layout_variant": "DETAIL",
+      "purpose": "改造前自然状态"
+    },
+    {
+      "slot_index": 3,
+      "role": "after",
+      "source_slots": [],
+      "layout_variant": "DETAIL",
+      "purpose": "改造后完整发型"
+    },
+    {
+      "slot_index": 4,
+      "role": "hair_detail",
+      "source_slots": [
+        3
+      ],
+      "layout_variant": "DETAIL",
+      "purpose": "从After图展示发际线、分缝、卷度或发色"
+    },
+    {
+      "slot_index": 5,
+      "role": "cta",
+      "source_slots": [
+        3
+      ],
+      "layout_variant": "DETAIL",
+      "purpose": "复用After效果，以是否尝试该造型轻互动"
+    }
+  ],
+  "copy_style": {
+    "locale": "es-MX",
+    "tone": "direct_emotional",
+    "max_lines_per_block": 2,
+    "example": "ANTES / DESPUÉS — ¿te harías este cambio?"
+  },
+  "suitable_topics": [
+    "wig_transformation",
+    "before_after",
+    "change_of_look"
+  ],
+  "quality_profile_id": "QUALITY_STANDARD_V1",
+  "recipe_spec": {
+    "schema_version": "opv-photo-recipe-v1",
+    "media_kind": "native_photo",
+    "category_key": "wig",
+    "markets": [
+      "MX"
+    ],
+    "theme_types": [
+      "TRANSFORMATION"
+    ],
+    "product_modes": [
+      "NO_PRODUCT",
+      "SOFT_PRODUCT"
+    ],
+    "variables_schema": {
+      "length": {
+        "type": "enum",
+        "values": [
+          "bob",
+          "medium",
+          "long"
+        ],
+        "required": true
+      },
+      "texture": {
+        "type": "enum",
+        "values": [
+          "straight",
+          "wavy",
+          "curly"
+        ],
+        "required": true
+      },
+      "color": {
+        "type": "enum",
+        "values": [
+          "black",
+          "dark_brown",
+          "brown",
+          "highlighted",
+          "pink_black"
+        ],
+        "required": true
+      },
+      "change_intensity": {
+        "type": "enum",
+        "values": [
+          "natural",
+          "noticeable",
+          "bold"
+        ],
+        "required": true
+      }
+    },
+    "template_id": "PHOTO_COMPARISON_V1",
+    "template_version": 1,
+    "visual_rules": {
+      "same_identity": true,
+      "same_camera_angle": true,
+      "preserve_face_and_skin_tone": true,
+      "hairline_visible": true,
+      "transformation_changes_only": "hairstyle"
+    },
+    "asset_policy": {
+      "default": "ASSET_REUSE",
+      "on_missing": "NEEDS_ASSET"
+    },
+    "asset_match_keys": [
+      "length",
+      "texture",
+      "color",
+      "change_intensity"
+    ],
+    "asset_requirements": {
+      "required_roles": [
+        "cover",
+        "before",
+        "after",
+        "detail",
+        "cta"
+      ],
+      "required_tags": {
+        "use_cases": "before_after"
+      },
+      "required_pairs": [
+        {
+          "roles": [
+            "before",
+            "after"
+          ],
+          "relation": "same_identity_before_after"
+        }
+      ]
+    },
+    "execution_profiles": [
+      {
+        "profile_id": "pink_black_bold",
+        "label": "pink_black 前后变化",
+        "variables": {
+          "length": "long",
+          "texture": "wavy",
+          "color": "pink_black",
+          "change_intensity": "bold"
+        },
+        "asset_set_keys": [
+          "MX_WIG_TRANSFORM"
+        ],
+        "copy_variants": [
+          {
+            "copy_id": "pink_black_bold_copy_1",
+            "copy": {
+              "title": "Un cambio de look",
+              "caption": "El mismo rostro, otro peinado. ¿Te animarías a probar este cambio de look?",
+              "hashtags": [
+                "#CambioDeLook",
+                "#Pelucas"
+              ],
+              "slide_texts": [
+                "ANTES / DESPUÉS",
+                "ANTES",
+                "DESPUÉS",
+                "Mira el peinado",
+                "¿Lo probarías?"
+              ]
+            }
+          },
+          {
+            "copy_id": "pink_black_bold_copy_2",
+            "copy": {
+              "title": "Mira el antes y después",
+              "caption": "Desliza para ver el cambio de peinado y cuéntanos cuál versión te gusta más.",
+              "hashtags": [
+                "#CambioDeLook",
+                "#Pelucas"
+              ],
+              "slide_texts": [
+                "Un nuevo peinado",
+                "Así empezó",
+                "Así quedó",
+                "Un vistazo de cerca",
+                "¿Antes o después?"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "profile_id": "black_natural",
+        "label": "black 前后变化",
+        "variables": {
+          "length": "long",
+          "texture": "wavy",
+          "color": "black",
+          "change_intensity": "natural"
+        },
+        "asset_set_keys": [
+          "MX_WIG_TRANSFORM"
+        ],
+        "copy_variants": [
+          {
+            "copy_id": "black_natural_copy_1",
+            "copy": {
+              "title": "Un cambio de look",
+              "caption": "El mismo rostro, otro peinado. ¿Te animarías a probar este cambio de look?",
+              "hashtags": [
+                "#CambioDeLook",
+                "#Pelucas"
+              ],
+              "slide_texts": [
+                "ANTES / DESPUÉS",
+                "ANTES",
+                "DESPUÉS",
+                "Mira el peinado",
+                "¿Lo probarías?"
+              ]
+            }
+          },
+          {
+            "copy_id": "black_natural_copy_2",
+            "copy": {
+              "title": "Mira el antes y después",
+              "caption": "Desliza para ver el cambio de peinado y cuéntanos cuál versión te gusta más.",
+              "hashtags": [
+                "#CambioDeLook",
+                "#Pelucas"
+              ],
+              "slide_texts": [
+                "Un nuevo peinado",
+                "Así empezó",
+                "Así quedó",
+                "Un vistazo de cerca",
+                "¿Antes o después?"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "profile_id": "brown_noticeable",
+        "label": "brown 前后变化",
+        "variables": {
+          "length": "long",
+          "texture": "wavy",
+          "color": "brown",
+          "change_intensity": "noticeable"
+        },
+        "asset_set_keys": [
+          "MX_WIG_TRANSFORM"
+        ],
+        "copy_variants": [
+          {
+            "copy_id": "brown_noticeable_copy_1",
+            "copy": {
+              "title": "Un cambio de look",
+              "caption": "El mismo rostro, otro peinado. ¿Te animarías a probar este cambio de look?",
+              "hashtags": [
+                "#CambioDeLook",
+                "#Pelucas"
+              ],
+              "slide_texts": [
+                "ANTES / DESPUÉS",
+                "ANTES",
+                "DESPUÉS",
+                "Mira el peinado",
+                "¿Lo probarías?"
+              ]
+            }
+          },
+          {
+            "copy_id": "brown_noticeable_copy_2",
+            "copy": {
+              "title": "Mira el antes y después",
+              "caption": "Desliza para ver el cambio de peinado y cuéntanos cuál versión te gusta más.",
+              "hashtags": [
+                "#CambioDeLook",
+                "#Pelucas"
+              ],
+              "slide_texts": [
+                "Un nuevo peinado",
+                "Así empezó",
+                "Así quedó",
+                "Un vistazo de cerca",
+                "¿Antes o después?"
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "status": "active"
+}

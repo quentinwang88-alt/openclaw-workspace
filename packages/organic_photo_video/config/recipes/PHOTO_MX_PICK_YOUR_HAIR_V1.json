@@ -1,0 +1,314 @@
+{
+  "schema_version": "opv-content-recipe-v1",
+  "recipe_id": "PHOTO_MX_PICK_YOUR_HAIR_V1",
+  "recipe_key": "MX_PICK_YOUR_HAIR",
+  "recipe_version": 2,
+  "content_goal": "pick_your_hair",
+  "anchor_slot": 2,
+  "shot_count": 5,
+  "hook_types": [
+    "pick_one_of_four",
+    "cual_elegirias"
+  ],
+  "story_structure": [
+    {
+      "slot_index": 1,
+      "role": "choice_grid",
+      "source_slots": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "layout_variant": "GRID_FOUR",
+      "purpose": "A/B/C/D 四种发型选择封面"
+    },
+    {
+      "slot_index": 2,
+      "role": "hair_a",
+      "source_slots": [],
+      "layout_variant": "CHOICE_DETAIL",
+      "purpose": "发型 A 完整效果"
+    },
+    {
+      "slot_index": 3,
+      "role": "hair_b",
+      "source_slots": [],
+      "layout_variant": "CHOICE_DETAIL",
+      "purpose": "发型 B 完整效果"
+    },
+    {
+      "slot_index": 4,
+      "role": "hair_c",
+      "source_slots": [],
+      "layout_variant": "CHOICE_DETAIL",
+      "purpose": "发型 C 完整效果"
+    },
+    {
+      "slot_index": 5,
+      "role": "hair_d_with_cta",
+      "source_slots": [],
+      "layout_variant": "CHOICE_DETAIL",
+      "purpose": "发型 D 完整效果并互动"
+    }
+  ],
+  "copy_style": {
+    "locale": "es-MX",
+    "tone": "short_interactive",
+    "max_lines_per_block": 2,
+    "example": "¿Cuál elegirías: A, B, C o D?"
+  },
+  "suitable_topics": [
+    "hair_choice",
+    "length_choice",
+    "color_choice",
+    "texture_choice"
+  ],
+  "quality_profile_id": "QUALITY_STANDARD_V1",
+  "recipe_spec": {
+    "schema_version": "opv-photo-recipe-v1",
+    "media_kind": "native_photo",
+    "category_key": "wig",
+    "markets": [
+      "MX"
+    ],
+    "theme_types": [
+      "CHOICE"
+    ],
+    "product_modes": [
+      "NO_PRODUCT",
+      "SOFT_PRODUCT"
+    ],
+    "variables_schema": {
+      "choice_axis": {
+        "type": "enum",
+        "values": [
+          "length",
+          "texture",
+          "color",
+          "style"
+        ],
+        "required": true
+      },
+      "length_options": {
+        "type": "set",
+        "values": [
+          "bob",
+          "medium",
+          "long"
+        ],
+        "required": false
+      },
+      "texture_options": {
+        "type": "set",
+        "values": [
+          "straight",
+          "wavy",
+          "curly"
+        ],
+        "required": false
+      },
+      "color_options": {
+        "type": "set",
+        "values": [
+          "black",
+          "dark_brown",
+          "brown",
+          "highlighted"
+        ],
+        "required": false
+      }
+    },
+    "template_id": "PHOTO_CHOICE_GRID_V1",
+    "template_version": 2,
+    "visual_rules": {
+      "same_identity": true,
+      "same_camera_scale": true,
+      "distinct_hairstyles": 4,
+      "hairline_visible": true,
+      "choice_labels": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ]
+    },
+    "asset_policy": {
+      "default": "ASSET_REUSE",
+      "on_missing": "NEEDS_ASSET"
+    },
+    "asset_match_keys": [
+      "choice_axis"
+    ],
+    "asset_requirements": {
+      "required_roles": [
+        "cover_seed",
+        "hair_a",
+        "hair_b",
+        "hair_c",
+        "hair_d"
+      ],
+      "required_tags": {
+        "use_cases": "pick_your_hair"
+      },
+      "required_pairs": []
+    },
+    "execution_profiles": [
+      {
+        "profile_id": "hair_length",
+        "label": "length 发型四选一",
+        "variables": {
+          "choice_axis": "length",
+          "length_options": [
+            "bob",
+            "medium",
+            "long"
+          ]
+        },
+        "asset_set_keys": [
+          "MX_WIG_CHOICE"
+        ],
+        "copy_variants": [
+          {
+            "copy_id": "hair_length_copy_1",
+            "copy": {
+              "title": "¿Corto o largo?",
+              "caption": "Compara los largos de estos cuatro peinados. ¿Con cuál te quedarías hoy?",
+              "hashtags": [
+                "#IdeasDePeinado",
+                "#Pelucas"
+              ],
+              "slide_texts": [
+                "¿Corto o largo?",
+                "Look A",
+                "Look B",
+                "Look C",
+                "Look D — ¿cuál eliges?"
+              ]
+            }
+          },
+          {
+            "copy_id": "hair_length_copy_2",
+            "copy": {
+              "title": "Elige tu largo favorito",
+              "caption": "Desliza para comparar los cuatro looks y vota por tu largo favorito: A, B, C o D.",
+              "hashtags": [
+                "#IdeasDePeinado",
+                "#Pelucas"
+              ],
+              "slide_texts": [
+                "Elige tu largo favorito",
+                "Opción A",
+                "Opción B",
+                "Opción C",
+                "Opción D — vota abajo"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "profile_id": "hair_texture",
+        "label": "texture 发型四选一",
+        "variables": {
+          "choice_axis": "texture",
+          "texture_options": [
+            "straight",
+            "wavy",
+            "curly"
+          ]
+        },
+        "asset_set_keys": [
+          "MX_WIG_CHOICE"
+        ],
+        "copy_variants": [
+          {
+            "copy_id": "hair_texture_copy_1",
+            "copy": {
+              "title": "¿Liso o con ondas?",
+              "caption": "Mira la textura de los cuatro looks. ¿Cuál te gustaría probar primero?",
+              "hashtags": [
+                "#IdeasDePeinado",
+                "#Pelucas"
+              ],
+              "slide_texts": [
+                "¿Liso o con ondas?",
+                "Look A",
+                "Look B",
+                "Look C",
+                "Look D — ¿cuál eliges?"
+              ]
+            }
+          },
+          {
+            "copy_id": "hair_texture_copy_2",
+            "copy": {
+              "title": "Tu textura favorita",
+              "caption": "Compara cómo cae cada peinado y dinos cuál va más contigo: A, B, C o D.",
+              "hashtags": [
+                "#IdeasDePeinado",
+                "#Pelucas"
+              ],
+              "slide_texts": [
+                "Tu textura favorita",
+                "Opción A",
+                "Opción B",
+                "Opción C",
+                "Opción D — vota abajo"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "profile_id": "hair_style",
+        "label": "style 发型四选一",
+        "variables": {
+          "choice_axis": "style"
+        },
+        "asset_set_keys": [
+          "MX_WIG_CHOICE"
+        ],
+        "copy_variants": [
+          {
+            "copy_id": "hair_style_copy_1",
+            "copy": {
+              "title": "¿Cuál es tu estilo?",
+              "caption": "Cuatro ideas para cambiar de peinado. ¿Eres más de A, B, C o D?",
+              "hashtags": [
+                "#IdeasDePeinado",
+                "#Pelucas"
+              ],
+              "slide_texts": [
+                "¿Cuál es tu estilo?",
+                "Look A",
+                "Look B",
+                "Look C",
+                "Look D — ¿cuál eliges?"
+              ]
+            }
+          },
+          {
+            "copy_id": "hair_style_copy_2",
+            "copy": {
+              "title": "Elige tu próximo look",
+              "caption": "Desliza, compara los estilos y cuéntanos con cuál te quedarías hoy.",
+              "hashtags": [
+                "#IdeasDePeinado",
+                "#Pelucas"
+              ],
+              "slide_texts": [
+                "Elige tu próximo look",
+                "Opción A",
+                "Opción B",
+                "Opción C",
+                "Opción D — vota abajo"
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "status": "active"
+}

@@ -1,0 +1,112 @@
+{
+  "schema_version": "opv-asset-set-v1",
+  "asset_set_id": "ASSET_TH_WOMENSWEAR_CHOICE_V3",
+  "asset_set_key": "TH_WOMENSWEAR_CHOICE",
+  "asset_set_version": 3,
+  "category_key": "womenswear",
+  "market": "TH",
+  "status": "enabled",
+  "tags": {
+    "use_cases": [
+      "short_outerwear_bottom_choice"
+    ],
+    "choice_axis": [
+      "pants_or_skirt"
+    ],
+    "source": "existing_generated_photos_visually_inspected"
+  },
+  "assets": [
+    {
+      "asset_id": "th_choice_a",
+      "path": "../../../../shared/data/organic_photo_video/asset_sets/th_choice/look_a.png",
+      "role": "look_a",
+      "tags": {
+        "outerwear": "brown_zip_short_jacket",
+        "bottom": "black_shorts_a"
+      },
+      "display_label": {
+        "th-TH": "แจ็กเก็ตน้ำตาล + ขาสั้น"
+      },
+      "sha256": "ab3fe9354b9f53f0f0d61168bd0fd87c27d50c83ac4ee05c53262b49c17e6c64"
+    },
+    {
+      "asset_id": "th_choice_b",
+      "path": "../../../../shared/data/organic_photo_video/asset_sets/th_choice/look_b.png",
+      "role": "look_b",
+      "tags": {
+        "outerwear": "gray_roundneck_short_jacket",
+        "bottom": "black_shorts_b"
+      },
+      "display_label": {
+        "th-TH": "เสื้อคลุมเทา + ขาสั้น"
+      },
+      "sha256": "a122a45d897b54fa0114be8c6219a0137bcfa989dc034b21b6e6c27fa7f527ea"
+    },
+    {
+      "asset_id": "th_choice_c",
+      "path": "../../../../shared/data/organic_photo_video/asset_sets/th_choice/look_c.png",
+      "role": "look_c",
+      "tags": {
+        "outerwear": "gray_roundneck_short_jacket",
+        "bottom": "gray_pleated_skirt"
+      },
+      "display_label": {
+        "th-TH": "เสื้อคลุมเทา + กระโปรงพลีต"
+      },
+      "sha256": "24fbc509c5e987a1e218dbedb383ae147bb5cf95a06637dc37cfe10f3151bb7a"
+    },
+    {
+      "asset_id": "th_choice_d",
+      "path": "../../../../shared/data/organic_photo_video/asset_sets/th_choice/look_d.png",
+      "role": "look_d",
+      "tags": {
+        "outerwear": "brown_goldbutton_short_jacket",
+        "bottom": "black_skirt"
+      },
+      "display_label": {
+        "th-TH": "แจ็กเก็ตน้ำตาล + กระโปรง"
+      },
+      "sha256": "e8d9385bd426e8c159553ca5ff8a048a35ab444c0781772457bd8ce839e85c72"
+    }
+  ],
+  "pairs": [],
+  "content_approval": {
+    "schema_version": "opv-source-qualification-v1",
+    "reviewer": "codex_visual_inspection",
+    "reviewer_type": "assistant",
+    "allowed_logic_keys": [
+      "short_outerwear_bottom_choice"
+    ],
+    "excluded_claims": [
+      "temperature_dressing",
+      "travel_destination",
+      "layering_progression",
+      "single_variable_comparison",
+      "native_language_approved"
+    ],
+    "source_hashes": {
+      "th_choice_a": "ab3fe9354b9f53f0f0d61168bd0fd87c27d50c83ac4ee05c53262b49c17e6c64",
+      "th_choice_b": "a122a45d897b54fa0114be8c6219a0137bcfa989dc034b21b6e6c27fa7f527ea",
+      "th_choice_c": "24fbc509c5e987a1e218dbedb383ae147bb5cf95a06637dc37cfe10f3151bb7a",
+      "th_choice_d": "e8d9385bd426e8c159553ca5ff8a048a35ab444c0781772457bd8ce839e85c72"
+    },
+    "attributes": {
+      "th_choice_a": {
+        "outerwear_id": "brown_zip_short_jacket",
+        "bottom_id": "black_shorts_a"
+      },
+      "th_choice_b": {
+        "outerwear_id": "gray_roundneck_short_jacket",
+        "bottom_id": "black_shorts_b"
+      },
+      "th_choice_c": {
+        "outerwear_id": "gray_roundneck_short_jacket",
+        "bottom_id": "gray_pleated_skirt"
+      },
+      "th_choice_d": {
+        "outerwear_id": "brown_goldbutton_short_jacket",
+        "bottom_id": "black_skirt"
+      }
+    }
+  }
+}

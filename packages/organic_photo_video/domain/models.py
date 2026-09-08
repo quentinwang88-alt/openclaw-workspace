@@ -440,6 +440,54 @@ class ProductReferencePack:
         )
 
 
+@dataclass
+class AssetSet:
+    """A versioned manifest of source photos that may be reused together.
+
+    The files remain in the existing media storage.  This row only freezes
+    their roles, hashes, identity/pair relationships, and business tags so a
+    content revision can select them deterministically.
+    """
+
+    asset_set_id: str
+    asset_set_key: str
+    category_key: str
+    manifest_json: Dict[str, Any]
+    asset_set_version: int = 1
+    market: Optional[str] = None
+    status: str = "draft"
+    tags_json: Dict[str, Any] = dataclasses.field(default_factory=dict)
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    def to_row(self) -> Dict[str, Any]:
+        return {
+            "asset_set_id": self.asset_set_id,
+            "asset_set_key": self.asset_set_key,
+            "asset_set_version": self.asset_set_version,
+            "category_key": self.category_key,
+            "market": self.market,
+            "status": self.status,
+            "tags_json": dump_json(self.tags_json),
+            "manifest_json": dump_json(self.manifest_json),
+        }
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> "AssetSet":
+        return cls(
+            asset_set_id=row["asset_set_id"],
+            asset_set_key=row["asset_set_key"],
+            asset_set_version=int(row.get("asset_set_version") or 1),
+            category_key=row["category_key"],
+            market=row.get("market"),
+            status=row.get("status") or "draft",
+            tags_json=load_json_value(row.get("tags_json"), {}),
+            manifest_json=load_json_value(row.get("manifest_json"), {}),
+            created_at=row.get("created_at"),
+            updated_at=row.get("updated_at"),
+        )
+
+
 # --------------------------------------------------------------------------
 # Business flow
 # --------------------------------------------------------------------------
@@ -449,10 +497,15 @@ class ContentTask:
     task_id: str
     idempotency_key: str
     account_id: str
-    product_id: str
+    product_id: Optional[str]
     target_country: str
     target_locale: str
     product_snapshot_json: Dict[str, Any] = dataclasses.field(default_factory=dict)
+    # ``video`` preserves the historical flow.  Native photo tasks opt in
+    # explicitly and may omit a product when ``product_mode=NO_PRODUCT``.
+    media_kind: str = "video"
+    category_key: Optional[str] = None
+    product_mode: Optional[str] = None
     source_type: str = "manual"
     source_record_id: Optional[str] = None
     market_pack_id: Optional[str] = None
@@ -500,6 +553,9 @@ class ContentTask:
             "account_id": self.account_id,
             "product_id": self.product_id,
             "product_snapshot_json": dump_json(self.product_snapshot_json),
+            "media_kind": self.media_kind,
+            "category_key": self.category_key,
+            "product_mode": self.product_mode,
             "target_country": self.target_country,
             "target_locale": self.target_locale,
             "market_pack_id": self.market_pack_id,
@@ -553,8 +609,11 @@ class ContentTask:
             source_type=row.get("source_type") or "manual",
             source_record_id=row.get("source_record_id"),
             account_id=row["account_id"],
-            product_id=row["product_id"],
+            product_id=row.get("product_id"),
             product_snapshot_json=load_json_value(row.get("product_snapshot_json"), {}),
+            media_kind=row.get("media_kind") or "video",
+            category_key=row.get("category_key"),
+            product_mode=row.get("product_mode"),
             target_country=row["target_country"],
             target_locale=row["target_locale"],
             market_pack_id=row.get("market_pack_id"),
@@ -708,7 +767,7 @@ class ContentShot:
     task_id: str
     slot_index: int
     slot_role: str
-    duration_ms: int
+    duration_ms: Optional[int]
     shot_version: int = 1
     shot_status: str = "planned"
     narrative_purpose: Optional[str] = None
@@ -792,7 +851,11 @@ class ContentShot:
             task_id=row["task_id"],
             slot_index=int(row["slot_index"]),
             slot_role=row["slot_role"],
-            duration_ms=int(row["duration_ms"]),
+            duration_ms=(
+                int(row["duration_ms"])
+                if row.get("duration_ms") is not None
+                else None
+            ),
             shot_version=int(row.get("shot_version") or 1),
             shot_status=row.get("shot_status") or "planned",
             narrative_purpose=row.get("narrative_purpose"),
@@ -936,9 +999,18 @@ class VideoRender:
 class PublishRecord:
     publish_id: str
     task_id: str
-    render_id: str
+    render_id: Optional[str]
     account_id: str
     caption_snapshot_json: Dict[str, Any] = dataclasses.field(default_factory=dict)
+    media_kind: str = "video"
+    content_package_id: Optional[str] = None
+    revision_id: Optional[str] = None
+    main_slot_id: Optional[int] = None
+    publisher_account_id: Optional[str] = None
+    publish_channel: Optional[str] = None
+    provider_task_id: Optional[str] = None
+    publish_key: Optional[str] = None
+    release_manifest_json: Optional[Dict[str, Any]] = None
     platform: str = "tiktok"
     publish_status: str = "ready"
     publish_mode: str = "manual"
@@ -960,6 +1032,19 @@ class PublishRecord:
             "task_id": self.task_id,
             "render_id": self.render_id,
             "account_id": self.account_id,
+            "media_kind": self.media_kind,
+            "content_package_id": self.content_package_id,
+            "revision_id": self.revision_id,
+            "main_slot_id": self.main_slot_id,
+            "publisher_account_id": self.publisher_account_id,
+            "publish_channel": self.publish_channel,
+            "provider_task_id": self.provider_task_id,
+            "publish_key": self.publish_key,
+            "release_manifest_json": (
+                dump_json(self.release_manifest_json)
+                if self.release_manifest_json is not None
+                else None
+            ),
             "platform": self.platform,
             "publish_status": self.publish_status,
             "publish_mode": self.publish_mode,
@@ -984,8 +1069,21 @@ class PublishRecord:
         return cls(
             publish_id=row["publish_id"],
             task_id=row["task_id"],
-            render_id=row["render_id"],
+            render_id=row.get("render_id"),
             account_id=row["account_id"],
+            media_kind=row.get("media_kind") or "video",
+            content_package_id=row.get("content_package_id"),
+            revision_id=row.get("revision_id"),
+            main_slot_id=(
+                int(row["main_slot_id"])
+                if row.get("main_slot_id") is not None
+                else None
+            ),
+            publisher_account_id=row.get("publisher_account_id"),
+            publish_channel=row.get("publish_channel"),
+            provider_task_id=row.get("provider_task_id"),
+            publish_key=row.get("publish_key"),
+            release_manifest_json=load_json_value(row.get("release_manifest_json")),
             platform=row.get("platform") or "tiktok",
             publish_status=row.get("publish_status") or "ready",
             publish_mode=row.get("publish_mode") or "manual",
@@ -1209,6 +1307,7 @@ class ContentRecipe:
     story_structure_json: List[Any] = dataclasses.field(default_factory=list)
     copy_style_json: Dict[str, Any] = dataclasses.field(default_factory=dict)
     suitable_topics_json: List[str] = dataclasses.field(default_factory=list)
+    recipe_spec_json: Dict[str, Any] = dataclasses.field(default_factory=dict)
     recipe_version: int = 1
     anchor_slot: int = 1
     shot_count: int = 5
@@ -1236,6 +1335,7 @@ class ContentRecipe:
             "render_profile_id": self.render_profile_id,
             "quality_profile_id": self.quality_profile_id,
             "suitable_topics_json": dump_json(self.suitable_topics_json),
+            "recipe_spec_json": dump_json(self.recipe_spec_json),
             "status": self.status,
         }
 
@@ -1254,6 +1354,7 @@ class ContentRecipe:
             render_profile_id=row.get("render_profile_id"),
             quality_profile_id=row.get("quality_profile_id"),
             suitable_topics_json=load_json_value(row.get("suitable_topics_json"), []),
+            recipe_spec_json=load_json_value(row.get("recipe_spec_json"), {}),
             status=row.get("status") or "draft",
             created_at=row.get("created_at"),
             updated_at=row.get("updated_at"),
@@ -1364,6 +1465,7 @@ class ContentPackage:
     hashtags_json: List[str] = dataclasses.field(default_factory=list)
     render_ids_json: List[Any] = dataclasses.field(default_factory=list)
     generation_lineage_json: Dict[str, Any] = dataclasses.field(default_factory=dict)
+    photo_manifest_json: Optional[Dict[str, Any]] = None
     product_snapshot_id: Optional[str] = None
     recipe_id: Optional[str] = None
     theme_id: Optional[str] = None
@@ -1400,6 +1502,11 @@ class ContentPackage:
             ),
             "content_fingerprint": self.content_fingerprint,
             "generation_lineage_json": dump_json(self.generation_lineage_json),
+            "photo_manifest_json": (
+                dump_json(self.photo_manifest_json)
+                if self.photo_manifest_json is not None
+                else None
+            ),
             "status": self.status,
         }
 
@@ -1426,6 +1533,7 @@ class ContentPackage:
             generation_lineage_json=load_json_value(
                 row.get("generation_lineage_json"), {}
             ),
+            photo_manifest_json=load_json_value(row.get("photo_manifest_json")),
             status=row.get("status") or "planning",
             created_at=row.get("created_at"),
             updated_at=row.get("updated_at"),

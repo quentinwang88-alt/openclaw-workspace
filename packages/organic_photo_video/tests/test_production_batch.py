@@ -190,16 +190,18 @@ class ScannerLockTest(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         with tempfile.TemporaryDirectory() as root:
-            lock_path = Path(root) / "scanner.lock"
-            with lock_path.open("w+") as owned:
-                fcntl.flock(owned, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # 占满 2 个槽位：后续 run() 直接返回 0，不 exec。
+            held = [module.claim_slot(slot_dir=root, count=2) for _ in range(2)]
+            try:
                 with patch.object(module.os, "execv") as execute:
-                    self.assertEqual(module.run(["/bin/true"], lock_path=str(lock_path)), 0)
+                    self.assertEqual(module.run(["/bin/true"], slot_dir=root, slot_count=2), 0)
                     execute.assert_not_called()
-            # The metadata file remains, but kernel ownership disappeared.
+            finally:
+                for fd in held:
+                    module.os.close(fd)
+            # 槽位释放后：kernel 所有权消失，run() 可以 exec。
             def mocked_exec(*_):
                 raise RuntimeError("exec reached")
-            # Capture/close fd because a real exec owns it, unlike this mock.
             opened = []
             real_open = module.os.open
             def capture(*args):
@@ -209,7 +211,7 @@ class ScannerLockTest(unittest.TestCase):
             with patch.object(module.os, "open", side_effect=capture), patch.object(module.os, "execv", side_effect=mocked_exec):
                 try:
                     with self.assertRaisesRegex(RuntimeError, "exec reached"):
-                        module.run(["/bin/true"], lock_path=str(lock_path))
+                        module.run(["/bin/true"], slot_dir=root, slot_count=2)
                 finally:
                     for fd in opened:
                         module.os.close(fd)

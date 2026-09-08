@@ -153,6 +153,13 @@ class MainScheduleBridgeTest(unittest.TestCase):
         with self.assertRaisesRegex(MainScheduleBridgeError, "未配置 VN"):
             MainScheduleBridge(self.repo, db=self.db).enqueue_task("task-1")
 
+    def test_mexico_wig_routes_to_existing_mx_store(self):
+        self.task.target_country = "MX"
+        self.task.category_key = "wig"
+        result = MainScheduleBridge(self.repo, db=self.db).enqueue_task("task-1")
+        self.assertEqual(result["store_id"], "MXJF01")
+        self.assertEqual(self.db.get_script_metadata("opv:task-1")["product_type"], "wig")
+
     def test_publish_context_prefers_frozen_product_id_used_by_render(self):
         self.task.product_id = "173661-wrong"
         self.task.product_snapshot_json["product"].update({

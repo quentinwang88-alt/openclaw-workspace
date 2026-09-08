@@ -1,0 +1,35 @@
+{
+  "schema_version": "opv-photo-layout-v1",
+  "layout_id": "PHOTO_COMPARISON_V1",
+  "layout_version": 1,
+  "layout_kind": "COMPARISON",
+  "status": "active",
+  "canvas": {"width": 1080, "height": 1920, "background": "#F7F5F0", "color_space": "sRGB"},
+  "safe_area": {"top": 220, "bottom": 420, "left": 60, "right": 60},
+  "page_variants": {
+    "SPLIT_TWO": {
+      "regions": [
+        {"id": "option_a", "kind": "image", "source_key": "a", "fit": "cover", "rect": {"x": 40, "y": 430, "width": 490, "height": 1020}},
+        {"id": "option_b", "kind": "image", "source_key": "b", "fit": "cover", "rect": {"x": 550, "y": 430, "width": 490, "height": 1020}},
+        {"id": "headline", "kind": "text", "text_role": "headline", "max_lines": 2, "align": "center", "rect": {"x": 90, "y": 230, "width": 900, "height": 170}},
+        {"id": "label_a", "kind": "text", "text_role": "label_a", "max_lines": 1, "align": "center", "rect": {"x": 80, "y": 1280, "width": 410, "height": 100}},
+        {"id": "label_b", "kind": "text", "text_role": "label_b", "max_lines": 1, "align": "center", "rect": {"x": 590, "y": 1280, "width": 410, "height": 100}}
+      ]
+    },
+    "DETAIL": {
+      "regions": [
+        {"id": "photo", "kind": "image", "source_key": "primary", "fit": "cover", "rect": {"x": 0, "y": 0, "width": 1080, "height": 1920}},
+        {"id": "headline", "kind": "text", "text_role": "headline", "max_lines": 2, "align": "center", "rect": {"x": 90, "y": 250, "width": 900, "height": 180}},
+        {"id": "detail", "kind": "text", "text_role": "support_or_cta", "max_lines": 2, "align": "center", "rect": {"x": 120, "y": 1360, "width": 840, "height": 140}}
+      ]
+    }
+  },
+  "text_defaults": {
+    "font_candidates": ["/System/Library/Fonts/Thonburi.ttc", "/System/Library/Fonts/Supplemental/Arial Unicode.ttf"],
+    "headline_size": 56,
+    "label_size": 42,
+    "color": "#171717",
+    "backplate": {"enabled": true, "color": "#FFFFFF", "opacity": 0.86, "corner_radius": 22}
+  },
+  "export": {"format": "JPEG", "quality": 90, "strip_metadata": true}
+}

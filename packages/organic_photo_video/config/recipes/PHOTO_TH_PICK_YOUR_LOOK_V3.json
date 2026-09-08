@@ -1,0 +1,73 @@
+{
+  "schema_version": "opv-content-recipe-v1",
+  "recipe_id": "PHOTO_TH_PICK_YOUR_LOOK_V3",
+  "recipe_key": "TH_PICK_YOUR_LOOK",
+  "recipe_version": 9,
+  "content_goal": "pick_your_look",
+  "anchor_slot": 2,
+  "shot_count": 5,
+  "hook_types": ["pick_one_of_four", "which_look"],
+  "story_structure": [
+    {"slot_index": 1, "role": "choice_grid", "source_slots": [], "layout_variant": "GRID_FOUR", "purpose": "四宫格展示四套造型并提出选择问题", "source_roles": ["look_a", "look_b", "look_c", "look_d"]},
+    {"slot_index": 2, "role": "look_a", "source_slots": [], "layout_variant": "CHOICE_DETAIL", "purpose": "展示第一套完整造型", "source_roles": ["look_a"]},
+    {"slot_index": 3, "role": "look_b", "source_slots": [], "layout_variant": "CHOICE_DETAIL", "purpose": "展示第二套完整造型，为下一页保留比较参照", "source_roles": ["look_b"]},
+    {"slot_index": 4, "role": "look_c", "source_slots": [], "layout_variant": "CHOICE_DETAIL", "purpose": "展示第三套完整造型", "source_roles": ["look_c"]},
+    {"slot_index": 5, "role": "look_d_with_cta", "source_slots": [], "layout_variant": "CHOICE_DETAIL", "purpose": "展示第四套完整造型并请读者选择", "source_roles": ["look_d"]}
+  ],
+  "copy_style": {"locale": "th-TH", "tone": "short_interactive", "max_lines_per_block": 2, "example": "ลุคไหนที่คุณจะเลือก?", "language_review_status": "production_copy_pack"},
+  "suitable_topics": ["short_outerwear_bottom_choice"],
+  "quality_profile_id": "QUALITY_STANDARD_V1",
+  "recipe_spec": {
+    "schema_version": "opv-photo-recipe-v1",
+    "media_kind": "native_photo",
+    "category_key": "womenswear",
+    "markets": ["TH"],
+    "theme_types": ["CHOICE"],
+    "product_modes": ["NO_PRODUCT"],
+    "variables_schema": {"choice_axis": {"type": "enum", "values": ["pants_or_skirt"], "required": true}},
+    "template_id": "PHOTO_CHOICE_CARD_V2",
+    "template_version": 2,
+    "supported_presentations": ["FLAT_LAY", "MODEL_FULL_BODY", "SCENE_MODEL"],
+    "visual_rules": {"distinct_looks": 4},
+    "asset_policy": {"default": "ASSET_REUSE", "on_missing": "NEEDS_ASSET"},
+    "outfit_supply": {
+      "mode": "REUSE_THEN_GENERATE_MISSING",
+      "roles": [
+        {"role": "look_a", "bottom_axis": "pants"},
+        {"role": "look_b", "bottom_axis": "pants"},
+        {"role": "look_c", "bottom_axis": "skirt"},
+        {"role": "look_d", "bottom_axis": "skirt"}
+      ]
+    },
+    "asset_match_keys": ["choice_axis"],
+    "asset_requirements": {
+      "required_roles": ["look_a", "look_b", "look_c", "look_d"],
+      "required_tags": {"use_cases": "short_outerwear_bottom_choice"},
+      "required_pairs": []
+    },
+    "execution_profiles": [{
+      "profile_id": "pants_or_skirt_four_looks",
+      "label": "短外套：四套完整 Look 选一",
+      "variables": {"choice_axis": "pants_or_skirt"},
+      "asset_set_keys": ["TH_WOMENSWEAR_CHOICE"],
+      "copy_pack_id": "TH_PICK_YOUR_LOOK_V3"
+    }],
+    "content_card": {
+      "schema_version": "opv-photo-content-card-v1",
+      "summary_zh": "四套短外套完整 Look 选一",
+      "audience_zh": "想寻找短外套日常搭配灵感的泰国女装用户",
+      "question_zh": "A/B/C/D 四套完整造型里最喜欢哪一套？",
+      "comparison_basis_zh": "只比较画面中可见的完整造型与整体风格，不宣称单变量实验、保暖能力、城市或显高效果。",
+      "logic_key": "short_outerwear_bottom_choice",
+      "asset_gaps": [],
+      "pages": [
+        {"index": 1, "purpose_zh": "四宫格展示 A/B/C/D，提出四套完整 Look 选择问题", "layout": "grid_2x2", "source_roles": ["look_a", "look_b", "look_c", "look_d"]},
+        {"index": 2, "purpose_zh": "A：{{label_a}}", "layout": "single", "source_roles": ["look_a"]},
+        {"index": 3, "purpose_zh": "B：{{label_b}}", "layout": "single", "source_roles": ["look_b"]},
+        {"index": 4, "purpose_zh": "C：{{label_c}}", "layout": "single", "source_roles": ["look_c"]},
+        {"index": 5, "purpose_zh": "D：{{label_d}}，收束并请读者选择 A/B/C/D", "layout": "single", "source_roles": ["look_d"]}
+      ]
+    }
+  },
+  "status": "active"
+}

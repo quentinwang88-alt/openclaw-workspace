@@ -1,0 +1,310 @@
+{
+  "schema_version": "opv-content-recipe-v1",
+  "recipe_id": "PHOTO_MX_FACE_SHAPE_MATCH_V1",
+  "recipe_key": "MX_FACE_SHAPE_MATCH",
+  "recipe_version": 2,
+  "content_goal": "face_shape_hair_match",
+  "anchor_slot": 2,
+  "shot_count": 5,
+  "hook_types": [
+    "face_shape_match",
+    "which_style_suits_you"
+  ],
+  "story_structure": [
+    {
+      "slot_index": 1,
+      "role": "face_shape_hook",
+      "source_slots": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "layout_variant": "GRID_FOUR",
+      "purpose": "四种脸型和推荐发型总览"
+    },
+    {
+      "slot_index": 2,
+      "role": "round_face",
+      "source_slots": [],
+      "layout_variant": "CHOICE_DETAIL",
+      "purpose": "圆脸的发型匹配"
+    },
+    {
+      "slot_index": 3,
+      "role": "oval_face",
+      "source_slots": [],
+      "layout_variant": "CHOICE_DETAIL",
+      "purpose": "椭圆脸的发型匹配"
+    },
+    {
+      "slot_index": 4,
+      "role": "square_face",
+      "source_slots": [],
+      "layout_variant": "CHOICE_DETAIL",
+      "purpose": "方脸的发型匹配"
+    },
+    {
+      "slot_index": 5,
+      "role": "long_face_with_cta",
+      "source_slots": [],
+      "layout_variant": "CHOICE_DETAIL",
+      "purpose": "长脸的发型匹配并询问用户脸型"
+    }
+  ],
+  "copy_style": {
+    "locale": "es-MX",
+    "tone": "friendly_guide",
+    "max_lines_per_block": 2,
+    "example": "¿Qué estilo va mejor con tu rostro?"
+  },
+  "suitable_topics": [
+    "face_shape",
+    "hair_match",
+    "hairstyle_guide"
+  ],
+  "quality_profile_id": "QUALITY_STANDARD_V1",
+  "recipe_spec": {
+    "schema_version": "opv-photo-recipe-v1",
+    "media_kind": "native_photo",
+    "category_key": "wig",
+    "markets": [
+      "MX"
+    ],
+    "theme_types": [
+      "MATCH",
+      "GUIDE"
+    ],
+    "product_modes": [
+      "NO_PRODUCT",
+      "SOFT_PRODUCT"
+    ],
+    "variables_schema": {
+      "face_shapes": {
+        "type": "fixed_set",
+        "values": [
+          "round",
+          "oval",
+          "square",
+          "long"
+        ],
+        "required": true
+      },
+      "recommendation_strength": {
+        "type": "enum",
+        "values": [
+          "soft_suggestion"
+        ],
+        "required": true
+      },
+      "hair_style_family": {
+        "type": "enum",
+        "values": [
+          "straight",
+          "wavy",
+          "curly",
+          "bob"
+        ],
+        "required": true
+      }
+    },
+    "template_id": "PHOTO_CHOICE_GRID_V1",
+    "template_version": 2,
+    "visual_rules": {
+      "same_identity": false,
+      "same_photo_style": true,
+      "face_shape_labels_are_manual": true,
+      "no_automated_face_classification": true,
+      "avoid_absolute_claims": true
+    },
+    "asset_policy": {
+      "default": "ASSET_REUSE",
+      "on_missing": "NEEDS_ASSET"
+    },
+    "asset_match_keys": [
+      "face_shapes",
+      "hair_style_family"
+    ],
+    "asset_requirements": {
+      "required_roles": [
+        "cover_seed",
+        "round_face",
+        "oval_face",
+        "square_face",
+        "long_face"
+      ],
+      "required_tags": {
+        "use_cases": "face_shape_match"
+      },
+      "required_pairs": []
+    },
+    "execution_profiles": [
+      {
+        "profile_id": "face_straight",
+        "label": "straight 脸型建议",
+        "variables": {
+          "face_shapes": [
+            "round",
+            "oval",
+            "square",
+            "long"
+          ],
+          "recommendation_strength": "soft_suggestion",
+          "hair_style_family": "straight"
+        },
+        "asset_set_keys": [
+          "MX_WIG_FACE_SHAPE"
+        ],
+        "copy_variants": [
+          {
+            "copy_id": "face_straight_copy_1",
+            "copy": {
+              "title": "Ideas según tu rostro",
+              "caption": "Estas son sugerencias para explorar estilos, no reglas. Lo importante es que te guste cómo te ves.",
+              "hashtags": [
+                "#IdeasDePeinado",
+                "#TuEstilo"
+              ],
+              "slide_texts": [
+                "Inspírate, no son reglas",
+                "Rostro redondo",
+                "Rostro ovalado",
+                "Rostro cuadrado",
+                "Rostro alargado"
+              ]
+            }
+          },
+          {
+            "copy_id": "face_straight_copy_2",
+            "copy": {
+              "title": "Tu rostro, tu estilo",
+              "caption": "Prueba diferentes formas de enmarcar tu rostro y elige la que te haga sentir más tú.",
+              "hashtags": [
+                "#IdeasDePeinado",
+                "#TuEstilo"
+              ],
+              "slide_texts": [
+                "Cuatro ideas para probar",
+                "Idea para rostro redondo",
+                "Idea para rostro ovalado",
+                "Idea para rostro cuadrado",
+                "Idea para rostro alargado"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "profile_id": "face_wavy",
+        "label": "wavy 脸型建议",
+        "variables": {
+          "face_shapes": [
+            "round",
+            "oval",
+            "square",
+            "long"
+          ],
+          "recommendation_strength": "soft_suggestion",
+          "hair_style_family": "wavy"
+        },
+        "asset_set_keys": [
+          "MX_WIG_FACE_SHAPE"
+        ],
+        "copy_variants": [
+          {
+            "copy_id": "face_wavy_copy_1",
+            "copy": {
+              "title": "Ideas según tu rostro",
+              "caption": "Estas son sugerencias para explorar estilos, no reglas. Lo importante es que te guste cómo te ves.",
+              "hashtags": [
+                "#IdeasDePeinado",
+                "#TuEstilo"
+              ],
+              "slide_texts": [
+                "Inspírate, no son reglas",
+                "Rostro redondo",
+                "Rostro ovalado",
+                "Rostro cuadrado",
+                "Rostro alargado"
+              ]
+            }
+          },
+          {
+            "copy_id": "face_wavy_copy_2",
+            "copy": {
+              "title": "Tu rostro, tu estilo",
+              "caption": "Prueba diferentes formas de enmarcar tu rostro y elige la que te haga sentir más tú.",
+              "hashtags": [
+                "#IdeasDePeinado",
+                "#TuEstilo"
+              ],
+              "slide_texts": [
+                "Cuatro ideas para probar",
+                "Idea para rostro redondo",
+                "Idea para rostro ovalado",
+                "Idea para rostro cuadrado",
+                "Idea para rostro alargado"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "profile_id": "face_bob",
+        "label": "bob 脸型建议",
+        "variables": {
+          "face_shapes": [
+            "round",
+            "oval",
+            "square",
+            "long"
+          ],
+          "recommendation_strength": "soft_suggestion",
+          "hair_style_family": "bob"
+        },
+        "asset_set_keys": [
+          "MX_WIG_FACE_SHAPE"
+        ],
+        "copy_variants": [
+          {
+            "copy_id": "face_bob_copy_1",
+            "copy": {
+              "title": "Ideas según tu rostro",
+              "caption": "Estas son sugerencias para explorar estilos, no reglas. Lo importante es que te guste cómo te ves.",
+              "hashtags": [
+                "#IdeasDePeinado",
+                "#TuEstilo"
+              ],
+              "slide_texts": [
+                "Inspírate, no son reglas",
+                "Rostro redondo",
+                "Rostro ovalado",
+                "Rostro cuadrado",
+                "Rostro alargado"
+              ]
+            }
+          },
+          {
+            "copy_id": "face_bob_copy_2",
+            "copy": {
+              "title": "Tu rostro, tu estilo",
+              "caption": "Prueba diferentes formas de enmarcar tu rostro y elige la que te haga sentir más tú.",
+              "hashtags": [
+                "#IdeasDePeinado",
+                "#TuEstilo"
+              ],
+              "slide_texts": [
+                "Cuatro ideas para probar",
+                "Idea para rostro redondo",
+                "Idea para rostro ovalado",
+                "Idea para rostro cuadrado",
+                "Idea para rostro alargado"
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "status": "active"
+}

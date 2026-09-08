@@ -78,6 +78,39 @@ class TaskStatusMachineTest(unittest.TestCase):
             statuses.STAGE_FOR_STATUS[statuses.TASK_DRAFT], statuses.STAGE_INTAKE
         )
 
+    def test_native_photo_main_line_skips_video_render(self) -> None:
+        transitions = statuses.TASK_STATUS_TRANSITIONS
+        statuses.ensure_transition(
+            transitions, statuses.TASK_PLANNED, statuses.TASK_IMAGE_GENERATING
+        )
+        statuses.ensure_transition(
+            transitions, statuses.TASK_IMAGE_GENERATING, statuses.TASK_IMAGE_REVIEW
+        )
+        statuses.ensure_transition(
+            transitions, statuses.TASK_IMAGE_REVIEW, statuses.TASK_PHOTO_PACKAGING
+        )
+        statuses.ensure_transition(
+            transitions, statuses.TASK_PHOTO_PACKAGING, statuses.TASK_PHOTO_READY
+        )
+        statuses.ensure_transition(
+            transitions, statuses.TASK_PHOTO_READY, statuses.TASK_PUBLISH_PREPARING
+        )
+
+    def test_photo_publish_can_archive_without_metrics(self) -> None:
+        statuses.ensure_transition(
+            statuses.TASK_STATUS_TRANSITIONS,
+            statuses.TASK_PUBLISHED,
+            statuses.TASK_ARCHIVED,
+        )
+        self.assertEqual(
+            statuses.STAGE_FOR_STATUS[statuses.TASK_PHOTO_PACKAGING],
+            statuses.STAGE_PHOTO_PACKAGING,
+        )
+        self.assertEqual(
+            statuses.STAGE_FOR_STATUS[statuses.TASK_PHOTO_READY],
+            statuses.STAGE_PHOTO_REVIEW,
+        )
+
 
 class ShotStatusMachineTest(unittest.TestCase):
     def test_planned_to_approved_main_line(self) -> None:

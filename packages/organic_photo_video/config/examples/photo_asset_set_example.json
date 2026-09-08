@@ -1,0 +1,21 @@
+{
+  "schema_version": "opv-asset-set-v1",
+  "asset_set_id": "aset_th_womenswear_travel_001",
+  "asset_set_key": "TH_WOMENSWEAR_TRAVEL",
+  "asset_set_version": 1,
+  "category_key": "womenswear",
+  "market": "TH",
+  "status": "draft",
+  "tags": {
+    "destination": ["Seoul", "Tokyo"],
+    "style": ["korean_clean"]
+  },
+  "assets": [
+    {"asset_id": "look_01", "path": "replace-with-local-image-01.jpg", "role": "look_a"},
+    {"asset_id": "look_02", "path": "replace-with-local-image-02.jpg", "role": "look_b"},
+    {"asset_id": "look_03", "path": "replace-with-local-image-03.jpg", "role": "look_c"},
+    {"asset_id": "look_04", "path": "replace-with-local-image-04.jpg", "role": "look_d"},
+    {"asset_id": "look_05", "path": "replace-with-local-image-05.jpg", "role": "detail"}
+  ],
+  "pairs": []
+}

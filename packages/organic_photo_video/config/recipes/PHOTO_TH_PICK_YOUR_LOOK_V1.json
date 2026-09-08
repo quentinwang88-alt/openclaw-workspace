@@ -1,0 +1,313 @@
+{
+  "schema_version": "opv-content-recipe-v1",
+  "recipe_id": "PHOTO_TH_PICK_YOUR_LOOK_V1",
+  "recipe_key": "TH_PICK_YOUR_LOOK",
+  "recipe_version": 2,
+  "content_goal": "pick_your_look",
+  "anchor_slot": 2,
+  "shot_count": 5,
+  "hook_types": [
+    "pick_one_of_four",
+    "which_look"
+  ],
+  "story_structure": [
+    {
+      "slot_index": 1,
+      "role": "choice_grid",
+      "source_slots": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "layout_variant": "GRID_FOUR",
+      "purpose": "A/B/C/D 四套造型封面"
+    },
+    {
+      "slot_index": 2,
+      "role": "look_a",
+      "source_slots": [],
+      "layout_variant": "CHOICE_DETAIL",
+      "purpose": "Look A 完整造型"
+    },
+    {
+      "slot_index": 3,
+      "role": "look_b",
+      "source_slots": [],
+      "layout_variant": "CHOICE_DETAIL",
+      "purpose": "Look B 完整造型"
+    },
+    {
+      "slot_index": 4,
+      "role": "look_c",
+      "source_slots": [],
+      "layout_variant": "CHOICE_DETAIL",
+      "purpose": "Look C 完整造型"
+    },
+    {
+      "slot_index": 5,
+      "role": "look_d_with_cta",
+      "source_slots": [],
+      "layout_variant": "CHOICE_DETAIL",
+      "purpose": "Look D 完整造型并在最后一页互动"
+    }
+  ],
+  "copy_style": {
+    "locale": "th-TH",
+    "tone": "short_interactive",
+    "max_lines_per_block": 2,
+    "example": "ลุคไหนที่คุณจะเลือก?",
+    "language_review_status": "pending_native_review"
+  },
+  "suitable_topics": [
+    "outfit_choice",
+    "color_choice",
+    "travel_look"
+  ],
+  "quality_profile_id": "QUALITY_STANDARD_V1",
+  "recipe_spec": {
+    "schema_version": "opv-photo-recipe-v1",
+    "media_kind": "native_photo",
+    "category_key": "womenswear",
+    "markets": [
+      "TH"
+    ],
+    "theme_types": [
+      "CHOICE"
+    ],
+    "product_modes": [
+      "NO_PRODUCT",
+      "SOFT_PRODUCT"
+    ],
+    "variables_schema": {
+      "choice_axis": {
+        "type": "enum",
+        "values": [
+          "color",
+          "outerwear",
+          "bottom",
+          "style",
+          "travel_scene",
+          "destination"
+        ],
+        "required": true
+      },
+      "scene": {
+        "type": "enum",
+        "values": [
+          "Airport",
+          "Shopping",
+          "Cafe",
+          "Walking",
+          "Photo",
+          "Night"
+        ],
+        "required": true
+      },
+      "style": {
+        "type": "enum",
+        "values": [
+          "korean_clean",
+          "minimal",
+          "casual",
+          "sweet"
+        ],
+        "required": true
+      }
+    },
+    "template_id": "PHOTO_CHOICE_GRID_V1",
+    "template_version": 2,
+    "visual_rules": {
+      "same_identity": true,
+      "same_camera_scale": true,
+      "distinct_looks": 4,
+      "choice_labels": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ]
+    },
+    "asset_policy": {
+      "default": "ASSET_REUSE",
+      "on_missing": "NEEDS_ASSET"
+    },
+    "asset_match_keys": [
+      "choice_axis",
+      "scene",
+      "style"
+    ],
+    "asset_requirements": {
+      "required_roles": [
+        "cover_seed",
+        "look_a",
+        "look_b",
+        "look_c",
+        "look_d"
+      ],
+      "required_tags": {
+        "use_cases": "pick_your_look"
+      },
+      "required_pairs": []
+    },
+    "execution_profiles": [
+      {
+        "profile_id": "outerwear_photo",
+        "label": "Photo outerwear 四选一",
+        "variables": {
+          "choice_axis": "outerwear",
+          "scene": "Photo",
+          "style": "korean_clean"
+        },
+        "asset_set_keys": [
+          "TH_WOMENSWEAR_CHOICE"
+        ],
+        "copy_variants": [
+          {
+            "copy_id": "outerwear_photo_copy_1",
+            "copy": {
+              "title": "เลือกเสื้อตัวนอก",
+              "caption": "ถ้าวันนี้อยากถ่ายรูป คุณชอบเสื้อตัวนอกของลุคไหนมากที่สุด คอมเมนต์ A B C หรือ D แล้วบอกเหตุผลที่ชอบ",
+              "hashtags": [
+                "#OOTD",
+                "#เลือกชุด"
+              ],
+              "slide_texts": [
+                "เลือกเสื้อตัวนอก",
+                "A · {{label_a}}",
+                "B · {{label_b}}",
+                "C · {{label_c}}",
+                "D · {{label_d}}\nคอมเมนต์ A B C หรือ D"
+              ],
+              "language_review_status": "pending_native_review"
+            }
+          },
+          {
+            "copy_id": "outerwear_photo_copy_2",
+            "copy": {
+              "title": "เสื้อตัวนอกแบบไหนดี",
+              "caption": "เลือกไอเดียเสื้อตัวนอกจาก A B C หรือ D สำหรับลุควันนี้ เลือก A B C หรือ D แล้วบอกว่าจะใส่ไปไหน",
+              "hashtags": [
+                "#OOTD",
+                "#เลือกชุด"
+              ],
+              "slide_texts": [
+                "เสื้อตัวนอกแบบไหนดี",
+                "A · {{label_a}}",
+                "B · {{label_b}}",
+                "C · {{label_c}}",
+                "D · {{label_d}}\nคุณเลือก A B C หรือ D?"
+              ],
+              "language_review_status": "pending_native_review"
+            }
+          }
+        ]
+      },
+      {
+        "profile_id": "minimal_cafe",
+        "label": "Cafe style 四选一",
+        "variables": {
+          "choice_axis": "style",
+          "scene": "Cafe",
+          "style": "minimal"
+        },
+        "asset_set_keys": [
+          "TH_WOMENSWEAR_CHOICE"
+        ],
+        "copy_variants": [
+          {
+            "copy_id": "minimal_cafe_copy_1",
+            "copy": {
+              "title": "ไปคาเฟ่ใส่อะไรดี",
+              "caption": "วันไปคาเฟ่ คุณจะเลือก A B C หรือ D มาเป็นไอเดียแต่งตัว คอมเมนต์ A B C หรือ D แล้วบอกเหตุผลที่ชอบ",
+              "hashtags": [
+                "#OOTD",
+                "#เลือกชุด"
+              ],
+              "slide_texts": [
+                "ไปคาเฟ่ใส่อะไรดี",
+                "A · {{label_a}}",
+                "B · {{label_b}}",
+                "C · {{label_c}}",
+                "D · {{label_d}}\nคอมเมนต์ A B C หรือ D"
+              ],
+              "language_review_status": "pending_native_review"
+            }
+          },
+          {
+            "copy_id": "minimal_cafe_copy_2",
+            "copy": {
+              "title": "เลือกลุคไปคาเฟ่",
+              "caption": "เก็บไอเดียไว้แต่งตัวไปคาเฟ่ ลุคไหนใกล้สไตล์คุณที่สุด เลือก A B C หรือ D แล้วบอกว่าจะใส่ไปไหน",
+              "hashtags": [
+                "#OOTD",
+                "#เลือกชุด"
+              ],
+              "slide_texts": [
+                "เลือกลุคไปคาเฟ่",
+                "A · {{label_a}}",
+                "B · {{label_b}}",
+                "C · {{label_c}}",
+                "D · {{label_d}}\nคุณเลือก A B C หรือ D?"
+              ],
+              "language_review_status": "pending_native_review"
+            }
+          }
+        ]
+      },
+      {
+        "profile_id": "casual_shopping",
+        "label": "Shopping color 四选一",
+        "variables": {
+          "choice_axis": "color",
+          "scene": "Shopping",
+          "style": "casual"
+        },
+        "asset_set_keys": [
+          "TH_WOMENSWEAR_CHOICE"
+        ],
+        "copy_variants": [
+          {
+            "copy_id": "casual_shopping_copy_1",
+            "copy": {
+              "title": "เดินช้อปเลือกชุดไหน",
+              "caption": "ลองเทียบสีของสี่ลุคนี้ แล้วเลือกหนึ่งลุคสำหรับวันเดินช้อป คอมเมนต์ A B C หรือ D แล้วบอกเหตุผลที่ชอบ",
+              "hashtags": [
+                "#OOTD",
+                "#เลือกชุด"
+              ],
+              "slide_texts": [
+                "เดินช้อปเลือกชุดไหน",
+                "A · {{label_a}}",
+                "B · {{label_b}}",
+                "C · {{label_c}}",
+                "D · {{label_d}}\nคอมเมนต์ A B C หรือ D"
+              ],
+              "language_review_status": "pending_native_review"
+            }
+          },
+          {
+            "copy_id": "casual_shopping_copy_2",
+            "copy": {
+              "title": "สีไหนเข้ากับวันนี้",
+              "caption": "A B C หรือ D คุณชอบคู่สีของลุคไหนสำหรับวันสบาย ๆ เลือก A B C หรือ D แล้วบอกว่าจะใส่ไปไหน",
+              "hashtags": [
+                "#OOTD",
+                "#เลือกชุด"
+              ],
+              "slide_texts": [
+                "สีไหนเข้ากับวันนี้",
+                "A · {{label_a}}",
+                "B · {{label_b}}",
+                "C · {{label_c}}",
+                "D · {{label_d}}\nคุณเลือก A B C หรือ D?"
+              ],
+              "language_review_status": "pending_native_review"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "status": "deprecated"
+}

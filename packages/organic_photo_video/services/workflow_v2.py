@@ -40,7 +40,9 @@ def review_actor(reviewer_type: str, reviewer: str) -> str:
     return reviewer_type
 
 
-VALID_SCOPES = frozenset({"anchor", "photo", "cutout", "board", "group", "render"})
+VALID_SCOPES = frozenset(
+    {"anchor", "photo", "cutout", "board", "group", "photo_package", "render"}
+)
 VALID_DECISIONS = frozenset({"passed", "failed", "waived"})
 
 
@@ -371,15 +373,29 @@ class ScopedReviewService:
         self._repository = repository
 
     @staticmethod
-    def selection_keys(scope: str, task: ContentTask) -> list[str]:
+    def selection_keys(
+        scope: str, task: ContentTask, *, package: Any = None
+    ) -> list[str]:
         if scope in {"group", "render"}:
             count = len((task.plan_json or {}).get("shots") or [])
             return [f"shot:{index}" for index in range(1, count + 1)]
+        if scope == "photo_package":
+            manifest = getattr(package, "photo_manifest_json", None) or {}
+            slides = list(manifest.get("slides") or [])
+            if not slides:
+                raise WorkflowV2Error("photo_package has no final slides")
+            indexes = [int(item.get("index") or 0) for item in slides]
+            if indexes != list(range(1, len(slides) + 1)):
+                raise WorkflowV2Error("photo_package slide indexes must be consecutive")
+            return [f"slide:{index}" for index in indexes]
         raise WorkflowV2Error(f"scope {scope!r} requires explicit selection keys")
 
-    def fingerprint(self, task: ContentTask, revision: TaskRevision, *, scope: str, extra: Any = None) -> str:
+    def fingerprint(
+        self, task: ContentTask, revision: TaskRevision, *, scope: str,
+        extra: Any = None, package: Any = None,
+    ) -> str:
         return RevisionAssetResolver.fingerprint(
-            revision, self.selection_keys(scope, task), extra=extra or {
+            revision, self.selection_keys(scope, task, package=package), extra=extra or {
                 "quality_contract": (revision.plan_snapshot_json.get("plan") or {}).get("quality_contract") or {},
             }
         )
@@ -390,8 +406,10 @@ class ScopedReviewService:
         evidence: Optional[Mapping[str, Any]] = None, reviewer_type: str = "human",
         reviewer: str = "operator", extra_fingerprint_input: Any = None,
     ) -> QualityReview:
-        if scope not in {"group", "render"} or decision not in VALID_DECISIONS:
-            raise WorkflowV2Error("only group/render passed, failed or waived reviews are supported")
+        if scope not in {"group", "photo_package", "render"} or decision not in VALID_DECISIONS:
+            raise WorkflowV2Error(
+                "only group/photo_package/render passed, failed or waived reviews are supported"
+            )
         reviewer_type = review_actor(reviewer_type, reviewer)
         if reviewer_type == "technical":
             from services.release_gate import TECHNICAL_REVIEWER, technical_evidence_valid
@@ -403,11 +421,19 @@ class ScopedReviewService:
         revision = self._repository.get_task_revision(task.active_revision_id)
         if revision is None:
             raise WorkflowV2Error("active revision is missing")
+        package = None
+        if scope == "photo_package":
+            package = self._repository.get_content_package(target_id)
+            if package is None or package.task_id != task_id:
+                raise WorkflowV2Error("photo_package review target is missing or belongs to another task")
         profile_id, profile_version = _quality_profile(revision.plan_snapshot_json.get("plan") or {})
         review = QualityReview(
             review_id=generate_prefixed_id("opv_qr"), revision_id=revision.revision_id,
             scope=scope, target_id=target_id,
-            input_fingerprint=self.fingerprint(task, revision, scope=scope, extra=extra_fingerprint_input),
+            input_fingerprint=self.fingerprint(
+                task, revision, scope=scope, extra=extra_fingerprint_input,
+                package=package,
+            ),
             quality_profile_id=profile_id, quality_profile_version=profile_version,
             decision=decision, reviewer_type=reviewer_type,
             dimensions_json=dict(dimensions), reason_codes_json=[str(v) for v in reason_codes],
@@ -425,7 +451,15 @@ class ScopedReviewService:
         revision = self._repository.get_task_revision(task.active_revision_id)
         if revision is None:
             raise WorkflowV2Error("active revision is missing")
-        expected = self.fingerprint(task, revision, scope=scope, extra=extra_fingerprint_input)
+        package = None
+        if scope == "photo_package":
+            package = self._repository.get_content_package(target_id)
+            if package is None or package.task_id != task.task_id:
+                raise WorkflowV2Error("photo_package review target is missing or belongs to another task")
+        expected = self.fingerprint(
+            task, revision, scope=scope, extra=extra_fingerprint_input,
+            package=package,
+        )
         matches = self._repository.list_quality_reviews(
             revision.revision_id, scope=scope, target_id=target_id
         )
@@ -435,6 +469,102 @@ class ScopedReviewService:
             raise WorkflowV2Error(
                 f"Workflow V2 {scope} review is missing or stale for {target_id}"
             )
+        return review
+
+
+def photo_package_fingerprint_input(package: Any) -> Dict[str, Any]:
+    """Return the non-file portion that a final photo review must freeze."""
+    manifest = dict(getattr(package, "photo_manifest_json", None) or {})
+    slides = []
+    for item in manifest.get("slides") or []:
+        slides.append({
+            "index": int(item.get("index") or 0),
+            "asset_id": str(item.get("asset_id") or ""),
+            "sha256": str(item.get("sha256") or ""),
+            "width": int(item.get("width") or 0),
+            "height": int(item.get("height") or 0),
+            "mime_type": str(item.get("mime_type") or ""),
+        })
+    result = {
+        "schema_version": str(manifest.get("schema_version") or ""),
+        "media_kind": str(manifest.get("media_kind") or ""),
+        "content_package_id": str(package.content_package_id),
+        "template_id": str(manifest.get("template_id") or ""),
+        "template_version": int(manifest.get("template_version") or 0),
+        "cover_index": int(manifest.get("cover_index") or 0),
+        "copy": copy.deepcopy(manifest.get("copy") or {}),
+        "slides": slides,
+    }
+    binding_version = int(manifest.get("theme_copy_binding_version") or 0)
+    if binding_version:
+        result["theme_copy_binding_version"] = binding_version
+        result["theme_brief"] = copy.deepcopy(manifest.get("theme_brief") or {})
+    return result
+
+
+class PhotoPackageReviewService:
+    """Review and atomically release the actual, text-baked photo carousel."""
+
+    def __init__(self, repository):
+        self._repository = repository
+        self._reviews = ScopedReviewService(repository)
+
+    def record(
+        self, task_id: str, *, decision: str, dimensions: Mapping[str, Any],
+        reason_codes: Sequence[str] = (), evidence: Optional[Mapping[str, Any]] = None,
+        reviewer_type: str = "human", reviewer: str = "operator",
+    ) -> QualityReview:
+        task = self._repository.get_task(task_id)
+        if task is None or not workflow_v2_enabled(task) or not task.active_revision_id:
+            raise WorkflowV2Error("photo package review requires an active Workflow V2 task")
+        if decision in {"passed", "waived"}:
+            from services.release_gate import require_photo_content_allowed
+            require_photo_content_allowed(self._repository, task)
+        if str(getattr(task, "media_kind", "video") or "video") != "native_photo":
+            raise WorkflowV2Error("photo package review requires media_kind=native_photo")
+        package_id = str(getattr(task, "content_package_id", "") or "")
+        package = self._repository.get_content_package(package_id) if package_id else None
+        if package is None or package.task_id != task_id:
+            raise WorkflowV2Error("photo package is missing or belongs to another task")
+        manifest = dict(getattr(package, "photo_manifest_json", None) or {})
+        slides = list(manifest.get("slides") or [])
+        if manifest.get("schema_version") != "opv-photo-package-v1" or not slides:
+            raise WorkflowV2Error("photo package manifest is missing or invalid")
+        if task.task_status != "photo_packaging":
+            raise WorkflowV2Error("photo package review requires photo_packaging status")
+        revision = self._repository.get_task_revision(task.active_revision_id)
+        if revision is None or revision.revision_status != "working":
+            raise WorkflowV2Error("photo package revision is not working")
+        from services.release_gate import file_hash
+        for index, item in enumerate(slides, 1):
+            asset = RevisionAssetResolver.selected(revision, f"slide:{index}")
+            if (int(item.get("index") or 0) != index
+                    or str(item.get("asset_id") or "") != asset["asset_id"]
+                    or str(item.get("sha256") or "") != asset["sha256"]
+                    or file_hash(asset["path"]) != asset["sha256"]):
+                raise WorkflowV2Error(f"final photo slide:{index} changed before review")
+        extra = photo_package_fingerprint_input(package)
+        review = self._reviews.record(
+            task_id, scope="photo_package", target_id=package_id,
+            decision=decision, dimensions=dimensions, reason_codes=reason_codes,
+            evidence=evidence, reviewer_type=reviewer_type, reviewer=reviewer,
+            extra_fingerprint_input=extra,
+        )
+        from services.release_gate import trusted_photo_content_review
+        if trusted_photo_content_review(review):
+            self._repository.release_revision(
+                task_id, revision.revision_id,
+                expected_task_row_version=int(getattr(task, "row_version", 1) or 1),
+                review_id=review.review_id, review_scope="photo_package",
+                review_target_id=package_id,
+                expected_review_fingerprint=review.input_fingerprint,
+                expected_selection_hash=revision.selection_hash,
+                expected_input_snapshot_hash=revision.input_snapshot_hash,
+            )
+        elif decision in {"passed", "waived"}:
+            # Keep technical/model evidence append-only, but never turn it into
+            # permission to publish a native-photo package.
+            return review
         return review
 
 

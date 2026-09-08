@@ -1,0 +1,315 @@
+{
+  "schema_version": "opv-content-recipe-v1",
+  "recipe_id": "PHOTO_MX_OCCASION_HAIR_V1",
+  "recipe_key": "MX_OCCASION_HAIR",
+  "recipe_version": 2,
+  "content_goal": "occasion_hair_match",
+  "anchor_slot": 2,
+  "shot_count": 5,
+  "hook_types": [
+    "hair_for_each_plan",
+    "occasion_match"
+  ],
+  "story_structure": [
+    {
+      "slot_index": 1,
+      "role": "occasion_hook",
+      "source_slots": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "layout_variant": "GRID_FOUR",
+      "purpose": "四种场景发型总览"
+    },
+    {
+      "slot_index": 2,
+      "role": "date_hair",
+      "source_slots": [],
+      "layout_variant": "CHOICE_DETAIL",
+      "purpose": "约会发型"
+    },
+    {
+      "slot_index": 3,
+      "role": "party_hair",
+      "source_slots": [],
+      "layout_variant": "CHOICE_DETAIL",
+      "purpose": "派对发型"
+    },
+    {
+      "slot_index": 4,
+      "role": "work_hair",
+      "source_slots": [],
+      "layout_variant": "CHOICE_DETAIL",
+      "purpose": "工作场景发型"
+    },
+    {
+      "slot_index": 5,
+      "role": "weekend_hair_with_cta",
+      "source_slots": [],
+      "layout_variant": "CHOICE_DETAIL",
+      "purpose": "周末发型并询问下一个计划"
+    }
+  ],
+  "copy_style": {
+    "locale": "es-MX",
+    "tone": "direct_lifestyle",
+    "max_lines_per_block": 2,
+    "example": "Un look para cada plan — ¿cuál tienes hoy?"
+  },
+  "suitable_topics": [
+    "occasion_hair",
+    "date_hair",
+    "party_hair",
+    "work_hair",
+    "weekend_hair"
+  ],
+  "quality_profile_id": "QUALITY_STANDARD_V1",
+  "recipe_spec": {
+    "schema_version": "opv-photo-recipe-v1",
+    "media_kind": "native_photo",
+    "category_key": "wig",
+    "markets": [
+      "MX"
+    ],
+    "theme_types": [
+      "SCENARIO",
+      "MATCH"
+    ],
+    "product_modes": [
+      "NO_PRODUCT",
+      "SOFT_PRODUCT"
+    ],
+    "variables_schema": {
+      "occasions": {
+        "type": "fixed_set",
+        "values": [
+          "date",
+          "party",
+          "work",
+          "weekend"
+        ],
+        "required": true
+      },
+      "style_intensity": {
+        "type": "enum",
+        "values": [
+          "natural",
+          "polished",
+          "bold"
+        ],
+        "required": true
+      },
+      "hair_color_family": {
+        "type": "enum",
+        "values": [
+          "black",
+          "brown",
+          "warm_brown",
+          "highlighted"
+        ],
+        "required": true
+      }
+    },
+    "template_id": "PHOTO_CHOICE_GRID_V1",
+    "template_version": 2,
+    "visual_rules": {
+      "same_identity": false,
+      "same_photo_style": true,
+      "distinct_occasions": 4,
+      "scene_cues_must_be_subtle": true,
+      "hairline_visible": true
+    },
+    "asset_policy": {
+      "default": "ASSET_REUSE",
+      "on_missing": "NEEDS_ASSET"
+    },
+    "asset_match_keys": [
+      "occasions",
+      "style_intensity",
+      "hair_color_family"
+    ],
+    "asset_requirements": {
+      "required_roles": [
+        "cover_seed",
+        "date_hair",
+        "party_hair",
+        "work_hair",
+        "weekend_hair"
+      ],
+      "required_tags": {
+        "use_cases": "occasion_hair"
+      },
+      "required_pairs": []
+    },
+    "execution_profiles": [
+      {
+        "profile_id": "occasion_natural",
+        "label": "natural 场景发型",
+        "variables": {
+          "occasions": [
+            "date",
+            "party",
+            "work",
+            "weekend"
+          ],
+          "style_intensity": "natural",
+          "hair_color_family": "black"
+        },
+        "asset_set_keys": [
+          "MX_WIG_OCCASION"
+        ],
+        "copy_variants": [
+          {
+            "copy_id": "occasion_natural_copy_1",
+            "copy": {
+              "title": "Un peinado para cada plan",
+              "caption": "Una cita, una fiesta, el trabajo o un fin de semana libre: ¿cuál es tu próximo plan?",
+              "hashtags": [
+                "#Peinados",
+                "#IdeasDeLook"
+              ],
+              "slide_texts": [
+                "¿Cuál es tu plan?",
+                "Para una cita",
+                "Para una fiesta",
+                "Para el trabajo",
+                "Para el fin de semana"
+              ]
+            }
+          },
+          {
+            "copy_id": "occasion_natural_copy_2",
+            "copy": {
+              "title": "Cambia el look, cambia el plan",
+              "caption": "Guarda estas ideas de peinado para inspirarte antes de tu próxima salida.",
+              "hashtags": [
+                "#Peinados",
+                "#IdeasDeLook"
+              ],
+              "slide_texts": [
+                "Cuatro planes, cuatro ideas",
+                "Idea para una cita",
+                "Idea para una fiesta",
+                "Idea para el trabajo",
+                "Idea para el fin de semana"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "profile_id": "occasion_polished",
+        "label": "polished 场景发型",
+        "variables": {
+          "occasions": [
+            "date",
+            "party",
+            "work",
+            "weekend"
+          ],
+          "style_intensity": "polished",
+          "hair_color_family": "brown"
+        },
+        "asset_set_keys": [
+          "MX_WIG_OCCASION"
+        ],
+        "copy_variants": [
+          {
+            "copy_id": "occasion_polished_copy_1",
+            "copy": {
+              "title": "Un peinado para cada plan",
+              "caption": "Una cita, una fiesta, el trabajo o un fin de semana libre: ¿cuál es tu próximo plan?",
+              "hashtags": [
+                "#Peinados",
+                "#IdeasDeLook"
+              ],
+              "slide_texts": [
+                "¿Cuál es tu plan?",
+                "Para una cita",
+                "Para una fiesta",
+                "Para el trabajo",
+                "Para el fin de semana"
+              ]
+            }
+          },
+          {
+            "copy_id": "occasion_polished_copy_2",
+            "copy": {
+              "title": "Cambia el look, cambia el plan",
+              "caption": "Guarda estas ideas de peinado para inspirarte antes de tu próxima salida.",
+              "hashtags": [
+                "#Peinados",
+                "#IdeasDeLook"
+              ],
+              "slide_texts": [
+                "Cuatro planes, cuatro ideas",
+                "Idea para una cita",
+                "Idea para una fiesta",
+                "Idea para el trabajo",
+                "Idea para el fin de semana"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "profile_id": "occasion_bold",
+        "label": "bold 场景发型",
+        "variables": {
+          "occasions": [
+            "date",
+            "party",
+            "work",
+            "weekend"
+          ],
+          "style_intensity": "bold",
+          "hair_color_family": "highlighted"
+        },
+        "asset_set_keys": [
+          "MX_WIG_OCCASION"
+        ],
+        "copy_variants": [
+          {
+            "copy_id": "occasion_bold_copy_1",
+            "copy": {
+              "title": "Un peinado para cada plan",
+              "caption": "Una cita, una fiesta, el trabajo o un fin de semana libre: ¿cuál es tu próximo plan?",
+              "hashtags": [
+                "#Peinados",
+                "#IdeasDeLook"
+              ],
+              "slide_texts": [
+                "¿Cuál es tu plan?",
+                "Para una cita",
+                "Para una fiesta",
+                "Para el trabajo",
+                "Para el fin de semana"
+              ]
+            }
+          },
+          {
+            "copy_id": "occasion_bold_copy_2",
+            "copy": {
+              "title": "Cambia el look, cambia el plan",
+              "caption": "Guarda estas ideas de peinado para inspirarte antes de tu próxima salida.",
+              "hashtags": [
+                "#Peinados",
+                "#IdeasDeLook"
+              ],
+              "slide_texts": [
+                "Cuatro planes, cuatro ideas",
+                "Idea para una cita",
+                "Idea para una fiesta",
+                "Idea para el trabajo",
+                "Idea para el fin de semana"
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "status": "active"
+}

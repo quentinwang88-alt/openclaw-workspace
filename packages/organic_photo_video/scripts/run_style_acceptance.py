@@ -86,7 +86,7 @@ def main():
         return 0
     from services.content_story import generate_product_image_story
     from services.hero_first import HeroFirstProducer
-    from services.image_generator import OpenAIImageGenerator
+    from services.image_generator import build_default_photo_generator
     from services.technical_production import TechnicalProductionFlow
     from services.video_render_flow import VideoRenderFlow
     from services.video_renderer import FFmpegStillRenderer
@@ -112,7 +112,7 @@ def main():
     dump(args.output_dir / "tasks.json", [{"sample": i, "task_id": task_id} for i, task_id in prepared])
     for i, task_id in prepared:
         print(json.dumps({"sample": i, "task_id": task_id, "phase": "production_start"}), flush=True)
-        TechnicalProductionFlow(repo, HeroFirstProducer(repo, OpenAIImageGenerator(), technical_only=True),
+        TechnicalProductionFlow(repo, HeroFirstProducer(repo, build_default_photo_generator(), technical_only=True),
                                 VideoRenderFlow(repo, FFmpegStillRenderer())).run(task_id, overlay_profile_id="OVERLAY_LIGHT_V1")
         task = repo.get_task(task_id)
         render = repo.get_render(task.selected_render_id)

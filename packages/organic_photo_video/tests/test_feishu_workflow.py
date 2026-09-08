@@ -15,12 +15,13 @@ if str(PACKAGE_ROOT) not in sys.path:
 from services.feishu_workflow import (  # noqa: E402
     FIELD_EXECUTE,
     FIELD_CONFIRM_PUBLISH,
+    FIELD_PHOTO_REQUEST,
     FIELD_QUANTITY,
     FIELD_PROGRESS,
     FIELD_REVIEW,
     PROGRESS_DONE,
     PROGRESS_REVIEW,
-    FeishuTaskWorkflow,
+    FeishuTaskWorkflow, FeishuWorkflowError,
     ProductionPresetCatalog,
     dependent_redo_slots,
     quantity_value,
@@ -102,8 +103,61 @@ class CatalogTest(unittest.TestCase):
         ))
         self.assertTrue(all(spec.look_ref == "" for spec in batch))
 
+    def test_shipped_catalog_exposes_eight_native_photo_presets(self):
+        path = PACKAGE_ROOT / "config" / "feishu_production_presets.json"
+        catalog = ProductionPresetCatalog(path)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        photo_presets = [
+            item for item in payload["presets"]
+            if item.get("media_kind") == "native_photo"
+        ]
+        self.assertEqual(len(photo_presets), 8)
+        self.assertEqual(
+            {item["category_key"] for item in photo_presets},
+            {"womenswear", "wig"},
+        )
+        expected_routes = {
+            "图文｜TH｜四选一穿搭": (
+                "native_photo_product_supply_v1", "REUSE_THEN_GENERATE_MISSING",
+            ),
+            "图文｜TH｜旅行穿搭": (
+                "native_photo_style_plan_v1", "REUSE_THEN_GENERATE_MISSING",
+            ),
+        }
+        recipe_ids = set()
+        for item in photo_presets:
+            expected_route, expected_assets = expected_routes.get(
+                item["name"], ("native_photo_v1", "ASSET_REUSE"),
+            )
+            self.assertEqual(item["routing_policy"], expected_route)
+            self.assertEqual(item["default_product_mode"], "NO_PRODUCT")
+            self.assertEqual(item["default_asset_mode"], expected_assets)
+            if item.get("status") == "disabled":
+                self.assertNotIn(item["name"], catalog.names)
+                with self.assertRaisesRegex(FeishuWorkflowError, "NEEDS_CONTENT"):
+                    catalog.resolve(item["name"], "photo-config-test")
+                continue
+            resolved = catalog.resolve(item["name"], "photo-config-test")
+            self.assertEqual(len(resolved), 1)
+            self.assertTrue(catalog.is_native_photo(item["name"]))
+            self.assertEqual(catalog.metadata(item["name"])["routing_policy"], expected_route)
+            recipe_ids.add(resolved[0].recipe_id)
+        self.assertEqual(len(recipe_ids), 7)
+        self.assertIn("PHOTO_TH_TRAVEL_OUTFIT_V2", recipe_ids)
+
+    def test_photo_plan_note_never_reports_video_duration(self):
+        from types import SimpleNamespace
+        note = FeishuTaskWorkflow._production_plan_note([
+            SimpleNamespace(media_kind="native_photo", plan_json={"slides": [{}, {}, {}, {}, {}]})
+        ])
+        self.assertIn("5张原生图文", note)
+        self.assertNotIn("秒", note)
+
 
 class FieldParsingTest(unittest.TestCase):
+    def test_photo_request_field_name_is_stable(self):
+        self.assertEqual(FIELD_PHOTO_REQUEST, "图文任务JSON")
+
     def test_text_value_accepts_feishu_rich_text(self):
         self.assertEqual(text_value([{"text": "173"}, {"text": "42"}]), "17342")
         self.assertEqual(text_value(None), "")
@@ -143,7 +197,7 @@ class FieldParsingTest(unittest.TestCase):
             FeishuTaskWorkflow._action({
                 FIELD_CONFIRM_PUBLISH: True, FIELD_PROGRESS: PROGRESS_DONE,
             }),
-            "schedule",
+            "confirm_publish",
         )
         self.assertEqual(
             FeishuTaskWorkflow._action({

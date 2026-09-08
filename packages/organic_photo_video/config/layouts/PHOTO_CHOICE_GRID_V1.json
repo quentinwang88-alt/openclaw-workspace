@@ -1,0 +1,162 @@
+{
+  "schema_version": "opv-photo-layout-v1",
+  "layout_id": "PHOTO_CHOICE_GRID_V1",
+  "layout_version": 2,
+  "layout_kind": "CHOICE_GRID",
+  "status": "active",
+  "canvas": {
+    "width": 1080,
+    "height": 1920,
+    "background": "#F7F5F0",
+    "color_space": "sRGB"
+  },
+  "safe_area": {
+    "top": 220,
+    "bottom": 420,
+    "left": 60,
+    "right": 60
+  },
+  "page_variants": {
+    "GRID_FOUR": {
+      "regions": [
+        {
+          "id": "option_a",
+          "kind": "image",
+          "source_key": "a",
+          "fit": "cover",
+          "rect": {
+            "x": 40,
+            "y": 410,
+            "width": 490,
+            "height": 520
+          }
+        },
+        {
+          "id": "option_b",
+          "kind": "image",
+          "source_key": "b",
+          "fit": "cover",
+          "rect": {
+            "x": 550,
+            "y": 410,
+            "width": 490,
+            "height": 520
+          }
+        },
+        {
+          "id": "option_c",
+          "kind": "image",
+          "source_key": "c",
+          "fit": "cover",
+          "rect": {
+            "x": 40,
+            "y": 950,
+            "width": 490,
+            "height": 520
+          }
+        },
+        {
+          "id": "option_d",
+          "kind": "image",
+          "source_key": "d",
+          "fit": "cover",
+          "rect": {
+            "x": 550,
+            "y": 950,
+            "width": 490,
+            "height": 520
+          }
+        },
+        {
+          "id": "headline",
+          "kind": "text",
+          "text_role": "headline",
+          "max_lines": 2,
+          "align": "center",
+          "rect": {
+            "x": 90,
+            "y": 220,
+            "width": 900,
+            "height": 170
+          }
+        },
+        {
+          "id": "labels",
+          "kind": "text",
+          "text_role": "choice_labels",
+          "max_lines": 1,
+          "align": "center",
+          "rect": {
+            "x": 60,
+            "y": 1310,
+            "width": 960,
+            "height": 120
+          }
+        }
+      ]
+    },
+    "CHOICE_DETAIL": {
+      "regions": [
+        {
+          "id": "photo",
+          "kind": "image",
+          "source_key": "primary",
+          "fit": "cover",
+          "rect": {
+            "x": 0,
+            "y": 0,
+            "width": 1080,
+            "height": 1920
+          }
+        },
+        {
+          "id": "choice_label",
+          "kind": "text",
+          "text_role": "choice_label",
+          "max_lines": 1,
+          "align": "center",
+          "rect": {
+            "x": 400,
+            "y": 250,
+            "width": 280,
+            "height": 120
+          }
+        },
+        {
+          "id": "support",
+          "kind": "text",
+          "text_role": "support_or_cta",
+          "max_lines": 2,
+          "align": "center",
+          "rect": {
+            "x": 120,
+            "y": 1370,
+            "width": 840,
+            "height": 130
+          }
+        }
+      ]
+    }
+  },
+  "text_defaults": {
+    "font_candidates": [
+      "/System/Library/Fonts/Thonburi.ttc",
+      "/System/Library/Fonts/Supplemental/Arial Unicode.ttf"
+    ],
+    "headline_size": 56,
+    "choice_size": 54,
+    "color": "#171717",
+    "backplate": {
+      "enabled": true,
+      "color": "#FFFFFF",
+      "opacity": 0.88,
+      "corner_radius": 22
+    }
+  },
+  "export": {
+    "format": "JPEG",
+    "quality": 90,
+    "strip_metadata": true
+  },
+  "choice_badges": true
+}

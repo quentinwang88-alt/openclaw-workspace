@@ -75,8 +75,11 @@ class FeishuV2Mixin:
         return asset
 
     def _v2_released(self, task):
-        from services.release_gate import freeze_release, ReleaseGateError
+        from services.release_gate import freeze_photo_release, freeze_release, ReleaseGateError
         try:
+            if str(getattr(task, "media_kind", "video") or "video") == "native_photo":
+                freeze_photo_release(self.repository, task)
+                return True
             freeze_release(self.repository, task, self.repository.get_render(task.selected_render_id or ""))
             return True
         except (ReleaseGateError, OSError):

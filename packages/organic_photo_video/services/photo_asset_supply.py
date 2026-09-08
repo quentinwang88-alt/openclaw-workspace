@@ -1,0 +1,319 @@
+"""Stage operator-provided complete-look photos without requiring JSON input."""
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import mimetypes
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+from PIL import Image, ImageOps
+
+from services.image_generator import read_image_dimensions
+from domain.models import AssetSet
+from services.asset_set_service import AssetSetService
+
+
+class PhotoAssetSupplyError(ValueError):
+    pass
+
+
+def _register_heif_support() -> None:
+    """Best-effort HEIC/HEIF decode registration (iPhone uploads)."""
+    try:
+        import pillow_heif  # noqa: F401
+
+        pillow_heif.register_heif_opener()
+    except Exception:  # noqa: BLE001 - absence only narrows format support
+        pass
+
+
+_register_heif_support()
+
+
+def normalize_image_bytes(content: bytes, name: str, content_type: str) -> tuple[bytes, str]:
+    """Return JPG/PNG bytes; other Pillow-decodable formats (HEIC/WebP/BMP/
+    TIFF) are transcoded to JPEG with EXIF orientation applied."""
+    suffix = _suffix_static(name, content_type)
+    if suffix:
+        return content, suffix
+    if not content:
+        return b"", ""
+    try:
+        with Image.open(io.BytesIO(content)) as image:
+            converted = ImageOps.exif_transpose(image.convert("RGB"))
+            buffer = io.BytesIO()
+            converted.save(buffer, "JPEG", quality=92)
+            return buffer.getvalue(), ".jpg"
+    except Exception:  # noqa: BLE001 - undecodable stays an explicit error
+        return b"", ""
+
+
+def _suffix_static(name: str, content_type: str) -> str:
+    suffix = Path(name).suffix.lower()
+    if suffix == ".jpeg":
+        suffix = ".jpg"
+    if suffix in {".jpg", ".png"}:
+        return suffix
+    mime = content_type.lower() or str(mimetypes.guess_type(name)[0] or "").lower()
+    return {"image/jpeg": ".jpg", "image/png": ".png"}.get(mime, "")
+
+
+class PhotoAssetSupplyService:
+    """Download and describe candidate photos; qualification stays separate."""
+
+    def __init__(self, client: Any, *, root: Path):
+        self.client = client
+        self.root = Path(root)
+
+    @staticmethod
+    def gap_summary(recipe: Any) -> str:
+        spec = dict(getattr(recipe, "recipe_spec_json", {}) or {})
+        roles = list((spec.get("asset_requirements") or {}).get("required_roles") or [])
+        relations = list((spec.get("visual_rules") or {}).get("garment_relations") or [])
+        relation_text = ""
+        if any(item.get("relation") == "same_outerwear_different_bottom" for item in relations):
+            relation_text = "；其中 B/C 需为同款外套、不同下装"
+        return f"需要 {len(roles)} 张完整穿搭图（{', '.join(roles)}）{relation_text}"
+
+    def stage(self, *, record_id: str, attachments: Sequence[Mapping[str, Any]],
+              required_roles: Sequence[str]) -> dict[str, Any]:
+        if len(attachments) != len(required_roles):
+            raise PhotoAssetSupplyError(
+                f"上传了 {len(attachments)} 张，当前主题需要 {len(required_roles)} 张完整穿搭图；"
+                "请按 A、B、C、D 顺序上传"
+            )
+        folder = self.root / "staging" / self._safe(record_id)
+        folder.mkdir(parents=True, exist_ok=True)
+        files = []
+        for index, (attachment, role) in enumerate(zip(attachments, required_roles), 1):
+            if not isinstance(attachment, Mapping) or not attachment.get("file_token"):
+                raise PhotoAssetSupplyError(f"第 {index} 个附件缺少 file_token")
+            content, name, content_type, _size = self.client.download_attachment_bytes(dict(attachment))
+            content, suffix = normalize_image_bytes(content, str(name or ""), str(content_type or ""))
+            if not content or not suffix:
+                raise PhotoAssetSupplyError(f"第 {index} 个附件不是支持的 JPG/PNG 图片")
+            digest = hashlib.sha256(content).hexdigest()
+            path = folder / f"{index:02d}_{role}_{digest[:16]}{suffix}"
+            if not path.exists():
+                path.write_bytes(content)
+            dimensions = read_image_dimensions(str(path))
+            if dimensions is None:
+                raise PhotoAssetSupplyError(f"第 {index} 张图片无法解码")
+            files.append({
+                "role": str(role), "path": str(path.resolve()), "sha256": digest,
+                "width": dimensions[0], "height": dimensions[1],
+                "source_file_token": str(attachment["file_token"]),
+            })
+        manifest = {
+            "schema_version": "opv-photo-asset-staging-v1",
+            "record_id": record_id, "status": "pending_content_review", "files": files,
+        }
+        manifest_path = folder / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {**manifest, "manifest_path": str(manifest_path.resolve())}
+
+    def stage_product_references(
+        self, *, record_id: str, attachments: Sequence[Mapping[str, Any]]
+    ) -> list[str]:
+        """Download reusable product truth images; these are not post pages."""
+        return self.stage_reference_images(
+            record_id=record_id, attachments=attachments, reference_kind="product"
+        )
+
+    def stage_reference_images(
+        self, *, record_id: str, attachments: Sequence[Mapping[str, Any]],
+        reference_kind: str,
+    ) -> list[str]:
+        """Download immutable reference bytes into a role-specific cache."""
+        if not attachments:
+            raise PhotoAssetSupplyError("请至少上传一张参考图")
+        kind = str(reference_kind or "reference").strip().lower()
+        folder_name = "product_references" if kind == "product" else f"{self._safe(kind)}_references"
+        folder = self.root / folder_name / self._safe(record_id)
+        folder.mkdir(parents=True, exist_ok=True)
+        paths = []
+        for index, attachment in enumerate(attachments, 1):
+            if not isinstance(attachment, Mapping) or not attachment.get("file_token"):
+                raise PhotoAssetSupplyError(f"第 {index} 个参考图附件缺少 file_token")
+            content, name, content_type, _size = self.client.download_attachment_bytes(dict(attachment))
+            content, suffix = normalize_image_bytes(content, str(name or ""), str(content_type or ""))
+            if not content or not suffix:
+                raise PhotoAssetSupplyError(f"第 {index} 张参考图不是支持的 JPG/PNG")
+            digest = hashlib.sha256(content).hexdigest()
+            path = folder / f"{index:02d}_{digest[:16]}{suffix}"
+            if not path.exists():
+                path.write_bytes(content)
+            if read_image_dimensions(str(path)) is None:
+                raise PhotoAssetSupplyError(f"第 {index} 张参考图无法解码")
+            paths.append(str(path.resolve()))
+        return paths
+
+    def stage_existing(self, *, record_id: str, sources: Sequence[Mapping[str, Any]],
+                       required_roles: Sequence[str], metadata: Mapping[str, Any] = None) -> dict[str, Any]:
+        if len(sources) < len(required_roles):
+            raise PhotoAssetSupplyError(
+                f"旧穿搭任务仅找到 {len(sources)} 套不同 Look，当前主题需要 {len(required_roles)} 套"
+            )
+        folder = self.root / "staging" / self._safe(record_id)
+        folder.mkdir(parents=True, exist_ok=True)
+        files = []
+        for index, (source, role) in enumerate(zip(sources, required_roles), 1):
+            path = Path(str(source.get("path") or "")).expanduser().resolve()
+            if not path.is_file():
+                raise PhotoAssetSupplyError(f"旧穿搭素材 {index} 文件不存在")
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            if source.get("sha256") and source.get("sha256") != digest:
+                raise PhotoAssetSupplyError(f"旧穿搭素材 {index} 哈希已变化")
+            dimensions = read_image_dimensions(str(path))
+            if dimensions is None:
+                raise PhotoAssetSupplyError(f"旧穿搭素材 {index} 无法解码")
+            files.append({
+                "role": str(role), "path": str(path), "sha256": digest,
+                "width": dimensions[0], "height": dimensions[1],
+                "source_task_id": str(source.get("task_id") or ""),
+                "source_look_ref": str(source.get("look_ref") or ""),
+                "source_kind": str(source.get("source_kind") or "existing_outfit"),
+                "generation_provider": str(source.get("generation_provider") or ""),
+                "generation_model": str(source.get("generation_model") or ""),
+                "generation_request_id": str(source.get("generation_request_id") or ""),
+                "display_label": dict(source.get("display_label") or {}),
+                "outerwear_signature": str(source.get("outerwear_signature") or ""),
+                "planned_look_signature": str(source.get("planned_look_signature") or ""),
+                "content_plan_item_id": str(source.get("content_plan_item_id") or ""),
+                "planned_attributes": dict(source.get("planned_attributes") or {}),
+            })
+        manifest = {
+            "schema_version": "opv-photo-asset-staging-v1", "record_id": record_id,
+            "status": "pending_content_review", "source": "existing_outfit_tasks", "files": files,
+            "metadata": dict(metadata or {}),
+        }
+        manifest_path = folder / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {**manifest, "manifest_path": str(manifest_path.resolve())}
+
+    def load_staged(self, record_id: str) -> dict[str, Any]:
+        path = self.root / "staging" / self._safe(record_id) / "manifest.json"
+        if not path.is_file():
+            raise PhotoAssetSupplyError("找不到该行已暂存的图文参考图，请重新上传并执行")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("status") not in {"pending_content_review", "qualified"}:
+            raise PhotoAssetSupplyError("暂存素材状态不是待内容审核")
+        for item in payload.get("files") or []:
+            source = Path(str(item.get("path") or ""))
+            if not source.is_file() or hashlib.sha256(source.read_bytes()).hexdigest() != item.get("sha256"):
+                raise PhotoAssetSupplyError("暂存图片缺失或内容已经变化")
+        return payload
+
+    def qualify(self, *, record_id: str, recipe: Any, repository: Any,
+                reviewer: str = "feishu_human_operator", reviewer_type: str = "human",
+                source: str = "feishu_human_confirmed_upload") -> AssetSet:
+        """Promote the exact staged bytes after the operator confirms the theme."""
+        staged = self.load_staged(record_id)
+        existing = None
+        if staged.get("status") == "qualified" and staged.get("asset_set_id"):
+            existing = repository.get_asset_set(str(staged["asset_set_id"]))
+            if existing is not None:
+                return existing
+        spec = dict(getattr(recipe, "recipe_spec_json", {}) or {})
+        profile = (spec.get("execution_profiles") or [None])[0]
+        if not isinstance(profile, Mapping):
+            raise PhotoAssetSupplyError("Recipe 缺少可执行方案")
+        key = str((profile.get("asset_set_keys") or [""])[0])
+        market = str((spec.get("markets") or [""])[0])
+        category = str(spec.get("category_key") or "")
+        current = repository.list_asset_sets(category_key=category, market=market, status="enabled")
+        version = max((item.asset_set_version for item in current if item.asset_set_key == key), default=0) + 1
+        assets = []
+        approval_attributes = {}
+        source_hashes = {}
+        for index, item in enumerate(staged["files"]):
+            role = str(item["role"])
+            letter = chr(65 + index)
+            asset_id = f"{self._safe(record_id)}_{role}_{item['sha256'][:10]}"
+            source_hashes[asset_id] = item["sha256"]
+            approval_attributes[asset_id] = {
+                "outerwear_id": f"human_confirmed_{asset_id}_outerwear",
+                "bottom_id": f"human_confirmed_{asset_id}_bottom",
+            }
+            assets.append({
+                "asset_id": asset_id, "role": role, "path": item["path"],
+                "sha256": item["sha256"], "tags": {},
+                "display_label": dict(item.get("display_label") or {
+                    "th-TH": f"ลุค {letter}", "zh-CN": f"造型 {letter}"
+                }),
+                "content_plan": {
+                    "item_id": str(item.get("content_plan_item_id") or ""),
+                    "look_signature": str(item.get("planned_look_signature") or ""),
+                    "attributes": dict(item.get("planned_attributes") or {}),
+                },
+            })
+        for relation in (spec.get("visual_rules") or {}).get("garment_relations") or []:
+            if relation.get("relation") == "same_outerwear_different_bottom":
+                relation_roles = list(relation.get("roles") or [])
+                members = [asset for asset in assets if asset["role"] in relation_roles]
+                if len(members) == 2:
+                    if source == "feishu_style_reference_generated":
+                        signatures = {
+                            str(item.get("outerwear_signature") or "")
+                            for item in staged["files"] if item.get("role") in relation_roles
+                        }
+                        if len(signatures) != 1 or "" in signatures:
+                            raise PhotoAssetSupplyError("风格参考生成的 B/C 未保持同款外套，不能进入四选一 Recipe")
+                    shared = "human_confirmed_same_outerwear_" + hashlib.sha256(
+                        (record_id + ":" + ":".join(sorted(relation_roles))).encode()
+                    ).hexdigest()[:12]
+                    for member in members:
+                        approval_attributes[member["asset_id"]]["outerwear_id"] = shared
+        required_tags = dict((spec.get("asset_requirements") or {}).get("required_tags") or {})
+        match_tags = {
+            key_name: profile.get("variables", {}).get(key_name)
+            for key_name in spec.get("asset_match_keys") or []
+            if key_name in profile.get("variables", {})
+        }
+        identity = hashlib.sha256(
+            ":".join(item["sha256"] for item in staged["files"]).encode()
+        ).hexdigest()[:16]
+        asset_set_id = f"ASSET_{market}_{category.upper()}_UPLOAD_{identity}"
+        # Content-addressed idempotency: retries of the same record regenerate
+        # the staging manifest as pending, but identical content must reuse the
+        # already-qualified asset set instead of colliding on a drifted version.
+        if existing is None:
+            existing = repository.get_asset_set(asset_set_id)
+        if existing is not None:
+            staged.update(status="qualified", asset_set_id=existing.asset_set_id,
+                          asset_set_version=existing.asset_set_version, reviewer=reviewer)
+            path = Path(staged["files"][0]["path"]).parent / "manifest.json"
+            path.write_text(json.dumps(staged, ensure_ascii=False, indent=2), encoding="utf-8")
+            return existing
+        asset_set = AssetSet(
+            asset_set_id=asset_set_id,
+            asset_set_key=key, asset_set_version=version,
+            category_key=category, market=market, status="enabled",
+            tags_json={**required_tags, **match_tags, "source": source,
+                       "theme_key": str((staged.get("metadata") or {}).get("theme_key") or "")},
+            manifest_json={
+                "assets": assets, "pairs": [],
+                "content_approval": {
+                    "schema_version": "opv-source-qualification-v1",
+                    "reviewer": reviewer, "reviewer_type": reviewer_type,
+                    "allowed_logic_keys": [str((spec.get("content_card") or {}).get("logic_key") or "")],
+                    "source_hashes": source_hashes, "attributes": approval_attributes,
+                },
+            },
+        )
+        saved = AssetSetService(repository).save(asset_set)
+        path = Path(staged["files"][0]["path"]).parent / "manifest.json"
+        staged.update(status="qualified", asset_set_id=saved.asset_set_id,
+                      asset_set_version=saved.asset_set_version, reviewer=reviewer)
+        path.write_text(json.dumps(staged, ensure_ascii=False, indent=2), encoding="utf-8")
+        return saved
+
+    @staticmethod
+    def _safe(value: str) -> str:
+        return "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(value))[:120]
+
+    @staticmethod
+    def _suffix(name: str, content_type: str) -> str:
+        return _suffix_static(name, content_type)

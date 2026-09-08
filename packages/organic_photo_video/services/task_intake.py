@@ -41,8 +41,11 @@ class TaskIntakeError(ValueError):
 @dataclass
 class TaskRequest:
     account_id: str
-    product_id: str
+    product_id: Optional[str]
     product_snapshot: Dict[str, Any]
+    media_kind: str = "video"
+    category_key: Optional[str] = None
+    product_mode: str = "SOFT_PRODUCT"
     theme_id: Optional[str] = None
     topic_text: Optional[str] = None
     source_type: str = "manual"
@@ -62,7 +65,7 @@ class IntakeResult:
     created: bool
     market_pack: MarketPack
     account: AccountProfile
-    render_preset: RenderPreset
+    render_preset: Optional[RenderPreset]
     theme: Optional[ThemeCatalog] = None
 
 
@@ -75,6 +78,9 @@ def derive_idempotency_key(
         {
             "account_id": request.account_id,
             "product_id": request.product_id,
+            "media_kind": request.media_kind,
+            "category_key": request.category_key,
+            "product_mode": request.product_mode,
             "source_type": request.source_type,
             "source_record_id": request.source_record_id,
             "theme_id": request.theme_id,
@@ -131,7 +137,7 @@ class TaskIntakeService:
             if account.default_render_preset_id
             else None
         )
-        if preset is None:
+        if preset is None and request.media_kind != "native_photo":
             raise TaskIntakeError(
                 f"account {account.account_id} has no resolvable default render preset"
             )
@@ -161,7 +167,7 @@ class TaskIntakeService:
                 "core_scene_refs": account.core_scene_refs_json,
                 "market_pack_id": pack.market_pack_id,
                 "market_pack_version": pack.pack_version,
-                "render_preset_id": preset.render_preset_id,
+                "render_preset_id": preset.render_preset_id if preset else None,
                 "target_country": pack.target_country,
                 "target_locale": pack.target_locale,
             },
@@ -174,6 +180,9 @@ class TaskIntakeService:
             source_record_id=request.source_record_id,
             account_id=account.account_id,
             product_id=request.product_id,
+            media_kind=request.media_kind,
+            category_key=request.category_key,
+            product_mode=request.product_mode,
             product_snapshot_json=snapshot,
             target_country=pack.target_country,
             target_locale=pack.target_locale,
@@ -219,12 +228,19 @@ class TaskIntakeService:
     def _validate_request(request: TaskRequest) -> None:
         if not request.account_id or not request.account_id.strip():
             raise TaskIntakeError("account_id is required")
-        if not request.product_id or not request.product_id.strip():
-            raise TaskIntakeError("product_id is required")
+        if request.media_kind not in {"video", "native_photo"}:
+            raise TaskIntakeError("media_kind must be video or native_photo")
+        if request.product_mode not in {"NO_PRODUCT", "SOFT_PRODUCT", "PRODUCT_LED"}:
+            raise TaskIntakeError("unknown product_mode")
+        if request.media_kind == "native_photo" and not str(request.category_key or "").strip():
+            raise TaskIntakeError("native_photo requires category_key")
+        if request.product_mode != "NO_PRODUCT" and not str(request.product_id or "").strip():
+            raise TaskIntakeError("product_id is required unless product_mode=NO_PRODUCT")
         if not isinstance(request.product_snapshot, dict):
             raise TaskIntakeError("product_snapshot must be an object")
         reference_images = request.product_snapshot.get("reference_images")
-        if not isinstance(reference_images, list) or not reference_images:
+        if (request.product_mode != "NO_PRODUCT"
+                and (not isinstance(reference_images, list) or not reference_images)):
             raise TaskIntakeError(
                 "product_snapshot.reference_images must contain at least one "
                 "product reference image"

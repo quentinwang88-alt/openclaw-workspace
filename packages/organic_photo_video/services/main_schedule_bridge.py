@@ -83,7 +83,8 @@ class MainScheduleBridge:
         snapshot = task.product_snapshot_json or {}
         product = cls._product_snapshot(task)
         return str(
-            product.get("category")
+            getattr(task, "category_key", None)
+            or product.get("category")
             or product.get("product_type")
             or snapshot.get("category")
             or "apparel"
@@ -152,65 +153,86 @@ class MainScheduleBridge:
         task = self.repository.get_task(task_id)
         if task is None:
             raise MainScheduleBridgeError(f"找不到 OPV 任务：{task_id}")
-        render = (
-            self.repository.get_render(task.selected_render_id)
-            if task.selected_render_id
-            else self.repository.latest_render(task_id)
-        )
+        media_kind = str(getattr(task, "media_kind", "video") or "video")
+        if media_kind not in {"video", "native_photo"}:
+            raise MainScheduleBridgeError(f"OPV 任务 {task_id} 素材类型不受支持：{media_kind}")
+        render = None
+        if media_kind == "video":
+            render = (self.repository.get_render(task.selected_render_id)
+                      if task.selected_render_id else self.repository.latest_render(task_id))
+
         from services.workflow_v2 import workflow_v2_enabled
-        if workflow_v2_enabled(task) and (
-            not task.released_revision_id
-            or task.active_revision_id != task.released_revision_id
-            or render is None
-            or render.origin_revision_id != task.released_revision_id
-            or task.selected_render_id != render.render_id
-            or not render.publish_ready
+        if media_kind == "video" and workflow_v2_enabled(task) and (
+            not task.released_revision_id or task.active_revision_id != task.released_revision_id
+            or render is None or render.origin_revision_id != task.released_revision_id
+            or task.selected_render_id != render.render_id or not render.publish_ready
         ):
             raise MainScheduleBridgeError(
                 f"OPV 任务 {task_id} 没有已冻结并审核放行的 Workflow V2 成片"
             )
+        if media_kind == "native_photo" and (
+            not workflow_v2_enabled(task) or not task.released_revision_id
+            or task.active_revision_id != task.released_revision_id
+        ):
+            raise MainScheduleBridgeError(f"OPV 任务 {task_id} 没有已冻结并审核放行的原生图文包")
+
         release_manifest = None
         if workflow_v2_enabled(task):
-            from services.release_gate import freeze_release, ReleaseGateError
+            from services.release_gate import freeze_photo_release, freeze_release, ReleaseGateError
             try:
-                release_manifest = freeze_release(self.repository, task, render)
+                release_manifest = (freeze_photo_release(self.repository, task)
+                                    if media_kind == "native_photo"
+                                    else freeze_release(self.repository, task, render))
             except (ReleaseGateError, OSError) as exc:
                 raise MainScheduleBridgeError(str(exc)) from exc
             revision = self.repository.get_task_revision(task.released_revision_id)
-            # Publication inputs follow the released snapshot, never mutable task fields.
             task = copy.copy(task)
             task.plan_json = copy.deepcopy(revision.plan_snapshot_json.get("plan") or {})
             task.product_snapshot_json = copy.deepcopy(revision.plan_snapshot_json.get("product_snapshot") or {})
             task.copy_json = copy.deepcopy(release_manifest["copy"])
-        if render is None or not str(render.output_url or "").strip():
-            raise MainScheduleBridgeError(f"OPV 任务 {task_id} 没有可排班的成片")
-        video_path = Path(str(render.output_url)).expanduser()
-        if not video_path.is_file():
-            raise MainScheduleBridgeError(f"OPV 成片文件不存在：{video_path}")
+
+        video_path = None
+        if media_kind == "video":
+            if render is None or not str(render.output_url or "").strip():
+                raise MainScheduleBridgeError(f"OPV 任务 {task_id} 没有可排班的成片")
+            video_path = Path(str(render.output_url)).expanduser()
+            if not video_path.is_file():
+                raise MainScheduleBridgeError(f"OPV 成片文件不存在：{video_path}")
 
         country = str(task.target_country or "").strip().upper()
         store_id = self._store_id(country)
         title = self._publish_title(task, country)
         source_record_id = str(feishu_record_id or task.feishu_record_id or task.source_record_id or task_id)
-        canonical_key = f"opv:{task_id}"
-        script_slot = self._script_slot(task_id)
-        bgm_inputs = task_content_profile_inputs(task)
+        canonical_key, script_slot = f"opv:{task_id}", self._script_slot(task_id)
         context = {
-            "schema_version": "opv-main-publish-v1",
+            "schema_version": "opv-main-publish-v1", "media_kind": media_kind,
             "source_product_id": self._source_product_id(task),
             "theme_id": str(task.theme_id or ""),
-            "recipe_id": str(
-                getattr(task, "recipe_id", "")
-                or (((task.plan_json or {}).get("recipe") or {}).get("id") or "")
-            ),
+            "recipe_id": str(getattr(task, "recipe_id", "")
+                             or (((task.plan_json or {}).get("recipe") or {}).get("id") or "")),
             "content_package_id": str(task.content_package_id or ""),
-            "bgm_mood_hints": self._bgm_mood_hints(task),
-            "bgm_content_template": bgm_inputs["content_template"],
-            "bgm_rhythm_preference": bgm_inputs["rhythm_preference"],
-            "audio_mode": "silent_source_platform_bgm",
-            "video_duration_ms": int(render.duration_ms or 10_000),
+            "audio_mode": (
+                "platform_auto_bgm"
+                if media_kind == "native_photo"
+                else "silent_source_platform_bgm"
+            ),
             "feishu_record_id": source_record_id,
         }
+        if media_kind == "native_photo":
+            theme_brief = dict((release_manifest or {}).get("theme_brief") or {})
+            context.update(
+                theme_key=str(theme_brief.get("theme_key") or ""),
+                theme_label=str(theme_brief.get("label_zh") or theme_brief.get("theme_label_zh") or ""),
+                reference_mode=str(theme_brief.get("reference_mode") or ""),
+            )
+        if media_kind == "video":
+            bgm_inputs = task_content_profile_inputs(task)
+            context.update({
+                "bgm_mood_hints": self._bgm_mood_hints(task),
+                "bgm_content_template": bgm_inputs["content_template"],
+                "bgm_rhythm_preference": bgm_inputs["rhythm_preference"],
+                "video_duration_ms": int(render.duration_ms or 10_000),
+            })
         if release_manifest:
             context.update(schema_version="opv-main-publish-v2", workflow_version=2,
                            release_manifest=release_manifest, publish_title=title)
@@ -219,46 +241,47 @@ class MainScheduleBridge:
                 old = json.loads(existing["script_text"] or "{}")
                 if old.get("release_manifest") != release_manifest:
                     raise MainScheduleBridgeError("任务已有不同 release 的发布记录，不能覆盖冻结队列")
+
+        family_key = str((render.output_sha256 if render else "")
+                         or (release_manifest or {}).get("manifest_sha256")
+                         or task.content_package_id or task_id)
         metadata = ScriptMetadata(
-            canonical_script_key=canonical_key,
-            script_id=task_id,
-            source_record_id=source_record_id,
-            script_slot=script_slot,
-            task_no=task_id,
-            store_id=store_id,
-            product_id="",
-            parent_slot="OPV",
+            canonical_script_key=canonical_key, script_id=task_id,
+            source_record_id=source_record_id, script_slot=script_slot,
+            task_no=task_id, store_id=store_id, product_id="", parent_slot="OPV",
             direction_label=str(task.theme_id or "图文养号"),
-            variant_strength="成片",
-            target_country=country,
-            product_type=self._product_type(task),
-            content_family_key=str(render.output_sha256 or task.content_package_id or task_id),
+            variant_strength="原生图文" if media_kind == "native_photo" else "成片",
+            target_country=country, product_type=self._product_type(task),
+            content_family_key=family_key,
             script_text=json.dumps(context, ensure_ascii=False, sort_keys=True),
-            short_video_title=title,
-            title_source="opv_copy",
-            script_source="图文养号",
-            publish_purpose="养号",
-            cart_enabled="否",
-            content_branch="非商品展示型",
+            short_video_title=title, title_source="opv_copy", script_source="图文养号",
+            publish_purpose="养号", cart_enabled="否", content_branch="非商品展示型",
+            audio_mode=context["audio_mode"],
         )
         self.db.upsert_script_metadata([metadata])
-        self.db.upsert_video_asset(
-            canonical_script_key=canonical_key,
-            script_id=task_id,
-            run_manager_record_id=source_record_id,
-            video_source_type="opv_render",
-            video_source_value=str(video_path),
-            local_file_path=str(video_path),
-            download_status="下载成功",
-            run_video_status="已完成",
-            publish_status="待排期",
-        )
+        if media_kind == "native_photo":
+            self.db.upsert_video_asset(
+                canonical_script_key=canonical_key, script_id=task_id,
+                run_manager_record_id=source_record_id,
+                video_source_type="opv_photo_package",
+                video_source_value=str(task.content_package_id or ""),
+                local_file_path=None, media_kind="native_photo",
+                photo_manifest_json=release_manifest,
+                download_status="下载成功", run_video_status="已完成",
+                publish_status="待排期",
+            )
+        else:
+            self.db.upsert_video_asset(
+                canonical_script_key=canonical_key, script_id=task_id,
+                run_manager_record_id=source_record_id,
+                video_source_type="opv_render", video_source_value=str(video_path),
+                local_file_path=str(video_path), download_status="下载成功",
+                run_video_status="已完成", publish_status="待排期",
+            )
         return {
-            "task_id": task_id,
-            "canonical_script_key": canonical_key,
-            "store_id": store_id,
-            "publish_type": "organic_nurture",
-            "status": "待排期",
+            "task_id": task_id, "canonical_script_key": canonical_key,
+            "store_id": store_id, "publish_type": "organic_nurture",
+            "media_kind": media_kind, "status": "待排期",
         }
 
     def get_task_state(self, task_id: str) -> Dict[str, str]:

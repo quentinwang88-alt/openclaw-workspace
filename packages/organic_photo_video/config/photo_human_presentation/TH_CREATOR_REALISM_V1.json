@@ -1,0 +1,45 @@
+{
+  "schema_version": "opv-photo-human-presentation-v1",
+  "policy_id": "TH_CREATOR_REALISM_V1",
+  "policy_version": 1,
+  "description": "TH 女装图文真人摄影合同：真实皮肤质感、水平头位、可信受力与抓拍感；仅约束真人模式生成，不涉及平铺与信息卡。",
+  "head": {
+    "require_level_neck": true,
+    "forbid_intentional_side_tilt": true
+  },
+  "face": {
+    "require_real_skin_texture": true,
+    "forbid_doll_eyes": true,
+    "forbid_plastic_skin": true,
+    "forbid_fixed_beauty_smile": true
+  },
+  "body": {
+    "require_believable_weight_distribution": true,
+    "require_relaxed_shoulders": true,
+    "forbid_mannequin_arms": true
+  },
+  "identity": {
+    "reference_binding": "persona_pack_only",
+    "forbid_copying_reference_pose": true
+  },
+  "candid": {
+    "low_camera_awareness": true,
+    "allow_off_axis_phone_angle": true,
+    "allow_asymmetric_framing": true,
+    "allow_environment_in_frame": true,
+    "allow_natural_imperfection": true,
+    "skin_fairness": "natural_fair_cool_tone",
+    "eyes_keep_reference_size": true,
+    "hair_wind_movement": true,
+    "polished_daily_styling": true,
+    "relaxed_spirited_expression": true,
+    "clear_face_exposure_soft_shadows": true
+  },
+  "group": {
+    "min_pose_families": 3,
+    "min_gaze_directions": 2,
+    "max_static_camera_smile": 1,
+    "max_same_direction_minor_tilt": 1,
+    "max_fixed_beauty_smile_roles": 1
+  }
+}

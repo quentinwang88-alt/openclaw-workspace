@@ -193,6 +193,27 @@ class TaskIntakeTest(unittest.TestCase):
             self.service.create_task(request(product_snapshot={"reference_images": []}))
         self.assertIn("reference_images", str(ctx.exception))
 
+    def test_native_photo_no_product_does_not_require_fake_product_or_render(self) -> None:
+        self.repo.accounts["OPV_TH_TEST_1"].default_render_preset_id = None
+        result = self.service.create_task(request(
+            product_id=None,
+            product_snapshot={},
+            media_kind="native_photo",
+            category_key="womenswear",
+            product_mode="NO_PRODUCT",
+        ))
+        self.assertIsNone(result.task.product_id)
+        self.assertEqual(result.task.media_kind, "native_photo")
+        self.assertEqual(result.task.category_key, "womenswear")
+        self.assertIsNone(result.render_preset)
+
+    def test_soft_product_photo_still_requires_reference_truth(self) -> None:
+        with self.assertRaisesRegex(TaskIntakeError, "reference_images"):
+            self.service.create_task(request(
+                media_kind="native_photo", category_key="wig",
+                product_mode="SOFT_PRODUCT", product_snapshot={},
+            ))
+
     def test_unknown_account_rejected(self) -> None:
         with self.assertRaises(TaskIntakeError):
             self.service.create_task(request(account_id="OPV_GHOST"))

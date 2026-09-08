@@ -1,0 +1,309 @@
+{
+  "schema_version": "opv-content-recipe-v1",
+  "recipe_id": "PHOTO_TH_PETITE_STYLING_V1",
+  "recipe_key": "TH_PETITE_STYLING",
+  "recipe_version": 1,
+  "content_goal": "petite_styling_guide",
+  "anchor_slot": 3,
+  "shot_count": 5,
+  "hook_types": [
+    "petite_question",
+    "before_after",
+    "comparison"
+  ],
+  "story_structure": [
+    {
+      "slot_index": 1,
+      "role": "hook_comparison",
+      "source_slots": [
+        2,
+        3
+      ],
+      "layout_variant": "SPLIT_TWO",
+      "purpose": "同一人物错误与优化穿法对比"
+    },
+    {
+      "slot_index": 2,
+      "role": "baseline",
+      "source_slots": [],
+      "layout_variant": "DETAIL",
+      "purpose": "展示常见压身高穿法"
+    },
+    {
+      "slot_index": 3,
+      "role": "improved",
+      "source_slots": [],
+      "layout_variant": "DETAIL",
+      "purpose": "展示显高后的完整造型"
+    },
+    {
+      "slot_index": 4,
+      "role": "key_detail",
+      "source_slots": [
+        3
+      ],
+      "layout_variant": "DETAIL",
+      "purpose": "从优化图裁切解释腰线或衣长"
+    },
+    {
+      "slot_index": 5,
+      "role": "cta",
+      "source_slots": [
+        3
+      ],
+      "layout_variant": "DETAIL",
+      "purpose": "复用优化造型并轻互动"
+    }
+  ],
+  "copy_style": {
+    "locale": "th-TH",
+    "tone": "friendly_tip",
+    "max_lines_per_block": 2,
+    "example": "สูง 155 ซม. แต่งยังไงให้ดูสูง?"
+  },
+  "suitable_topics": [
+    "petite_proportion",
+    "high_waist",
+    "jacket_length"
+  ],
+  "quality_profile_id": "QUALITY_STANDARD_V1",
+  "recipe_spec": {
+    "schema_version": "opv-photo-recipe-v1",
+    "media_kind": "native_photo",
+    "category_key": "womenswear",
+    "markets": [
+      "TH"
+    ],
+    "theme_types": [
+      "GUIDE",
+      "COMPARISON"
+    ],
+    "product_modes": [
+      "NO_PRODUCT",
+      "SOFT_PRODUCT"
+    ],
+    "variables_schema": {
+      "height_cm": {
+        "type": "enum",
+        "values": [
+          150,
+          155,
+          160
+        ],
+        "required": true
+      },
+      "styling_rule": {
+        "type": "enum",
+        "values": [
+          "cropped_jacket",
+          "high_waist",
+          "tone_on_tone_shoes",
+          "short_top_long_bottom",
+          "coat_length"
+        ],
+        "required": true
+      },
+      "style": {
+        "type": "enum",
+        "values": [
+          "korean_clean",
+          "casual",
+          "travel"
+        ],
+        "required": true
+      }
+    },
+    "template_id": "PHOTO_COMPARISON_V1",
+    "template_version": 1,
+    "visual_rules": {
+      "same_identity": true,
+      "same_camera_scale": true,
+      "same_pose_family": true,
+      "preserve_body_shape": true,
+      "comparison_change_only": "styling"
+    },
+    "asset_policy": {
+      "default": "ASSET_REUSE",
+      "on_missing": "NEEDS_ASSET"
+    },
+    "asset_match_keys": [
+      "height_cm",
+      "styling_rule",
+      "style"
+    ],
+    "asset_requirements": {
+      "required_roles": [
+        "cover",
+        "baseline",
+        "improved",
+        "detail",
+        "cta"
+      ],
+      "required_tags": {
+        "use_cases": "petite_styling"
+      },
+      "required_pairs": [
+        {
+          "roles": [
+            "baseline",
+            "improved"
+          ],
+          "relation": "same_identity_styling_comparison"
+        }
+      ]
+    },
+    "execution_profiles": [
+      {
+        "profile_id": "petite_150",
+        "label": "150cm 显高比例",
+        "variables": {
+          "height_cm": 150,
+          "styling_rule": "cropped_jacket",
+          "style": "korean_clean"
+        },
+        "asset_set_keys": [
+          "TH_WOMENSWEAR_PETITE"
+        ],
+        "copy_variants": [
+          {
+            "copy_id": "petite_150_copy_1",
+            "copy": {
+              "title": "ไอเดียสำหรับสาว 150",
+              "caption": "ถ้าสูงประมาณ 150 ซม. ลองปรับสัดส่วนการแต่งตัวแบบนี้ แล้วเลือกแบบที่คุณสบายใจ",
+              "hashtags": [
+                "#สาวตัวเล็ก",
+                "#ไอเดียแต่งตัว"
+              ],
+              "slide_texts": [
+                "ปรับสัดส่วนลองดู",
+                "ก่อนปรับลุค",
+                "หลังปรับลุค",
+                "ลองเสื้อตัวสั้น",
+                "ชอบก่อนหรือหลัง"
+              ]
+            }
+          },
+          {
+            "copy_id": "petite_150_copy_2",
+            "copy": {
+              "title": "ลองปรับลุค 150 ซม.",
+              "caption": "ไอเดียแต่งตัวสำหรับส่วนสูงประมาณ 150 ซม. สังเกตจุดเล็ก ๆ ที่เปลี่ยนความรู้สึกของลุค",
+              "hashtags": [
+                "#สาวตัวเล็ก",
+                "#ไอเดียแต่งตัว"
+              ],
+              "slide_texts": [
+                "สองลุคต่างกันตรงไหน",
+                "ลุคเริ่มต้น",
+                "อีกวิธีที่น่าลอง",
+                "ลองเสื้อตัวสั้น",
+                "คุณอยากลองไหม"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "profile_id": "petite_155",
+        "label": "155cm 显高比例",
+        "variables": {
+          "height_cm": 155,
+          "styling_rule": "high_waist",
+          "style": "casual"
+        },
+        "asset_set_keys": [
+          "TH_WOMENSWEAR_PETITE"
+        ],
+        "copy_variants": [
+          {
+            "copy_id": "petite_155_copy_1",
+            "copy": {
+              "title": "ไอเดียสำหรับสาว 155",
+              "caption": "ถ้าสูงประมาณ 155 ซม. ลองปรับสัดส่วนการแต่งตัวแบบนี้ แล้วเลือกแบบที่คุณสบายใจ",
+              "hashtags": [
+                "#สาวตัวเล็ก",
+                "#ไอเดียแต่งตัว"
+              ],
+              "slide_texts": [
+                "ปรับสัดส่วนลองดู",
+                "ก่อนปรับลุค",
+                "หลังปรับลุค",
+                "ลองเอวสูง",
+                "ชอบก่อนหรือหลัง"
+              ]
+            }
+          },
+          {
+            "copy_id": "petite_155_copy_2",
+            "copy": {
+              "title": "ลองปรับลุค 155 ซม.",
+              "caption": "ไอเดียแต่งตัวสำหรับส่วนสูงประมาณ 155 ซม. สังเกตจุดเล็ก ๆ ที่เปลี่ยนความรู้สึกของลุค",
+              "hashtags": [
+                "#สาวตัวเล็ก",
+                "#ไอเดียแต่งตัว"
+              ],
+              "slide_texts": [
+                "สองลุคต่างกันตรงไหน",
+                "ลุคเริ่มต้น",
+                "อีกวิธีที่น่าลอง",
+                "ลองเอวสูง",
+                "คุณอยากลองไหม"
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "profile_id": "petite_160",
+        "label": "160cm 显高比例",
+        "variables": {
+          "height_cm": 160,
+          "styling_rule": "tone_on_tone_shoes",
+          "style": "travel"
+        },
+        "asset_set_keys": [
+          "TH_WOMENSWEAR_PETITE"
+        ],
+        "copy_variants": [
+          {
+            "copy_id": "petite_160_copy_1",
+            "copy": {
+              "title": "ไอเดียสำหรับสาว 160",
+              "caption": "ถ้าสูงประมาณ 160 ซม. ลองปรับสัดส่วนการแต่งตัวแบบนี้ แล้วเลือกแบบที่คุณสบายใจ",
+              "hashtags": [
+                "#สาวตัวเล็ก",
+                "#ไอเดียแต่งตัว"
+              ],
+              "slide_texts": [
+                "ปรับสัดส่วนลองดู",
+                "ก่อนปรับลุค",
+                "หลังปรับลุค",
+                "รองเท้าโทนเดียวกัน",
+                "ชอบก่อนหรือหลัง"
+              ]
+            }
+          },
+          {
+            "copy_id": "petite_160_copy_2",
+            "copy": {
+              "title": "ลองปรับลุค 160 ซม.",
+              "caption": "ไอเดียแต่งตัวสำหรับส่วนสูงประมาณ 160 ซม. สังเกตจุดเล็ก ๆ ที่เปลี่ยนความรู้สึกของลุค",
+              "hashtags": [
+                "#สาวตัวเล็ก",
+                "#ไอเดียแต่งตัว"
+              ],
+              "slide_texts": [
+                "สองลุคต่างกันตรงไหน",
+                "ลุคเริ่มต้น",
+                "อีกวิธีที่น่าลอง",
+                "รองเท้าโทนเดียวกัน",
+                "คุณอยากลองไหม"
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "status": "active"
+}

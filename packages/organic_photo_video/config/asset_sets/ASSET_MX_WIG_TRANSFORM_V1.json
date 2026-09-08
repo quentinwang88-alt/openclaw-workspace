@@ -1,0 +1,27 @@
+{
+  "schema_version": "opv-asset-set-v1",
+  "asset_set_id": "ASSET_MX_WIG_TRANSFORM_V1",
+  "asset_set_key": "MX_WIG_TRANSFORM",
+  "asset_set_version": 1,
+  "category_key": "wig",
+  "market": "MX",
+  "status": "enabled",
+  "tags": {
+    "use_cases": ["before_after"],
+    "length": "long",
+    "texture": "wavy",
+    "color": "pink_black",
+    "change_intensity": "bold",
+    "source": "approved_existing_generation_frames"
+  },
+  "assets": [
+    {"asset_id": "mx_transform_cover", "path": "../../../../shared/data/organic_photo_video/asset_sets/mx_transform/cover_after.jpg", "role": "cover", "tags": {"state": "after"}},
+    {"asset_id": "mx_transform_before", "path": "../../../../shared/data/organic_photo_video/asset_sets/mx_transform/before.jpg", "role": "before", "tags": {"state": "before"}},
+    {"asset_id": "mx_transform_after", "path": "../../../../shared/data/organic_photo_video/asset_sets/mx_transform/after.jpg", "role": "after", "tags": {"state": "after"}},
+    {"asset_id": "mx_transform_detail", "path": "../../../../shared/data/organic_photo_video/asset_sets/mx_transform/detail.jpg", "role": "detail", "tags": {"state": "after", "view": "front"}},
+    {"asset_id": "mx_transform_cta", "path": "../../../../shared/data/organic_photo_video/asset_sets/mx_transform/cta.jpg", "role": "cta", "tags": {"state": "after", "view": "three_quarter"}}
+  ],
+  "pairs": [
+    {"pair_id": "mx_transform_pair_01", "asset_ids": ["mx_transform_before", "mx_transform_after"], "relation": "same_identity_before_after"}
+  ]
+}

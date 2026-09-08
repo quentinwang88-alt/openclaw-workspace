@@ -1,0 +1,28 @@
+{
+  "schema_version": "opv-photo-planning-policy-v2",
+  "policy_id": "TH_PICK_YOUR_LOOK_V2",
+  "policy_version": 2,
+  "base_policy": "TH_PICK_YOUR_LOOK_V1.json",
+  "family_compatibility": {
+    "warm_neutral": {"palette": ["warm_brown", "camel", "cream", "denim_blue"], "temperature": "warm", "seasons": ["autumn", "cool_weather"], "style_tags": ["warm_neutral", "heritage", "layered"]},
+    "soft_earth": {"palette": ["warm_brown", "camel", "cream", "olive"], "temperature": "warm", "seasons": ["autumn"], "style_tags": ["warm_neutral", "layered"]},
+    "travel_layer": {"palette": ["camel", "cream", "navy", "denim_blue"], "temperature": "neutral", "seasons": ["autumn", "cool_weather"], "style_tags": ["layered", "daily_outfit"]},
+    "denim_mix": {"palette": ["denim_blue", "cream", "warm_brown"], "temperature": "neutral", "seasons": ["autumn", "cool_weather"], "style_tags": ["layered", "daily_outfit"]},
+    "color_point": {"palette": ["warm_brown", "burgundy", "olive", "camel"], "temperature": "warm", "seasons": ["autumn"], "style_tags": ["layered"]},
+    "dark_clean": {"palette": ["black", "gray", "navy", "burgundy"], "temperature": "cool", "seasons": ["cool_weather"], "style_tags": ["daily_outfit"]},
+    "monochrome": {"palette": ["black", "gray", "white"], "temperature": "cool", "seasons": ["cool_weather"], "style_tags": ["minimal"]},
+    "sporty_layer": {"palette": ["navy", "gray", "burgundy", "cream"], "temperature": "cool", "seasons": ["cool_weather"], "style_tags": ["sporty", "layered"]},
+    "feminine_layer": {"palette": ["cream", "pink", "gray", "warm_brown"], "temperature": "neutral", "seasons": ["autumn", "cool_weather"], "style_tags": ["feminine", "layered"]}
+  },
+  "presentation_routes": {
+    "FLAT_LAY": {"background_mode": "reference_surface", "identity_required": false},
+    "MODEL_FULL_BODY": {"background_mode": "solid_color", "identity_required": true},
+    "EDITORIAL_COLLAGE": {"background_mode": "reference_surface", "identity_required": false},
+    "SCENE_MODEL": {"background_mode": "creator_environment", "identity_required": true}
+  },
+  "scoring_weights": {"palette": 35, "season_material": 25, "style": 20, "garment": 10, "presentation": 10},
+  "hard_conflicts": {
+    "warm_reference": ["monochrome", "sporty_layer"],
+    "flat_lay_avoid_tags": ["studio_model"]
+  }
+}

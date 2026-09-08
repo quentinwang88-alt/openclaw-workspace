@@ -8,7 +8,7 @@
   "default_locale": "th-TH",
   "timezone": "Asia/Bangkok",
   "status": "testing",
-  "persona_ref_id": "TH_APPAREL_SELECTED_01_001",
+  "persona_ref_id": "TH_APPAREL_REAL_02_001",
   "persona_snapshot": {
     "persona_name": "泰国穿搭人物 01｜黑发轻精致",
     "source_db": "skills/lightweight-tryon-video/var/light_tryon.sqlite3",
@@ -16,8 +16,8 @@
     "markets": [
       "TH"
     ],
-    "reference_image_count": 1,
-    "note": "正式转 active 前需补齐 3-5 张稳定参考图（MODEL_HANDOFF 4.2 要求）"
+    "reference_image_count": 3,
+    "note": "2026-09-07 人物对照实验 C 组胜出（温柔精致方向 + 新摄影文案）；旧人物保留追溯"
   },
   "visual_identity": {
     "tone": "warm natural daylight",
@@ -72,6 +72,8 @@
     "visual_qa_required": false,
     "persona_authority": "original_persona_template_library",
     "allowed_persona_refs": [
+      "TH_APPAREL_REAL_02_001",
+      "TH_APPAREL_REAL_01_001",
       "TH_APPAREL_SELECTED_01_001",
       "TH_APPAREL_SELECTED_02_001",
       "TH_APPAREL_SELECTED_03_001"

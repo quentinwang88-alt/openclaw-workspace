@@ -1,0 +1,26 @@
+{
+  "schema_version": "opv-photo-layout-v1",
+  "layout_id": "PHOTO_SINGLE_LIGHT_TEXT_V1",
+  "layout_version": 1,
+  "layout_kind": "SINGLE_LIGHT_TEXT",
+  "status": "active",
+  "canvas": {"width": 1080, "height": 1920, "background": "#F7F5F0", "color_space": "sRGB"},
+  "safe_area": {"top": 220, "bottom": 420, "left": 60, "right": 60},
+  "page_variants": {
+    "FULL_BLEED": {
+      "regions": [
+        {"id": "photo", "kind": "image", "source_key": "primary", "fit": "cover", "rect": {"x": 0, "y": 0, "width": 1080, "height": 1920}},
+        {"id": "headline", "kind": "text", "text_role": "headline", "max_lines": 2, "align": "center", "rect": {"x": 90, "y": 250, "width": 900, "height": 180}},
+        {"id": "footer", "kind": "text", "text_role": "support_or_cta", "max_lines": 2, "align": "center", "rect": {"x": 120, "y": 1370, "width": 840, "height": 130}}
+      ]
+    }
+  },
+  "text_defaults": {
+    "font_candidates": ["/System/Library/Fonts/Thonburi.ttc", "/System/Library/Fonts/Supplemental/Arial Unicode.ttf"],
+    "headline_size": 58,
+    "body_size": 36,
+    "color": "#171717",
+    "backplate": {"enabled": true, "color": "#FFFFFF", "opacity": 0.82, "corner_radius": 24}
+  },
+  "export": {"format": "JPEG", "quality": 90, "strip_metadata": true}
+}

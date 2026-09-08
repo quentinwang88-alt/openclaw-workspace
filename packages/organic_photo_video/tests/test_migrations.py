@@ -20,12 +20,25 @@ class MigrationInstallerTest(unittest.TestCase):
         self.assertEqual(len(by_name["004_unique_content_package_per_task.sql"]), 1)
         self.assertEqual(len(by_name["005_publish_schedule_queue.sql"]), 1)
         self.assertEqual(len(by_name["006_product_reference_pack.sql"]), 1)
+        self.assertEqual(len(by_name["009_native_photo_content.sql"]), 6)
         digests = {
             path.name: apply_rds_migration.source_digest(path.name, sql)
             for path, sql in sources
         }
         self.assertEqual(len(set(digests.values())), len(digests))
         self.assertTrue(all(len(value) == 64 for value in digests.values()))
+
+    def test_native_photo_migration_is_additive_and_keeps_video_defaults(self):
+        sources = dict(
+            (path.name, sql) for path, sql in apply_rds_migration.migration_sources()
+        )
+        sql = sources["009_native_photo_content.sql"]
+        self.assertIn("MODIFY COLUMN product_id VARCHAR(191) NULL", sql)
+        self.assertIn("MODIFY COLUMN duration_ms INT NULL", sql)
+        self.assertIn("MODIFY COLUMN render_id VARCHAR(64) NULL", sql)
+        self.assertIn("media_kind VARCHAR(24) NOT NULL DEFAULT 'video'", sql)
+        self.assertIn("UNIQUE KEY uq_opv_publish_key (publish_key)", sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS opv_asset_set", sql)
 
 
 if __name__ == "__main__":

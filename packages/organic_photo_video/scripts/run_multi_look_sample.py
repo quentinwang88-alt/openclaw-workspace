@@ -16,7 +16,7 @@ from repositories.rds_repository import RdsRepository
 from services.asset_resolver import LightTryonAssetReader
 from services.content_story import generate_product_image_story
 from services.hero_first import HeroFirstProducer
-from services.image_generator import OpenAIImageGenerator
+from services.image_generator import build_default_photo_generator
 from services.product_reference_resolver import ProductReferenceResolver
 from services.technical_production import TechnicalProductionFlow
 from services.video_render_flow import VideoRenderFlow
@@ -55,7 +55,7 @@ def main() -> int:
         "model_calls_authorized": True, "publish": False}, ensure_ascii=False, indent=2, default=str))
     print(json.dumps({"task_id": task_id, "pages": len(states), "looks": [s["look_ref"] for s in plan["outfit_sequence"]],
                       "phase": "generation_start", "published": False}, ensure_ascii=False), flush=True)
-    TechnicalProductionFlow(repo, HeroFirstProducer(repo, OpenAIImageGenerator(), technical_only=True),
+    TechnicalProductionFlow(repo, HeroFirstProducer(repo, build_default_photo_generator(), technical_only=True),
         VideoRenderFlow(repo, FFmpegStillRenderer())).run(task_id, overlay_profile_id="OVERLAY_LIGHT_V1")
     task = repo.get_task(task_id)
     render = repo.get_render(task.selected_render_id)

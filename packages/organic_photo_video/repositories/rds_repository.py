@@ -26,6 +26,7 @@ import pymysql.cursors
 from domain import statuses
 from domain.models import (
     AccountProfile,
+    AssetSet,
     ContentPackage,
     ContentRecipe,
     ContentShot,
@@ -299,6 +300,35 @@ class RdsRepository:
             [product_id],
         )
         return [ProductReferencePack.from_row(row) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Native-photo reusable asset sets
+    # ------------------------------------------------------------------
+
+    def upsert_asset_set(self, asset_set: AssetSet) -> None:
+        self._upsert("opv_asset_set", "asset_set_id", asset_set.to_row())
+
+    def get_asset_set(self, asset_set_id: str) -> Optional[AssetSet]:
+        row = self._fetch_one(
+            "SELECT * FROM opv_asset_set WHERE asset_set_id=%s", [asset_set_id]
+        )
+        return AssetSet.from_row(row) if row else None
+
+    def list_asset_sets(
+        self, *, category_key: str, market: Optional[str] = None,
+        status: str = "enabled",
+    ) -> List[AssetSet]:
+        clauses = ["category_key=%s", "status=%s"]
+        params: List[Any] = [category_key, status]
+        if market:
+            clauses.append("(market=%s OR market IS NULL)")
+            params.append(str(market).upper())
+        rows = self._fetch_all(
+            "SELECT * FROM opv_asset_set WHERE " + " AND ".join(clauses)
+            + " ORDER BY asset_set_key,asset_set_version DESC,asset_set_id",
+            params,
+        )
+        return [AssetSet.from_row(row) for row in rows]
 
     # ------------------------------------------------------------------
     # Content task: idempotent creation and guarded transitions
@@ -601,7 +631,106 @@ class RdsRepository:
         row = self._fetch_one("SELECT * FROM opv_production_batch WHERE source_type=%s AND source_record_id=%s", [source_type, source_record_id])
         return ProductionBatch.from_row(row) if row else None
 
+    @staticmethod
+    def _photo_signatures(manifest):
+        return [entry["request"]["content_card"]["content_signature"]
+                for entry in (manifest or {}).get("entries", [])
+                if entry.get("request", {}).get("schema_version") == "opv-photo-request-v2"]
+
+    def list_photo_content_signatures(self, *, exclude_record_id=""):
+        rows = self._run("SELECT manifest_json FROM opv_production_batch WHERE source_record_id<>%s AND batch_status<>'cancelled' AND JSON_UNQUOTE(JSON_EXTRACT(manifest_json,'$.media_kind'))='native_photo'", [exclude_record_id], fetch="all")
+        return {signature for row in rows for signature in self._photo_signatures(load_json_value(row["manifest_json"], {}))}
+
+    def cancel_photo_batch(self, source_record_id: str) -> ProductionBatch:
+        """Release unpublished photo inventory while retaining the audit row."""
+        connection = self._connect_fn()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT * FROM opv_production_batch WHERE source_type='feishu_opv' "
+                    "AND source_record_id=%s FOR UPDATE", [source_record_id],
+                )
+                row = cursor.fetchone()
+                if not row:
+                    raise RepositoryError("photo batch does not exist")
+                batch = ProductionBatch.from_row(row)
+                if batch.manifest_json.get("media_kind") != "native_photo":
+                    raise RepositoryError("only native-photo batches can release photo inventory")
+                if batch.batch_status == "cancelled":
+                    connection.commit()
+                    return batch
+                cursor.execute(
+                    "SELECT task_id,released_revision_id FROM opv_content_task "
+                    "WHERE feishu_record_id=%s FOR UPDATE", [source_record_id],
+                )
+                tasks = list(cursor.fetchall() or [])
+                if any(task.get("released_revision_id") for task in tasks):
+                    raise RepositoryError("released photo content cannot free inventory")
+                task_ids = [task["task_id"] for task in tasks]
+                if task_ids:
+                    placeholders = _placeholders(len(task_ids))
+                    cursor.execute(
+                        f"SELECT publish_id FROM opv_publish_record WHERE task_id IN ({placeholders}) LIMIT 1 FOR UPDATE",
+                        task_ids,
+                    )
+                    if cursor.fetchone():
+                        raise RepositoryError("photo content in the publish pipeline cannot free inventory")
+                cursor.execute(
+                    "UPDATE opv_production_batch SET batch_status='cancelled',run_owner=NULL,"
+                    "lease_until=NULL,lock_version=lock_version+1 WHERE batch_id=%s",
+                    [batch.batch_id],
+                )
+                connection.commit()
+                batch.batch_status = "cancelled"
+                batch.run_owner = None
+                batch.lease_until = None
+                batch.lock_version += 1
+                return batch
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def _create_photo_batch_reserved(self, batch):
+        # One shared MySQL advisory lock serializes the read/check/insert across
+        # machines. The existing batch table is the sole inventory reservation.
+        connection = self._connect_fn()
+        locked = False
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT GET_LOCK('opv_photo_content_inventory_v1',10) AS acquired")
+                locked = (cursor.fetchone() or {}).get("acquired") == 1
+                if not locked:
+                    raise RepositoryError("content inventory is busy; retry the same source record")
+                cursor.execute("SELECT * FROM opv_production_batch WHERE source_type=%s AND source_record_id=%s FOR UPDATE", [batch.source_type, batch.source_record_id])
+                existing = cursor.fetchone()
+                if existing:
+                    connection.commit()
+                    return ProductionBatch.from_row(existing)
+                signatures = self._photo_signatures(batch.manifest_json)
+                if len(signatures) != batch.expected_count or len(set(signatures)) != len(signatures):
+                    raise RepositoryError("NEEDS_CONTENT: whole batch requires distinct effective content")
+                cursor.execute("SELECT manifest_json FROM opv_production_batch WHERE batch_status<>'cancelled' AND JSON_UNQUOTE(JSON_EXTRACT(manifest_json,'$.media_kind'))='native_photo'")
+                reserved = {signature for row in cursor.fetchall() for signature in self._photo_signatures(load_json_value(row["manifest_json"], {}))}
+                if reserved.intersection(signatures):
+                    raise RepositoryError("NEEDS_CONTENT: source content is already frozen by another batch; no new batch was created")
+                row = batch.to_row()
+                cursor.execute(f"INSERT INTO opv_production_batch ({','.join(row)}) VALUES ({_placeholders(len(row))})", [row[k] for k in row])
+                connection.commit()
+                return batch
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            if locked:
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT RELEASE_LOCK('opv_photo_content_inventory_v1')")
+            connection.close()
+
     def create_production_batch_idempotent(self, batch: ProductionBatch) -> ProductionBatch:
+        if self._photo_signatures(batch.manifest_json):
+            return self._create_photo_batch_reserved(batch)
         row = batch.to_row()
         try:
             self._run(f"INSERT INTO opv_production_batch ({','.join(row)}) VALUES ({_placeholders(len(row))})", [row[k] for k in row], commit=True)
@@ -630,7 +759,8 @@ class RdsRepository:
     def claim_batch_run(self, batch_id: str, *, owner: str, lease_seconds: int = 120) -> bool:
         _, count = self._run_scoped(
             "UPDATE opv_production_batch SET run_owner=%s,lease_until=DATE_ADD(UTC_TIMESTAMP(6),INTERVAL %s SECOND),batch_status='running' "
-            "WHERE batch_id=%s AND (run_owner IS NULL OR lease_until<UTC_TIMESTAMP(6))",
+            "WHERE batch_id=%s AND batch_status<>'cancelled' "
+            "AND (run_owner IS NULL OR lease_until<UTC_TIMESTAMP(6))",
             [owner, lease_seconds, batch_id], commit=True,
         )
         return count == 1
@@ -775,17 +905,32 @@ class RdsRepository:
         )
         return [QualityReview.from_row(row) for row in rows]
 
+    def list_content_rejections(self, task_id: str) -> List[QualityReview]:
+        """Append-only content holds survive later review/revision changes."""
+        rows = self._fetch_all(
+            "SELECT q.* FROM opv_quality_review q "
+            "JOIN opv_task_revision r ON r.revision_id=q.revision_id "
+            "WHERE r.task_id=%s AND q.scope='photo_package' "
+            "AND JSON_CONTAINS(q.reason_codes_json, JSON_QUOTE('CONTENT_REJECTED')) "
+            "ORDER BY q.created_at,q.review_id", [task_id],
+        )
+        return [QualityReview.from_row(row) for row in rows]
+
     def release_revision(
         self, task_id: str, revision_id: str, *, expected_task_row_version: int,
         render_id: Optional[str] = None, review_id: Optional[str] = None,
-        expected_selection_hash: Optional[str] = None, expected_input_snapshot_hash: Optional[str] = None,
+        review_scope: str = "render", review_target_id: Optional[str] = None,
+        expected_review_fingerprint: Optional[str] = None,
+        expected_selection_hash: Optional[str] = None,
+        expected_input_snapshot_hash: Optional[str] = None,
     ) -> ContentTask:
         """Freeze the revision and pin it as the only releasable task output."""
         connection = self._connect_fn()
         try:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT active_revision_id,row_version FROM opv_content_task "
+                    "SELECT active_revision_id,row_version,task_status,content_package_id,media_kind "
+                    "FROM opv_content_task "
                     "WHERE task_id=%s FOR UPDATE", [task_id]
                 )
                 row = cursor.fetchone()
@@ -793,6 +938,16 @@ class RdsRepository:
                     raise StaleStatusError("active revision changed before release")
                 if int(row.get("row_version") or 1) != int(expected_task_row_version):
                     raise StaleStatusError("task row_version changed before release")
+                if row.get("media_kind") == "native_photo":
+                    cursor.execute(
+                        "SELECT q.review_id FROM opv_quality_review q "
+                        "JOIN opv_task_revision r ON r.revision_id=q.revision_id "
+                        "WHERE r.task_id=%s AND q.scope='photo_package' "
+                        "AND JSON_CONTAINS(q.reason_codes_json, JSON_QUOTE('CONTENT_REJECTED')) "
+                        "LIMIT 1 FOR UPDATE", [task_id],
+                    )
+                    if cursor.fetchone():
+                        raise StaleStatusError("CONTENT_REJECTED: rejected content cannot be released")
                 if expected_selection_hash is not None or expected_input_snapshot_hash is not None:
                     cursor.execute("SELECT selection_hash,input_snapshot_hash FROM opv_task_revision WHERE revision_id=%s FOR UPDATE", [revision_id])
                     selected = cursor.fetchone()
@@ -804,21 +959,58 @@ class RdsRepository:
                 )
                 if cursor.rowcount != 1:
                     raise StaleStatusError("revision is not releasable")
+                if review_scope not in {"render", "photo_package"}:
+                    raise StaleStatusError("unsupported terminal review scope")
+                target_id = review_target_id or render_id
                 if review_id:
-                    cursor.execute("SELECT * FROM opv_quality_review WHERE revision_id=%s AND scope='render' AND target_id=%s ORDER BY created_at DESC,review_id DESC LIMIT 1 FOR UPDATE", [revision_id, render_id])
+                    if not target_id:
+                        raise StaleStatusError("terminal review target is required")
+                    cursor.execute(
+                        "SELECT * FROM opv_quality_review WHERE revision_id=%s "
+                        "AND scope=%s AND target_id=%s ORDER BY created_at DESC,review_id DESC "
+                        "LIMIT 1 FOR UPDATE",
+                        [revision_id, review_scope, target_id],
+                    )
                     latest = cursor.fetchone()
-                    from services.release_gate import trusted_review
-                    if not latest or latest.get("review_id") != review_id or latest.get("decision") not in {"passed", "waived"} or not trusted_review(QualityReview.from_row(latest)):
+                    from services.release_gate import trusted_photo_content_review, trusted_review
+                    review_model = QualityReview.from_row(latest) if latest else None
+                    review_ok = (trusted_photo_content_review(review_model)
+                                 if review_scope == "photo_package" else trusted_review(review_model))
+                    if (not latest or latest.get("review_id") != review_id
+                            or latest.get("decision") not in {"passed", "waived"}
+                            or (expected_review_fingerprint is not None
+                                and latest.get("input_fingerprint") != expected_review_fingerprint)
+                            or not review_ok):
                         raise StaleStatusError("terminal review changed before release")
+                if review_scope == "photo_package":
+                    if (row.get("media_kind") != "native_photo"
+                            or row.get("content_package_id") != target_id):
+                        raise StaleStatusError("photo release target does not match task package")
+                    statuses.task_ensure_transition(row.get("task_status"), "photo_ready")
                 if render_id:
                     cursor.execute("UPDATE opv_video_render SET publish_ready=1 WHERE render_id=%s AND origin_revision_id=%s AND qc_status='passed'", [render_id, revision_id])
                     if cursor.rowcount != 1:
                         raise StaleStatusError("render is not releasable")
-                cursor.execute(
-                    "UPDATE opv_content_task SET released_revision_id=%s, selected_render_id=COALESCE(%s, selected_render_id), "
-                    "row_version=row_version+1 WHERE task_id=%s AND row_version=%s",
-                    [revision_id, render_id, task_id, int(expected_task_row_version)],
-                )
+                if review_scope == "photo_package":
+                    cursor.execute(
+                        "UPDATE opv_content_package SET status='ready' "
+                        "WHERE content_package_id=%s AND task_id=%s",
+                        [target_id, task_id],
+                    )
+                    if cursor.rowcount != 1:
+                        raise StaleStatusError("photo package disappeared during release")
+                    cursor.execute(
+                        "UPDATE opv_content_task SET released_revision_id=%s,task_status='photo_ready',"
+                        "current_stage='photo_packaging',row_version=row_version+1 "
+                        "WHERE task_id=%s AND row_version=%s",
+                        [revision_id, task_id, int(expected_task_row_version)],
+                    )
+                else:
+                    cursor.execute(
+                        "UPDATE opv_content_task SET released_revision_id=%s, selected_render_id=COALESCE(%s, selected_render_id), "
+                        "row_version=row_version+1 WHERE task_id=%s AND row_version=%s",
+                        [revision_id, render_id, task_id, int(expected_task_row_version)],
+                    )
                 if cursor.rowcount != 1:
                     raise StaleStatusError("task changed while releasing revision")
             connection.commit()
@@ -867,6 +1059,36 @@ class RdsRepository:
             ):
                 by_slot[shot.slot_index] = shot
         return [by_slot[slot] for slot in sorted(by_slot)]
+
+    def list_reusable_outfit_sources(self, product_id: str, *, limit: int = 20) -> List[Dict[str, Any]]:
+        """Return at most one selected, QC-passed photo per distinct frozen Look."""
+        rows = self._fetch_all(
+            "SELECT t.task_id,t.plan_json,s.slot_index,s.slot_role,s.image_url AS image_path,s.image_sha256 "
+            "FROM opv_content_task t JOIN opv_content_shot s ON s.task_id=t.task_id "
+            "WHERE t.product_id=%s AND t.media_kind='video' AND s.is_selected=1 "
+            "AND s.qa_status='passed' AND s.image_url IS NOT NULL "
+            "ORDER BY t.created_at DESC,t.task_id,FIELD(s.slot_role,'full_look','hero'),s.slot_index",
+            [product_id],
+        )
+        selected, seen_tasks, seen_looks = [], set(), set()
+        for row in rows:
+            if row["task_id"] in seen_tasks:
+                continue
+            plan = load_json_value(row.get("plan_json"), {})
+            look = (plan.get("look") or {}) if isinstance(plan, dict) else {}
+            look_ref = str(look.get("ref_id") or (look.get("snapshot") or {}).get("ref_id") or "")
+            identity = look_ref or str((look.get("snapshot") or {}).get("structured_snapshot_hash") or row["task_id"])
+            if identity in seen_looks:
+                continue
+            seen_tasks.add(row["task_id"]); seen_looks.add(identity)
+            selected.append({
+                "task_id": row["task_id"], "look_ref": look_ref,
+                "path": row["image_path"], "sha256": row.get("image_sha256"),
+                "slot_index": int(row.get("slot_index") or 0),
+            })
+            if len(selected) >= limit:
+                break
+        return selected
 
     def update_shot_status(
         self, shot_id: str, from_status: str, to_status: str
@@ -1523,6 +1745,7 @@ class RdsRepository:
             "render_ids_json",
             "generation_lineage_json",
             "qa_summary_json",
+            "photo_manifest_json",
         }
         sets: List[str] = []
         params: List[Any] = []
@@ -1532,7 +1755,7 @@ class RdsRepository:
                 "storyboard_version", "selected_image_ids_json", "cover_image_id",
                 "cover_title", "caption", "render_ids_json", "qa_summary_json",
                 "content_fingerprint", "generation_lineage_json", "status",
-                "hashtags_json", "selected_image_ids_json",
+                "hashtags_json", "selected_image_ids_json", "photo_manifest_json",
             }:
                 raise RepositoryError(f"unknown content package column {key!r}")
             params.append(dump_json(value) if key in json_fields else value)

@@ -63,6 +63,20 @@ class LightTryonAssetReader:
             {"local_path": path, "sha256": self._sha256(Path(path))}
             for path in local_paths
         ]
+        # Typed persona-pack items keep the full reference entry (role/approved)
+        # so human-scene readiness can verify face/full-body evidence.
+        reference_items = []
+        for entry in references:
+            if isinstance(entry, str):
+                entry = {"local_path": entry}
+            if not isinstance(entry, dict):
+                continue
+            path = str(entry.get("local_path") or "").strip()
+            if not path or not Path(path).is_file():
+                continue
+            item = dict(entry)
+            item.setdefault("sha256", self._sha256(Path(path)))
+            reference_items.append(item)
         snapshot = {
             "ref_id": row["persona_id"],
             "persona_id": row["persona_id"],
@@ -73,6 +87,7 @@ class LightTryonAssetReader:
             "reference_images": references,
             "local_reference_images": local_paths,
             "reference_assets": reference_assets,
+            "reference_items": reference_items,
             "source": {
                 "authority": "original_persona_template_library",
                 "feishu_record_id": row["feishu_record_id"],

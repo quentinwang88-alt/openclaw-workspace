@@ -1,0 +1,46 @@
+{
+  "schema_version": "opv-market-pack-v1",
+  "market_pack_id": "MP_MX_DEFAULT_V1",
+  "pack_key": "MP_MX_DEFAULT",
+  "pack_version": 1,
+  "target_country": "MX",
+  "target_locale": "es-MX",
+  "climate_zone": "multi_climate",
+  "season_key": "all_season",
+  "pack_name": "墨西哥默认 Market Pack V1",
+  "status": "active",
+  "visual_rules": {
+    "aspect_ratio": "9:16",
+    "photographic_style": "realistic smartphone beauty and lifestyle photo, natural skin texture, no studio catalogue look",
+    "hair_constraints": [
+      "keep hairline, parting, length, curl pattern and color internally consistent within one look",
+      "before and after pairs must preserve the same person's facial identity and camera angle",
+      "do not blur hair edges or hide the hairline with text"
+    ],
+    "preferred_scenes": ["bedroom_mirror", "vanity_corner", "workday_room", "date_ready_room", "party_ready_room"],
+    "color_grading": "warm, lively and natural; preserve accurate hair color across the 5-slide group"
+  },
+  "copy_rules": {
+    "locale": "es-MX",
+    "fallback_allowed": false,
+    "fallback_note": "unsupported market/language combos must fail loudly, never silently fall back to Thai or generic Spanish",
+    "title_max_chars": 72,
+    "caption_max_chars": 300,
+    "overlay_text_max_chars": 28,
+    "hashtag_count_range": [3, 6],
+    "style": "short, direct and conversational Mexican Spanish with natural emotional expression and one light interaction prompt",
+    "must_localize": ["title", "caption", "hashtags", "cover_text"]
+  },
+  "topic_rules": {
+    "posting_windows_local": ["12:00-14:00", "19:00-22:00"],
+    "look_source_priority": ["successful_asset_set", "approved_asset_set", "ai_exploration"],
+    "daily_content_volume": {"min": 3, "max": 8},
+    "topic_frequency_rule": "avoid repeating the same hairstyle choice or occasion within 5 days on one account"
+  },
+  "safety_rules": {
+    "banned": ["medical hair-growth claims", "visible brand watermarks", "explicit content", "false human-hair claims"],
+    "tiktok_ui_safe_area_px": {"top": 220, "bottom": 420, "left": 60, "right": 60},
+    "face_visibility": "face, hairline and full hairstyle silhouette must remain unobscured by overlays",
+    "before_after_integrity": "do not alter facial identity, skin tone or facial structure to create the transformation"
+  }
+}

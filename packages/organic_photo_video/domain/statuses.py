@@ -32,6 +32,8 @@ TASK_HERO_GENERATING = "hero_generating"
 TASK_ANCHOR_REVIEW = "anchor_review"
 TASK_IMAGE_GENERATING = "image_generating"
 TASK_IMAGE_REVIEW = "image_review"
+TASK_PHOTO_PACKAGING = "photo_packaging"
+TASK_PHOTO_READY = "photo_ready"
 TASK_REWORK_PENDING = "rework_pending"
 TASK_RENDERING = "rendering"
 TASK_VIDEO_REVIEW = "video_review"
@@ -51,6 +53,8 @@ TASK_STATUSES: FrozenSet[str] = frozenset(
         TASK_ANCHOR_REVIEW,
         TASK_IMAGE_GENERATING,
         TASK_IMAGE_REVIEW,
+        TASK_PHOTO_PACKAGING,
+        TASK_PHOTO_READY,
         TASK_REWORK_PENDING,
         TASK_RENDERING,
         TASK_VIDEO_REVIEW,
@@ -66,7 +70,11 @@ TASK_STATUSES: FrozenSet[str] = frozenset(
 
 TASK_STATUS_TRANSITIONS: Dict[str, FrozenSet[str]] = {
     TASK_DRAFT: frozenset({TASK_PLANNED, TASK_FAILED}),
-    TASK_PLANNED: frozenset({TASK_HERO_GENERATING, TASK_FAILED}),
+    # Asset-reuse photo plans can start image preparation without generating
+    # an artificial product/persona anchor.
+    TASK_PLANNED: frozenset(
+        {TASK_HERO_GENERATING, TASK_IMAGE_GENERATING, TASK_FAILED}
+    ),
     # V1 plans retain the direct hero -> image generation path.  V2 plans
     # stop here until the selected anchor has passed a scoped content review.
     TASK_HERO_GENERATING: frozenset({TASK_ANCHOR_REVIEW, TASK_IMAGE_GENERATING, TASK_FAILED}),
@@ -74,7 +82,19 @@ TASK_STATUS_TRANSITIONS: Dict[str, FrozenSet[str]] = {
     TASK_IMAGE_GENERATING: frozenset({TASK_IMAGE_REVIEW, TASK_FAILED}),
     # image_review may loop back to image_generating when a single slot is redone.
     TASK_IMAGE_REVIEW: frozenset(
-        {TASK_RENDERING, TASK_IMAGE_GENERATING, TASK_REWORK_PENDING, TASK_FAILED}
+        {
+            TASK_RENDERING,
+            TASK_PHOTO_PACKAGING,
+            TASK_IMAGE_GENERATING,
+            TASK_REWORK_PENDING,
+            TASK_FAILED,
+        }
+    ),
+    TASK_PHOTO_PACKAGING: frozenset(
+        {TASK_PHOTO_READY, TASK_IMAGE_REVIEW, TASK_REWORK_PENDING, TASK_FAILED}
+    ),
+    TASK_PHOTO_READY: frozenset(
+        {TASK_PUBLISH_PREPARING, TASK_PHOTO_PACKAGING, TASK_REWORK_PENDING, TASK_FAILED}
     ),
     TASK_RENDERING: frozenset({TASK_VIDEO_REVIEW, TASK_FAILED}),
     # video_review may loop back to rendering when the group is re-rendered.
@@ -86,7 +106,11 @@ TASK_STATUS_TRANSITIONS: Dict[str, FrozenSet[str]] = {
     # Ambiguous publish responses stay in publishing while being re-queried;
     # resubmission requires an explicit decision, never an automatic retry.
     TASK_PUBLISHING: frozenset({TASK_PUBLISHED, TASK_FAILED}),
-    TASK_PUBLISHED: frozenset({TASK_METRICS_COLLECTED, TASK_FAILED}),
+    # Metrics are optional for the native-photo MVP, so a completed post may
+    # be archived directly while the historical metric path stays available.
+    TASK_PUBLISHED: frozenset(
+        {TASK_METRICS_COLLECTED, TASK_ARCHIVED, TASK_FAILED}
+    ),
     TASK_METRICS_COLLECTED: frozenset({TASK_ARCHIVED}),
     TASK_ARCHIVED: frozenset(),
     # Recovery entry points. Metric collection failures do not need a status
@@ -96,6 +120,8 @@ TASK_STATUS_TRANSITIONS: Dict[str, FrozenSet[str]] = {
             TASK_HERO_GENERATING,
             TASK_IMAGE_GENERATING,
             TASK_IMAGE_REVIEW,
+            TASK_PHOTO_PACKAGING,
+            TASK_PHOTO_READY,
             TASK_RENDERING,
             TASK_VIDEO_REVIEW,
             TASK_PUBLISH_PREPARING,
@@ -107,7 +133,8 @@ TASK_STATUS_TRANSITIONS: Dict[str, FrozenSet[str]] = {
     # recovery stage instead of pretending every failure is a new task.
     TASK_REWORK_PENDING: frozenset(
         {TASK_PLANNED, TASK_HERO_GENERATING, TASK_IMAGE_GENERATING,
-         TASK_IMAGE_REVIEW, TASK_RENDERING, TASK_FAILED}
+         TASK_IMAGE_REVIEW, TASK_PHOTO_PACKAGING, TASK_PHOTO_READY,
+         TASK_RENDERING, TASK_FAILED}
     ),
 }
 
@@ -120,6 +147,8 @@ STAGE_PLANNING = "planning"
 STAGE_HERO_GENERATION = "hero_generation"
 STAGE_IMAGE_GENERATION = "image_generation"
 STAGE_IMAGE_REVIEW = "image_review"
+STAGE_PHOTO_PACKAGING = "photo_packaging"
+STAGE_PHOTO_REVIEW = "photo_review"
 STAGE_RENDERING = "rendering"
 STAGE_VIDEO_REVIEW = "video_review"
 STAGE_PUBLISH_PREPARATION = "publish_preparation"
@@ -134,6 +163,8 @@ STAGE_FOR_STATUS: Dict[str, str] = {
     TASK_ANCHOR_REVIEW: STAGE_IMAGE_REVIEW,
     TASK_IMAGE_GENERATING: STAGE_IMAGE_GENERATION,
     TASK_IMAGE_REVIEW: STAGE_IMAGE_REVIEW,
+    TASK_PHOTO_PACKAGING: STAGE_PHOTO_PACKAGING,
+    TASK_PHOTO_READY: STAGE_PHOTO_REVIEW,
     TASK_REWORK_PENDING: STAGE_PLANNING,
     TASK_RENDERING: STAGE_RENDERING,
     TASK_VIDEO_REVIEW: STAGE_VIDEO_REVIEW,

@@ -146,6 +146,89 @@ def plan_payload() -> dict:
     }
 
 
+def photo_recipe_spec_payload() -> dict:
+    return {
+        "schema_version": "opv-photo-recipe-v1",
+        "media_kind": "native_photo",
+        "category_key": "womenswear",
+        "markets": ["TH"],
+        "theme_types": ["CHOICE"],
+        "product_modes": ["NO_PRODUCT", "SOFT_PRODUCT"],
+        "variables_schema": {"style": {"enum": ["korean_clean"]}},
+        "template_id": "PHOTO_CHOICE_5P_V1",
+        "template_version": 1,
+        "visual_rules": {"same_identity": True},
+        "asset_policy": {"default": "ASSET_REUSE", "on_missing": "NEEDS_ASSET"},
+    }
+
+
+def photo_recipe_payload() -> dict:
+    return {
+        "schema_version": "opv-content-recipe-v1",
+        "recipe_id": "PHOTO_TH_PICK_LOOK_V1",
+        "recipe_key": "TH_PICK_LOOK",
+        "recipe_version": 1,
+        "content_goal": "ORGANIC_ACCOUNT_CONTENT",
+        "status": "active",
+        "shot_count": 5,
+        "anchor_slot": 2,
+        "hook_types": ["choice"],
+        "story_structure": [
+            {"slot_index": 1, "role": "choice_grid", "source_slots": [2, 3, 4, 5]},
+            {"slot_index": 2, "role": "look_a"},
+            {"slot_index": 3, "role": "look_b"},
+            {"slot_index": 4, "role": "look_c"},
+            {"slot_index": 5, "role": "look_d_with_cta"},
+        ],
+        "copy_style": {"locale": "th-TH", "tone": "casual"},
+        "suitable_topics": ["choice"],
+        "recipe_spec": photo_recipe_spec_payload(),
+    }
+
+
+def photo_plan_payload() -> dict:
+    slides = [
+        {
+            "slot_index": 1,
+            "slot_role": "choice_grid",
+            "source_kind": "composite_board",
+            "source_refs": [],
+            "source_slots": [2, 3, 4, 5],
+            "overlay_text": "เลือกหนึ่งลุค",
+            "layout_snapshot": {"template_id": "PHOTO_CHOICE_5P_V1"},
+        }
+    ]
+    slides.extend(
+        {
+            "slot_index": index,
+            "slot_role": f"look_{letter}",
+            "source_kind": "reused_asset",
+            "source_refs": [f"asset-{index}"],
+            "overlay_text": letter,
+            "layout_snapshot": {"fit_mode": "cover"},
+        }
+        for index, letter in zip(range(2, 6), "ABCD")
+    )
+    return {
+        "schema_version": "opv-photo-plan-v1",
+        "media_kind": "native_photo",
+        "category_key": "womenswear",
+        "product_mode": "NO_PRODUCT",
+        "market_pack": {
+            "id": "MP_TH_DEFAULT_V1",
+            "version": 1,
+            "country": "TH",
+            "locale": "th-TH",
+        },
+        "recipe": {"id": "PHOTO_TH_PICK_LOOK_V1", "version": 1},
+        "template": {"id": "PHOTO_CHOICE_5P_V1", "version": 1},
+        "variables": {"style": "korean_clean"},
+        "cover_index": 1,
+        "copy": {"title": "", "caption": "เลือกหนึ่งลุค", "hashtags": ["#ootd"]},
+        "slides": slides,
+    }
+
+
 class ConfigContractTest(unittest.TestCase):
     def test_valid_market_pack_passes(self) -> None:
         self.assertEqual(contracts.validate_market_pack_payload(market_pack_payload()), [])
@@ -279,6 +362,43 @@ class PlanContractTest(unittest.TestCase):
         plan["shots"][0]["slot_role"] = "selfie"
         errors = contracts.validate_plan_json(plan)
         self.assertTrue(any("slot_role" in e for e in errors))
+
+
+class PhotoContractTest(unittest.TestCase):
+    def test_photo_plan_passes_without_audio_duration_or_render_contract(self) -> None:
+        plan = photo_plan_payload()
+        self.assertEqual(contracts.validate_photo_plan_payload(plan), [])
+        self.assertEqual(contracts.validate_plan_json(plan), [])
+
+    def test_photo_plan_requires_product_for_soft_product(self) -> None:
+        plan = photo_plan_payload()
+        plan["product_mode"] = "SOFT_PRODUCT"
+        errors = contracts.validate_plan_json(plan)
+        self.assertTrue(any("product must be an object" in error for error in errors))
+        plan["product"] = {"id": "PROD_1"}
+        self.assertEqual(contracts.validate_plan_json(plan), [])
+
+    def test_photo_plan_rejects_duplicate_slots_and_dependency_cycle(self) -> None:
+        plan = photo_plan_payload()
+        plan["slides"][1]["source_slots"] = [1]
+        errors = contracts.validate_plan_json(plan)
+        self.assertTrue(any("dependency cycle" in error for error in errors))
+        plan = photo_plan_payload()
+        plan["slides"][4]["slot_index"] = 4
+        errors = contracts.validate_plan_json(plan)
+        self.assertTrue(any("duplicate slot_index" in error for error in errors))
+
+    def test_photo_recipe_uses_roles_and_does_not_require_render_profile(self) -> None:
+        payload = photo_recipe_payload()
+        self.assertEqual(contracts.validate_content_recipe_payload(payload), [])
+
+    def test_photo_recipe_rejects_unknown_product_and_asset_modes(self) -> None:
+        payload = photo_recipe_spec_payload()
+        payload["product_modes"] = ["MYSTERY"]
+        payload["asset_policy"]["default"] = "HIDDEN_AI"
+        errors = contracts.validate_photo_recipe_spec_payload(payload)
+        self.assertTrue(any("product_modes" in error for error in errors))
+        self.assertTrue(any("default" in error for error in errors))
 
 
 class BgmContractTest(unittest.TestCase):

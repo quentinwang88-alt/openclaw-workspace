@@ -24,13 +24,14 @@ class ShippedConfigTest(unittest.TestCase):
         cls.bundle = loader.load_seed_bundle()
 
     def test_bundle_counts_match_phase0_plan(self) -> None:
-        self.assertEqual(len(self.bundle.market_packs), 1)
+        self.assertEqual(len(self.bundle.categories), 2)
+        self.assertEqual(len(self.bundle.market_packs), 2)
         self.assertEqual(len(self.bundle.themes), 10)
         self.assertEqual(len(self.bundle.render_presets), 1)
-        self.assertEqual(len(self.bundle.content_recipes), 5)
+        self.assertEqual(len(self.bundle.content_recipes), 16)
         self.assertEqual(len(self.bundle.render_profiles), 2)
         self.assertEqual(len(self.bundle.quality_profiles), 3)
-        self.assertEqual(len(self.bundle.board_layouts), 3)
+        self.assertEqual(len(self.bundle.board_layouts), 8)
         self.assertEqual(len(self.bundle.variant_policies), 1)
         self.assertIsNotNone(self.bundle.account_example)
 
@@ -64,8 +65,14 @@ class ShippedConfigTest(unittest.TestCase):
         render_ids = {p.render_profile_id for p in self.bundle.render_profiles}
         quality_ids = {p.quality_profile_id for p in self.bundle.quality_profiles}
         for recipe in self.bundle.content_recipes:
-            self.assertEqual(recipe.status, "active")
-            self.assertIn(recipe.render_profile_id, render_ids)
+            self.assertEqual(recipe.status, "deprecated" if recipe.recipe_id in {
+                "PHOTO_TH_PICK_YOUR_LOOK_V1", "PHOTO_TH_PICK_YOUR_LOOK_V2",
+                "PHOTO_TH_TEMPERATURE_DRESSING_V1", "PHOTO_TH_TRAVEL_OUTFIT_V1",
+            } else "active")
+            if recipe.recipe_spec_json.get("media_kind") == "native_photo":
+                self.assertIsNone(recipe.render_profile_id)
+            else:
+                self.assertIn(recipe.render_profile_id, render_ids)
             self.assertIn(recipe.quality_profile_id, quality_ids)
 
     def test_travel_departure_theme_targets_outerwear(self) -> None:
@@ -80,7 +87,7 @@ class ShippedConfigTest(unittest.TestCase):
         self.assertIn("puffer_jacket", theme.product_match_rules_json["categories"])
 
     def test_th_market_pack_is_active_and_localized(self) -> None:
-        pack = self.bundle.market_packs[0]
+        pack = next(p for p in self.bundle.market_packs if p.target_country == "TH")
         self.assertEqual(pack.market_pack_id, "MP_TH_DEFAULT_V1")
         self.assertEqual(pack.pack_key, "MP_TH_DEFAULT")
         self.assertEqual(pack.target_country, "TH")
@@ -88,6 +95,116 @@ class ShippedConfigTest(unittest.TestCase):
         self.assertEqual(pack.status, "active")
         self.assertTrue(pack.visual_rules_json)
         self.assertFalse(pack.copy_rules_json.get("fallback_allowed"), True)
+
+    def test_mx_market_pack_is_active_and_uses_mexican_spanish(self) -> None:
+        pack = next(p for p in self.bundle.market_packs if p.target_country == "MX")
+        self.assertEqual(pack.market_pack_id, "MP_MX_DEFAULT_V1")
+        self.assertEqual(pack.target_locale, "es-MX")
+        self.assertEqual(pack.status, "active")
+        self.assertFalse(pack.copy_rules_json.get("fallback_allowed"), True)
+        self.assertIn("hairline", " ".join(pack.visual_rules_json["hair_constraints"]))
+
+    def test_photo_categories_are_config_only_and_active(self) -> None:
+        categories = {item["category_key"]: item for item in self.bundle.categories}
+        self.assertEqual(set(categories), {"womenswear", "wig"})
+        for item in categories.values():
+            self.assertEqual(item["status"], "active")
+            self.assertEqual(
+                item["content_rules"]["allowed_product_modes"],
+                ["NO_PRODUCT", "SOFT_PRODUCT"],
+            )
+            self.assertEqual(item["content_rules"]["default_asset_mode"], "ASSET_REUSE")
+
+    def test_eight_photo_recipes_have_stable_contracts(self) -> None:
+        photos = [
+            recipe for recipe in self.bundle.content_recipes
+            if recipe.recipe_spec_json.get("media_kind") == "native_photo"
+        ]
+        self.assertEqual(len(photos), 11)
+        layout_ids = {
+            layout["layout_id"] for layout in self.bundle.board_layouts
+            if layout["schema_version"] in {loader.PHOTO_LAYOUT_SCHEMA, "opv-photo-layout-v2"}
+        }
+        self.assertEqual(
+            layout_ids,
+            {
+                "PHOTO_SINGLE_LIGHT_TEXT_V1",
+                "PHOTO_COMPARISON_V1",
+                "PHOTO_CHOICE_GRID_V1",
+                "PHOTO_CHOICE_CARD_V1",
+                "PHOTO_CHOICE_CARD_V2",
+            },
+        )
+        for recipe in photos:
+            spec = recipe.recipe_spec_json
+            self.assertEqual(recipe.shot_count, 5, recipe.recipe_id)
+            self.assertEqual(
+                [slot["slot_index"] for slot in recipe.story_structure_json],
+                [1, 2, 3, 4, 5],
+                recipe.recipe_id,
+            )
+            self.assertEqual(spec["schema_version"], "opv-photo-recipe-v1")
+            self.assertIn("NO_PRODUCT", spec["product_modes"])
+            self.assertEqual(spec["asset_policy"], {
+                "default": "ASSET_REUSE", "on_missing": "NEEDS_ASSET",
+            })
+            self.assertIn(spec["template_id"], layout_ids)
+            self.assertTrue(spec["variables_schema"])
+            self._assert_acyclic_story(recipe.story_structure_json)
+
+    def test_pick_your_look_uses_operator_friendly_copy_pack(self) -> None:
+        recipe = next(
+            item for item in self.bundle.content_recipes
+            if item.recipe_id == "PHOTO_TH_PICK_YOUR_LOOK_V3"
+        )
+        profile = recipe.recipe_spec_json["execution_profiles"][0]
+        self.assertEqual(profile["copy_pack_id"], "TH_PICK_YOUR_LOOK_V3")
+        self.assertEqual(len(profile["copy_variants"]), 4)
+        self.assertTrue(all(
+            variant["copy"]["language_review_status"] == "production_copy_pack"
+            for variant in profile["copy_variants"]
+        ))
+
+    def test_travel_v2_uses_copy_pack_draft_templates_with_tokens(self) -> None:
+        recipe = next(
+            item for item in self.bundle.content_recipes
+            if item.recipe_id == "PHOTO_TH_TRAVEL_OUTFIT_V2"
+        )
+        self.assertEqual(recipe.status, "active")
+        profile = recipe.recipe_spec_json["execution_profiles"][0]
+        self.assertEqual(profile["copy_pack_id"], "TH_TRAVEL_OUTFIT_V2")
+        self.assertEqual(len(profile["copy_variants"]), 4)
+        self.assertTrue(all(
+            variant["copy"]["language_review_status"] == "DRAFT"
+            for variant in profile["copy_variants"]
+        ))
+        for variant in profile["copy_variants"]:
+            self.assertIn("A B C หรือ D", variant["copy"]["caption"])
+            self.assertIn("{{label_a}}", variant["copy"]["slide_texts"][1])
+            self.assertIn("{{label_d}}", variant["copy"]["slide_texts"][4])
+            self.assertIn("{destination}", variant["copy"]["title"])
+            self.assertIn("{temperature}", variant["copy"]["caption"])
+
+    @staticmethod
+    def _assert_acyclic_story(story) -> None:
+        dependencies = {
+            slot["slot_index"]: list(slot.get("source_slots") or []) for slot in story
+        }
+        visiting, visited = set(), set()
+
+        def visit(slot):
+            if slot in visiting:
+                raise AssertionError(f"photo recipe contains dependency cycle at slide {slot}")
+            if slot in visited:
+                return
+            visiting.add(slot)
+            for dependency in dependencies.get(slot, []):
+                visit(dependency)
+            visiting.remove(slot)
+            visited.add(slot)
+
+        for slot in dependencies:
+            visit(slot)
 
     def test_all_themes_apply_to_thailand_and_are_active(self) -> None:
         for theme in self.bundle.themes:
@@ -151,6 +268,46 @@ class ShippedConfigTest(unittest.TestCase):
 
 
 class LoaderFailureTest(unittest.TestCase):
+    def test_invalid_photo_category_fails_at_load_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "WIG_BAD.json"
+            bad.write_text(json.dumps({
+                "schema_version": "opv-category-profile-v1",
+                "category_key": "wig",
+                "category_name": "假发",
+                "status": "active",
+                "interest_drivers": [],
+                "visual_dimensions": ["hairline"],
+                "asset_requirements": ["clear"],
+                "content_rules": {"default_asset_mode": "ASSET_REUSE"},
+            }), encoding="utf-8")
+            with self.assertRaises(ContractViolationError):
+                loader.load_category_file(bad)
+
+    def test_invalid_photo_layout_does_not_fall_back_to_board_validator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "PHOTO_BAD.json"
+            bad.write_text(json.dumps({
+                "schema_version": "opv-photo-layout-v1",
+                "layout_id": "PHOTO_BAD",
+                "layout_version": 1,
+                "layout_kind": "CHOICE_GRID",
+                "status": "active",
+                "canvas": {"width": 1080, "height": 1920},
+                "page_variants": {
+                    "BAD": {"regions": [
+                        {"id": "outside", "kind": "image", "rect": {
+                            "x": 1000, "y": 0, "width": 200, "height": 400,
+                        }},
+                        {"id": "headline", "kind": "text", "rect": {
+                            "x": 0, "y": 0, "width": 400, "height": 100,
+                        }},
+                    ]},
+                },
+            }), encoding="utf-8")
+            with self.assertRaises(ContractViolationError):
+                loader.load_board_layouts(Path(tmp))
+
     def test_invalid_theme_file_fails_at_load_time(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             bad = Path(tmp) / "THEME_BAD_v1.json"

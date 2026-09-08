@@ -1,0 +1,22 @@
+{
+  "schema_version": "opv-asset-set-v1",
+  "asset_set_id": "ASSET_MX_WIG_CHOICE_V2",
+  "asset_set_key": "MX_WIG_CHOICE",
+  "asset_set_version": 2,
+  "category_key": "wig",
+  "market": "MX",
+  "status": "enabled",
+  "tags": {
+    "use_cases": ["pick_your_hair", "face_shape_match", "occasion_hair"],
+    "choice_axis": ["length", "texture", "color", "style"],
+    "source": "existing_product_and_model_references"
+  },
+  "assets": [
+    {"asset_id": "mx_hair_cover_seed", "path": "../../../../shared/data/organic_photo_video/asset_sets/mx_choice/hair_a.png", "role": "cover_seed", "tags": {"note": "slot 1 cover is composed from slots 2-5"}},
+    {"asset_id": "mx_hair_a", "path": "../../../../shared/data/organic_photo_video/asset_sets/mx_choice/hair_b.png", "role": "hair_a", "tags": {"length": "long", "texture": "wavy", "color": "pink_black"}},
+    {"asset_id": "mx_hair_b", "path": "../../../../shared/data/organic_photo_video/asset_sets/mx_choice/hair_c.jpg", "role": "hair_b", "tags": {"length": "long", "texture": "wavy", "color": "pink_black", "view": "front"}},
+    {"asset_id": "mx_hair_c", "path": "../../../../shared/data/organic_photo_video/asset_sets/mx_choice/hair_d.jpg", "role": "hair_c", "tags": {"length": "long", "texture": "wavy", "color": "pink_black", "view": "three_quarter"}},
+    {"asset_id": "mx_hair_d", "path": "../../../../shared/data/organic_photo_video/asset_sets/mx_choice/hair_e.png", "role": "hair_d", "tags": {"length": "bob", "texture": "layered", "color": "lavender"}}
+  ],
+  "pairs": []
+}

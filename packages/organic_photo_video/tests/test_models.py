@@ -18,6 +18,9 @@ if str(PACKAGE_ROOT) not in sys.path:
 from domain import models
 from domain.models import (
     AccountProfile,
+    AssetSet,
+    ContentPackage,
+    ContentRecipe,
     ContentShot,
     ContentTask,
     FeishuOutbox,
@@ -147,6 +150,23 @@ class ModelRoundTripTest(unittest.TestCase):
         self.assertIsNone(row["copy_json"])
         self._assert_round_trip(task, ContentTask.from_row)
 
+    def test_native_photo_task_allows_no_product(self) -> None:
+        task = ContentTask(
+            task_id="opv_task_photo_1",
+            idempotency_key="b" * 64,
+            account_id="OPV_TEST_1",
+            product_id=None,
+            target_country="MX",
+            target_locale="es-MX",
+            media_kind="native_photo",
+            category_key="wig",
+            product_mode="NO_PRODUCT",
+        )
+        row = task.to_row()
+        self.assertIsNone(row["product_id"])
+        self.assertEqual(row["media_kind"], "native_photo")
+        self._assert_round_trip(task, ContentTask.from_row)
+
     def test_content_shot_round_trip_bool_and_version(self) -> None:
         shot = ContentShot(
             shot_id="opv_shot_20260830_abcdef123456",
@@ -168,6 +188,16 @@ class ModelRoundTripTest(unittest.TestCase):
         self.assertEqual(revived.qa_json, {"score": 0.9})
         self.assertEqual(revived.outfit_state_ref, "FINAL")
         self.assertEqual(revived.to_row(), row)
+
+    def test_photo_shot_does_not_require_duration(self) -> None:
+        shot = ContentShot(
+            shot_id="opv_shot_photo_1",
+            task_id="opv_task_photo_1",
+            slot_index=1,
+            slot_role="choice_grid",
+            duration_ms=None,
+        )
+        self._assert_round_trip(shot, ContentShot.from_row)
 
     def test_video_render_and_publish_record_round_trip(self) -> None:
         render = VideoRender(
@@ -192,6 +222,58 @@ class ModelRoundTripTest(unittest.TestCase):
             submitted_at=datetime(2026, 9, 1, 2, 0, 0),
         )
         self._assert_round_trip(record, PublishRecord.from_row)
+
+    def test_native_photo_publish_record_round_trip_without_render(self) -> None:
+        record = PublishRecord(
+            publish_id="opv_pub_photo_1",
+            task_id="opv_task_photo_1",
+            render_id=None,
+            account_id="OPV_TEST_1",
+            media_kind="native_photo",
+            content_package_id="opv_package_photo_1",
+            revision_id="opv_revision_photo_1",
+            main_slot_id=42,
+            publisher_account_id="mx-wig-organic",
+            publish_channel="creatok",
+            provider_task_id="provider-task-1",
+            publish_key="c" * 64,
+            release_manifest_json={"schema_version": "opv-photo-release-v1"},
+        )
+        row = record.to_row()
+        self.assertIsNone(row["render_id"])
+        self.assertIsInstance(row["release_manifest_json"], str)
+        self._assert_round_trip(record, PublishRecord.from_row)
+
+    def test_photo_recipe_package_and_asset_set_round_trip(self) -> None:
+        recipe = ContentRecipe(
+            recipe_id="PHOTO_MX_PICK_HAIR_V1",
+            recipe_key="MX_PICK_HAIR",
+            content_goal="ORGANIC_ACCOUNT_CONTENT",
+            recipe_spec_json={
+                "schema_version": "opv-photo-recipe-v1",
+                "media_kind": "native_photo",
+            },
+        )
+        self._assert_round_trip(recipe, ContentRecipe.from_row)
+
+        package = ContentPackage(
+            content_package_id="opv_package_photo_1",
+            task_id="opv_task_photo_1",
+            photo_manifest_json={"slides": [{"slot_index": 1}]},
+        )
+        self._assert_round_trip(package, ContentPackage.from_row)
+
+        asset_set = AssetSet(
+            asset_set_id="opv_asset_set_1",
+            asset_set_key="MX_WIG_CHOICES",
+            asset_set_version=2,
+            category_key="wig",
+            market="MX",
+            status="enabled",
+            tags_json={"styles": ["bob", "largo"]},
+            manifest_json={"assets": [{"path": "/tmp/wig.jpg", "sha256": "d" * 64}]},
+        )
+        self._assert_round_trip(asset_set, AssetSet.from_row)
 
     def test_metric_snapshot_coerces_decimal_to_float(self) -> None:
         captured = datetime(2026, 8, 30, 12, 0, 0)

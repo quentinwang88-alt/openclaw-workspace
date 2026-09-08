@@ -1,0 +1,307 @@
+{
+  "schema_version": "opv-content-recipe-v1",
+  "recipe_id": "PHOTO_TH_TEMPERATURE_DRESSING_V1",
+  "recipe_key": "TH_TEMPERATURE_DRESSING",
+  "recipe_version": 2,
+  "content_goal": "temperature_dressing_guide",
+  "anchor_slot": 4,
+  "shot_count": 5,
+  "hook_types": [
+    "temperature_question",
+    "layering_guide"
+  ],
+  "story_structure": [
+    {
+      "slot_index": 1,
+      "role": "hook",
+      "source_slots": [
+        2,
+        3,
+        4
+      ],
+      "layout_variant": "FULL_BLEED",
+      "purpose": "指定温度下怎么穿的封面"
+    },
+    {
+      "slot_index": 2,
+      "role": "base_layer",
+      "source_slots": [],
+      "layout_variant": "FULL_BLEED",
+      "purpose": "基础层或较暖温度方案"
+    },
+    {
+      "slot_index": 3,
+      "role": "mid_layer",
+      "source_slots": [],
+      "layout_variant": "FULL_BLEED",
+      "purpose": "增加中间层后的方案"
+    },
+    {
+      "slot_index": 4,
+      "role": "outer_layer",
+      "source_slots": [],
+      "layout_variant": "FULL_BLEED",
+      "purpose": "完整保暖层次和外套"
+    },
+    {
+      "slot_index": 5,
+      "role": "cta",
+      "source_slots": [
+        4
+      ],
+      "layout_variant": "FULL_BLEED",
+      "purpose": "复用完整造型并询问目标温度"
+    }
+  ],
+  "copy_style": {
+    "locale": "th-TH",
+    "tone": "saveable_guide",
+    "max_lines_per_block": 2,
+    "example": "5°C ใส่อะไรบ้าง?",
+    "language_review_status": "pending_native_review"
+  },
+  "suitable_topics": [
+    "temperature_dressing",
+    "layering",
+    "cold_weather_travel"
+  ],
+  "quality_profile_id": "QUALITY_STANDARD_V1",
+  "recipe_spec": {
+    "schema_version": "opv-photo-recipe-v1",
+    "media_kind": "native_photo",
+    "category_key": "womenswear",
+    "markets": [
+      "TH"
+    ],
+    "theme_types": [
+      "GUIDE",
+      "CHECKLIST"
+    ],
+    "product_modes": [
+      "NO_PRODUCT",
+      "SOFT_PRODUCT"
+    ],
+    "variables_schema": {
+      "temperature_c": {
+        "type": "enum",
+        "values": [
+          15,
+          10,
+          5,
+          0,
+          -5
+        ],
+        "required": true
+      },
+      "activity_level": {
+        "type": "enum",
+        "values": [
+          "mostly_indoor",
+          "mixed",
+          "mostly_outdoor"
+        ],
+        "required": true
+      },
+      "style": {
+        "type": "enum",
+        "values": [
+          "korean_clean",
+          "minimal",
+          "casual",
+          "relaxed_travel",
+          "japanese_casual"
+        ],
+        "required": true
+      }
+    },
+    "template_id": "PHOTO_SINGLE_LIGHT_TEXT_V1",
+    "template_version": 1,
+    "visual_rules": {
+      "same_identity": true,
+      "same_camera_scale": true,
+      "layering_progression": true,
+      "show_full_body": true,
+      "evergreen_weather_only": true
+    },
+    "asset_policy": {
+      "default": "ASSET_REUSE",
+      "on_missing": "NEEDS_ASSET"
+    },
+    "asset_match_keys": [
+      "temperature_c",
+      "style"
+    ],
+    "asset_requirements": {
+      "required_roles": [
+        "look_a",
+        "look_b",
+        "look_c",
+        "look_d",
+        "alternate"
+      ],
+      "required_tags": {
+        "use_cases": "temperature_dressing"
+      },
+      "required_pairs": []
+    },
+    "execution_profiles": [
+      {
+        "profile_id": "temperature_10",
+        "label": "10°C 分层穿搭",
+        "variables": {
+          "temperature_c": 10,
+          "activity_level": "mixed",
+          "style": "korean_clean"
+        },
+        "asset_set_keys": [
+          "TH_WOMENSWEAR_LAYERED"
+        ],
+        "copy_variants": [
+          {
+            "copy_id": "temperature_10_copy_1",
+            "copy": {
+              "title": "อากาศ 10°C ใส่อะไร",
+              "caption": "ไอเดียเลเยอร์สำหรับอากาศประมาณ 10°C ปรับตามลม กิจกรรม และความหนาวของคุณ",
+              "hashtags": [
+                "#แต่งตัวหน้าหนาว",
+                "#เลเยอร์"
+              ],
+              "slide_texts": [
+                "แต่งตัวที่ 10°C",
+                "เริ่มจากชั้นแรก",
+                "เพิ่มอีกหนึ่งชั้น",
+                "พร้อมเสื้อตัวนอก",
+                "คุณกำลังจะไปกี่องศา"
+              ],
+              "language_review_status": "pending_native_review"
+            }
+          },
+          {
+            "copy_id": "temperature_10_copy_2",
+            "copy": {
+              "title": "ลองเลเยอร์ที่ 10°C",
+              "caption": "จัดเลเยอร์ให้ถอดเพิ่มได้ตามอากาศจริง บันทึกไว้เป็นไอเดียสำหรับวันที่ประมาณ 10°C",
+              "hashtags": [
+                "#แต่งตัวหน้าหนาว",
+                "#เลเยอร์"
+              ],
+              "slide_texts": [
+                "เลเยอร์แบบค่อยเป็นค่อยไป",
+                "ชั้นพื้นฐาน",
+                "เพิ่มความอบอุ่น",
+                "ลุคพร้อมออกไป",
+                "เซฟไว้เป็นไอเดีย"
+              ],
+              "language_review_status": "pending_native_review"
+            }
+          }
+        ]
+      },
+      {
+        "profile_id": "temperature_15",
+        "label": "15°C 分层穿搭",
+        "variables": {
+          "temperature_c": 15,
+          "activity_level": "mostly_indoor",
+          "style": "korean_clean"
+        },
+        "asset_set_keys": [
+          "TH_WOMENSWEAR_LAYERED"
+        ],
+        "copy_variants": [
+          {
+            "copy_id": "temperature_15_copy_1",
+            "copy": {
+              "title": "อากาศ 15°C ใส่อะไร",
+              "caption": "ไอเดียเลเยอร์สำหรับอากาศประมาณ 15°C ปรับตามลม กิจกรรม และความหนาวของคุณ",
+              "hashtags": [
+                "#แต่งตัวหน้าหนาว",
+                "#เลเยอร์"
+              ],
+              "slide_texts": [
+                "แต่งตัวที่ 15°C",
+                "เริ่มจากชั้นแรก",
+                "เพิ่มอีกหนึ่งชั้น",
+                "พร้อมเสื้อตัวนอก",
+                "คุณกำลังจะไปกี่องศา"
+              ],
+              "language_review_status": "pending_native_review"
+            }
+          },
+          {
+            "copy_id": "temperature_15_copy_2",
+            "copy": {
+              "title": "ลองเลเยอร์ที่ 15°C",
+              "caption": "จัดเลเยอร์ให้ถอดเพิ่มได้ตามอากาศจริง บันทึกไว้เป็นไอเดียสำหรับวันที่ประมาณ 15°C",
+              "hashtags": [
+                "#แต่งตัวหน้าหนาว",
+                "#เลเยอร์"
+              ],
+              "slide_texts": [
+                "เลเยอร์แบบค่อยเป็นค่อยไป",
+                "ชั้นพื้นฐาน",
+                "เพิ่มความอบอุ่น",
+                "ลุคพร้อมออกไป",
+                "เซฟไว้เป็นไอเดีย"
+              ],
+              "language_review_status": "pending_native_review"
+            }
+          }
+        ]
+      },
+      {
+        "profile_id": "temperature_5",
+        "label": "5°C 分层穿搭",
+        "variables": {
+          "temperature_c": 5,
+          "activity_level": "mostly_outdoor",
+          "style": "korean_clean"
+        },
+        "asset_set_keys": [
+          "TH_WOMENSWEAR_LAYERED"
+        ],
+        "copy_variants": [
+          {
+            "copy_id": "temperature_5_copy_1",
+            "copy": {
+              "title": "อากาศ 5°C ใส่อะไร",
+              "caption": "ไอเดียเลเยอร์สำหรับอากาศประมาณ 5°C ปรับตามลม กิจกรรม และความหนาวของคุณ",
+              "hashtags": [
+                "#แต่งตัวหน้าหนาว",
+                "#เลเยอร์"
+              ],
+              "slide_texts": [
+                "แต่งตัวที่ 5°C",
+                "เริ่มจากชั้นแรก",
+                "เพิ่มอีกหนึ่งชั้น",
+                "พร้อมเสื้อตัวนอก",
+                "คุณกำลังจะไปกี่องศา"
+              ],
+              "language_review_status": "pending_native_review"
+            }
+          },
+          {
+            "copy_id": "temperature_5_copy_2",
+            "copy": {
+              "title": "ลองเลเยอร์ที่ 5°C",
+              "caption": "จัดเลเยอร์ให้ถอดเพิ่มได้ตามอากาศจริง บันทึกไว้เป็นไอเดียสำหรับวันที่ประมาณ 5°C",
+              "hashtags": [
+                "#แต่งตัวหน้าหนาว",
+                "#เลเยอร์"
+              ],
+              "slide_texts": [
+                "เลเยอร์แบบค่อยเป็นค่อยไป",
+                "ชั้นพื้นฐาน",
+                "เพิ่มความอบอุ่น",
+                "ลุคพร้อมออกไป",
+                "เซฟไว้เป็นไอเดีย"
+              ],
+              "language_review_status": "pending_native_review"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "status": "deprecated"
+}

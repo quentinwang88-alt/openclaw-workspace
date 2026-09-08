@@ -18,10 +18,16 @@ for value in (str(BITABLE_SKILL), str(PACKAGE_ROOT)):
 from core.bitable import FeishuBitableClient, resolve_wiki_bitable_app_token  # noqa: E402
 from services.feishu_workflow import (  # noqa: E402
     FIELD_EXECUTE, FIELD_NOTES, FIELD_OUTPUT, FIELD_PRESET, FIELD_PRODUCT,
-    FIELD_PROGRESS, FIELD_REVIEW, FIELD_QUANTITY, FIELD_CONFIRM_PUBLISH,
+    FIELD_PROGRESS, FIELD_REVIEW, FIELD_QUANTITY, FIELD_QUANTITY_LEGACY, FIELD_CONFIRM_PUBLISH,
+    FIELD_PHOTO_SUMMARY, FIELD_PHOTO_INPUT, FIELD_PHOTO_INPUT_LEGACY,
+    FIELD_PRODUCT_REFERENCE, FIELD_PHOTO_ASSET_STATUS, FIELD_REFERENCE,
+    FIELD_REFERENCE_TYPE, FIELD_CONTENT_THEME, FIELD_MUSIC_MODE,
+    FIELD_CONTENT_REQUIREMENT,
     FIELD_REVIEW_MODE, FIELD_REVIEW_STAGE, FIELD_RETRY_REVIEW, FIELD_REVIEW_TOKEN,
     ProductionPresetCatalog,
 )
+from services.photo_reference import REFERENCE_TYPE_OPTIONS  # noqa: E402
+from services.photo_theme import THEME_OPTIONS  # noqa: E402
 
 
 def options(values):
@@ -70,17 +76,80 @@ def add_missing_select_options(client, field, desired) -> bool:
     return True
 
 
+def merge_attachments(*groups):
+    """Keep attachment order and deduplicate by Feishu file token."""
+    output, seen = [], set()
+    for group in groups:
+        for item in group or []:
+            if not isinstance(item, dict):
+                continue
+            identity = str(item.get("file_token") or item.get("name") or item)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            output.append(item)
+    return output
+
+
+def consolidate_reference_field(client, by_name, *, dry_run: bool) -> dict:
+    """Move legacy product-reference attachments, then retire the old field."""
+    legacy = by_name.get(FIELD_PRODUCT_REFERENCE)
+    if legacy is None:
+        return {"legacy_field_present": False, "records_to_migrate": 0, "deleted": False}
+    records = client.list_records(page_size=500)
+    updates = []
+    for record in records:
+        old = list(record.fields.get(FIELD_PRODUCT_REFERENCE) or [])
+        if not old:
+            continue
+        current = list(record.fields.get(FIELD_REFERENCE) or [])
+        merged = merge_attachments(current, old)
+        if merged != current:
+            updates.append({"record_id": record.record_id, "fields": {FIELD_REFERENCE: merged}})
+    if dry_run:
+        return {
+            "legacy_field_present": True, "records_scanned": len(records),
+            "records_to_migrate": len(updates), "deleted": False,
+        }
+    for start in range(0, len(updates), 500):
+        client.batch_update_records(updates[start:start + 500])
+    # Delete only after every old attachment has been copied to the unified field.
+    url = (
+        f"https://open.feishu.cn/open-apis/bitable/v1/apps/{client.app_token}/"
+        f"tables/{client.table_id}/fields/{legacy.field_id}"
+    )
+    response = client._request("DELETE", url, headers=client._headers())
+    result = response.json()
+    if result.get("code") != 0:
+        raise RuntimeError(f"删除旧商品参考图字段失败：{result.get('msg')}")
+    final_names = set(client.list_field_names())
+    if FIELD_PRODUCT_REFERENCE in final_names or FIELD_REFERENCE not in final_names:
+        raise RuntimeError("统一参考图字段回读校验失败")
+    return {
+        "legacy_field_present": True, "records_scanned": len(records),
+        "records_migrated": len(updates), "deleted": True,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wiki-token", default="TR10wxEXHiCYIhk8clActVdenpc")
     parser.add_argument("--table-id", default="tblj3x846gU3rshB")
     parser.add_argument("--preset-only", help="append one known preset option only; do not alter other fields")
+    parser.add_argument(
+        "--consolidate-reference-field", action="store_true",
+        help="copy legacy 商品参考图 attachments into 参考图（可选）, then delete the legacy field",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     client = FeishuBitableClient(resolve_wiki_bitable_app_token(args.wiki_token), args.table_id)
     catalog = ProductionPresetCatalog()
     fields = client.list_fields()
     by_name = {field.field_name: field for field in fields}
+    if args.consolidate_reference_field:
+        report = consolidate_reference_field(client, by_name, dry_run=args.dry_run)
+        print(json.dumps({"dry_run": args.dry_run, **report}, ensure_ascii=False, indent=2))
+        return 0
     if args.preset_only:
         if args.preset_only not in catalog.names or FIELD_PRESET not in by_name:
             raise ValueError("known preset and existing production-preset field required")
@@ -106,10 +175,28 @@ def main() -> int:
         rename_field(client, primary, FIELD_PRODUCT)
         renamed.append({"from": primary.field_name, "to": FIELD_PRODUCT})
         by_name[FIELD_PRODUCT] = primary
+    if FIELD_PHOTO_INPUT not in by_name and FIELD_PHOTO_INPUT_LEGACY in by_name:
+        old = by_name[FIELD_PHOTO_INPUT_LEGACY]
+        rename_field(client, old, FIELD_PHOTO_INPUT)
+        renamed.append({"from": FIELD_PHOTO_INPUT_LEGACY, "to": FIELD_PHOTO_INPUT})
+        by_name[FIELD_PHOTO_INPUT] = old
+    if FIELD_QUANTITY not in by_name and FIELD_QUANTITY_LEGACY in by_name:
+        old = by_name[FIELD_QUANTITY_LEGACY]
+        rename_field(client, old, FIELD_QUANTITY)
+        renamed.append({"from": FIELD_QUANTITY_LEGACY, "to": FIELD_QUANTITY})
+        by_name[FIELD_QUANTITY] = old
     specs = [
         (FIELD_PRESET, 3, "SingleSelect", options(catalog.names)),
         (FIELD_EXECUTE, 7, "Checkbox", None),
         (FIELD_QUANTITY, 2, "Number", {"formatter": "0"}),
+        (FIELD_CONTENT_THEME, 3, "SingleSelect", options(THEME_OPTIONS)),
+        (FIELD_CONTENT_REQUIREMENT, 1, "Text", None),
+        ("旅行地点（可选）", 1, "Text", None),
+        (FIELD_REFERENCE_TYPE, 3, "SingleSelect", options(REFERENCE_TYPE_OPTIONS)),
+        (FIELD_REFERENCE, 17, "Attachment", None),
+        (FIELD_PHOTO_SUMMARY, 1, "Text", None),
+        (FIELD_PHOTO_INPUT, 17, "Attachment", None),
+        (FIELD_PHOTO_ASSET_STATUS, 1, "Text", None),
         (FIELD_PROGRESS, 3, "SingleSelect", options([
             "待执行", "生成中", "待审核", "已完成", "需处理",
             "待排班", "已排期", "发布中", "已发布", "发布失败",
@@ -120,8 +207,9 @@ def main() -> int:
             "重做P5", "重做成片", "整组重做", "排期发布",
         ])),
         (FIELD_CONFIRM_PUBLISH, 7, "Checkbox", None),
+        (FIELD_MUSIC_MODE, 1, "Text", None),
         (FIELD_REVIEW_MODE, 3, "SingleSelect", options(["自动审核", "人工确认"])),
-        (FIELD_REVIEW_STAGE, 3, "SingleSelect", options(["锚点审核", "组图审核", "成片终审", "已验收", "处理中", "锚点技术检查", "组图技术检查", "成片技术检查", "技术完成"])),
+        (FIELD_REVIEW_STAGE, 3, "SingleSelect", options(["锚点审核", "组图审核", "成片终审", "图文终审", "素材审核", "已验收", "处理中", "锚点技术检查", "组图技术检查", "成片技术检查", "技术完成"])),
         (FIELD_RETRY_REVIEW, 7, "Checkbox", None),
         (FIELD_REVIEW_TOKEN, 1, "Text", None),
         (FIELD_NOTES, 1, "Text", None),

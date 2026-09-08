@@ -12,6 +12,23 @@ class ReleaseGateError(RuntimeError):
     pass
 
 
+def require_photo_content_allowed(repository: Any, task: Any) -> None:
+    """A rejected task cannot be revived by a later approval or rework."""
+    if str(getattr(task, "media_kind", "video")) != "native_photo":
+        return
+    reader = getattr(repository, "list_content_rejections", None)
+    if callable(reader):
+        rejected = reader(task.task_id)
+    else:
+        # Lightweight repositories used by local tests/diagnostics have no SQL
+        # projection; inspect their active review history when available.
+        reader = getattr(repository, "list_quality_reviews", None)
+        reviews = reader(task.active_revision_id, scope="photo_package") if callable(reader) else []
+        rejected = [r for r in reviews if "CONTENT_REJECTED" in (r.reason_codes_json or [])]
+    if rejected:
+        raise ReleaseGateError("CONTENT_REJECTED: 内容验收未通过，禁止该任务放行或发布；需另建修正样板")
+
+
 def assert_main_queue_rework_allowed(task_id: str, **kwargs: Any) -> None:
     from services.main_schedule_bridge import assert_main_queue_rework_allowed as guard
     guard(task_id, **kwargs)
@@ -39,7 +56,10 @@ def technical_evidence_valid(evidence: Any, scope: str) -> bool:
         return False
     checks = evidence.get("checks") or {}
     required = {"frozen_inputs", "file_hash", "media_qc"}
-    required.add("decoded_images" if scope in {"anchor", "group"} else "render_input_binding")
+    required.add(
+        "decoded_images" if scope in {"anchor", "group", "photo_package"}
+        else "render_input_binding"
+    )
     return (evidence.get("schema_version") == "opv-technical-check-v1"
             and evidence.get("production_policy") == "technical_only"
             and evidence.get("scope") == scope
@@ -55,6 +75,32 @@ def trusted_review(review: Any) -> bool:
     return kind in {"human", "model"} and not (
         kind == "human" and any(word in name for word in ("codex", "chatgpt", "assistant"))
     )
+
+
+def trusted_photo_content_review(review: Any) -> bool:
+    """A native-photo release needs one explicit operator authorization.
+
+    Older releases used three separate preview/content/language confirmations.
+    The compact flow binds the publish checkbox to the exact package fingerprint
+    after technical checks, so that one action can both freeze and authorize it.
+    """
+    if str(getattr(review, "scope", "")) != "photo_package":
+        return False
+    if str(getattr(review, "decision", "")) != "passed":
+        return False
+    if str(getattr(review, "reviewer_type", "")) != "human":
+        return False
+    if not trusted_review(review):
+        return False
+    dimensions = dict(getattr(review, "dimensions_json", None) or {})
+    legacy_review = all(dimensions.get(key) is True for key in (
+        "operator_preview", "content_alignment", "language_confirmed",
+    ))
+    publish_confirmation = (
+        dimensions.get("publish_confirmation") is True
+        and dimensions.get("technical_package") is True
+    )
+    return legacy_review or publish_confirmation
 
 
 def expected_render_fingerprint(revision: Any) -> str:
@@ -127,6 +173,89 @@ def freeze_release(repository: Any, task: Any, render: Any) -> dict:
     return manifest
 
 
+def freeze_photo_release(repository: Any, task: Any) -> dict:
+    """Rebuild and verify the exact ordered native-photo release contract."""
+    require_photo_content_allowed(repository, task)
+    revision_id = str(task.released_revision_id or "")
+    package_id = str(getattr(task, "content_package_id", "") or "")
+    if (str(getattr(task, "media_kind", "video") or "video") != "native_photo"
+            or not revision_id or task.active_revision_id != revision_id or not package_id):
+        raise ReleaseGateError("Workflow V2 没有当前版本的已验收图文包")
+    revision = repository.get_task_revision(revision_id)
+    package = repository.get_content_package(package_id)
+    if (revision is None or revision.task_id != task.task_id
+            or revision.revision_status != "released"
+            or package is None or package.task_id != task.task_id
+            or package.status != "ready"):
+        raise ReleaseGateError("已验收图文 revision 或内容包不存在或归属不匹配")
+    if (contract_hash(revision.plan_snapshot_json) != revision.input_snapshot_hash
+            or contract_hash((revision.asset_manifest_json or {}).get("selected") or {})
+            != revision.selection_hash):
+        raise ReleaseGateError("图文输入或选图与当前冻结 revision 不一致")
+    package_manifest = dict(getattr(package, "photo_manifest_json", None) or {})
+    slides = list(package_manifest.get("slides") or [])
+    if (package_manifest.get("schema_version") != "opv-photo-package-v1"
+            or package_manifest.get("media_kind") != "native_photo"
+            or package_manifest.get("revision_id") != revision_id
+            or package_manifest.get("content_package_id") != package_id
+            or not slides):
+        raise ReleaseGateError("已验收图文包清单缺失或版本不匹配")
+
+    from services.workflow_v2 import (
+        RevisionAssetResolver, photo_package_fingerprint_input,
+    )
+    release_slides = []
+    for expected_index, slide in enumerate(slides, 1):
+        asset = RevisionAssetResolver.selected(revision, f"slide:{expected_index}")
+        path = str(Path(asset["path"]).resolve())
+        if (int(slide.get("index") or 0) != expected_index
+                or slide.get("asset_id") != asset["asset_id"]
+                or slide.get("sha256") != asset["sha256"]
+                or file_hash(path) != asset["sha256"]):
+            raise ReleaseGateError(f"已验收图文第 {expected_index} 页文件或顺序已变化")
+        release_slides.append({
+            "index": expected_index, "asset_id": asset["asset_id"],
+            "path": path, "sha256": asset["sha256"],
+            "mime_type": str(slide.get("mime_type") or "image/jpeg"),
+            "width": int(slide.get("width") or 0),
+            "height": int(slide.get("height") or 0),
+            "source_asset_ids": list(slide.get("source_asset_ids") or []),
+        })
+    extra = photo_package_fingerprint_input(package)
+    input_fingerprint = RevisionAssetResolver.fingerprint(
+        revision, [f"slide:{index}" for index in range(1, len(slides) + 1)],
+        extra=extra,
+    )
+    reviews = repository.list_quality_reviews(
+        revision_id, scope="photo_package", target_id=package_id
+    )
+    review = next(
+        (item for item in reversed(reviews) if item.input_fingerprint == input_fingerprint),
+        None,
+    )
+    if review is None or not trusted_photo_content_review(review):
+        raise ReleaseGateError("图文包缺少当前版本的人工内容与语言确认")
+    manifest = {
+        "schema_version": "opv-photo-release-v1", "workflow_version": 2,
+        "media_kind": "native_photo", "task_id": task.task_id,
+        "revision_id": revision_id, "content_package_id": package_id,
+        "review_id": review.review_id, "reviewer_type": review.reviewer_type,
+        "reviewer": review.reviewer, "review_decision": review.decision,
+        "content_review": dict(review.dimensions_json or {}),
+        "input_fingerprint": input_fingerprint,
+        "selection_hash": revision.selection_hash,
+        "input_snapshot_hash": revision.input_snapshot_hash,
+        "template_id": str(package_manifest.get("template_id") or ""),
+        "template_version": int(package_manifest.get("template_version") or 0),
+        "cover_index": int(package_manifest.get("cover_index") or 1),
+        "copy": dict(package_manifest.get("copy") or {}),
+        "theme_brief": dict(package_manifest.get("theme_brief") or {}),
+        "slides": release_slides,
+    }
+    manifest["manifest_sha256"] = contract_hash(manifest)
+    return manifest
+
+
 def validate_upload(context: dict, *, video_path: str, script_id: str, title: str) -> None:
     """Revalidate the exact release bytes immediately before remote upload.
 
@@ -161,3 +290,50 @@ def validate_upload(context: dict, *, video_path: str, script_id: str, title: st
     if (str(Path(video_path).resolve()) != manifest["video_path"]
             or file_hash(video_path) != manifest["video_sha256"]):
         raise ReleaseGateError("上传前成片 SHA256/路径与验收版本不一致，已阻止发布")
+
+
+def validate_photo_upload(
+    context: dict, *, media_paths: list[str], script_id: str, title: str
+) -> None:
+    """Validate ordered photo bytes immediately before any remote upload."""
+    manifest = context.get("release_manifest")
+    if not isinstance(manifest, dict):
+        raise ReleaseGateError("Workflow V2 图文发布缺少冻结 release 清单")
+    unsigned = {key: value for key, value in manifest.items() if key != "manifest_sha256"}
+    required = (
+        "task_id", "revision_id", "content_package_id", "review_id",
+        "input_fingerprint", "selection_hash", "input_snapshot_hash",
+        "template_id", "template_version", "slides",
+    )
+    content_review = dict(manifest.get("content_review") or {})
+    if (manifest.get("schema_version") != "opv-photo-release-v1"
+            or manifest.get("media_kind") != "native_photo"
+            or any(not manifest.get(key) for key in required)
+            or manifest.get("manifest_sha256") != contract_hash(unsigned)
+            or manifest.get("reviewer_type") != "human"
+            or (manifest.get("reviewer_type") == "human" and any(
+                word in str(manifest.get("reviewer") or "").lower()
+                for word in ("codex", "chatgpt", "assistant")
+            ))
+            or manifest.get("review_decision") != "passed"
+            or not (
+                all(content_review.get(key) is True for key in (
+                    "operator_preview", "content_alignment", "language_confirmed",
+                ))
+                or (
+                    content_review.get("publish_confirmation") is True
+                    and content_review.get("technical_package") is True
+                )
+            )
+            or manifest.get("task_id") != script_id
+            or context.get("publish_title") != title):
+        raise ReleaseGateError("Workflow V2 图文 release 清单或发布标题不匹配")
+    slides = list(manifest.get("slides") or [])
+    if len(media_paths) != len(slides):
+        raise ReleaseGateError("上传图片数量与验收图文包不一致")
+    for index, (provided, slide) in enumerate(zip(media_paths, slides), 1):
+        expected_path = str(Path(str(slide.get("path") or "")).resolve())
+        if (int(slide.get("index") or 0) != index
+                or str(Path(provided).resolve()) != expected_path
+                or file_hash(provided) != slide.get("sha256")):
+            raise ReleaseGateError(f"上传前第 {index} 张图片或顺序与验收版本不一致")
