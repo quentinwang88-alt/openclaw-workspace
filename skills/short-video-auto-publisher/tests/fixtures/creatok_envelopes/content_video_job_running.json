@@ -1,0 +1,37 @@
+{
+  "_comment": "tiktok_content_video submit 的创建响应（job 349920）。状态机包含运行中态：raw_status=PROCESSING_DOWNLOAD（TikTok 下载处理中）；终态为 succeeded/failed（precheck_failed 等）。",
+  "ok": true,
+  "cli_version": "v0.13.0",
+  "command": "publish",
+  "status": "succeeded",
+  "data": {
+    "created": true,
+    "job": {
+      "job_id": 349920,
+      "kind": "tiktok_content_video",
+      "connection_uid": "conn_tc_3cWjrL84udzEWMsixHyspt",
+      "idempotency_key": "probe-org-l4",
+      "account": {
+        "username": null,
+        "display_name": "tamarawoo",
+        "platform_account_id": "-000onEsDR19oc5ODVjn-3i4VI6ONSuH03Vq"
+      },
+      "state": "running",
+      "raw_status": "PROCESSING_DOWNLOAD",
+      "result_unknown": false,
+      "provider_submission_id": "v_pub_url~v2-1.7681926058396092423",
+      "platform_content_ids": [],
+      "platform_content_urls": [],
+      "fail_reason": null,
+      "reason": null,
+      "stage": null,
+      "retryable": false,
+      "recovery_action": null,
+      "diagnostic": null,
+      "issues": null,
+      "schedule_time": null,
+      "completed_at": null,
+      "created_at": 1788587900150
+    }
+  }
+}

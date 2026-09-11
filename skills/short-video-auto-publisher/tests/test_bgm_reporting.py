@@ -21,6 +21,37 @@ from core.bitable import TableField
 
 
 class BgmReportingTest(unittest.TestCase):
+    def test_creatok_photo_platform_auto_is_not_reported_as_track_selection(self):
+        updates = build_bgm_status_updates([{
+            "run_manager_record_id": "rec-photo", "audio_mode": "platform_auto_bgm",
+            "cart_enabled": "否", "bgm_json": json.dumps({
+                "mode": "platform_auto", "selection": "platform_recommended",
+                "music_id": None, "profile": {"rhythm_preference": "soft"},
+            }),
+            "schedule_status": "已排期", "error_message": "", "publish_channel": "CreatOK",
+        }])
+        fields = updates[0]["fields"]
+        self.assertEqual(fields["BGM策略"], "TikTok自动推荐音乐")
+        self.assertEqual(fields["BGM状态"], "平台自动推荐")
+        self.assertEqual(fields["选中BGM"], "")
+
+    def test_creatok_embedded_local_music_needs_no_platform_readback(self):
+        updates = build_bgm_status_updates([{
+            "run_manager_record_id": "rec-local", "audio_mode": "silent_source_platform_bgm",
+            "cart_enabled": "否", "publish_channel": "CreatOK",
+            "bgm_json": json.dumps({
+                "mode": "local_mix", "music_id": "LOCAL_1", "music_title": "Autumn Walk",
+                "music_author": "Artist", "profile": {"rhythm_preference": "strong"},
+                "actual": {"music_id": "LOCAL_1", "title": "Autumn Walk", "author": "Artist"},
+            }),
+            "schedule_status": "已排期", "error_message": "",
+            "script_source": "图文养号", "content_branch": "非商品展示型",
+        }])
+        fields = updates[0]["fields"]
+        self.assertEqual(fields["BGM策略"], "发布前本地混入")
+        self.assertEqual(fields["BGM状态"], "已混入成片")
+        self.assertIn("Autumn Walk", fields["选中BGM"])
+
     def test_pending_generated_video_is_visible_without_manual_bgm_switch(self):
         updates = build_bgm_status_updates([{
             "run_manager_record_id": "rec-1", "audio_mode": "generated_nonvoice", "cart_enabled": "否",

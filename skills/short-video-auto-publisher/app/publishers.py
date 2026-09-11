@@ -14,8 +14,15 @@ from urllib.parse import parse_qsl, urlparse, urlunparse
 
 import requests
 
-from app.models import PublishTaskStatus
+from app.models import PublishRequest, PublishTaskStatus
 from app.script_pool import reject_internal_product_id
+
+
+class UnsupportedPublishMediaError(NotImplementedError):
+    """A local adapter capability rejection; no remote submission happened."""
+
+    submission_not_sent = True
+    retryable = False
 
 
 class BasePublishAdapter(ABC):
@@ -35,6 +42,30 @@ class BasePublishAdapter(ABC):
         music_selection: Optional[Dict[str, Any]] = None,
     ) -> str:
         raise NotImplementedError
+
+    def create_publish_task(self, request: PublishRequest) -> str:
+        """统一发布入口。
+
+        默认实现只支持单视频的 organic/video 请求，转发给旧的 create_scheduled_task，
+        保证 GeeLark/NeoBund 等旧渠道零改动；图文或新渠道必须覆盖本方法。
+        """
+        if request.content_type != "video" or len(request.media_paths) != 1:
+            raise UnsupportedPublishMediaError(
+                f"{type(self).__name__} 不支持 {request.content_type}/{request.commerce_type} "
+                f"({len(request.media_paths)} 个媒体)，请在适配器中实现 create_publish_task"
+            )
+        return self.create_scheduled_task(
+            account_id=request.account_id,
+            video_path=request.media_paths[0],
+            title=request.title,
+            publish_at=request.publish_at,
+            script_id=request.script_id,
+            product_id=request.product_id,
+            product_title=request.product_title,
+            ref_video_id=request.ref_video_id,
+            mark_ai=request.mark_ai,
+            music_selection=request.music_selection,
+        )
 
     @abstractmethod
     def query_task_status(self, *, task_id: str, scheduled_for: datetime) -> PublishTaskStatus:
@@ -68,6 +99,19 @@ class DryRunPublishAdapter(BasePublishAdapter):
         music_selection: Optional[Dict[str, Any]] = None,
     ) -> str:
         digest = hashlib.md5(f"{account_id}:{script_id}:{publish_at.isoformat()}".encode("utf-8")).hexdigest()[:10]
+        return f"dryrun-{digest}"
+
+    def create_publish_task(self, request: PublishRequest) -> str:
+        """Dry-run must accept every media shape the real channels accept.
+
+        Raising here (the previous behaviour via the base class) had REAL side
+        effects during debugging: slots got cancelled and candidates entered
+        the failure-cooldown table, even though nothing was submitted. A
+        dry-run adapter must stay side-effect free.
+        """
+        digest = hashlib.md5(
+            f"{request.account_id}:{request.script_id}:{request.publish_at.isoformat()}".encode("utf-8")
+        ).hexdigest()[:10]
         return f"dryrun-{digest}"
 
     def query_task_status(self, *, task_id: str, scheduled_for: datetime) -> PublishTaskStatus:
@@ -625,6 +669,8 @@ class RoutedPublishAdapter(BasePublishAdapter):
             return "NeoBund"
         if "geelark" in compact:
             return "GeeLark"
+        if "creatok" in compact:
+            return "CreatOK"
         if compact in {"manual", "human", "人工", "手动", "人工发布", "手动发布"}:
             return "手动"
         if compact in {"pause", "paused", "disabled", "disable", "stop", "暂停", "停用", "停止"}:
@@ -714,6 +760,24 @@ class RoutedPublishAdapter(BasePublishAdapter):
         if music_selection is not None:
             kwargs["music_selection"] = music_selection
         return adapter.create_scheduled_task(**kwargs)
+
+    def create_publish_task(self, request: PublishRequest) -> str:
+        if request.content_type == "photo":
+            adapter = self._adapter_for_account(request.account_id)
+            return adapter.create_publish_task(request)
+        channel = self._normalize_channel(self.account_channels.get(str(request.account_id or "").strip(), ""))
+        if channel == "CreatOK":
+            adapter = self.channel_adapters.get("CreatOK")
+            if adapter is not None:
+                return adapter.create_publish_task(request)
+        # 其余渠道沿用默认实现：单视频请求转发 create_scheduled_task。
+        return super().create_publish_task(request)
+
+    def create_publish_task_for_channel(
+        self, channel: str, request: PublishRequest
+    ) -> str:
+        """Submit through the channel already frozen on the schedule slot."""
+        return self._adapter_for_channel(channel).create_publish_task(request)
 
     def query_task_status(self, *, task_id: str, scheduled_for: datetime) -> PublishTaskStatus:
         adapter = self._adapter_for_task_id(task_id)

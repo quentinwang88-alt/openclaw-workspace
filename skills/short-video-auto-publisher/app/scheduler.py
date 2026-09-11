@@ -25,7 +25,7 @@ from app.db import (
     is_opv_initialization_candidate,
 )
 from app.metadata import infer_country_from_store_id, localized_template_title, sanitize_title, is_title_compatible_with_country
-from app.models import AccountConfig, ScriptMetadata
+from app.models import AccountConfig, PublishRequest, ScriptMetadata
 from app.publishers import BasePublishAdapter, DryRunPublishAdapter
 from app.script_pool import publishing_product_id, resolve_cart, register_script_pool_metadata
 
@@ -84,6 +84,13 @@ ACCOUNT_FIELD_ALIASES: Dict[str, List[str]] = {
     "nurture_daily_count": ["每日养号条数"],
     "nurture_only": ["是否仅养号"],
     "initialization_enabled": ["是否账号初始化", "initialization_enabled"],
+    "publish_profile_id": ["发布配置"],
+    "provider_connection_uid": ["CreatOK连接UID", "CreatOK 连接UID"],
+    "account_timezone": ["账号时区"],
+    "delivery_mode": ["CreatOK投递模式", "CreatOK 投递模式", "投递模式"],
+    "provider_health": ["CreatOK能力状态", "CreatOK 能力状态"],
+    "content_scope": ["内容类型限定", "内容类型", "带货限定"],
+    "provider_checked_at": ["能力检查时间"],
 }
 
 
@@ -125,6 +132,8 @@ def normalize_publish_channel(raw_value: Any) -> str:
         return "NeoBund"
     if compact in {"geelark", "geelarkcloudphone"} or "geelark" in compact:
         return "GeeLark"
+    if "creatok" in compact:
+        return "CreatOK"
     if compact in {"manual", "hand", "human", "人工", "手动", "人工发布", "手动发布"}:
         return "手动"
     if compact in {"pause", "paused", "disabled", "disable", "stop", "暂停", "停用", "停止"}:
@@ -140,6 +149,44 @@ def normalize_checkbox(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "y", "是", "已勾选", "勾选", "checked"}
     return False
+
+
+def normalize_creatok_delivery_mode(raw_value: Any) -> str:
+    """账号表"CreatOK投递模式"（直接发布/收件箱）→ 存储值 direct_post/inbox。"""
+    text = _choice_text(raw_value).strip().lower()
+    if not text:
+        return ""
+    if "inbox" in text or "收件" in text or "待确认" in text:
+        return "inbox"
+    if "direct" in text or "直接" in text or "post" in text:
+        return "direct_post"
+    return text
+
+
+def normalize_content_scope(raw_value: Any) -> str:
+    """账号表"内容类型限定"（带货/不带货/全部）→ shoppable/organic/all。"""
+    text = _choice_text(raw_value).strip().lower()
+    if not text:
+        return "all"
+    if "不带货" in text or "非带货" in text or "养号" in text or "organic" in text:
+        return "organic"
+    if "带货" in text or "shoppable" in text:
+        return "shoppable"
+    if "全部" in text or "all" in text:
+        return "all"
+    return "all"
+
+
+def normalize_creatok_health(raw_value: Any) -> str:
+    """账号表"CreatOK能力状态"（未知/正常/异常）→ 存储值 unknown/ok/error。"""
+    text = _choice_text(raw_value).strip().lower()
+    if not text:
+        return ""
+    if text in {"ok", "ready", "healthy", "正常"}:
+        return "ok"
+    if text in {"error", "failed", "limited", "异常"}:
+        return "error"
+    return "unknown"
 
 
 def should_mark_ai_for_geelark(candidate: Any) -> Optional[bool]:
@@ -169,10 +216,19 @@ def is_non_shoppable_candidate(candidate: Any) -> bool:
         return True  # Unknown input must never enable product binding.
 
 
-def account_can_publish_candidate(account: Any, candidate: Any) -> bool:
+def account_can_publish_candidate(account: Any, candidate: Any, publish_channel: str = "") -> bool:
     if account is None:
         return False
-    if normalize_publish_channel(account["publish_channel"]) != "NeoBund":
+    channel = normalize_publish_channel(publish_channel or account["publish_channel"])
+    if getattr(candidate, "content_type", "video") == "photo":
+        if channel != "CreatOK":
+            return False
+        capability_field = "content_photo_capable" if is_non_shoppable_candidate(candidate) else "shop_photo_capable"
+        return capability_field in account.keys() and bool(int(account[capability_field] or 0))
+    if channel == "CreatOK":
+        capability_field = "content_video_capable" if is_non_shoppable_candidate(candidate) else "shop_video_capable"
+        return capability_field in account.keys() and bool(int(account[capability_field] or 0))
+    if channel != "NeoBund":
         return True
     if str(account["capability_status"] or "").strip() != "ok":
         return False
@@ -278,7 +334,8 @@ def select_publish_attachment(
 
 
 def sync_accounts(records: Iterable[Any], mapping: Dict[str, Optional[str]], db: AutoPublishDB) -> int:
-    configs: List[AccountConfig] = []
+    account_rows: Dict[str, List[Dict[str, Any]]] = {}
+    binding_rows: Dict[str, List[Dict[str, Any]]] = {}
     for record in records:
         fields = record.fields
         account_id = normalize_text(fields.get(mapping.get("account_id")))
@@ -286,23 +343,151 @@ def sync_accounts(records: Iterable[Any], mapping: Dict[str, Optional[str]], db:
         store_id = normalize_text(fields.get(mapping.get("store_id")))
         if not account_id or not store_id:
             continue
-        configs.append(
-            AccountConfig(
-                account_id=account_id,
-                account_name=account_name or account_id,
-                store_id=store_id,
-                account_status=normalize_text(fields.get(mapping.get("account_status"))) or "暂停",
-                publish_channel=normalize_publish_channel(fields.get(mapping.get("publish_channel"))),
-                publish_time_1=normalize_text(fields.get(mapping.get("publish_time_1"))),
-                publish_time_2=normalize_text(fields.get(mapping.get("publish_time_2"))),
-                publish_time_3=normalize_text(fields.get(mapping.get("publish_time_3"))),
-                nurture_enabled=normalize_checkbox(fields.get(mapping.get("nurture_enabled"))),
-                nurture_daily_count=max(normalize_int(fields.get(mapping.get("nurture_daily_count")), 2), 0),
-                nurture_only=normalize_checkbox(fields.get(mapping.get("nurture_only"))),
-                initialization_enabled=normalize_checkbox(fields.get(mapping.get("initialization_enabled"))),
-            )
+        channel = normalize_publish_channel(fields.get(mapping.get("publish_channel")))
+        row = {
+                "publish_channel": channel,
+                "content_scope": normalize_content_scope(
+                    fields.get(mapping.get("content_scope"))
+                ),
+                "publish_time_1": normalize_text(fields.get(mapping.get("publish_time_1"))),
+                "publish_time_2": normalize_text(fields.get(mapping.get("publish_time_2"))),
+                "publish_time_3": normalize_text(fields.get(mapping.get("publish_time_3"))),
+                "source_record_id": getattr(record, "record_id", "") or "",
+                "account_name": account_name or account_id,
+                "store_id": store_id,
+                "account_status": normalize_text(fields.get(mapping.get("account_status"))) or "暂停",
+                "nurture_enabled": normalize_checkbox(fields.get(mapping.get("nurture_enabled"))),
+                "nurture_daily_count": max(normalize_int(fields.get(mapping.get("nurture_daily_count")), 2), 0),
+                "nurture_only": normalize_checkbox(fields.get(mapping.get("nurture_only"))),
+                "initialization_enabled": normalize_checkbox(fields.get(mapping.get("initialization_enabled"))),
+                "publish_profile_id": normalize_text(fields.get(mapping.get("publish_profile_id"))),
+                "provider_connection_uid": normalize_text(fields.get(mapping.get("provider_connection_uid"))),
+                "account_timezone": normalize_text(fields.get(mapping.get("account_timezone"))),
+                "delivery_mode": normalize_creatok_delivery_mode(fields.get(mapping.get("delivery_mode"))),
+                "provider_health": normalize_creatok_health(fields.get(mapping.get("provider_health"))),
+                "provider_checked_at": normalize_text(fields.get(mapping.get("provider_checked_at"))),
+        }
+        binding_rows.setdefault(account_id, []).append(row)
+        account_rows.setdefault(account_id, []).append(row)
+
+    configs: List[AccountConfig] = []
+    for account_id, rows in account_rows.items():
+        bindings = channel_bindings_for_rows(rows)
+        channels = sorted({row["publish_channel"] for row in rows
+                           if row["publish_channel"] not in {"", "手动", "暂停"}})
+        stores = {row["store_id"] for row in rows if row["store_id"]}
+        conflict = len(stores) != 1 or (len(channels) >= 2 and not bindings)
+        organic_channel = next(
+            (binding["publish_channel"] for binding in bindings
+             if binding["content_scope"] == "organic"), "",
         )
-    return db.upsert_account_configs(configs)
+        preferred = next(
+            (row for row in rows if row["publish_channel"] == organic_channel),
+            rows[0],
+        )
+        provider_row = next(
+            (row for row in rows if row["publish_channel"] == "CreatOK"),
+            preferred,
+        )
+        # Common fields are selected deterministically; CreatOK connection and
+        # nurture settings belong to the organic binding on dual-channel accounts.
+        configs.append(AccountConfig(
+            account_id=account_id,
+            account_name=next((row["account_name"] for row in rows if row["account_name"]), account_id),
+            store_id=next(iter(stores)) if len(stores) == 1 else preferred["store_id"],
+            account_status="暂停" if conflict else (
+                "可用" if any(row["account_status"] == "可用" for row in rows) else preferred["account_status"]
+            ),
+            publish_channel=preferred["publish_channel"],
+            publish_time_1=preferred["publish_time_1"],
+            publish_time_2=preferred["publish_time_2"],
+            publish_time_3=preferred["publish_time_3"],
+            nurture_enabled=preferred["nurture_enabled"],
+            nurture_daily_count=preferred["nurture_daily_count"],
+            nurture_only=preferred["nurture_only"],
+            initialization_enabled=preferred["initialization_enabled"],
+            publish_profile_id=provider_row["publish_profile_id"] or preferred["publish_profile_id"],
+            provider_connection_uid=provider_row["provider_connection_uid"],
+            account_timezone=provider_row["account_timezone"] or preferred["account_timezone"],
+            delivery_mode=provider_row["delivery_mode"],
+            provider_health=provider_row["provider_health"],
+            provider_checked_at=provider_row["provider_checked_at"],
+        ))
+    written = db.upsert_account_configs(configs)
+    _sync_channel_bindings(db, binding_rows)
+    return written
+
+
+def channel_bindings_for_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Resolve one account's bindings, returning [] for an unsafe conflict."""
+    channels = {row["publish_channel"] for row in rows if row["publish_channel"]}
+    distinct = sorted(c for c in channels if c not in ("手动", "暂停"))
+    bindings: List[Dict[str, Any]] = []
+    if len(distinct) >= 2:
+        scopes = {row["publish_channel"]: row["content_scope"] for row in rows}
+        explicit = {channel: scope for channel, scope in scopes.items()
+                    if scope in ("shoppable", "organic")}
+        if len(explicit) == 1:
+            channel, scope = next(iter(explicit.items()))
+            complement = "organic" if scope == "shoppable" else "shoppable"
+            for other in distinct:
+                if other != channel:
+                    scopes[other] = complement
+            explicit = scopes
+        if (len(distinct) == 2 and len(explicit) == len(distinct)
+                and len({explicit[c] for c in distinct}) == len(distinct)):
+            bindings = [{
+                "publish_channel": channel,
+                "content_scope": explicit[channel],
+                "publish_time_1": row_time(rows, channel, 1),
+                "publish_time_2": row_time(rows, channel, 2),
+                "publish_time_3": row_time(rows, channel, 3),
+                "source_record_id": row_record(rows, channel),
+            } for channel in distinct]
+            windows = [value for binding in bindings for value in (
+                binding["publish_time_1"], binding["publish_time_2"], binding["publish_time_3"]
+            ) if value]
+            if len(windows) != len(set(windows)):
+                return []
+    elif len(distinct) == 1:
+        only = distinct[0]
+        only_scope = next((row["content_scope"] for row in rows
+                           if row["publish_channel"] == only
+                           and row["content_scope"] in ("shoppable", "organic")), "all")
+        bindings = [{
+            "publish_channel": only, "content_scope": only_scope,
+            "publish_time_1": row_time(rows, only, 1),
+            "publish_time_2": row_time(rows, only, 2),
+            "publish_time_3": row_time(rows, only, 3),
+            "source_record_id": row_record(rows, only),
+        }]
+    return bindings
+
+
+def _sync_channel_bindings(db: AutoPublishDB, binding_rows: Dict[str, List[Dict[str, Any]]]) -> None:
+    """Persist per-account channel bindings with the dual-channel constraint.
+
+    规则（用户 2026-09-07 决策）：账号选了两个不同渠道时，两个渠道必须发不同
+    内容类型（一个带货、一个不带货）。分工由表格「内容类型限定」列决定，不按
+    渠道硬编码；只填一边时自动补全另一边。冲突时账号主记录会暂停，绝不回落
+    到某个默认渠道。
+    """
+    for account_id, rows in binding_rows.items():
+        db.replace_account_channel_bindings(account_id, channel_bindings_for_rows(rows))
+
+
+def row_time(rows: List[Dict[str, Any]], channel: str, index: int) -> str:
+    for row in rows:
+        if row["publish_channel"] == channel:
+            return str(row.get(f"publish_time_{index}") or "")
+    return ""
+
+
+def row_record(rows: List[Dict[str, Any]], channel: str) -> str:
+    for row in rows:
+        if row["publish_channel"] == channel:
+            return str(row.get("source_record_id") or "")
+    return ""
 
 
 def _ensure_download_dir(download_dir: Optional[Path]) -> Path:
@@ -600,7 +785,14 @@ def _is_auth_error(exc: Exception) -> bool:
     )
 
 
-def _account_adapter(publisher: BasePublishAdapter, account_id: str) -> BasePublishAdapter:
+def _account_adapter(
+    publisher: BasePublishAdapter, account_id: str, channel: str = ""
+) -> BasePublishAdapter:
+    wanted = str(channel or "").strip()
+    if wanted:
+        for_channel = getattr(publisher, "_adapter_for_channel", None)
+        if callable(for_channel):
+            return for_channel(wanted)
     route = getattr(publisher, "_adapter_for_account", None)
     return route(account_id) if callable(route) else publisher
 
@@ -632,10 +824,22 @@ def _validate_opv_upload(candidate: Any) -> None:
     spec = importlib.util.spec_from_file_location("opv_release_gate", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    module.validate_upload(context, video_path=candidate.publish_video_value,
-                           script_id=candidate.script_id, title=candidate.short_video_title)
+    is_photo = getattr(candidate, "content_type", "video") == "photo"
+    if is_photo:
+        validator = getattr(module, "validate_photo_upload", None)
+        if not callable(validator):
+            raise OpvReleaseVerificationError("照片 release 核验尚未接入")
+        validator(context, media_paths=list(candidate.media_paths),
+                  script_id=candidate.script_id, title=candidate.short_video_title)
+    else:
+        module.validate_upload(context, video_path=candidate.publish_video_value,
+                               script_id=candidate.script_id, title=candidate.short_video_title)
     if context.get("release_manifest"):
-        _verify_live_opv_release(candidate.script_id, context["release_manifest"]["manifest_sha256"])
+        if is_photo:
+            _verify_live_opv_release(candidate.script_id, context["release_manifest"]["manifest_sha256"],
+                                     media_kind="native_photo")
+        else:
+            _verify_live_opv_release(candidate.script_id, context["release_manifest"]["manifest_sha256"])
 
 
 class OpvReleaseVerificationError(ValueError):
@@ -648,11 +852,14 @@ class OpvReleaseVerificationError(ValueError):
         self.retryable = retryable
 
 
-def _verify_live_opv_release(task_id: str, manifest_sha256: str) -> None:
+def _verify_live_opv_release(task_id: str, manifest_sha256: str, *, media_kind: str = "video") -> None:
     script = Path(__file__).resolve().parents[3] / "packages/organic_photo_video/scripts/check_release_for_upload.py"
+    command = [sys.executable, str(script), "--task-id", task_id, "--manifest-sha256", manifest_sha256]
+    if media_kind != "video":
+        command.extend(["--media-kind", media_kind])
     try:
         result = subprocess.run(
-            [sys.executable, str(script), "--task-id", task_id, "--manifest-sha256", manifest_sha256],
+            command,
             capture_output=True, text=True, timeout=20, check=False,
         )
     except subprocess.TimeoutExpired as exc:
@@ -771,6 +978,13 @@ def schedule_slots(
         )
 
     pending_slots = sorted(pending_slots, key=pending_slot_priority)
+    binding_scopes: Dict[str, Dict[str, str]] = {}
+    for binding in db.list_account_channel_bindings():
+        binding_scopes.setdefault(
+            str(binding["account_id"] or ""), {}
+        )[str(binding["publish_channel"] or "")] = str(
+            binding["content_scope"] or "all"
+        )
 
     scheduled = 0
     skipped = 0
@@ -792,8 +1006,9 @@ def schedule_slots(
                 int(slot["slot_id"]), reason=f"距发布时间不足 {MIN_SUBMIT_LEAD_MINUTES} 分钟，内容顺延至后续槽位",
             )
             continue
+        slot_channel = str(slot["publish_channel_used"] or "").strip()
         try:
-            adapter = _account_adapter(publisher, account_id)
+            adapter = _account_adapter(publisher, account_id, channel=slot_channel)
         except Exception as exc:
             skipped += 1
             db.mark_slot_pending_reason(int(slot["slot_id"]), reason=f"发布通道路由失败：{exc}")
@@ -809,7 +1024,19 @@ def schedule_slots(
                 if candidate.canonical_script_key in canonical_keys
             ]
         account = db.get_account_config(account_id)
-        candidates = [candidate for candidate in candidates if account_can_publish_candidate(account, candidate)]
+        candidates = [
+            candidate for candidate in candidates
+            if account_can_publish_candidate(account, candidate, slot_channel)
+        ]
+        slot_scope = binding_scopes.get(account_id, {}).get(slot_channel, "all")
+        if slot_scope in ("shoppable", "organic"):
+            def _matches_scope(candidate: Any) -> bool:
+                organic = is_non_shoppable_candidate(candidate)
+                if slot_scope == "shoppable":
+                    # shop photo is not enabled yet: photo stays organic-only
+                    return (not organic) and getattr(candidate, "content_type", "video") != "photo"
+                return organic
+            candidates = [candidate for candidate in candidates if _matches_scope(candidate)]
         progress = initialization_progress.get(account_id)
         initialization_enabled = bool(
             account and int(account["initialization_enabled"] or 0)
@@ -862,10 +1089,26 @@ def schedule_slots(
         )
         prefer_nurture = nurture_only or (nurture_enabled and nurture_count < nurture_quota)
         has_nurture_candidate = any(is_nurture_candidate(candidate) for candidate in candidates)
+        # 每日养号条数是硬性封顶：当日已排/已发的养号内容达到条数后，
+        # 本账号当天不再分配养号内容；仅养号账号的后续槽位留待明日。
+        # 账号初始化期除外（初始化内容走独立的每日 1 条限制）。
+        nurture_quota_reached = (
+            nurture_enabled
+            and nurture_quota > 0
+            and nurture_count >= nurture_quota
+            and not initialization_incomplete
+        )
         if initialization_incomplete:
             prefer_nurture = True
             has_nurture_candidate = bool(candidates)
-        elif not nurture_enabled and not nurture_only:
+        elif nurture_quota_reached:
+            candidates = [candidate for candidate in candidates if not is_nurture_candidate(candidate)]
+            prefer_nurture = False
+            has_nurture_candidate = False
+        elif not nurture_enabled and not nurture_only and slot_scope != "organic":
+            # An organic-scoped channel binding is the operator's explicit
+            # organic intent; the legacy nurture toggle must not drain the
+            # pool of an organic-only channel.
             candidates = [candidate for candidate in candidates if not is_nurture_candidate(candidate)]
         elif nurture_only:
             candidates = [candidate for candidate in candidates if is_nurture_candidate(candidate)]
@@ -886,6 +1129,7 @@ def schedule_slots(
             1 if initialization_incomplete and candidate.recipe_id in used_recipe_ids else 0,
             db.count_recent_product_for_account(account_id, candidate.product_id, target_time, hours=24),
             int(db.has_recent_family_conflict(str(slot["store_id"] or ""), candidate.content_family_key, target_time, hours=48)),
+            int(db.recent_place_conflict(account_id, getattr(candidate, "place", ""), target_time, hours=48)),
         ))
         selected = None
         product_mapping_error = ""
@@ -901,26 +1145,33 @@ def schedule_slots(
             except ValueError as exc:
                 product_mapping_error = str(exc)
                 continue
+            if db.recent_place_conflict(account_id, getattr(candidate, "place", ""), target_time, hours=24):
+                # 同账号 24 小时内已排/已发同一景点：跳过该候选，
+                # 避免信息流中"同景点不同穿搭"被观众当成重复内容。
+                continue
             selected = candidate
             break
         if selected is None:
             skipped += 1
             blocked_by_rules += 1
+            if initialization_incomplete:
+                pending_reason = "初始化内容池不足，等待补充图文养号成片"
+            elif nurture_quota_reached:
+                pending_reason = f"今日养号条数已达上限（{nurture_quota}条），等待明日排班"
+            else:
+                pending_reason = product_mapping_error or "暂未找到符合规则的候选视频，等待后续自动补排"
             db.mark_slot_pending_reason(
                 int(slot["slot_id"]),
-                reason=(
-                    "初始化内容池不足，等待补充图文养号成片"
-                    if initialization_incomplete
-                    else product_mapping_error or "暂未找到符合规则的候选视频，等待后续自动补排"
-                ),
+                reason=pending_reason,
             )
             continue
         music_selection = None
         bgm_json = ""
-        if (
-            bgm.requires_platform_bgm(selected)
-            and normalize_publish_channel(account["publish_channel"]) == "NeoBund"
-        ):
+        publish_video_value = selected.publish_video_value
+        publish_channel = normalize_publish_channel(slot_channel or account["publish_channel"])
+        music_mode = bgm.resolve_music_mode(selected, publish_channel)
+        auto_add_music = music_mode == bgm.MUSIC_MODE_PLATFORM_AUTO
+        if music_mode == bgm.MUSIC_MODE_SELECTED:
             try:
                 music_selection, bgm_json = bgm.select_platform_bgm(
                     db,
@@ -941,18 +1192,89 @@ def schedule_slots(
                     reason=f"图文养号 BGM 选择暂时失败，等待重试：{exc}",
                 )
                 continue
+        elif auto_add_music:
+            bgm_json = bgm.platform_auto_audit(
+                selected, provider=publish_channel, now=current_time,
+            )
+        elif music_mode == bgm.MUSIC_MODE_LOCAL_MIX:
+            try:
+                publish_video_value, music_selection, bgm_json = bgm.prepare_local_bgm(
+                    db,
+                    account_id=account_id,
+                    candidate=selected,
+                    now=current_time,
+                )
+            except Exception as exc:
+                skipped += 1
+                retryable_create_failed += 1
+                db.record_candidate_failure(
+                    selected.canonical_script_key,
+                    current_time,
+                    f"BGM本地混音失败：{exc}",
+                    retryable=not isinstance(exc, ValueError),
+                )
+                db.mark_slot_pending_reason(
+                    int(slot["slot_id"]),
+                    reason=f"CreatOK BGM 本地混音暂时失败，等待重试：{exc}",
+                )
+                continue
+        product_id = publishing_product_id(selected)
+        timezone = (
+            str(account["account_timezone"] or "").strip()
+            if "account_timezone" in account.keys()
+            else ""
+        )
+        photo_context: Dict[str, Any] = {}
+        photo_description = ""
+        if selected.content_type == "photo":
+            photo_context = json.loads(selected.script_text or "{}")
+            frozen_copy = ((photo_context.get("release_manifest") or {}).get("copy") or {})
+            caption = str(frozen_copy.get("caption") or "").strip()
+            hashtags = " ".join(
+                str(item).strip() for item in (frozen_copy.get("hashtags") or [])
+                if str(item).strip()
+            )
+            photo_description = " ".join(part for part in (caption, hashtags) if part)
+        publish_request = PublishRequest(
+            account_id=account_id,
+            content_type=selected.content_type,
+            commerce_type="shop" if product_id else "organic",
+            media_paths=list(selected.media_paths) if selected.content_type == "photo" else [publish_video_value],
+            title=selected.short_video_title,
+            description=photo_description,
+            auto_add_music=auto_add_music,
+            publish_at=target_time,
+            timezone=timezone,
+            script_id=selected.script_id,
+            product_id=product_id,
+            product_title=selected.product_title,
+            ref_video_id=selected.ref_video_id,
+            mark_ai=should_mark_ai_for_geelark(selected),
+            music_selection=music_selection,
+        )
         submission_context = {
             "account_id": account_id, "script_id": selected.script_id,
             "title": selected.short_video_title,
-            "product_id": publishing_product_id(selected),
+            "description": photo_description,
+            "product_id": product_id,
             "scheduled_for": target_time.strftime("%Y-%m-%d %H:%M:%S"),
             "bgm_json": bgm_json,
+            "music_mode": music_mode,
+            "content_type": publish_request.content_type,
+            "publish_channel": publish_channel,
+            "media_paths": publish_request.media_paths,
         }
+        if selected.content_type == "photo":
+            submission_context["release_manifest"] = photo_context["release_manifest"]
         try:
             submission_context["adapter_type"] = f"{type(adapter).__module__}.{type(adapter).__name__}"
             identity = getattr(adapter, "submission_identity", None)
             if callable(identity):
                 submission_context.update(identity(account_id=account_id, product_id=submission_context["product_id"]))
+            # 渠道专属冻结身份（如 CreatOK 的幂等键/operation_id）必须在 reserve 前落库。
+            submission_stamp = getattr(adapter, "build_submission_context", None)
+            if callable(submission_stamp):
+                submission_context.update(submission_stamp(publish_request))
         except Exception as exc:
             skipped += 1
             if _is_auth_error(exc):
@@ -976,20 +1298,23 @@ def schedule_slots(
         try:
             _validate_opv_upload(selected)
             validated_for_upload = True
-            publish_kwargs = dict(
-                account_id=account_id,
-                video_path=selected.publish_video_value,
-                title=selected.short_video_title,
-                publish_at=target_time,
-                script_id=selected.script_id,
-                product_id=publishing_product_id(selected),
-                product_title=selected.product_title,
-                ref_video_id=selected.ref_video_id,
-                mark_ai=should_mark_ai_for_geelark(selected),
-            )
-            if music_selection is not None:
-                publish_kwargs["music_selection"] = music_selection
-            task_id = publisher.create_scheduled_task(**publish_kwargs)
+            if selected.content_type == "photo" or publish_channel == "CreatOK":
+                task_id = adapter.create_publish_task(publish_request)
+            else:
+                publish_kwargs = dict(
+                    account_id=account_id,
+                    video_path=publish_video_value,
+                    title=selected.short_video_title,
+                    publish_at=target_time,
+                    script_id=selected.script_id,
+                    product_id=product_id,
+                    product_title=selected.product_title,
+                    ref_video_id=selected.ref_video_id,
+                    mark_ai=should_mark_ai_for_geelark(selected),
+                )
+                if music_selection is not None:
+                    publish_kwargs["music_selection"] = music_selection
+                task_id = adapter.create_scheduled_task(**publish_kwargs)
         except Exception as exc:
             create_failed += 1
             skipped += 1
@@ -1029,12 +1354,38 @@ def schedule_slots(
                 if any(marker in error_message.lower() for marker in ("balance not enough", "too many requests", "rate limit")):
                     disabled_accounts.add(account_id)
                 db.mark_slot_pending_reason(int(slot["slot_id"]), reason=f"创建自动发布定时任务暂时失败，等待重试：{error_message}")
+            elif getattr(exc, "submission_not_sent", False) is True and not isinstance(exc, ValueError):
+                # Read-only preflight failures (release verification, asset
+                # preparation) never reached the remote API: permanent slot
+                # cancellation on a transient environment error silently
+                # swallows future slots (2026-09-09 incident). Park the slot
+                # instead; deterministic content problems still exit via the
+                # candidate retry cap.
+                retryable_create_failed += 1
+                db.mark_slot_pending_reason(
+                    int(slot["slot_id"]),
+                    reason=f"提交前检查暂时失败，等待重试：{error_message}",
+                )
+            elif getattr(exc, "submission_not_sent", False) is True and isinstance(exc, ValueError):
+                # Deterministic preflight rejection (content/contract): the
+                # slot can never take this candidate, but a later candidate
+                # may pass — keep the slot pending instead of cancelling it.
+                db.mark_slot_pending_reason(
+                    int(slot["slot_id"]),
+                    reason=f"提交前检查未通过，换用其他候选重排：{error_message}",
+                )
             else:
                 db.cancel_slot(int(slot["slot_id"]), reason=f"创建自动发布定时任务失败：{error_message}")
             continue
         # Persist the returned ID before final assignment. Local writeback
         # failures must leave a recoverable reservation, never a fresh retry.
         try:
+            receipt_reader = getattr(adapter, "submission_receipt", None)
+            if callable(receipt_reader):
+                db.merge_submission_context(
+                    int(slot["slot_id"]),
+                    receipt_reader(str(submission_context.get("idempotency_key") or "")),
+                )
             db.record_confirmed_submission(int(slot["slot_id"]), task_id)
             assigned = db.assign_slot(
                 slot_id=int(slot["slot_id"]),
@@ -1118,11 +1469,14 @@ def sync_publish_results(
 def _apply_publish_result(db, task, status, scheduled_for, now, grace) -> str:
     task_id = str(task["publish_task_id"])
     if status.state == "success":
+        is_photo = "media_kind" in task.keys() and task["media_kind"] == "native_photo"
         db.mark_publish_result(
             canonical_script_key=str(task["canonical_script_key"] or ""),
             script_id=str(task["script_id"]), publish_task_id=task_id,
             schedule_status="已发布", publish_status="已发布", publish_result="发布成功",
-            published_at=status.published_at or scheduled_for.strftime("%Y-%m-%d %H:%M:%S"),
+            published_at=(status.published_at or (None if is_photo else scheduled_for.strftime("%Y-%m-%d %H:%M:%S"))),
+            platform_post_id=getattr(status, "platform_post_id", None),
+            platform_post_url=getattr(status, "platform_post_url", None),
         )
         return "published"
     if status.state == "failed":

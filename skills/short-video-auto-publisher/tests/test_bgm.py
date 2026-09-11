@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +18,79 @@ from app import bgm  # noqa: E402
 
 
 class BgmPolicyTest(unittest.TestCase):
+    def test_provider_neutral_music_mode_routes_creatok_photo_to_platform_auto(self):
+        from types import SimpleNamespace
+        photo = SimpleNamespace(content_type="photo")
+        self.assertEqual(
+            bgm.resolve_music_mode(photo, "CreatOK"),
+            bgm.MUSIC_MODE_PLATFORM_AUTO,
+        )
+        self.assertEqual(
+            bgm.resolve_music_mode(photo, "NeoBund"),
+            bgm.MUSIC_MODE_NO_BGM,
+        )
+
+    def test_creatok_organic_video_local_mix_is_paused(self):
+        from types import SimpleNamespace
+        video = SimpleNamespace(
+            content_type="video", cart_enabled="否", script_source="图文养号",
+            content_branch="非商品展示型", audio_mode="silent_source_platform_bgm",
+            script_text="{}",
+        )
+        self.assertFalse(bgm.CREATOK_LOCAL_BGM_ACTIVE)
+        self.assertEqual(bgm.resolve_music_mode(video, "CreatOK"), bgm.MUSIC_MODE_NO_BGM)
+        self.assertEqual(bgm.resolve_music_mode(video, "NeoBund"), bgm.MUSIC_MODE_SELECTED)
+
+    def test_prepare_local_bgm_persists_embedded_actual(self):
+        from types import SimpleNamespace
+        candidate = SimpleNamespace(
+            content_type="video", cart_enabled="否", script_source="图文养号",
+            publish_purpose="养号", content_branch="非商品展示型",
+            audio_mode="silent_source_platform_bgm", target_country="泰国",
+            product_type="womenswear", short_video_title="秋日穿搭",
+            script_text=json.dumps({"video_duration_ms": 6000, "content_template": "图文穿搭"}),
+            publish_video_value="/tmp/source.mp4", local_file_path="/tmp/source.mp4",
+        )
+
+        class DB:
+            def recent_bgm_use_counts(self, account_id, since):
+                return {"LOCAL_USED": 1}
+
+        track = {
+            "music_id": "LOCAL_OK", "music_title": "Autumn Walk",
+            "music_author": "Artist", "license_type": "CC0",
+            "license_source": "OpenGameArt", "audio_analysis": {"beat_times_ms": [1000]},
+        }
+        with patch("app.local_bgm.select_track", return_value=(track, 0.88, [{"music_id": "LOCAL_OK"}])):
+            path, selection, audit_json = bgm.prepare_local_bgm(
+                DB(), account_id="acct-th", candidate=candidate,
+                now=datetime(2026, 9, 6, 12, 0), track_loader=lambda: [track],
+                renderer=lambda **kwargs: {
+                    "path": "/tmp/mixed.mp4", "sha256": "abc", "source_sha256": "def",
+                    "start_ms": 12000, "mix_volume": 0.42, "source_had_audio": False,
+                },
+            )
+        audit = json.loads(audit_json)
+        self.assertEqual(path, "/tmp/mixed.mp4")
+        self.assertEqual(selection["mode"], "local_mix")
+        self.assertEqual(audit["country"], "TH")
+        self.assertEqual(audit["actual"]["music_id"], "LOCAL_OK")
+        self.assertEqual(audit["actual"]["source"], "embedded_local_file")
+
+    def test_platform_auto_audit_never_claims_a_selected_track(self):
+        from types import SimpleNamespace
+        candidate = SimpleNamespace(
+            content_type="photo", script_text="{}", audio_mode="platform_auto_bgm",
+            script_source="图文养号", publish_purpose="养号", content_branch="非商品展示型",
+            product_type="womenswear", short_video_title="เลือกหนึ่งลุค",
+        )
+        payload = json.loads(bgm.platform_auto_audit(
+            candidate, provider="CreatOK", now=datetime(2026, 9, 6, 12, 0),
+        ))
+        self.assertEqual(payload["mode"], "platform_auto")
+        self.assertEqual(payload["selection"], "platform_recommended")
+        self.assertIsNone(payload["music_id"])
+
     def test_chinese_mexico_country_normalized_before_music_search(self):
         from types import SimpleNamespace
         observed = []
@@ -100,6 +174,25 @@ class BgmPolicyTest(unittest.TestCase):
         self.assertTrue(bgm.requires_platform_bgm(Opv()))
         self.assertTrue(bgm.requires_platform_bgm(Other()))
         self.assertFalse(bgm.requires_platform_bgm(CartVideo()))
+
+    def test_longform_voiceover_keeps_original_audio_and_uses_low_bgm(self):
+        class Candidate:
+            content_type = "video"
+            script_source = "原创长视频"
+            publish_purpose = "养号"
+            content_branch = "非商品展示型"
+            cart_enabled = "否"
+            audio_mode = "embedded_voiceover_platform_bgm_low"
+            product_type = "outerwear"
+            short_video_title = "daily outfit"
+            script_text = "{}"
+
+        candidate = Candidate()
+        self.assertTrue(bgm.requires_platform_bgm(candidate))
+        profile = bgm.derive_bgm_profile(candidate, {})
+        self.assertTrue(profile["voice_present"])
+        self.assertEqual(100, profile["video_original_sound_volume"])
+        self.assertEqual(12, profile["music_sound_volume"])
 
     def test_remake_profile_requires_real_audio_for_strong_rhythm(self):
         class Candidate:

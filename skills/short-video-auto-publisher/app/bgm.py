@@ -25,11 +25,150 @@ from services.neobund_publisher import (  # noqa: E402
 from app.script_pool import resolve_cart  # noqa: E402
 
 
-_BGM_AUDIO_MODES = {"silent_source_platform_bgm", "generated_nonvoice", "clean_voice"}
+_BGM_AUDIO_MODES = {
+    "silent_source_platform_bgm", "platform_auto_bgm",
+    "generated_nonvoice", "clean_voice", "embedded_voiceover_platform_bgm_low",
+}
+MUSIC_MODE_NO_BGM = "no_bgm"
+MUSIC_MODE_PLATFORM_AUTO = "platform_auto"
+MUSIC_MODE_SELECTED = "selected_bgm"
+MUSIC_MODE_LOCAL_MIX = "local_mix"
+# 2026-09-06: paused for production.  CreatOK Content Posting videos cannot
+# attach a platform music_id; native-photo posts use TikTok auto_add_music.
+CREATOK_LOCAL_BGM_ACTIVE = False
 
 
 class BgmSelectionError(RuntimeError):
     pass
+
+
+def resolve_music_mode(candidate: Any, publish_channel: str) -> str:
+    """Resolve one provider-neutral music decision before channel submission.
+
+    CreatOK regular photo posting can ask TikTok to add recommended music but
+    cannot select a track. NeoBund videos retain the ranked-track flow.
+    """
+    channel = str(publish_channel or "").strip().lower()
+    if getattr(candidate, "content_type", "video") == "photo":
+        return MUSIC_MODE_PLATFORM_AUTO if channel == "creatok" else MUSIC_MODE_NO_BGM
+    if requires_platform_bgm(candidate):
+        if channel == "neobund":
+            return MUSIC_MODE_SELECTED
+        if channel == "creatok" and CREATOK_LOCAL_BGM_ACTIVE:
+            return MUSIC_MODE_LOCAL_MIX
+    return MUSIC_MODE_NO_BGM
+
+
+def prepare_local_bgm(
+    db: Any,
+    *,
+    account_id: str,
+    candidate: Any,
+    now: datetime,
+    track_loader: Any = None,
+    renderer: Any = None,
+) -> Tuple[str, Dict[str, Any], str]:
+    """Select licensed local music and return a rendered CreatOK video.
+
+    The business profile and ranking weights are shared with NeoBund.  Only
+    the transport changes: this path embeds a licensed local file instead of
+    handing a TikTok music_id to the provider.
+    """
+    from app import local_bgm
+
+    context = parse_context(candidate)
+    profile = derive_bgm_profile(candidate, context)
+    video_ms = _video_duration_ms(candidate, context)
+    loader = track_loader or local_bgm.load_licensed_tracks
+    tracks = list(loader())
+    use_counts = db.recent_bgm_use_counts(
+        account_id,
+        since=now - timedelta(days=neobund_music.DEDUP_WINDOW_DAYS),
+    )
+    track, score, top = local_bgm.select_track(
+        tracks=tracks,
+        mood_hints=profile["mood_hints"],
+        rhythm_preference=profile["rhythm_preference"],
+        video_duration_ms=video_ms,
+        use_counts=use_counts,
+    )
+    render = renderer or local_bgm.render_mix
+    mixed = dict(render(
+        source_path=str(getattr(candidate, "publish_video_value", "") or getattr(candidate, "local_file_path", "")),
+        track=track,
+        video_duration_ms=video_ms,
+        voice_present=bool(profile.get("voice_present")),
+    ))
+    selected = {
+        "mode": MUSIC_MODE_LOCAL_MIX,
+        "music_id": track["music_id"],
+        "music_title": track["music_title"],
+        "music_author": track.get("music_author", ""),
+        "license_type": track.get("license_type", ""),
+        "license_source": track.get("license_source", ""),
+        "start_ms": mixed.get("start_ms"),
+        "mix_volume": mixed.get("mix_volume"),
+        "output_sha256": mixed.get("sha256"),
+    }
+    audit = {
+        "policy_version": neobund_music.POLICY_VERSION,
+        "render_policy_version": local_bgm.POLICY_VERSION,
+        "mode": MUSIC_MODE_LOCAL_MIX,
+        "provider": "CreatOK",
+        "country": _canonical_country(getattr(candidate, "target_country", "")),
+        **selected,
+        "profile": profile,
+        "video_duration_ms": video_ms,
+        "timing_plan": _timing_plan_from_analysis(track, profile, video_ms),
+        "selected_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "top_candidates": top,
+        # Embedded audio is final before upload, so it does not require a
+        # later platform-music readback.
+        "actual": {
+            "music_id": track["music_id"],
+            "title": track["music_title"],
+            "author": track.get("music_author", ""),
+            "confirmed_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "source": "embedded_local_file",
+        },
+        "render": mixed,
+    }
+    return str(mixed["path"]), selected, json.dumps(audit, ensure_ascii=False, sort_keys=True)
+
+
+def _canonical_country(value: Any) -> str:
+    country = str(value or "").strip().upper()
+    return {
+        "墨西哥": "MX", "MEXICO": "MX", "MÉXICO": "MX", "ES-MX": "MX",
+        "西班牙语（墨西哥）": "MX", "泰国": "TH", "THAILAND": "TH", "TH-TH": "TH",
+        "越南": "VN", "VIETNAM": "VN", "VIỆT NAM": "VN", "VI-VN": "VN",
+    }.get(country, country)
+
+
+def _timing_plan_from_analysis(track: Dict[str, Any], profile: Dict[str, Any], video_ms: int) -> Dict[str, Any]:
+    analysis = track.get("audio_analysis") if isinstance(track.get("audio_analysis"), dict) else {}
+    beats = [int(value) for value in (analysis.get("beat_times_ms") or []) if 0 <= int(value) < video_ms]
+    mode = str(profile.get("sync_mode") or "none")
+    return {
+        "mode": mode,
+        "status": "embedded_audio_verified",
+        "beat_candidates_ms": beats[:32],
+    }
+
+
+def platform_auto_audit(candidate: Any, *, provider: str, now: datetime) -> str:
+    """Persist the decision without claiming that a specific track was selected."""
+    context = parse_context(candidate)
+    payload = {
+        "policy_version": neobund_music.POLICY_VERSION,
+        "mode": MUSIC_MODE_PLATFORM_AUTO,
+        "provider": str(provider or ""),
+        "selection": "platform_recommended",
+        "music_id": None,
+        "profile": derive_bgm_profile(candidate, context),
+        "selected_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
 def requires_platform_bgm(candidate: Any) -> bool:
@@ -39,6 +178,8 @@ def requires_platform_bgm(candidate: Any) -> bool:
     product-bound (cart) video is left untouched until the corresponding
     NeoBund shoppable music contract is captured.
     """
+    if getattr(candidate, "content_type", "video") == "photo":
+        return False
     try:
         if resolve_cart(candidate) != "否":
             return False
@@ -102,7 +243,7 @@ def derive_bgm_profile(candidate: Any, context: Dict[str, Any]) -> Dict[str, Any
     markers = markers.lower()
     explicit_hints = _strings(context.get("bgm_mood_hints"))
     audio_mode = _audio_mode(candidate, context)
-    voice = audio_mode == "clean_voice"
+    voice = audio_mode in {"clean_voice", "embedded_voiceover_platform_bgm_low"}
     profile = neobund_music.derive_content_profile(
         markers,
         explicit_hints,
@@ -113,8 +254,14 @@ def derive_bgm_profile(candidate: Any, context: Dict[str, Any]) -> Dict[str, Any
         **profile,
         "audio_mode": audio_mode,
         "voice_present": voice,
-        "music_sound_volume": 45 if voice else DEFAULT_MUSIC_VOLUME,
-        "video_original_sound_volume": 60 if voice else DEFAULT_VIDEO_ORIGINAL_SOUND_VOLUME,
+        "music_sound_volume": (
+            12 if audio_mode == "embedded_voiceover_platform_bgm_low"
+            else (45 if voice else DEFAULT_MUSIC_VOLUME)
+        ),
+        "video_original_sound_volume": (
+            100 if audio_mode == "embedded_voiceover_platform_bgm_low"
+            else (60 if voice else DEFAULT_VIDEO_ORIGINAL_SOUND_VOLUME)
+        ),
     }
 
 
@@ -164,12 +311,7 @@ def select_platform_bgm(
     audio_enricher=bgm_audio.enrich_candidates,
 ) -> Tuple[Dict[str, Any], str]:
     """Return the NeoBund commit contract and an auditable compact snapshot."""
-    country = str(getattr(candidate, "target_country", "") or "").strip().upper()
-    country = {
-        "墨西哥": "MX", "MEXICO": "MX", "MÉXICO": "MX", "ES-MX": "MX",
-        "西班牙语（墨西哥）": "MX", "泰国": "TH", "THAILAND": "TH", "TH-TH": "TH",
-        "越南": "VN", "VIETNAM": "VN", "VIỆT NAM": "VN", "VI-VN": "VN",
-    }.get(country, country)
+    country = _canonical_country(getattr(candidate, "target_country", ""))
     if country not in LOCALE_BY_COUNTRY:
         raise BgmSelectionError(f"NeoBund BGM 暂不支持国家: {country or '未设置'}")
 

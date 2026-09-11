@@ -62,6 +62,13 @@ class ScriptPoolTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "内部产品编码"):
             publishing_product_id(item)
 
+    def test_shoppable_video_without_product_mapping_is_blocked(self):
+        item = self.candidate("带货", "是")
+        item.script_pool_registered = False
+        item.product_id = ""
+        with self.assertRaisesRegex(ValueError, "缺少有效平台商品 ID"):
+            publishing_product_id(item)
+
     def test_platform_capability_not_content_pool_controls_channel(self):
         account = dict(publish_channel="NeoBund", capability_status="ok", organic_capable=0, shoppable_capable=1)
         self.assertTrue(account_can_publish_candidate(account, self.candidate("养号", "是")))

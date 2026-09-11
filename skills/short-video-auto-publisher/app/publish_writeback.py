@@ -72,6 +72,7 @@ def _normal(value: Any) -> Any:
 
 def normalize_field_specs(fields: Iterable[Any]) -> List[Dict[str, Any]]:
     return [dict(field) if isinstance(field, dict) else {
+        "field_id": getattr(field, "field_id", None),
         "field_name": field.field_name, "type": field.field_type,
         "property": getattr(field, "property", None),
     } for field in fields]

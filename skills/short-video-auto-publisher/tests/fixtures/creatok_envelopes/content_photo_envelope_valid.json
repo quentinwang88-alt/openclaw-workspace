@@ -1,0 +1,21 @@
+{
+  "_comment": "CreatOK tiktok_content_photo 官方 envelope 契约（2026-09-06，CLI v0.13.0）。media 用 object_keys（数组，多图）；provider_options 的 title 与 description 已通过 schema 校验，并完成真实定时图文提交验证。",
+  "kind": "tiktok_content_photo",
+  "connection_uid": "conn_tc_3cWjrL84udzEWMsixHyspt",
+  "idempotency_key": "probe-photo-l2",
+  "media": {
+    "object_keys": [
+      "uploads/images/k0b14Ru6nnpg0dXZ47QJg59tmrbtp5rA/1788588177317_dpmb63lv4q4.png"
+    ]
+  },
+  "provider_options": {
+    "post_mode": "DIRECT_POST",
+    "privacy_level": "PUBLIC_TO_EVERYONE",
+    "disable_comment": false,
+    "auto_add_music": false,
+    "brand_content_toggle": false,
+    "brand_organic_toggle": false,
+    "title": "标题",
+    "description": ""
+  }
+}

@@ -1332,6 +1332,81 @@ class SchedulerTest(unittest.TestCase):
         self.assertEqual([call["script_id"] for call in publisher.calls], ["YR030_YR1_M"])
         self.assertEqual([call["product_id"] for call in publisher.calls], [""])
 
+    def test_nurture_daily_count_caps_nurture_posts_per_day(self) -> None:
+        """每日养号条数是硬性封顶：仅养号账号当天第二条槽位不再分配养号内容。"""
+        self.db.upsert_account_configs(
+            [
+                AccountConfig(
+                    account_id="acc-1",
+                    account_name="账号1",
+                    store_id="SHOP-01",
+                    account_status="可用",
+                    publish_time_1="12:00",
+                    publish_time_2="17:00",
+                    publish_time_3="",
+                    nurture_enabled=True,
+                    nurture_daily_count=1,
+                    nurture_only=True,
+                )
+            ]
+        )
+        self._upsert_nurture_script("YR031_YR1_M")
+        self._upsert_nurture_script("YR032_YR1_M")
+        publisher = RealishPublisher()
+
+        stats = schedule_slots(
+            self.db,
+            publisher,
+            now=datetime(2026, 4, 15, 11, 0, 0),
+        )
+
+        # 调度窗口覆盖两天：每天各排 1 条养号，每天的第二条槽位都被封顶。
+        self.assertEqual(stats.scheduled, 2)
+        self.assertEqual(
+            [call["script_id"] for call in publisher.calls],
+            ["YR031_YR1_M", "YR032_YR1_M"],
+        )
+        with self.db._connect() as conn:
+            capped = conn.execute(
+                "SELECT COUNT(*) FROM publish_slots WHERE error_message LIKE '%今日养号条数已达上限（1条）%'"
+            ).fetchone()[0]
+        self.assertEqual(capped, 2)
+
+    def test_nurture_daily_count_cap_allows_product_content_after_quota(self) -> None:
+        """封顶只限制养号内容：混合账号达到条数后仍可正常排带货内容。"""
+        self.db.upsert_account_configs(
+            [
+                AccountConfig(
+                    account_id="acc-1",
+                    account_name="账号1",
+                    store_id="SHOP-01",
+                    account_status="可用",
+                    publish_time_1="12:00",
+                    publish_time_2="17:00",
+                    publish_time_3="",
+                    nurture_enabled=True,
+                    nurture_daily_count=1,
+                )
+            ]
+        )
+        self._upsert_nurture_script("YR033_YR1_M")
+        self._upsert_nurture_script("YR034_YR1_M")
+        self._upsert_script("012_M1_M", "P1012", "P1012_M1")
+        publisher = RealishPublisher()
+
+        stats = schedule_slots(
+            self.db,
+            publisher,
+            now=datetime(2026, 4, 15, 11, 0, 0),
+        )
+
+        # 4/15：12:00 养号（达上限），17:00 带货；4/16：12:00 养号，17:00 无带货可排。
+        self.assertEqual(stats.scheduled, 3)
+        self.assertEqual(publisher.calls[0]["script_id"], "YR033_YR1_M")
+        self.assertEqual(publisher.calls[1]["script_id"], "012_M1_M")
+        self.assertEqual(publisher.calls[1]["product_id"], "P1012")
+        self.assertEqual(publisher.calls[2]["script_id"], "YR034_YR1_M")
+
     def test_nurture_disabled_account_never_falls_back_to_nurture_video(self) -> None:
         self.db.upsert_account_configs(
             [
@@ -2212,3 +2287,161 @@ class SchedulerTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PreflightFailureClassificationTest(unittest.TestCase):
+    """2026-09-09 incident regression: preflight (not-sent) failures must
+    park the slot for retry instead of permanently cancelling it."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db = AutoPublishDB(Path(self.temp_dir.name) / "autopublish.sqlite3")
+        self.db.upsert_account_configs(
+            [
+                AccountConfig(
+                    account_id="acc-verify",
+                    account_name="核验账号",
+                    store_id="SHOP-01",
+                    account_status="可用",
+                    publish_channel="CreatOK",
+                    publish_time_1="12:00",
+                    publish_time_2="",
+                    publish_time_3="",
+                    nurture_enabled=1,
+                    nurture_daily_count=2,
+                )
+            ]
+        )
+        with self.db._connect() as conn:
+            conn.execute(
+                "UPDATE account_configs SET content_photo_capable = 1, "
+                "content_video_capable = 1 WHERE account_id = 'acc-verify'"
+            )
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def _seed_candidate(self) -> None:
+        import hashlib as _hashlib
+
+        slides = []
+        for index, name in enumerate(("slide-a.jpg", "slide-b.jpg"), start=1):
+            photo = Path(self.temp_dir.name) / name
+            photo.write_bytes(b"fake-jpeg-bytes")
+            slides.append({"index": index, "path": str(photo), "sha256": "0" * 64})
+        manifest = {
+            "schema_version": "opv-photo-release-v1",
+            "media_kind": "native_photo",
+            "task_id": "opv_task_verify_1",
+            "slides": slides,
+        }
+        unsigned = {key: value for key, value in manifest.items() if key != "manifest_sha256"}
+        manifest["manifest_sha256"] = _hashlib.sha256(
+            json.dumps(unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        script_text = json.dumps({"release_manifest": manifest}, ensure_ascii=False)
+        self.db.upsert_script_metadata(
+            [
+                ScriptMetadata(
+                    canonical_script_key="opv:opv_task_verify_1",
+                    script_id="opv_task_verify_1",
+                    source_record_id="rec-verify",
+                    script_slot="S1",
+                    task_no="001",
+                    store_id="SHOP-01",
+                    product_id="",
+                    parent_slot="M1",
+                    direction_label="日常轻分享流",
+                    variant_strength="母版",
+                    product_type="外套",
+                    target_country="Thailand",
+                    content_family_key="FAM-VERIFY",
+                    script_text=script_text,
+                    short_video_title="opv verify",
+                    title_source="test",
+                    script_source="种草脚本",
+                    publish_purpose="养号",
+                    content_branch="SEEDING_ORGANIC",
+                    cart_enabled="否",
+                )
+            ]
+        )
+        with self.db._connect() as conn:
+            conn.execute(
+                "INSERT INTO video_assets (canonical_script_key, script_id, download_status, publish_status, "
+                "media_kind, photo_manifest_json, created_at, updated_at) "
+                "VALUES ('opv:opv_task_verify_1', 'opv_task_verify_1', '下载成功', '待排期', 'native_photo', ?, ?, ?)",
+                (
+                    json.dumps(manifest, ensure_ascii=False),
+                    "2026-09-01 00:00:00",
+                    "2026-09-01 00:00:00",
+                ),
+            )
+
+    @patch("app.scheduler.bgm.requires_platform_bgm", return_value=False)
+    def test_verification_error_parks_slot_not_cancels(self, _bgm) -> None:
+        self._seed_candidate()
+
+        from app.scheduler import OpvReleaseVerificationError, _validate_opv_upload
+
+        def _boom(candidate: object) -> None:
+            raise OpvReleaseVerificationError("核验运行环境或配置异常")
+
+        with patch("app.scheduler._validate_opv_upload", side_effect=_boom):
+            stats = schedule_slots(
+                self.db,
+                DryRunPublishAdapter(),
+                now=datetime(2026, 9, 1, 11, 0, 0),
+                window_hours=4,
+            )
+        self.assertEqual(stats.scheduled, 0)
+        row = self.db._connect().execute(
+            "SELECT schedule_status, error_message FROM publish_slots ORDER BY slot_id LIMIT 1"
+        ).fetchone()
+        self.assertEqual(row["schedule_status"], "待排期")
+        self.assertIn("提交前检查未通过，换用其他候选重排", row["error_message"])
+
+    @patch("app.scheduler.bgm.requires_platform_bgm", return_value=False)
+    @patch("app.scheduler._validate_opv_upload", lambda candidate: None)
+    def test_presubmit_runtime_error_parks_for_retry(self, *_mocks) -> None:
+        self._seed_candidate()
+
+        class FailingAdapter(DryRunPublishAdapter):
+            def create_publish_task(self, request: object) -> str:
+                class _Err(RuntimeError):
+                    submission_not_sent = True
+
+                raise _Err("资产准备暂时失败")
+
+        stats = schedule_slots(
+            self.db,
+            FailingAdapter(),
+            now=datetime(2026, 9, 1, 11, 0, 0),
+            window_hours=4,
+        )
+        self.assertEqual(stats.scheduled, 0)
+        self.assertGreaterEqual(stats.retryable_create_failed, 1)
+        row = self.db._connect().execute(
+            "SELECT schedule_status, error_message FROM publish_slots ORDER BY slot_id LIMIT 1"
+        ).fetchone()
+        self.assertEqual(row["schedule_status"], "待排期")
+        self.assertIn("提交前检查暂时失败", row["error_message"])
+
+
+class DryRunUnifiedInterfaceTest(unittest.TestCase):
+    def test_dryrun_accepts_photo_organic_without_side_effect(self) -> None:
+        from app.models import PublishRequest
+        from app.publishers import DryRunPublishAdapter
+
+        request = PublishRequest(
+            account_id="acc-1",
+            content_type="photo",
+            commerce_type="organic",
+            media_paths=["/tmp/a.jpg", "/tmp/b.jpg"],
+            title="t",
+            publish_at=datetime(2026, 9, 1, 12, 0, 0),
+            timezone="Asia/Bangkok",
+            script_id="s1",
+        )
+        task_id = DryRunPublishAdapter().create_publish_task(request)
+        self.assertTrue(task_id.startswith("dryrun-"))

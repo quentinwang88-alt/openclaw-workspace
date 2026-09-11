@@ -16,7 +16,8 @@ BGM_FIELD_SPECS = {
         "SingleSelect",
         {"options": [{"name": name} for name in (
             "不适用", "待发布前选曲", "已选待发布", "待平台回读",
-            "已确认一致", "实际BGM不一致", "选曲失败",
+            "已确认一致", "实际BGM不一致", "选曲失败", "平台自动推荐",
+            "已混入成片",
         )]},
     ),
     "选中BGM": (1, "Text", None),
@@ -24,18 +25,37 @@ BGM_FIELD_SPECS = {
     "BGM节奏方案": (1, "Text", None),
 }
 
-_SUPPORTED_AUDIO_MODES = {"silent_source_platform_bgm", "generated_nonvoice", "clean_voice"}
+_SUPPORTED_AUDIO_MODES = {
+    "silent_source_platform_bgm", "platform_auto_bgm",
+    "generated_nonvoice", "clean_voice",
+}
 
 
 def ensure_bgm_fields(client: Any, fields: Any = None) -> List[str]:
     """Create only read-only observability fields; there is no manual gate."""
     from app.publish_writeback import normalize_field_specs
-    existing = {item["field_name"] for item in normalize_field_specs(fields)} if fields is not None else set(client.list_field_names())
+    normalized = normalize_field_specs(fields) if fields is not None else []
+    existing = {item["field_name"] for item in normalized} if fields is not None else set(client.list_field_names())
     created: List[str] = []
     for name, (field_type, ui_type, property_) in BGM_FIELD_SPECS.items():
         if name not in existing:
             client.create_field(name, field_type=field_type, ui_type=ui_type, property=property_)
             created.append(name)
+    status_field = next((item for item in normalized if item["field_name"] == "BGM状态"), None)
+    if status_field and int(status_field.get("type") or 0) == 3:
+        current_options = list((status_field.get("property") or {}).get("options") or [])
+        current_names = {str(item.get("name") or "") for item in current_options}
+        desired_names = [
+            str(item.get("name") or "")
+            for item in (BGM_FIELD_SPECS["BGM状态"][2] or {}).get("options", [])
+        ]
+        missing_options = [{"name": name} for name in desired_names if name and name not in current_names]
+        if current_options and missing_options and callable(getattr(client, "update_field", None)):
+            client.update_field(
+                status_field.get("field_id"), field_name="BGM状态", field_type=3,
+                property={"options": current_options + missing_options},
+            )
+            created.append("BGM状态:option")
     return created
 
 
@@ -58,7 +78,13 @@ def _fields_for_row(row: Any) -> Dict[str, Any]:
     selected_id = str(audit.get("music_id") or "").strip()
     actual_id = str(actual.get("music_id") or "").strip()
     error = str(row["error_message"] or "")
-    if selected_id:
+    platform_auto = audit.get("mode") == "platform_auto"
+    local_mix = audit.get("mode") == "local_mix"
+    if platform_auto:
+        status = "平台自动推荐"
+    elif local_mix and selected_id and actual_id == selected_id:
+        status = "已混入成片"
+    elif selected_id:
         if actual_id:
             status = "已确认一致" if selected_id == actual_id else "实际BGM不一致"
         elif str(row["schedule_status"] or "") == "已发布":
@@ -71,11 +97,17 @@ def _fields_for_row(row: Any) -> Dict[str, Any]:
         status = "待发布前选曲"
     profile = audit.get("profile") if isinstance(audit.get("profile"), dict) else {}
     timing = audit.get("timing_plan") if isinstance(audit.get("timing_plan"), dict) else {}
-    rhythm = str(profile.get("rhythm_preference") or "待实际选曲")
+    rhythm = str(profile.get("rhythm_preference") or (
+        "由平台决定" if platform_auto else "待实际选曲"
+    ))
     sync_mode = str(timing.get("mode") or profile.get("sync_mode") or "")
     timing_text = " · ".join(part for part in (rhythm, sync_mode) if part)[:500]
     return {
-        "BGM策略": "自动平台BGM",
+        "BGM策略": (
+            "TikTok自动推荐音乐" if platform_auto
+            else "发布前本地混入" if local_mix
+            else "自动平台BGM"
+        ),
         "BGM状态": status,
         "选中BGM": _compact_track({
             "music_id": selected_id, "music_title": audit.get("music_title"),
@@ -101,7 +133,9 @@ def build_bgm_status_updates(rows: Iterable[Any]) -> List[Dict[str, Any]]:
             organic = False
         markers = " ".join(str(row.get(key) or "") for key in ("script_source", "content_branch")).lower()
         channel = str(row.get("publish_channel") or "").lower()
-        if not organic or "混剪" in markers or "mixcut" in markers or (channel and channel != "neobund"):
+        if not organic or "混剪" in markers or "mixcut" in markers or (
+            channel and channel not in {"neobund", "creatok"}
+        ):
             continue
         updates.append({"record_id": record_id, "fields": _fields_for_row(row)})
     return updates

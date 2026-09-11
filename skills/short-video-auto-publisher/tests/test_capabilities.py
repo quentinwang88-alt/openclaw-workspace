@@ -72,6 +72,26 @@ class CapabilityReconciliationTest(unittest.TestCase):
         self.assertEqual(account2["organic_capable"], 0)
         self.assertEqual(account2["shoppable_capable"], 1)
 
+    def test_reconcile_includes_dual_channel_binding_when_default_is_creatok(self) -> None:
+        with self.db._connect() as conn:
+            conn.execute(
+                "UPDATE account_configs SET publish_channel='CreatOK' WHERE account_id='tocrystal66'"
+            )
+        self.db.replace_account_channel_bindings("tocrystal66", [
+            {"publish_channel": "NeoBund", "content_scope": "shoppable"},
+            {"publish_channel": "CreatOK", "content_scope": "organic"},
+        ])
+        client = Mock()
+        client.list_tiktok_accounts.return_value = {"records": []}
+        client.list_creator_accounts.return_value = {
+            "records": [{"authId": 45953, "username": "tocrystal66", "quotaStatus": 1}]
+        }
+        stats = reconcile_neobund_account_capabilities(
+            self.db, NeoBundPublishAdapter(client=client)
+        )
+        self.assertEqual(stats["checked"], 2)
+        self.assertEqual(self.db.get_account_config("tocrystal66")["shoppable_capable"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

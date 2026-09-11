@@ -1,0 +1,43 @@
+{
+  "_comment": "submit tiktok_shop_video 的创建响应（job 349753）。字段结构为官方契约：data.created=true + data.job。有效提交会先经过 provider precheck，可能失败（本样例 fail_reason=Video id is invalid，result_unknown=false）。",
+  "ok": true,
+  "cli_version": "v0.13.0",
+  "command": "publish",
+  "status": "succeeded",
+  "data": {
+    "created": true,
+    "job": {
+      "job_id": 349753,
+      "kind": "tiktok_shop_video",
+      "connection_uid": "conn_ts_4zDg4wT0Wd9L82ysizOb66",
+      "idempotency_key": "probe-layer5-0001",
+      "account": {
+        "username": "yoursbeauty.my",
+        "display_name": "yoursbeauty.my",
+        "platform_account_id": "7525721272178066433"
+      },
+      "state": "failed",
+      "raw_status": "precheck_failed",
+      "result_unknown": false,
+      "provider_submission_id": null,
+      "platform_content_ids": [],
+      "platform_content_urls": [],
+      "fail_reason": "Video id is invalid",
+      "reason": "publish_provider_rejected",
+      "stage": "provider_precheck",
+      "retryable": false,
+      "recovery_action": "contact_support",
+      "diagnostic": {
+        "source": "provider",
+        "provider": "tiktok",
+        "code": 170001040,
+        "message": "Video id is invalid",
+        "request_id": "2026090512432135699E74A3246B03499A"
+      },
+      "issues": null,
+      "schedule_time": null,
+      "completed_at": 1788583401989,
+      "created_at": 1788583400868
+    }
+  }
+}

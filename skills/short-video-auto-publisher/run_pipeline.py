@@ -17,8 +17,22 @@ from typing import Any, Dict, Iterable, Tuple
 SKILL_DIR = Path(__file__).parent.absolute()
 sys.path.insert(0, str(SKILL_DIR))
 
+REPO_ROOT = SKILL_DIR.parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+try:
+    from workspace_support import load_repo_env  # type: ignore  # noqa: E402
+
+    load_repo_env()
+except Exception:
+    # .env 不存在或 workspace_support 不可用时保持原行为（如测试环境）。
+    pass
+
 from app.db import AutoPublishDB, default_db_path, default_video_dir  # noqa: E402
-from app.capabilities import reconcile_neobund_account_capabilities  # noqa: E402
+from app.capabilities import (  # noqa: E402
+    reconcile_creatok_account_capabilities,
+    reconcile_neobund_account_capabilities,
+)
 from app.metadata import (  # noqa: E402
     FallbackTitleGenerator,
     HeuristicTitleGenerator,
@@ -38,6 +52,11 @@ from app.manual_publish import (  # noqa: E402
 from app.models import ScriptMetadata  # noqa: E402
 from app.mixcut import sync_mixcut_publish_results, sync_mixcut_videos  # noqa: E402
 from app.bgm_reporting import sync_bgm_statuses  # noqa: E402
+from app.creatok_publish import (  # noqa: E402
+    CREATOK_TASK_PREFIX,
+    CreatOKCLI,
+    CreatOKPublishAdapter,
+)
 from app.neobund_publish import NeoBundPublishAdapter  # noqa: E402
 from app.neobund_auth import read_browser_credentials  # noqa: E402
 from app.notifications import (  # noqa: E402
@@ -593,6 +612,36 @@ def ensure_account_nurture_fields(client: FeishuBitableClient, field_names: list
                 ui_type="SingleSelect",
                 property={"options": [{"name": "是"}, {"name": "否"}]},
             )
+    creatok_text_fields = (
+        "发布配置",
+        "CreatOK连接UID",
+        "账号时区",
+        "能力检查时间",
+    )
+    for field_name in creatok_text_fields:
+        if field_name not in existing:
+            create_optional_field(field_name, field_type=1, ui_type="Text")
+    if "CreatOK投递模式" not in existing:
+        create_optional_field(
+            "CreatOK投递模式",
+            field_type=3,
+            ui_type="SingleSelect",
+            property={"options": [{"name": "直接发布"}, {"name": "收件箱"}]},
+        )
+    if "CreatOK能力状态" not in existing:
+        create_optional_field(
+            "CreatOK能力状态",
+            field_type=3,
+            ui_type="SingleSelect",
+            property={"options": [{"name": "未知"}, {"name": "正常"}, {"name": "异常"}]},
+        )
+    if "内容类型限定" not in existing:
+        create_optional_field(
+            "内容类型限定",
+            field_type=3,
+            ui_type="SingleSelect",
+            property={"options": [{"name": "带货"}, {"name": "不带货"}]},
+        )
     return client.list_field_names()
 
 
@@ -672,6 +721,41 @@ def build_neobund_publish_adapter(args: argparse.Namespace) -> NeoBundPublishAda
     return adapter
 
 
+def build_creatok_publish_adapter(args: argparse.Namespace) -> CreatOKPublishAdapter:
+    """CreatOK 渠道：API Key 只从环境变量读取（默认 CREATOK_API_KEY），
+    CLI 路径可从配置文件 creatok_cli_path 覆盖。账号连接 UID 从本地配置回填。"""
+    config_path = str(getattr(args, "config_path", DEFAULT_CONFIG_PATH))
+    config = load_local_config(config_path)
+    cli_path = str(config.get("creatok_cli_path") or "").strip() or "creatok"
+    api_key_env_name = str(config.get("creatok_api_key_env_name") or "").strip() or "CREATOK_API_KEY"
+    db = AutoPublishDB(Path(args.db_path))
+    account_connections: Dict[str, str] = {}
+    for row in db.list_account_configs(publish_channel="CreatOK"):
+        uid = str(row["provider_connection_uid"] or "").strip()
+        account_id = str(row["account_id"] or "").strip()
+        if uid and account_id:
+            account_connections[account_id] = uid
+    db_for_backfill = AutoPublishDB(Path(args.db_path))
+
+    def on_connection_resolved(account_id: str, connection_uid: str) -> None:
+        """自动发现的连接 UID 回填账号表列，之后无需再发现。"""
+        db_for_backfill.update_account_configs([{
+            "account_id": account_id,
+            "account_name": account_id,
+            "store_id": "-",
+            "account_status": "可用",
+            "publish_channel": "CreatOK",
+            "provider_connection_uid": connection_uid,
+            "provider_checked_at": __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }])
+
+    return CreatOKPublishAdapter(
+        cli=CreatOKCLI(cli_path=cli_path, api_key_env_name=api_key_env_name),
+        account_connections=account_connections,
+        on_connection_resolved=on_connection_resolved,
+    )
+
+
 def build_publish_adapter(args: argparse.Namespace):
     mode = args.publish_mode
     if mode == "http":
@@ -684,6 +768,7 @@ def build_publish_adapter(args: argparse.Namespace):
     if mode == "auto":
         geelark_adapter = build_geelark_publish_adapter(args)
         neobund_adapter = build_neobund_publish_adapter(args)
+        creatok_adapter = build_creatok_publish_adapter(args)
         dryrun_adapter = DryRunPublishAdapter()
         account_channels = AutoPublishDB(Path(args.db_path)).list_account_publish_channels()
         return RoutedPublishAdapter(
@@ -691,10 +776,12 @@ def build_publish_adapter(args: argparse.Namespace):
             channel_adapters={
                 "GeeLark": geelark_adapter,
                 "NeoBund": neobund_adapter,
+                "CreatOK": creatok_adapter,
             },
             account_channels=account_channels,
             task_prefix_adapters={
                 "neobund:": neobund_adapter,
+                CREATOK_TASK_PREFIX: creatok_adapter,
                 "dryrun-": dryrun_adapter,
             },
             default_channel="GeeLark",
@@ -703,16 +790,27 @@ def build_publish_adapter(args: argparse.Namespace):
 
 
 def reconcile_publish_account_capabilities(db: AutoPublishDB, publisher: Any) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "neobund": {"skipped": 1, "reason": "neobund_not_enabled"},
+        "creatok": {"skipped": 1, "reason": "creatok_not_enabled"},
+    }
     neobund = None
+    creatok = None
     if isinstance(publisher, NeoBundPublishAdapter):
         neobund = publisher
+    elif isinstance(publisher, CreatOKPublishAdapter):
+        creatok = publisher
     elif isinstance(publisher, RoutedPublishAdapter):
-        candidate = publisher.channel_adapters.get("NeoBund")
-        if isinstance(candidate, NeoBundPublishAdapter):
-            neobund = candidate
-    if neobund is None:
-        return {"skipped": 1, "reason": "neobund_not_enabled"}
-    return reconcile_neobund_account_capabilities(db, neobund)
+        candidates = publisher.channel_adapters
+        if isinstance(candidates.get("NeoBund"), NeoBundPublishAdapter):
+            neobund = candidates["NeoBund"]
+        if isinstance(candidates.get("CreatOK"), CreatOKPublishAdapter):
+            creatok = candidates["CreatOK"]
+    if neobund is not None:
+        result["neobund"] = reconcile_neobund_account_capabilities(db, neobund)
+    if creatok is not None:
+        result["creatok"] = reconcile_creatok_account_capabilities(db, creatok)
+    return result
 
 
 def command_sync_script_db(args: argparse.Namespace) -> None:
@@ -849,6 +947,13 @@ def sync_publish_observability(db, args, *, client=None, records=None):
 
 
 def command_schedule(args: argparse.Namespace) -> None:
+    if str(getattr(args, "publish_mode", "") or "") == "dry-run":
+        print(
+            "[schedule] 警告：当前为 dry-run 模式。注意：dry-run 仍会写本地槽位/资产状态，"
+            "photo 候选会产生排期记录（dryrun- 前缀任务，下一轮真实调度会回收重排）。"
+            "要真实创建发布任务请使用 --publish-mode auto。",
+            flush=True,
+        )
     with exclusive_run_lock("schedule"):
         video_dir = ensure_video_storage_ready(args.video_dir)
         db = AutoPublishDB(Path(args.db_path))
@@ -886,8 +991,11 @@ def command_sync_results(args: argparse.Namespace) -> None:
 
 def command_sync_account_capabilities(args: argparse.Namespace) -> None:
     db = AutoPublishDB(Path(args.db_path))
-    publisher = build_neobund_publish_adapter(args)
-    stats = reconcile_neobund_account_capabilities(db, publisher)
+    stats: Dict[str, Any] = {}
+    neobund = build_neobund_publish_adapter(args)
+    stats["neobund"] = reconcile_neobund_account_capabilities(db, neobund)
+    creatok = build_creatok_publish_adapter(args)
+    stats["creatok"] = reconcile_creatok_account_capabilities(db, creatok)
     print(json.dumps(stats, ensure_ascii=False, indent=2))
 
 
@@ -1538,9 +1646,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     sync_capabilities = subparsers.add_parser(
         "sync-account-capabilities",
-        help="对账本地账号与 NeoBund Organic/带货发布能力",
+        help="对账本地账号与 NeoBund/CreatOK 发布能力（只读，不创建发布任务）",
     )
     add_neobund_args(sync_capabilities)
+    sync_capabilities.add_argument(
+        "--publish-mode",
+        choices=["dry-run", "http", "geelark", "neobund", "auto"],
+        default="auto",
+        help="默认 auto：同时同步 NeoBund 与 CreatOK 能力",
+    )
     sync_capabilities.set_defaults(func=command_sync_account_capabilities)
 
     requeue_tasks = subparsers.add_parser(

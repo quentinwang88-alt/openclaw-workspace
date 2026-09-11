@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 
 
@@ -15,8 +16,14 @@ SKILL_DIR = TESTS_DIR.parent
 if str(SKILL_DIR) not in sys.path:
     sys.path.insert(0, str(SKILL_DIR))
 
+from app.creatok_publish import CreatOKSubmissionNotReadyError
 from app.db import AutoPublishDB
-from app.manual_publish import MANUAL_PUBLISH_FIELD_ALIASES, sync_manual_publish_requests
+from app.manual_publish import (
+    MANUAL_PUBLISH_CHANNELS,
+    MANUAL_PUBLISH_FIELD_ALIASES,
+    ensure_manual_publish_fields,
+    sync_manual_publish_requests,
+)
 from app.models import AccountConfig
 from app.scheduler import resolve_field_mapping
 
@@ -57,6 +64,58 @@ class FlakyPublisher(ChannelPublisher):
         if len(self.calls) <= self.failures:
             raise RuntimeError("HTTPSConnectionPool: Max retries exceeded; ProxyError Cannot connect to proxy")
         return f"task-{kwargs['channel']}-{kwargs['script_id']}"
+
+
+class CreatOKWindowPublisher(ChannelPublisher):
+    """第一次提交命中 CreatOK 排期窗口校验，之后恢复，模拟窗口边界。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_first = True
+
+    def create_scheduled_task_for_channel(self, **kwargs) -> str:
+        self.calls.append(dict(kwargs))
+        if self.fail_first:
+            self.fail_first = False
+            raise CreatOKSubmissionNotReadyError(
+                "CreatOK Organic 排期窗口为 60 秒 ~ 7 天，当前为 45 秒，任务未提交（保留待排期）"
+            )
+        return f"task-{kwargs['channel']}-{kwargs['script_id']}"
+
+
+class LegacyPublisher:
+    """不带按渠道路由的旧发布器（--publish-mode neobund 等单渠道模式）。"""
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    def create_scheduled_task(self, **kwargs) -> str:
+        self.calls.append(dict(kwargs))
+        return "legacy-task-1"
+
+
+class FakeFieldClient:
+    def __init__(self, fields) -> None:
+        self.fields = fields
+        self.field_updates = []
+
+    def list_fields(self):
+        return self.fields
+
+    def create_field(self, field_name=None, field_type=1, ui_type="Text", property=None):
+        field = SimpleNamespace(
+            field_id=f"fld-{field_name}",
+            field_name=field_name,
+            field_type=field_type,
+            ui_type=ui_type,
+            property=property,
+            description=None,
+        )
+        self.fields.append(field)
+        return {}
+
+    def update_field(self, field_id, **kwargs):
+        self.field_updates.append((field_id, kwargs))
 
 
 class ManualPublishTest(unittest.TestCase):
@@ -406,6 +465,178 @@ class ManualPublishTest(unittest.TestCase):
         self.assertEqual(stats["create_retried"], 1)
         self.assertEqual(len(publisher.calls), 2)
         self.assertEqual(client.updates[-1]["fields"]["处理状态"], "已创建")
+
+    def _future_time(self, *, days: int = 1, hour: int = 18) -> str:
+        return (datetime.now() + timedelta(days=days)).replace(hour=hour, minute=0, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M")
+
+    def test_manual_creatok_request_routes_to_creatok_channel(self) -> None:
+        record = self._record("rec-manual-creatok")
+        record.fields["发布渠道"] = "CreatOK"
+        record.fields["短视频发布时间"] = self._future_time(days=1)
+        client = DummyManualClient()
+        publisher = ChannelPublisher()
+
+        stats = sync_manual_publish_requests(
+            [record],
+            self._mapping(),
+            self.db,
+            publisher,
+            client=client,
+            video_dir=Path(self.temp_dir.name) / "videos",
+        )
+
+        self.assertEqual(stats["created"], 1)
+        self.assertEqual(publisher.calls[0]["channel"], "CreatOK")
+        self.assertEqual(publisher.calls[0]["product_id"], "")
+        self.assertEqual(client.updates[-1]["fields"]["处理状态"], "已创建")
+        self.assertTrue(client.updates[-1]["fields"]["发布任务ID"].startswith("task-CreatOK-"))
+
+    def test_manual_creatok_request_with_product_id_waits_until_fixed(self) -> None:
+        record = self._record("rec-manual-creatok-shop")
+        record.fields["发布渠道"] = "CreatOK"
+        record.fields["产品ID"] = "1737141103233042426"
+        record.fields["短视频发布时间"] = self._future_time(days=1)
+        client = DummyManualClient()
+        publisher = ChannelPublisher()
+
+        stats = sync_manual_publish_requests(
+            [record],
+            self._mapping(),
+            self.db,
+            publisher,
+            client=client,
+            video_dir=Path(self.temp_dir.name) / "videos",
+        )
+
+        self.assertEqual(stats["validation_failed"], 1)
+        self.assertEqual(len(publisher.calls), 0)
+        self.assertEqual(client.updates[-1]["fields"]["处理状态"], "待补充")
+        self.assertIn("产品ID", client.updates[-1]["fields"]["错误信息"])
+
+        record.fields["产品ID"] = ""
+        second_stats = sync_manual_publish_requests(
+            [record],
+            self._mapping(),
+            self.db,
+            publisher,
+            client=client,
+            video_dir=Path(self.temp_dir.name) / "videos",
+        )
+
+        self.assertEqual(second_stats["created"], 1)
+        self.assertEqual(publisher.calls[0]["channel"], "CreatOK")
+
+    def test_manual_creatok_request_beyond_window_waits_until_window(self) -> None:
+        record = self._record("rec-manual-creatok-far")
+        record.fields["发布渠道"] = "CreatOK"
+        record.fields["短视频发布时间"] = self._future_time(days=10)
+        client = DummyManualClient()
+        publisher = ChannelPublisher()
+
+        stats = sync_manual_publish_requests(
+            [record],
+            self._mapping(),
+            self.db,
+            publisher,
+            client=client,
+            video_dir=Path(self.temp_dir.name) / "videos",
+        )
+
+        self.assertEqual(stats["validation_failed"], 1)
+        self.assertEqual(len(publisher.calls), 0)
+        self.assertEqual(client.updates[-1]["fields"]["处理状态"], "待补充")
+        self.assertIn("排期窗口", client.updates[-1]["fields"]["错误信息"])
+
+    def test_creatok_window_error_at_create_defers_instead_of_failed(self) -> None:
+        record = self._record("rec-manual-creatok-defer")
+        record.fields["发布渠道"] = "CreatOK"
+        record.fields["短视频发布时间"] = self._future_time(days=1, hour=20)
+        client = DummyManualClient()
+        publisher = CreatOKWindowPublisher()
+
+        first_stats = sync_manual_publish_requests(
+            [record],
+            self._mapping(),
+            self.db,
+            publisher,
+            client=client,
+            video_dir=Path(self.temp_dir.name) / "videos",
+        )
+
+        self.assertEqual(first_stats["create_deferred"], 1)
+        self.assertEqual(first_stats["create_failed"], 0)
+        self.assertEqual(client.updates[-1]["fields"]["处理状态"], "待补充")
+        self.assertIn("排期窗口", client.updates[-1]["fields"]["错误信息"])
+
+        record.fields["处理状态"] = "待补充"
+        second_stats = sync_manual_publish_requests(
+            [record],
+            self._mapping(),
+            self.db,
+            publisher,
+            client=client,
+            video_dir=Path(self.temp_dir.name) / "videos",
+        )
+
+        self.assertEqual(second_stats["created"], 1)
+        self.assertEqual(client.updates[-1]["fields"]["处理状态"], "已创建")
+
+    def test_manual_creatok_request_rejected_on_non_routed_publisher(self) -> None:
+        record = self._record("rec-manual-creatok-legacy")
+        record.fields["发布渠道"] = "CreatOK"
+        record.fields["短视频发布时间"] = self._future_time(days=1)
+        client = DummyManualClient()
+        publisher = LegacyPublisher()
+
+        stats = sync_manual_publish_requests(
+            [record],
+            self._mapping(),
+            self.db,
+            publisher,
+            client=client,
+            video_dir=Path(self.temp_dir.name) / "videos",
+        )
+
+        self.assertEqual(stats["create_failed"], 1)
+        self.assertEqual(len(publisher.calls), 0)
+        self.assertEqual(client.updates[-1]["fields"]["处理状态"], "发布失败")
+        self.assertIn("按渠道路由", client.updates[-1]["fields"]["错误信息"])
+
+    def test_ensure_manual_publish_fields_adds_creatok_channel_option(self) -> None:
+        field = SimpleNamespace(
+            field_id="fld-channel",
+            field_name="发布渠道",
+            field_type=3,
+            ui_type="SingleSelect",
+            property={"options": [{"name": "GeeLark"}, {"name": "NeoBund"}]},
+            description=None,
+        )
+        client = FakeFieldClient([field])
+
+        stats = ensure_manual_publish_fields(client)
+
+        self.assertEqual(stats["channel_options_added"], 1)
+        updated_options = client.field_updates[0][1]["property"]["options"]
+        self.assertEqual(
+            [item["name"] for item in updated_options],
+            ["GeeLark", "NeoBund", "CreatOK"],
+        )
+
+        client2 = FakeFieldClient(
+            [
+                SimpleNamespace(
+                    field_id="fld-channel",
+                    field_name="发布渠道",
+                    field_type=3,
+                    ui_type="SingleSelect",
+                    property={"options": [{"name": name} for name in MANUAL_PUBLISH_CHANNELS]},
+                    description=None,
+                )
+            ]
+        )
+        stats2 = ensure_manual_publish_fields(client2)
+        self.assertEqual(stats2["channel_options_added"], 0)
+        self.assertEqual(len(client2.field_updates), 0)
 
 
 if __name__ == "__main__":

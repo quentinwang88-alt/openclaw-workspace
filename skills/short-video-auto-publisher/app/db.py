@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -75,6 +76,42 @@ def _candidate_context(script_text: str) -> Dict[str, str]:
     }
 
 
+def _photo_candidate_paths(raw_manifest: str, script_text: str, script_id: str) -> List[str]:
+    """Read only a released, ordered photo manifest bound to its queue metadata.
+
+    File bytes and the current RDS revision are rechecked by the release gate
+    immediately before upload. Candidate scans never initialize the OPV DB.
+    """
+    manifest = json.loads(raw_manifest)
+    context = json.loads(script_text)
+    if (not isinstance(manifest, dict) or not isinstance(context, dict)
+            or manifest.get("schema_version") != "opv-photo-release-v1"
+            or manifest.get("media_kind") != "native_photo"
+            or manifest.get("task_id") != script_id
+            or context.get("release_manifest") != manifest):
+        raise ValueError("照片候选与冻结发布清单不匹配")
+    unsigned = {key: value for key, value in manifest.items() if key != "manifest_sha256"}
+    digest = hashlib.sha256(json.dumps(unsigned, ensure_ascii=False, sort_keys=True,
+                                      separators=(",", ":")).encode()).hexdigest()
+    if manifest.get("manifest_sha256") != digest:
+        raise ValueError("照片发布清单指纹不匹配")
+    slides = manifest.get("slides")
+    if not isinstance(slides, list) or not slides:
+        raise ValueError("照片发布清单为空")
+    paths = []
+    for index, slide in enumerate(slides, start=1):
+        if not isinstance(slide, dict) or type(slide.get("index")) is not int or slide["index"] != index:
+            raise ValueError("照片发布清单顺序无效")
+        raw_path = slide.get("path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise ValueError("照片发布清单缺少路径")
+        path = Path(raw_path)
+        if not path.is_absolute() or not path.is_file() or not slide.get("sha256"):
+            raise ValueError("照片发布素材不存在或缺少指纹")
+        paths.append(str(path))
+    return paths
+
+
 class AutoPublishDB:
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = Path(db_path) if db_path else default_db_path()
@@ -120,6 +157,23 @@ class AutoPublishDB:
 
     def _initialize(self) -> None:
         with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS account_channel_bindings (
+                    account_id TEXT NOT NULL,
+                    publish_channel TEXT NOT NULL,
+                    content_scope TEXT NOT NULL DEFAULT 'all',
+                    publish_time_1 TEXT,
+                    publish_time_2 TEXT,
+                    publish_time_3 TEXT,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    source_record_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (account_id, publish_channel)
+                )
+                """
+            )
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS publish_candidate_retries (
                     canonical_script_key TEXT PRIMARY KEY,
@@ -150,6 +204,8 @@ class AutoPublishDB:
             self._ensure_column(conn, "script_metadata", "cart_enabled", "TEXT")
             self._ensure_column(conn, "script_metadata", "content_branch", "TEXT")
             self._ensure_column(conn, "script_metadata", "audio_mode", "TEXT")
+            self._ensure_column(conn, "video_assets", "media_kind", "TEXT NOT NULL DEFAULT 'video'")
+            self._ensure_column(conn, "video_assets", "photo_manifest_json", "TEXT")
             self._ensure_column(conn, "account_configs", "nurture_enabled", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "account_configs", "nurture_daily_count", "INTEGER NOT NULL DEFAULT 2")
             self._ensure_column(conn, "account_configs", "nurture_only", "INTEGER NOT NULL DEFAULT 0")
@@ -162,8 +218,25 @@ class AutoPublishDB:
             self._ensure_column(conn, "account_configs", "capability_status", "TEXT NOT NULL DEFAULT 'unknown'")
             self._ensure_column(conn, "account_configs", "capability_checked_at", "TEXT")
             self._ensure_column(conn, "account_configs", "capability_error", "TEXT")
+            self._ensure_column(conn, "account_configs", "publish_profile_id", "TEXT")
+            self._ensure_column(conn, "publish_slots", "publish_channel_used", "TEXT")
+            self._ensure_column(conn, "account_configs", "provider_connection_uid", "TEXT")
+            self._ensure_column(conn, "account_configs", "account_timezone", "TEXT")
+            self._ensure_column(conn, "account_configs", "content_video_capable", "INTEGER")
+            self._ensure_column(conn, "account_configs", "content_photo_capable", "INTEGER")
+            self._ensure_column(conn, "account_configs", "shop_video_capable", "INTEGER")
+            self._ensure_column(conn, "account_configs", "shop_photo_capable", "INTEGER")
+            self._ensure_column(conn, "account_configs", "direct_post_capable", "INTEGER")
+            self._ensure_column(conn, "account_configs", "delivery_mode", "TEXT")
+            self._ensure_column(conn, "account_configs", "provider_health", "TEXT")
+            self._ensure_column(conn, "account_configs", "provider_checked_at", "TEXT")
+            self._ensure_column(conn, "account_configs", "provider_error", "TEXT")
+            self._ensure_publisher_profiles_table(conn)
             self._ensure_column(conn, "publish_slots", "bgm_json", "TEXT")
             self._ensure_column(conn, "publish_slots", "submission_context_json", "TEXT")
+            self._ensure_column(conn, "publish_slots", "platform_post_id", "TEXT")
+            self._ensure_column(conn, "publish_slots", "platform_post_url", "TEXT")
+            self._ensure_column(conn, "publish_slots", "published_at", "TEXT")
             self._ensure_column(conn, "publish_slots", "error_message", "TEXT")
             self._ensure_column(conn, "publish_slots", "slot_source", "TEXT NOT NULL DEFAULT 'auto'")
             self._ensure_column(conn, "publish_slots", "manual_request_record_id", "TEXT")
@@ -222,6 +295,8 @@ class AutoPublishDB:
                 video_source_type TEXT,
                 video_source_value TEXT,
                 local_file_path TEXT,
+                media_kind TEXT NOT NULL DEFAULT 'video',
+                photo_manifest_json TEXT,
                 download_status TEXT NOT NULL DEFAULT '待下载',
                 run_video_status TEXT,
                 publish_status TEXT NOT NULL DEFAULT '待排期',
@@ -257,6 +332,18 @@ class AutoPublishDB:
                 capability_status TEXT NOT NULL DEFAULT 'unknown',
                 capability_checked_at TEXT,
                 capability_error TEXT,
+                publish_profile_id TEXT,
+                provider_connection_uid TEXT,
+                account_timezone TEXT,
+                content_video_capable INTEGER,
+                content_photo_capable INTEGER,
+                shop_video_capable INTEGER,
+                shop_photo_capable INTEGER,
+                direct_post_capable INTEGER,
+                delivery_mode TEXT,
+                provider_health TEXT,
+                provider_checked_at TEXT,
+                provider_error TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -273,11 +360,15 @@ class AutoPublishDB:
                 schedule_status TEXT NOT NULL DEFAULT '待排期',
                 publish_task_id TEXT,
                 bgm_json TEXT,
+                platform_post_id TEXT,
+                platform_post_url TEXT,
+                published_at TEXT,
                 error_message TEXT,
                 slot_source TEXT NOT NULL DEFAULT 'auto',
                 manual_request_record_id TEXT,
                 title_override TEXT,
                 channel_override TEXT,
+                publish_channel_used TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE(account_id, scheduled_for)
@@ -290,6 +381,7 @@ class AutoPublishDB:
         self._ensure_manual_publish_requests_table(conn)
         self._ensure_publish_task_history_table(conn)
         self._ensure_script_pool_bindings_table(conn)
+        self._ensure_publisher_profiles_table(conn)
         self._ensure_indexes(conn)
 
     def _ensure_script_pool_bindings_table(self, conn: sqlite3.Connection) -> None:
@@ -301,6 +393,25 @@ class AutoPublishDB:
                 updated_at TEXT NOT NULL
             )
         """)
+
+    def _ensure_publisher_profiles_table(self, conn: sqlite3.Connection) -> None:
+        """发布渠道配置文件（如 CreatOK workspace）。API Key 只存环境变量名。"""
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS publisher_profiles (
+                profile_id TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                workspace_name TEXT,
+                api_key_env_name TEXT NOT NULL,
+                cli_path TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                last_health_check_at TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
 
     def _ensure_disabled_products_table(self, conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -764,30 +875,56 @@ class AutoPublishDB:
         run_manager_record_id: str,
         video_source_type: str,
         video_source_value: str,
-        local_file_path: str,
+        local_file_path: Optional[str],
         download_status: str,
         run_video_status: str,
         publish_status: str = "待排期",
         canonical_script_key: str = "",
+        media_kind: str = "video",
+        photo_manifest_json: Optional[Dict[str, Any]] = None,
     ) -> None:
+        if media_kind not in {"video", "native_photo"}:
+            raise ValueError(f"不支持的发布素材类型：{media_kind}")
+        if media_kind == "native_photo":
+            if local_file_path:
+                raise ValueError("原生照片必须使用图片清单，不能设置视频路径")
+            local_file_path = None
+            if not isinstance(photo_manifest_json, dict):
+                raise ValueError("原生照片缺少图片清单")
+        elif photo_manifest_json is not None:
+            raise ValueError("视频素材不能携带照片清单")
+        photo_json = (json.dumps(photo_manifest_json, ensure_ascii=False, sort_keys=True)
+                      if photo_manifest_json is not None else None)
         now = self._now_text()
         resolved_key = self._resolve_canonical_for_write(
             canonical_script_key=canonical_script_key,
             script_id=script_id,
         )
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT media_kind,photo_manifest_json,publish_status FROM video_assets "
+                "WHERE canonical_script_key=?", (resolved_key,),
+            ).fetchone()
+            if (existing and "native_photo" in {existing["media_kind"], media_kind}
+                    and existing["publish_status"] in {"提交中", "提交结果不明", "已排期", "已发布"}
+                    and (existing["media_kind"] != media_kind or existing["photo_manifest_json"] != photo_json)):
+                raise ValueError("照片已进入发布流程，不能替换冻结图片清单")
             conn.execute(
                 """
                 INSERT INTO video_assets (
                     canonical_script_key, script_id, run_manager_record_id, video_source_type, video_source_value,
-                    local_file_path, download_status, run_video_status, publish_status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    local_file_path, download_status, run_video_status, publish_status, created_at, updated_at,
+                    media_kind, photo_manifest_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(canonical_script_key) DO UPDATE SET
                     script_id = excluded.script_id,
                     run_manager_record_id = excluded.run_manager_record_id,
                     video_source_type = excluded.video_source_type,
                     video_source_value = excluded.video_source_value,
                     local_file_path = excluded.local_file_path,
+                    media_kind = excluded.media_kind,
+                    photo_manifest_json = excluded.photo_manifest_json,
                     download_status = excluded.download_status,
                     run_video_status = excluded.run_video_status,
                     publish_status = CASE
@@ -808,6 +945,8 @@ class AutoPublishDB:
                     publish_status,
                     now,
                     now,
+                    media_kind,
+                    photo_json,
                 ),
             )
 
@@ -1434,8 +1573,10 @@ class AutoPublishDB:
                     account_id, account_name, store_id, account_status,
                     publish_channel, publish_time_1, publish_time_2, publish_time_3,
                     nurture_enabled, nurture_daily_count, nurture_only, initialization_enabled,
+                    publish_profile_id, provider_connection_uid, account_timezone,
+                    delivery_mode, provider_health, provider_checked_at,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(account_id) DO UPDATE SET
                     account_name = excluded.account_name,
                     store_id = excluded.store_id,
@@ -1448,6 +1589,12 @@ class AutoPublishDB:
                     nurture_daily_count = excluded.nurture_daily_count,
                     nurture_only = excluded.nurture_only,
                     initialization_enabled = excluded.initialization_enabled,
+                    publish_profile_id = COALESCE(NULLIF(excluded.publish_profile_id, ''), account_configs.publish_profile_id),
+                    provider_connection_uid = COALESCE(NULLIF(excluded.provider_connection_uid, ''), account_configs.provider_connection_uid),
+                    account_timezone = COALESCE(NULLIF(excluded.account_timezone, ''), account_configs.account_timezone),
+                    delivery_mode = COALESCE(NULLIF(excluded.delivery_mode, ''), account_configs.delivery_mode),
+                    provider_health = COALESCE(NULLIF(excluded.provider_health, ''), account_configs.provider_health),
+                    provider_checked_at = COALESCE(NULLIF(excluded.provider_checked_at, ''), account_configs.provider_checked_at),
                     updated_at = excluded.updated_at
                 """,
                 [
@@ -1464,6 +1611,12 @@ class AutoPublishDB:
                         int(item.nurture_daily_count or 2),
                         1 if item.nurture_only else 0,
                         1 if item.initialization_enabled else 0,
+                        str(item.publish_profile_id or "").strip(),
+                        str(item.provider_connection_uid or "").strip(),
+                        str(item.account_timezone or "").strip(),
+                        str(item.delivery_mode or "").strip(),
+                        str(item.provider_health or "").strip(),
+                        str(item.provider_checked_at or "").strip(),
                         now,
                         now,
                     )
@@ -1523,53 +1676,172 @@ class AutoPublishDB:
                     )
         return len(rows)
 
+    def replace_account_channel_bindings(
+        self, account_id: str, bindings: Iterable[Dict[str, Any]]
+    ) -> int:
+        """Replace one account's channel bindings (content-scope split)."""
+        account_id = str(account_id or "").strip()
+        now_text = self._now_text()
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM account_channel_bindings WHERE account_id = ?",
+                (account_id,),
+            )
+            written = 0
+            for binding in bindings:
+                channel = str(binding.get("publish_channel") or "").strip()
+                if not channel:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO account_channel_bindings (
+                        account_id, publish_channel, content_scope,
+                        publish_time_1, publish_time_2, publish_time_3,
+                        enabled, source_record_id, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        account_id,
+                        channel,
+                        str(binding.get("content_scope") or "all"),
+                        binding.get("publish_time_1"),
+                        binding.get("publish_time_2"),
+                        binding.get("publish_time_3"),
+                        1 if binding.get("enabled", True) else 0,
+                        binding.get("source_record_id"),
+                        now_text,
+                        now_text,
+                    ),
+                )
+                written += 1
+            return written
+
+    def list_account_channel_bindings(self, account_id: str = "") -> List[sqlite3.Row]:
+        with self._connect() as conn:
+            if account_id:
+                return conn.execute(
+                    """
+                    SELECT * FROM account_channel_bindings
+                    WHERE account_id = ? AND enabled = 1
+                    ORDER BY publish_channel
+                    """,
+                    (str(account_id).strip(),),
+                ).fetchall()
+            return conn.execute(
+                """
+                SELECT * FROM account_channel_bindings
+                WHERE enabled = 1
+                ORDER BY account_id, publish_channel
+                """
+            ).fetchall()
+
+    def mark_slot_channel(self, slot_id: int, publish_channel: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE publish_slots SET publish_channel_used = ?, updated_at = ? "
+                "WHERE slot_id = ?",
+                (str(publish_channel or ""), self._now_text(), int(slot_id)),
+            )
+
     def generate_future_slots(self, now: datetime, window_hours: int = 24) -> int:
         end_at = now + timedelta(hours=window_hours)
         created = 0
         with self._connect() as conn:
             accounts = conn.execute(
                 """
-                SELECT account_id, account_name, store_id, publish_time_1, publish_time_2, publish_time_3
+                SELECT account_id, account_name, store_id, publish_time_1, publish_time_2, publish_time_3,
+                       publish_channel
                 FROM account_configs
                 WHERE account_status = '可用'
                   AND COALESCE(publish_channel, 'GeeLark') NOT IN ('手动', '暂停')
                 """
             ).fetchall()
+            bindings_by_account: Dict[str, List[sqlite3.Row]] = {}
+            for binding in conn.execute(
+                "SELECT * FROM account_channel_bindings WHERE enabled = 1"
+            ).fetchall():
+                bindings_by_account.setdefault(
+                    str(binding["account_id"] or ""), []
+                ).append(binding)
             for account in accounts:
-                times = [
-                    str(account["publish_time_1"] or "").strip(),
-                    str(account["publish_time_2"] or "").strip(),
-                    str(account["publish_time_3"] or "").strip(),
-                ]
-                current_day = now.date()
-                final_day = end_at.date()
-                while current_day <= final_day:
-                    for hhmm in times:
-                        parsed = self._parse_hhmm(hhmm)
-                        if parsed is None:
-                            continue
-                        slot_time = datetime.combine(current_day, parsed)
-                        if slot_time < now or slot_time > end_at:
-                            continue
-                        before = conn.total_changes
-                        conn.execute(
-                            """
-                            INSERT OR IGNORE INTO publish_slots (
-                                store_id, account_id, account_name, scheduled_for, schedule_status, created_at, updated_at
-                            ) VALUES (?, ?, ?, ?, '待排期', ?, ?)
-                            """,
-                            (
-                                str(account["store_id"] or ""),
-                                str(account["account_id"] or ""),
-                                str(account["account_name"] or ""),
-                                slot_time.strftime("%Y-%m-%d %H:%M:%S"),
-                                self._now_text(),
-                                self._now_text(),
-                            ),
+                account_bindings = bindings_by_account.get(
+                    str(account["account_id"] or ""), []
+                )
+                if account_bindings:
+                    # Dual-channel accounts: each binding owns its schedule
+                    # windows and channel stamp (rows come from the account
+                    # sheet, one row per channel).
+                    windows = [
+                        (
+                            [
+                                str(b["publish_time_1"] or "").strip(),
+                                str(b["publish_time_2"] or "").strip(),
+                                str(b["publish_time_3"] or "").strip(),
+                            ],
+                            str(b["publish_channel"] or ""),
                         )
-                        if conn.total_changes > before:
-                            created += 1
-                    current_day += timedelta(days=1)
+                        for b in account_bindings
+                    ]
+                else:
+                    windows = [
+                        (
+                            [
+                                str(account["publish_time_1"] or "").strip(),
+                                str(account["publish_time_2"] or "").strip(),
+                                str(account["publish_time_3"] or "").strip(),
+                            ],
+                            "",
+                        )
+                    ]
+                for times, window_channel in windows:
+                    current_day = now.date()
+                    final_day = end_at.date()
+                    while current_day <= final_day:
+                        for hhmm in times:
+                            parsed = self._parse_hhmm(hhmm)
+                            if parsed is None:
+                                continue
+                            slot_time = datetime.combine(current_day, parsed)
+                            if slot_time < now or slot_time > end_at:
+                                continue
+                            # Backfill legacy slots at this window that predate
+                            # channel stamping (INSERT OR IGNORE skips them).
+                            conn.execute(
+                                """
+                                UPDATE publish_slots SET publish_channel_used = ?, updated_at = ?
+                                WHERE account_id = ?
+                                  AND scheduled_for LIKE ?
+                                  AND publish_channel_used IS NULL
+                                  AND schedule_status = '待排期'
+                                """,
+                                (
+                                    window_channel or str(account["publish_channel"] or ""),
+                                    self._now_text(),
+                                    str(account["account_id"] or ""),
+                                    "% " + parsed.strftime("%H:%M") + ":00",
+                                ),
+                            )
+                            before = conn.total_changes
+                            conn.execute(
+                                """
+                                INSERT OR IGNORE INTO publish_slots (
+                                    store_id, account_id, account_name, scheduled_for,
+                                    schedule_status, publish_channel_used, created_at, updated_at
+                                ) VALUES (?, ?, ?, ?, '待排期', ?, ?, ?)
+                                """,
+                                (
+                                    str(account["store_id"] or ""),
+                                    str(account["account_id"] or ""),
+                                    str(account["account_name"] or ""),
+                                    slot_time.strftime("%Y-%m-%d %H:%M:%S"),
+                                    window_channel or str(account["publish_channel"] or ""),
+                                    self._now_text(),
+                                    self._now_text(),
+                                ),
+                            )
+                            if conn.total_changes > before:
+                                created += 1
+                        current_day += timedelta(days=1)
         return created
 
     @staticmethod
@@ -1608,6 +1880,7 @@ class AutoPublishDB:
                 """
                 SELECT sm.canonical_script_key, sm.script_id, sm.store_id, sm.product_id, sm.content_family_key,
                        sm.short_video_title, va.local_file_path, va.video_source_type, va.video_source_value,
+                       va.media_kind, va.photo_manifest_json,
                        sm.source_record_id, sm.script_slot,
                        sm.script_source, sm.publish_purpose, sm.cart_enabled, sm.content_branch, sm.audio_mode,
                        sm.target_country, sm.script_text,
@@ -1621,7 +1894,10 @@ class AutoPublishDB:
                     ON psp.store_id = sm.store_id AND psp.product_id = sm.product_id
                 WHERE sm.store_id = ?
                   AND COALESCE(sm.short_video_title, '') <> ''
-                  AND COALESCE(va.local_file_path, '') <> ''
+                  AND (
+                      (va.media_kind = 'video' AND COALESCE(va.local_file_path, '') <> '')
+                      OR (va.media_kind = 'native_photo' AND COALESCE(va.photo_manifest_json, '') <> '')
+                  )
                   AND va.download_status = '下载成功'
                   AND va.publish_status = '待排期'
                   AND sm.canonical_script_key NOT LIKE 'manual:%'
@@ -1685,6 +1961,24 @@ class AutoPublishDB:
         candidates: List[PublishCandidate] = []
         for row in rows:
             context = _candidate_context(str(row["script_text"] or ""))
+            is_photo = row["media_kind"] == "native_photo"
+            video_value = (
+                str(row["video_source_value"] or "").strip()
+                if str(row["video_source_type"] or "").strip() == "link"
+                and str(row["video_source_value"] or "").strip().startswith(("http://", "https://"))
+                else str(row["local_file_path"] or "")
+            )
+            if is_photo:
+                try:
+                    media_paths = _photo_candidate_paths(
+                        str(row["photo_manifest_json"] or ""), str(row["script_text"] or ""),
+                        str(row["script_id"] or ""),
+                    )
+                except (ValueError, TypeError, OSError):
+                    # Incomplete/stale releases never become publish candidates.
+                    continue
+            else:
+                media_paths = [video_value]
             candidates.append(
                 PublishCandidate(
                     canonical_script_key=str(row["canonical_script_key"] or ""),
@@ -1694,12 +1988,9 @@ class AutoPublishDB:
                     content_family_key=str(row["content_family_key"] or ""),
                     short_video_title=str(row["short_video_title"] or ""),
                     local_file_path=str(row["local_file_path"] or ""),
-                    publish_video_value=(
-                        str(row["video_source_value"] or "").strip()
-                        if str(row["video_source_type"] or "").strip() == "link"
-                        and str(row["video_source_value"] or "").strip().startswith(("http://", "https://"))
-                        else str(row["local_file_path"] or "")
-                    ),
+                    publish_video_value="" if is_photo else video_value,
+                    content_type="photo" if is_photo else "video",
+                    media_paths=media_paths,
                     source_record_id=str(row["source_record_id"] or ""),
                     script_slot=str(row["script_slot"] or ""),
                     script_source=str(row["script_source"] or ""),
@@ -1715,6 +2006,7 @@ class AutoPublishDB:
                     script_text=str(row["script_text"] or ""),
                     recipe_id=context.get("recipe_id", ""),
                     theme_id=context.get("theme_id", ""),
+                    place=str(context.get("place") or ""),
                     source_product_id=(
                         context.get("source_product_id", "")
                         or str(row["product_id"] or "")
@@ -2021,6 +2313,168 @@ class AutoPublishDB:
                 )
         return updated
 
+    def upsert_publisher_profile(self, profile: Dict[str, Any]) -> int:
+        """写入发布渠道配置文件（API Key 只存环境变量名）。"""
+        profile_id = str(profile.get("profile_id") or "").strip()
+        if not profile_id:
+            return 0
+        now = self._now_text()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO publisher_profiles (
+                    profile_id, provider, workspace_name, api_key_env_name, cli_path,
+                    enabled, last_health_check_at, last_error, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(profile_id) DO UPDATE SET
+                    provider = excluded.provider,
+                    workspace_name = excluded.workspace_name,
+                    api_key_env_name = excluded.api_key_env_name,
+                    cli_path = excluded.cli_path,
+                    enabled = excluded.enabled,
+                    last_health_check_at = excluded.last_health_check_at,
+                    last_error = excluded.last_error,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    profile_id,
+                    str(profile.get("provider") or "").strip(),
+                    str(profile.get("workspace_name") or "").strip(),
+                    str(profile.get("api_key_env_name") or "").strip(),
+                    str(profile.get("cli_path") or "").strip(),
+                    1 if profile.get("enabled", True) else 0,
+                    profile.get("last_health_check_at") or None,
+                    profile.get("last_error") or None,
+                    now,
+                    now,
+                ),
+            )
+        return 1
+
+    def get_publisher_profile(self, profile_id: str) -> Optional[sqlite3.Row]:
+        profile_id = str(profile_id or "").strip()
+        if not profile_id:
+            return None
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT * FROM publisher_profiles WHERE profile_id = ?",
+                (profile_id,),
+            ).fetchone()
+
+    def list_publisher_profiles(self, *, provider: str = "") -> List[sqlite3.Row]:
+        with self._connect() as conn:
+            if provider:
+                return conn.execute(
+                    "SELECT * FROM publisher_profiles WHERE provider = ? ORDER BY profile_id",
+                    (str(provider).strip(),),
+                ).fetchall()
+            return conn.execute("SELECT * FROM publisher_profiles ORDER BY profile_id").fetchall()
+
+    def update_account_provider_info(
+        self,
+        account_id: str,
+        *,
+        connection_uid: str = "",
+        timezone: str = "",
+        content_video: Optional[bool] = None,
+        content_photo: Optional[bool] = None,
+        shop_video: Optional[bool] = None,
+        shop_photo: Optional[bool] = None,
+        direct_post: Optional[bool] = None,
+        delivery_mode: str = "",
+        health: str = "ok",
+        error: str = "",
+        profile_id: str = "",
+    ) -> int:
+        """把 CreatOK 连接发现/能力结果回写账号配置。"""
+        account_id = str(account_id or "").strip()
+        if not account_id:
+            return 0
+        now = self._now_text()
+        with self._connect() as conn:
+            return int(
+                conn.execute(
+                    """
+                    UPDATE account_configs
+                    SET provider_connection_uid = CASE
+                            WHEN ? = '' THEN provider_connection_uid ELSE ? END,
+                        account_timezone = CASE
+                            WHEN ? = '' THEN account_timezone ELSE ? END,
+                        content_video_capable = COALESCE(?, content_video_capable),
+                        content_photo_capable = COALESCE(?, content_photo_capable),
+                        shop_video_capable = COALESCE(?, shop_video_capable),
+                        shop_photo_capable = COALESCE(?, shop_photo_capable),
+                        direct_post_capable = COALESCE(?, direct_post_capable),
+                        delivery_mode = CASE
+                            WHEN ? = '' THEN delivery_mode ELSE ? END,
+                        publish_profile_id = CASE
+                            WHEN ? = '' THEN publish_profile_id ELSE ? END,
+                        provider_health = ?,
+                        provider_checked_at = ?,
+                        provider_error = ?,
+                        updated_at = ?
+                    WHERE account_id = ?
+                    """,
+                    (
+                        connection_uid, connection_uid,
+                        timezone, timezone,
+                        None if content_video is None else (1 if content_video else 0),
+                        None if content_photo is None else (1 if content_photo else 0),
+                        None if shop_video is None else (1 if shop_video else 0),
+                        None if shop_photo is None else (1 if shop_photo else 0),
+                        None if direct_post is None else (1 if direct_post else 0),
+                        delivery_mode, delivery_mode,
+                        profile_id, profile_id,
+                        str(health or "").strip(),
+                        now,
+                        str(error or "").strip()[:1000],
+                        now,
+                        account_id,
+                    ),
+                ).rowcount
+                or 0
+            )
+
+    def mark_account_provider_error(self, account_id: str, error_message: str) -> int:
+        """记录渠道侧连接/能力校验失败；已有 ok 状态不被降级。"""
+        account_id = str(account_id or "").strip()
+        if not account_id:
+            return 0
+        now = self._now_text()
+        with self._connect() as conn:
+            return int(
+                conn.execute(
+                    """
+                    UPDATE account_configs
+                    SET provider_health = CASE
+                            WHEN provider_health = 'ok' THEN provider_health ELSE 'error' END,
+                        provider_checked_at = ?,
+                        provider_error = ?,
+                        updated_at = ?
+                    WHERE account_id = ?
+                    """,
+                    (now, str(error_message or "").strip()[:1000], now, account_id),
+                ).rowcount
+                or 0
+            )
+
+    def get_creatok_connection_cache(self, account_id: str) -> Optional[sqlite3.Row]:
+        account_id = str(account_id or "").strip()
+        if not account_id:
+            return None
+        with self._connect() as conn:
+            return conn.execute(
+                """
+                SELECT account_id, publish_profile_id, provider_connection_uid, account_timezone,
+                       content_video_capable, content_photo_capable, shop_video_capable,
+                       shop_photo_capable, direct_post_capable, delivery_mode,
+                       provider_health, provider_checked_at, provider_error
+                FROM account_configs
+                WHERE account_id = ?
+                """,
+                (account_id,),
+            ).fetchone()
+
     def get_publish_slot_by_task_id(self, publish_task_id: str) -> Optional[sqlite3.Row]:
         task_id = str(publish_task_id or "").strip()
         if not task_id:
@@ -2243,6 +2697,35 @@ class AutoPublishDB:
             ).fetchone()
         return row is not None
 
+    def recent_place_conflict(self, account_id: str, place: str, target_time: datetime, hours: int = 24) -> bool:
+        """同账号同景点时间隔离：N 小时内已排/已发过同一景点则冲突。
+
+        place 存于 script_text JSON 的 context.place（OPV 桥接层写入）。
+        SQLite json_extract 在旧版本不可用时返回 0 行，等价于无冲突。
+        """
+        if not str(place or "").strip() or not str(account_id or "").strip():
+            return False
+        start_at = (target_time - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+        end_at = target_time.strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            try:
+                row = conn.execute(
+                    """
+                    SELECT 1
+                    FROM publish_slots ps
+                    INNER JOIN script_metadata sm ON sm.canonical_script_key = ps.canonical_script_key
+                    WHERE ps.account_id = ?
+                      AND json_extract(sm.script_text, '$.place') = ?
+                      AND ps.scheduled_for >= ? AND ps.scheduled_for <= ?
+                      AND ps.schedule_status IN ('已排期', '已发布')
+                    LIMIT 1
+                    """,
+                    (account_id, str(place).strip(), start_at, end_at),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return False
+        return row is not None
+
     def get_active_script_assignment(self, canonical_script_key: str, *, exclude_slot_id: int = 0) -> Optional[sqlite3.Row]:
         resolved_key = self._resolve_canonical_for_write(canonical_script_key=canonical_script_key)
         if not resolved_key:
@@ -2375,6 +2858,24 @@ class AutoPublishDB:
                 raise RuntimeError("远端已创建，但本地提交占位不存在，禁止重发")
             context = json.loads(row["submission_context_json"] or "{}")
             context["confirmed_task_id"] = str(task_id)
+            conn.execute(
+                "UPDATE publish_slots SET submission_context_json=?, updated_at=? WHERE slot_id=?",
+                (json.dumps(context, ensure_ascii=False, sort_keys=True), self._now_text(), int(slot_id)),
+            )
+
+    def merge_submission_context(self, slot_id: int, updates: Dict[str, Any]) -> None:
+        """Persist channel diagnostics while the submission reservation is held."""
+        if not isinstance(updates, dict) or not updates:
+            return
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT submission_context_json FROM publish_slots WHERE slot_id=? AND schedule_status='提交中'",
+                (int(slot_id),),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("提交占位不存在，无法保存发布诊断信息")
+            context = json.loads(row["submission_context_json"] or "{}")
+            context.update(updates)
             conn.execute(
                 "UPDATE publish_slots SET submission_context_json=?, updated_at=? WHERE slot_id=?",
                 (json.dumps(context, ensure_ascii=False, sort_keys=True), self._now_text(), int(slot_id)),
@@ -2642,6 +3143,8 @@ class AutoPublishDB:
         published_at: Optional[str] = None,
         error_message: str = "",
         canonical_script_key: str = "",
+        platform_post_id: Optional[str] = None,
+        platform_post_url: Optional[str] = None,
     ) -> None:
         now = self._now_text()
         resolved_key = self._resolve_canonical_for_write(
@@ -2652,10 +3155,14 @@ class AutoPublishDB:
             conn.execute(
                 """
                 UPDATE publish_slots
-                SET schedule_status = ?, error_message = ?, updated_at = ?
+                SET schedule_status = ?, error_message = ?, updated_at = ?,
+                    platform_post_id = COALESCE(NULLIF(?, ''), platform_post_id),
+                    platform_post_url = COALESCE(NULLIF(?, ''), platform_post_url),
+                    published_at = COALESCE(NULLIF(?, ''), published_at)
                 WHERE publish_task_id = ?
                 """,
-                (schedule_status, error_message, now, publish_task_id),
+                (schedule_status, error_message, now, platform_post_id, platform_post_url,
+                 published_at, publish_task_id),
             )
             conn.execute(
                 """
@@ -2732,7 +3239,8 @@ class AutoPublishDB:
             return conn.execute(
                 """
                 SELECT ps.slot_id, ps.publish_task_id, ps.scheduled_for, ps.account_id, ps.account_name,
-                       ps.schedule_status,
+                       ps.schedule_status, ps.platform_post_id, ps.platform_post_url, ps.published_at,
+                       va.media_kind,
                        ps.store_id, ps.canonical_script_key, ps.script_id, va.local_file_path,
                        sm.short_video_title, sm.product_id, sm.content_family_key, ps.bgm_json,
                        COALESCE(ac.publish_channel, '') AS publish_channel
@@ -2783,7 +3291,7 @@ class AutoPublishDB:
                 )
                 WHERE COALESCE(va.run_manager_record_id, '') <> ''
                   AND (
-                    COALESCE(sm.audio_mode, '') IN ('silent_source_platform_bgm', 'generated_nonvoice', 'clean_voice')
+                    COALESCE(sm.audio_mode, '') IN ('silent_source_platform_bgm', 'platform_auto_bgm', 'generated_nonvoice', 'clean_voice')
                     OR COALESCE(ps.bgm_json, '') <> ''
                   )
                 ORDER BY va.updated_at DESC, va.run_manager_record_id ASC

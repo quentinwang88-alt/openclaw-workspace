@@ -34,6 +34,12 @@ MANUAL_PUBLISH_FIELD_ALIASES: Dict[str, List[str]] = {
 }
 
 
+MANUAL_PUBLISH_CHANNELS: tuple[str, ...] = ("GeeLark", "NeoBund", "CreatOK")
+
+# 与 CreatOKPublishAdapter.ORGANIC_MAX_SCHEDULE_DAYS 对齐：CreatOK Organic 仅支持 60 秒~7 天排期。
+CREATOK_MAX_SCHEDULE_DAYS = 7
+
+
 MANUAL_PUBLISH_FIELD_SPECS: Sequence[Dict[str, Any]] = (
     {
         "name": "处理状态",
@@ -71,11 +77,25 @@ class ManualPublishRequest:
     canonical_script_key: str = ""
 
 
+def _ensure_publish_channel_options(client: Any, fields_by_name: Dict[str, Any]) -> int:
+    """发布渠道下拉缺渠道选项时补齐，保证运营能在表格里直接选 CreatOK。"""
+    field = fields_by_name.get("发布渠道")
+    if field is None or not str(getattr(field, "field_id", "") or "").strip():
+        return 0
+    options = [item for item in ((getattr(field, "property", None) or {}).get("options") or []) if isinstance(item, dict)]
+    names = {str(item.get("name") or "").strip() for item in options}
+    missing = [name for name in MANUAL_PUBLISH_CHANNELS if name not in names]
+    if not missing:
+        return 0
+    client.update_field(field.field_id, property={"options": options + [{"name": name} for name in missing]})
+    return len(missing)
+
+
 def ensure_manual_publish_fields(client: Any) -> Dict[str, int]:
-    existing = {item.field_name for item in client.list_fields()}
+    fields_by_name = {item.field_name: item for item in client.list_fields()}
     created = 0
     for spec in MANUAL_PUBLISH_FIELD_SPECS:
-        if spec["name"] in existing:
+        if spec["name"] in fields_by_name:
             continue
         client.create_field(
             field_name=spec["name"],
@@ -84,8 +104,18 @@ def ensure_manual_publish_fields(client: Any) -> Dict[str, int]:
             property=spec.get("property"),
         )
         created += 1
-        existing.add(spec["name"])
-    return {"created_fields": created, "existing_fields": len(existing)}
+        fields_by_name[spec["name"]] = spec
+    channel_options_added = 0
+    try:
+        channel_options_added = _ensure_publish_channel_options(client, fields_by_name)
+    except Exception:
+        # 补选项失败不阻塞同步：飞书写入新渠道值时也会自动补选项。
+        channel_options_added = 0
+    return {
+        "created_fields": created,
+        "existing_fields": len(fields_by_name),
+        "channel_options_added": channel_options_added,
+    }
 
 
 def _text(value: Any) -> str:
@@ -242,6 +272,34 @@ def _write_record_status(
         client.update_record_fields(record_id, fields)
 
 
+def _creatok_request_block(
+    product_id: str,
+    scheduled_for: datetime,
+    *,
+    now: Optional[datetime] = None,
+) -> str:
+    """CreatOK 渠道预校验：不满足时返回原因，记录走「待补充」自动重试，而不是硬失败。"""
+    if str(product_id or "").strip():
+        return "CreatOK 渠道暂不支持带货任务：请清空产品ID，或改用 NeoBund 渠道"
+    current = now or datetime.now()
+    if scheduled_for <= current:
+        return f"CreatOK 排期时间已过期：{scheduled_for.strftime('%Y-%m-%d %H:%M')}，请更新发布时间"
+    limit = current + timedelta(days=CREATOK_MAX_SCHEDULE_DAYS)
+    if scheduled_for > limit:
+        return (
+            f"CreatOK 排期窗口最长 {CREATOK_MAX_SCHEDULE_DAYS} 天："
+            f"{scheduled_for.strftime('%Y-%m-%d %H:%M')} 超出窗口，进入窗口后会自动创建"
+        )
+    return ""
+
+
+def _is_creatok_window_deferral(exc: BaseException) -> bool:
+    """CreatOK 窗口校验失败属于「暂不能提交」而非任务失败，保留待补充等下一轮自动重试。"""
+    from app.creatok_publish import CreatOKSubmissionNotReadyError
+
+    return isinstance(exc, CreatOKSubmissionNotReadyError) and "排期窗口" in str(exc)
+
+
 def _request_from_record(
     record: Any,
     mapping: Dict[str, Optional[str]],
@@ -287,6 +345,12 @@ def _request_from_record(
     if channel in {"手动", "暂停"}:
         return None, f"发布渠道不可用于自动创建任务：{channel}"
 
+    product_id = _text(fields.get(mapping.get("product_id")))
+    if channel == "CreatOK":
+        block_reason = _creatok_request_block(product_id, scheduled_for, now=now)
+        if block_reason:
+            return None, block_reason
+
     script_id = _text(fields.get(mapping.get("script_id"))) or f"manual_{record.record_id}"
     canonical_script_key = f"manual:{record.record_id}"
     return (
@@ -300,7 +364,7 @@ def _request_from_record(
             scheduled_for=scheduled_for,
             publish_channel=channel,
             mark_ai=_parse_ai_marker(fields.get(mapping.get("mark_ai"))),
-            product_id=_text(fields.get(mapping.get("product_id"))),
+            product_id=product_id,
             product_title=_text(fields.get(mapping.get("product_title"))),
             script_id=script_id,
             canonical_script_key=canonical_script_key,
@@ -319,6 +383,8 @@ def _create_task(
         raise RuntimeError("人工任务指定 NeoBund，但当前发布模式是 GeeLark；请使用 --publish-mode auto 或 neobund")
 
     create_for_channel = getattr(publisher, "create_scheduled_task_for_channel", None)
+    if request.publish_channel == "CreatOK" and not callable(create_for_channel):
+        raise RuntimeError("人工任务指定 CreatOK，但当前发布模式不支持按渠道路由；请使用 --publish-mode auto")
     kwargs = {
         "account_id": request.account_id,
         "video_path": local_file_path,
@@ -403,6 +469,7 @@ def sync_manual_publish_requests(
         "validation_failed": 0,
         "download_failed": 0,
         "create_failed": 0,
+        "create_deferred": 0,
         "create_retried": 0,
         "created": 0,
         "conflicted": 0,
@@ -576,6 +643,12 @@ def sync_manual_publish_requests(
             if not publish_task_id:
                 raise RuntimeError("发布平台未返回任务ID")
         except Exception as exc:
+            if _is_creatok_window_deferral(exc):
+                stats["create_deferred"] += 1
+                error = f"等待 CreatOK 排期窗口：{exc}"
+                db.mark_manual_publish_request(record_id=request.record_id, request_status="待创建", error_message=error)
+                _write_record_status(client, request.record_id, status="待补充", error=error, script_id=script_id)
+                continue
             stats["create_failed"] += 1
             error = f"创建人工发布任务失败：{exc}"
             db.mark_manual_publish_request(record_id=request.record_id, request_status="发布失败", error_message=error)

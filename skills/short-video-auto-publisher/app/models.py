@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
@@ -47,6 +47,12 @@ class AccountConfig:
     nurture_daily_count: int = 2
     nurture_only: bool = False
     initialization_enabled: bool = False
+    publish_profile_id: str = ""
+    provider_connection_uid: str = ""
+    account_timezone: str = ""
+    delivery_mode: str = ""
+    provider_health: str = ""
+    provider_checked_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -77,6 +83,9 @@ class PublishCandidate:
     audio_mode: str = ""
     schedule_strategy: str = "普通"
     priority_updated_at: str = ""
+    place: str = ""
+    content_type: str = "video"
+    media_paths: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -97,3 +106,27 @@ class PublishTaskStatus:
     result: str
     published_at: Optional[str] = None
     error_message: str = ""
+    platform_post_id: Optional[str] = None
+    platform_post_url: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class PublishRequest:
+    """渠道无关的统一发布请求，多图片/图文与视频共用。"""
+
+    account_id: str
+    content_type: str          # video | photo
+    commerce_type: str         # organic | shop
+    media_paths: list[str]
+    title: str
+    publish_at: datetime
+    timezone: str
+    script_id: str
+    description: str = ""
+    auto_add_music: bool = False
+    product_id: str = ""
+    product_title: str = ""    # 兼容旧渠道转发
+    ref_video_id: str = ""
+    mark_ai: Optional[bool] = None
+    delivery_mode: str = ""    # direct_post | inbox
+    music_selection: Optional[dict] = None

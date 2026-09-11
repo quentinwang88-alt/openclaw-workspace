@@ -1,0 +1,16 @@
+{
+  "_comment": "CreatOK tiktok_shop_video 官方 envelope 契约（2026-09-05 从正式账号 yoursbeauty.my 采集，CLI v0.13.0）。该 envelope 被 submit 接受并创建 job_id=349753（precheck 拒绝，未发布）。字段仅展示契约，不含真实提交数据之外的敏感信息。",
+  "kind": "tiktok_shop_video",
+  "connection_uid": "conn_ts_4zDg4wT0Wd9L82ysizOb66",
+  "idempotency_key": "probe-layer5-0001",
+  "timezone": "GMT+8",
+  "media": {
+    "file_id": "v14d00g50024dadpr0f0g65u58m5rpo0",
+    "file_kind": "video_file"
+  },
+  "provider_options": {
+    "product_id": "1736519949980763739",
+    "product_title": "CreatOK fixture test ring",
+    "title": "CreatOK fixture sample"
+  }
+}

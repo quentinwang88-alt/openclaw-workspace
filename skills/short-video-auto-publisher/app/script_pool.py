@@ -55,6 +55,8 @@ def publishing_product_id(candidate: Any) -> str:
         product_id = str(getattr(candidate, "platform_product_id", "") or "").strip()
         if not re.fullmatch(r"[0-9]{10,30}", product_id):
             raise ValueError("明确挂车的总库脚本缺少有效平台商品映射；请填写平台商品 ID 后重试发布")
+    if not product_id:
+        raise ValueError("明确挂车的视频缺少有效平台商品 ID；请补充商品映射后重试发布")
     reject_internal_product_id(product_id)
     return product_id
 

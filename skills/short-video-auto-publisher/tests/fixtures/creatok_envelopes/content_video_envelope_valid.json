@@ -1,0 +1,19 @@
+{
+  "_comment": "CreatOK tiktok_content_video 官方 envelope 契约（2026-09-05 实测，CLI v0.13.0）。media.object_key 用 assets create 返回的裸对象键（uploads/...）；assets list 的签名 media_url 只是下载视图，用于提交会报 asset_not_accessible（实测 422）。排期字段为 schedule 对象：at=毫秒（绝对 UTC），timezone 仅 GMT+8/EST/PST/BRT/CST（IANA 需映射，schedule.at 决定实际时刻）。post_mode 变体仅 DIRECT_POST。",
+  "kind": "tiktok_content_video",
+  "connection_uid": "conn_tc_3cWjrL84udzEWMsixHyspt",
+  "idempotency_key": "probe-org-l4",
+  "media": {
+    "object_key": "uploads/videos/k0b14Ru6nnpg0dXZ47QJg59tmrbtp5rA/1788583431115_pniqr6e2ru8.mp4",
+    "file_name": "creatok_fixture_test2.mp4"
+  },
+  "provider_options": {
+    "post_mode": "DIRECT_POST",
+    "privacy_level": "PUBLIC_TO_EVERYONE",
+    "disable_comment": false,
+    "disable_duet": false,
+    "disable_stitch": false,
+    "brand_content_toggle": false,
+    "brand_organic_toggle": false
+  }
+}

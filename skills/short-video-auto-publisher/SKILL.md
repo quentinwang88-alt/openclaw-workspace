@@ -116,10 +116,11 @@ python3 /Users/likeu3/.openclaw/workspace/skills/short-video-auto-publisher/run_
 
 ## 发布规则
 
-当前只保留两条硬规则：
+当前只保留三条硬规则：
 
 - 同账号同产品 24 小时不重复
 - 同店铺同内容家族 48 小时不重复
+- 账号管理表「每日养号条数」为硬性封顶：账号当天已排/已发的养号内容达到条数后，当天不再分配养号内容（仅养号账号的后续槽位留待明日，带货内容不受影响；账号初始化期除外）。每天实际条数仍由「发布时间1/2/3」的个数决定生成多少槽位。
 
 调度方式：
 
@@ -186,6 +187,15 @@ python3 /Users/likeu3/.openclaw/workspace/skills/short-video-auto-publisher/scri
 ```
 
 NeoBund 创建的任务 ID 会写成 `neobund:<taskId>`，用于和历史 GeeLark 任务区分。默认 `Publish Directly`；需要预检时再加 `--neobund-precheck`。
+
+## 人工发布通道（人工发布请求表）
+
+运营在「人工发布请求表」（wiki `WtYOwvKGUivSLfkwiq0cB1SFnwb` / 表 `tblNoxxGk7IRuuIP`）填行即可发起人工指定发布：填 店铺、计划发布账号、短视频上传（附件）、短视频标题、发布时间，并用「发布渠道」选 `NeoBund` / `CreatOK` / `GeeLark`；「处理状态」留空或 `待创建` 即会进入处理。
+
+- 入口：`run-all --manual-publish-only --publish-mode auto`（按需立即跑）；生产 launchd 每小时的 `run-all --publish-mode auto` 也会顺带处理该表。
+- CreatOK 渠道约束（不满足会写「待补充」并自动重试，不会硬失败）：仅支持 Organic 非带货，`产品ID` 必须留空；排期窗口 60 秒 ~ 7 天，超窗的行进入窗口后会自动创建。
+- CreatOK 提交成功后任务 ID 写成 `creatok:<jobId>`，结果回查按前缀路由，发布结果照常回写表格。
+- 单渠道模式（如 `--publish-mode neobund`）不支持按渠道路由：指定 `CreatOK` 的行会直接判失败并提示改用 auto，不会静默发错渠道。
 
 ## 推荐触发说法
 
