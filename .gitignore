@@ -172,3 +172,27 @@ memory/dreaming/
 # 外部卷符号链接
 # =========================
 skills/tiktok-fashion-image-pack/output
+
+# =========================
+# 运行态产物与实验数据（不入库）
+# =========================
+# 生成图片与素材包（体量大，可重新生成）
+outputs/
+shared/data/
+# 工作区引导状态（机器本地）
+openclaw-workspace-state.json
+# runtime 下的烟雾测试/审计/批次产物（保留 runtime/*.py 工具脚本）
+runtime/opv-*/
+runtime/remake-reference-audit-*/
+runtime/wig-chain-audit-*/
+runtime/THFZ01_batch*
+runtime/product_list_*.xlsx
+# 结构路由实验产物与报告（保留已跟踪的分析 .py）
+structure_router_test/expression_v2_fixed_b/run_[0-9]*/
+structure_router_test/reality_reference_*/
+# 该目录内有已跟踪的分析脚本，需显式放行（git 不会进入被忽略的目录）
+!structure_router_test/reality_reference_v17_batch_4x4/
+structure_router_test/reality_reference_v17_batch_4x4/*
+!structure_router_test/reality_reference_v17_batch_4x4/analyze_v17_batch.py
+structure_router_test/*.md
+structure_router_test/*.json
