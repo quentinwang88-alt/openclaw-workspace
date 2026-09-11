@@ -124,6 +124,26 @@ class OriginalBatchSourceTest(unittest.TestCase):
         )
         self.assertEqual(tasks, [])
 
+    def test_long_remake_with_blank_video_format_is_not_sent_to_short_worker(self):
+        mapping = resolve_original_batch_field_mapping(
+            [
+                "脚本ID", "产品编码", "短视频提示词", "进入生产",
+                "脚本来源", "视频时长", "视频形态（系统）",
+            ]
+        )
+        tasks = build_original_batch_sync_tasks(
+            [TableRecord("rec", {
+                "脚本ID": "vs_test",
+                "产品编码": "1737141103233042426",
+                "短视频提示词": "这是一条41秒复刻提示词",
+                "进入生产": True,
+                "脚本来源": "视频复刻",
+                "视频时长": 41,
+            })],
+            mapping,
+        )
+        self.assertEqual(tasks, [])
+
     def test_required_strategy_does_not_block_without_user_request(self):
         fields = [
             "脚本ID", "产品编码", "产品图片", "视频生成提示词", "进入生产",

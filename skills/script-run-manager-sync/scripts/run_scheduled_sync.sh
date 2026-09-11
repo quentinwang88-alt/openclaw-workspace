@@ -24,6 +24,7 @@ fi
 if {
   /usr/bin/python3 "$WORKDIR/skills/script-run-manager-sync/run_pipeline.py" --mode scheduled
   /usr/bin/python3 "$WORKDIR/skills/script-run-manager-sync/run_pipeline.py" --mode scheduled --source-kind manual
+  /usr/bin/python3 "$WORKDIR/skills/script-run-manager-sync/run_pipeline.py" --mode scheduled --source-kind original-batch --limit 20
 } >"$TMP_LOG" 2>&1; then
   if ! grep -Eq "待新增脚本数: [1-9]|输入校验失败源记录数: [1-9]" "$TMP_LOG"; then
     exit 0

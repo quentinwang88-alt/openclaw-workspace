@@ -14,6 +14,7 @@ from core.sync import (
     normalize_video_duration,
     resolve_field_mapping,
 )
+from core.production_route import ProductionRoute, classify_production_route
 
 
 ORIGINAL_BATCH_SOURCE_FIELD_ALIASES: Dict[str, List[str]] = {
@@ -169,13 +170,11 @@ def build_original_batch_sync_tasks(
         if record_id and record.record_id != record_id:
             continue
         fields = record.fields
-        video_format = (
-            normalize_text(fields.get(mapping.get("video_format")))
-            if mapping.get("video_format") else ""
-        )
-        # Long-form rows are executed by the isolated H3 workflow and must
-        # never be copied into the stable short-video run-manager table.
-        if video_format == "长视频":
+        # Every shared-pool row has exactly one production owner.  In particular,
+        # a long remake must not fall through merely because its historical
+        # 视频形态 field is blank.
+        route = classify_production_route(fields, mapping)
+        if route.route != ProductionRoute.SHORT_VIDEO_RUN_MANAGER:
             continue
         enabled = normalize_checkbox(fields.get(mapping.get("sync_enabled"))) if mapping.get("sync_enabled") else False
         if not enabled:
