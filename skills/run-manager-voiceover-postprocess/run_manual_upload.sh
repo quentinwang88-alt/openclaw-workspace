@@ -46,4 +46,4 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "$ENGINE_DIR"
-PYTHONPATH=. python3 scripts/run_manual_upload_voiceover.py "${ARGS[@]}"
+PYTHONPATH=".:${PYTHONPATH:-}" python3 scripts/run_manual_upload_voiceover.py "${ARGS[@]}"
