@@ -8,7 +8,7 @@ import sys
 import tempfile
 import unittest
 
-from PIL import Image
+from PIL import Image, ImageFont
 
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 if str(PACKAGE_ROOT) not in sys.path:
@@ -17,7 +17,7 @@ if str(PACKAGE_ROOT) not in sys.path:
 from domain import statuses
 from domain.models import QualityReview, TaskRevision
 from services.photo_package import (
-    NativePhotoProductionFlow, PhotoPackageExporter, PhotoPackageError,
+    NativePhotoProductionFlow, PhotoPackageExporter, PhotoPackageError, _draw_overlay,
     normalize_photo_template,
 )
 from services.release_gate import (
@@ -145,6 +145,17 @@ class PhotoPackageTest(unittest.TestCase):
         root = self.root / "outputs"
         flow = NativePhotoProductionFlow(self.repo, None, output_root=root)
         self.assertEqual(flow.output_root, root)
+
+    def test_exporter_accepts_four_page_travel_contract(self):
+        self.repo.task.requested_shot_count = 4
+        specs = [
+            {"index": index, "layout": "single", "source_slots": [index]}
+            for index in range(1, 5)
+        ]
+        manifest = PhotoPackageExporter(
+            self.repo, output_root=self.root / "outputs-four"
+        ).export("photo-task", template=self.template, slide_specs=specs)
+        self.assertEqual(len(manifest["slides"]), 4)
 
     def _export_and_release(self):
         package = PhotoPackageExporter(
@@ -313,6 +324,45 @@ class PhotoPackageTest(unittest.TestCase):
             "photo-task", template=layout, slide_specs=specs,
         )
         self.assertEqual(len(manifest["slides"]), 5)
+
+    def test_travel_card_v3_has_safe_offsets_and_large_cover(self):
+        import json
+        layout = json.loads(
+            (PACKAGE_ROOT / "config/layouts/PHOTO_TRAVEL_CARD_V3.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        normalized = normalize_photo_template(layout)
+        self.assertEqual(normalized["template_version"], 3)
+        self.assertEqual(normalized["cover_font_size"], 64)
+        self.assertEqual(normalized["top_offset"], 120)
+        self.assertEqual(normalized["bottom_offset"], 260)
+
+    def test_split_last_slide_uses_cta_font_size(self):
+        from unittest.mock import patch
+
+        image = Image.new("RGB", (1080, 1920), "white")
+        requested_sizes = []
+
+        def tracking_font(_template, *, required, size=None):
+            requested_sizes.append(size)
+            return ImageFont.truetype(
+                "/System/Library/Fonts/Supplemental/Arial Unicode.ttf", size=size
+            )
+
+        template = {
+            "font_size": 42, "detail_font_size": 38, "cta_font_size": 40,
+            "min_font_size": 28, "padding_x": 28, "padding_y": 22,
+            "top_offset": 120, "bottom_offset": 260,
+            "split_last_line_to_bottom": True,
+        }
+        with patch("services.photo_package._font", side_effect=tracking_font):
+            _draw_overlay(
+                image, "D look\nPick A B C or D?", template,
+                index=5, cover_index=1, total=5,
+            )
+        self.assertIn(38, requested_sizes)
+        self.assertIn(40, requested_sizes)
 
     def test_rejects_cover_index_outside_ordered_slides(self):
         template = {**self.template, "cover_index": 6}

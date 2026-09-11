@@ -73,6 +73,7 @@
     "persona_authority": "original_persona_template_library",
     "allowed_persona_refs": [
       "TH_APPAREL_REAL_02_001",
+      "TH_APPAREL_REAL_03_001",
       "TH_APPAREL_REAL_01_001",
       "TH_APPAREL_SELECTED_01_001",
       "TH_APPAREL_SELECTED_02_001",

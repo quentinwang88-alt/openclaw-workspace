@@ -79,7 +79,8 @@ def validate_variables(schema: Mapping[str, Any], values: Mapping[str, Any]) -> 
     return errors
 
 
-def validate_copy(copy_block: Any, *, allow_placeholders: bool = False) -> list[str]:
+def validate_copy(copy_block: Any, *, allow_placeholders: bool = False,
+                  expected_slide_count: int = 5) -> list[str]:
     if not isinstance(copy_block, Mapping):
         return ["copy must be an object"]
     errors = placeholder_errors(copy_block, allow_labels=allow_placeholders)
@@ -90,8 +91,11 @@ def validate_copy(copy_block: Any, *, allow_placeholders: bool = False) -> list[
     if not isinstance(hashtags, list) or not all(isinstance(v, str) and v.startswith("#") and len(v) > 1 for v in hashtags):
         errors.append("copy.hashtags must be a list of hashtag strings")
     texts = copy_block.get("slide_texts")
-    if not isinstance(texts, list) or len(texts) != 5 or not all(isinstance(v, str) and v.strip() for v in texts):
-        errors.append("localized copy.slide_texts must contain five strings")
+    if (not isinstance(texts, list) or len(texts) != expected_slide_count
+            or not all(isinstance(v, str) and v.strip() for v in texts)):
+        errors.append(
+            f"localized copy.slide_texts must contain {expected_slide_count} strings"
+        )
     title = copy_block.get("title")
     if isinstance(title, str) and _utf16_units(title.strip()) > TIKTOK_PHOTO_TITLE_MAX_UTF16:
         errors.append(f"copy.title exceeds TikTok's {TIKTOK_PHOTO_TITLE_MAX_UTF16} UTF-16 unit limit")
@@ -115,6 +119,9 @@ def validate_execution_profiles(spec: Mapping[str, Any], *, require_profiles: bo
     profiles = spec.get("execution_profiles")
     if not require_profiles and requirements is None and profiles is None:
         return []  # Legacy explicit requests remain readable.
+    # Only the explicit mx_wig_choice_v1 flow freezes four-slide copy; every
+    # other spec keeps the five-slide default untouched.
+    expected_slides = 4 if spec.get("execution_flow") == "mx_wig_choice_v1" else 5
     if not isinstance(requirements, Mapping):
         return ["asset_requirements must be an object"]
     if not isinstance(requirements.get("required_tags", {}), Mapping):
@@ -166,5 +173,8 @@ def validate_execution_profiles(spec: Mapping[str, Any], *, require_profiles: bo
                     errors.append(f"profile {identity} copy_id must be non-empty and unique")
                 else:
                     copy_ids.add(copy_id)
-                errors.extend(validate_copy(variant.get("copy"), allow_placeholders=True))
+                errors.extend(validate_copy(
+                    variant.get("copy"), allow_placeholders=True,
+                    expected_slide_count=expected_slides,
+                ))
     return errors

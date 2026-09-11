@@ -14,7 +14,10 @@ if str(PACKAGE_ROOT) not in sys.path:
 from config.loader import load_board_layouts, load_content_recipes
 from domain.photo_contracts import validate_variables, validate_execution_profiles
 from services.asset_set_service import AssetSetService, AssetSetError
-from services.photo_request_factory import PhotoRequestFactory, PhotoRequestError, validate_frozen_request
+from services.photo_request_factory import (
+    PhotoRequestFactory, PhotoRequestError, apply_travel_single_cover,
+    fingerprint, validate_frozen_request,
+)
 from services.photo_planner import PhotoReusePlannerService
 from test_photo_planner import PlannerRepo, PACKAGE_ROOT
 
@@ -70,6 +73,48 @@ class FactoryTest(unittest.TestCase):
         self.assertIn("content_card", first[0])
         with self.assertRaisesRegex(PhotoRequestError, "整批未冻结"):
             self.build(2)
+
+    def test_travel_first_look_becomes_cover_without_duplicate_detail_page(self):
+        request = self.build()[0]
+        request["recipe_id"] = "PHOTO_TH_TRAVEL_OUTFIT_V2"
+        snapshot = dict(request["recipe_snapshot"])
+        snapshot["recipe_id"] = request["recipe_id"]
+        request["recipe_snapshot"] = snapshot
+        request["request_sha256"] = fingerprint({
+            key: value for key, value in request.items() if key != "request_sha256"
+        })
+
+        selected = apply_travel_single_cover(request, {
+            "role": "look_c", "source": "human_presentation_observation",
+            "reason_zh": "穿搭清楚，环境适合封面",
+        })
+
+        self.assertEqual(selected["content_card"]["pages"][0]["layout"], "single")
+        self.assertEqual(len(selected["content_card"]["pages"]), 4)
+        self.assertEqual(
+            selected["content_card"]["pages"][0]["source_roles"], ["look_a"]
+        )
+        self.assertEqual(selected["cover_selection"]["role"], "look_a")
+        self.assertEqual(selected["cover_selection"]["source"], "fixed_first_look")
+        self.assertEqual(
+            [page["source_roles"] for page in selected["content_card"]["pages"]],
+            [["look_a"], ["look_b"], ["look_c"], ["look_d"]],
+        )
+        self.assertEqual(len(selected["copy"]["slide_texts"]), 4)
+        validate_frozen_request(selected)
+
+    def test_travel_cover_invalid_role_falls_back_and_non_travel_is_unchanged(self):
+        request = self.build()[0]
+        unchanged = apply_travel_single_cover(request, {"role": "look_c"})
+        self.assertEqual(unchanged, request)
+
+        request["recipe_id"] = "PHOTO_TH_TRAVEL_OUTFIT_V2"
+        snapshot = dict(request["recipe_snapshot"])
+        snapshot["recipe_id"] = request["recipe_id"]
+        request["recipe_snapshot"] = snapshot
+        selected = apply_travel_single_cover(request, {"role": "missing"})
+        self.assertEqual(selected["cover_selection"]["role"], "look_a")
+        self.assertEqual(selected["cover_selection"]["source"], "fixed_first_look")
 
     def test_latest_enabled_is_chosen_and_no_fallback_to_old_match(self):
         old = self.repo.asset_set
@@ -165,7 +210,8 @@ class FactoryTest(unittest.TestCase):
 class ShippedProfileTest(unittest.TestCase):
     def test_shipped_recipes_have_valid_profiles_copy_and_explicit_visual_keys(self):
         recipes = [r for r in load_content_recipes() if r.recipe_id.startswith("PHOTO_")]
-        self.assertEqual(len(recipes), 11)
+        # 2026-09-10: +1 shipped recipe = PHOTO_MX_PICK_YOUR_HAIR_V2 (mx_wig_choice_v1).
+        self.assertEqual(len(recipes), 12)
         for recipe in recipes:
             with self.subTest(recipe=recipe.recipe_id):
                 self.assertEqual(validate_execution_profiles(recipe.recipe_spec_json), [])
@@ -176,9 +222,13 @@ class ShippedProfileTest(unittest.TestCase):
         result = preflight(PACKAGE_ROOT / "config")
         self.assertEqual(result["errors"], [])
         self.assertEqual(result["external_writes"], 0)
-        self.assertEqual(result["recipe_count"], 11)
-        self.assertEqual(result["profile_count"], 27)
+        self.assertEqual(result["recipe_count"], 12)
+        self.assertEqual(result["profile_count"], 28)
         self.assertIn("PHOTO_MX_FACE_SHAPE_MATCH_V1", result["needs_asset"])
+        # The MX wig recipe ships without a seeded MX_WIG_CHOICE_GEN set;
+        # per-row supply generates and qualifies its assets, so it lands in
+        # needs_asset like the other unseeded MX recipes.
+        self.assertIn("PHOTO_MX_PICK_YOUR_HAIR_V2", result["needs_asset"])
 
 
 if __name__ == "__main__":

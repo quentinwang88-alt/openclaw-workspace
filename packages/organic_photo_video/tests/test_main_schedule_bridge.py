@@ -160,6 +160,20 @@ class MainScheduleBridgeTest(unittest.TestCase):
         self.assertEqual(result["store_id"], "MXJF01")
         self.assertEqual(self.db.get_script_metadata("opv:task-1")["product_type"], "wig")
 
+    def test_explicit_photo_store_is_frozen_in_publish_context(self):
+        result = MainScheduleBridge(self.repo, db=self.db).enqueue_task(
+            "task-1", store_id="THFZ01"
+        )
+        context = json.loads(self.db.get_script_metadata("opv:task-1")["script_text"])
+        self.assertEqual(result["store_id"], "THFZ01")
+        self.assertEqual(context["publish_store_id"], "THFZ01")
+
+    def test_unknown_explicit_store_fails_closed(self):
+        with self.assertRaisesRegex(MainScheduleBridgeError, "未知的图文发布店铺"):
+            MainScheduleBridge(self.repo, db=self.db).enqueue_task(
+                "task-1", store_id="UNKNOWN"
+            )
+
     def test_publish_context_prefers_frozen_product_id_used_by_render(self):
         self.task.product_id = "173661-wrong"
         self.task.product_snapshot_json["product"].update({

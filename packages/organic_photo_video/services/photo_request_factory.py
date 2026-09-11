@@ -12,6 +12,7 @@ from domain.photo_contracts import validate_copy, validate_execution_profiles, v
 from services.asset_set_service import AssetSetService, AssetSetError, validate_asset_set
 from services.photo_copy import resolve_photo_copy
 from services.photo_content import freeze_content_card
+from services.photo_wig_flow import recipe_is_mx_wig_choice, request_is_mx_wig_choice
 
 
 class PhotoRequestError(ValueError):
@@ -24,6 +25,13 @@ def fingerprint(value: Any) -> str:
 
 
 def validate_frozen_request(request: Mapping[str, Any]) -> None:
+    if request_is_mx_wig_choice(request):
+        # Explicit MX dispatch: wig requests validate in the wig module with
+        # four-page/hair-evidence semantics; every other request keeps the
+        # original validation below unchanged.
+        from services.photo_wig_planner import validate_mx_wig_frozen_request
+        validate_mx_wig_frozen_request(request)
+        return
     unsigned = {key: value for key, value in request.items() if key != "request_sha256"}
     if request.get("request_sha256") != fingerprint(unsigned):
         raise PhotoRequestError("frozen photo request fingerprint mismatch")
@@ -31,7 +39,11 @@ def validate_frozen_request(request: Mapping[str, Any]) -> None:
         raise PhotoRequestError("unsupported frozen photo request schema")
     recipe = ContentRecipe.from_row(request["recipe_snapshot"])
     errors = validate_variables(recipe.recipe_spec_json.get("variables_schema") or {}, request.get("variables"))
-    errors += validate_copy(request.get("copy"))
+    card_pages = list((request.get("content_card") or {}).get("pages") or [])
+    expected_slides = len(card_pages) if card_pages else 5
+    errors += validate_copy(
+        request.get("copy"), expected_slide_count=expected_slides,
+    )
     if errors:
         raise PhotoRequestError("; ".join(errors))
     if (recipe.recipe_id != request.get("recipe_id")
@@ -47,6 +59,62 @@ def validate_frozen_request(request: Mapping[str, Any]) -> None:
             raise PhotoRequestError("frozen content card or layout mismatch")
 
 
+def apply_travel_single_cover(
+    request: Mapping[str, Any], recommendation: Mapping[str, Any] = None,
+) -> dict[str, Any]:
+    """Make Look A the cover and remove its duplicate detail page."""
+    result = copy.deepcopy(dict(request))
+    if not str(result.get("recipe_id") or "").startswith("PHOTO_TH_TRAVEL"):
+        return result
+    recipe = ContentRecipe.from_row(result["recipe_snapshot"])
+    asset_set = AssetSet.from_row(result["asset_snapshot"])
+    available_roles = {
+        str(item.get("role") or "")
+        for item in asset_set.manifest_json.get("assets") or []
+    }
+    cover_role = "look_a"
+    if cover_role not in available_roles:
+        raise PhotoRequestError("旅行单图封面缺少 look_a..look_d 素材")
+
+    card = copy.deepcopy(dict(result.get("content_card") or {}))
+    pages = list(card.get("pages") or [])
+    if card.get("travel_first_look_cover") is True and len(pages) == 4:
+        return result
+    if len(pages) != 5:
+        raise PhotoRequestError("旅行单图封面需要完整五页内容卡")
+    cover = {
+        **dict(pages[0]),
+        "purpose_zh": "旅行主题首套穿搭封面",
+        "layout": "single",
+        "source_roles": [cover_role],
+    }
+    # Original page 2 is Look A again. The cover now performs both jobs.
+    card["pages"] = [cover] + [
+        {**dict(page), "index": index}
+        for index, page in enumerate(pages[2:], 2)
+    ]
+    card["travel_first_look_cover"] = True
+    copy_block = copy.deepcopy(dict(result.get("copy") or {}))
+    slide_texts = list(copy_block.get("slide_texts") or [])
+    if len(slide_texts) != 5:
+        raise PhotoRequestError("旅行首套封面需要完整五条原始排版文案")
+    copy_block["slide_texts"] = [slide_texts[0]] + slide_texts[2:]
+    copy_block["cover"] = copy_block["slide_texts"][0]
+    result["copy"] = copy_block
+    result["content_card"] = freeze_content_card(
+        card, asset_set, recipe.recipe_spec_json.get("visual_rules") or {},
+    )
+    result["cover_selection"] = {
+        "role": cover_role, "source": "fixed_first_look",
+        "reason_zh": "第一套穿搭直接作为首图，不重复生成详情页",
+    }
+    result["request_sha256"] = fingerprint({
+        key: value for key, value in result.items() if key != "request_sha256"
+    })
+    validate_frozen_request(result)
+    return result
+
+
 class PhotoRequestFactory:
     def __init__(self, repository: Any, *, layouts: Sequence[Mapping[str, Any]]):
         self.repository = repository
@@ -58,6 +126,18 @@ class PhotoRequestFactory:
                     overrides: Sequence[Mapping[str, Any]] = ()) -> list[dict[str, Any]]:
         if product_mode != "NO_PRODUCT":
             raise PhotoRequestError("automatic photo requests currently require NO_PRODUCT")
+        if specs:
+            probe = self.repository.get_content_recipe(specs[0].recipe_id)
+            if probe is not None and recipe_is_mx_wig_choice(probe):
+                # Explicit MX dispatch: the wig flow freezes its own requests
+                # with the frozen hair plan; all other recipes keep the
+                # original path below untouched.
+                from services.photo_wig_planner import build_mx_wig_requests
+                return build_mx_wig_requests(
+                    self, record_id=record_id, specs=specs,
+                    category_key=category_key, product_mode=product_mode,
+                    overrides=overrides,
+                )
         if overrides and len(overrides) != len(specs):
             raise PhotoRequestError("photo overrides must match the requested count")
         profile_use, asset_use, copy_use = Counter(), Counter(), Counter()

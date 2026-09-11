@@ -344,6 +344,12 @@ class PhotoStyleReferenceSupplyService:
                         "forbidden": ["手机遮脸", "试衣间界面", "商品编号", "截图黑边"],
                         "prop_policy": "no_new_props",
                     }
+                    if travel_moment and role == "look_a":
+                        composition["instruction"] += (
+                            "；本页兼作图文首图，画面上方保留自然、干净的短标题区域，"
+                            "人物和穿搭主体保持完整"
+                        )
+                        composition["cover_overlay_safe_area"] = "top"
                     if pose_contract:
                         gesture = pose_gesture_detail(
                             role, f"{record_id}|{variation.get('family_id')}|{role}"
@@ -405,14 +411,20 @@ class PhotoStyleReferenceSupplyService:
                         "shoes": look["shoes"], "style_direction": "；".join(filter(None, [
                             str(theme["visual_brief"]), str(variation.get("style_modifier") or ""),
                             (
+                                "穿搭比例与下装鞋履衔接："
+                                + str(look.get("styling_intent") or "")
+                                if str(look.get("styling_intent") or "").strip() else ""
+                            ),
+                            (
                                 "同一人物身份、同一目的地视觉体系、统一色彩基调；"
                                 "各 Look 场景互相独立，按各自 travel_moment 呈现"
                                 if travel_moment else ""
                             ),
                             (
-                                "严格执行参考图签名配色（"
+                                "全组摄影调色延续参考图气质；当套服装颜色严格执行冻结描述。"
+                                "参考图配色仅作为审美方向（"
                                 + "、".join(reference_palette[:4])
-                                + "），单品颜色以冻结描述为准，不得偏移到其他色系"
+                                + "），不得把四套配套单品强行收敛到同一色域"
                                 if reference_palette else ""
                             ),
                         ])),
@@ -631,6 +643,7 @@ class PhotoStyleReferenceSupplyService:
             group_consistency_qa = None
             reviewer = self._vision_reviewer()
             failed_roles: list[str] = []
+            has_attribution = False
             consistency_failed = False
             # 程序化跨图一致性：免费、确定性，失败直接短路省掉视觉调用。
             if human_scene and color_grading_plan:
@@ -641,21 +654,34 @@ class PhotoStyleReferenceSupplyService:
                 )
                 group_consistency_qa = {"program": program_consistency}
                 if not program_consistency["passed"]:
-                    consistency_failed = True
+                    # 旅行/生活场景天然存在白天、室内和夜景差异。默认 standard
+                    # 仅记录整图色彩统计，避免用背景色差触发付费重生；strict
+                    # 仍保留旧门禁供专项调试。
+                    consistency_failed = (
+                        os.environ.get("OPV_PHOTO_QA_LEVEL", "standard").strip().lower()
+                        == "strict"
+                    )
                     index_roles = list(role_order)
                     failed_roles = [
                         index_roles[index]
                         for index in program_consistency["failed_roles"]
                         if index < len(index_roles)
                     ]
-                    for role in failed_roles:
-                        repair_notes[role] = (
-                            "本张肤色/色调偏离全组基准（"
-                            + "；".join(program_consistency["issues"][:2])
-                            + "）；严格对齐人物参考图的肤色与全组统一色调重新生成。"
+                    if consistency_failed:
+                        for role in failed_roles:
+                            repair_notes[role] = (
+                                "本张肤色/色调偏离全组基准（"
+                                + "；".join(program_consistency["issues"][:2])
+                                + "）；严格对齐人物参考图的肤色与全组统一色调重新生成。"
+                            )
+                        _emit_progress(progress, "consistency_failed",
+                                       roles=list(failed_roles))
+                    else:
+                        failed_roles = []
+                        _emit_progress(
+                            progress, "consistency_hint",
+                            notes="；".join(program_consistency["issues"][:2]),
                         )
-                    _emit_progress(progress, "consistency_failed",
-                                   roles=list(failed_roles))
                 if consistency_failed and group_repair_attempts >= MAX_GROUP_REPAIR_ATTEMPTS:
                     self._save(manifest_path, input_hash, record_id, theme, paths, completed,
                               "group_failed", group_alignment=None,
@@ -702,6 +728,20 @@ class PhotoStyleReferenceSupplyService:
                 if travel_planned and hasattr(reviewer, "review_travel_pages"):
                     semantic = reviewer.review_travel_pages(
                         reference_paths=qa_reference_paths, look_plans=looks,
+                        product_reference_paths=[
+                            str(value) for value in product.get("reference_images") or []
+                            if Path(str(value)).is_file()
+                        ],
+                        style_reference_paths=paths,
+                        product_context={
+                            key: product.get(key)
+                            for key in ("product_id", "product_name", "category",
+                                        "reference_pack_id", "reference_pack_version")
+                            if product.get(key) not in (None, "")
+                        },
+                        travel_place=str(
+                            (style_profile.get("travel_topic") or {}).get("place") or ""
+                        ),
                         image_paths=[str(item["path"]) for item in ordered],
                         travel_contract=style_profile.get("travel_contract") or {},
                         persona_based=bool(persona),
@@ -725,7 +765,8 @@ class PhotoStyleReferenceSupplyService:
                         persona_based=bool(persona),
                     )
                     if not group_alignment["passed"]:
-                        failed_roles = self._failed_roles(group_alignment, role_order)
+                        failed_roles, has_attribution = self._failed_roles(
+                            group_alignment, role_order)
                 if human_scene and hasattr(reviewer, "review_human_presentation"):
                     _emit_progress(progress, "human_qa_started")
                     group_human_qa = self._review_human(
@@ -779,9 +820,9 @@ class PhotoStyleReferenceSupplyService:
                         **(group_consistency_qa or {}),
                         "visual": visual_verdict,
                     }
-                    # 肤色/调色的跨图微差是生成端已知方差，重生无法收敛
-                    # （两轮真实样片验证）。降级为记录+人工审核提示，不再
-                    # 触发付费重生；粗粒度色温/亮度漂移仍由程序化检查拦截。
+                    # 肤色/调色的跨图微差是生成端已知方差，重生无法收敛。
+                    # 降级为质量提示，不再触发付费重生；需要专项调试时可用
+                    # OPV_PHOTO_QA_LEVEL=strict 恢复程序化色彩门禁。
                     if not visual_verdict["passed"]:
                         drift_notes = [
                             f"{role}：{(visual_verdict['roles'].get(role) or {}).get('drift_note_zh')}"
@@ -796,7 +837,12 @@ class PhotoStyleReferenceSupplyService:
                                        notes=human_review_hint[:120])
                 style_failed = group_alignment is None or not group_alignment["passed"]
                 human_failed_flag = group_human_qa is not None and not group_human_qa["passed"]
-                if style_failed or human_failed_flag:
+                # 归因语义：模型给了 per_look → 只重生归因到的角色；
+                # 完全无归因 → 保守整组重做（failed_roles 填全角色）。
+                if style_failed and not has_attribution and not failed_roles:
+                    failed_roles = list(role_order)
+                style_needs_redo = style_failed or human_failed_flag
+                if style_needs_redo or human_failed_flag:
                     if group_repair_attempts >= MAX_GROUP_REPAIR_ATTEMPTS:
                         self._save(manifest_path, input_hash, record_id, theme, paths, completed,
                                   "group_failed", group_alignment=group_alignment,
@@ -904,6 +950,12 @@ class PhotoStyleReferenceSupplyService:
                 "code": str(item.get("code") or ""),
                 "message": str(item.get("message") or ""),
             })
+        for item in (group_alignment or {}).get("quality_warnings") or []:
+            warnings.append({
+                "role": str(item.get("role") or "group"),
+                "code": str(item.get("code") or "TRAVEL_QA_NOTE"),
+                "message": str(item.get("message") or ""),
+            })
         program = (group_consistency_qa or {}).get("program") or {}
         for issue in program.get("issues") or []:
             warnings.append({
@@ -921,7 +973,11 @@ class PhotoStyleReferenceSupplyService:
         repair_count = sum(len(entry.get("retired") or []) for entry in attempt_history)
         style_passed = bool((group_alignment or {}).get("passed", True))
         human_passed = bool((group_human_qa or {}).get("passed", True))
-        color_passed = bool(program.get("passed", True))
+        color_passed = (
+            bool(program.get("passed", True))
+            if os.environ.get("OPV_PHOTO_QA_LEVEL", "standard").strip().lower()
+            == "strict" else True
+        )
         passed = style_passed and human_passed and color_passed
         summary_parts = [f"{w['role']}：{w['message']}" for w in warnings[:3]]
         summary = ("质量提示（不影响发布）：" + "；".join(summary_parts)) if warnings else ""
@@ -932,6 +988,50 @@ class PhotoStyleReferenceSupplyService:
             "publish_ready": passed,
             "quality_summary_zh": summary,
         }
+
+    def regenerate_roles(self, *, item_dir: Path, roles: Sequence[str],
+                         reason: str) -> dict:
+        """手动指定重生：把指定角色从 completed 摘除（原始条目进 retired
+        留痕），重勾执行时断点续跑只重生这些角色。不触发自动重试循环。"""
+        item_dir = Path(item_dir)
+        manifest_path = item_dir / "supply_manifest.json"
+        if not manifest_path.is_file():
+            raise PhotoStyleReferenceError(f"找不到供给清单：{manifest_path}")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        wanted = {str(r).strip().lower() for r in roles}
+        unknown = wanted - {str(item.get("role") or "") for item in manifest.get("sources") or []}
+        if unknown:
+            raise PhotoStyleReferenceError(f"素材里没有这些角色：{sorted(unknown)}")
+        repair_round = {
+            "round": int(manifest.get("group_repair_attempts") or 0) + 1,
+            "trigger": "operator_manual",
+            "reason": reason,
+            "failed_roles": sorted(wanted),
+            "alignment": None,
+            "repair_notes": {role: f"运营手动要求重生：{reason}" for role in wanted},
+            "retired": [],
+            "invalidated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        new_sources = []
+        for item in manifest.get("sources") or []:
+            role = str(item.get("role") or "")
+            if role in wanted:
+                repair_round["retired"].append({
+                    "role": role, "path": str(item.get("path") or ""),
+                    "sha256": str(item.get("sha256") or ""),
+                    "planned_look_signature": str(item.get("planned_look_signature") or ""),
+                })
+            else:
+                new_sources.append(item)
+        manifest["sources"] = new_sources
+        manifest.setdefault("attempt_history", []).append(repair_round)
+        # 手动重生不消耗自动修复预算（trigger=operator_manual 区分）。
+        manifest["status"] = "group_repair_pending"
+        temporary = manifest_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(manifest_path)
+        return {"roles": sorted(wanted), "retired": repair_round["retired"],
+                "manifest": str(manifest_path)}
 
     def restore_retired_sources(self, item_dir: Path, *, reason: str,
                                 recheck_result: str = None,
@@ -1016,24 +1116,106 @@ class PhotoStyleReferenceSupplyService:
             for item in alignment.get("role_findings") or []
             if isinstance(item, Mapping)
         }
-        failed = [
-            role for role in role_order
-            if role in findings and findings[role].get("passed") is False
-        ]
+        FAILURE_HINTS = ("场景", "退化", "平铺", "棚拍", "畸形", "多人",
+                         "水印", "Logo", "肢体", "重叠", "错配", "缺失")
+        failed = []
+        detail_notes = []
+        attributed = False
+        for role in role_order:
+            finding = findings.get(role)
+            if not finding:
+                continue
+            attributed = True
+            if finding.get("missing_major_garment"):
+                failed.append(role)
+                continue
+            if finding.get("passed") is False:
+                issues = [str(v) for v in finding.get("issues") or []]
+                blocking = any(
+                    hint in issue for issue in issues for hint in FAILURE_HINTS)
+                if blocking:
+                    failed.append(role)
+                else:
+                    # 单品级细节（内搭层数/配饰/鞋型/颜色微差）降为提示。
+                    detail_notes.extend(f"{role}：{issue}" for issue in issues)
+        if detail_notes:
+            alignment = dict(alignment)
+            alignment["detail_level_notes"] = detail_notes
         # 穿搭主体缺失是硬门禁：模型整体 passed 也按角色失败处理。
         missing = [
             role for role in role_order
             if role in findings and findings[role].get("missing_major_garment")
         ]
         failed = list(dict.fromkeys(failed + missing))
-        # 无法归因到具体角色时，显式整组重做，避免在同一组图片上重复检查。
-        return failed or [role for role in role_order]
+        # 无归因（模型没给 per_look）时整组重做，避免重复检查同一组图。
+        return failed, attributed or bool(failed)
 
     def _vision_reviewer(self):
         if self.vision_service is None:
             from services.photo_reference_vision import PhotoReferenceVisionService
             self.vision_service = PhotoReferenceVisionService(root=self.root)
         return self.vision_service
+
+    @classmethod
+    def input_fingerprint(cls, paths, theme, variation, account, product=None) -> str:
+        """重拍前置校验：当前输入能否复现原供给清单的 input_hash。"""
+        looks = style_look_specs(theme, variation)
+        resolved = [str(Path(value).expanduser().resolve()) for value in paths]
+        return cls._input_hash(resolved, theme, looks, account, variation, product)
+
+    def verify_and_rebaseline_identity(self, *, item_dir: Path, paths, theme, account,
+                                       variation, persona=None, product=None) -> None:
+        """重拍前逐组件身份校验，通过后重定 input_hash 基线。
+
+        冻结内容计划可能在供给生成之后被补写（如旅行 cover_selection 兜底），
+        组合 hash 因此无法直接复现；这里改为核对真正影响生成的身份组件：
+        参考图文件哈希、主题字典、各角色穿搭规格签名、人物包 ID。全部一致
+        才允许按当前输入重写 input_hash，供 prepare 断点续跑。
+        """
+        import re as _re
+        item_dir = Path(item_dir)
+        manifest_path = item_dir / "supply_manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        resolved = [str(Path(value).expanduser().resolve()) for value in paths]
+        current_refs = [hashlib.sha256(Path(value).read_bytes()).hexdigest()
+                        for value in resolved]
+        raw_record_id = str(manifest.get("record_id") or "")
+        analysis_id = _re.sub(r"_item_\d+$", "", raw_record_id)
+        analysis_path = self.root / "reference_contracts" / analysis_id / "reference_analysis.json"
+        if analysis_path.is_file():
+            analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+            recorded = [str(value) for value in analysis.get("reference_hashes") or []]
+            if recorded and recorded != current_refs:
+                raise PhotoStyleReferenceError(
+                    "参考图与原生成不一致（文件哈希不匹配）；不能按新参考重拍旧素材")
+        stored_theme = dict(manifest.get("theme_brief") or {})
+        if stored_theme and dict(theme) != stored_theme:
+            original_label = str(stored_theme.get("label_zh") or "原主题")
+            raise PhotoStyleReferenceError(
+                f"图文主题已从「{original_label}」改为「{theme.get('label_zh') or '当前所选'}」，"
+                "不能按新主题重拍旧素材；请把该行图文主题改回原值后重拍，"
+                "或新建一行按新主题整组重做")
+        looks = style_look_specs(theme, variation)
+        by_role = {str(item.get("role") or ""): item for item in manifest.get("sources") or []}
+        for look in looks:
+            source = by_role.get(str(look.get("role") or ""))
+            if not source:
+                continue
+            recorded_signature = str(source.get("planned_look_signature") or "")
+            if recorded_signature and recorded_signature != self._look_signature(look):
+                raise PhotoStyleReferenceError(
+                    f"{look.get('role')} 穿搭规格与原生成不一致；请勿修改内容计划后重拍")
+        stored_pack_id = str(manifest.get("persona_pack_id") or "")
+        if stored_pack_id and persona:
+            from services.persona_pack import build_persona_pack
+            if str(build_persona_pack(persona).get("persona_pack_id") or "") != stored_pack_id:
+                raise PhotoStyleReferenceError("账号绑定的人物模板与原生成不一致；不能换人重拍")
+        manifest["input_hash"] = self._input_hash(
+            resolved, theme, looks, account, variation, product)
+        temporary = manifest_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(manifest, ensure_ascii=False, indent=2),
+                             encoding="utf-8")
+        temporary.replace(manifest_path)
 
     @staticmethod
     def _input_hash(paths, theme, looks, account, variation, product=None) -> str:

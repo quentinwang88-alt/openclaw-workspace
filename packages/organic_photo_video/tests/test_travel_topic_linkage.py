@@ -42,6 +42,7 @@ def travel_payload(*, same_moment: bool = False, with_copy: bool = True):
     moments = ["old_town_walk"] * 4 if same_moment else [
         "airport_departure", "old_town_walk", "cafe_visit", "evening_stroll"]
     copy = {
+        "place_localized": "อาซากุสะ",
         "title": "4 ลุคเข้ากับอาซากุสะ",
         "caption": "แต่งตัวเข้ากับบรรยากาศอาซากุสะ คุณชอบลุคไหน?",
         "hashtags": ["#แต่งตัวเที่ยว"],
@@ -105,6 +106,19 @@ class TravelPromptTopicTest(unittest.TestCase):
         self.assertIn("可共用同一 key", prompt)
         self.assertIn("发布文案（主题联动必须生成）", prompt)
         self.assertIn("topic_zh", prompt)
+        self.assertIn("place_localized", prompt)
+        self.assertIn("ภูเขาไฟฟูจิ", prompt)
+        self.assertIn("slide_texts 只用于图片排版", prompt)
+        self.assertIn("禁止省略号和不完整选项", prompt)
+        self.assertIn("不能退化成‘某地 4 套穿搭’", prompt)
+        self.assertIn("第二行是与 topic_zh 对应的短钩子", prompt)
+        self.assertIn("不重复四套名称", prompt)
+        self.assertIn("整组只需 1-2 页清晰展示代表性地标", prompt)
+        self.assertIn("避免全部正面站立微笑", prompt)
+        self.assertIn("下装和鞋履必须联合规划", prompt)
+        self.assertIn("允许复用协调的鞋履、成熟裤型和指定商品", prompt)
+        self.assertIn("只更换场景、姿势", prompt)
+        self.assertNotIn("任意两套在外套、内搭、下装、鞋履四个核心字段中至少有两个不同", prompt)
 
     def test_legacy_prompt_unchanged_without_topic(self):
         prompt = PhotoReferenceVisionService._travel_plan_prompt(
@@ -167,9 +181,38 @@ class TravelPlanNormalizeTopicTest(unittest.TestCase):
         self.assertEqual(post["topic_zh"], "去浅草寺周边怎么穿更协调？")
         self.assertEqual(len(post["copy"]["slide_texts"]), 5)
         self.assertEqual(post["copy"]["language_review_status"], "DRAFT_TRAVEL_TOPIC")
+        self.assertEqual(post["copy"]["place_localized"], "อาซากุสะ")
+        self.assertIn("อาซากุสะ", post["copy"]["title"])
+        self.assertIn("อาซากุสะ", post["copy"]["slide_texts"][0])
 
-    def test_missing_copy_degrades_to_theme_fallback_not_error(self):
-        # 方案 §7.3：文案结构无效→同主题模板降级，不阻塞生产。
+    def test_product_category_overrides_same_category_outfit_reference(self):
+        plan, errors = PhotoReferenceVisionService(root=Path("/tmp"))._normalize_travel_plan(
+            travel_payload(), self.contract, 1, travel_topic=TRAVEL_TOPIC,
+            outfit_reference_indices=[1],
+            product_context={
+                "product_id": "puffer-1", "product_name": "棕色羽绒服",
+                "category": "outerwear", "reference_pack_id": "pack-1",
+            },
+        )
+        self.assertEqual(errors, [])
+        for look in plan["posts"][0]["looks"]:
+            self.assertEqual(look["outerwear"], "指定商品外套（以商品参考图为准）")
+            self.assertEqual(look["target_product"]["product_id"], "puffer-1")
+
+    def test_footwear_product_remains_authoritative(self):
+        plan, errors = PhotoReferenceVisionService(root=Path("/tmp"))._normalize_travel_plan(
+            travel_payload(), self.contract, 1, travel_topic=TRAVEL_TOPIC,
+            product_context={
+                "product_id": "shoe-1", "product_name": "棕色乐福鞋",
+                "category": "footwear", "reference_pack_id": "pack-shoe-1",
+            },
+        )
+        self.assertEqual(errors, [])
+        for look in plan["posts"][0]["looks"]:
+            self.assertEqual(look["shoes"], "指定商品鞋履（以商品参考图为准）")
+            self.assertEqual(look["target_product"]["product_id"], "shoe-1")
+
+    def test_missing_copy_with_specific_place_requests_plan_revision(self):
         payload = travel_payload(with_copy=False)
         topic = dict(TRAVEL_TOPIC, thai_fallback={
             "title": "4 ลุคเข้ากับบรรยากาศทริป", "cover": "ลุคเข้ากับสถานที่\nA B C หรือ D?",
@@ -177,12 +220,7 @@ class TravelPlanNormalizeTopicTest(unittest.TestCase):
             "cta": "เลือกลุคไหนดี?",
         })
         plan, errors = self.normalize(payload, topic)
-        self.assertEqual(errors, [])
-        post = plan["posts"][0]
-        self.assertEqual(len(post["copy"]["slide_texts"]), 5)
-        self.assertTrue(all(post["copy"]["slide_texts"]))
-        self.assertEqual(post["copy"]["language_review_status"], "DRAFT_FALLBACK")
-        self.assertTrue(post.get("copy_degraded"))
+        self.assertTrue(any("place_localized" in error for error in errors))
 
     def test_topic_copy_with_cjk_in_slide_degrades_to_theme_fallback(self):
         payload = travel_payload()
@@ -197,10 +235,7 @@ class TravelPlanNormalizeTopicTest(unittest.TestCase):
 
         plan, errors = self.normalize(payload, topic)
 
-        self.assertEqual(errors, [])
-        post = plan["posts"][0]
-        self.assertEqual(post["copy"]["language_review_status"], "DRAFT_FALLBACK")
-        self.assertNotIn("湖", "".join(post["copy"]["slide_texts"]))
+        self.assertTrue(any("标题和封面" in error for error in errors))
 
 
 class PlannerTopicBranchTest(unittest.TestCase):
@@ -267,6 +302,7 @@ class CopySurvivalTest(unittest.TestCase):
                   for letter in "abcd"]
         variation = {
             "copy": {
+                "place_localized": "อาซากุสะ",
                 "title": "ไตเติลจากโมเดล", "caption": "แคปชันจากโมเดล",
                 "hashtags": ["#tag"],
                 "slide_texts": ["ปก", "A หนึ่ง", "B สอง", "C สาม", "D สี่ เลือกลุคไหน"],
@@ -274,8 +310,12 @@ class CopySurvivalTest(unittest.TestCase):
             },
         }
         result = build_theme_copy(theme, assets, variation)
-        self.assertEqual(result["slide_texts"], variation["copy"]["slide_texts"])
+        self.assertEqual(result["slide_texts"][:4], variation["copy"]["slide_texts"][:4])
+        self.assertEqual(
+            result["slide_texts"][4], "D สี่\nไปที่นี่คุณจะเลือกลุคไหน?"
+        )
         self.assertEqual(result["title"], "ไตเติลจากโมเดล")
+        self.assertEqual(result["place_localized"], "อาซากุสะ")
         self.assertEqual(result["language_review_status"], "DRAFT_TRAVEL_TOPIC")
 
     def test_missing_topic_slides_fall_back_to_legacy_assembly(self):
@@ -285,11 +325,58 @@ class CopySurvivalTest(unittest.TestCase):
         self.assertEqual(len(result["slide_texts"]), 5)
         self.assertEqual(result["language_review_status"], "production_theme_profile")
 
+    def test_long_topic_copy_becomes_complete_short_image_copy(self):
+        theme = resolve_photo_theme("旅行·环境协调")
+        assets = [{"role": f"look_{letter}", "display_label": {"th-TH": f"ลุค {letter}"}}
+                  for letter in "abcd"]
+        variation = {"copy": {
+            "place_localized": "ภูเขาไฟฟูจิ",
+            "title": "เช็กอินภูเขาไฟฟูจิด้วย 4 ลุควินเทจฝรั่งเศส: กางเกงหรือกระโปรง?",
+            "caption": "คำบรรยายฉบับเต็มยังคงอยู่สำหรับตอนเผยแพร่",
+            "hashtags": ["#ฟูจิ"],
+            "cta": "คุณเลือก A, B, C หรือ D?",
+            "slide_texts": [
+                "เช็กอินภูเขาไฟฟูจิด้วยสี่ลุควินเทจฝรั่งเศส กางเกงหรือกระโปรง แบบไหนเหมาะกับทริปนี้ที่สุด",
+                "A · กางเกงทรงสวย — คำอธิบายรายละเอียดที่ยาวเกินพื้นที่บนภาพและควรอยู่ในแคปชันเท่านั้น",
+                "B · กระโปรงคลาสสิก — คำอธิบายรายละเอียดที่ยาวเกินพื้นที่บนภาพและควรอยู่ในแคปชันเท่านั้น",
+                "C · ลุคเดินเล่น — คำอธิบายรายละเอียดที่ยาวเกินพื้นที่บนภาพและควรอยู่ในแคปชันเท่านั้น",
+                "D · ลุคริมทะเลสาบ — คำอธิบายรายละเอียดที่ยาวมาก คุณเลือก A, B, C หรือ D?",
+            ],
+        }}
+        result = build_theme_copy(theme, assets, variation)
+        self.assertEqual(result["title"], variation["copy"]["title"])
+        self.assertEqual(result["caption"], variation["copy"]["caption"])
+        self.assertIn("ภูเขาไฟฟูจิ", result["slide_texts"][0])
+        self.assertIn("\n", result["slide_texts"][0])
+        self.assertEqual(result["slide_texts"][1], "A · กางเกงทรงสวย")
+        self.assertEqual(result["slide_texts"][4].splitlines()[-1], "คุณเลือก A, B, C หรือ D?")
+        self.assertTrue(all("…" not in slide for slide in result["slide_texts"]))
+
     def test_partial_slides_do_not_leak(self):
         theme = resolve_photo_theme("旅行·环境协调")
         variation = {"copy": {"slide_texts": ["only", "two"]}}
         result = build_theme_copy(theme, [], variation)
         self.assertEqual(len(result["slide_texts"]), 5)
+
+    def test_short_final_page_still_uses_compact_theme_cta(self):
+        theme = resolve_photo_theme("旅行·四选一")
+        assets = [{"role": f"look_{letter}", "display_label": {"th-TH": letter}}
+                  for letter in "abcd"]
+        variation = {"copy": {
+            "place_localized": "โอซาก้า",
+            "title": "ไปโอซาก้าใส่ลุคไหนดี?",
+            "caption": "สี่ไอเดียสำหรับเดินเที่ยวโอซาก้า",
+            "slide_texts": [
+                "โอซาก้า\nทริปนี้ใส่อะไรดี?", "A · แจ็กเก็ต", "B · เสื้อโค้ต",
+                "C · คาร์ดิแกน", "D · เบลเซอร์ คุณเลือก A, B, C หรือ D?",
+            ],
+        }}
+        result = build_theme_copy(theme, assets, variation)
+        self.assertEqual(
+            result["slide_texts"][4],
+            "D · เบลเซอร์\nคอมเมนต์บอกหน่อยว่าเลือกลุคไหน",
+        )
+        self.assertEqual(result["copy_policy_version"], 2)
 
 
 class CacheKeyTest(unittest.TestCase):

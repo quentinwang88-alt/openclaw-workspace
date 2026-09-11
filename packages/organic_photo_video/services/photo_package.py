@@ -35,7 +35,7 @@ def normalize_photo_template(template: Mapping[str, Any]) -> Dict[str, Any]:
         if any(v and k not in allowed for k, v in template.items()):
             raise PhotoPackageError("unsupported non-empty layout field")
         options = dict(template.get("render_options") or {})
-        supported = {"width", "height", "background", "jpeg_quality", "font_candidates", "font_size", "cover_font_size", "detail_font_size", "cta_font_size", "min_font_size", "text_color", "text_background", "cta_text_color", "cta_background", "text_radius", "max_lines", "cover_index", "choice_badges", "padding_x", "padding_y", "line_spacing", "text_position", "split_last_line_to_bottom"}
+        supported = {"width", "height", "background", "jpeg_quality", "font_candidates", "font_size", "cover_font_size", "detail_font_size", "cta_font_size", "min_font_size", "text_color", "text_background", "cta_text_color", "cta_background", "text_radius", "max_lines", "cover_index", "choice_badges", "padding_x", "padding_y", "top_offset", "bottom_offset", "line_spacing", "text_position", "split_last_line_to_bottom"}
         if any(v and k not in supported for k, v in options.items()):
             raise PhotoPackageError("unsupported non-empty render option")
         if options.get("text_position", "top") not in {"top", "bottom"}:
@@ -142,13 +142,15 @@ def _draw_overlay(
         _draw_overlay(
             image, "\n".join(lines[:-1]),
             {**dict(template), "split_last_line_to_bottom": False,
-             "font_size": int(template.get("detail_font_size") or template.get("font_size") or 54)},
+             "font_size": int(template.get("detail_font_size") or template.get("font_size") or 54),
+             "_force_font_size": True},
             index=index, cover_index=cover_index, total=total,
         )
         _draw_overlay(
             image, lines[-1],
             {**dict(template), "split_last_line_to_bottom": False, "text_position": "bottom",
              "font_size": int(template.get("cta_font_size") or template.get("detail_font_size") or 42),
+             "_force_font_size": True,
              "text_color": str(template.get("cta_text_color") or template.get("text_color") or "#171717"),
              "text_background": str(template.get("cta_background") or template.get("text_background") or "#FFFFFF")},
             index=index, cover_index=cover_index, total=total,
@@ -160,11 +162,14 @@ def _draw_overlay(
     draw = ImageDraw.Draw(image)
     spacing = int(template.get("line_spacing") or 12)
     padding_x, padding_y = int(template.get("padding_x") or 36), int(template.get("padding_y") or 24)
-    start_size = int(
-        (template.get("cover_font_size") or template.get("font_size") or 54)
-        if index == cover_index
-        else (template.get("detail_font_size") or template.get("font_size") or 54)
-    )
+    if template.get("_force_font_size"):
+        start_size = int(template.get("font_size") or 54)
+    else:
+        start_size = int(
+            (template.get("cover_font_size") or template.get("font_size") or 54)
+            if index == cover_index
+            else (template.get("detail_font_size") or template.get("font_size") or 54)
+        )
     min_size = int(template.get("min_font_size") or max(24, round(start_size * .55)))
     font = None
     bbox = None
@@ -180,7 +185,11 @@ def _draw_overlay(
         raise PhotoPackageError("overlay text cannot fit the configured canvas at minimum font size")
     text_width, text_height = bbox[2] - bbox[0], bbox[3] - bbox[1]
     position = str(template.get("text_position") or "top")
-    top = padding_y if position == "top" else image.height - text_height - padding_y * 2
+    top = (
+        int(template.get("top_offset") or padding_y)
+        if position == "top"
+        else image.height - int(template.get("bottom_offset") or padding_y * 2) - text_height
+    )
     left = (image.width - text_width) // 2
     background = str(template.get("text_background") or "#000000B3")
     draw.rounded_rectangle(
@@ -424,7 +433,11 @@ class NativePhotoProductionFlow:
             str(text) for text in (manifest.get("copy") or {}).get("slide_texts") or []
         ]
         slides = list(manifest.get("slides") or [])
-        role_order = ["cover"] + [f"look_{letter}" for letter in "abcd"]
+        role_order = (
+            [f"look_{letter}" for letter in "abcd"]
+            if len(slides) == 4 else
+            ["cover"] + [f"look_{letter}" for letter in "abcd"]
+        )
         if len(expected_texts) != len(slides):
             raise PhotoPackageError(
                 f"旅行最终页面 QA 需要成片文字与页面一一对应（{len(expected_texts)} vs {len(slides)}）"

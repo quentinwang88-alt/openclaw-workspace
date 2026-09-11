@@ -149,7 +149,9 @@ class MainScheduleBridge:
             raise MainScheduleBridgeError("OPV 任务缺少稳定 task_id")
         return f"OPV:{normalized}"
 
-    def enqueue_task(self, task_id: str, *, feishu_record_id: str = "") -> Dict[str, str]:
+    def enqueue_task(
+        self, task_id: str, *, feishu_record_id: str = "", store_id: str = ""
+    ) -> Dict[str, str]:
         task = self.repository.get_task(task_id)
         if task is None:
             raise MainScheduleBridgeError(f"找不到 OPV 任务：{task_id}")
@@ -200,7 +202,15 @@ class MainScheduleBridge:
                 raise MainScheduleBridgeError(f"OPV 成片文件不存在：{video_path}")
 
         country = str(task.target_country or "").strip().upper()
-        store_id = self._store_id(country)
+        requested_store_id = str(store_id or "").strip()
+        configured_stores = {
+            str(route.get("default_store_id") or "").strip()
+            for route in self.routes.values()
+            if str(route.get("default_store_id") or "").strip()
+        }
+        if requested_store_id and requested_store_id not in configured_stores:
+            raise MainScheduleBridgeError(f"未知的图文发布店铺：{requested_store_id}")
+        store_id = requested_store_id or self._store_id(country)
         title = self._publish_title(task, country)
         source_record_id = str(feishu_record_id or task.feishu_record_id or task.source_record_id or task_id)
         canonical_key, script_slot = f"opv:{task_id}", self._script_slot(task_id)
@@ -217,6 +227,7 @@ class MainScheduleBridge:
                 else "silent_source_platform_bgm"
             ),
             "feishu_record_id": source_record_id,
+            "publish_store_id": store_id,
         }
         if media_kind == "native_photo":
             theme_brief = dict((release_manifest or {}).get("theme_brief") or {})
@@ -224,6 +235,8 @@ class MainScheduleBridge:
                 theme_key=str(theme_brief.get("theme_key") or ""),
                 theme_label=str(theme_brief.get("label_zh") or theme_brief.get("theme_label_zh") or ""),
                 reference_mode=str(theme_brief.get("reference_mode") or ""),
+                # 同景点错开发布：排班器按此字段做同账号时间隔离。
+                place=str(theme_brief.get("place") or "").strip(),
             )
         if media_kind == "video":
             bgm_inputs = task_content_profile_inputs(task)

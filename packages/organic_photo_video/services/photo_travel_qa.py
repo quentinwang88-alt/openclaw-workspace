@@ -12,6 +12,7 @@ model once and stops while preserving the raw payload on a second failure.
 """
 from __future__ import annotations
 
+import os
 from typing import Any, Mapping, Sequence
 
 
@@ -88,6 +89,7 @@ def normalize_travel_qa(
     raw: Mapping[str, Any], *, look_plans: Sequence[Mapping[str, Any]],
     moment_rules: Mapping[str, Mapping] = None,
     footwear_types: Sequence[str] = (),
+    has_product: bool = False, travel_place: str = "", level: str = None,
 ) -> dict[str, Any]:
     """Convert a model verdict into per-role QA results with deterministic
     failure codes and repair instructions. Nothing defaults to passed."""
@@ -108,9 +110,12 @@ def normalize_travel_qa(
     if not isinstance(style_uniform, bool):
         raise TravelSemanticQAError("QA_SCHEMA_INCOMPLETE：style_uniform 必须是布尔值")
 
+    qa_level = (level or os.environ.get("OPV_PHOTO_QA_LEVEL", "standard")).strip().lower()
+    strict = qa_level == "strict"
     rules = dict(moment_rules or {})
     observed_moments: dict[str, str] = {}
     results = []
+    quality_warnings: list[dict[str, str]] = []
     for role, moment in expected.items():
         page = page_by_role[role]
         plan = plans_by_role[role]
@@ -119,6 +124,7 @@ def normalize_travel_qa(
         outfit_ok = _require_bool(page, "outfit_matches", role)
         weather_ok = _require_bool(page, "weather_matches", role)
         mobility_claim = _require_bool(page, "mobility_matches", role)
+        product_ok = _require_bool(page, "product_matches", role) if has_product else True
         observed_footwear = _require_observed_footwear(page, role, footwear_types)
         observed_moments[role] = observed
         # 人物观察（2026-09-08）：灾难级旗标参与失败判定；相似表情/头姿/视线
@@ -145,7 +151,10 @@ def normalize_travel_qa(
             failure_code = FAILURE_SCENE_MISMATCH
         elif scene_ok is False:
             failure_code = FAILURE_INSUFFICIENT_EVIDENCE
-        elif not outfit_ok:
+        elif not product_ok:
+            failure_code = FAILURE_OUTFIT_MISMATCH
+        elif not outfit_ok and (
+                strict or str(page.get("outfit_severity") or "MINOR").upper() == "MAJOR"):
             failure_code = FAILURE_OUTFIT_MISMATCH
         elif not weather_ok:
             failure_code = FAILURE_WEATHER_MISMATCH
@@ -157,6 +166,21 @@ def normalize_travel_qa(
             failure_code = FAILURE_PERSON_DISASTER
 
         repair = str(page.get("repair_instruction") or "").strip()
+        if not outfit_ok and not failure_code:
+            quality_warnings.append({
+                "role": role, "code": "MINOR_OUTFIT_VARIATION",
+                "message": repair or "穿搭细节与计划存在轻微差异",
+            })
+        if not weather_ok and not failure_code:
+            quality_warnings.append({
+                "role": role, "code": "WEATHER_NOTE",
+                "message": repair or "光线或温度感与计划存在轻微差异",
+            })
+        if not mobility_ok and not failure_code:
+            quality_warnings.append({
+                "role": role, "code": "FOOTWEAR_NOTE",
+                "message": repair or "鞋履与场景步行强度存在轻微偏差",
+            })
         if failure_code == FAILURE_SCENE_MISMATCH and not repair:
             repair = (
                 f"当前图片场景是 {observed}，目标是 {moment}；"
@@ -183,6 +207,7 @@ def normalize_travel_qa(
             "planned_footwear_type": str(plan.get("footwear_type") or ""),
             "mobility_matches": mobility_ok,
             "outfit_matches": outfit_ok,
+            "product_matches": product_ok if has_product else None,
             "weather_matches": weather_ok,
             "person_flags": {
                 "face_or_limb_deformity": person_deformity,
@@ -205,7 +230,29 @@ def normalize_travel_qa(
                     "请按各自 scene_prompt 重做"
                 )
 
+    destination_conflict = bool(raw.get("destination_conflict"))
+    if destination_conflict:
+        for item in results:
+            if item["passed"]:
+                item["passed"] = False
+                item["failure_code"] = FAILURE_SCENE_MISMATCH
+                item["repair_instruction"] = (
+                    f"画面与指定地点 {travel_place or '旅行目的地'} 存在明显地理冲突；"
+                    "按指定地点重做场景"
+                )
     passed = all(item["passed"] for item in results) and style_uniform
+    raw_cover = raw.get("cover_recommendation") or {}
+    cover_role = str(
+        raw_cover.get("role") if isinstance(raw_cover, Mapping) else ""
+    ).strip()
+    if cover_role not in expected:
+        cover_role = ""
+    cover_recommendation = {
+        "role": cover_role,
+        "reason_zh": str(
+            raw_cover.get("reason_zh") if isinstance(raw_cover, Mapping) else ""
+        ).strip(),
+    }
     # 相似笑容/头姿/视线（>=2 页）：写 warning，继续成片与发布。
     person_warnings = []
     expression_pages = _pages_with_flag(raw, "similar_fixed_smile")
@@ -229,9 +276,14 @@ def normalize_travel_qa(
     return {
         "schema_version": TRAVEL_QA_SCHEMA,
         "passed": passed,
+        "qa_level": "strict" if strict else "standard",
         "style_uniform": style_uniform,
+        "destination_conflict": destination_conflict,
+        "destination_evidence": [str(v) for v in raw.get("destination_evidence") or []],
         "roles": results,
+        "quality_warnings": quality_warnings,
         "person_warnings": person_warnings,
+        "cover_recommendation": cover_recommendation,
         "notes": str(raw.get("notes") or ""),
     }
 
@@ -278,5 +330,8 @@ def travel_qa_as_alignment(qa: Mapping[str, Any]) -> dict[str, Any]:
              "issues": [str(item.get("failure_code") or "")]}
             for item in qa.get("roles") or []
         ],
+        "quality_warnings": list(qa.get("quality_warnings") or [])
+        + list(qa.get("person_warnings") or []),
+        "cover_recommendation": dict(qa.get("cover_recommendation") or {}),
         "travel_qa": qa,
     }

@@ -354,6 +354,8 @@ def plan_th_choice_batch(
                 # 主题联动分支：规划响应同时产出选题与发布文案，直接冻结。
                 model_copy = dict(value.get("copy") or {})
                 item["copy"] = {
+                    "copy_policy_version": 2,
+                    "place_localized": str(model_copy.get("place_localized") or ""),
                     "title": str(model_copy.get("title") or ""),
                     "caption": str(model_copy.get("caption") or ""),
                     "hashtags": [str(v) for v in model_copy.get("hashtags") or []],
@@ -434,8 +436,11 @@ def summarize_batch_plan(plan: Mapping[str, Any]) -> str:
         ) if looks else "按上传的 A/B/C/D 完整穿搭"
         topic = str(item.get("topic_zh") or "")
         topic_text = f"｜选题：{topic}" if topic else ""
+        cover_role = str((item.get("cover_selection") or {}).get("role") or "")
+        cover_text = f"｜封面：{cover_role[-1:].upper()}" if cover_role else ""
         lines.append(
-            f"{item['index']}. {item['angle_zh']}｜配色：{item['palette_zh']}{topic_text}｜{look_text}"
+            f"{item['index']}. {item['angle_zh']}｜配色：{item['palette_zh']}"
+            f"{topic_text}{cover_text}｜{look_text}"
         )
     return "\n".join(lines)
 

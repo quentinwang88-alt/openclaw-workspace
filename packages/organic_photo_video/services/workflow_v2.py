@@ -639,7 +639,8 @@ class RenderReviewService:
 class ReworkService:
     """Create an explicit child revision; no released material is overwritten."""
 
-    VALID_SCOPES = frozenset({"plan", "anchor", "shot", "cutout", "board", "render", "timing"})
+    VALID_SCOPES = frozenset({"plan", "anchor", "shot", "cutout", "board", "render", "timing",
+                              "photo_source"})
 
     def __init__(self, repository, publication_guard=None):
         self._repository = repository
@@ -652,6 +653,7 @@ class ReworkService:
         self, task_id: str, *, expected_revision_id: str, expected_lock_version: int,
         scope: str, reason: str, idempotency_key: str, operator: str = "operator",
         slot_indexes: Sequence[int] = (), timing_ms: Mapping[int, int] | None = None,
+        plan_patch: Mapping[int, Mapping[str, Any]] | None = None,
     ) -> TaskRevision:
         if scope not in self.VALID_SCOPES:
             raise WorkflowV2Error(f"unsupported rework scope {scope!r}")
@@ -698,6 +700,27 @@ class ReworkService:
                 shot["duration_ms"] = requested[int(shot["slot_index"])]
         if scope == "shot" and (not slots or not set(slots) <= valid_slots):
             raise WorkflowV2Error("shot rework requires valid explicit slot indexes")
+        patch: dict[int, dict[str, Any]] = {}
+        if scope == "photo_source":
+            # 重拍 look 素材：槽位必须存在且补丁必须给出可校验的新文件指针。
+            patch = {
+                int(key): dict(value) for key, value in (plan_patch or {}).items()
+                if isinstance(value, Mapping)
+            }
+            if not patch or not set(patch) <= valid_slots:
+                raise WorkflowV2Error("photo source rework requires valid explicit slot indexes")
+            if any(not str(item.get("asset_path") or "") or not str(item.get("asset_sha256") or "")
+                   for item in patch.values()):
+                raise WorkflowV2Error("photo source rework requires asset_path and asset_sha256 per slot")
+            slots = sorted(patch)
+            patched = set()
+            for shot in plan.get("shots") or []:
+                slot = int(shot.get("slot_index") or 0)
+                if slot in patch:
+                    shot.update({key: str(value) for key, value in patch[slot].items()})
+                    patched.add(slot)
+            if patched != set(patch):
+                raise WorkflowV2Error("photo source rework patch does not match frozen plan shots")
         anchor_slot = int(plan.get("anchor_slot") or 1)
         if scope == "shot" and anchor_slot in slots:
             raise WorkflowV2Error("use anchor rework when changing the continuity anchor")
@@ -710,6 +733,10 @@ class ReworkService:
             "board": ("board", "group", "render", *[f"shot:{slot}" for slot in board_slots]),
             "render": ("render",),
             "timing": ("group", "render"),
+            "photo_source": (
+                "group", "render", *[f"shot:{slot}" for slot in slots],
+                *[key for key in selected if key.startswith("slide:")],
+            ),
         }[scope])
         if scope == "cutout":
             invalid.update(key for key in selected if key.startswith("cutout:"))
@@ -742,6 +769,8 @@ class ReworkService:
                 "scope": scope, "reason": reason, "idempotency_key": idempotency_key,
                 "invalidated_selection_keys": sorted(invalid),
                 "slot_indexes": slots, "timing_ms": dict(timing_ms or {}), "resume_stage": resume_stage,
+                **({"plan_patch": {str(key): value for key, value in patch.items()}}
+                   if scope == "photo_source" else {}),
             },
             created_by=operator,
         )

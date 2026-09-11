@@ -138,7 +138,7 @@ class PhotoPlannerTest(unittest.TestCase):
 
     def test_requires_all_five_localized_slide_texts(self):
         bad = {**self.copy, "slide_texts": ["only one"]}
-        with self.assertRaisesRegex(PhotoPlannerError, "five strings"):
+        with self.assertRaisesRegex(PhotoPlannerError, "contain 5 strings"):
             PhotoReusePlannerService(self.repo).plan_task(
                 self.repo.task.task_id, recipe_id=self.repo.recipe.recipe_id,
                 variables=self.variables, copy_block=bad, layout=self.layout,

@@ -150,5 +150,68 @@ class PhotoReferenceVisionTest(unittest.TestCase):
         self.assertEqual(bare["role_findings"], [], "缺少逐张归因时必须返回空列表以触发整组重做")
 
 
+class ParseVisionEnvelopeTest(unittest.TestCase):
+    def test_parses_fenced_and_junk_wrapped_json(self):
+        fenced = {"choices": [{"message": {"content": "```json\n{\"ok\": 1}\n```"}}]}
+        self.assertEqual(parse_vision_envelope(fenced), {"ok": 1})
+        junk = {"choices": [{"message": {
+            "content": "好的，以下是分析：\n{\"ok\": 2}\n希望有帮助"}}]}
+        self.assertEqual(parse_vision_envelope(junk), {"ok": 2})
+
+    def test_truncated_response_reports_length_and_diagnostics(self):
+        truncated = {"choices": [{"finish_reason": "length",
+                                  "message": {"content": "{\"ok\": 1, \"items\": ["}}]}
+        with self.assertRaisesRegex(PhotoReferenceVisionError, "截断.*finish_reason=length"):
+            parse_vision_envelope(truncated)
+
+    def test_empty_content_reports_head_diagnostics(self):
+        empty = {"choices": [{"finish_reason": "stop", "message": {"content": ""}}],
+                 "error": {"message": "quota"}}
+        with self.assertRaisesRegex(PhotoReferenceVisionError, "content为空.*quota"):
+            parse_vision_envelope(empty)
+
+
+class DoubaoFastPathRetryTest(unittest.TestCase):
+    """偶发坏 JSON 必须就地重试一次，而不是让整轮 QA 失败。"""
+
+    def test_fast_path_retries_once_on_garbage_then_returns_valid(self):
+        import types
+        responses = [
+            {"choices": [{"message": {"content": "模型抽风输出"}}]},
+            {"choices": [{"message": {"content": "{\"ok\": true}"}}]},
+        ]
+        calls = []
+
+        class FakeDoubao:
+            def chat_with_multiple_images(self, paths, prompt, max_tokens):
+                calls.append(max_tokens)
+                return responses.pop(0)
+
+        from services.photo_reference_vision import PhotoReferenceVisionService
+        service = PhotoReferenceVisionService.__new__(PhotoReferenceVisionService)
+        service.client = None
+        service.provider = "doubao"
+        service.model, service.api_url, service.api_key = "m", "https://x", "k"
+        service._build_client = lambda provider: FakeDoubao()
+        response, used = service._chat([], "prompt", 2600, prefer="fast")
+        self.assertEqual(used, "doubao")
+        self.assertEqual(len(calls), 2, "第一次坏响应后应重试一次")
+        self.assertEqual(parse_vision_envelope(response), {"ok": True})
+
+    def test_fast_path_gives_up_after_two_bad_responses(self):
+        class FakeDoubao:
+            def chat_with_multiple_images(self, paths, prompt, max_tokens):
+                return {"choices": [{"message": {"content": "还是坏的"}}]}
+
+        from services.photo_reference_vision import PhotoReferenceVisionService
+        service = PhotoReferenceVisionService.__new__(PhotoReferenceVisionService)
+        service.client = None
+        service.provider = "doubao"
+        service.model, service.api_url, service.api_key = "m", "https://x", "k"
+        service._build_client = lambda provider: FakeDoubao()
+        with self.assertRaises(PhotoReferenceVisionError):
+            service._chat([], "prompt", 2600, prefer="fast")
+
+
 if __name__ == "__main__":
     unittest.main()

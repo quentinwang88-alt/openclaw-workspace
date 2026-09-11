@@ -7,7 +7,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
+
+from PIL import Image
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 if str(PACKAGE_ROOT) not in sys.path:
@@ -20,6 +23,7 @@ from services.image_generator import (  # noqa: E402
     OpenAIImageGenerator,
     ShotGenerationRequest,
     build_default_photo_generator,
+    prepare_sunburst_primary_reference,
 )
 
 
@@ -157,6 +161,144 @@ class CreatokImageGeneratorTest(unittest.TestCase):
         self.assertNotIn("quality", options)
 
 
+class OpenAIImageGeneratorTest(unittest.TestCase):
+    @staticmethod
+    def _schemas_module():
+        module = ModuleType("core.schemas")
+        module.ImageTaskRequest = SimpleNamespace(from_dict=lambda payload: payload)
+        return module
+
+    def test_sunburst_primary_reference_is_contained_on_cached_9x16_canvas(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "narrow-person.png"
+            Image.new("RGB", (300, 900), (180, 90, 45)).save(source)
+
+            first = prepare_sunburst_primary_reference(str(source), tmp)
+            second = prepare_sunburst_primary_reference(str(source), tmp)
+
+            self.assertEqual(first, second)
+            with Image.open(source) as original:
+                self.assertEqual(original.size, (300, 900))
+            with Image.open(first) as canvas:
+                self.assertEqual(canvas.size, (1080, 1920))
+                self.assertEqual(canvas.mode, "RGB")
+                self.assertEqual(canvas.getpixel((0, 0)), (242, 242, 242))
+                self.assertEqual(canvas.getpixel((540, 960)), (180, 90, 45))
+
+    def test_sunburst_request_replaces_only_the_primary_reference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            primary = Path(tmp) / "square-product.png"
+            secondary = Path(tmp) / "persona.png"
+            Image.new("RGB", (640, 640), (240, 240, 240)).save(primary)
+            Image.new("RGB", (900, 1600), (210, 180, 160)).save(secondary)
+            output = fake_png(Path(tmp) / "sunburst-output.png", 941, 1672)
+            captured = {}
+
+            def process_task(payload):
+                captured.update(payload)
+                return SimpleNamespace(
+                    status="success",
+                    output_image_paths=[str(output)],
+                    error_message="",
+                    task_id="task_probe_P1_v1",
+                    model="gpt-image-2.5-sunburst",
+                )
+
+            service = SimpleNamespace(
+                settings=SimpleNamespace(effective_model="gpt-image-2.5-sunburst"),
+                process_task=process_task,
+            )
+            request = make_request(tmp)
+            request.product = {"reference_images": [str(primary)]}
+            request.persona_snapshot = {"local_reference_images": [str(secondary)]}
+
+            with patch.dict(sys.modules, {"core.schemas": self._schemas_module()}):
+                outcome = OpenAIImageGenerator(service=service).generate_shot(request)
+
+            normalized = captured["input_image_paths"][0]
+            self.assertNotEqual(normalized, str(primary))
+            self.assertEqual(captured["input_image_paths"][1], str(secondary))
+            with Image.open(normalized) as canvas:
+                self.assertEqual(canvas.size, (1080, 1920))
+            self.assertIn("light-gray 9:16 composition canvas", captured["prompt"])
+            self.assertTrue(outcome.raw["sunburst_canvas_normalized"])
+            self.assertTrue(outcome.ok, outcome.error)
+
+    def test_other_models_keep_the_original_primary_reference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            primary = Path(tmp) / "square-product.png"
+            Image.new("RGB", (640, 640), (240, 240, 240)).save(primary)
+            output = fake_png(Path(tmp) / "flare-output.png", 941, 1672)
+            captured = {}
+
+            def process_task(payload):
+                captured.update(payload)
+                return SimpleNamespace(
+                    status="success",
+                    output_image_paths=[str(output)],
+                    error_message="",
+                    task_id="task_probe_P1_v1",
+                    model="gpt-image-2.5-flare",
+                )
+
+            service = SimpleNamespace(
+                settings=SimpleNamespace(effective_model="gpt-image-2.5-flare"),
+                process_task=process_task,
+            )
+            request = make_request(tmp)
+            request.product = {"reference_images": [str(primary)]}
+
+            with patch.dict(sys.modules, {"core.schemas": self._schemas_module()}):
+                outcome = OpenAIImageGenerator(service=service).generate_shot(request)
+
+            self.assertEqual(captured["input_image_paths"][0], str(primary))
+            self.assertNotIn("sunburst_canvas_normalized", outcome.raw)
+            self.assertTrue(outcome.ok, outcome.error)
+
+    def test_records_the_model_resolved_by_the_shared_service(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = fake_png(Path(tmp) / "sunburst.png")
+            result = SimpleNamespace(
+                status="success",
+                output_image_paths=[str(image_path)],
+                error_message="",
+                task_id="task_probe_P1_v1",
+                model="gpt-image-2.5-sunburst",
+            )
+            service = SimpleNamespace(
+                settings=SimpleNamespace(effective_model="gpt-image-2.5-sunburst"),
+                process_task=lambda _request: result,
+            )
+
+            with patch.dict(sys.modules, {"core.schemas": self._schemas_module()}):
+                outcome = OpenAIImageGenerator(service=service).generate_shot(
+                    make_request(tmp)
+                )
+
+        self.assertTrue(outcome.ok, outcome.error)
+        self.assertEqual(outcome.model, "gpt-image-2.5-sunburst")
+
+    def test_records_resolved_model_when_generation_fails(self):
+        service = SimpleNamespace(
+            settings=SimpleNamespace(effective_model="gpt-image-2.5-sunburst"),
+            process_task=lambda _request: SimpleNamespace(
+                status="failed",
+                output_image_paths=[],
+                error_message="model unavailable",
+                task_id="task_probe_P1_v1",
+                model="gpt-image-2.5-sunburst",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(sys.modules, {"core.schemas": self._schemas_module()}):
+                outcome = OpenAIImageGenerator(service=service).generate_shot(
+                    make_request(tmp)
+                )
+
+        self.assertFalse(outcome.ok)
+        self.assertEqual(outcome.model, "gpt-image-2.5-sunburst")
+
+
 class FallbackShotGeneratorTest(unittest.TestCase):
     def test_primary_success_skips_fallback(self):
         primary = _FakeGenerator(ok=True, provider="creatok")
@@ -240,6 +382,14 @@ class DefaultBuilderTest(unittest.TestCase):
         with patch.dict("os.environ", {"OPV_PHOTO_CHANNEL": "creatok"}):
             generator = build_default_photo_generator()
         self.assertIsInstance(generator, CreatokImageGenerator)
+
+    def test_codex_fallback_flips_direction(self):
+        """codex 主力 + CreatoK 兜底：额度耗尽时自动切通道，不裸奔。"""
+        with patch.dict("os.environ", {"OPV_PHOTO_CHANNEL": "codex_fallback"}):
+            generator = build_default_photo_generator()
+        self.assertIsInstance(generator, FallbackShotGenerator)
+        self.assertIsInstance(generator.primary, OpenAIImageGenerator)
+        self.assertIsInstance(generator.fallback, CreatokImageGenerator)
 
 
 if __name__ == "__main__":

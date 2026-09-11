@@ -8,10 +8,28 @@
   "default_locale": "es-MX",
   "timezone": "America/Mexico_City",
   "status": "testing",
-  "persona_ref_id": null,
+  "persona_ref_id": "MX_WIG_CAST_A_001",
   "persona_snapshot": {
-    "mode": "asset_set_bound",
-    "note": "原生图文 MVP 复用已审核素材；需要 AI 生图时再单独绑定稳定人物参考。"
+    "mode": "persona_reference_bound",
+    "persona_pack_id": "MX_WIG_CAST_A_001",
+    "primary_face_reference": {
+      "local_path": "/Users/likeu3/output/imagegen/mx-wig-casting-v1/A-日常亲和.png",
+      "sha256": "5d162ac84a9a6f419b675a392ca968c2b4654e577a24bb3662b34f2ad560bff0",
+      "role": "FACE_FRONT_NEUTRAL",
+      "source": "mx-wig-casting-v1/prompts.json candidate A（内置 imagegen 选角原图，用户已选定）"
+    },
+    "hair_policy": {
+      "hair_variable": true,
+      "identity_authority": "primary_face_reference_only",
+      "full_body_required": false,
+      "note": "脸部身份/肤色/年龄感锁定主参考；长度、轮廓、卷度、发色方向由每页发型计划决定。不复制泰国人物包语义。"
+    },
+    "registration": {
+      "library": "skills/lightweight-tryon-video/var/light_tryon.sqlite3:persona_templates",
+      "registered_by": "scripts/register_mx_wig_persona.py",
+      "bound_accounts": ["OPV_MX_PHOTO_001"]
+    },
+    "note": "2026-09-10 绑定用户选定人物 A；生产通道一致性验证（短Bob/长波浪样片）通过前不投产。"
   },
   "visual_identity": {
     "tone": "direct, expressive, social-first",

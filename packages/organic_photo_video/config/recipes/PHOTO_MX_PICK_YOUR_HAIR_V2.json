@@ -1,0 +1,195 @@
+{
+  "schema_version": "opv-content-recipe-v1",
+  "recipe_id": "PHOTO_MX_PICK_YOUR_HAIR_V2",
+  "recipe_key": "MX_PICK_YOUR_HAIR",
+  "recipe_version": 1,
+  "content_goal": "pick_your_hair",
+  "anchor_slot": 1,
+  "shot_count": 4,
+  "hook_types": [
+    "pick_one_of_four",
+    "cual_elegirias"
+  ],
+  "story_structure": [
+    {
+      "slot_index": 1,
+      "role": "hair_a",
+      "source_slots": [],
+      "layout_variant": "HAIR_OPTION",
+      "purpose": "首图：利落短 Bob，主题短标题 + 小号 A 标识"
+    },
+    {
+      "slot_index": 2,
+      "role": "hair_b",
+      "source_slots": [],
+      "layout_variant": "HAIR_OPTION",
+      "purpose": "选项 B：锁骨长度、柔和弧度"
+    },
+    {
+      "slot_index": 3,
+      "role": "hair_c",
+      "source_slots": [],
+      "layout_variant": "HAIR_OPTION",
+      "purpose": "选项 C：长直发"
+    },
+    {
+      "slot_index": 4,
+      "role": "hair_d",
+      "source_slots": [],
+      "layout_variant": "HAIR_OPTION_CTA",
+      "purpose": "选项 D：长波浪，并承载选择 CTA"
+    }
+  ],
+  "copy_style": {
+    "locale": "es-MX",
+    "tone": "short_interactive",
+    "max_lines_per_block": 2,
+    "overlay_text_max_chars": 28,
+    "example_title": "¿Qué look eliges para este finde?",
+    "example_cta": "¿A, B, C o D?"
+  },
+  "suitable_topics": [
+    "hair_choice",
+    "weekend_hair_choice"
+  ],
+  "quality_profile_id": "QUALITY_STANDARD_V1",
+  "status": "active",
+  "recipe_spec": {
+    "schema_version": "opv-photo-recipe-v1",
+    "media_kind": "native_photo",
+    "category_key": "wig",
+    "markets": [
+      "MX"
+    ],
+    "theme_types": [
+      "CHOICE"
+    ],
+    "product_modes": [
+      "NO_PRODUCT"
+    ],
+    "execution_flow": "mx_wig_choice_v1",
+    "locale": "es-MX",
+    "variables_schema": {
+      "choice_axis": {
+        "type": "enum",
+        "values": [
+          "length",
+          "texture",
+          "color",
+          "style"
+        ],
+        "required": true
+      }
+    },
+    "template_id": "PHOTO_MX_HAIR_CARD_V1",
+    "template_version": 1,
+    "visual_rules": {
+      "same_identity": true,
+      "same_camera_scale": true,
+      "distinct_hairstyles": 4,
+      "hairline_visible": true,
+      "choice_labels": true
+    },
+    "persona_contract": {
+      "hair_variable": true,
+      "hair_locked": false,
+      "identity_authority": "persona_primary_face_reference",
+      "full_body_required": false
+    },
+    "asset_policy": {
+      "default": "AI_GENERATE",
+      "on_missing": "NEEDS_ASSET"
+    },
+    "asset_match_keys": [
+      "choice_axis"
+    ],
+    "asset_requirements": {
+      "required_roles": [
+        "hair_a",
+        "hair_b",
+        "hair_c",
+        "hair_d"
+      ],
+      "required_tags": {
+        "use_cases": "pick_your_hair"
+      },
+      "required_pairs": []
+    },
+    "content_card": {
+      "summary_zh": "同一人物四款周末发型选择：A 利落短 Bob，B 锁骨长度柔和弧度，C 长直发，D 长波浪；A 本身承担首图。",
+      "audience_zh": "墨西哥 TikTok 女性用户，想换周末发型但还没决定款式",
+      "question_zh": "周末换个发型，你选哪款？",
+      "comparison_basis_zh": "同一人物、同一摄影氛围下四款发型的长度、轮廓与卷度差异",
+      "logic_key": "wig_four_choice_es",
+      "asset_gaps": [],
+      "choice_axis": "style",
+      "default_topic_key": "MX_WEEKEND_HAIR_CHOICE",
+      "pages": [
+        {
+          "index": 1,
+          "purpose_zh": "首图：A 利落短 Bob，主题短标题与小号 A 标识同页",
+          "layout": "single",
+          "source_roles": [
+            "hair_a"
+          ]
+        },
+        {
+          "index": 2,
+          "purpose_zh": "选项 B：锁骨长度、柔和弧度 + 简短发型名",
+          "layout": "single",
+          "source_roles": [
+            "hair_b"
+          ]
+        },
+        {
+          "index": 3,
+          "purpose_zh": "选项 C：长直发 + 简短发型名",
+          "layout": "single",
+          "source_roles": [
+            "hair_c"
+          ]
+        },
+        {
+          "index": 4,
+          "purpose_zh": "选项 D：长波浪 + 简短发型名 + 选择 CTA",
+          "layout": "single",
+          "source_roles": [
+            "hair_d"
+          ]
+        }
+      ]
+    },
+    "execution_profiles": [
+      {
+        "profile_id": "mx_weekend_hair_choice",
+        "label": "周末四选一发型（es-MX）",
+        "variables": {
+          "choice_axis": "style"
+        },
+        "asset_set_keys": [
+          "MX_WIG_CHOICE_GEN"
+        ],
+        "copy_variants": [
+          {
+            "copy_id": "mx_weekend_hair_seed_es_1",
+            "copy": {
+              "title": "¿Qué look eliges para este finde?",
+              "caption": "Cuatro peinados, una sola decisión de fin de semana. Desliza, compara y cuéntanos cuál te pondrías mañana.",
+              "hashtags": [
+                "#CambioDeLook",
+                "#Peinados",
+                "#IdeasDeCabello"
+              ],
+              "slide_texts": [
+                "¿Qué look eliges? · A",
+                "B · Bob a la clavícula",
+                "C · Largo liso",
+                "D · Ondas · ¿A, B, C o D?"
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

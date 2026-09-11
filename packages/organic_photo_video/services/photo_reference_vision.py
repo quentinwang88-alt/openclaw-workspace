@@ -15,14 +15,11 @@ import requests
 
 
 PROMPT_VERSION = "opv-photo-reference-v2"
-TRAVEL_PROMPT_VERSION = "opv-photo-travel-plan-v3"
+TRAVEL_PROMPT_VERSION = "opv-photo-travel-plan-v8-astra-visual"
 PRESENTATIONS = {"FLAT_LAY", "MODEL_FULL_BODY", "SCENE_MODEL", "EDITORIAL_COLLAGE"}
 ROLES = ["look_a", "look_b", "look_c", "look_d"]
 REFERENCE_USES = {"OUTFIT", "ENVIRONMENT", "VISUAL_STYLE"}
 
-TRAVEL_LOOK_CORE_FIELDS = ("outerwear", "top_inner", "bottom", "shoes")
-TRAVEL_MIN_PAIRWISE_FIELD_DIFF = 2
-TRAVEL_MIN_UPPER_COMBOS = 3
 TRAVEL_WEATHER_TEMP_PATTERN = re.compile(r"\d+\s*(?:°\s*C|℃|摄氏度|度)")
 from services.photo_travel_qa import FOOTWEAR_TYPES
 from services.locale_quality import copy_locale_issues
@@ -35,14 +32,6 @@ FOOTWEAR_KEYWORD_RULES = (
     ("玛丽珍", "MARY_JANE"), ("凉鞋", "SANDAL"), ("低跟", "LOW_HEEL"),
 )
 
-
-
-def _normalized_look_value(value: Any) -> str:
-    """Basic string normalization only; no vectors or extra LLM calls."""
-    text = "".join(str(value or "").split()).lower()
-    if text in {"", "无", "none", "不穿", "不穿外套", "无外套"}:
-        return "NONE"
-    return text
 
 
 def _footwear_text_types(shoes_text: str) -> set:
@@ -206,24 +195,56 @@ def _hash(value: Any) -> str:
     ).encode("utf-8")).hexdigest()
 
 
+def _vision_failure_detail(response: Any) -> str:
+    """把失败响应的关键事实带进报错，避免只有一句泛化文案无法定位。"""
+    try:
+        choice = (response.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        content = message.get("content")
+        parts = [f"finish_reason={choice.get('finish_reason') or 'unknown'}"]
+        if content:
+            text = str(content)
+            parts.append(f"content_len={len(text)}")
+            parts.append("head=" + text[:120].replace("\n", " "))
+        else:
+            parts.append("content为空")
+        if response.get("error"):
+            parts.append("error=" + str(response["error"])[:160])
+        return "；".join(parts)
+    except Exception:  # noqa: BLE001 - 诊断信息自身不允许再抛
+        return "响应结构未知"
+
+
 def parse_vision_envelope(response: Any) -> Dict[str, Any]:
     """Tolerant JSON extraction shared by every vision provider envelope."""
     try:
-        content = response["choices"][0]["message"]["content"].strip()
-        if content.startswith("```json"):
-            content = content[7:]
+        choice = (response.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        content = str(message.get("content") or "").strip()
+        if not content:
+            raise ValueError(f"模型返回空内容（{_vision_failure_detail(response)}）")
         if content.startswith("```"):
             content = content[3:]
+            if content.startswith("json"):
+                content = content[4:]
         if content.endswith("```"):
             content = content[:-3]
+        starts = [index for index in (content.find("{"), content.find("[")) if index >= 0]
+        if starts:
+            content = content[min(starts):]
         try:
-            return json.loads(content.strip())
-        except json.JSONDecodeError:
-            # 模型偶尔在 JSON 对象后附带解释文本；取第一个完整 JSON 对象。
             value, _ = json.JSONDecoder().raw_decode(content.strip())
             return value
-    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-        raise PhotoReferenceVisionError("图文视觉模型没有返回有效 JSON") from exc
+        except json.JSONDecodeError as exc:
+            if str(choice.get("finish_reason") or "") == "length":
+                raise ValueError(
+                    "响应被截断（finish_reason=length，max_tokens 不足）；"
+                    + _vision_failure_detail(response)) from exc
+            raise ValueError("内容不可解析；" + _vision_failure_detail(response)) from exc
+    except PhotoReferenceVisionError:
+        raise
+    except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise PhotoReferenceVisionError(f"图文视觉模型没有返回有效 JSON：{exc}") from exc
 
 
 DEFAULT_COLOR_GRADING_PLAN = {
@@ -295,6 +316,13 @@ class PhotoReferenceVisionService:
         self.codex_effort = os.environ.get(
             "OPV_PHOTO_VISION_CODEX_EFFORT", "medium"
         ).strip() or "medium"
+        # Only travel outfit planning needs the higher-judgement route.
+        self.travel_planning_model = os.environ.get(
+            "OPV_PHOTO_TRAVEL_PLANNING_MODEL", "gpt-6-astra"
+        ).strip() or "gpt-6-astra"
+        self.travel_planning_effort = os.environ.get(
+            "OPV_PHOTO_TRAVEL_PLANNING_EFFORT", "medium"
+        ).strip() or "medium"
 
     @staticmethod
     def _load_local_environment() -> None:
@@ -307,6 +335,8 @@ class PhotoReferenceVisionService:
             "OPV_PHOTO_VISION_API_KEY", "OPV_PHOTO_VISION_PROVIDER",
             "OPV_PHOTO_QA_LEVEL",
             "OPV_PHOTO_VISION_CODEX_MODEL", "OPV_PHOTO_VISION_CODEX_EFFORT",
+            "OPV_PHOTO_TRAVEL_PLANNING_MODEL",
+            "OPV_PHOTO_TRAVEL_PLANNING_EFFORT",
         }
         for raw_line in path.read_text(encoding="utf-8").splitlines():
             line = raw_line.strip()
@@ -347,15 +377,24 @@ class PhotoReferenceVisionService:
         """
         if prefer == "fast" and self.client is None and all(
                 (self.model, self.api_url, self.api_key)):
-            try:
-                doubao = self._build_client("doubao")
-                return doubao.chat_with_multiple_images(
-                    paths, prompt, max_tokens), "doubao"
-            except Exception:  # noqa: BLE001 - fallback boundary
-                pass
+            # 预解析校验：偶发的空内容/坏 JSON 在此就地重试一次，而不是
+            # 让整轮 QA 失败落进"失败可重试"。
+            doubao_error: Exception | None = None
+            for _ in range(2):
+                try:
+                    doubao = self._build_client("doubao")
+                    response = doubao.chat_with_multiple_images(
+                        paths, prompt, max_tokens)
+                    parse_vision_envelope(response)
+                    return response, "doubao"
+                except Exception as exc:  # noqa: BLE001 - fallback boundary
+                    doubao_error = exc
+            del doubao_error
         try:
             client = self._client()
-            return client.chat_with_multiple_images(paths, prompt, max_tokens), self.provider
+            response = client.chat_with_multiple_images(paths, prompt, max_tokens)
+            parse_vision_envelope(response)
+            return response, self.provider
         except Exception:  # noqa: BLE001 - fallback boundary
             injectable = self.client is not None
             doubao_ready = self.model and self.api_url and self.api_key
@@ -363,6 +402,7 @@ class PhotoReferenceVisionService:
                 raise
             doubao = self._build_client("doubao")
             response = doubao.chat_with_multiple_images(paths, prompt, max_tokens)
+            parse_vision_envelope(response)
             return response, "doubao_fallback"
 
     def provider_signature(self) -> Dict[str, str]:
@@ -376,6 +416,54 @@ class PhotoReferenceVisionService:
                 self.codex_effort if self.provider == "codex" else ""
             ),
         }
+
+    def travel_planning_signature(self) -> Dict[str, str]:
+        return {
+            "provider": "codex",
+            "model": self.travel_planning_model,
+            "reasoning_effort": self.travel_planning_effort,
+        }
+
+    def _travel_planning_chat(
+        self, paths: Sequence[str], prompt: str, max_tokens: int,
+    ) -> tuple[Any, Dict[str, Any]]:
+        """Astra planning route with the existing Doubao fallback."""
+        if self.client is not None:
+            response = self.client.chat_with_multiple_images(paths, prompt, max_tokens)
+            return response, {
+                "requested_model": self.travel_planning_model,
+                "actual_model": str(getattr(self.client, "model", "")
+                                    or self.travel_planning_model),
+                "reasoning_effort": self.travel_planning_effort,
+                "provider_used": "injected",
+                "fallback_used": False,
+            }
+        try:
+            from services.codex_vision_client import CodexVisionClient
+            client = CodexVisionClient(
+                model=self.travel_planning_model,
+                reasoning_effort=self.travel_planning_effort,
+            )
+            response = client.chat_with_multiple_images(paths, prompt, max_tokens)
+            return response, {
+                "requested_model": self.travel_planning_model,
+                "actual_model": self.travel_planning_model,
+                "reasoning_effort": self.travel_planning_effort,
+                "provider_used": "codex",
+                "fallback_used": False,
+            }
+        except Exception:
+            if not all((self.model, self.api_url, self.api_key)):
+                raise
+            client = self._build_client("doubao")
+            response = client.chat_with_multiple_images(paths, prompt, max_tokens)
+            return response, {
+                "requested_model": self.travel_planning_model,
+                "actual_model": self.model,
+                "reasoning_effort": "",
+                "provider_used": "doubao_fallback",
+                "fallback_used": True,
+            }
 
     def analyze(
         self, *, record_id: str, paths: Sequence[str], theme: Mapping[str, Any],
@@ -583,6 +671,8 @@ class PhotoReferenceVisionService:
         content_requirement: str = "", count: int = 1,
         travel_topic: Mapping[str, Any] = None,
         product_context: Mapping[str, Any] = None,
+        reference_paths: Sequence[str] = (),
+        product_reference_paths: Sequence[str] = (),
     ) -> dict[str, Any]:
         """Step 2: recipe-bound travel plan; strongly validated with one auto-revise.
 
@@ -595,14 +685,20 @@ class PhotoReferenceVisionService:
             raise PhotoReferenceVisionError("旅行合同缺少场景枚举")
         topic = dict(travel_topic or {})
         topic_theme_type = str(topic.get("theme_type") or "")
+        planning_paths, planning_images = self._travel_planning_images(
+            analysis=analysis, reference_paths=reference_paths,
+            product_reference_paths=product_reference_paths,
+        )
         input_contract = {
-            "prompt_version": TRAVEL_PROMPT_VERSION, "model": self.model,
+            "prompt_version": TRAVEL_PROMPT_VERSION,
             "analysis_sha256": _hash(dict(analysis)),
             "moments": [str(item.get("key") or "") for item in moments],
             "variables": dict(variables), "content_requirement": content_requirement,
             "count": count,
             "travel_topic": topic,
             "product_context": dict(product_context or {}),
+            "planning_route": self.travel_planning_signature(),
+            "planning_images": planning_images,
         }
         folder = self.root / "reference_contracts" / self._safe(record_id)
         folder.mkdir(parents=True, exist_ok=True)
@@ -621,29 +717,39 @@ class PhotoReferenceVisionService:
             travel_topic=topic,
             product_context=product_context,
         )
+        if planning_images:
+            base_prompt += self._travel_planning_image_prompt(planning_images)
         background_features = [
             str(value) for value in dict(analysis).get("background_features") or []
             if str(value or "").strip()
         ]
-        response, _ = self._chat([], base_prompt, max_tokens=3600)
+        response, model_routing = self._travel_planning_chat(
+            self._model_images(planning_paths), base_prompt, max_tokens=3600,
+        )
         raw = parse_vision_envelope(response)
         outfit_reference_indices = list(
             (dict(analysis).get("outfit_reference") or {}).get("indices") or []
         )
         plan, errors = self._normalize_travel_plan(
             raw, travel_contract, count, background_features=background_features,
-            travel_topic=topic, outfit_reference_indices=outfit_reference_indices)
+            travel_topic=topic, outfit_reference_indices=outfit_reference_indices,
+            product_context=product_context)
         if errors:
             revise_prompt = base_prompt + "\n\n上一次输出存在以下结构错误，必须全部修正后重新输出完整 JSON：\n- " + "\n- ".join(errors)
-            response, _ = self._chat([], revise_prompt, max_tokens=3600)
+            response, model_routing = self._travel_planning_chat(
+                self._model_images(planning_paths), revise_prompt, max_tokens=3600,
+            )
             raw = parse_vision_envelope(response)
             plan, errors = self._normalize_travel_plan(
                 raw, travel_contract, count, background_features=background_features,
-                travel_topic=topic, outfit_reference_indices=outfit_reference_indices)
+                travel_topic=topic, outfit_reference_indices=outfit_reference_indices,
+                product_context=product_context)
             if errors:
                 raise PhotoReferenceVisionError(
                     "旅行内容计划两次未通过结构校验：" + "；".join(errors[:6])
                 )
+        plan["model"] = model_routing["actual_model"]
+        plan["model_routing"] = dict(model_routing)
         payload = {
             "schema_version": "opv-photo-travel-plan-store-v1",
             "record_id": record_id, "input_sha256": input_sha256,
@@ -654,8 +760,72 @@ class PhotoReferenceVisionService:
         temporary.replace(path)
         return plan
 
+    @staticmethod
+    def _travel_planning_image_prompt(images: Sequence[Mapping[str, Any]]) -> str:
+        lines = []
+        for index, item in enumerate(images, 1):
+            uses = "、".join(str(value) for value in item.get("uses") or [])
+            lines.append(f"- 图片{index}：{uses}")
+        return (
+            "\n\n【本次直接提供给规划模型的图片】\n"
+            + "\n".join(lines)
+            + "\n商品图只决定指定商品的颜色、版型与结构；OUTFIT 参考只用于搭配比例、层次、"
+              "配色关系和穿法；ENVIRONMENT/VISUAL_STYLE 参考中的服装不得成为商品或搭配权威。"
+              "请直接观察图片中的全身比例以及下装与鞋履衔接，不只依赖前面的文字摘要。"
+        )
+
+    @staticmethod
+    def _travel_planning_images(
+        *, analysis: Mapping[str, Any], reference_paths: Sequence[str],
+        product_reference_paths: Sequence[str],
+    ) -> tuple[list[str], list[dict[str, Any]]]:
+        """Select and fingerprint existing inputs without new operator fields."""
+        selected: dict[str, dict[str, Any]] = {}
+        per_reference = {
+            int(item.get("index") or 0): dict(item)
+            for item in analysis.get("per_reference") or []
+            if isinstance(item, Mapping)
+        }
+        for index, raw in enumerate(reference_paths or (), 1):
+            path = Path(str(raw)).expanduser().resolve()
+            if not path.is_file():
+                raise PhotoReferenceVisionError(f"旅行规划参考图不存在：{path}")
+            uses = _normalize_reference_uses(
+                per_reference.get(index, {}).get("reference_uses")
+            ) or ["OUTFIT", "ENVIRONMENT", "VISUAL_STYLE"]
+            selected[str(path)] = {
+                "uses": uses,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+        for raw in product_reference_paths or ():
+            path = Path(str(raw)).expanduser().resolve()
+            if not path.is_file():
+                raise PhotoReferenceVisionError(f"旅行规划商品参考图不存在：{path}")
+            key = str(path)
+            if key in selected:
+                uses = list(selected[key]["uses"])
+                if "PRODUCT" not in uses:
+                    uses.insert(0, "PRODUCT")
+                selected[key]["uses"] = uses
+            else:
+                selected[key] = {
+                    "uses": ["PRODUCT"],
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+        paths = list(selected)
+        metadata = [
+            {"uses": list(selected[path]["uses"]),
+             "sha256": selected[path]["sha256"]}
+            for path in paths
+        ]
+        return paths, metadata
+
     def review_travel_pages(
-        self, *, reference_paths: Sequence[str], look_plans: Sequence[Mapping[str, Any]],
+        self, *, reference_paths: Sequence[str] = (),
+        product_reference_paths: Sequence[str] = (),
+        style_reference_paths: Sequence[str] = (),
+        product_context: Mapping[str, Any] = None, travel_place: str = "",
+        look_plans: Sequence[Mapping[str, Any]],
         image_paths: Sequence[str], travel_contract: Mapping[str, Any] = None,
         persona_based: bool = False,
     ) -> dict[str, Any]:
@@ -668,7 +838,17 @@ class PhotoReferenceVisionService:
             FOOTWEAR_TYPES, TravelSemanticQAError, moment_rules_from_contract,
             normalize_travel_qa,
         )
-        references = [str(Path(value).resolve()) for value in reference_paths]
+        product_references = list(dict.fromkeys(
+            str(Path(value).resolve()) for value in product_reference_paths
+        ))
+        style_references = [
+            value for value in dict.fromkeys(
+                str(Path(item).resolve()) for item in style_reference_paths
+            ) if value not in product_references
+        ]
+        references = product_references + style_references or [
+            str(Path(value).resolve()) for value in reference_paths
+        ]
         generated = [str(Path(value).resolve()) for value in image_paths]
         if not references or not generated or any(
                 not Path(value).is_file() for value in references + generated):
@@ -687,10 +867,13 @@ class PhotoReferenceVisionService:
                     for key in ("outerwear", "top_inner", "bottom", "shoes")
                 },
             })
-        prompt = self._travel_qa_prompt(page_plans=page_plans,
-                                        reference_count=len(references),
-                                        image_count=len(generated),
-                                        persona_based=persona_based)
+        prompt = self._travel_qa_prompt(
+            page_plans=page_plans, reference_count=len(references),
+            product_reference_count=len(product_references),
+            style_reference_count=len(style_references),
+            image_count=len(generated), persona_based=persona_based,
+            product_context=dict(product_context or {}), travel_place=travel_place,
+        )
         response, _ = self._chat(
             self._model_images(references + generated), prompt, max_tokens=2600,
             prefer="fast",
@@ -701,6 +884,7 @@ class PhotoReferenceVisionService:
                 raw, look_plans=look_plans,
                 moment_rules=moment_rules_from_contract(contract),
                 footwear_types=FOOTWEAR_TYPES,
+                has_product=bool(product_context), travel_place=travel_place,
             )
         except TravelSemanticQAError as first_error:
             retry_prompt = (
@@ -712,7 +896,7 @@ class PhotoReferenceVisionService:
             )
             retry_response, _ = self._chat(
                 self._model_images(references + generated), retry_prompt, max_tokens=2600,
-                prefer="fast", persona_based=persona_based,
+                prefer="fast",
             )
             raw_retry = parse_vision_envelope(retry_response)
             try:
@@ -720,12 +904,261 @@ class PhotoReferenceVisionService:
                     raw_retry, look_plans=look_plans,
                     moment_rules=moment_rules_from_contract(contract),
                     footwear_types=FOOTWEAR_TYPES,
+                    has_product=bool(product_context), travel_place=travel_place,
                 )
             except TravelSemanticQAError as second_error:
                 raise PhotoReferenceVisionError(
                     f"旅行语义质检两次结构不完整：{second_error}；"
                     f"原始响应已保留：{json.dumps(raw_retry, ensure_ascii=False)[:1200]}"
                 ) from second_error
+
+    MX_WIG_PLAN_PROMPT_VERSION = "opv-photo-mx-wig-plan-v1"
+
+    def plan_wig_choice_content(
+        self, *, record_id: str, persona_paths: Sequence[str],
+        reference_paths: Sequence[str] = (), content_requirement: str = "",
+        count: int = 1, theme_label_zh: str = "", choice_axis: str = "style",
+    ) -> dict[str, Any]:
+        """MX wig four-choice planning route (Astra path), mirror of travel.
+
+        Emits one frozen plan with ``count`` items; each item carries four
+        distinct hair options plus natural es-MX copy.  No Thai or clothing
+        fallback exists — structural failure after one auto-revise raises.
+        """
+        from services.photo_wig_planner import normalize_wig_choice_plan
+
+        planning_paths = list(dict.fromkeys(
+            [str(Path(value).resolve()) for value in persona_paths]
+            + [str(Path(value).resolve()) for value in reference_paths]
+        ))
+        if not planning_paths or any(
+                not Path(value).is_file() for value in planning_paths):
+            raise PhotoReferenceVisionError("假发规划缺少人物/参考图片")
+        persona_sha = [
+            hashlib.sha256(Path(value).read_bytes()).hexdigest()
+            for value in persona_paths
+        ]
+        reference_sha = [
+            hashlib.sha256(Path(value).read_bytes()).hexdigest()
+            for value in reference_paths
+        ]
+        input_contract = {
+            "prompt_version": self.MX_WIG_PLAN_PROMPT_VERSION,
+            "persona_sha256": persona_sha,
+            "reference_sha256": reference_sha,
+            "content_requirement": content_requirement,
+            "count": count, "theme_label_zh": theme_label_zh,
+            "choice_axis": choice_axis,
+            "planning_route": self.travel_planning_signature(),
+        }
+        folder = self.root / "reference_contracts" / self._safe(record_id)
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / "wig_plan.json"
+        input_sha256 = _hash(input_contract)
+        if path.is_file():
+            cached = json.loads(path.read_text(encoding="utf-8"))
+            if cached.get("input_sha256") != input_sha256:
+                raise PhotoReferenceVisionError(
+                    "主题、人物或参考图已变化；请新建任务避免混用旧假发计划"
+                )
+            return dict(cached["plan"])
+        base_prompt = self._wig_plan_prompt(
+            theme_label_zh=theme_label_zh, choice_axis=choice_axis,
+            content_requirement=content_requirement, count=count,
+            image_count=len(planning_paths),
+        )
+        response, model_routing = self._travel_planning_chat(
+            self._model_images(planning_paths), base_prompt, max_tokens=3800,
+        )
+        raw = parse_vision_envelope(response)
+        plan, errors = normalize_wig_choice_plan(
+            raw, count=count, choice_axis=choice_axis,
+        )
+        if errors:
+            revise_prompt = (
+                base_prompt
+                + "\n\n上一次输出存在以下结构错误，必须全部修正后重新输出完整 JSON：\n- "
+                + "\n- ".join(errors)
+            )
+            response, model_routing = self._travel_planning_chat(
+                self._model_images(planning_paths), revise_prompt, max_tokens=3800,
+            )
+            raw = parse_vision_envelope(response)
+            plan, errors = normalize_wig_choice_plan(
+                raw, count=count, choice_axis=choice_axis,
+            )
+            if errors:
+                raise PhotoReferenceVisionError(
+                    "假发内容计划两次未通过结构校验：" + "；".join(errors[:6])
+                )
+        plan["model"] = model_routing["actual_model"]
+        plan["model_routing"] = dict(model_routing)
+        plan["prompt_version"] = self.MX_WIG_PLAN_PROMPT_VERSION
+        payload = {
+            "schema_version": "opv-photo-mx-wig-plan-store-v1",
+            "record_id": record_id, "input_sha256": input_sha256,
+            "input_contract": input_contract, "plan": plan,
+        }
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        temporary.replace(path)
+        return plan
+
+    @staticmethod
+    def _wig_plan_prompt(*, theme_label_zh: str, choice_axis: str,
+                         content_requirement: str, count: int,
+                         image_count: int) -> str:
+        return f"""你是墨西哥西语（es-MX）假发账号的原生图文策划。为“四选一发型”帖子输出 {count} 篇互相有差异的内容计划 JSON。
+
+输入图片共 {image_count} 张：第一张是人物身份参考（只代表人物的脸，不代表目标发型）；其余（若有）是发型/环境/风格灵感，只取其标注用途。
+
+每篇固定结构（角色不可改变）：
+- hair_a：第 1 页，同时是首图；短发方向（如利落短 Bob）。
+- hair_b：第 2 页；中长方向（如锁骨长度、柔和弧度）。
+- hair_c：第 3 页；长直方向。
+- hair_d：第 4 页；长波浪方向，并承载选择 CTA。
+
+硬性要求：
+1. 四个选项必须肉眼可辨：length/texture/color/parting/silhouette 至少三项不同；同一篇内不得出现实质重复的发型。
+2. 每个选项给 label_es（≤22 字符的西语发型名，如 "Bob corto"）和中文描述字段（*_zh）供生图 prompt 使用。
+3. 文案全部为自然墨西哥西语：title ≤72 字符（自然提问句），caption 2-3 句（描述这组选择，不提价格/促销/生发/真人发），hashtags 3-5 个（# 开头），slide_texts 恰好 4 条且每条 ≤28 字符。
+4. slide_texts[0] 是主题短标题并以 "· A" 结尾（小号 A 标识）；slide_texts[1..3] 分别以 "B · "、"C · "、"D · " 开头；slide_texts[3] 结尾含 "¿A, B, C o D?"。
+5. 不出现中文、泰文或英语句子；不用 {{label_x}} 占位符。
+6. 多篇之间轮换选项差异轴（卷度/发色/分缝/造型细节），不得产出四篇完全相同的选项组合。
+7. 只根据图片里真实可见的信息使用参考图，不虚构品牌或商品。
+
+默认主题：{theme_label_zh or "周末换个发型，你选哪款？"}（theme_key 固定为 MX_WEEKEND_HAIR_CHOICE）。选择轴：{choice_axis}。
+{("运营补充要求（必须遵守）：" + content_requirement) if content_requirement else ""}
+
+只输出一个 JSON 对象，结构：
+{{
+  "theme_key": "MX_WEEKEND_HAIR_CHOICE",
+  "locale": "es-MX",
+  "choice_axis": "{choice_axis}",
+  "photography_direction_zh": "整篇统一的摄影方向（中文，给生图用）",
+  "items": [
+    {{
+      "item_index": 1,
+      "topic_zh": "本篇主题方向（中文）",
+      "photography_direction_zh": "…",
+      "wardrobe_direction_zh": "…",
+      "makeup_direction_zh": "…",
+      "scene_prompt_zh": "…",
+      "reference_uses": [{{"image_index": 1, "uses": ["persona"]}}, {{"image_index": 2, "uses": ["hair_inspiration"]}}],
+      "options": [
+        {{"role": "hair_a", "label_es": "…", "label_zh": "…", "length": "chin_bob", "length_zh": "…", "texture": "straight", "texture_zh": "…", "color_zh": "…", "parting_zh": "…", "silhouette_zh": "…", "framing_zh": "…", "bangs_zh": "…", "note_zh": "…"}},
+        {{"role": "hair_b", "…": "…"}},
+        {{"role": "hair_c", "…": "…"}},
+        {{"role": "hair_d", "…": "…"}}
+      ],
+      "copy": {{
+        "title": "…",
+        "caption": "…",
+        "hashtags": ["#…"],
+        "slide_texts": ["…· A", "B · …", "C · …", "D · … ¿A, B, C o D?"]
+      }}
+    }}
+  ]
+}}"""
+
+    def review_wig_group(
+        self, *, persona_image_path: str, sources: Sequence[Mapping[str, Any]],
+        plan_item: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """One group-level visual check for the four generated hair options.
+
+        Hard failures only (face swap/deformity, severe hair-face artifacts,
+        substantively duplicated options, core hairstyle mismatch); small
+        deviations are recorded as notes, never as failures.
+        """
+        from services.photo_wig_qa import normalize_wig_group_qa
+
+        generated = [str(Path(item["path"]).resolve()) for item in sources]
+        paths = [str(Path(persona_image_path).resolve())] + generated
+        if any(not Path(value).is_file() for value in paths):
+            raise PhotoReferenceVisionError("假发组级质检缺少人物或生成图片")
+        options = {str(item.get("role")): item
+                   for item in plan_item.get("options") or []}
+        page_plans = []
+        for item in sources:
+            option = options.get(str(item.get("role"))) or {}
+            page_plans.append({
+                "role": str(item.get("role")),
+                "label_es": str(option.get("label_es") or ""),
+                "length_zh": str(option.get("length_zh") or option.get("length") or ""),
+                "texture_zh": str(option.get("texture_zh") or option.get("texture") or ""),
+                "color_zh": str(option.get("color_zh") or option.get("color") or ""),
+                "silhouette_zh": str(option.get("silhouette_zh") or ""),
+            })
+        prompt = f"""你是严格的图文技术质检引擎。输入图片第 1 张是人物身份参考原图，其后 {len(generated)} 张是按计划生成的发型选项页（顺序如下）。
+
+逐张检查，只把“硬伤”记为失败：
+- face_changed：生成页主角的脸与人物参考明显不是同一人（换脸、五官/脸型/肤色/年龄感明显偏离）。
+- deformity：明显畸形（手、肢体、眼睛、皮肤塑料感严重）。
+- hair_artifact：头发严重粘连脸部/发际线严重失真。
+- hairstyle_mismatch：核心发型与该页计划严重不符（长度级别错误、卷度方向相反、发色方向完全不同）。
+- duplicate_of：该页发型与另一页实质重复（同一长度+同一卷度+同一轮廓）。
+
+以下情况只记入 notes，不作为失败：自然光导致的肤色明暗差、个别发丝、轻微表情/视线变化、非核心卷度细节、刘海轻微遮挡发际线、背景轻微差异。
+
+页面计划：
+{json.dumps(page_plans, ensure_ascii=False, indent=1)}
+
+只输出 JSON：
+{{"roles": [{{"role": "hair_a", "passed": true, "hard_flags": [], "notes": "…"}}, …全部四页…], "group_notes": "…"}}
+所有 passed 必须是真正的 true/false。"""
+        response, _ = self._chat(
+            self._model_images(paths), prompt, max_tokens=1600, prefer="fast",
+        )
+        raw = parse_vision_envelope(response)
+        roles = [str(item.get("role")) for item in sources]
+        try:
+            return normalize_wig_group_qa(raw, roles=roles)
+        except PhotoReferenceVisionError as first_error:
+            retry_response, _ = self._chat(
+                self._model_images(paths),
+                prompt + "\n\n上一次结果结构不完整（" + str(first_error)
+                + "）。必须重新输出覆盖全部四页的完整 JSON，布尔字段必须是真正的 true/false。",
+                max_tokens=1600, prefer="fast",
+            )
+            raw_retry = parse_vision_envelope(retry_response)
+            return normalize_wig_group_qa(raw_retry, roles=roles)
+
+    def review_wig_copy_semantics(
+        self, *, copy_block: Mapping[str, Any], plan_item: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Text-only es-MX semantic review (same QA pass, no extra pipeline)."""
+        from services.photo_wig_qa import normalize_wig_copy_review
+
+        prompt = f"""你是墨西哥西语（es-MX）母语内容审校。检查下面这条四选一发型帖子的文案是否合格。
+
+文案：
+{json.dumps(dict(copy_block), ensure_ascii=False, indent=1)}
+
+本篇计划主题：{plan_item.get('topic_zh') or '周末换个发型，你选哪款？'}；四个选项：{json.dumps([o.get('label_es') for o in plan_item.get('options') or []], ensure_ascii=False)}
+
+职责边界（重要）：格式规范——slide_texts 的 "· A"/"B · "/"C · "/"D · " 前缀、CTA 是否存在、字数上限、选项标签与计划名称是否一致、caption 是否逐条对应选项——全部由程序规则负责并已另行校验，你一律不检查、不评论、不据此判 fail。文字被 28 字上限压缩、CTA 与选项标签同行，都是规范的既定形态。
+
+你只负责以下三类问题（任一命中才 fail）：
+1. 语言不是自然的墨西哥西语：整句英语、机翻腔、混入中文/泰文。
+2. 主题明显无关：文案讲的不是"从几款发型里做选择"（例如在讲穿搭教程、化妆步骤、价格或促销）。
+3. 违禁内容：价格、促销、医疗/生发功效、"100% 真人发"等未经提供的产品事实宣称。
+
+除以上三类之外的一切（措辞偏好、标签简繁、信息完整度）都必须 passed=true。
+
+只输出 JSON：{{"passed": true, "issues": [], "notes": "…"}}；passed 必须是真正的 true/false。"""
+        response, _ = self._chat([], prompt, max_tokens=700, prefer="fast")
+        raw = parse_vision_envelope(response)
+        try:
+            return normalize_wig_copy_review(raw)
+        except PhotoReferenceVisionError:
+            retry_response, _ = self._chat(
+                [], prompt + "\n\n上一次结果结构不完整。必须重新输出完整 JSON。",
+                max_tokens=700, prefer="fast",
+            )
+            return normalize_wig_copy_review(parse_vision_envelope(retry_response))
 
     @staticmethod
     def build_travel_style_profile(analysis: Mapping[str, Any],
@@ -759,11 +1192,13 @@ class PhotoReferenceVisionService:
         self, *, image_paths: Sequence[str], expected_texts: Sequence[str],
         role_order: Sequence[str],
     ) -> dict[str, Any]:
-        """QA over the final composited pages (cover + A-D) after text overlay."""
+        """QA final travel pages; four-page output plus legacy five-page batches."""
         images = [str(Path(value).resolve()) for value in image_paths]
-        if len(images) != 5 or len(expected_texts) != 5 or len(role_order) != 5:
+        page_count = len(images)
+        if (page_count not in {4, 5} or len(expected_texts) != page_count
+                or len(role_order) != page_count):
             raise PhotoReferenceVisionError(
-                f"旅行最终页面质检必须覆盖 5 页；收到图片 {len(images)}、"
+                f"旅行最终页面质检必须覆盖新版 4 页或历史 5 页；收到图片 {len(images)}、"
                 f"文字 {len(expected_texts)}、角色 {len(role_order)}"
             )
         if any(not Path(value).is_file() for value in images):
@@ -772,9 +1207,15 @@ class PhotoReferenceVisionService:
             {"index": index, "role": str(role), "expected_text": str(text)}
             for index, (role, text) in enumerate(zip(role_order, expected_texts), 1)
         ]
+        page_description = (
+            "以下 4 张是新版最终成片页：第 1 页是 Look A 并直接承担封面，"
+            "第 2-4 页依次是 Look B/C/D，没有额外复制的封面页。"
+            if page_count == 4 else
+            "以下 5 张是历史批次成片页：第 1 页封面，第 2-5 页为 A/B/C/D。"
+        )
         prompt = (
-            "你是图文套版终审质检员。以下 5 张是最终成片页（第 1 页封面，第 2-5 页 A/B/C/D），"
-            "每页已叠加泰语文字。逐页对照预期文字检查并只返回 JSON：\n"
+            f"你是图文套版终审质检员。{page_description}每页已叠加泰语文字。"
+            "逐页对照预期文字检查并只返回 JSON：\n"
             f"{json.dumps(pages_payload, ensure_ascii=False, indent=1)}\n"
             '返回格式：{"pages":[{"index":1,"text_readable":true,'
             '"text_matches_expected":true,"text_clipped":false,"text_garbled":false,'
@@ -797,7 +1238,7 @@ class PhotoReferenceVisionService:
         required_bools = ("text_readable", "text_matches_expected",
                           "text_clipped", "text_garbled", "subject_obscured")
         normalized = []
-        for index in range(1, 6):
+        for index in range(1, page_count + 1):
             page = by_index.get(index)
             if not isinstance(page, Mapping):
                 raise PhotoReferenceVisionError(f"旅行最终页面质检缺少第 {index} 页结果")
@@ -876,7 +1317,8 @@ class PhotoReferenceVisionService:
     def _normalize_travel_plan(self, raw, travel_contract, count,
                                background_features=None,
                                travel_topic: Mapping[str, Any] = None,
-                               outfit_reference_indices: Sequence[int] = ()):
+                               outfit_reference_indices: Sequence[int] = (),
+                               product_context: Mapping[str, Any] = None):
         if not isinstance(raw, Mapping):
             return {}, ["输出不是 JSON 对象"]
         moments = {str(item.get("key") or ""): item for item in travel_contract.get("moments") or []}
@@ -954,7 +1396,7 @@ class PhotoReferenceVisionService:
                         continue
                     if selected in valid_outfit_indices and selected not in selected_indices:
                         selected_indices.append(selected)
-                normalized_looks.append({
+                normalized_look = {
                     **look,
                     "footwear_type": footwear,
                     "background_feature_zh": str(look.get("background_feature_zh") or ""),
@@ -962,44 +1404,42 @@ class PhotoReferenceVisionService:
                     "display_label": str(moments[moment].get("label_th") or ""),
                     "outfit_reference_indices": selected_indices,
                     "styling_intent": str(look.get("styling_intent") or ""),
-                })
+                }
+                product = dict(product_context or {})
+                product_id = str(product.get("product_id") or "")
+                if product_id:
+                    category = str(product.get("category") or "").strip().lower()
+                    normalized_look["target_product"] = {
+                        key: product.get(key)
+                        for key in ("product_id", "product_name", "category",
+                                    "reference_pack_id", "reference_pack_version")
+                        if product.get(key) not in (None, "")
+                    }
+                    target_fields = {
+                        "outerwear": ("outerwear", "外套"),
+                        "top": ("top_inner", "上装"),
+                        "bottom": ("bottom", "下装"),
+                        "dress": ("outerwear", "连衣裙"),
+                        "shoes": ("shoes", "鞋履"),
+                        "shoe": ("shoes", "鞋履"),
+                        "footwear": ("shoes", "鞋履"),
+                    }
+                    target = target_fields.get(category)
+                    if target:
+                        normalized_look[target[0]] = (
+                            f"指定商品{target[1]}（以商品参考图为准）"
+                        )
+                normalized_looks.append(normalized_look)
             topic_active = bool(travel_topic and travel_topic.get("theme_type"))
             if (len(plan_moments) == len(ROLES)
                     and len(set(plan_moments)) != len(ROLES) and not topic_active):
                 errors.append(f"第 {post_index} 篇四个 travel_moment 必须互不相同")
-            # 改造一：任意两套 Look 至少两个核心字段不同；上装组合至少三种。
-            inspiration_mode = bool(outfit_reference_indices) or str(
-                (travel_topic or {}).get("theme_type") or ""
-            ) == "COLOR_MATCH"
-            if len(normalized_looks) == len(ROLES) and not inspiration_mode:
-                for left in range(len(ROLES)):
-                    for right in range(left + 1, len(ROLES)):
-                        distance = sum(
-                            _normalized_look_value(normalized_looks[left][field])
-                            != _normalized_look_value(normalized_looks[right][field])
-                            for field in TRAVEL_LOOK_CORE_FIELDS
-                        )
-                        if distance < TRAVEL_MIN_PAIRWISE_FIELD_DIFF:
-                            errors.append(
-                                f"第 {post_index} 篇 {ROLES[left]} 与 {ROLES[right]} 仅有"
-                                f" {distance} 个核心单品不同，至少需要"
-                                f" {TRAVEL_MIN_PAIRWISE_FIELD_DIFF} 个；"
-                                "不能用同一件外套、内搭和鞋只替换下装冒充新 Look"
-                            )
-                upper_combos = {
-                    (_normalized_look_value(look.get("outerwear")),
-                     _normalized_look_value(look.get("top_inner")))
-                    for look in normalized_looks
-                }
-                if len(upper_combos) < TRAVEL_MIN_UPPER_COMBOS:
-                    errors.append(
-                        f"第 {post_index} 篇上装组合只有 {len(upper_combos)} 种，"
-                        f"至少需要 {TRAVEL_MIN_UPPER_COMBOS} 种肉眼明显不同的上半身"
-                    )
             post["looks"] = normalized_looks
             if topic_active:
                 topic_zh = str(post.get("topic_zh") or "").strip()
                 copy_block = post.get("copy") if isinstance(post.get("copy"), Mapping) else {}
+                place = str((travel_topic or {}).get("place") or "").strip()
+                place_localized = str(copy_block.get("place_localized") or "").strip()
                 title = str(copy_block.get("title") or "").strip()
                 caption = str(copy_block.get("caption") or "").strip()
                 hashtags = [str(v) for v in copy_block.get("hashtags") or []]
@@ -1033,8 +1473,20 @@ class PhotoReferenceVisionService:
                     caption = caption or str(fallback.get("caption") or "")
                     hashtags = hashtags or [str(v) for v in fallback.get("hashtags") or []]
                     post["copy_degraded"] = True
+                if place:
+                    if not place_localized:
+                        errors.append(
+                            f"第 {post_index} 篇缺少当地语言地点名 place_localized（{place}）"
+                        )
+                    elif place_localized not in title or place_localized not in (
+                            slide_texts[0] if slide_texts else ""):
+                        errors.append(
+                            f"第 {post_index} 篇发布标题和封面必须同时包含地点名 "
+                            f"{place_localized}"
+                        )
                 post["topic_zh"] = topic_zh
                 post["copy"] = {
+                    "place_localized": place_localized,
                     "title": title,
                     "caption": caption,
                     "hashtags": hashtags,
@@ -1129,22 +1581,33 @@ class PhotoReferenceVisionService:
                 "- 运营补充要求与地点描述只用于场景与穿搭语境，内容市场语言仍按既定市场输出。\n"
                 "\n【发布文案（主题联动必须生成）】以四套 Look 为依据，同时输出：\n"
                 '{{"topic_zh":"中文选题（可用主题句式，填入地点）",'
-                '"copy":{{"title":"当地语言发布标题","caption":"当地语言发布正文",'
-                '"hashtags":["当地语言标签"],"slide_texts":["主题封面","A：名称及短说明","B：名称及短说明","C：名称及短说明","D：名称及短说明，加 CTA"]}}}}\n'
-                "文案要求：标题与逐页说明围绕同一选题；逐页说明使用造型名称加一条画面能够支持的短说明；"
-                "slide_texts 必须 5 条且顺序为封面+A/B/C/D；CTA 并入第 5 条末尾。\n"
+                '"copy":{{"place_localized":"目标市场常用地点名","title":"当地语言发布标题","caption":"当地语言发布正文",'
+                '"hashtags":["当地语言标签"],"slide_texts":["两行短封面","A · 当地语言短名称","B · 当地语言短名称","C · 当地语言短名称","D · 当地语言短名称\\n完整选择 CTA"]}}}}\n'
+                "文案要求：title、caption、封面必须由同一个具体选题驱动。title 用地点加一个明确的穿搭问题或利益点，"
+                "不能退化成‘某地 4 套穿搭’；caption 用一两句补充为什么这些搭配适合该地点/主题，不机械复述 A/B/C/D 名称。"
+                "只有当四张最终画面都明确支持某种审美风格时，title/caption 才能写法式、学院风等风格名。"
+                "slide_texts 只用于图片排版，必须短、完整、易扫读。slide_texts 必须 5 条且顺序为封面+A/B/C/D："
+                "封面固定两层信息，第一行是 place_localized，第二行是与 topic_zh 对应的短钩子；A-C 每页只写一个当地语言造型短名称，不编造英文杂志式名称；"
+                "第 5 页固定两行，第一行是 D 的短名称，第二行只写简短的 A/B/C/D 选择 CTA，不重复四套名称。禁止省略号和不完整选项。\n"
+                "标题规则（最重要）：title 与封面必须包含 place_localized（目标市场常用地点名，"
+                "如富士山→ภูเขาไฟฟูจิ、河口湖→คาวากุจิโกะ、浅草寺→วัดอาซากุสะ、涩谷→ชิบุยะ），"
+                "地点是旅行内容最大的吸引力点，绝不允许只写泛泛的\u201c旅行穿搭\u201d。\n"
             ).format(tt=topic_theme_type, place=topic.get("place") or "未指定（使用参考图目的地氛围，不猜测具体地名）",
                      focus=topic.get("planning_focus") or "")
         difference_rule = (
-            "四套 Look 从完整参考搭配出发，保留好看的长短/宽窄比例、层次、配色关系和穿法；"
-            "可用配色、轮廓、层次、配套单品或穿法形成可见区别，不为凑差异拆散协调搭配。"
-            "每套在 outfit_reference_indices 中填写主要借鉴的参考图序号（可复用），并用 styling_intent 说明保留什么；"
-            if outfit_indices else
-            "四套 Look 必须肉眼明显不同。任意两套在外套、内搭、下装、鞋履四个核心字段中至少有两个不同；"
-            "上装组合至少三种。"
+            "四套 Look 要提供读者第一眼就能感知的不同搭配选择；区别主要来自整体轮廓、配色关系、"
+            "层次或穿法。只更换场景、姿势、面料名称、配饰或相近颜色称呼，不算新的搭配方向。"
+            "允许复用协调的鞋履、成熟裤型和指定商品，不为凑字段数量拆散好看的组合。"
+            "输出前横向比较四套；若两套第一眼近似，只调整其中一套最有必要的搭配部分，并同步相关文案。"
+            + (
+                "从完整参考搭配出发，保留好看的长短/宽窄比例、层次、配色关系和穿法；"
+                "每套在 outfit_reference_indices 中填写主要借鉴的参考图序号（可复用），"
+                "并用 styling_intent 说明保留什么；"
+                if outfit_indices else ""
+            )
         )
         topic_schema = (
-            '{{"travel_variables":{{}},"posts":[{{"content_angle_zh":"","scene_zh":"","palette_zh":"","background_prompt":"","style_modifier":"","topic_zh":"中文选题（填入地点）","copy":{{"title":"当地语言发布标题","caption":"当地语言发布正文","hashtags":["当地语言标签"],"slide_texts":["主题封面","A：名称及短说明","B：名称及短说明","C：名称及短说明","D：名称及短说明，加 CTA"]}},"looks":[\n'
+            '{{"travel_variables":{{}},"posts":[{{"content_angle_zh":"","scene_zh":"","palette_zh":"","background_prompt":"","style_modifier":"","topic_zh":"中文选题（填入地点）","copy":{{"place_localized":"目标市场常用地点名","title":"当地语言发布标题","caption":"当地语言发布正文","hashtags":["当地语言标签"],"slide_texts":["两行短封面","A · 当地语言短名称","B · 当地语言短名称","C · 当地语言短名称","D · 当地语言短名称\\n完整选择 CTA"]}},"looks":[\n'
             '{{"role":"look_a","travel_moment":"old_town_walk","scene_prompt":"中文场景描述","weather_logic":"中文逻辑（无具体温度）","display_label":"","footwear_type":"SNEAKER","background_feature_zh":"该场景延续的参考背景特征","outfit_reference_indices":[],"styling_intent":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":""}},\n'
             '{{"role":"look_b","travel_moment":"shopping_day","scene_prompt":"","weather_logic":"","display_label":"","footwear_type":"LOAFER","background_feature_zh":"","outfit_reference_indices":[],"styling_intent":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":""}},\n'
             '{{"role":"look_c","travel_moment":"cafe_visit","scene_prompt":"","weather_logic":"","display_label":"","footwear_type":"LOW_HEEL","background_feature_zh":"","outfit_reference_indices":[],"styling_intent":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":""}},\n'
@@ -1166,11 +1629,12 @@ class PhotoReferenceVisionService:
 规则：
 1. 每篇 looks 必须是有序 look_a..look_d；{same_moment_rule}
 2. {difference_rule}
-2.1 如有指定商品，四套都必须保留该商品的核心颜色、版型与结构，只改变配套单品、穿法或场景；穿搭参考中的同类单品不得替换指定商品；
-3. 背景延续（按优先级）：当页场所合理 → 整篇旅行氛围一致 → 可选地标与景观。延续参考图的旅行氛围、季节与环境气质（气候/地域/建筑气质），travel_moment 决定场所类型；每页优先呈现该场所合理的画面，允许室内、近景或被遮挡的视角，具体地标和景观不必在每页出现。background_feature_zh 字段列出该场景实际延续的参考背景特征（没有就留空，不强制文字重叠）；
-4. scene_prompt 用中文具体描述该 Look 的独立场景画面，必须包含枚举中的画面证据要素（如机场：航站楼、行李箱、登机区域）；以当页冻结的 scene_prompt 为最终画面依据；
+2.1 如有指定商品，四套都必须保留该商品，只改变配套单品、穿法或场景；商品颜色、版型与结构以商品参考图为唯一权威，不得根据商品名称或普通穿搭参考猜测；对应商品字段写“指定商品（以商品参考图为准）”，穿搭参考中的同类单品不得替换指定商品；
+3. 背景延续（按优先级）：当页场所合理 → 整篇旅行氛围一致 → 可选地标与景观。延续参考图的旅行氛围、季节与环境气质（气候/地域/建筑气质），travel_moment 决定场所类型；整组只需 1-2 页清晰展示代表性地标，其余页可用街道、湖畔、店内、局部景观等延续氛围，具体地标和景观不必在每页出现。background_feature_zh 字段列出该场景实际延续的参考背景特征（没有就留空，不强制文字重叠）；
+4. scene_prompt 用中文具体描述该 Look 的独立场景画面，必须包含枚举中的画面证据要素（如机场：航站楼、行李箱、登机区域）；四页自然变化人物动作、视线方向与景别，避免全部正面站立微笑；不为差异强制固定机位配额。以当页冻结的 scene_prompt 为最终画面依据；
 5. weather_logic 只能用中文说明室内外切换、白天/傍晚温差、防风、方便穿脱、步行舒适等搭配理由；禁止出现任何具体温度数字（如 20°C、16度、21℃）；温度只以文章级温度档呈现；
 6. 穿搭单品用中文具体描述（外套/内搭/下装/鞋履），符合温度档与参考图风格；display_label 不要自己编写，系统会按枚举固定泰语标签；
+6.1 下装和鞋履必须联合规划：先确定整套轮廓，再决定裤型或裙型、材质垂坠感、下装长度、鞋口位置、鞋面和鞋底体量。舒适度是旅行条件之一，不能代替搭配审美。避免无意的裤脚堆积、腰胯鼓包、裙摆与靴口之间形成笨重截断或上下同时过度膨胀；允许有意的宽松轮廓、长裤覆盖鞋面和厚底搭配，不把露脚踝、尖头鞋或某一种裤型设为统一答案。styling_intent 用一句具体话说明为何选择该鞋，以及它怎样承接裙摆或裤脚；禁止只写“整体协调、显高显瘦、适合旅行”等空泛结论；
 7. footwear_type 必须从枚举 SNEAKER/LOAFER/FLAT/MARY_JANE/LOW_BOOT/LOW_HEEL/HIGH_HEEL/STILETTO/SANDAL 中选择，并与 shoes 中文描述一致。参考图中的鞋履只能作为审美参考；机场、老城步行、傍晚散步等高步行场景必须优先使用舒适可行走鞋履，不能照搬细跟高跟鞋；
 8. 不同篇的内容角度和单品组合必须有明显差异；
 8.1 机场不是默认开场或必选场景。只有选题/运营要求明确涉及机场、出发日或飞行穿搭时才使用 airport_departure；Look A 优先直接表达选定地点、主题和穿搭亮点；
@@ -1182,15 +1646,9 @@ posts 数量必须等于 {count}。不要输出 Markdown。"""
 
     @staticmethod
     def _travel_qa_prompt(*, page_plans, reference_count, image_count,
+                          product_reference_count=0, style_reference_count=0,
+                          product_context=None, travel_place="",
                           persona_based=False):
-        identity_clause = (
-            "\n人物身份规则：生成图的人物来自系统人物资产（有独立的身份参考与检查），"
-            "风格参考图中的人物仅用于提取风格、场景、氛围与穿搭语言。"
-            "生成图人物与风格参考图中的人物长相、发型、发色不同是预期行为，"
-            "绝不作为任何页面的失败理由。style_uniform 只评价四页生成图之间的"
-            "人物是否为同一人、视觉风格是否统一。"
-            if persona_based else ""
-        )
         plans_text = json.dumps(page_plans, ensure_ascii=False, indent=1)
         footwear_enum = "、".join(FOOTWEAR_TYPES)
         identity_clause = (
@@ -1201,19 +1659,29 @@ posts 数量必须等于 {count}。不要输出 Markdown。"""
             "style_uniform 只评价四页生成图之间的人物是否为同一人、视觉风格是否统一。"
             if persona_based else ""
         )
-        return f"""你是旅行图文逐页语义质检员。前 {reference_count} 张是原始参考图（可能包含指定商品、环境、穿搭或画面风格参考），后 {image_count} 张是按顺序对应下列页面计划的生成图。各类参考只用于其对应职责；是否符合穿搭以冻结页面计划为准，穿搭灵感不要求同款。
+        product_clause = (
+            f"前 {product_reference_count} 张是指定商品参考图，是商品身份的唯一权威；"
+            f"随后 {style_reference_count} 张是环境、穿搭或画面风格参考，只提供灵感，不能替换指定商品。"
+            if product_reference_count else
+            f"前 {reference_count} 张是环境、穿搭或画面风格参考，只提供对应职责的灵感。"
+        )
+        return f"""你是旅行图文逐页语义质检员。{product_clause}后 {image_count} 张是按顺序对应下列页面计划的生成图。穿搭灵感不要求同款。
+指定商品：{json.dumps(dict(product_context or {}), ensure_ascii=False) if product_context else '无'}
+指定旅行地点：{travel_place or '无具体地点'}
 【页面计划（按生成图顺序）】{plans_text}{identity_clause}
 逐页检查并只返回 JSON（本阶段图片没有叠加文字，不要评价标题或文字渲染）：
-{{"pages":[{{"role":"look_a","observed_moment":"airport_departure 或枚举 key；看不清就写 unknown","scene_evidence":["画面中实际看见的证据，逐条中文短语"],"outfit_matches":true,"weather_matches":true,"mobility_matches":true,"observed_footwear_type":"SNEAKER","person_flags":{{"face_or_limb_deformity":false,"obvious_unnatural_tilt":false,"similar_fixed_smile":false,"similar_gaze":false,"similar_head_pose":false}},"repair_instruction":"中文修复要求，未通过时必填"}}],"style_uniform":true,"notes":"中文简述"}}
+{{"pages":[{{"role":"look_a","observed_moment":"airport_departure 或枚举 key；看不清就写 unknown","scene_evidence":["画面中实际看见的证据，逐条中文短语"],"product_matches":true,"outfit_matches":true,"outfit_severity":"NONE","weather_matches":true,"mobility_matches":true,"observed_footwear_type":"SNEAKER","person_flags":{{"face_or_limb_deformity":false,"obvious_unnatural_tilt":false,"similar_fixed_smile":false,"similar_gaze":false,"similar_head_pose":false}},"repair_instruction":"中文修复要求，未通过时必填"}}],"style_uniform":true,"destination_conflict":false,"destination_evidence":["画面可见的地点证据"],"notes":"中文简述"}}
 person_flags 说明（只报告明显情况，轻微偏差一律 false）：face_or_limb_deformity=明显脸部或肢体畸形；obvious_unnatural_tilt=明显不自然的头部倾斜（轻微歪头算 false）；similar_fixed_smile/similar_gaze/similar_head_pose=该页与另一页出现明显相似的表情/视线/头姿。
 判定要求：
 - observed_moment 只能使用页面计划里出现过的 travel_moment 枚举 key，无法判断必须写 unknown；
 - scene_evidence 必须是字符串数组，逐条写出画面中实际看见的证据要素（如机场的航站楼落地窗、登机箱），不得照抄计划文本，看不见就少写或写"证据不足"；
-- outfit_matches：画面穿搭是否与计划单品一致；
+- product_matches：有指定商品时，检查商品是否保留核心颜色、版型与结构；无商品时填 true。商品明显缺失或被替换才填 false，细微纹理差异不算失败；
+- outfit_matches：画面穿搭是否与计划方向一致；outfit_severity 只能是 NONE/MINOR/MAJOR。少一层内搭、配饰、纽扣、鞋型或颜色深浅差异属于 MINOR；主体单品完全缺失或季节/类目彻底错误才属于 MAJOR；
 - weather_matches：光线/时段/温度感是否与 weather_logic 一致（如傍晚场景出现强白天阳光则为 false）；
 - mobility_matches：鞋履是否适合该场景的步行强度（高步行场景出现细跟鞋应为 false）；observed_footwear_type 从枚举中选最接近的：{footwear_enum}；
 - repair_instruction：未通过时必须给出具体修复要求；
-- style_uniform：四页人物身份与整体视觉风格是否统一。"""
+- style_uniform：只有四页人物明显换人，或照片风格彻底改变（例如其中一页变成插画）才为 false；室内外、白天傍晚、背景颜色及自然光线差异都应为 true；
+- destination_conflict：只有出现与指定地点明显矛盾的地标，或同组混入两个不可能共存的目的地时才为 true；没有地标、室内场景或普通街道不能判冲突。"""
 
     def _normalize_contract(self, raw, source_hashes, content_requirement, count):
         if not isinstance(raw, Mapping):
@@ -1358,7 +1826,7 @@ recommended_sets 数量必须等于 {count}；不同篇要有明显内容角度�
 参考用途规则：逐图 reference_uses 是比较边界。ENVIRONMENT 只比较环境，OUTFIT 只比较搭配关系，VISUAL_STYLE 只比较摄影表达；不得用环境图中的衣服或穿搭图中的背景判定失败。穿搭参考不要求同款。
 如目标合同包含 product_context，前置的商品参考图用于检查指定商品身份；指定商品被明显替换或核心颜色、版型、结构明显错误时才判失败，细微纹理与配饰差异记录即可。
 核心要求：真人参考不能变成平铺；平铺参考不能出现人物；场景参考不能退化成纯色棚拍；核心风格、场景、配色和服装语言必须肉眼可见；不得复制 Logo、水印、来源文字或人物身份。{"整组还要检查 A/B/C/D 差异和风格统一。" if generated_count > 1 else ""}
-宽容边界：只在整体维度（展示方式/风格/场景/配色/构图完整性）偏离时判失败；单品级呈现细节（如具体鞋型款式、内搭颜色是否显眼、配饰有无）不作为失败理由，可写入 notes 供参考——生成模型不保证像素级服从单品描述。
+宽容边界：只在整体维度（展示方式/风格/场景/配色/构图完整性）偏离时判失败；单品级呈现细节不作为失败理由，可写入 notes 供参考——生成模型不保证像素级服从单品描述。具体不受罚的例子：内搭少一层开衫或薄衫、配饰有无、鞋型款式差异、衣服颜色深浅微差——这些只写 notes。真正的失败仅限：完全缺失计划中的主体单品（有外套计划但整张无外套）、场景类型完全错配、展示方式退化。
 只返回 JSON：{{"passed":true,"scores":{{"presentation_alignment":0,"style_alignment":0,"scene_alignment":0,"palette_alignment":0,"look_difference":0}},"reason_codes":[],"notes":"中文简述"}}。任一必要维度低于75时 passed 必须为 false。{role_clause}"""
 
     def review_human_presentation(

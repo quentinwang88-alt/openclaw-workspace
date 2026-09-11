@@ -14,6 +14,7 @@ from services.asset_set_service import AssetSetService
 from services.photo_copy import resolve_photo_copy
 from services.locale_quality import copy_locale_issues
 from services.photo_content import freeze_content_card
+from services.photo_wig_flow import recipe_is_mx_wig_choice
 from services.content_package import ContentPackageService
 from services.workflow_v2 import RevisionService
 
@@ -50,6 +51,21 @@ class PhotoReusePlannerService:
             raise PhotoPlannerError("photo task must be draft or planned")
         if task.media_kind != "native_photo":
             raise PhotoPlannerError("photo planner requires media_kind=native_photo")
+        recipe_probe = (ContentRecipe.from_row(recipe_snapshot) if recipe_snapshot
+                        else self.repository.get_content_recipe(recipe_id))
+        if recipe_probe is not None and recipe_is_mx_wig_choice(recipe_probe):
+            # Explicit MX dispatch: the wig flow maps its own four-page plan;
+            # every other task keeps the original five-slot logic below.
+            from services.photo_wig_planner import plan_mx_wig_task
+            return plan_mx_wig_task(
+                self, task_id, recipe_id=recipe_id, variables=variables,
+                copy_block=copy_block, layout=layout, asset_set_id=asset_set_id,
+                operator=operator, recipe_snapshot=recipe_snapshot,
+                asset_snapshot=asset_snapshot,
+                execution_profile_id=execution_profile_id,
+                copy_variant_id=copy_variant_id, content_card=content_card,
+                theme_brief=theme_brief,
+            )
         recipe = (ContentRecipe.from_row(recipe_snapshot) if recipe_snapshot
                   else self.repository.get_content_recipe(recipe_id))
         if recipe is None or recipe.status != "active":
@@ -93,10 +109,14 @@ class PhotoReusePlannerService:
         if len(recipe.story_structure_json) != 5:
             raise PhotoPlannerError("photo MVP recipe must contain five story slots")
         try:
-            copy_block = resolve_photo_copy(copy_block, assets=assets, locale=task.target_locale)
+            # 页数契约与冻结校验同源：单封面行 content_card.pages=4 → 4 条文案。
+            card_pages = list((content_card or {}).get("pages") or [])
+            expected_slides = len(card_pages) if card_pages else 5
+            copy_block = resolve_photo_copy(copy_block, assets=assets, locale=task.target_locale,
+                                            expected_slide_count=expected_slides)
         except ValueError as exc:
             raise PhotoPlannerError(str(exc)) from exc
-        copy_errors = validate_copy(copy_block)
+        copy_errors = validate_copy(copy_block, expected_slide_count=expected_slides)
         copy_errors.extend(copy_locale_issues(copy_block, task.target_locale))
         if copy_errors:
             raise PhotoPlannerError("; ".join(copy_errors))
@@ -106,8 +126,10 @@ class PhotoReusePlannerService:
         slide_texts = list(copy_block.get("slide_texts") or [])
         if not caption or not all(isinstance(value, str) for value in hashtags):
             raise PhotoPlannerError("localized caption and string hashtags are required")
-        if len(slide_texts) != 5 or not all(isinstance(value, str) for value in slide_texts):
-            raise PhotoPlannerError("localized copy.slide_texts must contain five strings")
+        if (len(slide_texts) != expected_slides
+                or not all(isinstance(value, str) for value in slide_texts)):
+            raise PhotoPlannerError(
+                f"localized copy.slide_texts must contain {expected_slides} strings")
 
         layout_types = {
             "FULL_BLEED": "single", "DETAIL": "single",
@@ -125,32 +147,53 @@ class PhotoReusePlannerService:
         role_slots = {item["role"]: index for index, item in enumerate(assets, 1)}
         slides = []
         shots = []
-        for index, story in enumerate(recipe.story_structure_json, 1):
-            if int(story.get("slot_index") or index) != index:
-                raise PhotoPlannerError("recipe story slots must be in 1..5 order")
-            page = frozen_card["pages"][index - 1] if frozen_card else None
-            source_slots = ([role_slots[role] for role in page["source_roles"]] if page
-                            else [int(value) for value in story.get("source_slots") or []])
-            if any(value < 1 or value > len(assets) for value in source_slots):
-                raise PhotoPlannerError("recipe source_slots must reference slots 1..5")
-            source_ids = ([assets[value - 1]["asset_id"] for value in source_slots]
-                          if source_slots else [assets[index - 1]["asset_id"]])
-            slides.append({
-                "slot_index": index,
-                "slot_role": str(story.get("role") or story.get("slot_role") or f"slide_{index}"),
-                "source_kind": "reused_asset",
-                "source_refs": source_ids,
-                "source_slots": source_slots,
-                "overlay_text": slide_texts[index - 1],
-                "layout_snapshot": {
-                    "template_id": template_id, "template_version": template_version,
-                    "layout_variant": str(story.get("layout_variant") or "DETAIL"),
-                    "layout": page["layout"] if page else layout_types.get(
-                        str(story.get("layout_variant") or "DETAIL"),
-                        str(story.get("layout") or "single"),
-                    ),
-                },
-            })
+        if frozen_card:
+            # 卡片驱动：单封面等按 content_card 页数出页（页数与 slide_texts 同源）。
+            for index, page in enumerate(frozen_card["pages"], 1):
+                source_slots = [role_slots[role] for role in page.get("source_roles") or []
+                                if role in role_slots]
+                if any(value < 1 or value > len(assets) for value in source_slots):
+                    raise PhotoPlannerError("card source_roles must reference available looks")
+                source_ids = [assets[value - 1]["asset_id"] for value in source_slots]
+                slides.append({
+                    "slot_index": index,
+                    "slot_role": f"slide_{index}",
+                    "source_kind": "reused_asset",
+                    "source_refs": source_ids,
+                    "source_slots": source_slots,
+                    "overlay_text": slide_texts[index - 1] if index <= len(slide_texts) else "",
+                    "layout_snapshot": {
+                        "template_id": template_id, "template_version": template_version,
+                        "layout": str(page.get("layout") or "single"),
+                    },
+                })
+        else:
+            for index, story in enumerate(recipe.story_structure_json, 1):
+                if int(story.get("slot_index") or index) != index:
+                    raise PhotoPlannerError("recipe story slots must be in 1..5 order")
+                page = frozen_card["pages"][index - 1] if frozen_card else None
+                source_slots = ([role_slots[role] for role in page["source_roles"]] if page
+                                else [int(value) for value in story.get("source_slots") or []])
+                if any(value < 1 or value > len(assets) for value in source_slots):
+                    raise PhotoPlannerError("recipe source_slots must reference slots 1..5")
+                source_ids = ([assets[value - 1]["asset_id"] for value in source_slots]
+                              if source_slots else [assets[index - 1]["asset_id"]])
+                slides.append({
+                    "slot_index": index,
+                    "slot_role": str(story.get("role") or story.get("slot_role") or f"slide_{index}"),
+                    "source_kind": "reused_asset",
+                    "source_refs": source_ids,
+                    "source_slots": source_slots,
+                    "overlay_text": slide_texts[index - 1],
+                    "layout_snapshot": {
+                        "template_id": template_id, "template_version": template_version,
+                        "layout_variant": str(story.get("layout_variant") or "DETAIL"),
+                        "layout": page["layout"] if page else layout_types.get(
+                            str(story.get("layout_variant") or "DETAIL"),
+                            str(story.get("layout") or "single"),
+                        ),
+                    },
+                })
         for index, source in enumerate(assets, 1):
             shots.append({
                 "slot_index": index,
@@ -210,6 +253,10 @@ class PhotoReusePlannerService:
             storyboard_version=storyboard_version,
             workflow_version=2,
         )
+        if len(slides) != int(getattr(task, "requested_shot_count", 0) or 0):
+            # 卡片驱动计划（如单封面 4 页）：可交付页数以冻结卡片为准。
+            self.repository.update_task_requested_shot_count(
+                task_id, requested_shot_count=len(slides))
         if task.task_status == statuses.TASK_DRAFT:
             task = self.repository.transition_task(task_id, statuses.TASK_DRAFT, statuses.TASK_PLANNED)
         else:

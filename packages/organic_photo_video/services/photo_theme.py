@@ -175,6 +175,55 @@ def style_look_specs(
     ]
 
 
+def _wrap_cover(text: str) -> str:
+    """Keep the full hook while giving the renderer a useful two-line break."""
+    text = str(text or "").strip()
+    if "\n" in text or len(text) <= 34:
+        return text
+    spaces = [index for index, char in enumerate(text) if char == " "]
+    if not spaces:
+        return text
+    midpoint = len(text) / 2
+    split_at = min(spaces, key=lambda index: abs(index - midpoint))
+    return text[:split_at].rstrip() + "\n" + text[split_at + 1:].lstrip()
+
+
+def _short_look_label(text: str) -> str:
+    """Use the planned look name as image copy; details remain in the caption."""
+    text = str(text or "").strip()
+    for separator in (" — ", " – ", " - ", "：", ":"):
+        if separator in text:
+            head = text.split(separator, 1)[0].strip()
+            if head:
+                return head
+    return text
+
+
+def _display_slide_texts(values: Sequence[Any], *, cta: str) -> list[str]:
+    """Convert model prose to complete, compact overlay copy without ellipses."""
+    slides = [str(value or "").strip() for value in values]
+    if len(slides) != 5 or not all(slides):
+        return slides
+    slides[0] = _wrap_cover(slides[0])
+    for index in range(1, 4):
+        slides[index] = _short_look_label(slides[index])
+
+    final = slides[4]
+    planned_cta = str(cta or "").strip()
+    cta_markers = ("คุณเลือก", "คุณชอบ", "เลือกลุคไหน", "เลือก A", "A, B, C", "A B C")
+    marker_positions = [final.find(marker) for marker in cta_markers if final.find(marker) > 0]
+    if marker_positions:
+        position = min(marker_positions)
+        final_label = final[:position].strip(" ·,-—–")
+    else:
+        final_label = final.splitlines()[0].strip()
+    final_label = _short_look_label(final_label)
+    # The model may repeat all four look names in its final sentence.  Keep the
+    # frozen topic CTA instead: the last page should remain readable at phone size.
+    slides[4] = f"{final_label}\n{planned_cta}" if planned_cta else final_label
+    return slides
+
+
 def build_theme_copy(
     theme: Mapping[str, Any], assets: Sequence[Mapping[str, Any]],
     variation: Optional[Mapping[str, Any]] = None,
@@ -192,9 +241,13 @@ def build_theme_copy(
     labels[-1] += "\n" + cta
     # 主题联动（2026-09-08）：规划产出的逐页 slide_texts 是围绕同一选题的
     # 完整文案，优先使用，不得被标签重组覆盖；缺失时退回旧组装路径。
-    topic_slides = [str(v) for v in planned_copy.get("slide_texts") or []]
+    topic_slides = _display_slide_texts(
+        planned_copy.get("slide_texts") or [], cta=cta,
+    )
     if len(topic_slides) == 5 and all(topic_slides):
         return {
+            "copy_policy_version": 2,
+            "place_localized": str(planned_copy.get("place_localized") or ""),
             "title": str(planned_copy.get("title") or theme["title"]),
             "caption": str(planned_copy.get("caption") or theme["caption"]),
             "hashtags": [str(v) for v in planned_copy.get("hashtags") or theme["hashtags"]],
@@ -203,6 +256,7 @@ def build_theme_copy(
                 planned_copy.get("language_review_status") or "DRAFT_TRAVEL_TOPIC"),
         }
     return {
+        "place_localized": str(planned_copy.get("place_localized") or ""),
         "title": str(planned_copy.get("title") or variation.get("thai_hook") or theme["title"]),
         "caption": str(planned_copy.get("caption") or variation.get("thai_caption") or theme["caption"]),
         "hashtags": list(theme["hashtags"]),

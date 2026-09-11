@@ -12,6 +12,7 @@ import json
 import mimetypes
 import os
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timezone
 from domain.models import ProductionBatch
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional
@@ -21,6 +22,11 @@ from services.batch_diversity_planner import BatchDiversityPlanner
 from services.content_story import generate_product_image_story
 from services.hero_first import HeroFirstProducer
 from services.image_generator import build_default_photo_generator
+from services.photo_wig_flow import (
+    MX_WIG_CHOICE_FLOW,
+    batch_is_mx_wig_choice,
+    recipe_is_mx_wig_choice,
+)
 from services.product_reference_resolver import (
     ProductReferenceResolutionError,
     ProductReferenceResolver,
@@ -37,6 +43,7 @@ from services.production_batch import BatchLeaseBusy, ProjectionPendingError
 
 SOURCE_TYPE = "feishu_opv"
 FIELD_PRODUCT = "产品编码"
+FIELD_STORE = "店铺"
 FIELD_PRESET = "生产预设"
 FIELD_EXECUTE = "执行"
 FIELD_PROGRESS = "进度"
@@ -56,6 +63,8 @@ FIELD_REFERENCE_TYPE = "参考图类型"
 FIELD_CONTENT_THEME = "图文主题"
 FIELD_CONTENT_REQUIREMENT = "内容要求（可选）"
 FIELD_TRAVEL_PLACE = "旅行地点（可选）"
+FIELD_FAILURE_REASON = "图文生成失败的原因"
+FIELD_RETAKE_LOOK = "重拍 Look（可选）"
 FIELD_MUSIC_MODE = "配乐方式"
 FIELD_PHOTO_ASSET_STATUS = "素材状态"
 
@@ -85,6 +94,19 @@ REVIEW_APPROVED = "通过"
 REVIEW_NOT_REQUIRED = "无需审核"
 REVIEW_REDO_ALL = "整组重做"
 REVIEW_SCHEDULE = "排期发布"
+
+
+def parse_retake_roles(raw: Any) -> list[str]:
+    """解析“重拍 Look（可选）”列：C / C,D / look_c 均可，中英逗号均可；非法 token 忽略。"""
+    tokens = str(raw or "").replace("，", ",").replace("、", ",").split(",")
+    roles = set()
+    for token in tokens:
+        name = token.strip().lower()
+        if name in ("a", "b", "c", "d"):
+            roles.add("look_" + name)
+        elif name in ("look_a", "look_b", "look_c", "look_d"):
+            roles.add(name)
+    return sorted(roles)
 
 
 class FeishuWorkflowError(RuntimeError):
@@ -316,6 +338,63 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
     def _complete_look_attachments(fields: Dict[str, Any]) -> List[Dict[str, Any]]:
         return list(fields.get(FIELD_PHOTO_INPUT) or fields.get(FIELD_PHOTO_INPUT_LEGACY) or [])
 
+    @staticmethod
+    def _is_replannable_photo_error(exc: Exception) -> bool:
+        """Only pre-batch local planning/supply conflicts may start a clean attempt."""
+        message = str(exc)
+        return any(marker in message for marker in (
+            "参考图或内容要求已变化",
+            "参考分析或旅行变量已变化",
+            "主题、预设、参考模式或生成数量已变化",
+            "参考图或主题已变化",
+            "主题、人物或参考图已变化",
+            "整组参考一致性重做次数已用尽",
+        ))
+
+    @staticmethod
+    def _archive_photo_planning_state(
+        root: Path,
+        record_id: str,
+        *,
+        reason: str,
+        include_reference: bool = True,
+        include_content_plan: bool = True,
+        supply_item_ids: Optional[Iterable[str]] = None,
+    ) -> Optional[Path]:
+        """Move stale pre-batch state aside so a row can be safely replanned once."""
+        safe_record_id = "".join(
+            char if char.isalnum() or char in "-_" else "_" for char in record_id
+        )
+        sources: list[tuple[str, Path]] = []
+        if include_reference:
+            sources.append(("reference_contracts", root / "reference_contracts" / record_id))
+        if include_content_plan:
+            sources.append(("content_plans", root / "content_plans" / record_id))
+        if supply_item_ids is None:
+            supply_paths = sorted((root / "style_reference_supply").glob(f"{record_id}_item_*"))
+        else:
+            supply_paths = [root / "style_reference_supply" / value for value in supply_item_ids]
+        sources.extend(("style_reference_supply", path) for path in supply_paths)
+        sources = [(group, path) for group, path in sources if path.exists()]
+        if not sources:
+            return None
+
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+        archive = root / "replan_archive" / f"{safe_record_id}_{stamp}"
+        moved: list[str] = []
+        for group, source in sources:
+            destination = archive / group / source.name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            source.rename(destination)
+            moved.append(str(destination.relative_to(archive)))
+        (archive / "replan.json").write_text(json.dumps({
+            "record_id": record_id,
+            "archived_at": datetime.now(timezone.utc).isoformat(),
+            "reason": reason,
+            "moved": moved,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        return archive
+
     def scan(
         self,
         *,
@@ -400,8 +479,11 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 if (
                     callable(getattr(self.publish_scheduler, "get_task_state", None))
                     and text_value(fields.get(FIELD_PROGRESS))
-                    in {PROGRESS_QUEUED, PROGRESS_SCHEDULED, PROGRESS_PUBLISHING}
+                    in {PROGRESS_QUEUED, PROGRESS_SCHEDULED, PROGRESS_PUBLISHING,
+                        PROGRESS_PUBLISH_FAILED}
                 ):
+                    # 发布失败的行也要继续投影：底层重试恢复后，陈旧的失败
+                    # 显示必须能自愈回真实状态（已排期/已发布）。
                     synced = self.sync_publication_status(record.record_id, current_fields=fields)
                     if synced.get("updated"):
                         report["processed"].append(synced)
@@ -477,6 +559,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     FIELD_EXECUTE: False,
                     FIELD_PROGRESS: PROGRESS_ACTION,
                     FIELD_NOTES: message,
+                    FIELD_FAILURE_REASON: message,
                     FIELD_RETRY_REVIEW: False,
                     FIELD_REVIEW: REVIEW_PENDING,
                 }
@@ -574,6 +657,12 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
             return f"redo_{int(review[3:])}"
         if bool(fields.get(FIELD_RETRY_REVIEW)):
             return "retry_review"
+        if bool(fields.get(FIELD_EXECUTE)) and parse_retake_roles(
+                fields.get(FIELD_RETAKE_LOOK)) and progress not in {
+            PROGRESS_QUEUED, PROGRESS_SCHEDULED, PROGRESS_PUBLISHING, PROGRESS_PUBLISHED,
+        }:
+            # 运营手动重拍：已完成的技术成品也允许按重拍 Look 重生指定素材。
+            return "generate"
         if bool(fields.get(FIELD_EXECUTE)) and progress not in {
             PROGRESS_DONE, PROGRESS_QUEUED, PROGRESS_SCHEDULED, PROGRESS_PUBLISHING,
             PROGRESS_PUBLISHED,
@@ -755,10 +844,20 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
         """Freeze the entire row before task creation; retry only its frozen entries."""
         if batch and batch.batch_status == "cancelled":
             raise FeishuWorkflowError("该图文批次已取消；请新增一行重新发起，历史记录保持只读")
+        if batch is None and not existing and self._mx_wig_recipe_for_preset(preset_name) is not None:
+            # Explicit MX dispatch (mx_wig_choice_v1): only brand-new rows on
+            # the MX wig preset enter the wig flow here.  Frozen MX batches
+            # fall through to the shared production tail below, where frozen
+            # request validation and the planner dispatch back into the wig
+            # module; historical TH/MX V1 rows never enter the wig code.
+            return self._generate_mx_wig_photo(record, preset_name, quantity)
         from config.loader import load_board_layouts
         from services.photo_package import NativePhotoProductionFlow
         from services.photo_planner import PhotoReusePlannerService
-        from services.photo_request_factory import PhotoRequestFactory, fingerprint, validate_frozen_request
+        from services.photo_request_factory import (
+            PhotoRequestFactory, apply_travel_single_cover, fingerprint,
+            validate_frozen_request,
+        )
         from services.task_intake import TaskIntakeService, TaskRequest
 
         style_product: dict[str, Any] = {}
@@ -877,6 +976,11 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     if profiles_input else []
                 ) or None
                 if theme and theme.get("travel_theme_type"):
+                    if not travel_place:
+                        raise FeishuWorkflowError(
+                            "当前选择的是具体旅行主题，请填写旅行地点；"
+                            "如不需要具体目的地，请改选“凉爽旅行”"
+                        )
                     travel_topic = {
                         "theme_type": str(theme.get("travel_theme_type")),
                         "theme_version": int(theme.get("travel_theme_version") or 1),
@@ -917,19 +1021,35 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 self.photo_reference_vision = reference_vision
                 if planning_flow == "travel_two_step":
                     self._write_fields(record.record_id, {FIELD_PROGRESS: PROGRESS_PLANNING})
-                    reference_analysis = reference_vision.analyze_reference(
-                        record_id=record.record_id, paths=style_reference_paths,
-                        theme=theme or variation_theme,
-                        category_key=str((recipe_for_input.recipe_spec_json or {}).get("category_key") or ""),
-                        content_requirement=content_requirement,
-                    )
-                    travel_plan = reference_vision.plan_travel_content(
-                        record_id=record.record_id, analysis=reference_analysis,
-                        travel_contract=travel_contract, variables=travel_variables,
-                        content_requirement=content_requirement, count=quantity,
-                        travel_topic=travel_topic or None,
-                        product_context=product_context,
-                    )
+                    def _plan_travel_reference():
+                        analysis = reference_vision.analyze_reference(
+                            record_id=record.record_id, paths=style_reference_paths,
+                            theme=theme or variation_theme,
+                            category_key=str((recipe_for_input.recipe_spec_json or {}).get("category_key") or ""),
+                            content_requirement=content_requirement,
+                        )
+                        plan = reference_vision.plan_travel_content(
+                            record_id=record.record_id, analysis=analysis,
+                            travel_contract=travel_contract, variables=travel_variables,
+                            content_requirement=content_requirement, count=quantity,
+                            travel_topic=travel_topic or None,
+                            product_context=product_context,
+                            reference_paths=style_reference_paths,
+                            product_reference_paths=list(
+                                style_product.get("reference_images") or []
+                            ),
+                        )
+                        return analysis, plan
+
+                    try:
+                        reference_analysis, travel_plan = _plan_travel_reference()
+                    except Exception as exc:
+                        if not self._is_replannable_photo_error(exc):
+                            raise
+                        self._archive_photo_planning_state(
+                            staging_root, record.record_id, reason=str(exc),
+                        )
+                        reference_analysis, travel_plan = _plan_travel_reference()
                     style_profile = reference_vision.build_travel_style_profile(
                         reference_analysis, travel_plan, count=quantity,
                     )
@@ -969,17 +1089,31 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     "travel_topic": travel_topic or {},
                     "travel_place": travel_place,
                 }
-                content_plan = PhotoContentPlanStore(staging_root).load_or_create(
-                    record_id=record.record_id, input_contract=input_contract,
-                    create=lambda: plan_th_choice_batch(
-                        record_id=record.record_id,
-                        recipe_id=recipe_for_input.recipe_id,
-                        theme=theme, reference_mode=reference_mode, count=quantity,
-                        style_profile=style_profile,
-                        travel_contract=travel_contract or None,
-                        copy_templates=travel_copy_templates,
-                    ),
-                )
+                plan_store = PhotoContentPlanStore(staging_root)
+
+                def _load_content_plan():
+                    return plan_store.load_or_create(
+                        record_id=record.record_id, input_contract=input_contract,
+                        create=lambda: plan_th_choice_batch(
+                            record_id=record.record_id,
+                            recipe_id=recipe_for_input.recipe_id,
+                            theme=theme, reference_mode=reference_mode, count=quantity,
+                            style_profile=style_profile,
+                            travel_contract=travel_contract or None,
+                            copy_templates=travel_copy_templates,
+                        ),
+                    )
+
+                try:
+                    content_plan = _load_content_plan()
+                except Exception as exc:
+                    if not self._is_replannable_photo_error(exc):
+                        raise
+                    self._archive_photo_planning_state(
+                        staging_root, record.record_id, reason=str(exc),
+                        include_reference=False,
+                    )
+                    content_plan = _load_content_plan()
                 variations = list(content_plan["items"])
             else:
                 variations = plan_batch_variations(
@@ -1027,6 +1161,8 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 from services.photo_asset_supply import PhotoAssetSupplyService
                 from services.photo_style_reference_supply import PhotoStyleReferenceSupplyService
                 asset_supply = PhotoAssetSupplyService(self.client, root=staging_root)
+                # 重拍 Look 只在已有冻结批次的行生效（见 _retake_photo_supply_roles）；
+                # 首跑路径忽略该字段，避免误填导致首跑失败。
                 paths = style_reference_paths
                 account = self.repository.get_account_profile(specs[0].account_id)
                 if account is None:
@@ -1071,14 +1207,35 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                                 } if note or data.get("reason") else {}),
                             })
 
-                    prepared = PhotoStyleReferenceSupplyService(
+                    supply_service = PhotoStyleReferenceSupplyService(
                         generator=self.generator, root=staging_root,
                         vision_service=self.photo_reference_vision,
-                    ).prepare(
-                        record_id=item_id, reference_paths=paths, theme=theme,
-                        account=account, persona=persona, variation=variation,
-                        progress=_asset_progress, product=style_product,
                     )
+
+                    def _prepare_style_sources():
+                        return supply_service.prepare(
+                            record_id=item_id, reference_paths=paths, theme=theme,
+                            account=account, persona=persona, variation=variation,
+                            progress=_asset_progress, product=style_product,
+                        )
+
+                    try:
+                        prepared = _prepare_style_sources()
+                    except Exception as exc:
+                        if not self._is_replannable_photo_error(exc):
+                            raise
+                        self._archive_photo_planning_state(
+                            staging_root, record.record_id, reason=str(exc),
+                            include_reference=False, include_content_plan=False,
+                            supply_item_ids=[item_id],
+                        )
+                        prepared = _prepare_style_sources()
+                    if recipe.recipe_id.startswith("PHOTO_TH_TRAVEL"):
+                        variation["cover_selection"] = {
+                            "role": "look_a",
+                            "source": "fixed_first_look",
+                            "reason_zh": "第一套穿搭直接承担首图，不另选并重复一张素材",
+                        }
                     from services.photo_content_check import validate_prepared_sources
                     validate_prepared_sources(variation, prepared["sources"])
                     quality_summary = str(
@@ -1183,6 +1340,18 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
             if len(prepared_source_groups) > 1:
                 from services.photo_content_check import validate_batch_sources
                 validate_batch_sources(prepared_source_groups)
+            if recipe_for_input and recipe_for_input.recipe_id.startswith("PHOTO_TH_TRAVEL"):
+                for variation in variations:
+                    variation["cover_selection"] = {
+                        "role": "look_a",
+                        "source": "fixed_first_look",
+                        "reason_zh": "第一套穿搭直接承担首图，不另选并重复一张素材",
+                    }
+                if content_plan is not None:
+                    content_plan["plan_sha256"] = fingerprint({
+                        key: value for key, value in content_plan.items()
+                        if key != "plan_sha256"
+                    })
             if pinned_asset_set_ids:
                 if len(pinned_asset_set_ids) != quantity:
                     raise FeishuWorkflowError("批次素材集数量与生成篇数不一致")
@@ -1236,6 +1405,10 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                             key: value for key, value in request.items() if key != "request_sha256"
                         })
                         validate_frozen_request(request)
+                # Theme copy is authored as cover + A/B/C/D. For travel output,
+                # Look A itself becomes the cover, so remove its duplicate detail
+                # page only after all theme/product mutations are frozen.
+                requests = [apply_travel_single_cover(request) for request in requests]
             except Exception as exc:
                 from services.asset_set_service import AssetSetError
                 attachments = self._complete_look_attachments(record.fields)
@@ -1286,6 +1459,20 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 source_record_id=record.record_id, expected_count=quantity,
                 manifest_json=manifest,
             ))
+        return self._produce_native_photo_entries(record, batch)
+
+    def _produce_native_photo_entries(self, record, batch) -> Dict[str, Any]:
+        """Shared frozen-batch production tail (first run and every resume).
+
+        Behavior-preserving extraction: the per-entry verify → intake → plan
+        → produce → export → upload loop is identical for TH and MX; all MX
+        semantics arrive via the frozen request (validate dispatch) and the
+        planner dispatch inside ``plan_task``.
+        """
+        from services.photo_planner import PhotoReusePlannerService
+        from services.photo_package import NativePhotoProductionFlow
+        from services.photo_request_factory import PhotoRequestFactory, validate_frozen_request
+        from services.task_intake import TaskIntakeService, TaskRequest
         self._claim_batch(batch)
         entries = self._photo_batch_entries(batch)
         expected_sources = {entry["source_record_id"] for entry in entries}
@@ -1303,6 +1490,19 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
             self.repository, self.generator, output_root=output_root,
             asset_readiness_gate=self.asset_readiness_gate, technical_only=True,
         )
+        retake_roles = parse_retake_roles(text_value(record.fields.get(FIELD_RETAKE_LOOK)))
+        if retake_roles:
+            # staging_root 只在首跑分支里定义；重拍发生在批次复用路径，需要自取。
+            retake_staging_root = (Path(self.output_root) if self.output_root else
+                                   Path.home() / ".openclaw/shared/data/organic_photo_video")
+            if batch_is_mx_wig_choice(batch.manifest_json or {}):
+                # Explicit MX dispatch: frozen wig batches retake through the
+                # wig supply adapter; the look_x tokens map to hair_x there.
+                self._retake_mx_wig_roles(
+                    record, batch, entries, retake_roles, retake_staging_root, producer)
+            else:
+                self._retake_photo_supply_roles(
+                    record, batch, entries, retake_roles, retake_staging_root, producer)
         self._write_fields(record.record_id, {
             FIELD_EXECUTE: False, FIELD_PROGRESS: PROGRESS_RUNNING,
             FIELD_REVIEW: REVIEW_PENDING, FIELD_NOTES: "", FIELD_PHOTO_SUMMARY: summary,
@@ -1326,7 +1526,9 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     media_kind="native_photo", category_key=item["category_key"],
                     product_mode=item["product_mode"], source_type=SOURCE_TYPE,
                     source_record_id=source_record_id, feishu_record_id=record.record_id,
-                    requested_shot_count=5, created_by="feishu_opv_photo", idempotency_key=source_record_id,
+                    requested_shot_count=(
+                        len((item.get("content_card") or {}).get("pages") or []) or 5
+                    ), created_by="feishu_opv_photo", idempotency_key=source_record_id,
                 )).task
                 if task.target_country != item["market"] or task.target_locale != item["locale"]:
                     raise FeishuWorkflowError("生产账号市场/语言已变化，与冻结批次不一致")
@@ -1345,7 +1547,8 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 )
                 result = flow.prepare(task.task_id, template=item["layout_snapshot"])
                 manifest = result.get("photo_manifest") or {}
-                if len(manifest.get("slides") or []) != 5:
+                expected_pages = int(getattr(task, "requested_shot_count", 0) or 5)
+                if len(manifest.get("slides") or []) != expected_pages:
                     raise FeishuWorkflowError(f"图文任务 {task.task_id} 没有完整成品页")
                 task_ids.append(task.task_id)
                 paths.extend(str(slide["path"]) for slide in manifest["slides"])
@@ -1356,14 +1559,526 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
             FIELD_PROGRESS: PROGRESS_ACTION if failures else PROGRESS_DONE,
             FIELD_OUTPUT: attachments, FIELD_REVIEW: REVIEW_NOT_REQUIRED,
             FIELD_REVIEW_STAGE: "处理中" if failures else "技术完成", FIELD_PHOTO_SUMMARY: summary,
+            FIELD_FAILURE_REASON: None,
             FIELD_NOTES: (f"已完成 {len(task_ids)}/{batch.expected_count} 篇原生图文，共 {len(paths)} 张；"
                           + ("勾选执行后沿用冻结方案补齐。" + "；".join(failures) if failures
-                             else "技术检查已通过；勾选确认发布后冻结当前五页并进入发布队列。")
+                             else "技术检查已通过；勾选确认发布后冻结当前成品并进入发布队列。")
                           + "｜" + self._photo_quality_summaries.get(record.record_id, "")
                           )[:1500],
         })
         return {"record_id": record.record_id, "action": "generate_native_photo",
                 "task_ids": task_ids, "photo_count": len(paths), "failures": failures}
+
+    def _mx_wig_recipe_for_preset(self, preset_name: str):
+        """Return the wig recipe only when the preset's tasks point at the
+        exact ``mx_wig_choice_v1`` recipe; everything else returns None."""
+        try:
+            metadata = self.catalog.metadata(preset_name)
+        except FeishuWorkflowError:
+            return None
+        if metadata.get("media_kind") != "native_photo":
+            return None
+        recipe_ids = sorted({
+            str(task.get("recipe_id") or "")
+            for task in metadata.get("tasks") or []
+        })
+        for recipe_id in recipe_ids:
+            try:
+                recipe = self.repository.get_content_recipe(recipe_id)
+            except Exception:  # noqa: BLE001 - probe must never raise
+                recipe = None
+            if recipe_is_mx_wig_choice(recipe):
+                return recipe
+        return None
+
+    def _archive_mx_wig_planning_state(self, staging_root: Path, record_id: str,
+                                       reason: str) -> None:
+        """Move stale wig planning state aside so a row can be replanned once."""
+        supply_paths = sorted(
+            (staging_root / "wig_choice_supply").glob(f"{record_id}_item_*")
+        ) if (staging_root / "wig_choice_supply").exists() else []
+        self._archive_photo_planning_state(
+            staging_root, record_id, reason=reason,
+            include_reference=True, include_content_plan=True,
+            supply_item_ids=[],
+        )
+        if not supply_paths:
+            return
+        from datetime import datetime as _dt
+        stamp = _dt.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+        archive = staging_root / "replan_archive" / f"{record_id}_{stamp}"
+        moved = []
+        for source in supply_paths:
+            destination = archive / "wig_choice_supply" / source.name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            source.rename(destination)
+            moved.append(str(destination.relative_to(archive)))
+        (archive / "replan.json").write_text(json.dumps({
+            "record_id": record_id, "flow": MX_WIG_CHOICE_FLOW,
+            "archived_at": _dt.now(timezone.utc).isoformat(),
+            "reason": reason, "moved": moved,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _generate_mx_wig_photo(self, record, preset_name: str,
+                               quantity: int) -> Dict[str, Any]:
+        """``mx_wig_choice_v1`` first run: plan → generate → freeze → produce.
+
+        全程不进入 TH 主题解析/服装供给：主题在 MX 模块解析，参考图按发型
+        灵感/环境/风格处理，产品编码在付费生成前显式拒绝并保留原值。
+        """
+        from config.loader import load_board_layouts
+        from domain.models import ProductionBatch
+        from dataclasses import asdict
+        from services.photo_asset_supply import PhotoAssetSupplyService
+        from services.photo_reference_vision import PhotoReferenceVisionService
+        from services.photo_request_factory import (
+            PhotoRequestFactory, fingerprint,
+        )
+        from services.photo_wig_planner import (
+            reference_roles_from_plan, resolve_mx_wig_theme,
+            summarize_mx_wig_plan,
+        )
+        from services.photo_wig_qa import WigGroupQaReviewer, check_wig_batch_sources
+        from services.photo_wig_supply import PhotoWigSupplyService
+
+        specs = self.catalog.resolve_batch(preset_name, record.record_id, quantity)
+        if any(not spec.account_id for spec in specs):
+            raise FeishuWorkflowError("该图文预设尚未绑定 OPV 生产账号")
+        preset = self.catalog.metadata(preset_name)
+        product_id = text_value(record.fields.get(FIELD_PRODUCT))
+        if product_id:
+            raise FeishuWorkflowError(
+                "本预设生成四款发型灵感；单款商品模式暂未开放，"
+                "请清空产品编码或使用后续单品预设。（已保留你填写的产品编码，未自动清除）"
+            )
+        unified_attachments = list(record.fields.get(FIELD_REFERENCE) or [])
+        legacy_complete = self._complete_look_attachments(record.fields)
+        reference_attachments = unified_attachments or legacy_complete
+        theme = resolve_mx_wig_theme(text_value(record.fields.get(FIELD_CONTENT_THEME)))
+        content_requirement = text_value(record.fields.get(FIELD_CONTENT_REQUIREMENT))
+        staging_root = (Path(self.output_root) if self.output_root else
+                        Path.home() / ".openclaw/shared/data/organic_photo_video")
+        account = self.repository.get_account_profile(specs[0].account_id)
+        if account is None:
+            raise FeishuWorkflowError("图文生产账号不存在")
+        if not getattr(account, "persona_ref_id", None):
+            raise FeishuWorkflowError("MX 假发预设需要生产账号绑定人物主参考（OPV_MX_PHOTO_001 → MX_WIG_CAST_A_001）")
+        persona = LightTryonAssetReader().get_persona(account.persona_ref_id)
+        persona_paths = [
+            str(item.get("local_path"))
+            for item in persona.get("reference_items") or []
+            if item.get("approved", True) and item.get("role") in {"FACE_FRONT_NEUTRAL", "FACE_THREE_QUARTER"}
+        ]
+        if not persona_paths:
+            raise FeishuWorkflowError("绑定人物缺少已批准的脸部主参考，无法锁定身份")
+
+        self._write_fields(record.record_id, {FIELD_PROGRESS: PROGRESS_PLANNING})
+        reference_paths: list[str] = []
+        if reference_attachments:
+            reference_paths = PhotoAssetSupplyService(
+                self.client, root=staging_root,
+            ).stage_reference_images(
+                record_id=record.record_id, attachments=reference_attachments,
+                reference_kind="style",
+            )
+        reference_vision = self.photo_reference_vision or PhotoReferenceVisionService(
+            root=staging_root
+        )
+        self.photo_reference_vision = reference_vision
+
+        def _plan_wig_content():
+            return reference_vision.plan_wig_choice_content(
+                record_id=record.record_id, persona_paths=persona_paths,
+                reference_paths=reference_paths,
+                content_requirement=content_requirement, count=quantity,
+                theme_label_zh=str(theme.get("label_zh") or ""),
+            )
+
+        try:
+            wig_plan = _plan_wig_content()
+        except Exception as exc:
+            if not self._is_replannable_photo_error(exc):
+                raise
+            self._archive_mx_wig_planning_state(staging_root, record.record_id, reason=str(exc))
+            wig_plan = _plan_wig_content()
+        reviewer = WigGroupQaReviewer(reference_vision)
+        for plan_item in wig_plan["items"]:
+            copy_review = reviewer.review_copy(plan_item=plan_item)
+            if not copy_review.get("passed"):
+                raise FeishuWorkflowError(
+                    "西语文案审校未通过："
+                    + "；".join(copy_review.get("issues") or ["语义不合格"])
+                    + "。请调整内容要求后重新执行。"
+                )
+        pinned_asset_set_ids: list[str] = []
+        prepared_source_groups: list[list[dict[str, Any]]] = []
+        supply = PhotoWigSupplyService(
+            generator=self.generator, root=staging_root, qa_reviewer=reviewer,
+        )
+        total_assets = len(wig_plan["items"]) * 4
+        asset_counter = {"done": 0}
+
+        def _asset_progress(event: str, **data: Any) -> None:
+            if event == "asset_generated":
+                asset_counter["done"] += 1
+                self._write_fields(record.record_id, {
+                    FIELD_PROGRESS: f"素材生成 {asset_counter['done']}/{total_assets}",
+                })
+            elif event == "qa_started":
+                self._write_fields(record.record_id, {FIELD_PROGRESS: PROGRESS_QA})
+            elif event == "repair_scheduled":
+                self._write_fields(record.record_id, {
+                    FIELD_PROGRESS: PROGRESS_REPAIR,
+                    FIELD_NOTES: f"假发组级质检修复 {'、'.join(data.get('roles') or [])}"[:180],
+                })
+
+        for index, plan_item in enumerate(wig_plan["items"], 1):
+            item_id = f"{record.record_id}_item_{index}"
+            self._write_fields(record.record_id, {FIELD_PROGRESS: PROGRESS_PREPARING_ASSETS})
+            prepared = supply.prepare(
+                record_id=item_id, plan_item=plan_item, persona=persona,
+                reference_paths=reference_paths,
+                reference_roles=reference_roles_from_plan(
+                    plan_item, persona_paths, reference_paths),
+                content_requirement=content_requirement,
+                progress=_asset_progress,
+            )
+            prepared_source_groups.append(list(prepared["sources"]))
+            asset_set = supply.register_asset_set(
+                repository=self.repository, record_id=item_id,
+                sources=prepared["sources"], plan_item=plan_item, persona=persona,
+            )
+            pinned_asset_set_ids.append(asset_set.asset_set_id)
+        check_wig_batch_sources(prepared_source_groups)
+        overrides = [
+            {"asset_set_id": asset_set_id, "wig_plan_item": plan_item}
+            for asset_set_id, plan_item in zip(pinned_asset_set_ids, wig_plan["items"])
+        ]
+        requests = PhotoRequestFactory(
+            self.repository, layouts=load_board_layouts(),
+        ).build_batch(
+            record_id=record.record_id, specs=specs,
+            category_key=str(preset.get("category_key") or ""),
+            product_mode=str(preset.get("default_product_mode") or "NO_PRODUCT"),
+            overrides=overrides,
+        )
+        summary = PhotoRequestFactory.summary(requests) + "\n" + summarize_mx_wig_plan(wig_plan)
+        manifest = {
+            "schema_version": "opv-photo-batch-v1", "workflow_version": 2,
+            "media_kind": "native_photo", "preset": preset_name,
+            "execution_flow": MX_WIG_CHOICE_FLOW,
+            "theme_key": str(theme.get("theme_key") or ""),
+            "wig_plan": wig_plan,
+            "entries": [{"spec": asdict(spec), "request": request,
+                         "source_record_id": f"{record.record_id}:{index}:{spec.recipe_id}:1"}
+                        for index, (spec, request) in enumerate(zip(specs, requests), 1)],
+        }
+        manifest["manifest_sha256"] = fingerprint(manifest)
+        batch = self.repository.create_production_batch_idempotent(ProductionBatch(
+            batch_id="opv_batch_" + fingerprint(record.record_id)[:32],
+            source_record_id=record.record_id, expected_count=quantity,
+            manifest_json=manifest,
+        ))
+        return self._produce_native_photo_entries(record, batch)
+
+    def _retake_mx_wig_roles(self, record, batch, entries, retake_roles,
+                             staging_root, producer) -> None:
+        """运营手动重拍（MX）：只重生指定发型素材，再按新素材换绑对应页面。
+
+        ``重拍 Look`` 列继续由运营填 A/B/C/D；``parse_retake_roles`` 返回的
+        look_x 在本 MX 适配层内映射为 hair_x，不修改全局 parser。重拍沿用
+        revision/rework 流程只替换对应资产，发布冻结版本不可原地覆盖。
+        """
+        from domain import statuses
+        from services.photo_reference_vision import PhotoReferenceVisionService
+        from services.photo_request_factory import fingerprint
+        from services.photo_wig_qa import WigGroupQaReviewer
+        from services.photo_wig_supply import PhotoWigSupplyService
+        from services.release_gate import assert_main_queue_rework_allowed
+        from services.workflow_v2 import ReworkService
+
+        hair_roles = [f"hair_{str(role).split('_', 1)[1].lower()}" for role in retake_roles]
+        roles_label = "、".join(role.split("_")[1].upper() for role in retake_roles)
+        self._write_fields(record.record_id, {
+            FIELD_PROGRESS: PROGRESS_RUNNING,
+            FIELD_NOTES: f"重拍发型 {roles_label}：正在重生指定素材…",
+        })
+        vision = self.photo_reference_vision or PhotoReferenceVisionService(root=staging_root)
+        self.photo_reference_vision = vision
+        supply = PhotoWigSupplyService(
+            generator=self.generator, root=staging_root,
+            qa_reviewer=WigGroupQaReviewer(vision),
+        )
+        wig_plan = (batch.manifest_json or {}).get("wig_plan") or {}
+        content_items = list(wig_plan.get("items") or [])
+        task_by_source = {
+            task.source_record_id: task for task in self._tasks(record.record_id)
+        }
+        default_slots = {"hair_a": 1, "hair_b": 2, "hair_c": 3, "hair_d": 4}
+        for index, entry in enumerate(entries, 1):
+            item_id = f"{record.record_id}_item_{index}"
+            manifest = supply.load_manifest(item_id)
+            if manifest is None:
+                raise FeishuWorkflowError(
+                    f"第 {index} 篇没有假发供给清单；只有 mx_wig_choice_v1 生成的行支持重拍发型")
+            plan_item = content_items[index - 1] if index <= len(content_items) else None
+            if plan_item is None:
+                raise FeishuWorkflowError(f"第 {index} 篇缺少冻结发型计划，无法重拍")
+            account = self.repository.get_account_profile(entry["request"]["account_id"])
+            if account is None:
+                raise FeishuWorkflowError("图文生产账号不存在")
+            persona = LightTryonAssetReader().get_persona(account.persona_ref_id)
+            reference_paths = [str(value) for value in manifest.get("reference_paths") or []]
+            missing = [value for value in reference_paths if not Path(value).is_file()]
+            if missing:
+                raise FeishuWorkflowError("参考原图缺失，无法按原参考重拍：" + "、".join(missing))
+            expected_hash = str(manifest.get("input_hash") or "")
+            if expected_hash and supply.input_hash(
+                    plan_item=plan_item, persona=persona,
+                    reference_paths=reference_paths,
+                    content_requirement=str(manifest.get("content_requirement") or ""),
+                    channel_params=dict(manifest.get("channel_params") or {})) != expected_hash:
+                raise FeishuWorkflowError(
+                    f"第 {index} 篇的人物/参考图/计划与冻结供给不一致，已停止重拍")
+            to_retire = [role for role in hair_roles if role in default_slots]
+            supply.regenerate_roles(item_id, to_retire, reason="运营手动重拍")
+            self._write_fields(record.record_id, {
+                FIELD_PROGRESS: f"素材重拍 {index}/{len(entries)} 篇",
+            })
+            prepared = supply.prepare(
+                record_id=item_id, plan_item=plan_item, persona=persona,
+                reference_paths=reference_paths,
+                reference_roles=dict(manifest.get("reference_roles") or {}),
+                content_requirement=str(manifest.get("content_requirement") or ""),
+                channel_params=dict(manifest.get("channel_params") or {}),
+            )
+            new_sources = {
+                str(item.get("role")): item for item in prepared.get("sources") or []
+            }
+            # manifest 是重生成本地快照：其中的 sources 即重拍前的旧源。
+            old_sources = {
+                str(item.get("role")): item
+                for item in manifest.get("sources") or []
+            }
+            # 生成文件名是确定性的（同名覆盖），必须比内容哈希而不是路径。
+            changed_roles = sorted(
+                role for role in to_retire
+                if str((new_sources.get(role) or {}).get("sha256") or "")
+                != str((old_sources.get(role) or {}).get("sha256") or "")
+            )
+            if not changed_roles:
+                raise FeishuWorkflowError(
+                    f"第 {index} 篇重拍后素材内容没有变化（生成通道可能返回了相同结果）；请重新勾选执行重试")
+            task = task_by_source.get(entry["source_record_id"])
+            if task is None:
+                raise FeishuWorkflowError(f"第 {index} 篇任务不存在，无法换绑重拍素材")
+            assert_main_queue_rework_allowed(task.task_id)
+            current = self.repository.get_task(task.task_id) or task
+            if current.task_status == statuses.TASK_PHOTO_READY:
+                current = self.repository.transition_task(
+                    task.task_id, statuses.TASK_PHOTO_READY, statuses.TASK_PHOTO_PACKAGING)
+            if current.task_status != statuses.TASK_PHOTO_PACKAGING:
+                raise FeishuWorkflowError(
+                    f"第 {index} 篇任务状态为 {current.task_status}；"
+                    "仅已完成图文支持重拍发型，已进入发布队列的请先处理排程")
+            self.repository.transition_task(
+                task.task_id, statuses.TASK_PHOTO_PACKAGING, statuses.TASK_IMAGE_REVIEW)
+            revision = self.repository.get_task_revision(current.active_revision_id)
+            if revision is None:
+                raise FeishuWorkflowError(f"第 {index} 篇任务缺少活动修订版，无法重拍")
+            plan_shots = ((revision.plan_snapshot_json or {}).get("plan") or {}).get("shots") or []
+            patch: dict[int, dict[str, str]] = {}
+            for role in changed_roles:
+                new_item = new_sources[role]
+                prior_path = str((old_sources.get(role) or {}).get("path") or "")
+                slot = next(
+                    (int(shot.get("slot_index") or 0) for shot in plan_shots
+                     if prior_path and shot.get("asset_path") == prior_path),
+                    0,
+                ) or default_slots.get(role, 0)
+                if not slot:
+                    raise FeishuWorkflowError(
+                        f"第 {index} 篇冻结计划里找不到 {role} 对应页面，已停止换绑")
+                patch[slot] = {
+                    "asset_path": str(new_item.get("path")),
+                    "asset_sha256": str(new_item.get("sha256")),
+                }
+            ReworkService(self.repository).begin(
+                task.task_id, expected_revision_id=revision.revision_id,
+                expected_lock_version=revision.lock_version,
+                scope="photo_source", plan_patch=patch,
+                reason=f"运营手动重拍发型 {roles_label}",
+                idempotency_key=fingerprint({
+                    "record": record.record_id, "revision": revision.revision_id,
+                    "flow": MX_WIG_CHOICE_FLOW, "roles": to_retire,
+                }),
+                operator="feishu_operator_retake",
+            )
+            report = producer.produce(task.task_id)
+            if report.task_status not in {
+                statuses.TASK_IMAGE_REVIEW, statuses.TASK_PHOTO_PACKAGING,
+                statuses.TASK_PHOTO_READY,
+            }:
+                raise FeishuWorkflowError(
+                    f"第 {index} 篇重拍后任务状态异常：{report.task_status}")
+        self._write_fields(record.record_id, {FIELD_RETAKE_LOOK: ""})
+
+    def _retake_photo_supply_roles(self, record, batch, entries, retake_roles,
+                                   staging_root, producer) -> None:
+        """运营手动重拍：只重生指定 look 素材，再按新素材重建受影响页面。
+
+        供给清单断点续跑保证其余 look 不重复生成、不重复计费；页面通过
+        V2 photo_source 返工修订换绑新文件，未重拍槽位沿用已选素材。
+        仅支持风格参考生成、且尚未进入发布管线的已完成图文。
+        """
+        from domain import statuses
+        from services.photo_style_reference_supply import PhotoStyleReferenceSupplyService
+        from services.photo_theme import resolve_photo_theme
+        from services.photo_request_factory import fingerprint
+        from services.release_gate import assert_main_queue_rework_allowed
+        from services.workflow_v2 import ReworkService
+        roles_label = "、".join(role.split("_")[1].upper() for role in retake_roles)
+        self._write_fields(record.record_id, {
+            FIELD_PROGRESS: PROGRESS_RUNNING,
+            FIELD_NOTES: f"重拍 Look {roles_label}：正在重生指定素材…",
+        })
+        supply_service = PhotoStyleReferenceSupplyService(
+            generator=self.generator, root=staging_root,
+            vision_service=self.photo_reference_vision,
+        )
+        theme = resolve_photo_theme(text_value(record.fields.get(FIELD_CONTENT_THEME)))
+        content_items = list(
+            ((batch.manifest_json or {}).get("content_plan") or {}).get("items") or [])
+        task_by_source = {
+            task.source_record_id: task for task in self._tasks(record.record_id)
+        }
+        for index, entry in enumerate(entries, 1):
+            item_request = entry["request"]
+            item_id = f"{record.record_id}_item_{index}"
+            item_dir = staging_root / "style_reference_supply" / item_id
+            manifest_path = item_dir / "supply_manifest.json"
+            if not manifest_path.is_file():
+                raise FeishuWorkflowError(
+                    f"第 {index} 篇没有素材供给清单；只有风格参考模式生成的行支持重拍 Look")
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            old_sources = {
+                str(item.get("role") or ""): item for item in manifest.get("sources") or []
+            }
+            # 角色可能已被此前的质检修复摘除（sources 里暂时没有）——这正是
+            # 断点续跑要重生的情况，不能当作填写错误拦截。
+            # 注意循环变量不能叫 entry：外层 entry 是批次条目，遮蔽会在
+            # 后面的 task_by_source 取值处炸 KeyError。
+            retired_sources = {}
+            for attempt in manifest.get("attempt_history") or []:
+                for item in attempt.get("retired") or []:
+                    role = str(item.get("role") or "")
+                    if role and role not in retired_sources:
+                        retired_sources[role] = item
+            reference_paths = [str(value) for value in manifest.get("style_reference_paths") or []]
+            missing = [value for value in reference_paths if not Path(value).is_file()]
+            if missing:
+                raise FeishuWorkflowError(
+                    "风格参考原图缺失，无法按原参考重拍：" + "、".join(missing))
+            variation = content_items[index - 1] if index <= len(content_items) else {}
+            account = self.repository.get_account_profile(item_request["account_id"])
+            if account is None:
+                raise FeishuWorkflowError("图文生产账号不存在")
+            persona = {}
+            if getattr(account, "persona_ref_id", None):
+                persona = LightTryonAssetReader().get_persona(account.persona_ref_id)
+            product = {}
+            if item_request.get("product_id"):
+                product = self.product_reference_resolver.resolve_snapshot(
+                    item_request["product_id"], selection_key=record.record_id,
+                    account_id=item_request["account_id"],
+                )
+            expected_hash = str(manifest.get("input_hash") or "")
+            if expected_hash and supply_service.input_fingerprint(
+                    reference_paths, theme, variation, account, product) != expected_hash:
+                # 冻结内容计划可能在供给之后被补写（如旅行 cover_selection 兜底），
+                # 组合 hash 无法直接复现；逐组件核对参考图/主题/穿搭/人物后重定基线。
+                supply_service.verify_and_rebaseline_identity(
+                    item_dir=item_dir, paths=reference_paths, theme=theme,
+                    account=account, variation=variation, persona=persona, product=product)
+            # 幂等：上次重拍中断时目标角色可能已被摘除，直接续跑重生即可。
+            to_retire = [role for role in retake_roles if role in old_sources]
+            if to_retire:
+                supply_service.regenerate_roles(
+                    item_dir=item_dir, roles=to_retire, reason="运营手动重拍")
+            self._write_fields(record.record_id, {
+                FIELD_PROGRESS: f"素材重拍 {index}/{len(entries)} 篇",
+            })
+            prepared = supply_service.prepare(
+                record_id=item_id, reference_paths=reference_paths, theme=theme,
+                account=account, persona=persona, variation=variation, product=product,
+            )
+            new_sources = {
+                str(item.get("role") or ""): item for item in prepared.get("sources") or []
+            }
+            # 生成文件名是确定性的（同名覆盖），必须比内容哈希而不是路径。
+            changed_roles = sorted(
+                role for role, item in new_sources.items()
+                if str(item.get("sha256") or "") != str(
+                    (old_sources.get(role) or {}).get("sha256") or "")
+            )
+            if not changed_roles:
+                raise FeishuWorkflowError(
+                    f"第 {index} 篇重拍后素材内容没有变化（生成通道可能返回了相同结果）；请重新勾选执行重试")
+            task = task_by_source.get(entry["source_record_id"])
+            if task is None:
+                raise FeishuWorkflowError(f"第 {index} 篇任务不存在，无法换绑重拍素材")
+            assert_main_queue_rework_allowed(task.task_id)
+            current = self.repository.get_task(task.task_id) or task
+            if current.task_status == statuses.TASK_PHOTO_READY:
+                current = self.repository.transition_task(
+                    task.task_id, statuses.TASK_PHOTO_READY, statuses.TASK_PHOTO_PACKAGING)
+            if current.task_status != statuses.TASK_PHOTO_PACKAGING:
+                raise FeishuWorkflowError(
+                    f"第 {index} 篇任务状态为 {current.task_status}；"
+                    "仅已完成图文支持重拍 Look，已进入发布队列的请先处理排程")
+            self.repository.transition_task(
+                task.task_id, statuses.TASK_PHOTO_PACKAGING, statuses.TASK_IMAGE_REVIEW)
+            revision = self.repository.get_task_revision(current.active_revision_id)
+            if revision is None:
+                raise FeishuWorkflowError(f"第 {index} 篇任务缺少活动修订版，无法重拍")
+            plan_shots = ((revision.plan_snapshot_json or {}).get("plan") or {}).get("shots") or []
+            patch: dict[int, dict[str, str]] = {}
+            default_slots = {"look_a": 1, "look_b": 2, "look_c": 3, "look_d": 4}
+            for role in changed_roles:
+                new_item = new_sources[role]
+                prior_path = (str((old_sources.get(role) or {}).get("path") or "")
+                              or str((retired_sources.get(role) or {}).get("path") or ""))
+                slot = next(
+                    (int(shot.get("slot_index") or 0) for shot in plan_shots
+                     if prior_path and shot.get("asset_path") == prior_path),
+                    0,
+                ) or default_slots.get(role, 0)
+                if not slot:
+                    raise FeishuWorkflowError(
+                        f"第 {index} 篇冻结计划里找不到 {role} 对应页面，已停止换绑")
+                patch[slot] = {
+                    "asset_path": str(new_item.get("path")),
+                    "asset_sha256": str(new_item.get("sha256")),
+                }
+            ReworkService(self.repository).begin(
+                task.task_id, expected_revision_id=revision.revision_id,
+                expected_lock_version=revision.lock_version,
+                scope="photo_source", plan_patch=patch,
+                reason=f"运营手动重拍 {roles_label}",
+                idempotency_key=fingerprint({
+                    "record": record.record_id, "revision": revision.revision_id,
+                    "roles": retake_roles,
+                }),
+                operator="feishu_operator_retake",
+            )
+            report = producer.produce(task.task_id)
+            if report.task_status not in {
+                statuses.TASK_IMAGE_REVIEW, statuses.TASK_PHOTO_PACKAGING,
+                statuses.TASK_PHOTO_READY,
+            }:
+                raise FeishuWorkflowError(
+                    f"第 {index} 篇重拍后任务状态异常：{report.task_status}")
+        self._write_fields(record.record_id, {FIELD_RETAKE_LOOK: ""})
 
     def _approve_staged_photo_assets(self, record) -> Dict[str, Any]:
         """Turn an ordered upload into reusable inventory, then produce its package."""
@@ -1512,7 +2227,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
         """Validate the actual frozen travel package selected for publishing.
 
         Topic-linked travel copy is generated per task, so a static copy-pack
-        status cannot prove that the final title and five overlays are safe.
+        status cannot prove that the final title and four overlays are safe.
         The publish checkbox binds the operator decision to this exact package;
         this gate checks its topic binding, locale purity and placeholders.
         """
@@ -1536,10 +2251,13 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 ((revision.plan_snapshot_json or {}).get("plan") or {}).get("theme_brief") or {}
             ) if revision else {}
             slide_texts = list(copy_block.get("slide_texts") or [])
-            if package is None or revision is None or len(slide_texts) != 5 or not all(
+            expected_pages = int(getattr(task, "requested_shot_count", 0) or 5)
+            if package is None or revision is None or len(slide_texts) != expected_pages or not all(
                 str(value or "").strip() for value in slide_texts
             ):
-                raise FeishuWorkflowError("旅行图文缺少完整的最终五页文案")
+                raise FeishuWorkflowError(
+                    f"旅行图文缺少完整的最终 {expected_pages} 页文案"
+                )
             if (not theme_brief.get("travel_theme_type")
                     or theme_brief.get("travel_theme_type") != frozen_theme.get("travel_theme_type")
                     or theme_brief.get("theme_key") != frozen_theme.get("theme_key")):
@@ -1705,6 +2423,9 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
             str(getattr(task, "media_kind", "video") or "video") == "native_photo"
             for task in tasks
         )
+        selected_store_id = text_value(record.fields.get(FIELD_STORE))
+        if photo_only and not selected_store_id:
+            raise FeishuWorkflowError("原生图文确认发布前必须选择店铺")
         # Preflight every task before enqueuing any member of this row.
         for task in tasks:
             if workflow_v2_enabled(task) and not self._v2_released(task):
@@ -1712,11 +2433,10 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
         enqueue_main = callable(getattr(self.publish_scheduler, "enqueue_task", None))
         for task in tasks:
             if enqueue_main:
-                slots.append(
-                    self.publish_scheduler.enqueue_task(
-                        task.task_id, feishu_record_id=record.record_id
-                    )
-                )
+                enqueue_kwargs = {"feishu_record_id": record.record_id}
+                if photo_only:
+                    enqueue_kwargs["store_id"] = selected_store_id
+                slots.append(self.publish_scheduler.enqueue_task(task.task_id, **enqueue_kwargs))
             else:
                 slot = self.publish_scheduler.queue_task(
                     task.task_id,
@@ -1733,7 +2453,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
         if enqueue_main:
             progress = PROGRESS_QUEUED
             note = (f"已进入主排班池，共 {len(slots)} 篇原生图文；"
-                    "按店铺养号配额分配具备图文直发能力的账号和时间，不挂商品；"
+                    f"发布店铺 {selected_store_id}；按店铺养号配额分配具备图文直发能力的账号和时间，不挂商品；"
                     "CreatOK 原生图文由 TikTok 自动添加推荐音乐，不承诺具体曲目。"
                     if photo_only else
                     f"已进入短视频主排班池，共 {len(slots)} 条。"

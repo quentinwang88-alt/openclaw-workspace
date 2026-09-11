@@ -2,7 +2,7 @@
   "schema_version": "opv-content-recipe-v1",
   "recipe_id": "PHOTO_TH_TRAVEL_OUTFIT_V2",
   "recipe_key": "TH_TRAVEL_OUTFIT",
-  "recipe_version": 5,
+  "recipe_version": 6,
   "content_goal": "travel_look_choice",
   "anchor_slot": 2,
   "shot_count": 5,
@@ -13,15 +13,12 @@
   "story_structure": [
     {
       "slot_index": 1,
-      "role": "choice_grid",
+      "role": "travel_cover",
       "source_slots": [],
-      "layout_variant": "GRID_FOUR",
-      "purpose": "四宫格展示四套旅行造型并提出选择问题",
+      "layout_variant": "FULL_BLEED",
+      "purpose": "从四套旅行造型中选择一张作为主题大图封面",
       "source_roles": [
-        "look_a",
-        "look_b",
-        "look_c",
-        "look_d"
+        "look_a"
       ]
     },
     {
@@ -156,8 +153,8 @@
         "required": true
       }
     },
-    "template_id": "PHOTO_CHOICE_CARD_V2",
-    "template_version": 2,
+    "template_id": "PHOTO_TRAVEL_CARD_V3",
+    "template_version": 3,
     "supported_presentations": [
       "FLAT_LAY",
       "MODEL_FULL_BODY",
@@ -371,13 +368,10 @@
       "pages": [
         {
           "index": 1,
-          "purpose_zh": "四宫格展示 A/B/C/D，提出旅行四套完整 Look 选择问题",
-          "layout": "grid_2x2",
+          "purpose_zh": "旅行主题精选大图封面",
+          "layout": "single",
           "source_roles": [
-            "look_a",
-            "look_b",
-            "look_c",
-            "look_d"
+            "look_a"
           ]
         },
         {

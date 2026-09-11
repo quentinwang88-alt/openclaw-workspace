@@ -1,0 +1,38 @@
+{
+  "schema_version": "opv-photo-layout-v2",
+  "layout_id": "PHOTO_MX_HAIR_CARD_V1",
+  "layout_version": 1,
+  "layout_kind": "HAIR_CHOICE_CARD",
+  "status": "active",
+  "render_options": {
+    "width": 1080,
+    "height": 1920,
+    "background": "#F8F4EE",
+    "jpeg_quality": 90,
+    "font_candidates": [
+      "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+      "/System/Library/Fonts/Helvetica.ttc",
+      "/System/Library/Fonts/Supplemental/Times New Roman.ttf"
+    ],
+    "font_size": 44,
+    "cover_font_size": 60,
+    "detail_font_size": 40,
+    "cta_font_size": 44,
+    "min_font_size": 30,
+    "text_color": "#241A14",
+    "text_background": "#FFF6E9D9",
+    "cta_text_color": "#FFF6E9",
+    "cta_background": "#3B2B23D9",
+    "text_radius": 18,
+    "max_lines": 2,
+    "cover_index": 1,
+    "choice_badges": false,
+    "padding_x": 28,
+    "padding_y": 22,
+    "top_offset": 230,
+    "bottom_offset": 460,
+    "line_spacing": 12,
+    "text_position": "top",
+    "split_last_line_to_bottom": true
+  }
+}

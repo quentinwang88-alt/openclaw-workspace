@@ -28,10 +28,12 @@ class ShippedConfigTest(unittest.TestCase):
         self.assertEqual(len(self.bundle.market_packs), 2)
         self.assertEqual(len(self.bundle.themes), 10)
         self.assertEqual(len(self.bundle.render_presets), 1)
-        self.assertEqual(len(self.bundle.content_recipes), 16)
+        # 2026-09-10: +1 content recipe (PHOTO_MX_PICK_YOUR_HAIR_V2)
+        # and +1 board layout (PHOTO_MX_HAIR_CARD_V1) for mx_wig_choice_v1.
+        self.assertEqual(len(self.bundle.content_recipes), 17)
         self.assertEqual(len(self.bundle.render_profiles), 2)
         self.assertEqual(len(self.bundle.quality_profiles), 3)
-        self.assertEqual(len(self.bundle.board_layouts), 8)
+        self.assertEqual(len(self.bundle.board_layouts), 10)
         self.assertEqual(len(self.bundle.variant_policies), 1)
         self.assertIsNotNone(self.bundle.account_example)
 
@@ -120,7 +122,10 @@ class ShippedConfigTest(unittest.TestCase):
             recipe for recipe in self.bundle.content_recipes
             if recipe.recipe_spec_json.get("media_kind") == "native_photo"
         ]
-        self.assertEqual(len(photos), 11)
+        # 2026-09-10: +1 photo recipe = PHOTO_MX_PICK_YOUR_HAIR_V2, which is
+        # asserted against its own four-page mx_wig_choice_v1 contract below;
+        # every other photo recipe keeps the original five-page assertions.
+        self.assertEqual(len(photos), 12)
         layout_ids = {
             layout["layout_id"] for layout in self.bundle.board_layouts
             if layout["schema_version"] in {loader.PHOTO_LAYOUT_SCHEMA, "opv-photo-layout-v2"}
@@ -133,24 +138,46 @@ class ShippedConfigTest(unittest.TestCase):
                 "PHOTO_CHOICE_GRID_V1",
                 "PHOTO_CHOICE_CARD_V1",
                 "PHOTO_CHOICE_CARD_V2",
+                "PHOTO_TRAVEL_CARD_V3",
+                "PHOTO_MX_HAIR_CARD_V1",
             },
         )
         for recipe in photos:
             spec = recipe.recipe_spec_json
+            self.assertEqual(spec["schema_version"], "opv-photo-recipe-v1")
+            self.assertIn("NO_PRODUCT", spec["product_modes"])
+            self.assertTrue(spec["variables_schema"])
+            self._assert_acyclic_story(recipe.story_structure_json)
+            if spec.get("execution_flow") == "mx_wig_choice_v1":
+                self.assertEqual(recipe.recipe_id, "PHOTO_MX_PICK_YOUR_HAIR_V2")
+                self.assertEqual(recipe.shot_count, 4, recipe.recipe_id)
+                self.assertEqual(
+                    [slot["slot_index"] for slot in recipe.story_structure_json],
+                    [1, 2, 3, 4],
+                    recipe.recipe_id,
+                )
+                self.assertEqual(
+                    [slot["role"] for slot in recipe.story_structure_json],
+                    ["hair_a", "hair_b", "hair_c", "hair_d"],
+                    recipe.recipe_id,
+                )
+                self.assertEqual(spec["asset_policy"], {
+                    "default": "AI_GENERATE", "on_missing": "NEEDS_ASSET",
+                })
+                self.assertEqual(spec["template_id"], "PHOTO_MX_HAIR_CARD_V1")
+                self.assertEqual(recipe.recipe_spec_json["content_card"]["logic_key"],
+                                 "wig_four_choice_es")
+                continue
             self.assertEqual(recipe.shot_count, 5, recipe.recipe_id)
             self.assertEqual(
                 [slot["slot_index"] for slot in recipe.story_structure_json],
                 [1, 2, 3, 4, 5],
                 recipe.recipe_id,
             )
-            self.assertEqual(spec["schema_version"], "opv-photo-recipe-v1")
-            self.assertIn("NO_PRODUCT", spec["product_modes"])
             self.assertEqual(spec["asset_policy"], {
                 "default": "ASSET_REUSE", "on_missing": "NEEDS_ASSET",
             })
             self.assertIn(spec["template_id"], layout_ids)
-            self.assertTrue(spec["variables_schema"])
-            self._assert_acyclic_story(recipe.story_structure_json)
 
     def test_pick_your_look_uses_operator_friendly_copy_pack(self) -> None:
         recipe = next(
@@ -171,6 +198,12 @@ class ShippedConfigTest(unittest.TestCase):
             if item.recipe_id == "PHOTO_TH_TRAVEL_OUTFIT_V2"
         )
         self.assertEqual(recipe.status, "active")
+        self.assertEqual(recipe.recipe_version, 6)
+        self.assertEqual(recipe.story_structure_json[0]["layout_variant"], "FULL_BLEED")
+        self.assertEqual(recipe.story_structure_json[0]["source_roles"], ["look_a"])
+        self.assertEqual(
+            recipe.recipe_spec_json["content_card"]["pages"][0]["layout"], "single"
+        )
         profile = recipe.recipe_spec_json["execution_profiles"][0]
         self.assertEqual(profile["copy_pack_id"], "TH_TRAVEL_OUTFIT_V2")
         self.assertEqual(len(profile["copy_variants"]), 4)

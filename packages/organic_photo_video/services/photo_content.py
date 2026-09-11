@@ -52,8 +52,11 @@ def freeze_content_card(card: Mapping[str, Any], asset_set: Any, visual_rules: M
     if not isinstance(card.get("asset_gaps"), list) or card["asset_gaps"]:
         raise ValueError("NEEDS_ASSET: 内容卡的素材缺口必须明确且已补齐")
     pages = card.get("pages")
-    if not isinstance(pages, list) or len(pages) != 5:
-        raise ValueError("NEEDS_CONTENT: content card requires five page responsibilities")
+    expected_pages = 4 if card.get("travel_first_look_cover") is True else 5
+    if not isinstance(pages, list) or len(pages) != expected_pages:
+        raise ValueError(
+            f"NEEDS_CONTENT: content card requires {expected_pages} page responsibilities"
+        )
     by_role = {}
     for asset in assets:
         role = asset.get("role")

@@ -17,7 +17,7 @@ for value in (str(BITABLE_SKILL), str(PACKAGE_ROOT)):
 
 from core.bitable import FeishuBitableClient, resolve_wiki_bitable_app_token  # noqa: E402
 from services.feishu_workflow import (  # noqa: E402
-    FIELD_EXECUTE, FIELD_NOTES, FIELD_OUTPUT, FIELD_PRESET, FIELD_PRODUCT,
+    FIELD_EXECUTE, FIELD_NOTES, FIELD_OUTPUT, FIELD_PRESET, FIELD_PRODUCT, FIELD_STORE,
     FIELD_PROGRESS, FIELD_REVIEW, FIELD_QUANTITY, FIELD_QUANTITY_LEGACY, FIELD_CONFIRM_PUBLISH,
     FIELD_PHOTO_SUMMARY, FIELD_PHOTO_INPUT, FIELD_PHOTO_INPUT_LEGACY,
     FIELD_PRODUCT_REFERENCE, FIELD_PHOTO_ASSET_STATUS, FIELD_REFERENCE,
@@ -32,6 +32,17 @@ from services.photo_theme import THEME_OPTIONS  # noqa: E402
 
 def options(values):
     return {"options": [{"name": value} for value in values]}
+
+
+def publish_store_options():
+    routes = json.loads(
+        (PACKAGE_ROOT / "config" / "main_publish_routes.json").read_text(encoding="utf-8")
+    ).get("routes", {})
+    return sorted({
+        str(route.get("default_store_id") or "").strip()
+        for route in routes.values()
+        if str(route.get("default_store_id") or "").strip()
+    })
 
 
 def rename_field(client, field, target_name: str) -> None:
@@ -137,6 +148,10 @@ def main() -> int:
     parser.add_argument("--table-id", default="tblj3x846gU3rshB")
     parser.add_argument("--preset-only", help="append one known preset option only; do not alter other fields")
     parser.add_argument(
+        "--store-only", action="store_true",
+        help="create/update only the publish-store selector; do not alter other fields",
+    )
+    parser.add_argument(
         "--consolidate-reference-field", action="store_true",
         help="copy legacy 商品参考图 attachments into 参考图（可选）, then delete the legacy field",
     )
@@ -165,6 +180,31 @@ def main() -> int:
         print(json.dumps({"preset": args.preset_only, "dry_run": args.dry_run,
             "missing": args.preset_only not in before, "appended": changed, "record_writes": 0}, ensure_ascii=False))
         return 0
+    if args.store_only:
+        desired = publish_store_options()
+        field = by_name.get(FIELD_STORE)
+        if args.dry_run:
+            existing = {str(item.get("name") or "") for item in ((field.property if field else {}) or {}).get("options", [])}
+            print(json.dumps({
+                "field": FIELD_STORE, "dry_run": True, "exists": field is not None,
+                "desired_options": desired, "missing_options": sorted(set(desired) - existing),
+                "record_writes": 0,
+            }, ensure_ascii=False, indent=2))
+            return 0
+        if field is None:
+            client.create_field(FIELD_STORE, 3, "SingleSelect", options(desired))
+            action = "created"
+        else:
+            action = "options_appended" if add_missing_select_options(client, field, desired) else "unchanged"
+        checked = next(item for item in client.list_fields() if item.field_name == FIELD_STORE)
+        actual = {str(item.get("name") or "") for item in (checked.property or {}).get("options", [])}
+        if not set(desired).issubset(actual):
+            raise RuntimeError("店铺字段回读校验失败")
+        print(json.dumps({
+            "field": FIELD_STORE, "action": action, "options": sorted(actual),
+            "record_writes": 0,
+        }, ensure_ascii=False, indent=2))
+        return 0
     if args.dry_run:
         print(json.dumps({"dry_run": True, "existing_fields": sorted(by_name), "writes": 0}, ensure_ascii=False))
         return 0
@@ -186,12 +226,14 @@ def main() -> int:
         renamed.append({"from": FIELD_QUANTITY_LEGACY, "to": FIELD_QUANTITY})
         by_name[FIELD_QUANTITY] = old
     specs = [
+        (FIELD_STORE, 3, "SingleSelect", options(publish_store_options())),
         (FIELD_PRESET, 3, "SingleSelect", options(catalog.names)),
         (FIELD_EXECUTE, 7, "Checkbox", None),
         (FIELD_QUANTITY, 2, "Number", {"formatter": "0"}),
         (FIELD_CONTENT_THEME, 3, "SingleSelect", options(THEME_OPTIONS)),
         (FIELD_CONTENT_REQUIREMENT, 1, "Text", None),
         ("旅行地点（可选）", 1, "Text", None),
+        ("重拍 Look（可选）", 1, "Text", None),
         (FIELD_REFERENCE_TYPE, 3, "SingleSelect", options(REFERENCE_TYPE_OPTIONS)),
         (FIELD_REFERENCE, 17, "Attachment", None),
         (FIELD_PHOTO_SUMMARY, 1, "Text", None),

@@ -362,13 +362,36 @@ def validate_account_profile_payload(payload: Mapping[str, Any]) -> List[str]:
 # Plan / shot / BGM contracts (docs/MODEL_HANDOFF.md section 8)
 # --------------------------------------------------------------------------
 
+# MX wig four-choice flow (mx_wig_choice_v1) is the only flow allowed to freeze
+# a four-slide native-photo plan; every other plan keeps the five-slide MVP
+# contract unchanged.  Services import this constant — do not duplicate the
+# literal elsewhere.
+MX_WIG_CHOICE_FLOW = "mx_wig_choice_v1"
+MX_WIG_PLAN_SLIDE_COUNT = 4
+
+
+def photo_plan_slide_count(plan: Mapping[str, Any]) -> int:
+    """Ordered slide count for a native-photo plan payload."""
+    if plan.get("execution_flow") == MX_WIG_CHOICE_FLOW:
+        return MX_WIG_PLAN_SLIDE_COUNT
+    # 单封面等卡片驱动计划：冻结卡片页数即成片页数（无卡片保持 5 页 MVP）。
+    card = plan.get("content_card")
+    pages = card.get("pages") if isinstance(card, Mapping) else None
+    if isinstance(pages, list) and pages:
+        return len(pages)
+    return PLAN_SHOT_COUNT
+
+
 def validate_photo_plan_payload(plan: Mapping[str, Any]) -> List[str]:
     """Validate a native-photo plan without inventing video-only fields.
 
-    The MVP deliberately freezes five ordered slides.  A slide may depend on
-    other slides (for example a four-choice cover), but dependencies must form
-    an acyclic graph so the exporter always has a deterministic build order.
+    The default MVP deliberately freezes five ordered slides; the explicit
+    ``mx_wig_choice_v1`` execution flow freezes four (A/B/C/D hair choices).
+    A slide may depend on other slides (for example a four-choice cover), but
+    dependencies must form an acyclic graph so the exporter always has a
+    deterministic build order.
     """
+    expected_slides = photo_plan_slide_count(plan)
     errors: List[str] = []
     _check_schema_version(errors, plan, PHOTO_PLAN_SCHEMA_VERSION)
     _require_enum(errors, plan, "media_kind", ("native_photo",))
@@ -420,9 +443,9 @@ def validate_photo_plan_payload(plan: Mapping[str, Any]) -> List[str]:
         errors.append("product must be an object or null")
 
     slides = plan.get("slides")
-    if not _is_list(slides) or len(slides) != PLAN_SHOT_COUNT:
+    if not _is_list(slides) or len(slides) != expected_slides:
         errors.append(
-            f"slides must contain exactly {PLAN_SHOT_COUNT} entries for the photo MVP"
+            f"slides must contain exactly {expected_slides} entries for this photo plan"
         )
         return errors
 
@@ -477,9 +500,9 @@ def validate_photo_plan_payload(plan: Mapping[str, Any]) -> List[str]:
             if _is_int(slot_index):
                 dependencies[slot_index].append(source_slot)
 
-    expected_slots = set(range(1, PLAN_SHOT_COUNT + 1))
+    expected_slots = set(range(1, expected_slides + 1))
     if seen_slots != expected_slots:
-        errors.append(f"slides slot_index must cover 1..{PLAN_SHOT_COUNT} exactly once")
+        errors.append(f"slides slot_index must cover 1..{expected_slides} exactly once")
     if _photo_dependencies_have_cycle(dependencies):
         errors.append("slides source_slots must not contain a dependency cycle")
     return errors

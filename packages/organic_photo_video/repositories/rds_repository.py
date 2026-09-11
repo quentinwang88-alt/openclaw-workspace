@@ -750,6 +750,13 @@ class RdsRepository:
         if count != 1:
             raise StaleStatusError("batch manifest changed")
 
+    def update_task_requested_shot_count(self, task_id: str, *, requested_shot_count: int) -> None:
+        """Align the deliverable page count when a frozen card dictates slides."""
+        self._run(
+            "UPDATE opv_content_task SET requested_shot_count=%s WHERE task_id=%s",
+            [int(requested_shot_count), task_id], commit=True,
+        )
+
     def queue_batch_projection(self, batch_id: str, fields: Dict[str, Any]) -> None:
         self._run("UPDATE opv_production_batch SET pending_fields_json=%s WHERE batch_id=%s", [dump_json(fields), batch_id], commit=True)
 

@@ -16,7 +16,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
-from services.feishu_workflow import FeishuTaskWorkflow, FIELD_PHOTO_SUMMARY
+from services.feishu_workflow import FeishuTaskWorkflow, FIELD_PHOTO_SUMMARY, FIELD_STORE
 from services.image_generator import GenerationOutcome
 from services.photo_request_factory import fingerprint
 from test_photo_planner import PlannerRepo
@@ -68,7 +68,7 @@ class BatchRepo(PlannerRepo):
 class Client:
     def __init__(self):
         self.fields = {"生产预设": "图文｜TH｜穿搭四选一", "生成数量": 3, "执行": True,
-                       "素材状态": "已匹配可用素材"}
+                       "素材状态": "已匹配可用素材", FIELD_STORE: "THFZ01"}
         self.fail_terminal = False
 
     def get_record(self, identity):
@@ -438,6 +438,18 @@ class PhotoBatchTest(unittest.TestCase):
         self.assertEqual(len(scheduler.calls), 3)
         self.assertEqual(self.client.fields["审核"], "无需审核")
         self.assertFalse(self.client.fields["确认发布"])
+        self.assertTrue(all(call[1]["store_id"] == "THFZ01" for call in scheduler.calls))
+
+    def test_photo_confirm_publish_requires_store(self):
+        self.scan()
+        self.workflow.publish_scheduler = SimpleNamespace(
+            enqueue_task=lambda task_id, **kwargs: {"task_id": task_id}
+        )
+        self.client.fields.pop(FIELD_STORE)
+        self.client.fields["确认发布"] = True
+        report = self.scan()
+        self.assertTrue(report["errors"])
+        self.assertIn("必须选择店铺", report["errors"][0]["error"])
 
     def test_committed_review_projection_replays_without_new_review(self):
         self.scan()
@@ -478,6 +490,37 @@ class PhotoBatchTest(unittest.TestCase):
         result = self.scan()
         self.assertEqual(result["processed"][0]["action"], "leased_skip")
         self.assertTrue(self.client.fields["确认发布"])
+
+    def test_pre_batch_replan_archives_only_local_planning_state(self):
+        root = Path(self.temp.name)
+        paths = [
+            root / "reference_contracts" / "rec",
+            root / "content_plans" / "rec",
+            root / "style_reference_supply" / "rec_item_1",
+        ]
+        for path in paths:
+            path.mkdir(parents=True)
+            (path / "manifest.json").write_text("{}", encoding="utf-8")
+
+        archive = self.workflow._archive_photo_planning_state(
+            root, "rec", reason="参考图或内容要求已变化",
+        )
+
+        self.assertIsNotNone(archive)
+        self.assertTrue((archive / "replan.json").exists())
+        self.assertTrue((archive / "reference_contracts" / "rec" / "manifest.json").exists())
+        self.assertTrue((archive / "content_plans" / "rec" / "manifest.json").exists())
+        self.assertTrue((archive / "style_reference_supply" / "rec_item_1" / "manifest.json").exists())
+        self.assertTrue(all(not path.exists() for path in paths))
+        self.assertIsNone(self.repo.batch, "replan helper must not create or mutate a DB batch")
+
+    def test_only_known_pre_batch_failures_are_replannable(self):
+        self.assertTrue(self.workflow._is_replannable_photo_error(
+            RuntimeError("参考分析或旅行变量已变化；请新建任务")))
+        self.assertTrue(self.workflow._is_replannable_photo_error(
+            RuntimeError("整组参考一致性重做次数已用尽")))
+        self.assertFalse(self.workflow._is_replannable_photo_error(
+            RuntimeError("模型鉴权失败")))
 
 
 if __name__ == "__main__":

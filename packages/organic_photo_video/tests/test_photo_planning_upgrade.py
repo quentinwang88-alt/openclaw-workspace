@@ -566,24 +566,29 @@ class SupplyConsistencyIntegrationTest(unittest.TestCase):
                     if w["code"] == "SKIN_TONE_NOTE"]
             self.assertTrue(skin)
 
-    def test_consistency_fail_repairs_divergent_roles(self):
+    def test_program_color_difference_is_warning_in_standard(self):
         with tempfile.TemporaryDirectory() as folder:
             generator = RecordingGenerator()
-            reviewer = ConsistencyAwareReviewer([True, True], [])
+            reviewer = ConsistencyAwareReviewer(
+                [True, True],
+                [{"roles": [human_observation("look_a")]}, passing_group_observation()],
+            )
             kwargs = self._kwargs(folder, "rec-cons-fail", generator, reviewer)
             service = PhotoStyleReferenceSupplyService(
                 generator=generator, root=Path(folder), vision_service=reviewer)
-            with self.assertRaisesRegex(ValueError, "跨图一致性检查未通过且重做次数已用尽"):
-                service.prepare(**kwargs)
+            result = service.prepare(**kwargs)
+            self.assertEqual(result["group_repair_attempts"], 0)
             manifest = json.loads(
                 (Path(folder) / "style_reference_supply" / "rec-cons-fail"
                  / "supply_manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(manifest["status"], "group_failed")
+            self.assertEqual(manifest["status"], "complete")
             self.assertFalse(manifest["group_consistency_qa"]["program"]["passed"])
-            first_round = manifest["attempt_history"][0]
-            self.assertIn("consistency_alignment", first_round)
-            self.assertTrue(any("肤色/色调偏离" in note
-                                for note in first_round["repair_notes"].values()))
+            self.assertEqual(manifest["attempt_history"], [])
+            self.assertTrue(any(
+                warning["code"] == "COLOR_CONSISTENCY"
+                for warning in manifest["quality"]["quality_warnings"]
+            ))
+            self.assertTrue(manifest["quality"]["publish_ready"])
 
 
 if __name__ == "__main__":

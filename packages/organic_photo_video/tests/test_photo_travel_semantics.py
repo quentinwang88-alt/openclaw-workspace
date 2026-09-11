@@ -2,6 +2,7 @@
 targeted repair, template copy, and the native-review release gate."""
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -138,6 +139,24 @@ class TravelSemanticQATest(unittest.TestCase):
         self.assertEqual(first["observed_footwear_type"], "SNEAKER")
         self.assertTrue(all(item["passed"] for item in qa["roles"]))
 
+    def test_cover_recommendation_is_preserved_without_affecting_qa(self):
+        raw = self.qa_raw()
+        raw["cover_recommendation"] = {
+            "role": "look_c", "reason_zh": "穿搭清楚，旅行环境适合封面",
+        }
+        qa = self.normalize(raw)
+        self.assertTrue(qa["passed"])
+        self.assertEqual(qa["cover_recommendation"]["role"], "look_c")
+        projected = travel_qa_as_alignment(qa)
+        self.assertEqual(projected["cover_recommendation"]["role"], "look_c")
+
+    def test_invalid_cover_recommendation_degrades_to_fallback_signal(self):
+        raw = self.qa_raw()
+        raw["cover_recommendation"] = {"role": "cover", "reason_zh": "bad"}
+        qa = self.normalize(raw)
+        self.assertTrue(qa["passed"])
+        self.assertEqual(qa["cover_recommendation"]["role"], "")
+
     def test_airport_title_over_cafe_background_must_fail(self):
         raw = self.qa_raw(look_a={"observed_moment": "cafe_visit"})
         qa = self.normalize(raw)
@@ -221,6 +240,53 @@ class TravelSemanticQATest(unittest.TestCase):
         result = next(item for item in qa["roles"] if item["role"] == "look_d")
         self.assertFalse(result["passed"])
         self.assertEqual(result["failure_code"], FAILURE_WEATHER_MISMATCH)
+
+    def test_minor_outfit_difference_is_warning_in_standard(self):
+        raw = self.qa_raw(look_c={
+            "outfit_matches": False, "outfit_severity": "MINOR",
+            "repair_instruction": "少一层同色薄开衫",
+        })
+        qa = self.normalize(raw)
+        self.assertTrue(qa["passed"])
+        self.assertTrue(qa["roles"][2]["passed"])
+        self.assertEqual(qa["quality_warnings"][0]["code"], "MINOR_OUTFIT_VARIATION")
+
+    def test_major_outfit_difference_still_blocks(self):
+        raw = self.qa_raw(look_c={
+            "outfit_matches": False, "outfit_severity": "MAJOR",
+            "repair_instruction": "主体外套完全缺失",
+        })
+        qa = self.normalize(raw)
+        self.assertFalse(qa["passed"])
+        self.assertEqual(qa["roles"][2]["failure_code"], "OUTFIT_MISMATCH")
+
+    def test_product_replacement_is_hard_failure(self):
+        raw = self.qa_raw()
+        for page in raw["pages"]:
+            page["product_matches"] = True
+        raw["pages"][1]["product_matches"] = False
+        qa = normalize_travel_qa(
+            raw, look_plans=travel_looks(), moment_rules=self.moment_rules,
+            has_product=True,
+        )
+        self.assertFalse(qa["passed"])
+        self.assertEqual(qa["roles"][1]["failure_code"], "OUTFIT_MISMATCH")
+
+    def test_destination_conflict_blocks_group_but_missing_landmark_does_not(self):
+        raw = self.qa_raw()
+        raw["destination_conflict"] = False
+        qa = normalize_travel_qa(
+            raw, look_plans=travel_looks(), moment_rules=self.moment_rules,
+            travel_place="河口湖",
+        )
+        self.assertTrue(qa["passed"])
+        raw["destination_conflict"] = True
+        raw["destination_evidence"] = ["富士山", "瑞士城堡"]
+        qa2 = normalize_travel_qa(
+            raw, look_plans=travel_looks(), moment_rules=self.moment_rules,
+            travel_place="河口湖",
+        )
+        self.assertFalse(qa2["passed"])
 
     def test_four_identical_scenes_claiming_four_moments_must_all_fail(self):
         raw = self.qa_raw()
@@ -331,6 +397,31 @@ class TravelTwoStepVisionTest(unittest.TestCase):
         self.assertEqual(profile["planning_flow"], "travel_two_step")
         self.assertTrue(all(look.get("scene_prompt") for look in profile["recommended_sets"][0]["looks"]))
 
+    def test_travel_plan_sees_reference_images_and_records_astra_route(self):
+        client = FakeVisionClient([self.analysis_payload(), self.travel_plan_payload()])
+        service = PhotoReferenceVisionService(root=self.root, client=client)
+        analysis = service.analyze_reference(
+            record_id="rec-direct-vision", paths=self.images, theme={},
+            category_key="womenswear")
+        plan = service.plan_travel_content(
+            record_id="rec-direct-vision", analysis=analysis,
+            travel_contract=travel_contract(), variables={}, count=1,
+            reference_paths=self.images,
+        )
+
+        self.assertEqual(1, len(client.calls[1][0]))
+        self.assertIn("直接提供给规划模型的图片", client.calls[1][1])
+        self.assertEqual("gpt-6-astra", plan["model_routing"]["requested_model"])
+        stored = json.loads(
+            (self.root / "reference_contracts" / "rec-direct-vision" /
+             "travel_plan.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            "gpt-6-astra", stored["input_contract"]["planning_route"]["model"]
+        )
+        self.assertEqual(1, len(stored["input_contract"]["planning_images"]))
+        self.assertTrue(stored["input_contract"]["planning_images"][0]["sha256"])
+
     def test_travel_plan_auto_revises_once_then_stops(self):
         broken = self.travel_plan_payload(
             moments=("airport_departure", "airport_departure",
@@ -341,8 +432,9 @@ class TravelTwoStepVisionTest(unittest.TestCase):
             record_id="rec-revise", paths=self.images, theme={}, category_key="womenswear")
         plan = service.plan_travel_content(
             record_id="rec-revise", analysis=analysis, travel_contract=travel_contract(),
-            variables={}, count=1)
+            variables={}, count=1, reference_paths=self.images)
         self.assertEqual(len(client.calls), 3)  # analysis + broken plan + revised plan
+        self.assertEqual(client.calls[1][0], client.calls[2][0])
         moments = [look["travel_moment"] for look in plan["posts"][0]["looks"]]
         self.assertEqual(len(set(moments)), 4)
 
@@ -455,6 +547,34 @@ class TravelSupplySceneTest(unittest.TestCase):
             self.assertIn("travel_moment=", request.plan_shot["purpose"])
         self.assertEqual(len(generator.requests), 4)
 
+    def test_styling_intent_reaches_image_prompt_direction(self):
+        generator = FakeGenerator()
+
+        class PassingQA:
+            def review_alignment(self, **kwargs):
+                return {"passed": True, "notes": "ok"}
+
+            def review_travel_pages(self, **kwargs):
+                return {"schema_version": "opv-photo-travel-semantic-qa-v1",
+                        "passed": True, "style_uniform": True,
+                        "roles": [{"role": look["role"], "passed": True,
+                                   "failure_code": "", "expected": look["travel_moment"],
+                                   "observed": look["travel_moment"], "title": "",
+                                   "repair_instruction": ""}
+                                  for look in travel_looks()],
+                        "notes": ""}
+
+        kwargs = self.base_kwargs()
+        kwargs["variation"]["looks"][0]["styling_intent"] = (
+            "用顺直裤线平衡短外套体积，裤脚与修长乐福鞋自然衔接"
+        )
+        service = PhotoStyleReferenceSupplyService(
+            generator=generator, root=Path(self.tmp.name), vision_service=PassingQA())
+        service.prepare(**kwargs)
+        direction = generator.requests[0].outfit_state["style_direction"]
+        self.assertIn("穿搭比例与下装鞋履衔接", direction)
+        self.assertIn("裤脚与修长乐福鞋自然衔接", direction)
+
     def test_style_direction_carries_reference_palette(self):
         generator = FakeGenerator()
 
@@ -477,9 +597,10 @@ class TravelSupplySceneTest(unittest.TestCase):
             generator=generator, root=Path(self.tmp.name), vision_service=PassingQA())
         service.prepare(**kwargs)
         for request in generator.requests:
-            self.assertIn("严格执行参考图签名配色（鲜红色、深靛蓝色、藏蓝色、白色）",
+            self.assertIn("参考图配色仅作为审美方向（鲜红色、深靛蓝色、藏蓝色、白色）",
                           request.outfit_state["style_direction"])
-            self.assertIn("不得偏移到其他色系", request.outfit_state["style_direction"])
+            self.assertIn("不得把四套配套单品强行收敛到同一色域",
+                          request.outfit_state["style_direction"])
 
     def test_travel_prompt_core_uses_frozen_scene_without_background_injection(self):
         generator = FakeGenerator()
@@ -816,7 +937,7 @@ class TravelBackgroundContinuityTest(unittest.TestCase):
 
 
 class TravelPlanDifferenceTest(unittest.TestCase):
-    """改造一：任意两套 Look 至少两个核心字段不同。"""
+    """旅行差异保持可感知，同时允许复用成熟裤型和协调鞋履。"""
 
     def plan_with_looks(self, looks):
         return PhotoReferenceVisionService(root=Path("/tmp"))._normalize_travel_plan(
@@ -839,23 +960,23 @@ class TravelPlanDifferenceTest(unittest.TestCase):
             })
         return looks
 
-    def test_a_c_differing_only_in_bottom_is_rejected(self):
+    def test_a_c_can_reuse_outerwear_inner_and_shoes(self):
         looks = self.base_looks()
         looks[2]["outerwear"] = looks[0]["outerwear"]      # 同外套
         looks[2]["top_inner"] = looks[0]["top_inner"]      # 同内搭
         looks[2]["shoes"] = looks[0]["shoes"]              # 同鞋
         looks[2]["footwear_type"] = looks[0]["footwear_type"]
         plan, errors = self.plan_with_looks(looks)
-        self.assertTrue(any("look_a 与 look_c" in e and "至少" in e for e in errors), errors)
+        self.assertEqual(errors, [], errors)
 
-    def test_b_d_differing_only_in_bottom_is_rejected(self):
+    def test_b_d_can_reuse_outerwear_inner_and_shoes(self):
         looks = self.base_looks()
         looks[3]["outerwear"] = looks[1]["outerwear"]
         looks[3]["top_inner"] = looks[1]["top_inner"]
         looks[3]["shoes"] = looks[1]["shoes"]
         looks[3]["footwear_type"] = looks[1]["footwear_type"]
         plan, errors = self.plan_with_looks(looks)
-        self.assertTrue(any("look_b 与 look_d" in e for e in errors), errors)
+        self.assertEqual(errors, [], errors)
 
     def test_two_core_field_difference_passes(self):
         looks = self.base_looks()
@@ -865,24 +986,21 @@ class TravelPlanDifferenceTest(unittest.TestCase):
         self.assertEqual(errors, [], errors)
         self.assertEqual(len(plan["posts"][0]["looks"]), 4)
 
-    def test_synonym_whitespace_bypass_is_normalized(self):
+    def test_completely_identical_outfit_is_still_rejected(self):
         looks = self.base_looks()
-        looks[2]["outerwear"] = f" {looks[0]['outerwear']} "
-        looks[2]["top_inner"] = str(looks[0]["top_inner"]).upper()
+        for field in ("outerwear", "top_inner", "bottom", "shoes"):
+            looks[2][field] = looks[0][field]
+        looks[2]["footwear_type"] = looks[0]["footwear_type"]
         plan, errors = self.plan_with_looks(looks)
-        self.assertEqual(errors, [], errors)  # 归一化后仍距离 2 → 通过
-        looks[2]["bottom"] = f" {looks[0]['bottom']} "
-        looks[2]["shoes"] = f" {looks[0]['shoes']} "
-        plan, errors = self.plan_with_looks(looks)  # 全部归一相同 → pairwise 失败
-        self.assertTrue(any("look_a 与 look_c" in e for e in errors), errors)
+        self.assertTrue(any("重复 Look" in e for e in errors), errors)
 
-    def test_only_two_upper_body_combinations_is_rejected(self):
+    def test_two_upper_body_combinations_are_allowed(self):
         looks = self.base_looks()
         for index in (2, 3):
             looks[index]["outerwear"] = looks[index % 2]["outerwear"]
             looks[index]["top_inner"] = looks[index % 2]["top_inner"]
         plan, errors = self.plan_with_looks(looks)
-        self.assertTrue(any("上装组合" in e for e in errors), errors)
+        self.assertEqual(errors, [], errors)
 
 
 class TravelFootwearContractTest(unittest.TestCase):
@@ -1005,7 +1123,7 @@ class TravelFinalPageQATest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.image_paths = []
-        for index in range(1, 6):
+        for index in range(1, 5):
             path = Path(self.tmp.name) / f"page-{index}.jpg"
             Image.new("RGB", (60, 90), (90, 90, 90)).save(path)
             self.image_paths.append(str(path))
@@ -1018,7 +1136,7 @@ class TravelFinalPageQATest(unittest.TestCase):
 
     def pages(self, **overrides):
         pages = []
-        for index in range(1, 6):
+        for index in range(1, 5):
             page = {"index": index, "text_readable": True, "text_matches_expected": True,
                     "text_clipped": False, "text_garbled": False, "subject_obscured": False,
                     "issues": []}
@@ -1030,34 +1148,34 @@ class TravelFinalPageQATest(unittest.TestCase):
         service = self.vision(self.pages())
         qa = service.review_travel_final_pages(
             image_paths=self.image_paths,
-            expected_texts=[f"文字{i}" for i in range(1, 6)],
-            role_order=["cover", "look_a", "look_b", "look_c", "look_d"],
+            expected_texts=[f"文字{i}" for i in range(1, 5)],
+            role_order=["look_a", "look_b", "look_c", "look_d"],
         )
         self.assertTrue(qa["passed"])
-        self.assertEqual(len(qa["pages"]), 5)
+        self.assertEqual(len(qa["pages"]), 4)
 
-    def test_final_pages_must_cover_all_five(self):
+    def test_final_pages_must_cover_all_four(self):
         service = self.vision(self.pages())
-        with self.assertRaisesRegex(Exception, "5"):
+        with self.assertRaisesRegex(Exception, "4"):
             service.review_travel_final_pages(
-                image_paths=self.image_paths[:4],
-                expected_texts=[f"文字{i}" for i in range(1, 6)],
-                role_order=["cover", "look_a", "look_b", "look_c", "look_d"],
+                image_paths=self.image_paths[:3],
+                expected_texts=[f"文字{i}" for i in range(1, 5)],
+                role_order=["look_a", "look_b", "look_c", "look_d"],
             )
 
     def test_clipped_or_garbled_text_fails(self):
         raw = self.pages()
         raw["pages"][2]["text_clipped"] = True
-        raw["pages"][4]["text_garbled"] = True
+        raw["pages"][3]["text_garbled"] = True
         service = self.vision(raw)
         qa = service.review_travel_final_pages(
             image_paths=self.image_paths,
-            expected_texts=[f"文字{i}" for i in range(1, 6)],
-            role_order=["cover", "look_a", "look_b", "look_c", "look_d"],
+            expected_texts=[f"文字{i}" for i in range(1, 5)],
+            role_order=["look_a", "look_b", "look_c", "look_d"],
         )
         self.assertFalse(qa["passed"])
         self.assertEqual(qa["pages"][2]["text_clipped"], True)
-        self.assertEqual(qa["pages"][4]["text_garbled"], True)
+        self.assertEqual(qa["pages"][3]["text_garbled"], True)
 
     def test_missing_bool_field_is_structural_failure(self):
         bad = self.pages()
@@ -1066,16 +1184,16 @@ class TravelFinalPageQATest(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "text_matches_expected"):
             service.review_travel_final_pages(
                 image_paths=self.image_paths,
-                expected_texts=[f"文字{i}" for i in range(1, 6)],
-                role_order=["cover", "look_a", "look_b", "look_c", "look_d"],
+                expected_texts=[f"文字{i}" for i in range(1, 5)],
+                role_order=["look_a", "look_b", "look_c", "look_d"],
             )
 
     def test_travel_flow_blocks_technical_completion_on_failed_qa(self):
         from services.photo_package import NativePhotoProductionFlow
         manifest = {
             "content_package_id": "pkg-1",
-            "copy": {"slide_texts": [f"文字{i}" for i in range(1, 6)]},
-            "slides": [{"index": i, "path": f"p{i}.jpg", "sha256": "x"} for i in range(1, 6)],
+            "copy": {"slide_texts": [f"文字{i}" for i in range(1, 5)]},
+            "slides": [{"index": i, "path": f"p{i}.jpg", "sha256": "x"} for i in range(1, 5)],
         }
         saved = {}
 
@@ -1111,7 +1229,7 @@ class TravelFinalPageQATest(unittest.TestCase):
         # Passing QA stores evidence without raising.
         manifest2 = {**manifest}
         ok_qa = {"schema_version": "opv-photo-travel-final-qa-v1", "passed": True,
-                 "pages": [{"index": i, "issues": []} for i in range(1, 6)], "notes": ""}
+                 "pages": [{"index": i, "issues": []} for i in range(1, 5)], "notes": ""}
         vision2 = Vision(ok_qa)
         flow2 = NativePhotoProductionFlow(None, None, output_root=Path("/tmp"), vision_service=vision2)
         flow2.repository = Repo()

@@ -1,7 +1,8 @@
 """Image generation adapter (Stage C) for OPV.
 
-Wraps the existing ``skills/openai-image`` service (gpt-image-2, codex OAuth
-path) so OPV never builds a second model-auth stack (MODEL_HANDOFF 4.3).
+Wraps the existing ``skills/openai-image`` service (Codex OAuth path) so OPV
+never builds a second model-auth stack (MODEL_HANDOFF 4.3).  The concrete image
+model is resolved by that service and recorded on every generation outcome.
 
 Prompt composition is deterministic: product identity lock + persona lock +
 frozen look recipe + scene + per-slot intent. The generator never invents
@@ -11,10 +12,12 @@ product/persona/look/scene refs from the plan for cross-shot consistency.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import struct
 import subprocess
+import tempfile
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,9 +35,19 @@ OPENAI_IMAGE_SKILL_DIR = WORKSPACE_ROOT / "skills" / "openai-image"
 
 PROVIDER_NAME = "openai-image"
 MODEL_NAME = "gpt-image-2"
-OPV_SIZE = "1024x1536"  # 9:16 vertical
+# Closest supported portrait request size; the prompt and media gate enforce 9:16.
+OPV_SIZE = "1024x1536"
 OPV_QUALITY = "high"
 OPV_OUTPUT_FORMAT = "png"
+SUNBURST_MODEL_PREFIX = "gpt-image-2.5-sunburst"
+SUNBURST_CANVAS_SIZE = (1080, 1920)
+SUNBURST_CANVAS_PROMPT = (
+    "Sunburst reference handling: reference image 1 is the primary visual "
+    "reference placed on a neutral light-gray 9:16 composition canvas. Use its "
+    "visible content as reference evidence, replace all neutral canvas padding "
+    "with the requested complete scene, and return a full-bleed 9:16 image "
+    "without borders, blank margins, gray bands, or transparency."
+)
 
 
 @dataclass
@@ -55,6 +68,10 @@ class ShotGenerationRequest:
     recipe_execution: Dict[str, Any] = field(default_factory=dict)
     camera_hint: str = ""
     reference_roles: Dict[str, Any] = field(default_factory=dict)
+    # Explicit alternative-flow prompt (e.g. mx_wig_choice_v1).  When set it
+    # fully replaces compose_shot_prompt so clothing-contract lines never leak
+    # into a wig portrait.  TH paths never set it and keep the original prompt.
+    prompt_override: str = ""
 
 
 @dataclass
@@ -68,6 +85,60 @@ class GenerationOutcome:
     height: Optional[int] = None
     error: str = ""
     raw: Dict[str, Any] = field(default_factory=dict)
+
+
+def prepare_sunburst_primary_reference(
+    source_path: str,
+    output_dir: str,
+    canvas_size: tuple = SUNBURST_CANVAS_SIZE,
+) -> str:
+    """Contain the primary reference on a cached neutral 9:16 canvas.
+
+    Sunburst edit requests strongly inherit the first input image's canvas.
+    OPV references may be square or unusually narrow, so only the first input
+    is normalized. Source pixels and all later references remain untouched.
+    """
+    from PIL import Image, ImageOps
+
+    source = Path(source_path).expanduser().resolve()
+    if not source.is_file():
+        raise FileNotFoundError(f"primary reference not found: {source}")
+    width, height = (int(canvas_size[0]), int(canvas_size[1]))
+    if width <= 0 or height <= 0 or abs(width / height - 9 / 16) > 0.001:
+        raise ValueError(f"Sunburst canvas must be 9:16, got {canvas_size!r}")
+
+    source_digest = hashlib.sha256()
+    source_digest.update(source.read_bytes())
+    source_digest.update(f"|{width}x{height}|contain-rgb-v2".encode("ascii"))
+    cache_dir = Path(output_dir).expanduser().resolve() / ".sunburst_reference_canvases"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    target = cache_dir / f"{source_digest.hexdigest()[:24]}_9x16.png"
+    if target.is_file():
+        return str(target)
+
+    with Image.open(source) as opened:
+        normalized = ImageOps.exif_transpose(opened).convert("RGBA")
+        normalized.thumbnail((width, height), Image.Resampling.LANCZOS)
+        canvas = Image.new("RGB", (width, height), (242, 242, 242))
+        position = (
+            (width - normalized.width) // 2,
+            (height - normalized.height) // 2,
+        )
+        canvas.paste(normalized.convert("RGB"), position, normalized.getchannel("A"))
+        with tempfile.NamedTemporaryFile(
+            dir=cache_dir,
+            prefix=f".{target.stem}.",
+            suffix=".tmp.png",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+        try:
+            canvas.save(temporary, format="PNG", optimize=True)
+            os.replace(temporary, target)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+    return str(target)
 
 
 def read_image_dimensions(path: str) -> Optional[tuple]:
@@ -636,11 +707,35 @@ class OpenAIImageGenerator:
         return self._service
 
     def generate_shot(self, request: ShotGenerationRequest) -> GenerationOutcome:
+        resolved_model = (
+            str(os.environ.get("OPENAI_CODEX_IMAGE_MODEL", "") or "").strip()
+            or MODEL_NAME
+        )
+        reference_canvas: Dict[str, Any] = {}
         try:
             service = self._load_service()
+            resolved_model = str(
+                getattr(getattr(service, "settings", None), "effective_model", "")
+                or MODEL_NAME
+            )
             from core.schemas import ImageTaskRequest
 
             reference_paths = self._reference_paths(request)
+            prompt = request.prompt_override or compose_shot_prompt(request)
+            if reference_paths and resolved_model.startswith(SUNBURST_MODEL_PREFIX):
+                original_primary = reference_paths[0]
+                normalized_primary = prepare_sunburst_primary_reference(
+                    original_primary,
+                    request.output_dir,
+                )
+                reference_paths = [normalized_primary, *reference_paths[1:]]
+                prompt = f"{prompt}\n\n{SUNBURST_CANVAS_PROMPT}"
+                reference_canvas = {
+                    "sunburst_canvas_normalized": True,
+                    "primary_reference_original": original_primary,
+                    "primary_reference_canvas": normalized_primary,
+                    "canvas_size": list(SUNBURST_CANVAS_SIZE),
+                }
             image_request = ImageTaskRequest.from_dict(
                 {
                     "task_id": (
@@ -649,7 +744,7 @@ class OpenAIImageGenerator:
                     "task_type": "opv_still_shot",
                     "target_field": f"slot_{request.slot_index}",
                     "mode": "edit" if reference_paths else "generate",
-                    "prompt": compose_shot_prompt(request),
+                    "prompt": prompt,
                     "input_image_paths": reference_paths,
                     "size": self._size,
                     "quality": self._quality,
@@ -662,6 +757,7 @@ class OpenAIImageGenerator:
                             "PERSONA_IDENTITY",
                             "RECIPE_CONTINUITY_ANCHOR",
                         ],
+                        **reference_canvas,
                         "reference_roles": request.reference_roles,
                         "outfit_state_ref": request.plan_shot.get(
                             "outfit_state_ref"
@@ -674,7 +770,14 @@ class OpenAIImageGenerator:
             )
             result = service.process_task(image_request)
         except Exception as exc:  # noqa: BLE001 - adapter boundary
-            return GenerationOutcome(ok=False, error=f"{type(exc).__name__}: {exc}")
+            return GenerationOutcome(
+                ok=False,
+                model=resolved_model,
+                error=f"{type(exc).__name__}: {exc}",
+                raw=reference_canvas,
+            )
+
+        result_model = str(getattr(result, "model", "") or resolved_model)
 
         status = str(getattr(result, "status", "") or "")
         paths = list(getattr(result, "output_image_paths", []) or [])
@@ -685,9 +788,10 @@ class OpenAIImageGenerator:
         if status != "success" or not paths:
             return GenerationOutcome(
                 ok=False,
+                model=result_model,
                 request_id=request_id,
                 error=error_message or f"generator status {status!r}",
-                raw={"status": status},
+                raw={"status": status, **reference_canvas},
             )
         image_path = paths[0]
         dimensions = read_image_dimensions(image_path)
@@ -695,11 +799,12 @@ class OpenAIImageGenerator:
         return GenerationOutcome(
             ok=size_ok,
             image_path=image_path,
+            model=result_model,
             request_id=request_id,
             width=dimensions[0] if dimensions else None,
             height=dimensions[1] if dimensions else None,
             error="" if size_ok else f"image is not 9:16 portrait: {dimensions}",
-            raw={"status": status},
+            raw={"status": status, **reference_canvas},
         )
 
     @staticmethod
@@ -851,7 +956,7 @@ class CreatokImageGenerator:
         reference_paths = OpenAIImageGenerator._reference_paths(request)
         command = [
             self.binary, "image", "generate",
-            "--prompt", compose_shot_prompt(request),
+            "--prompt", request.prompt_override or compose_shot_prompt(request),
             "--options", json.dumps(self._options()),
             "--out", str(run_dir),
             "--timeout", str(self.poll_timeout),
@@ -996,11 +1101,15 @@ def build_default_photo_generator():
     """Production default: CreatOK primary, codex openai-image fallback.
 
     ``OPV_PHOTO_CHANNEL`` overrides: ``openai-image`` pins the legacy codex
-    channel, ``creatok`` drops the fallback. Defaults to ``creatok_fallback``.
+    channel, ``creatok`` drops the fallback, ``codex_fallback`` flips the
+    direction to codex primary with CreatOK catching quota/availability
+    failures. Defaults to ``creatok_fallback``.
     """
     channel = _env("OPV_PHOTO_CHANNEL", "creatok_fallback").lower()
     if channel == "openai-image":
         return OpenAIImageGenerator()
     if channel == "creatok":
         return CreatokImageGenerator()
+    if channel == "codex_fallback":
+        return FallbackShotGenerator(OpenAIImageGenerator(), CreatokImageGenerator())
     return FallbackShotGenerator(CreatokImageGenerator(), OpenAIImageGenerator())

@@ -8,7 +8,8 @@ from domain.photo_contracts import LABEL_PLACEHOLDER, validate_copy
 
 
 def resolve_photo_copy(copy_block: Mapping[str, Any], *, assets: Sequence[Mapping[str, Any]],
-                       locale: str, extra_tokens: Mapping[str, str] = None) -> dict[str, Any]:
+                       locale: str, extra_tokens: Mapping[str, str] = None,
+                       expected_slide_count: int = 5) -> dict[str, Any]:
     labels = {}
     for letter in "abcd":
         matches = [asset for asset in assets if asset.get("role") == f"look_{letter}"]
@@ -35,7 +36,7 @@ def resolve_photo_copy(copy_block: Mapping[str, Any], *, assets: Sequence[Mappin
         return copy.deepcopy(value)
 
     resolved = replace(copy_block)
-    errors = validate_copy(resolved)
+    errors = validate_copy(resolved, expected_slide_count=expected_slide_count)
     if errors:
         raise ValueError("; ".join(errors))
     return resolved
