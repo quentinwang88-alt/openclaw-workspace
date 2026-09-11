@@ -16,6 +16,7 @@ from core.complete_voiceover_direct import (
     _estimated_spoken_seconds,
     _expression_with_selected_claims,
     _invoke_model,
+    original_voiceover_route_cache_key,
     _hook_surface_status,
     _narrative_anchor_options,
     _relationship_language_profile,
@@ -43,6 +44,7 @@ class CompleteVoiceoverDirectTest(unittest.TestCase):
 
         def fake_run(command, *, input, **kwargs):
             captured["input"] = input
+            captured["timeout"] = kwargs["timeout"]
             return type(
                 "Completed",
                 (),
@@ -60,6 +62,16 @@ class CompleteVoiceoverDirectTest(unittest.TestCase):
 
         self.assertEqual(result, {"ok": True})
         self.assertIn("2026-08-27 01:02:03", captured["input"])
+        self.assertEqual(json.loads(captured["input"])["route_scope"], "original_shortform")
+        self.assertEqual(captured["timeout"], 600)
+
+    def test_voiceover_route_cache_changes_on_rollback(self):
+        with patch.dict('os.environ', {'ORIGINAL_SHORTFORM_VOICEOVER_ASTRA_ENABLED':'1'}):
+            enabled = original_voiceover_route_cache_key()
+        with patch.dict('os.environ', {'ORIGINAL_SHORTFORM_VOICEOVER_ASTRA_ENABLED':'0'}):
+            disabled = original_voiceover_route_cache_key()
+        self.assertNotEqual(enabled, disabled)
+        self.assertEqual(enabled['scope'], disabled['scope'])
 
     def test_target_language_guard_rejects_thai_for_vietnamese_and_malay(self):
         thai = "ดูนี่ก่อนนะ ตัวนี้สวยมากค่ะ"

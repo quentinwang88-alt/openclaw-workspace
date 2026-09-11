@@ -211,19 +211,12 @@ def _execution_units(
             first["product_anchors_visible"] = _limited(
                 [*(first.get("product_anchors_visible") or []), *detail_focus], 3
             )
-            if incoming_boundary_mode == "DISCONTINUOUS_CUT":
-                first["visual_content"] = (
-                    f"商品主导的自然中近景，清楚呈现{focus_text}；"
-                    "人物保持已经完成的穿戴状态，背景只保留少量当前场景识别信息。"
-                )
-                first["character_action"] = (
-                    "人物不重新穿戴，只做一次自然的小幅姿态调整，让商品细节持续可见"
-                )
-            else:
-                first["visual_content"] = (
-                    f"先让商品成为画面主体，清楚呈现{focus_text}；"
-                    f"随后自然进入原画面任务：{text(first.get('visual_content'))}"
-                )
+            # Detail projection may narrow framing, never replace the authored
+            # action/state with a generic pose adjustment.
+            first["visual_content"] = (
+                f"以商品主导取景清楚呈现{focus_text}；"
+                f"保留本单元原有画面与动作：{text(first.get('visual_content'))}"
+            )
     if len(projected) <= 3:
         selected = projected
     else:
@@ -380,13 +373,13 @@ def _segment_prompt(
         if entry_frame_role == "SETUP_ENTRY":
             continuity = (
                 f"片段{segment}在普通硬切后留在同一生活地点，但切到新的手机机位和商品观察关系；"
-                "人物、商品、穿搭和已完成穿戴状态不变，不模仿上一片段姿势。"
-                "不得重新开场、重新穿戴、重新系结或重复介绍商品。"
+                "保持同一人物、商品和穿搭单品，不模仿上一片段姿势。"
+                "切镜后的穿着状态按本段首个单元执行，不得重新开场或重复介绍商品。"
             )
         else:
             continuity = (
-                f"片段{segment}在普通硬切后进入新的生活场景；人物、商品、穿搭和已完成穿戴状态不变，"
-                "但不模仿上一片段姿势或机位。不得重新开场、重新穿戴、重新系结或重复介绍商品。"
+                f"片段{segment}在普通硬切后进入新的生活场景；保持同一人物、商品和穿搭单品，"
+                "但不模仿上一片段姿势或机位。切镜后的穿着状态按本段首个单元执行，不得重新开场或重复介绍商品。"
             )
     else:
         continuity = (
@@ -422,7 +415,7 @@ def _segment_prompt(
 片段衔接状态：
 {json.dumps(bridge_projection, ensure_ascii=False, separators=(',', ':'))}
 
-拍摄要求：本片段内人物、商品和穿搭保持连续；同一拍摄单元内地点、时刻和手机关系自然稳定，单元之间允许普通直接切镜。商品结构和数量服从参考图及身份锁。{bridge_finish_guidance}普通手机质感，自然直切。不要字幕；不要让人物在画面中说话或做口型；不要影视广告布光、慢动作或无意义空镜。"""
+拍摄要求：保持同一人物、商品和穿搭单品；同一拍摄单元内状态、地点、时刻和手机关系自然连续。单元之间允许普通直接切镜，切镜后可执行本单元明确设计的穿着状态变化，不自行增加穿脱、系结或未选单品。商品结构和数量服从参考图及身份锁。{bridge_finish_guidance}普通手机质感，自然直切。不要字幕；不要让人物在画面中说话或做口型；不要影视广告布光、慢动作或无意义空镜。"""
 
 
 def _group_units_for_segments(

@@ -10,7 +10,10 @@ from core.longform.feishu_workbench import (
     export_longform_projections,
     longform_batch_id,
 )
-from core.longform.production_runner import ensure_unattended_keyframes
+from core.longform.production_runner import (
+    ensure_unattended_keyframes,
+    run_longform_job_to_final,
+)
 from core.longform.source_adapter import source_from_complete_script, source_from_product_plan
 from core.longform.storage import LongformStorage
 
@@ -281,6 +284,7 @@ class LongformFeishuWorkbenchTest(unittest.TestCase):
         self.assertEqual("长视频", fields["视频形态（系统）"])
         self.assertEqual("15+15", fields["分段计划（系统）"])
         self.assertEqual("不适用", fields["首帧准备状态（系统）"])
+        self.assertNotIn("长视频首帧（系统）", fields)
         self.assertFalse(fields["进入生产"])
 
     def test_unattended_keyframes_generate_continuous_plan_without_human_pause(self):
@@ -321,6 +325,30 @@ class LongformFeishuWorkbenchTest(unittest.TestCase):
         planned_values = register.call_args.args[5]
         self.assertEqual(1, len(planned_values))
         self.assertTrue(planned_values[0].startswith("K1="))
+
+    def test_production_preflight_fails_before_keyframe_generation(self):
+        class FakeStorage:
+            def ensure_schema(self):
+                return None
+
+            def get_job(self, _job_id):
+                return {"segments": [{"segment_id": "A", "status": "PLANNED"}]}
+
+        with mock.patch(
+            "core.longform.production_runner.H3Gateway.preflight",
+            return_value={"ready": False, "problems": ["missing h3 credential"]},
+        ), mock.patch(
+            "core.longform.production_runner.ensure_unattended_keyframes"
+        ) as keyframes:
+            with self.assertRaisesRegex(RuntimeError, "missing h3 credential"):
+                run_longform_job_to_final(
+                    "LFJ_PREFLIGHT",
+                    storage=FakeStorage(),
+                    allow_real_submit=True,
+                    allow_external_tts=True,
+                )
+
+        keyframes.assert_not_called()
 
 
 if __name__ == "__main__":

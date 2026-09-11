@@ -266,6 +266,7 @@ def select_persona_contract(
     presentation_mode: str, capture_mode: str, demonstration_mode: str,
     seed: int, recent_usage: Sequence[Dict[str, Any]], db_path: str = "",
     preferred_persona_ids: Sequence[str] = (),
+    prefer_reference_pack: bool = False,
 ) -> Tuple[Dict[str, Any], int, int]:
     """Return one frozen persona without creating a new generation gate."""
 
@@ -332,6 +333,10 @@ def select_persona_contract(
         tie = int(hashlib.sha256(tie_material.encode("utf-8")).hexdigest()[:8], 16)
         ranked.append((
             0 if not preferred_set or persona_id in preferred_set else 1,
+            0 if not prefer_reference_pack or len({
+                _text(ref.get("role")) for ref in item.get("reference_images") or []
+                if isinstance(ref, dict) and ref.get("approved") is not False and ref.get("role")
+            }) >= 2 else 1,
             batch[persona_id], historical[persona_id],
             -int(item.get("priority") or 0), tie, item,
         ))
@@ -379,7 +384,8 @@ def select_persona_contract(
             "MATCHED" if preferred_set and persona_id in preferred_set
             else "FALLBACK" if preferred_set else "NO_PREFERENCE"
         ),
-        "selection_policy": "OUTFIT_PREFERRED_COMPATIBLE_THEN_LEAST_USED",
+        "selection_policy": ("OUTFIT_PREFERRED_THEN_REFERENCE_PACK_THEN_LEAST_USED"
+                             if prefer_reference_pack else "OUTFIT_PREFERRED_COMPATIBLE_THEN_LEAST_USED"),
         "recent_usage_count": historical[persona_id],
         "batch_usage_count": batch[persona_id],
         "hard_required": False,

@@ -9,7 +9,7 @@ from unittest import mock
 
 from core.longform.audio import (
     _resolve_bgm_path, choose_narration_rate, finalize_with_voiceover,
-    synthesize_segment_preflight, voiceover_text_hash,
+    synthesize_segment_preflight, validate_finalized_media, voiceover_text_hash,
 )
 from core.longform.assets import freeze_reference_assets
 from core.longform.contracts import (
@@ -128,7 +128,7 @@ class LongformOriginalTest(unittest.TestCase):
         payload = build_longform_voiceover_payload(master, plan)
         self.assertEqual(
             [item["target_spoken_seconds_range"] for item in payload["semantic_sections"]],
-            [[9.0, 9.55], [9.0, 9.55]],
+            [[7.5, 9.55], [7.5, 9.55]],
         )
 
     def test_compile_is_one_story_with_bridge(self):
@@ -460,7 +460,7 @@ class LongformOriginalTest(unittest.TestCase):
         self.assertEqual(payload["speech_policy"]["tts_layout"], "bounded-semantic-continuation-v1")
         self.assertIn("longform_argument_bundle", payload)
         self.assertEqual(
-            payload["semantic_sections"][0]["target_spoken_seconds_range"], [12.6, 13.4]
+            payload["semantic_sections"][0]["target_spoken_seconds_range"], [10.5, 13.4]
         )
 
     def test_segment_duration_fit_detects_total_fit_but_local_overflow(self):
@@ -809,6 +809,69 @@ class LongformOriginalTest(unittest.TestCase):
             self.assertTrue(all(item["preflight_audio_reused"] for item in result["sections"]))
             self.assertTrue(all(item["selected_rate_percent"] == 0 for item in result["sections"]))
             self.assertTrue(all(item["opening_delay_ms"] < 350 for item in result["sections"]))
+
+    def test_segmented_finalization_without_bgm_keeps_video_and_audio_streams(self):
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            self.skipTest("ffmpeg not installed")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            video = root / "video.mp4"
+            subprocess.run([
+                ffmpeg, "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+                "color=c=black:s=108x192:d=8:r=30", "-an", str(video),
+            ], check=True)
+            sections = []
+            reports = []
+            for segment_id, frequency in (("A", 440), ("B", 520)):
+                target_text = f"text-{segment_id}"
+                audio = root / f"preflight-{segment_id}.mp3"
+                subprocess.run([
+                    ffmpeg, "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+                    f"sine=frequency={frequency}:duration=2.7", "-q:a", "5", str(audio),
+                ], check=True)
+                sections.append({"segment_id": segment_id, "target_text": target_text})
+                reports.append({
+                    "segment_id": segment_id,
+                    "text_sha256": voiceover_text_hash(target_text),
+                    "audio_path": str(audio),
+                })
+            output = root / "final.mp4"
+            result = finalize_with_voiceover(
+                video,
+                {
+                    "target_text": "text-A text-B",
+                    "semantic_sections": sections,
+                    "tts_preflight": {
+                        "voice_id": "th-TH-PremwadeeNeural",
+                        "sections": reports,
+                    },
+                },
+                output,
+                allow_external_tts=True,
+                segment_plan=[
+                    {"segment_id": "A", "duration_seconds": 4},
+                    {"segment_id": "B", "duration_seconds": 4},
+                ],
+            )
+            validation = validate_finalized_media(
+                output, expected_duration_seconds=8.0,
+            )
+            self.assertEqual(validation["stream_types"], ["audio", "video"])
+            self.assertEqual(result["media_validation"]["status"], "PASS")
+
+    def test_final_media_validation_rejects_audio_only_mp4(self):
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            self.skipTest("ffmpeg not installed")
+        with tempfile.TemporaryDirectory() as directory:
+            audio_only = Path(directory) / "audio-only.mp4"
+            subprocess.run([
+                ffmpeg, "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+                "sine=frequency=440:duration=2", "-c:a", "aac", str(audio_only),
+            ], check=True)
+            with self.assertRaisesRegex(RuntimeError, "缺少视频流"):
+                validate_finalized_media(audio_only)
 
     def test_voiceover_payload_uses_neutral_closure_language_when_unverified(self):
         master = validate_master_contract(fixture())

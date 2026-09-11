@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from core.longform.contracts import stable_id
+from core.longform.h3_gateway import H3Gateway
 from core.longform.storage import DEFAULT_ASSET_ROOT, LongformStorage
 from core.longform.workflow import run_to_final
 from scripts.run_first_frame_tasks import _generate_image
@@ -13,6 +14,7 @@ from scripts.run_longform_original import (
     _k0_reference_paths,
     _register_initial_keyframes,
     _segment_entry_reference_paths,
+    _reference_image_guidance,
 )
 
 
@@ -53,7 +55,7 @@ def ensure_unattended_keyframes(
     if not k0_prompt:
         raise RuntimeError("长视频任务缺少K0提示词")
     k0 = Path(_generate_image(
-        prompt=k0_prompt,
+        prompt=_reference_image_guidance(keyframes, _k0_reference_paths(keyframes)) + k0_prompt,
         reference_paths=_k0_reference_paths(keyframes),
         output_dir=first_dir,
         asset_id=stable_id("LFK0_", {"job_id": job_id, "prompt": k0_prompt}),
@@ -74,7 +76,7 @@ def ensure_unattended_keyframes(
         output_dir = root / "planned_frames" / key
         output_dir.mkdir(parents=True, exist_ok=True)
         generated = Path(_generate_image(
-            prompt=prompt,
+            prompt=_reference_image_guidance(keyframes, [previous_frame, *raw_references]) + prompt,
             reference_paths=[previous_frame, *raw_references],
             output_dir=output_dir,
             asset_id=stable_id(
@@ -111,6 +113,18 @@ def run_longform_job_to_final(
 ) -> Dict[str, Any]:
     storage = storage or LongformStorage()
     storage.ensure_schema()
+    row = storage.get_job(job_id)
+    if not row:
+        raise RuntimeError(f"找不到长视频任务: {job_id}")
+    needs_h3 = any(
+        str(item.get("status") or "") != "READY"
+        for item in row.get("segments") or []
+    )
+    preflight = H3Gateway(
+        state_root=Path(asset_root).expanduser().resolve() / job_id / "h3_state"
+    ).preflight(require_api_key=needs_h3)
+    if needs_h3 and not preflight["ready"]:
+        raise RuntimeError("；".join(preflight["problems"]))
     ensure_unattended_keyframes(storage, job_id, asset_root=asset_root)
     kwargs = {}
     if voiceover_model_command:

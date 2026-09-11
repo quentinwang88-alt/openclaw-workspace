@@ -36,6 +36,61 @@ def audio_duration_seconds(path: str | Path) -> float:
     return float(completed.stdout.strip())
 
 
+def validate_finalized_media(
+    path: str | Path,
+    *,
+    expected_duration_seconds: float | None = None,
+) -> Dict[str, Any]:
+    """Require a playable long-form master, not merely an existing MP4 shell."""
+
+    media = Path(path).expanduser().resolve()
+    if not media.is_file():
+        raise RuntimeError(f"最终长视频文件不存在: {media}")
+    completed = subprocess.run(
+        [
+            _binary("ffprobe"), "-v", "error", "-show_entries",
+            "format=duration,size:stream=codec_type,codec_name,width,height",
+            "-of", "json", str(media),
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("最终长视频媒体检查失败: " + completed.stderr[-800:])
+    try:
+        probe = json.loads(completed.stdout or "{}")
+        streams = list(probe.get("streams") or [])
+        format_info = dict(probe.get("format") or {})
+        duration = float(format_info.get("duration") or 0)
+        size = int(format_info.get("size") or media.stat().st_size)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"最终长视频媒体检查结果不可解析: {exc}") from exc
+    stream_types = {str(item.get("codec_type") or "") for item in streams}
+    problems: list[str] = []
+    if "video" not in stream_types:
+        problems.append("缺少视频流")
+    if "audio" not in stream_types:
+        problems.append("缺少音频流")
+    if duration <= 1.0:
+        problems.append(f"时长异常({duration:.3f}s)")
+    if size < 10_240:
+        problems.append(f"文件异常过小({size} bytes)")
+    if expected_duration_seconds is not None:
+        tolerance = max(0.75, float(expected_duration_seconds) * 0.03)
+        if abs(duration - float(expected_duration_seconds)) > tolerance:
+            problems.append(
+                f"时长与合并视频不一致({duration:.3f}s vs "
+                f"{float(expected_duration_seconds):.3f}s)"
+            )
+    if problems:
+        raise RuntimeError("最终长视频不可交付: " + "；".join(problems))
+    return {
+        "status": "PASS",
+        "duration_seconds": round(duration, 3),
+        "size_bytes": size,
+        "stream_types": sorted(stream_types),
+    }
+
+
 def choose_narration_rate(measured_seconds: float, video_seconds: float) -> int:
     """Only speed up genuine overflow; never slow short copy into an unnatural read."""
 
@@ -275,12 +330,23 @@ def finalize_with_voiceover(
     text_hash = hashlib.sha256(
         json.dumps(hash_material, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()
+    video_seconds = _video_duration_seconds(video)
     if manifest_path.is_file() and output.is_file():
         existing = json.loads(manifest_path.read_text(encoding="utf-8"))
         if existing.get("text_sha256") == text_hash and existing.get("final_video_path") == str(output):
-            return {**existing, "action": "IDEMPOTENT_REUSE"}
+            try:
+                validation = validate_finalized_media(
+                    output, expected_duration_seconds=video_seconds,
+                )
+            except RuntimeError:
+                pass
+            else:
+                return {
+                    **existing,
+                    "action": "IDEMPOTENT_REUSE",
+                    "media_validation": validation,
+                }
 
-    video_seconds = _video_duration_seconds(video)
     if segmented:
         return _finalize_segmented_voiceover(
             video, sections, planned_segments, output,
@@ -332,6 +398,13 @@ def finalize_with_voiceover(
     completed = subprocess.run(command, capture_output=True, text=True, check=False)
     if completed.returncode != 0:
         raise RuntimeError("最终长视频混音失败: " + completed.stderr[-1200:])
+    try:
+        validation = validate_finalized_media(
+            temp, expected_duration_seconds=video_seconds,
+        )
+    except Exception:
+        temp.unlink(missing_ok=True)
+        raise
     temp.replace(output)
     result = {
         "schema_version": "longform-finalization-v1",
@@ -349,6 +422,7 @@ def finalize_with_voiceover(
         "bgm_path": str(bgm) if bgm else "",
         "audio_path": str(selected_audio),
         "final_video_path": str(output),
+        "media_validation": validation,
     }
     manifest_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result
@@ -466,13 +540,14 @@ def _finalize_segmented_voiceover(
         label = f"section_{index}"
         filters.append(
             f"[{index + 1}:a]atrim=start={report['trim_start_seconds']}:end={report['trim_end_seconds']},"
-            f"asetpts=PTS-STARTPTS,loudnorm=I=-16:TP=-1.5:LRA=11,"
+            f"asetpts=PTS-STARTPTS,"
             f"adelay={section_delay_ms}:all=1[{label}]"
         )
         labels.append(f"[{label}]")
     filters.append(
         "".join(labels)
         + f"amix=inputs={len(labels)}:duration=longest:normalize=0:dropout_transition=0,"
+        f"loudnorm=I=-16:TP=-1.5:LRA=11,aresample=44100,"
         f"apad,atrim=duration={video_seconds:.3f}[voice]"
     )
     if bgm_input_index is not None:
@@ -494,6 +569,13 @@ def _finalize_segmented_voiceover(
     completed = subprocess.run(command, capture_output=True, text=True, check=False)
     if completed.returncode != 0:
         raise RuntimeError("长视频分段口播混音失败: " + completed.stderr[-1200:])
+    try:
+        validation = validate_finalized_media(
+            temp, expected_duration_seconds=video_seconds,
+        )
+    except Exception:
+        temp.unlink(missing_ok=True)
+        raise
     temp.replace(output)
     result = {
         "schema_version": "longform-finalization-v3-bounded-continuation",
@@ -510,6 +592,7 @@ def _finalize_segmented_voiceover(
         "bgm_policy": "LIGHT_BED_APPLIED" if bgm_path else "PLATFORM_BGM_EXPECTED",
         "bgm_path": str(bgm_path) if bgm_path else "",
         "final_video_path": str(output),
+        "media_validation": validation,
     }
     (output.parent / "finalization.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"

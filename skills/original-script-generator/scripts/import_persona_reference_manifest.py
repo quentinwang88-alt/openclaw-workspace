@@ -43,19 +43,26 @@ def import_manifest(manifest_path: Path, db_path: Path, *, apply: bool) -> Dict[
             raise ValueError("persona_id is required")
         references = []
         for value in row.get("reference_images") or []:
-            path = Path(str(value))
+            item = dict(value) if isinstance(value, dict) else {}
+            path_value = (
+                item.get("local_path") or item.get("path")
+                if item else value
+            )
+            path = Path(str(path_value))
             if not path.is_absolute():
                 path = manifest_path.parent / path
             path = path.resolve()
             if not path.is_file():
                 raise FileNotFoundError(f"{persona_id} reference missing: {path}")
-            references.append({
+            item.update({
                 "local_path": str(path),
-                "name": path.name,
+                "name": str(item.get("name") or path.name),
                 "size": path.stat().st_size,
                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                 "type": "image/png" if path.suffix.lower() == ".png" else "image/jpeg",
             })
+            item.setdefault("approved", True)
+            references.append(item)
         if not references:
             raise ValueError(f"{persona_id} requires at least one reference")
         row["reference_images"] = references

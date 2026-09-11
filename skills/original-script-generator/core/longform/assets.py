@@ -40,12 +40,21 @@ def _sha256(path: Path) -> str:
 def _local_paths(value: Any, *, role: str = "SUPPORTING_REFERENCE") -> list[Dict[str, str]]:
     results: list[Dict[str, str]] = []
     if isinstance(value, Mapping):
-        local_role = _text(value.get("role")) or role
+        if value.get("approved") is False:
+            return results
+        declared_role = _text(value.get("role"))
+        local_role = {"PERSONA_IDENTITY": "PERSONA_REFERENCE", "PRODUCT_IDENTITY": "PRODUCT_REFERENCE"}.get(declared_role, declared_role)
+        if local_role not in ROLE_PRIORITY:
+            local_role = role
         for key in ("local_path", "cached_path", "path"):
             candidate = Path(_text(value.get(key))).expanduser()
             if candidate.is_file() and candidate.suffix.lower() in IMAGE_SUFFIXES:
                 results.append({"role": local_role, "source_path": str(candidate.resolve()),
-                                "expected_sha256": _text(value.get("sha256"))})
+                                "expected_sha256": _text(value.get("sha256")),
+                                "reference_view": value.get("reference_view") or (declared_role if declared_role not in ROLE_PRIORITY else ""),
+                                "is_primary": bool(value.get("is_primary")),
+                                "persona_id": _text(value.get("persona_id")),
+                                "source_asset_id": _text(value.get("source_asset_id") or value.get("file_token"))})
         for key, nested in value.items():
             normalized = str(key).lower()
             nested_role = local_role
@@ -145,13 +154,18 @@ def freeze_reference_assets(
                 item.get("role") or "SUPPORTING_REFERENCE", 99
             ) < ROLE_PRIORITY.get(previous.get("role") or "SUPPORTING_REFERENCE", 99):
                 unique[digest] = item
+            elif previous.get("role") == item.get("role"):
+                for key in ("reference_view", "is_primary", "persona_id", "source_asset_id"):
+                    if item.get(key):
+                        previous[key] = item[key]
 
     target_root = Path(asset_root).expanduser().resolve() / job_id / "frozen_references"
     target_root.mkdir(parents=True, exist_ok=True)
     frozen = []
     ordered = sorted(
         unique.items(),
-        key=lambda pair: (ROLE_PRIORITY.get(pair[1].get("role") or "", 99), pair[0]),
+        key=lambda pair: (ROLE_PRIORITY.get(pair[1].get("role") or "", 99),
+                          not pair[1].get("is_primary", False), pair[0]),
     )
     for index, (digest, item) in enumerate(ordered, 1):
         source = Path(item["source_path"])
@@ -166,6 +180,9 @@ def freeze_reference_assets(
             "sha256": digest,
             "source_asset_id": item.get("source_asset_id") or "",
             "source_fingerprint": item.get("source_fingerprint") or "",
+            "reference_view": item.get("reference_view") or "",
+            "is_primary": bool(item.get("is_primary")),
+            "persona_id": item.get("persona_id") or "",
         })
     roles = {item["role"] for item in frozen}
     if "PRODUCT_REFERENCE" in roles and "PERSONA_REFERENCE" in roles:
@@ -192,7 +209,7 @@ def freeze_reference_assets(
         ),
     }
     manifest = {
-        "schema_version": "longform-frozen-reference-assets-v2-authority",
+        "schema_version": "longform-frozen-reference-assets-v3-persona-pack",
         "status": "AVAILABLE" if frozen else "UNAVAILABLE",
         "job_id": job_id,
         "reference_mode": reference_mode,

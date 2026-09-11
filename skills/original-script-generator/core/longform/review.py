@@ -71,6 +71,20 @@ def export_review_bundle(row: Mapping[str, Any], output_dir: str | Path) -> dict
         "",
         "## 完整口播（中文）", "", str(voiceover.get("chinese_translation") or ""), "",
         "## 完整口播（目标语言）", "", str(voiceover.get("target_text") or ""), "",
+        "## 口播写作输入审计", "",
+    ])
+    writer_audit = _json(voiceover.get("_writer_input_audit"))
+    resource_snapshot = _json(voiceover.get("central_resource_snapshot"))
+    reference_audit = _json(resource_snapshot.get("approved_style_reference_audit"))
+    native_audit = _json(resource_snapshot.get("native_rhetoric_audit"))
+    lines.extend([
+        f"- 写作策略：`{writer_audit.get('policy_version', '')}`",
+        f"- 模型输入哈希：`{writer_audit.get('writer_input_hash', '')}`",
+        f"- 选中参考：{', '.join(writer_audit.get('selected_reference_ids') or []) or '无'}",
+        f"- 人工修辞参考数：{reference_audit.get('selected_count', 0)}",
+        f"- 本土原句状态：`{native_audit.get('status', '')}`",
+        f"- 排除的拍摄观察数：{writer_audit.get('excluded_description_count', 0)}",
+        "",
         "## 分段", "",
     ])
     for segment in plan.get("segments") or []:

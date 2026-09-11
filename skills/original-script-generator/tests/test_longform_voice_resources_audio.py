@@ -1,4 +1,6 @@
 from pathlib import Path
+from datetime import datetime, timezone
+import json
 import subprocess
 import tempfile
 import unittest
@@ -68,6 +70,35 @@ class LongformResourcesAndAudioTests(unittest.TestCase):
                 }},
             })
         self.assertFalse(native.call_args.kwargs["rhetorical_conflict_authorized"])
+
+    def test_resource_snapshot_is_json_safe_when_rds_returns_datetime(self):
+        with mock.patch("core.complete_voiceover_direct.load_active_voiceover_hooks", return_value=[]), mock.patch(
+            "core.complete_voiceover_direct._approved_style_references", return_value=[]
+        ), mock.patch("core.complete_voiceover_direct._central_native_rhetoric_contract", return_value={
+            "status": "AVAILABLE", "source_updated_at": datetime(2026, 9, 9, tzinfo=timezone.utc),
+        }), mock.patch(
+            "core.complete_voiceover_direct.hook_knowledge_snapshot_hash", return_value="snapshot"
+        ):
+            result = resolve_longform_voiceover_resources({})
+        json.dumps(result, ensure_ascii=False)
+        self.assertEqual(result["native_rhetoric_audit"]["source_updated_at"], "2026-09-09 00:00:00+00:00")
+
+    def test_unreviewed_case_is_not_used(self):
+        with mock.patch("core.complete_voiceover_direct.load_active_voiceover_hooks", return_value=[]), mock.patch(
+            "core.complete_voiceover_direct._approved_style_references", return_value=[]
+        ), mock.patch("core.complete_voiceover_direct._central_native_rhetoric_contract", return_value={
+            "status": "AVAILABLE",
+            "native_surface_references": [{"video_id": "live", "reference_excerpt": "เติมสต๊อก รีบเข้าไลฟ์ ราคา"}],
+            "diagnostics": {},
+        }), mock.patch("core.complete_voiceover_direct.hook_knowledge_snapshot_hash", return_value="snapshot"):
+            result = resolve_longform_voiceover_resources({
+                "target_language": "泰语", "target_country": "泰国",
+                "source_lineage": {"top_category": "女装", "product_type": "外套"},
+                "semantic_spine": {"primary_narrative_context": "小个子去寒冷地区旅行"},
+            })
+        self.assertEqual(result["writing_case_reference"], {})
+        self.assertEqual(result["native_rhetoric_contract"]["native_surface_references"], [])
+        self.assertEqual(result["native_rhetoric_audit"]["diagnostics"]["longform_sales_surface_excluded_ids"], ["live"])
 
     def test_writer_receives_selected_world_not_template_audit(self):
         payload = build_longform_voiceover_payload({

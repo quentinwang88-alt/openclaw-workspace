@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Dict, Mapping
 
 from core.llm_client import OriginalScriptLLMClient
@@ -12,6 +13,9 @@ from .contracts import (
     segment_count_for_duration,
     validate_master_contract,
 )
+
+DEFAULT_BLUEPRINT_MODEL = "gpt-6-astra"
+BLUEPRINT_PROMPT_VERSION = "longform-writer-v2-product-led-cuts"
 
 
 def build_master_script_prompt(source: Mapping[str, Any]) -> str:
@@ -56,12 +60,12 @@ def build_master_script_prompt(source: Mapping[str, Any]) -> str:
 1. 这是一个作品，不是{segment_count}条短视频。全片只允许一个开场钩子；后续片段继续论证，禁止重新介绍商品。
 2. 保持 product_identity_lock、人物和穿搭不变。{scene_instruction}
 2.1 longform_argument_bundle 是完整内容容量：primary_argument 定主线，supporting_arguments 负责把中段发展成原因、使用价值或风格回报。严格按其中 content_capacity 的软范围使用1-4个不同价值：20-24秒通常1-2个，25-30秒通常2-3个，40-45秒通常3-4个；不逐条朗读、不虚构，也不能只剩主卖点反复改写。
-3. 建议输出{unit_min}至{unit_max}个按序 capture_units，每段通常3个主要观看任务，只有确有新证明、使用关系或观看信息时才增加第4个。每个单元必须有新的可见信息，使用 HOOK / PROOF / USE_PROCESS / CONTEXT / ENDING 等输入结构允许的Beat；避免一镜到底，也不要为凑镜头增加无意义动作。
+3. 建议输出{unit_min}至{unit_max}个按序 capture_units，每段通常3个主要观看任务，只有确有新证明、使用关系或观看信息时才增加第4个。使用 HOOK / PROOF / USE_PROCESS / CONTEXT / ENDING 等输入结构允许的Beat。围绕已选购买理由设计观众能直接看见的商品效果或使用变化，而非给普通动作附会上商品价值：走路、看手机或整理头发可以连接生活情境，但本身不证明版型、保暖或百搭。information_gain 对连接镜头如实说明承接作用即可，不要求每镜都证明卖点。不要把同一姿势换角度当成中段的全部内容，也不为凑镜头编排动作；商品效果以 visual_content 中真正看得见的内容为准。
 3.1 必须服从 scene_progression_contract.segment_visual_roles：A建立人物、穿搭和主要效果；两段视频的B从商品主导的真实细节或新使用关系进入。三段视频的B负责细节证明，C负责第二使用场景和回报。B/C不能只是人物在同一位置换姿势。
 3.2 每段第一个单元标记 execution_priority=OPENING，核心证明标记CORE，回报或真实使用标记PAYOFF；可补 visual_role、viewing_relationship 和 product_surface。片段B为DETAIL开头时，第一个单元必须是商品主导中近景或近景，同时保留人物和少量场景识别信息。
 4. 普通切镜可以发生在自然动作进行中，不需要为了结束镜头让人物站定。确需连续桥接时，描述边界处实际的人物、商品与动作状态供下一片段延续；连续不等于静止，不为桥接增加摆拍。
-5. 跨场景或切到新的商品观察关系时，后续片段从独立片段进入帧开始；同场景且同一动作连续时才延续上一段实际尾帧。两种情况都不得重新穿戴、重新系结或重复钩子。
-6. 真实感优先于广告精修：普通手机机位、自然直切、动作克制但持续有信息增量。商品结构、数量和锚点严格服从 product_identity_lock。
+5. 跨场景或切到新的商品观察关系时，后续片段从独立片段进入帧开始；同场景且同一动作连续时才延续上一段实际尾帧。锁定的是同一人物、同一商品及已选穿搭单品，不是全片一个姿势或穿着状态。明确切镜后可呈现脚本设计的合理状态变化，例如同一外套敞开或合拢、展示已选内搭；不用完整表演复杂穿脱过程，也不要求每条使用这些动作。把变化写进该单元的画面和动作；连续镜头仍承接实际状态，不让已完成动作无故重来。不可借状态变化增加商品没有的结构或未选穿搭单品，不重复钩子。
+6. 真实感优先于广告精修：普通手机机位、自然直切，动作由分享内容和商品使用决定，不限定为微动作，不安排夸张表演。商品结构、数量和锚点严格服从 product_identity_lock。
 7. 口播由中央口播引擎统一生成，本步骤不写逐句口播，不做句镜绑定。
 
 只返回JSON。保留输入的所有顶层权威字段，并新增 scene_blocks 与 capture_units。片段ID固定为{segment_ids}。scene_blocks最多2个，每个包含 scene_id、location、moment、lighting、background、narrative_role、segment_ids；一个片段只能属于一个场景。每个场景的segment_ids必须连续，全片最多出现一次场景切换，例如A在场景1、B/C在场景2，或A/B在场景1、C在场景2；禁止A/C同场景而B为另一场景。每个capture_unit至少包含 unit_id、segment_id、scene_id、beat、visual_content、information_gain、camera、character_action、product_anchors_visible、execution_priority；observable_end_state 或 end_state 为可选的实际边界状态，可描述仍在进行的动作，不要求每镜填写。
@@ -70,7 +74,7 @@ def build_master_script_prompt(source: Mapping[str, Any]) -> str:
 {json.dumps(dict(source), ensure_ascii=False, indent=2)}"""
 
 
-def generate_master_contract(source: Mapping[str, Any], *, model: str = "gpt-5.6-sol",
+def generate_master_contract(source: Mapping[str, Any], *, model: str = DEFAULT_BLUEPRINT_MODEL,
                              reasoning_effort: str = "high") -> Dict[str, Any]:
     """One optional model call; frozen authority is restored after generation."""
 
@@ -80,7 +84,17 @@ def generate_master_contract(source: Mapping[str, Any], *, model: str = "gpt-5.6
     )
     client = OriginalScriptLLMClient(
         route="primary", primary_model=model,
-        primary_reasoning_effort=reasoning_effort, timeout=300, max_retries=0,
+        primary_reasoning_effort=reasoning_effort,
+        timeout=int(
+            os.environ.get("ORIGINAL_SCRIPT_BLUEPRINT_LLM_TIMEOUT_SECONDS", "600") or 600
+        ),
+        max_retries=0,
+        # Match the already-validated Astra voiceover runtime only for this
+        # writer. Do not change other callers' CLI transport defaults.
+        primary_cli_binary=(
+            "/Applications/ChatGPT.app/Contents/Resources/codex"
+            if model == "gpt-6-astra" else None
+        ),
     )
     raw = client.call_json(
         build_master_script_prompt(frozen_source), max_tokens=9000, max_attempts=1,
@@ -99,4 +113,8 @@ def generate_master_contract(source: Mapping[str, Any], *, model: str = "gpt-5.6
         if key in frozen_source:
             merged[key] = frozen_source[key]
     merged["schema_version"] = LONGFORM_SCHEMA_VERSION
+    merged["generation_provenance"] = {
+        "model": model, "reasoning_effort": reasoning_effort,
+        "prompt_version": BLUEPRINT_PROMPT_VERSION,
+    }
     return validate_master_contract(merged)

@@ -37,6 +37,7 @@ from core.longform.feishu_workbench import (  # noqa: E402
     task_input_snapshot,
 )
 from core.longform.storage import LongformStorage  # noqa: E402
+from core.longform.model import DEFAULT_BLUEPRINT_MODEL as LONGFORM_BLUEPRINT_MODEL  # noqa: E402
 from core.longform.source_adapter import source_from_product_plan  # noqa: E402
 from core.production_script_feishu import (  # noqa: E402
     OPERATION_TASK_FIELD_RENAMES,
@@ -380,6 +381,7 @@ def _build_direct_longform_sources(
             output_dir=output_dir, voiceover_root=voiceover_root,
         )
     product_context["longform_outfit_color_matching"] = True
+    product_context["longform_prefer_persona_pack"] = True
     material = "|".join((
         longform_batch_id_value or _request_id(record_id, task, replan=replan),
         json.dumps(task_input_snapshot(task), ensure_ascii=False, sort_keys=True),
@@ -442,15 +444,16 @@ def _cache_longform_persona_references(client: FeishuBitableClient, frozen: dict
                                       root: Path) -> list[dict]:
     """Reuse the existing reference downloader; never borrow a product model's face."""
     from scripts.run_first_frame_tasks import _download_references
-    creative = frozen.get("creative_diversity_contract") or (
-        (frozen.get("simplified_creative_seed") or {}).get("diversity_context") or {}
-    )
-    persona = creative.get("persona_selection_contract") or {}
+    diversity = (frozen.get("simplified_creative_seed") or {}).get("diversity_context") or {}
+    creative = frozen.get("creative_diversity_contract") or {}
+    persona = (diversity.get("persona_selection_contract")
+               or frozen.get("persona_selection_contract")
+               or creative.get("persona_selection_contract") or {})
     references = persona.get("reference_images") or []
     if not references:
         return []
     reference_key = hashlib.sha256(json.dumps(
-        references, sort_keys=True, default=str,
+        {"version": "persona-cache-v2-roles", "references": references}, sort_keys=True, default=str,
     ).encode()).hexdigest()[:20]
     target = root / reference_key
     target.mkdir(parents=True, exist_ok=True)
@@ -460,10 +463,22 @@ def _cache_longform_persona_references(client: FeishuBitableClient, frozen: dict
         if assets and all(Path(item["local_path"]).is_file() and hashlib.sha256(
             Path(item["local_path"]).read_bytes()).hexdigest() == item["sha256"] for item in assets):
             return assets
-    paths = _download_references(client, references, target, cache_dir=target / "cache")
-    assets = [{"role": "PERSONA_REFERENCE", "local_path": str(path),
-               "sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest()}
-              for path in paths]
+    assets = []
+    # Resolve individually: a skipped attachment must not shift the role of
+    # every following image. Pack view/primary metadata survives freezing.
+    for reference in references:
+        if not isinstance(reference, dict) or reference.get("approved") is False:
+            continue
+        paths = _download_references(client, [reference], target, cache_dir=target / "cache")
+        for path in paths:
+            digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            if reference.get("sha256") and digest != reference["sha256"]:
+                raise ValueError("PERSONA_REFERENCE_CONTENT_CHANGED: 人物参考图指纹改变，请刷新人物配置")
+            assets.append({"role": "PERSONA_REFERENCE", "local_path": str(path),
+                           "sha256": digest, "persona_id": persona.get("persona_id", ""),
+                           "reference_view": reference.get("role", ""),
+                           "is_primary": bool(reference.get("is_primary")),
+                           "source_asset_id": reference.get("file_token") or reference.get("asset_id", "")})
     manifest.write_text(json.dumps(assets, ensure_ascii=False), encoding="utf-8")
     return assets
 
@@ -504,7 +519,8 @@ def main() -> int:
         "--voiceover-model-command",
         default="python3 /Users/likeu3/voiceover_copy_engine/scripts/codex_model_command.py",
     )
-    parser.add_argument("--blueprint-model", default="gpt-5.6-sol")
+    parser.add_argument("--blueprint-model", default=None,
+                        help="显式覆盖；默认长视频 Astra/high，15秒原创 Sol/high")
     parser.add_argument("--blueprint-reasoning", default="high")
     args = parser.parse_args()
     if args.resume_failed and not args.record_id:
@@ -640,7 +656,7 @@ def main() -> int:
                     record_id=record.record_id,
                     task=task,
                     batch_id=lf_batch_id,
-                    blueprint_model=args.blueprint_model,
+                    blueprint_model=args.blueprint_model or LONGFORM_BLUEPRINT_MODEL,
                     blueprint_reasoning=args.blueprint_reasoning,
                     voiceover_model_command=args.voiceover_model_command,
                     include_voiceover=not args.plan_only,
@@ -801,7 +817,7 @@ def main() -> int:
                 voiceover_root=args.voiceover_root,
                 voiceover_db_path=voiceover_db,
                 voiceover_model_command=args.voiceover_model_command,
-                blueprint_model=args.blueprint_model,
+                blueprint_model=args.blueprint_model or "gpt-5.6-sol",
                 blueprint_reasoning=args.blueprint_reasoning,
                 item_timeout_seconds=args.item_timeout_seconds,
             )

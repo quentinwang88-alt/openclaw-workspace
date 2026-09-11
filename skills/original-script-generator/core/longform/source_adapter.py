@@ -7,6 +7,7 @@ from core.simplified_complete_script import build_product_identity_lock, _outfit
 
 from .contracts import recommended_argument_range
 from .visual_guidance import segment_visibility
+from .product_identity import compile_longform_identity
 
 
 def _dict(value: Any) -> Dict[str, Any]:
@@ -284,6 +285,7 @@ def source_from_product_plan(
     product_truth.setdefault(
         "product_code", _text(product_code or context.get("product_code"))
     )
+    product_truth, identity_lock = compile_longform_identity(product_truth, context)
 
     diversity = _dict(seed.get("diversity_context"))
     creative = _dict(package.get("creative_diversity_contract"))
@@ -366,7 +368,7 @@ def source_from_product_plan(
         "scene_contract": scene_contract,
         "lighting": _text(scene_contract.get("lighting")),
         "person_state": _text(creative.get("persona_state")) or _text(character.get("identity")),
-        "product_wear_state": "沿用冻结展示方式并保持全片连续",
+        "product_wear_state": "开场沿用冻结展示方式；连续镜头承接实际状态，明确切镜后的穿着状态按本单元脚本执行",
         "camera": "普通手机竖屏原生记录，按长视频片段连续推进",
         "carrier_mode": _text(
             _dict(
@@ -419,7 +421,7 @@ def source_from_product_plan(
         "target_country": _text(context.get("target_country") or "泰国"),
         "target_language": _text(context.get("target_language") or "泰语"),
         "target_duration_seconds": int(duration_seconds),
-        "product_identity_lock": build_product_identity_lock(product_truth),
+        "product_identity_lock": identity_lock,
         "product_truth": product_truth,
         "production_world": world,
         "semantic_spine": {

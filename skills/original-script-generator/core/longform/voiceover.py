@@ -23,9 +23,18 @@ DEFAULT_MODEL_COMMAND = (
 def _closure_language_contract(master: Mapping[str, Any]) -> Dict[str, Any]:
     identity = dict(master.get("product_identity_lock") or {})
     visible = dict(identity.get("visible_closure_contract") or {})
-    evidence = json.dumps(identity, ensure_ascii=False).lower()
+    # Negative constraints and audit text are not positive closure evidence.
+    mechanisms = list(visible.get("mechanisms") or [])
+    evidence = " ".join(text(visible.get(k)) for k in (
+        "visible_description", "hidden_description", "mechanism_description"
+    )).lower()
+    if mechanisms:
+        evidence = " ".join(mechanisms).lower()
     status = text(visible.get("status")).upper()
-    if status == "AVAILABLE" and any(token in evidence for token in ("拉链", "zipper", "zip_closure")):
+    if status == "AVAILABLE" and len(mechanisms) > 1:
+        mode = "COMBINED_CLOSURE_VERIFIED"
+        guidance = "商品具有多种已确认闭合件，按对应部位自然表达，也可使用合上、敞开等中性表达。"
+    elif status == "AVAILABLE" and any(token in evidence for token in ("拉链", "zipper", "zip_closure")):
         mode = "ZIPPER_VERIFIED"
         guidance = "仅可使用拉开/拉上拉链等拉链动作词。"
     elif status == "AVAILABLE" and any(token in evidence for token in ("按扣", "snap")):
@@ -49,10 +58,10 @@ def _closure_language_contract(master: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def _spoken_target_range(duration_seconds: Any) -> list[float]:
-    """Leave enough tail room for the fixed 350ms segment opening delay."""
+    """Describe usable capacity without turning each segment into a text quota."""
 
     duration = float(duration_seconds or 0)
-    minimum = round(duration * 0.90, 1)
+    minimum = round(duration * 0.75, 1)
     precision = 2 if duration <= 11 else 1
     maximum = round(
         min(duration * 0.96, max(0.0, duration - 0.45)), precision
@@ -72,7 +81,7 @@ def build_longform_voiceover_payload(master: Mapping[str, Any], plan: Mapping[st
     character = dict(world.get("character") or {})
     scene = dict(world.get("scene_contract") or {})
     return {
-        "schema_version": "longform-voiceover-input-v3-spoken-context",
+        "schema_version": "longform-voiceover-input-v4-concrete-spoken-material",
         "product_code": text(master.get("product_code")),
         "target_country": text(master.get("target_country")),
         "target_language": text(master.get("target_language")),
@@ -117,7 +126,7 @@ def build_longform_voiceover_payload(master: Mapping[str, Any], plan: Mapping[st
             "tts_after_video_merge": True,
             "tts_layout": LAYOUT_VERSION,
             "segment_boundaries_are_soft": True,
-            "target_coverage_ratio": [0.90, 0.96],
+            "target_coverage_ratio": [0.80, 0.96],
             "natural_rate_first": True,
         },
     }
@@ -143,7 +152,7 @@ def _invoke_voiceover_model(request: Dict[str, Any], model_command: str) -> Dict
     if completed.returncode != 0:
         raise RuntimeError(f"长视频中央口播失败: {(completed.stderr or completed.stdout)[-1000:]}")
     result = json.loads(completed.stdout)
-    result.pop("_model_provenance", None)
+    # Retain actual model/fallback evidence in the persisted voiceover result.
     return result
 
 
@@ -203,8 +212,11 @@ def run_longform_voiceover(master: Mapping[str, Any], plan: Mapping[str, Any],
                            model_command: str = DEFAULT_MODEL_COMMAND) -> Dict[str, Any]:
     payload = build_longform_voiceover_payload(master, plan)
     resources = resolve_longform_voiceover_resources(master)
-    for key in ("hook_guidance", "relationship_language", "approved_style_references", "native_rhetoric_contract"):
-        payload[key] = resources[key]
+    for key in (
+        "hook_guidance", "relationship_language", "approved_style_references",
+        "native_rhetoric_contract", "writing_case_reference",
+    ):
+        payload[key] = resources.get(key, {} if key == "writing_case_reference" else [])
     request = {
         "contract_name": "creative_longform_single_v1",
         "payload": payload,
@@ -258,7 +270,6 @@ def _actual_fit_penalty(preflight: Mapping[str, Any]) -> float:
     penalty = 0.0
     for item in preflight.get("sections") or []:
         ratio = float(item.get("coverage_ratio") or 0)
-        penalty += abs(ratio - 0.93)
         if ratio < 0.86:
             penalty += (0.86 - ratio) * 4
         elif ratio > 1.0:
@@ -366,9 +377,10 @@ def calibrate_longform_voiceover_with_edge(
             },
             "measured_sections": list(preflight.get("sections") or []),
             "instruction": (
-                "只调整实测过短或过长的语义段，使Edge自然语速实测尽量达到对应视频段的90%-96%。"
-                "过短时补充同一已批准卖点下的具体处境、理由或个人判断；过长时删除重复表达。"
-                "保持一条连续思想，不新增卖点、商品事实、清单或第二次钩子，不改画面。"
+                "只调整实测确实无法容纳或明显过短的语义段。过短时只能从已冻结卖点材料中补充一项"
+                "尚未讲清的具体顾虑、结果或商品关系；没有新信息时保持原稿，不补整体协调、确实方便、"
+                "值得购买等空泛总结。过长时删除重复评价或枚举。保持一条连续思想，不新增卖点、"
+                "商品事实、清单或第二次钩子，不改画面。"
             ),
         }
         revised = _invoke_voiceover_model(

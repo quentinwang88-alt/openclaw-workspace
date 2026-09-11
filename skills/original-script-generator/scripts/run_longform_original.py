@@ -17,7 +17,7 @@ from core.longform.assets import freeze_reference_assets
 from core.longform.keyframes import build_keyframe_contracts
 from core.longform.h3_gateway import H3Gateway, write_segment_request
 from core.longform.media import extract_bridge_candidates, merge_segments, select_bridge_candidate
-from core.longform.model import generate_master_contract
+from core.longform.model import DEFAULT_BLUEPRINT_MODEL, generate_master_contract
 from core.longform.planner import compile_longform_plan
 from core.longform.storage import DEFAULT_ASSET_ROOT, DEFAULT_DB_PATH, LongformStorage
 from core.longform.source_adapter import add_supporting_scripts, source_from_complete_script
@@ -151,6 +151,25 @@ def _reference_mode_guidance(keyframes: dict) -> str:
     return ""
 
 
+def _reference_image_guidance(keyframes: dict, paths: list[str]) -> str:
+    """Bind actual attachment order to identity roles, including pack views."""
+    assets = (keyframes.get("frozen_reference_assets") or {}).get("assets") or []
+    by_path = {str(Path(a["local_path"]).resolve()): a for a in assets if a.get("local_path")}
+    lines = []
+    for index, path in enumerate(paths, 1):
+        asset = by_path.get(str(Path(path).resolve()), {})
+        role = asset.get("role")
+        if role == "PRODUCT_REFERENCE":
+            usage = "商品外观参考，不继承图中模特身份、穿搭和背景"
+        elif role == "PERSONA_REFERENCE":
+            usage = ("主人物身份参考" if asset.get("is_primary") else "同一人物辅助身份参考")
+            usage += f"（{asset.get('reference_view') or '人物图'}），不复制衣服、姿势或取景"
+        else:
+            usage = "已生成画面，提供连续性参考；本段画面仍服从本段脚本"
+        lines.append(f"图{index}：{usage}")
+    return "实际附件顺序与用途：\n" + "\n".join(lines) + "\n" if lines else ""
+
+
 def _register_initial_keyframes(storage: LongformStorage, row: dict, plan: dict,
                                 job_id: str, k0_path: str,
                                 planned_values: list[str], legacy_end_frame: str = "",
@@ -170,7 +189,7 @@ def _register_initial_keyframes(storage: LongformStorage, row: dict, plan: dict,
         output_dir = Path(asset_root) / job_id / "first_frame"
         output_dir.mkdir(parents=True, exist_ok=True)
         k0_path = str(_generate_image(
-            prompt=prompt,
+            prompt=_reference_image_guidance(keyframes, _k0_reference_paths(keyframes)) + prompt,
             reference_paths=_k0_reference_paths(keyframes),
             output_dir=output_dir,
             asset_id=stable_id("LFK0_", {"job_id": job_id, "prompt": prompt}),
@@ -207,7 +226,7 @@ def _register_initial_keyframes(storage: LongformStorage, row: dict, plan: dict,
             output_dir = Path(asset_root) / job_id / "scene_entries" / target_id
             output_dir.mkdir(parents=True, exist_ok=True)
             generated = _generate_image(
-                prompt=prompt,
+                prompt=_reference_image_guidance(keyframes, _segment_entry_reference_paths(keyframes, k0)) + prompt,
                 reference_paths=_segment_entry_reference_paths(keyframes, k0),
                 output_dir=output_dir,
                 asset_id=stable_id("LFSE_", {"job_id": job_id, "segment": target_id, "prompt": prompt}),
@@ -299,7 +318,7 @@ def main() -> int:
         "--scene-mode", choices=("single", "auto", "multi"),
         default=None,
     )
-    parser.add_argument("--blueprint-model", default="gpt-5.6-sol")
+    parser.add_argument("--blueprint-model", default=DEFAULT_BLUEPRINT_MODEL)
     parser.add_argument("--blueprint-reasoning", default="high")
     parser.add_argument("--video-a", default="")
     parser.add_argument("--video-b", default="")

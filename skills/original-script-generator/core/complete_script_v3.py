@@ -1933,6 +1933,7 @@ def build_creative_diversity_contract(
         preferred_persona_ids=list(
             outfit_contract.get("preferred_persona_ids") or []
         ),
+        prefer_reference_pack=bool(direction.get("prefer_persona_reference_pack")),
     )
     outfit_persona_affinity = build_outfit_persona_affinity_contract(
         outfit_contract, persona_contract

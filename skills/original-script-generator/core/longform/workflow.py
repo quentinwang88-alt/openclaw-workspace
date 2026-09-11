@@ -5,12 +5,16 @@ import time
 from pathlib import Path
 from typing import Any, Dict
 
-from .audio import finalize_with_voiceover
+from .audio import finalize_with_voiceover, validate_finalized_media
 from .h3_gateway import H3Gateway, write_segment_request
 from .media import extract_bridge_candidates, merge_segments, select_bridge_candidate
 from .review import export_review_bundle
 from .storage import LongformStorage
 from .voiceover import DEFAULT_MODEL_COMMAND, calibrate_longform_voiceover_with_edge
+
+
+class RemoteGenerationPending(RuntimeError):
+    """The remote H3 task is healthy but did not finish in this patrol window."""
 
 
 def _json(value: str) -> Dict[str, Any]:
@@ -156,7 +160,16 @@ def _wait_and_download(storage: LongformStorage, gateway: H3Gateway, job_id: str
         if status in {"failed", "error", "cancelled", "canceled"}:
             raise RuntimeError(f"片段{segment_id} H3 任务失败: {status}")
         if time.monotonic() >= deadline:
-            raise TimeoutError(f"片段{segment_id}等待超过 {max_wait_seconds} 秒；可稍后续跑")
+            storage.update_job(job_id, f"{segment_id}_WAITING_REMOTE")
+            events.append({
+                "stage": f"H3_{segment_id}_WAITING_REMOTE",
+                "task_id": task_id,
+                "max_wait_seconds": max_wait_seconds,
+                "at": int(time.time()),
+            })
+            raise RemoteGenerationPending(
+                f"片段{segment_id}仍在远端生成；下一轮将从任务 {task_id} 继续查询"
+            )
         time.sleep(max(5, poll_interval_seconds))
     target = asset_root / job_id / f"segment_{segment_id}.mp4"
     downloaded = gateway.download(task_id, target)
@@ -187,9 +200,16 @@ def run_to_final(
         raise RuntimeError(f"找不到 job: {job_id}")
     final_path = Path(str(row.get("final_video_path") or ""))
     if str(row.get("status") or "") == "FINAL_READY" and final_path.is_file():
-        review = export_review_bundle(row, root / job_id / "text_review")
-        return {"job_id": job_id, "status": "FINAL_READY", "final_video_path": str(final_path),
-                "action": "IDEMPOTENT_REUSE", "review": review}
+        try:
+            validate_finalized_media(final_path)
+        except RuntimeError:
+            # A prior run may have produced an MP4 container without a usable
+            # video/audio payload.  Resume from the already downloaded assets.
+            pass
+        else:
+            review = export_review_bundle(row, root / job_id / "text_review")
+            return {"job_id": job_id, "status": "FINAL_READY", "final_video_path": str(final_path),
+                    "action": "IDEMPOTENT_REUSE", "review": review}
     plan = _json(str(row.get("plan_json") or "{}"))
     master = _json(str(row.get("master_contract_json") or "{}"))
     gateway = H3Gateway(state_root=root / job_id / "h3_state")
@@ -216,6 +236,12 @@ def run_to_final(
     if requires_new_submit and not allow_external_tts:
         report = _persist_report(storage, job_id, root, events)
         return {"job_id": job_id, "status": "WAITING_TTS_PREFLIGHT_AUTHORIZATION", "report": report}
+    # Validate H3 credentials and runner before any external image/TTS work.
+    # This keeps a missing production dependency from consuming unrelated
+    # generation resources or changing the job to an ambiguous partial state.
+    preflight = gateway.preflight(require_api_key=needs_h3)
+    if needs_h3 and not preflight["ready"]:
+        raise RuntimeError("；".join(preflight["problems"]))
     if allow_external_tts:
         try:
             calibrated = calibrate_longform_voiceover_with_edge(
@@ -243,10 +269,6 @@ def run_to_final(
                            "at": int(time.time())})
             _persist_report(storage, job_id, root, events)
             raise
-    preflight = gateway.preflight(require_api_key=needs_h3)
-    if needs_h3 and not preflight["ready"]:
-        raise RuntimeError("；".join(preflight["problems"]))
-
     try:
         row = storage.get_job(job_id) or {}
         segments = _ordered_segments(plan)
@@ -349,6 +371,14 @@ def run_to_final(
             "job_id": job_id, "status": "FINAL_READY", "final_video_path": str(final_path),
             "finalization": finalization, "report_path": str(root / job_id / "execution_report.json"),
             "report": report, "review": review,
+        }
+    except RemoteGenerationPending as exc:
+        report = _persist_report(storage, job_id, root, events)
+        return {
+            "job_id": job_id,
+            "status": "WAITING_REMOTE",
+            "message": str(exc),
+            "report": report,
         }
     except Exception as exc:
         storage.update_job(

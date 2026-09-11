@@ -29,6 +29,16 @@ from core.reality_voiceover_bridge import (
 
 SCHEMA_VERSION = "creative-full-script-voiceover-v8-semantic-spine"
 HOOK_EXECUTION_POLICY_VERSION = "central-voiceover-v41-semantic-spine"
+ORIGINAL_VOICEOVER_ROUTE_SCOPE = "original_shortform"
+
+
+def original_voiceover_route_cache_key() -> Dict[str, Any]:
+    """Routing only: keep visual caches independent of a voice-model rollout."""
+    return {
+        "scope": ORIGINAL_VOICEOVER_ROUTE_SCOPE,
+        "astra_enabled": os.environ.get("ORIGINAL_SHORTFORM_VOICEOVER_ASTRA_ENABLED", "1") == "1",
+        "cli_override": os.environ.get("ORIGINAL_SHORTFORM_VOICEOVER_CODEX_BIN", ""),
+    }
 
 
 def _text(value: Any) -> str:
@@ -171,7 +181,8 @@ def _invoke_model(model_command: str, payload: Dict[str, Any]) -> Dict[str, Any]
     completed = subprocess.run(
         command,
         input=json.dumps(
-            {"contract_name": "creative_full_single_v1", "payload": payload},
+            {"contract_name": "creative_full_single_v1", "payload": payload,
+             "route_scope": ORIGINAL_VOICEOVER_ROUTE_SCOPE},
             ensure_ascii=False,
             # Knowledge snapshots can contain provider timestamps (for
             # example, an approved sample's created_at).  They are metadata,
@@ -181,7 +192,8 @@ def _invoke_model(model_command: str, payload: Dict[str, Any]) -> Dict[str, Any]
         ),
         text=True,
         capture_output=True,
-        timeout=360,
+        # Central retry budget: 3 * 185s plus short backoffs and serialization.
+        timeout=600,
         check=False,
     )
     if completed.returncode != 0:
@@ -294,6 +306,7 @@ def _approved_style_references(
     top_category: str = "",
     product_type: str = "",
     limit: int = 2,
+    allow_cross_hook_language_fallback: bool = False,
 ) -> List[Dict[str, Any]]:
     """Return governed same-hook samples using an explicit compatibility tier.
 
@@ -324,6 +337,20 @@ def _approved_style_references(
         )
         if _text(item.get("example_id"))
     ]
+    exact_hook_example_ids = set(matched_ids)
+    if allow_cross_hook_language_fallback:
+        matched_ids.extend(
+            _text(item.get("example_id"))
+            for item in sorted(
+                assignments,
+                key=lambda item: (
+                    -int(bool(item.get("is_primary"))),
+                    -float(item.get("match_confidence") or 0),
+                ),
+            )
+            if _text(item.get("example_id"))
+            and _text(item.get("archetype_id")) != hook_id
+        )
     examples = {
         _text(item.get("example_id")): item
         for item in snapshot.get("examples") or []
@@ -356,6 +383,14 @@ def _approved_style_references(
         excerpt = re.sub(r"\s+", " ", _text(example.get("raw_text")))[:680]
         if not excerpt:
             continue
+        matching_hooks = [
+            _text(item.get("archetype_id")) for item in assignments
+            if _text(item.get("example_id")) == example_id
+        ]
+        example_hook = hook_id if example_id in exact_hook_example_ids else next(
+            (value for value in matching_hooks if value), ""
+        )
+        cross_hook = example_id not in exact_hook_example_ids
         result.append({
             "reference_sample_id": example_id,
             "reference_excerpt": excerpt,
@@ -363,11 +398,20 @@ def _approved_style_references(
             "source_category": _text(example.get("category")),
             "source_language": _text(example.get("language")),
             "match_tier": match_tier,
+            "matched_hook_id": example_hook,
+            "reference_scope": (
+                "RHETORIC_STYLE_ONLY_CROSS_HOOK" if cross_hook
+                else "HOOK_AND_RHETORIC_STYLE"
+            ),
             "expression_family": requested_family,
-            "usage_boundary": "只学习观众关系、节奏、衔接和信息密度；不得继承事实、材质、功效、CTA或原句",
+            "usage_boundary": (
+                "只学习观众关系、节奏、衔接和信息密度；跨钩子样本不得改变本条钩子意图；"
+                "不得继承事实、材质、功效、CTA或完整原句"
+            ),
         })
     result.sort(
         key=lambda item: (
+            1 if item.get("reference_scope") == "RHETORIC_STYLE_ONLY_CROSS_HOOK" else 0,
             0 if item.get("match_tier") == "EXACT_CATEGORY" else 1,
             matched_ids.index(item["reference_sample_id"]),
         )

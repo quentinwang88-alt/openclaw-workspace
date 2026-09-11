@@ -3,7 +3,7 @@
 原创脚本生成 LLM 客户端。
 
 当前只保留一条主线路：
-- primary: 只走与 OpenClaw 当前主 agent 对齐的 openai-codex / gpt-5.5
+- primary: 只走与 OpenClaw 当前主 agent 对齐的 openai-codex / gpt-5.6-sol
 """
 
 import base64
@@ -56,7 +56,7 @@ def normalize_route_order(route_order: Optional[Any]) -> Optional[List[str]]:
     return normalized or None
 
 PRIMARY_LLM_DEFAULT_API_URL = "https://chatgpt.com/backend-api/codex"
-PRIMARY_LLM_DEFAULT_MODEL = "gpt-5.5"
+PRIMARY_LLM_DEFAULT_MODEL = "gpt-5.6-sol"
 PRIMARY_LLM_REASONING_EFFORT = os.environ.get("ORIGINAL_SCRIPT_PRIMARY_REASONING_EFFORT", "high")
 PRIMARY_LLM_STREAM_RETURN_ON_TEXT_DONE = (
     os.environ.get("ORIGINAL_SCRIPT_STREAM_RETURN_ON_TEXT_DONE", "1") != "0"
@@ -211,6 +211,7 @@ class OriginalScriptLLMClient:
         timeout: int = 120,
         max_retries: int = 2,
         route_order: Optional[List[str]] = None,
+        primary_cli_binary: Optional[str] = None,
     ):
         self.route = normalize_route(route)
         self._primary_client: Optional[OpenAI] = None
@@ -225,6 +226,7 @@ class OriginalScriptLLMClient:
         )
         self.primary_proxy_url = self._resolve_primary_proxy_url()
         self.route_order = normalize_route_order(route_order)
+        self.primary_cli_binary = primary_cli_binary or CODEX_CLI_BINARY
 
     def _get_primary_client(self) -> OpenAI:
         if self._primary_client is None:
@@ -471,7 +473,7 @@ class OriginalScriptLLMClient:
         """
 
         command = [
-            CODEX_CLI_BINARY,
+            self.primary_cli_binary,
             "exec",
             "-m",
             self.primary_model,

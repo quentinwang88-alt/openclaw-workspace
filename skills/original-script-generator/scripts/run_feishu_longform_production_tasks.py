@@ -18,6 +18,8 @@ if str(SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILL_ROOT))
 
 from core.longform.production_runner import run_longform_job_to_final  # noqa: E402
+from core.longform.main_schedule_bridge import enqueue_longform_final  # noqa: E402
+from core.longform.audio import validate_finalized_media  # noqa: E402
 from core.longform.storage import DEFAULT_ASSET_ROOT, LongformStorage  # noqa: E402
 from core.production_script_feishu import (  # noqa: E402
     PRODUCTION_SCRIPT_FIELD_NAMES,
@@ -96,6 +98,9 @@ def _feishu_upload_ready_video(path: Path) -> Path:
 
 def _upload_video(client: Any, path: Path) -> dict:
     path = _feishu_upload_ready_video(path)
+    # The upload copy may be a re-encoded derivative of the validated master,
+    # so verify the actual bytes that Feishu will receive as well.
+    validate_finalized_media(path)
     content_type = mimetypes.guess_type(path.name)[0] or "video/mp4"
     return client.upload_attachment(
         content=path.read_bytes(),
@@ -104,6 +109,64 @@ def _upload_video(client: Any, path: Path) -> dict:
         size=path.stat().st_size,
         parent_type="bitable_file",
     )
+
+
+def _upload_image(client: Any, path: Path) -> dict:
+    if not path.is_file():
+        raise RuntimeError(f"长视频首帧不存在: {path}")
+    if path.stat().st_size >= FEISHU_UPLOAD_LIMIT_BYTES:
+        raise RuntimeError(
+            f"长视频首帧超过飞书单文件限制: {path.stat().st_size} bytes"
+        )
+    content_type = mimetypes.guess_type(path.name)[0] or "image/png"
+    return client.upload_attachment(
+        content=path.read_bytes(),
+        file_name=path.name,
+        content_type=content_type,
+        size=path.stat().st_size,
+        parent_type="bitable_file",
+    )
+
+
+def _longform_first_frame_writeback(
+    client: Any,
+    storage: LongformStorage,
+    job_id: str,
+    current_fields: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    """Return a one-time Feishu K0 attachment update without blocking media.
+
+    Long-form owns K0 in its isolated state machine.  This projection only
+    makes the generated frame visible in the production-script workbench; it
+    never hands the row to the short-video run manager.
+    """
+
+    field_name = PRODUCTION_SCRIPT_FIELD_NAMES["longform_first_frame"]
+    if current_fields.get(field_name):
+        return {}, ""
+    try:
+        job = storage.get_job(job_id) or {}
+        segments = list(job.get("segments") or [])
+        path = Path(str((segments[0] if segments else {}).get("start_frame_path") or ""))
+        if not str(path) or str(path) == "." or not path.is_file():
+            raise RuntimeError("长视频 K0 尚未登记或本地文件不存在")
+        return {field_name: [_upload_image(client, path)]}, ""
+    except Exception as exc:
+        return {}, str(exc)[:500]
+
+
+def _list_records_with_transient_retry(
+    client: Any, *, page_size: int = 500, delays: tuple[int, ...] = (3, 8)
+) -> list[Any]:
+    """Retry only Feishu's documented transient materialization response."""
+    for attempt in range(len(delays) + 1):
+        try:
+            return list(client.list_records(page_size=page_size))
+        except Exception as exc:
+            if "Data not ready" not in str(exc) or attempt >= len(delays):
+                raise
+            time.sleep(delays[attempt])
+    return []
 
 
 def main() -> int:
@@ -143,7 +206,7 @@ def main() -> int:
     if not args.dry_run:
         ensure_fields(client, primary_field_name="脚本ID", specs=PRODUCTION_SCRIPT_FIELDS)
     f = PRODUCTION_SCRIPT_FIELD_NAMES
-    records = client.list_records(page_size=500)
+    records = _list_records_with_transient_retry(client, page_size=500)
     if args.record_id:
         records = [record for record in records if record.record_id == args.record_id]
     candidates = []
@@ -151,28 +214,63 @@ def main() -> int:
         fields = record.fields
         if str(fields.get(f["video_format"]) or "").strip() != "长视频":
             continue
-        if not _checked(fields.get(f["production_enabled"])):
-            continue
         code = str(fields.get(f["product_code"]) or "").strip()
         if args.product_code and code != args.product_code:
             continue
         job_id = str(fields.get(f["longform_job_id"]) or "").strip()
         if not job_id:
             continue
-        candidates.append((record, code, job_id))
+        if _checked(fields.get(f["production_enabled"])):
+            action = "produce"
+        elif (
+            str(fields.get(f["longform_status"]) or "").strip() == "已完成"
+            and _checked(fields.get(f["publish_confirmed"]))
+        ):
+            action = "publish_only"
+        else:
+            continue
+        candidates.append((record, code, job_id, action))
         if len(candidates) >= args.limit:
             break
 
-    print(f"待执行长视频生产脚本: {len(candidates)}")
-    for record, code, job_id in candidates:
-        print(f"- {record.record_id} | {code} | {job_id}")
+    print(f"待执行长视频生产/发布脚本: {len(candidates)}")
+    for record, code, job_id, action in candidates:
+        print(f"- {record.record_id} | {code} | {job_id} | {action}")
     if args.dry_run:
         return 0
 
     storage = LongformStorage()
     storage.ensure_schema()
     failed = 0
-    for record, code, job_id in candidates:
+    for record, code, job_id, action in candidates:
+        if action == "publish_only":
+            try:
+                job = storage.get_job(job_id) or {}
+                final_path = Path(str(job.get("final_video_path") or ""))
+                queued = enqueue_longform_final(
+                    record_id=record.record_id,
+                    job_id=job_id,
+                    final_video_path=final_path,
+                    fields=record.fields,
+                )
+                client.update_record_fields(record.record_id, {
+                    f["publish_confirmed"]: False,
+                    f["sync_result"]: "长视频成片已进入主发布队列待排期",
+                    f["sync_time"]: int(time.time() * 1000),
+                    f["run_task_id"]: job_id,
+                })
+                print(
+                    f"已进入发布队列: {record.record_id} | "
+                    f"{queued['canonical_script_key']}"
+                )
+            except Exception as exc:
+                failed += 1
+                client.update_record_fields(record.record_id, {
+                    f["sync_result"]: f"长视频排班接入失败：{str(exc)[:800]}",
+                    f["sync_time"]: int(time.time() * 1000),
+                })
+                print(f"排班接入失败: {record.record_id}: {exc}", file=sys.stderr)
+            continue
         try:
             client.update_record_fields(record.record_id, {
                 f["longform_status"]: "生成中",
@@ -189,28 +287,79 @@ def main() -> int:
                 max_wait_seconds=max(30, args.max_wait_seconds),
                 voiceover_model_command=args.voiceover_model_command,
             )
+            first_frame_fields, first_frame_error = _longform_first_frame_writeback(
+                client, storage, job_id, record.fields,
+            )
+            if str(result.get("status") or "") == "WAITING_REMOTE":
+                sync_result = "H3远端生成中，下一轮自动续跑"
+                if first_frame_error:
+                    sync_result += f"；长视频首帧展示回写失败：{first_frame_error}"
+                client.update_record_fields(record.record_id, {
+                    f["longform_status"]: "生成中",
+                    f["longform_error"]: "",
+                    f["processing_status"]: "已送生产",
+                    **first_frame_fields,
+                    f["sync_result"]: sync_result,
+                    f["sync_time"]: int(time.time() * 1000),
+                    f["run_task_id"]: job_id,
+                })
+                print(f"等待远端续跑: {record.record_id} | {job_id}")
+                continue
             if str(result.get("status") or "") != "FINAL_READY":
                 raise RuntimeError(f"长视频未到FINAL_READY: {result.get('status')}")
             final_path = Path(str(result.get("final_video_path") or ""))
             if not final_path.is_file():
                 raise RuntimeError("长视频FINAL_READY但成片文件不存在")
+            validate_finalized_media(final_path)
             attachment = _upload_video(client, final_path)
+            publish_result = None
+            publish_error = ""
+            if _checked(record.fields.get(f["publish_confirmed"])):
+                try:
+                    publish_result = enqueue_longform_final(
+                        record_id=record.record_id,
+                        job_id=job_id,
+                        final_video_path=final_path,
+                        fields=record.fields,
+                    )
+                except Exception as exc:
+                    # A publish-queue problem must not relabel a successfully
+                    # rendered master as a generation failure.
+                    publish_error = str(exc)[:800]
+            sync_result = "长视频完整生产已完成"
+            if first_frame_error:
+                sync_result += f"；长视频首帧展示回写失败：{first_frame_error}"
+            if publish_result:
+                sync_result += "；已进入主发布队列待排期"
+            elif publish_error:
+                sync_result += f"；排班接入失败：{publish_error}"
             client.update_record_fields(record.record_id, {
                 f["longform_status"]: "已完成",
+                **first_frame_fields,
                 f["longform_video"]: [attachment],
                 f["longform_error"]: "",
                 f["processing_status"]: "已送生产",
                 f["production_enabled"]: False,
-                f["sync_result"]: "长视频完整生产已完成",
+                **({f["publish_confirmed"]: False} if publish_result else {}),
+                f["sync_result"]: sync_result,
                 f["sync_time"]: int(time.time() * 1000),
                 f["run_task_id"]: job_id,
             })
             print(f"完成: {record.record_id} | {job_id} | {final_path}")
+            if publish_error:
+                print(f"排班接入失败: {record.record_id}: {publish_error}", file=sys.stderr)
         except Exception as exc:
             failed += 1
+            first_frame_fields, first_frame_error = _longform_first_frame_writeback(
+                client, storage, job_id, record.fields,
+            )
+            failure_text = str(exc)[:1800]
+            if first_frame_error and "尚未登记" not in first_frame_error:
+                failure_text += f"；长视频首帧展示回写失败：{first_frame_error}"
             client.update_record_fields(record.record_id, {
                 f["longform_status"]: "生成失败",
-                f["longform_error"]: str(exc)[:1800],
+                **first_frame_fields,
+                f["longform_error"]: failure_text[:1800],
                 f["processing_status"]: "同步失败",
                 f["sync_result"]: f"长视频生成失败：{str(exc)[:800]}",
                 f["sync_time"]: int(time.time() * 1000),

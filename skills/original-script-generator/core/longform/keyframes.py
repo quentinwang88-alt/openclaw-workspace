@@ -163,6 +163,10 @@ def build_keyframe_contracts(master: Mapping[str, Any], plan: Mapping[str, Any])
                 if entry_role == "SETUP_ENTRY" else
                 "这是新的真实生活场景进入画面，不延续上一段姿势或机位。\n"
             )
+            entry_guidance += (
+                "保持同一人物、商品和穿搭单品；这是明确切镜，"
+                "穿着状态以本段首个单元的画面为准，不照搬K0的敞合状态或姿势。\n"
+            )
             persona = dict(entry_contract.get("persona_contract") or {})
             hair = text(dict(persona.get("script_projection") or {}).get("hair_makeup"))
             if hair:

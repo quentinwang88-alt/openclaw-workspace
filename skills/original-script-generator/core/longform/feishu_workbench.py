@@ -16,7 +16,7 @@ from typing import Any, Dict, Mapping, Sequence
 from core.longform.assets import freeze_reference_assets
 from core.longform.contracts import stable_id
 from core.longform.keyframes import build_keyframe_contracts
-from core.longform.model import generate_master_contract
+from core.longform.model import DEFAULT_BLUEPRINT_MODEL, generate_master_contract
 from core.longform.planner import compile_longform_plan
 from core.longform.storage import DEFAULT_ASSET_ROOT, LongformStorage
 from core.longform.voiceover import DEFAULT_MODEL_COMMAND, run_longform_voiceover
@@ -267,7 +267,7 @@ def build_longform_text_batch(
     source_storage: BatchStorage | None = None,
     longform_storage: LongformStorage | None = None,
     asset_root: str | Path = DEFAULT_ASSET_ROOT,
-    blueprint_model: str = "gpt-5.6-sol",
+    blueprint_model: str = DEFAULT_BLUEPRINT_MODEL,
     blueprint_reasoning: str = "high",
     voiceover_model_command: str = DEFAULT_MODEL_COMMAND,
     include_voiceover: bool = True,
@@ -448,7 +448,7 @@ def export_longform_projections(
         for key in (
             "processing_status", "production_enabled", "review_note", "sync_result",
             "sync_time", "run_task_id", "longform_status", "longform_video",
-            "longform_error", "first_frame_requested", "composite_first_frame",
+            "longform_error", "longform_first_frame", "first_frame_requested", "composite_first_frame",
             "first_frame_status",
         )
     }

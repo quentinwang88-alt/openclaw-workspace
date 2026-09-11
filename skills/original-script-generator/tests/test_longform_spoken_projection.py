@@ -42,7 +42,7 @@ class LongformSpokenProjectionTests(unittest.TestCase):
         self.assertEqual(payload["approved_supporting_arguments"], master["longform_argument_bundle"]["supporting_arguments"])
         self.assertEqual(payload["verified_facts"], master["verified_facts"])
         self.assertEqual([x["scene_location"] for x in payload["semantic_sections"]], ["酒店房间", "候车区"])
-        self.assertEqual([x["target_spoken_seconds_range"] for x in payload["semantic_sections"]], [[13.5, 14.4]] * 2)
+        self.assertEqual([x["target_spoken_seconds_range"] for x in payload["semantic_sections"]], [[11.2, 14.4]] * 2)
         for key in ("capture_units", "information_gain", "scene_narrative_role", "不要透传"):
             self.assertNotIn(key, str(payload))
         self.assertEqual(plan, before, "Full visual audit must remain unchanged")

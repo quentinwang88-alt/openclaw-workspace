@@ -1,7 +1,42 @@
 """Read-only central expression resources; no short-form content allocation."""
 from __future__ import annotations
 
+import json
+import os
+import sys
+from pathlib import Path
 from typing import Any, Mapping
+
+
+def _json_safe(value: Any) -> Any:
+    """Freeze provider/RDS values before they enter persisted job JSON.
+
+    Some read-only rhetoric diagnostics contain native ``datetime`` objects.
+    They are useful for audit but must never make an otherwise successful
+    voiceover impossible to persist.
+    """
+    return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+
+def _remove_sales_surface_examples(native: Mapping[str, Any]) -> dict[str, Any]:
+    """Do not teach natural sharing from promotion/live-selling excerpts."""
+    output = dict(native)
+    kept = []
+    removed = []
+    sales_tokens = ("[cta]", "สต๊อก", "ไลฟ์", "ไล์", "ราคา", "หมดเร็ว", "รีบเข้า")
+    for row in native.get("native_surface_references") or []:
+        text = str((row or {}).get("reference_excerpt") or "").lower()
+        if any(token in text for token in sales_tokens):
+            removed.append(str((row or {}).get("video_id") or ""))
+        else:
+            kept.append(row)
+    output["native_surface_references"] = kept
+    diagnostics = dict(output.get("diagnostics") or {})
+    diagnostics["longform_sales_surface_excluded_ids"] = removed
+    output["diagnostics"] = diagnostics
+    if removed and not kept:
+        output["fallback_level"] = "WRITING_CASE_AND_STRUCTURE_ONLY"
+    return output
 
 
 def resolve_longform_voiceover_resources(master: Mapping[str, Any]) -> dict[str, Any]:
@@ -45,6 +80,7 @@ def resolve_longform_voiceover_resources(master: Mapping[str, Any]) -> dict[str,
         diagnostics.append("HOOK_PROVIDER_" + type(exc).__name__)
     references = _approved_style_references(
         hook_id, target_country=country, top_category=category, product_type=product_type,
+        allow_cross_hook_language_fallback=True,
     )
     native = _central_native_rhetoric_contract(
         voiceover_root="", requested_hook_id=hook_id, target_country=country,
@@ -55,8 +91,24 @@ def resolve_longform_voiceover_resources(master: Mapping[str, Any]) -> dict[str,
         rhetorical_conflict_authorized=bool(expression_policy.get("rhetorical_conflict_allowed")
                                             or semantic_tags.get("rhetorical_conflict_authorized")),
     )
-    return {
-        "schema_version": "longform-central-resources-v1",
+    native = _remove_sales_surface_examples(native)
+    writing_case = {}
+    writing_case_audit = {"status": "DISABLED"}
+    try:
+        engine_root = Path("/Users/likeu3/voiceover_copy_engine")
+        if str(engine_root) not in sys.path:
+            sys.path.insert(0, str(engine_root))
+        from voiceover_copy_engine.services.writing_cases import select_writing_case
+        writing_case = select_writing_case(
+            language=language, country=country, top_category=category,
+            product_type=product_type,
+            primary_context=str(semantic.get("primary_narrative_context") or argument.get("text") or ""),
+            diagnostics=writing_case_audit,
+        ) if os.environ.get("LONGFORM_WRITING_CASE_ENABLED", "0") == "1" else {}
+    except Exception as exc:
+        diagnostics.append("WRITING_CASE_PROVIDER_" + type(exc).__name__)
+    return _json_safe({
+        "schema_version": "longform-central-resources-v2-independent-expression-retrieval",
         "scope": {"hook_id": hook_id, "country": country, "language": language,
                   "top_category": category, "product_type": product_type},
         "hook_guidance": {key: hook[key] for key in (
@@ -65,8 +117,22 @@ def resolve_longform_voiceover_resources(master: Mapping[str, Any]) -> dict[str,
         ) if hook.get(key) not in (None, "", [])},
         "relationship_language": _relationship_language_profile(hook_id, target_language=language),
         "approved_style_references": references,
+        "approved_style_reference_audit": {
+            "selected_count": len(references),
+            "selected_ids": [
+                str(item.get("reference_sample_id") or "") for item in references
+                if item.get("reference_sample_id")
+            ],
+            "selection_scope": [
+                str(item.get("reference_scope") or "") for item in references
+                if item.get("reference_scope")
+            ],
+        },
         "native_rhetoric_contract": _compact_native_rhetoric_contract(native),
+        "writing_case_reference": writing_case,
+        "writing_case_audit": writing_case_audit,
+        "native_rhetoric_audit": native,
         "snapshot_hash": hook_knowledge_snapshot_hash(),
         "diagnostics": diagnostics,
         "reference_authority": "EXPRESSION_ONLY_NOT_PRODUCT_FACTS",
-    }
+    })

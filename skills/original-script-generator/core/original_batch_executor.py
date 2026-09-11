@@ -40,6 +40,9 @@ BLUEPRINT_FALLBACK_MODEL = str(
 DEFAULT_ITEM_TIMEOUT_SECONDS = int(
     os.environ.get("ORIGINAL_SCRIPT_ITEM_TIMEOUT_SECONDS", "420") or "420"
 )
+BLUEPRINT_LLM_TIMEOUT_SECONDS = int(
+    os.environ.get("ORIGINAL_SCRIPT_BLUEPRINT_LLM_TIMEOUT_SECONDS", "600") or "600"
+)
 
 
 class ItemExecutionTimeout(RuntimeError):
@@ -143,7 +146,7 @@ def _generate_simplified_visual_script_with_fallback(
             route="primary",
             primary_model=model,
             primary_reasoning_effort=reasoning_effort,
-            timeout=300,
+            timeout=BLUEPRINT_LLM_TIMEOUT_SECONDS,
             max_retries=0,
         )
         for attempt_index in range(attempts):
@@ -713,6 +716,9 @@ def run_plan_only(
         allow_structure_only=request.script_mode == "simplified_v1",
     )
     directions = packages.get("directions", [])
+    if ctx.get("longform_prefer_persona_pack"):
+        for direction in directions:
+            direction["prefer_persona_reference_pack"] = True
     if ctx.get("longform_outfit_color_matching"):
         from core.outfit_template_provider import outfit_product_color_tokens
 
@@ -1093,6 +1099,7 @@ def _execute_simplified_single_item(
 
     from core.complete_voiceover_direct import (
         hook_knowledge_snapshot_hash,
+        original_voiceover_route_cache_key,
         run_central_complete_voiceover,
     )
     from core.llm_client import OriginalScriptLLMClient
@@ -1252,6 +1259,7 @@ def _execute_simplified_single_item(
         "voiceover_surface_contract": voiceover_surface_contract,
         "hook_knowledge_snapshot_hash": hook_knowledge_snapshot_hash(),
         "model_command_hash": _stable_hash(voiceover_model_command),
+        "voiceover_route": original_voiceover_route_cache_key(),
     })
     voice_stage = checkpoint.setdefault("stages", {}).setdefault("voiceover", {})
     voiceover = voice_stage.get("plan")
@@ -1756,7 +1764,7 @@ def _execute_single_item(
         route="primary",
         primary_model=blueprint_model,
         primary_reasoning_effort=blueprint_reasoning,
-        timeout=300,
+        timeout=BLUEPRINT_LLM_TIMEOUT_SECONDS,
         max_retries=0,
     )
     consumer_run_id = _stable_id("RUN_", {"batch_item_id": item.batch_item_id, "ts": time.time_ns()})

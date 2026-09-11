@@ -91,15 +91,18 @@ class H3Gateway:
 
     @staticmethod
     def build_segment_request(segment: Mapping[str, Any], *, start_frame: str,
-                              end_frame: str = "") -> Dict[str, Any]:
+                              end_frame: str = "",
+                              reference_images: list[str] | None = None) -> Dict[str, Any]:
         mode = str(segment.get("generation_mode") or "")
         images = [start_frame]
         if mode == "first_last":
             if not end_frame:
                 raise ValueError("片段A的 first_last 模式必须提供计划桥接帧")
             images.append(end_frame)
-        elif mode != "first_frame":
+        elif mode not in {"first_frame", "reference"}:
             raise ValueError(f"长视频旁路不支持的 H3 模式: {mode}")
+        if mode == "reference":
+            images.extend(item for item in (reference_images or []) if item not in images)
         if any(not Path(item).is_file() for item in images):
             raise ValueError("H3 首帧/尾帧文件不存在")
         return {

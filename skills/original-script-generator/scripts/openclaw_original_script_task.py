@@ -52,7 +52,7 @@ REFRESH_ACTIONS = {
 }
 FIRST_FRAME_ACTIONS = {"first-frame-check", "first-frame-run", "first-frame-retry"}
 ALL_ACTIONS = {*ACTION_STATUSES, *REFRESH_ACTIONS, *FIRST_FRAME_ACTIONS}
-BLUEPRINT_MODELS = {"gpt-5.6-sol", "gpt-5.6-terra"}
+BLUEPRINT_MODELS = {"gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra"}
 BLUEPRINT_REASONING = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 
 
@@ -111,7 +111,7 @@ def build_runner_command(
         raise ValueError(f"未知 action: {action}")
     if blueprint_model is not None and blueprint_model not in BLUEPRINT_MODELS:
         raise ValueError(
-            "blueprint_model 仅允许 gpt-5.6-sol 或 gpt-5.6-terra"
+            "blueprint_model 仅允许 gpt-6-astra、gpt-5.6-sol 或 gpt-5.6-terra"
         )
     if blueprint_reasoning is not None and blueprint_reasoning not in BLUEPRINT_REASONING:
         raise ValueError("blueprint_reasoning 不是支持的推理强度")
