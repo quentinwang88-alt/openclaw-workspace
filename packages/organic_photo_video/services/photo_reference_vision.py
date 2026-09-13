@@ -1533,10 +1533,16 @@ class PhotoReferenceVisionService:
                                background_features=None,
                                travel_topic: Mapping[str, Any] = None,
                                outfit_reference_indices: Sequence[int] = (),
-                               product_context: Mapping[str, Any] = None):
+                               product_context: Mapping[str, Any] = None,
+                               locale_pack: Mapping[str, Any] = None):
         if not isinstance(raw, Mapping):
             return {}, ["输出不是 JSON 对象"]
         moments = {str(item.get("key") or ""): item for item in travel_contract.get("moments") or []}
+        # Audited moment labels come from the Locale Pack when one is bound; the
+        # legacy ``label_th`` table is read through the same resolver otherwise,
+        # so TH V2 keeps its exact labels while recipe v2 needs no ``_th`` field.
+        from services.photo_locale import travel_moment_labels
+        moment_labels = travel_moment_labels(travel_contract, locale_pack=locale_pack)
         footwear_rules = _moment_footwear_rules(travel_contract)
         background_tokens = _background_feature_tokens(background_features)
         posts_raw = raw.get("posts")
@@ -1616,7 +1622,7 @@ class PhotoReferenceVisionService:
                     "footwear_type": footwear,
                     "background_feature_zh": str(look.get("background_feature_zh") or ""),
                     # Audited enum labels only; never trust model-written Thai.
-                    "display_label": str(moments[moment].get("label_th") or ""),
+                    "display_label": str(moment_labels.get(moment) or ""),
                     "outfit_reference_indices": selected_indices,
                     "styling_intent": str(look.get("styling_intent") or ""),
                 }
@@ -1734,14 +1740,22 @@ class PhotoReferenceVisionService:
 
     @staticmethod
     def _travel_plan_prompt(*, analysis, travel_contract, variables, content_requirement, count,
-                            travel_topic=None, product_context=None):
+                            travel_topic=None, product_context=None, locale_pack=None):
         ordered_moments = sorted(
             list(travel_contract.get("moments") or []),
             key=lambda item: str(item.get("key") or "") == "airport_departure",
         )
+        # Label values always come through the locale layer.  With no pack bound
+        # this reads the legacy ``label_th`` table and keeps the exact Thai
+        # prompt wording; a bound pack switches to neutral wording so a VN task
+        # is not told its labels are Thai.
+        from services.photo_locale import travel_moment_labels
+        moment_labels = travel_moment_labels(travel_contract, locale_pack=locale_pack)
+        label_caption = "固定泰语标签" if locale_pack is None else "固定发布语言标签"
         moments_text = "\n".join(
             f"- {item.get('key')}：{item.get('label_zh')}"
-            f"（画面证据：{item.get('evidence_zh')}；固定泰语标签：{item.get('label_th')}；"
+            f"（画面证据：{item.get('evidence_zh')}；{label_caption}："
+            f"{moment_labels.get(str(item.get('key') or ''), '')}；"
             f"步行强度：{item.get('mobility_level') or '未标注'}；"
             f"禁用鞋型：{'、'.join(item.get('forbidden_footwear_types') or []) or '无'}）"
             for item in ordered_moments

@@ -1,0 +1,199 @@
+"""Resolve the labels owned by a Locale Pack and the facts owned by a catalog.
+
+Phase 2 of the VN scarf cross-market plan moves every publish label out of the
+recipe and its planning policy: the Locale Pack owns moments / destinations /
+temperature bands / per-family copy, and the Destination Catalog owns semantic
+travel facts (climate, seasons, snow policy) with no language at all.
+
+The legacy v1 recipe still carries its inline ``label_th``,
+``destination_labels_th`` and ``temperature_labels_th`` tables, so every
+resolver here treats ``locale_pack=None`` as "read the legacy inline tables".
+That keeps TH V2 output byte-identical to the pre-Phase-2 baseline while a
+country-agnostic recipe v2 reads exactly the same labels from a pack.
+
+Resolvers are pure: no IO, no network, no Feishu, no filesystem access.
+"""
+from __future__ import annotations
+
+from typing import Any, Mapping
+
+__all__ = [
+    "PhotoLocaleError",
+    "LOCALE_LABEL_KINDS",
+    "destination_entry",
+    "destination_labels",
+    "destinations_for_country",
+    "family_copy",
+    "locale_pack_labels",
+    "snow_scene_allowed",
+    "temperature_labels",
+    "travel_copy_tokens",
+    "travel_moment_labels",
+]
+
+# Legacy inline table names kept verbatim for the None-locale_pack path.
+LEGACY_MOMENT_LABEL_FIELD = "label_th"
+LEGACY_DESTINATION_LABEL_FIELD = "destination_labels_th"
+LEGACY_TEMPERATURE_LABEL_FIELD = "temperature_labels_th"
+
+LOCALE_LABEL_KINDS = ("travel_moments", "destinations", "temperature_bands", "generic")
+
+
+class PhotoLocaleError(ValueError):
+    """Raised when a bound locale pack or destination catalog is incomplete."""
+
+
+def locale_pack_labels(locale_pack: Mapping[str, Any] | None, kind: str) -> dict[str, str]:
+    """Return one label family from a locale pack, failing loudly when missing."""
+    if kind not in LOCALE_LABEL_KINDS:
+        raise PhotoLocaleError(f"未知的 locale 标签族：{kind}")
+    labels = dict((locale_pack or {}).get("labels") or {})
+    block = labels.get(kind)
+    if not isinstance(block, Mapping):
+        raise PhotoLocaleError(f"locale pack 缺少 labels.{kind}")
+    return {str(key): str(value) for key, value in block.items()}
+
+
+def travel_moment_labels(
+    travel_contract: Mapping[str, Any] | None, *, locale_pack: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
+    """Map ``travel_moment`` keys to their published label.
+
+    ``locale_pack=None`` reproduces the legacy inline ``label_th`` table exactly.
+    """
+    if locale_pack is None:
+        return {
+            str(item.get("key") or ""): str(item.get(LEGACY_MOMENT_LABEL_FIELD) or "")
+            for item in (travel_contract or {}).get("moments") or []
+        }
+    return locale_pack_labels(locale_pack, "travel_moments")
+
+
+def destination_labels(
+    travel_contract: Mapping[str, Any] | None, *, locale_pack: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
+    """Map destination keys to their published label."""
+    if locale_pack is None:
+        return {
+            str(key): str(value)
+            for key, value in dict(
+                (travel_contract or {}).get(LEGACY_DESTINATION_LABEL_FIELD) or {}
+            ).items()
+        }
+    return locale_pack_labels(locale_pack, "destinations")
+
+
+def temperature_labels(
+    travel_contract: Mapping[str, Any] | None, *, locale_pack: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
+    """Map temperature-band keys to their published label."""
+    if locale_pack is None:
+        return {
+            str(key): str(value)
+            for key, value in dict(
+                (travel_contract or {}).get(LEGACY_TEMPERATURE_LABEL_FIELD) or {}
+            ).items()
+        }
+    return locale_pack_labels(locale_pack, "temperature_bands")
+
+
+def family_copy(
+    family: Mapping[str, Any] | None, *, locale_pack: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return ``{title, cover, caption, look_labels}`` for one policy family.
+
+    ``locale_pack=None`` reads the legacy inline ``title_th``/``cover_th``/
+    ``caption_th`` fields and the per-look ``display_label``.
+    """
+    family = dict(family or {})
+    if locale_pack is None:
+        return {
+            "title": str(family.get("title_th") or ""),
+            "cover": str(family.get("cover_th") or ""),
+            "caption": str(family.get("caption_th") or ""),
+            "look_labels": {
+                str(look.get("role") or ""): str(look.get("display_label") or "")
+                for look in family.get("looks") or []
+            },
+        }
+    families = dict((locale_pack or {}).get("family_copy") or {})
+    entry = families.get(str(family.get("family_id") or ""))
+    if not isinstance(entry, Mapping):
+        raise PhotoLocaleError(
+            f"locale pack 未提供 {family.get('family_id') or '未命名方案'} 的 family_copy"
+        )
+    return {
+        "title": str(entry.get("title") or ""),
+        "cover": str(entry.get("cover") or ""),
+        "caption": str(entry.get("caption") or ""),
+        "look_labels": {
+            str(key): str(value)
+            for key, value in dict(entry.get("look_labels") or {}).items()
+        },
+    }
+
+
+def travel_copy_tokens(
+    variables: Mapping[str, Any] | None, *,
+    travel_contract: Mapping[str, Any] | None = None,
+    locale_pack: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
+    """Resolve the audited ``{destination}`` / ``{temperature}`` copy tokens."""
+    variables = dict(variables or {})
+    return {
+        "destination": destination_labels(
+            travel_contract, locale_pack=locale_pack
+        ).get(str(variables.get("destination") or ""), ""),
+        "temperature": temperature_labels(
+            travel_contract, locale_pack=locale_pack
+        ).get(str(variables.get("temperature_band") or ""), ""),
+    }
+
+
+def destination_entry(
+    catalog: Mapping[str, Any] | None, destination_id: Any,
+) -> dict[str, Any] | None:
+    """Return one destination entry, or ``None`` when the catalog lacks it."""
+    wanted = str(destination_id or "")
+    if not wanted:
+        return None
+    for entry in (catalog or {}).get("destinations") or []:
+        if str(entry.get("destination_id") or "") == wanted:
+            return dict(entry)
+    return None
+
+
+def destinations_for_country(
+    catalog: Mapping[str, Any] | None, country: Any,
+) -> tuple[str, ...]:
+    """Destination ids declared for one ISO alpha-2 country, in catalog order."""
+    wanted = str(country or "")
+    return tuple(
+        str(entry.get("destination_id") or "")
+        for entry in (catalog or {}).get("destinations") or []
+        if str(entry.get("destination_country") or "") == wanted
+    )
+
+
+def snow_scene_allowed(
+    catalog: Mapping[str, Any] | None, destination_id: Any, *, requested: bool = False,
+) -> bool:
+    """Whether a snow scene may be generated for this destination.
+
+    ``FORBIDDEN`` never allows snow; ``DEFAULT`` always does; the catalog default
+    (``OPTIONAL_NOT_DEFAULT``) allows it only when the caller explicitly asks,
+    so cool/winter cities such as Tokyo or Shanghai never default to snow.
+    """
+    entry = destination_entry(catalog, destination_id)
+    if entry is None:
+        raise PhotoLocaleError(f"目的地目录中不存在 {destination_id}")
+    policy = str(
+        entry.get("snow_scene_policy")
+        or (catalog or {}).get("default_snow_scene_policy")
+        or "OPTIONAL_NOT_DEFAULT"
+    )
+    if policy == "FORBIDDEN":
+        return False
+    if policy == "DEFAULT":
+        return True
+    return bool(requested)

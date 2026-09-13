@@ -32,6 +32,11 @@ RECIPE_POLICY_FILES = {
     # retired — it never reached RDS, and its slot is taken by the daily
     # thermal-transition line.  The 0-15°C job moves to the travel line.
     "PHOTO_TH_THERMAL_TRANSITION_V1": "TH_THERMAL_TRANSITION_V1.json",
+    # 2026-09-13 (VN scarf Phase 2): the country-agnostic travel template.  It
+    # reuses the exact TH families and executable rules, but every publish label
+    # comes from a Locale Pack, so one recipe can serve TH and VN.  Registered
+    # here so the canary is plannable; V2 keeps the live route until Phase 4.
+    "PHOTO_TRAVEL_OUTFIT_V3": "TRAVEL_OUTFIT_V3.json",
 }
 
 
@@ -150,12 +155,24 @@ def _family_plan(
     *, index: int, family: Mapping[str, Any], theme: Mapping[str, Any],
     policy: Mapping[str, Any], reference_mode: str,
     style_profile: Mapping[str, Any] | None = None,
+    locale_pack: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     looks = copy.deepcopy(list(family["looks"]))
     if reference_mode == "PRODUCT":
         for look in looks:
             look["outerwear"] = "目标商品外套；严格保持商品参考图中的款式、颜色、材质和结构"
             look["outerwear_type"] = "target_product"
+    # Publish copy is locale-owned.  ``locale_pack=None`` reads the legacy inline
+    # ``title_th``/``cover_th``/``caption_th``/``display_label`` fields, so the TH
+    # V2 plan is byte-identical; a bound Locale Pack supplies the same strings for
+    # the country-agnostic recipe v2 while the policy keeps the garment rules.
+    from services.photo_locale import family_copy as resolve_family_copy
+    locale_copy = resolve_family_copy(family, locale_pack=locale_pack)
+    if locale_pack is not None:
+        for look in looks:
+            label = str(locale_copy["look_labels"].get(str(look.get("role") or "")) or "")
+            if label:
+                look["display_label"] = label
     outerwear_types = sorted({str(item.get("outerwear_type") or "") for item in looks})
     bottom_types = sorted({str(item.get("bottom_type") or "") for item in looks})
     return {
@@ -178,8 +195,8 @@ def _family_plan(
         "style_profile": dict(style_profile or {}),
         "looks": looks,
         "copy": {
-            "title": family["title_th"], "cover": family["cover_th"],
-            "caption": family["caption_th"], "cta": str(theme["cta"]),
+            "title": locale_copy["title"], "cover": locale_copy["cover"],
+            "caption": locale_copy["caption"], "cta": str(theme["cta"]),
         },
         "difference_axes": {
             "family": family["family_id"], "palette": family["palette_zh"],
@@ -304,6 +321,7 @@ def validate_batch_plan(plan: Mapping[str, Any]) -> None:
 def _travel_template_copy(
     *, record_id: str, index: int, templates: Sequence[Mapping[str, Any]],
     travel_contract: Mapping[str, Any], variables: Mapping[str, Any],
+    locale_pack: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Travel copy comes only from audited templates with variable filling;
     the vision model never writes free-form Thai in phase 1."""
@@ -319,7 +337,8 @@ def _travel_template_copy(
     def fill(value):
         if isinstance(value, str):
             return fill_travel_copy_tokens(
-                value, travel_contract=travel_contract, variables=variables)
+                value, travel_contract=travel_contract, variables=variables,
+                locale_pack=locale_pack)
         if isinstance(value, list):
             return [fill(item) for item in value]
         return value
@@ -344,6 +363,7 @@ def plan_th_choice_batch(
     required_roles: Sequence[str] = (),
     recipe_spec: Mapping[str, Any] = None,
     variables: Mapping[str, Any] = None,
+    locale_pack: Mapping[str, Any] = None,
 ) -> dict[str, Any]:
     policy = load_planning_policy(recipe_id)
     if recipe_id not in policy["recipe_ids"]:
@@ -448,6 +468,7 @@ def plan_th_choice_batch(
                     record_id=record_id, index=index, templates=copy_templates,
                     travel_contract=travel_contract,
                     variables=style_profile.get("travel_variables") or {},
+                    locale_pack=locale_pack,
                 )
                 item["copy"] = template_copy
                 item["copy_source"] = "template_fill"
@@ -469,7 +490,8 @@ def plan_th_choice_batch(
         selected = [by_id[family_id] for family_id in selected_ids]
         items = [
             _family_plan(index=index, family=family, theme=theme, policy=policy,
-                         reference_mode=reference_mode, style_profile=style_profile)
+                         reference_mode=reference_mode, style_profile=style_profile,
+                         locale_pack=locale_pack)
             for index, family in enumerate(selected, 1)
         ]
     for item in items:

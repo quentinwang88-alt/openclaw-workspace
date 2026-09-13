@@ -1,0 +1,45 @@
+{
+  "schema_version": "opv-photo-execution-context-v1",
+  "recipe": {
+    "id": "PHOTO_TRAVEL_OUTFIT_V3",
+    "version": 1,
+    "planning_flow": "travel_two_step"
+  },
+  "category": {
+    "key": "womenswear",
+    "profile_id": "WOMENSWEAR_V1",
+    "profile_version": 1,
+    "main_product_slot": "outerwear"
+  },
+  "market": {
+    "country": "TH",
+    "market_pack_id": "MP_TH_DEFAULT_V1",
+    "market_pack_version": 1
+  },
+  "locale": {
+    "locale": "th-TH",
+    "locale_pack_id": "LOCALE_TH_TH_V1",
+    "locale_pack_version": 1,
+    "copy_pack_id": "TH_TRAVEL_OUTFIT_V3"
+  },
+  "reference": {
+    "mode": "STYLE",
+    "input_fingerprint": "114a1c4a5d137015276026937af64a27e7731e571ab4bda3c5e7f1e0d590960f",
+    "reference_hashes": [
+      "e073a8a2e5c648059c573d15d3480b413687d2666a40ecabcf7ea6886ed7c72f"
+    ]
+  },
+  "persona": {
+    "persona_ref_id": "FIXTURE_PERSONA_REF_TH_FEMALE",
+    "persona_pack_id": "FIXTURE_PERSONA_PACK_TH_FEMALE_V1",
+    "reference_hashes": [
+      "58183215a90a743e5da1e665826c1ad7bfb8954136c42c1ae0fabadbbbcbb441"
+    ]
+  },
+  "destination": {
+    "destination_id": "SEOUL_WINTER",
+    "destination_country": "KR",
+    "destination_city": "Seoul"
+  },
+  "_fixture_note": "Phase 2（VN 围巾跨市场）resolved execution context fixture：PHOTO_TRAVEL_OUTFIT_V3 绑定 TH + womenswear + LOCALE_TH_TH_V1，目的地 SEOUL_WINTER，参考模式 STYLE（无商品）。persona 为 fixture 占位标识，不代表任何真实人物包；哈希由 fixture 文本确定性派生，非真实图片哈希。"
+}

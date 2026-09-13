@@ -43,6 +43,10 @@ PROFILE_DIR = CONFIG_DIR / "profiles"
 LAYOUT_DIR = CONFIG_DIR / "layouts"
 VARIANT_POLICY_DIR = CONFIG_DIR / "variant_policies"
 EXAMPLES_DIR = CONFIG_DIR / "examples"
+# Country-agnostic layer (VN scarf cross-market, Phase 2).  Locale packs own
+# every publish-language label; destination catalogs own semantic travel facts.
+LOCALE_DIR = CONFIG_DIR / "locales"
+DESTINATION_DIR = CONFIG_DIR / "destinations"
 
 CATEGORY_PROFILE_SCHEMA = "opv-category-profile-v1"
 PHOTO_LAYOUT_SCHEMA = "opv-photo-layout-v1"
@@ -189,6 +193,31 @@ def load_categories(directory: Path = CATEGORY_DIR) -> List[Dict[str, Any]]:
     return [load_category_file(path) for path in sorted(directory.glob("*.json"))]
 
 
+def load_locale_pack_file(path: Path) -> Dict[str, Any]:
+    payload = _load_json(Path(path))
+    contracts.ensure_valid(
+        contracts.validate_locale_pack_payload(payload), f"locale pack {Path(path).name}"
+    )
+    return payload
+
+
+def load_locale_packs(directory: Path = LOCALE_DIR) -> List[Dict[str, Any]]:
+    return [load_locale_pack_file(path) for path in sorted(directory.glob("*.json"))]
+
+
+def load_destination_catalog_file(path: Path) -> Dict[str, Any]:
+    payload = _load_json(Path(path))
+    contracts.ensure_valid(
+        contracts.validate_destination_catalog_payload(payload),
+        f"destination catalog {Path(path).name}",
+    )
+    return payload
+
+
+def load_destination_catalogs(directory: Path = DESTINATION_DIR) -> List[Dict[str, Any]]:
+    return [load_destination_catalog_file(path) for path in sorted(directory.glob("*.json"))]
+
+
 def load_market_pack_file(path: Path) -> MarketPack:
     return _load_validated(
         Path(path), contracts.validate_market_pack_payload, MarketPack, "market pack"
@@ -213,9 +242,36 @@ def load_content_recipe_file(path: Path) -> ContentRecipe:
     payload = _load_json(recipe_path)
     spec = payload.get("recipe_spec") or payload.get("recipe_spec_json") or {}
     if isinstance(spec, dict):
+        is_v2 = spec.get("schema_version") == contracts.PHOTO_RECIPE_V2_SCHEMA_VERSION
+        locale_copy_packs = dict(spec.get("locale_copy_packs") or {}) if is_v2 else {}
         profiles = spec.get("execution_profiles") or []
         for profile in profiles:
             if not isinstance(profile, dict) or profile.get("copy_variants"):
+                continue
+            if is_v2:
+                # A country-agnostic profile must not pin one locale's copy pack:
+                # ``locale_copy_packs`` on the spec owns that binding.
+                if str(profile.get("copy_pack_id") or "").strip():
+                    continue
+                variants_by_locale: Dict[str, Any] = {}
+                for locale, locale_pack_id in locale_copy_packs.items():
+                    pack_path = (
+                        recipe_path.parent.parent / "copy_packs" / f"{locale_pack_id}.tsv"
+                    )
+                    variants = load_photo_copy_pack(
+                        pack_path,
+                        expected_recipe_id=str(payload.get("recipe_id") or ""),
+                        expected_profile_id=str(profile.get("profile_id") or ""),
+                    )
+                    variants_by_locale[str(locale)] = {
+                        "copy_pack_id": str(locale_pack_id),
+                        "copy_variants": variants,
+                    }
+                if not variants_by_locale:
+                    continue
+                default_locale = sorted(variants_by_locale)[0]
+                profile["copy_variants_by_locale"] = variants_by_locale
+                profile["copy_variants"] = variants_by_locale[default_locale]["copy_variants"]
                 continue
             pack_id = str(profile.get("copy_pack_id") or "").strip()
             if not pack_id:
@@ -382,6 +438,8 @@ class SeedBundle:
     quality_profiles: List[QualityProfile] = field(default_factory=list)
     board_layouts: List[dict] = field(default_factory=list)
     variant_policies: List[dict] = field(default_factory=list)
+    locale_packs: List[Dict[str, Any]] = field(default_factory=list)
+    destination_catalogs: List[Dict[str, Any]] = field(default_factory=list)
     # The example account is documentation, never seed data; it is loaded for
     # contract tests only and must not be upserted by seed scripts.
     account_example: Optional[AccountProfile] = None
@@ -395,6 +453,8 @@ class SeedBundle:
             f"account_example={'yes' if self.account_example else 'no'}",
             f"board_layouts={len(self.board_layouts)}",
             f"variant_policies={len(self.variant_policies)}",
+            f"locale_packs={len(self.locale_packs)}",
+            f"destination_catalogs={len(self.destination_catalogs)}",
         ]
         for category in self.categories:
             lines.append(f"category {category['category_key']} ({category['status']})")
@@ -428,6 +488,8 @@ def load_seed_bundle(config_dir: Path = CONFIG_DIR) -> SeedBundle:
         quality_profiles=load_quality_profiles(config_dir / "profiles"),
         board_layouts=load_board_layouts(config_dir / "layouts"),
         variant_policies=load_variant_policies(config_dir / "variant_policies"),
+        locale_packs=load_locale_packs(config_dir / "locales"),
+        destination_catalogs=load_destination_catalogs(config_dir / "destinations"),
     )
     examples = config_dir / "examples"
     if examples.is_dir():

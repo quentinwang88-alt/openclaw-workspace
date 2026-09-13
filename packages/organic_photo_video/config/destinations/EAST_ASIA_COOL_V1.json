@@ -1,0 +1,201 @@
+{
+  "schema_version": "opv-photo-destination-catalog-v1",
+  "catalog_id": "EAST_ASIA_COOL_V1",
+  "catalog_version": 1,
+  "status": "draft",
+  "default_snow_scene_policy": "OPTIONAL_NOT_DEFAULT",
+  "_scope_note": "V1 目的地范围（spec §3.4）：VN Hanoi winter / Sa Pa / Ha Giang / Da Lat；KR Seoul / Gangwon-Pyeongchang；JP Tokyo / Osaka-Kyoto / Sapporo-Hokkaido；CN Beijing / Shanghai / Harbin。只保存语义事实，不保存发布语言。",
+  "destinations": [
+    {
+      "destination_id": "HANOI_WINTER",
+      "destination_country": "VN",
+      "destination_city": "Hanoi",
+      "climate_family": "cool_city",
+      "temperature_bands": ["10_15c", "15_22c"],
+      "allowed_seasons": ["autumn", "winter"],
+      "travel_moments": [
+        "airport_departure",
+        "old_town_walk",
+        "cafe_visit",
+        "shopping_day",
+        "evening_stroll"
+      ],
+      "snow_scene_policy": "FORBIDDEN"
+    },
+    {
+      "destination_id": "SA_PA",
+      "destination_country": "VN",
+      "destination_city": "Sa Pa",
+      "climate_family": "mountain_cool",
+      "temperature_bands": ["5_10c", "10_15c"],
+      "allowed_seasons": ["autumn", "winter"],
+      "travel_moments": [
+        "airport_departure",
+        "photo_spot",
+        "cafe_visit",
+        "old_town_walk",
+        "evening_stroll"
+      ],
+      "snow_scene_policy": "OPTIONAL_NOT_DEFAULT"
+    },
+    {
+      "destination_id": "HA_GIANG",
+      "destination_country": "VN",
+      "destination_city": "Ha Giang",
+      "climate_family": "mountain_cool",
+      "temperature_bands": ["5_10c", "10_15c"],
+      "allowed_seasons": ["autumn", "winter"],
+      "travel_moments": [
+        "airport_departure",
+        "photo_spot",
+        "old_town_walk",
+        "cafe_visit",
+        "night_walk"
+      ],
+      "snow_scene_policy": "FORBIDDEN"
+    },
+    {
+      "destination_id": "DA_LAT",
+      "destination_country": "VN",
+      "destination_city": "Da Lat",
+      "climate_family": "highland_mild",
+      "temperature_bands": ["10_15c", "15_22c"],
+      "allowed_seasons": ["autumn", "winter", "spring"],
+      "travel_moments": [
+        "cafe_visit",
+        "photo_spot",
+        "old_town_walk",
+        "evening_stroll",
+        "shopping_day"
+      ],
+      "snow_scene_policy": "FORBIDDEN"
+    },
+    {
+      "destination_id": "SEOUL_WINTER",
+      "destination_country": "KR",
+      "destination_city": "Seoul",
+      "climate_family": "cold_city",
+      "temperature_bands": ["minus_10_0c", "0_5c", "5_10c"],
+      "allowed_seasons": ["winter"],
+      "travel_moments": [
+        "airport_departure",
+        "city_walk",
+        "cafe_visit",
+        "shopping_day",
+        "evening_stroll"
+      ],
+      "snow_scene_policy": "OPTIONAL_NOT_DEFAULT"
+    },
+    {
+      "destination_id": "GANGWON_PYEONGCHANG",
+      "destination_country": "KR",
+      "destination_city": "Pyeongchang",
+      "climate_family": "snow_mountain",
+      "temperature_bands": ["minus_10_0c", "0_5c"],
+      "allowed_seasons": ["winter"],
+      "travel_moments": [
+        "airport_departure",
+        "photo_spot",
+        "cafe_visit",
+        "old_town_walk"
+      ],
+      "snow_scene_policy": "DEFAULT"
+    },
+    {
+      "destination_id": "TOKYO",
+      "destination_country": "JP",
+      "destination_city": "Tokyo",
+      "climate_family": "cool_city",
+      "temperature_bands": ["0_5c", "5_10c", "10_15c"],
+      "allowed_seasons": ["autumn", "winter"],
+      "travel_moments": [
+        "airport_departure",
+        "city_walk",
+        "cafe_visit",
+        "shopping_day",
+        "evening_stroll"
+      ],
+      "snow_scene_policy": "FORBIDDEN"
+    },
+    {
+      "destination_id": "OSAKA_KYOTO",
+      "destination_country": "JP",
+      "destination_city": "Osaka",
+      "climate_family": "cool_city",
+      "temperature_bands": ["0_5c", "5_10c", "10_15c"],
+      "allowed_seasons": ["autumn", "winter"],
+      "travel_moments": [
+        "airport_departure",
+        "old_town_walk",
+        "photo_spot",
+        "cafe_visit",
+        "night_walk"
+      ],
+      "snow_scene_policy": "FORBIDDEN"
+    },
+    {
+      "destination_id": "SAPPORO_HOKKAIDO",
+      "destination_country": "JP",
+      "destination_city": "Sapporo",
+      "climate_family": "snow_city",
+      "temperature_bands": ["minus_10_0c", "0_5c"],
+      "allowed_seasons": ["winter"],
+      "travel_moments": [
+        "airport_departure",
+        "photo_spot",
+        "cafe_visit",
+        "shopping_day",
+        "night_walk"
+      ],
+      "snow_scene_policy": "DEFAULT"
+    },
+    {
+      "destination_id": "BEIJING",
+      "destination_country": "CN",
+      "destination_city": "Beijing",
+      "climate_family": "cold_city",
+      "temperature_bands": ["minus_10_0c", "0_5c", "5_10c"],
+      "allowed_seasons": ["autumn", "winter"],
+      "travel_moments": [
+        "airport_departure",
+        "photo_spot",
+        "old_town_walk",
+        "shopping_day",
+        "evening_stroll"
+      ],
+      "snow_scene_policy": "OPTIONAL_NOT_DEFAULT"
+    },
+    {
+      "destination_id": "SHANGHAI",
+      "destination_country": "CN",
+      "destination_city": "Shanghai",
+      "climate_family": "cool_city",
+      "temperature_bands": ["0_5c", "5_10c", "10_15c"],
+      "allowed_seasons": ["autumn", "winter"],
+      "travel_moments": [
+        "airport_departure",
+        "city_walk",
+        "cafe_visit",
+        "shopping_day",
+        "night_walk"
+      ],
+      "snow_scene_policy": "FORBIDDEN"
+    },
+    {
+      "destination_id": "HARBIN",
+      "destination_country": "CN",
+      "destination_city": "Harbin",
+      "climate_family": "snow_city",
+      "temperature_bands": ["minus_10_0c", "0_5c"],
+      "allowed_seasons": ["winter"],
+      "travel_moments": [
+        "airport_departure",
+        "photo_spot",
+        "old_town_walk",
+        "cafe_visit",
+        "night_walk"
+      ],
+      "snow_scene_policy": "DEFAULT"
+    }
+  ]
+}

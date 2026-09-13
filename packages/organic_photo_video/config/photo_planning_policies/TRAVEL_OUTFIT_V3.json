@@ -1,0 +1,432 @@
+{
+  "schema_version": "opv-photo-planning-policy-v1",
+  "policy_id": "TRAVEL_OUTFIT_V3",
+  "policy_version": 1,
+  "recipe_ids": [
+    "PHOTO_TRAVEL_OUTFIT_V3"
+  ],
+  "supported_reference_modes": [
+    "STYLE",
+    "COMPLETE_LOOK"
+  ],
+  "supported_theme_keys": [
+    "AUTUMN_OUTFIT",
+    "COOL_WEATHER_TRAVEL",
+    "DAILY_COMMUTE",
+    "CAFE_DATE"
+  ],
+  "minimum_cross_post_axis_difference": 2,
+  "theme_family_order": {
+    "AUTUMN_OUTFIT": [
+      "city_walk",
+      "cafe_hopping",
+      "mountain_town",
+      "old_town_photo",
+      "shopping_mall",
+      "airport_transit",
+      "night_market",
+      "seaside_stroll"
+    ],
+    "COOL_WEATHER_TRAVEL": [
+      "airport_transit",
+      "city_walk",
+      "cafe_hopping",
+      "old_town_photo",
+      "night_market",
+      "seaside_stroll",
+      "mountain_town",
+      "shopping_mall"
+    ],
+    "DAILY_COMMUTE": [
+      "shopping_mall",
+      "city_walk",
+      "cafe_hopping",
+      "airport_transit",
+      "night_market",
+      "mountain_town",
+      "old_town_photo",
+      "seaside_stroll"
+    ],
+    "CAFE_DATE": [
+      "cafe_hopping",
+      "old_town_photo",
+      "city_walk",
+      "night_market",
+      "shopping_mall",
+      "seaside_stroll",
+      "mountain_town",
+      "airport_transit"
+    ]
+  },
+  "families": [
+    {
+      "family_id": "airport_transit",
+      "angle_zh": "机场转场方便穿脱的轻层搭",
+      "scene_zh": "机场到市区的转场路线",
+      "palette_zh": "浅驼、海军蓝、奶油白、中蓝",
+      "background_color": "#E3DDD3",
+      "background_prompt": "均匀浅驼灰纯色背景",
+      "looks": [
+        {
+          "role": "look_a",
+          "outerwear": "浅驼色中长款宽松风衣",
+          "top_inner": "白色圆领针织叠穿浅蓝衬衫",
+          "bottom": "深蓝色高腰直筒牛仔裤",
+          "shoes": "米白色厚底运动鞋",
+          "outerwear_type": "trench",
+          "bottom_type": "straight_jeans"
+        },
+        {
+          "role": "look_b",
+          "outerwear": "海军蓝短款绗缝夹克",
+          "top_inner": "燕麦色薄高领针织",
+          "bottom": "奶油色高腰宽松长裤",
+          "shoes": "棕白拼色复古运动鞋",
+          "outerwear_type": "quilted_jacket",
+          "bottom_type": "relaxed_pants"
+        },
+        {
+          "role": "look_c",
+          "outerwear": "浅灰色短款连帽拉链外套",
+          "top_inner": "黑色圆领打底",
+          "bottom": "深靛蓝直筒牛仔中长裙",
+          "shoes": "黑色运动鞋和灰袜",
+          "outerwear_type": "hoodie_jacket",
+          "bottom_type": "denim_skirt"
+        },
+        {
+          "role": "look_d",
+          "outerwear": "暖棕色短款飞行夹克",
+          "top_inner": "奶白色圆领卫衣",
+          "bottom": "中灰色高腰束脚运动裤",
+          "shoes": "灰白跑鞋",
+          "outerwear_type": "bomber",
+          "bottom_type": "jogger"
+        }
+      ]
+    },
+    {
+      "family_id": "city_walk",
+      "angle_zh": "老城暴走一整天的舒适穿搭",
+      "scene_zh": "石板路老城街区",
+      "palette_zh": "燕麦、卡其、酒红、深蓝",
+      "background_color": "#E0D8CA",
+      "background_prompt": "均匀暖卡其纯色背景",
+      "looks": [
+        {
+          "role": "look_a",
+          "outerwear": "卡其色短款猎装夹克",
+          "top_inner": "白色圆领T恤",
+          "bottom": "中蓝色高腰直筒牛仔裤",
+          "shoes": "棕色复古运动鞋",
+          "outerwear_type": "field_jacket",
+          "bottom_type": "straight_jeans"
+        },
+        {
+          "role": "look_b",
+          "outerwear": "低饱和酒红色休闲西装",
+          "top_inner": "奶油色薄针织",
+          "bottom": "浅卡其高腰锥形长裤",
+          "shoes": "深棕色乐福鞋",
+          "outerwear_type": "casual_blazer",
+          "bottom_type": "tapered_pants"
+        },
+        {
+          "role": "look_c",
+          "outerwear": "燕麦色粗针短开衫",
+          "top_inner": "浅灰色圆领打底",
+          "bottom": "深灰色细褶中长裙",
+          "shoes": "黑色短靴",
+          "outerwear_type": "cardigan",
+          "bottom_type": "pleated_skirt"
+        },
+        {
+          "role": "look_d",
+          "outerwear": "中蓝色短款牛仔夹克",
+          "top_inner": "条纹圆领打底",
+          "bottom": "炭灰色A字西装中长裙",
+          "shoes": "米色乐福鞋和短袜",
+          "outerwear_type": "denim_jacket",
+          "bottom_type": "suit_skirt"
+        }
+      ]
+    },
+    {
+      "family_id": "cafe_hopping",
+      "angle_zh": "咖啡店巡礼的柔光穿搭",
+      "scene_zh": "街区咖啡店与窗边座位",
+      "palette_zh": "奶油、焦糖、可可棕、暖灰",
+      "background_color": "#EAE0D5",
+      "background_prompt": "均匀奶油米色纯色背景",
+      "looks": [
+        {
+          "role": "look_a",
+          "outerwear": "奶油白短款粗花呢夹克",
+          "top_inner": "浅灰粉色圆领针织",
+          "bottom": "中蓝色高腰直筒牛仔裤",
+          "shoes": "米色玛丽珍鞋",
+          "outerwear_type": "tweed_jacket",
+          "bottom_type": "straight_jeans"
+        },
+        {
+          "role": "look_b",
+          "outerwear": "焦糖色短款风衣",
+          "top_inner": "象牙白薄高领",
+          "bottom": "暖白色高腰阔腿长裤",
+          "shoes": "焦糖色乐福鞋",
+          "outerwear_type": "short_trench",
+          "bottom_type": "wide_pants"
+        },
+        {
+          "role": "look_c",
+          "outerwear": "可可棕短款针织开衫",
+          "top_inner": "奶白色圆领打底",
+          "bottom": "浅米色A字中长裙",
+          "shoes": "棕色短靴",
+          "outerwear_type": "cardigan",
+          "bottom_type": "a_line_skirt"
+        },
+        {
+          "role": "look_d",
+          "outerwear": "浅咖啡色短款翻领夹克",
+          "top_inner": "燕麦色贴身打底",
+          "bottom": "深靛蓝直筒牛仔中长裙",
+          "shoes": "深棕乐福鞋和短袜",
+          "outerwear_type": "cropped_jacket",
+          "bottom_type": "denim_skirt"
+        }
+      ]
+    },
+    {
+      "family_id": "night_market",
+      "angle_zh": "夜市小吃巡游的深色穿搭",
+      "scene_zh": "夜市灯串与小吃摊",
+      "palette_zh": "炭黑、酒红、深蓝、暖灰",
+      "background_color": "#D7D2CE",
+      "background_prompt": "均匀暖深灰纯色背景",
+      "looks": [
+        {
+          "role": "look_a",
+          "outerwear": "黑色短款飞行夹克",
+          "top_inner": "浅灰色圆领卫衣",
+          "bottom": "深靛蓝高腰直筒牛仔裤",
+          "shoes": "黑白复古运动鞋",
+          "outerwear_type": "bomber",
+          "bottom_type": "dark_jeans"
+        },
+        {
+          "role": "look_b",
+          "outerwear": "低饱和酒红色短款夹克",
+          "top_inner": "黑色贴身针织",
+          "bottom": "炭黑色高腰直筒长裤",
+          "shoes": "黑色短靴",
+          "outerwear_type": "cropped_jacket",
+          "bottom_type": "black_pants"
+        },
+        {
+          "role": "look_c",
+          "outerwear": "深海军蓝短款翻领呢外套",
+          "top_inner": "暖白色薄针织",
+          "bottom": "深灰色百褶中长裙",
+          "shoes": "黑色玛丽珍鞋",
+          "outerwear_type": "short_coat",
+          "bottom_type": "pleated_skirt"
+        },
+        {
+          "role": "look_d",
+          "outerwear": "深棕色短款皮质夹克",
+          "top_inner": "奶白色圆领针织",
+          "bottom": "中蓝色直筒牛仔中长裙",
+          "shoes": "黑色切尔西短靴",
+          "outerwear_type": "leather_jacket",
+          "bottom_type": "denim_skirt"
+        }
+      ]
+    },
+    {
+      "family_id": "old_town_photo",
+      "angle_zh": "古宫城墙拍照的衬景穿搭",
+      "scene_zh": "古城宫墙与石阶",
+      "palette_zh": "雾霾蓝、藕粉、米白、暖棕",
+      "background_color": "#E1DDD6",
+      "background_prompt": "均匀浅暖灰纯色背景",
+      "looks": [
+        {
+          "role": "look_a",
+          "outerwear": "雾霾蓝短款呢大衣",
+          "top_inner": "奶白色高领针织",
+          "bottom": "米白色高腰直筒长裤",
+          "shoes": "浅棕短靴",
+          "outerwear_type": "short_coat",
+          "bottom_type": "cream_pants"
+        },
+        {
+          "role": "look_b",
+          "outerwear": "藕粉色休闲西装",
+          "top_inner": "白色圆领针织",
+          "bottom": "中蓝色高腰阔腿牛仔裤",
+          "shoes": "米色玛丽珍鞋",
+          "outerwear_type": "casual_blazer",
+          "bottom_type": "wide_jeans"
+        },
+        {
+          "role": "look_c",
+          "outerwear": "暖棕色短款针织开衫",
+          "top_inner": "米白色贴身打底",
+          "bottom": "雾霾蓝A字长裙",
+          "shoes": "棕色乐福鞋",
+          "outerwear_type": "cardigan",
+          "bottom_type": "long_skirt"
+        },
+        {
+          "role": "look_d",
+          "outerwear": "浅灰花呢短款夹克",
+          "top_inner": "雾霾蓝圆领针织",
+          "bottom": "深灰色细褶中长裙",
+          "shoes": "黑色短靴",
+          "outerwear_type": "tweed_jacket",
+          "bottom_type": "pleated_skirt"
+        }
+      ]
+    },
+    {
+      "family_id": "seaside_stroll",
+      "angle_zh": "海边傍晚散步的防风穿搭",
+      "scene_zh": "傍晚海风步道",
+      "palette_zh": "米白、雾蓝、沙色、浅驼",
+      "background_color": "#E4E2DC",
+      "background_prompt": "均匀浅沙灰纯色背景",
+      "looks": [
+        {
+          "role": "look_a",
+          "outerwear": "米白色短款防风夹克",
+          "top_inner": "雾蓝色圆领针织",
+          "bottom": "中蓝色高腰直筒牛仔裤",
+          "shoes": "米白运动鞋",
+          "outerwear_type": "windbreaker",
+          "bottom_type": "straight_jeans"
+        },
+        {
+          "role": "look_b",
+          "outerwear": "浅驼色中长款风衣",
+          "top_inner": "白色薄针织",
+          "bottom": "暖白色高腰阔腿长裤",
+          "shoes": "浅棕色凉靴",
+          "outerwear_type": "trench",
+          "bottom_type": "linen_pants"
+        },
+        {
+          "role": "look_c",
+          "outerwear": "浅蓝色短款牛仔夹克",
+          "top_inner": "沙色圆领打底",
+          "bottom": "米白色A字长裙",
+          "shoes": "棕色平底凉鞋",
+          "outerwear_type": "denim_jacket",
+          "bottom_type": "long_skirt"
+        },
+        {
+          "role": "look_d",
+          "outerwear": "雾蓝色粗针短开衫",
+          "top_inner": "白色圆领打底",
+          "bottom": "沙色高腰直筒长裤",
+          "shoes": "米色乐福鞋",
+          "outerwear_type": "cardigan",
+          "bottom_type": "sand_pants"
+        }
+      ]
+    },
+    {
+      "family_id": "mountain_town",
+      "angle_zh": "山间小镇清晨的保暖穿搭",
+      "scene_zh": "山地小镇晨雾街道",
+      "palette_zh": "橄榄绿、燕麦、深棕、炭灰",
+      "background_color": "#DDD9CF",
+      "background_prompt": "均匀燕麦灰纯色背景",
+      "looks": [
+        {
+          "role": "look_a",
+          "outerwear": "燕麦色短款羊羔毛夹克",
+          "top_inner": "深棕色圆领针织",
+          "bottom": "深靛蓝高腰直筒牛仔裤",
+          "shoes": "棕色雪地短靴",
+          "outerwear_type": "sherpa_jacket",
+          "bottom_type": "straight_jeans"
+        },
+        {
+          "role": "look_b",
+          "outerwear": "橄榄绿短款羽绒马甲",
+          "top_inner": "奶白色连帽卫衣",
+          "bottom": "炭灰色高腰束脚长裤",
+          "shoes": "棕白运动鞋",
+          "outerwear_type": "puffer_vest",
+          "bottom_type": "jogger"
+        },
+        {
+          "role": "look_c",
+          "outerwear": "橄榄绿短款呢外套",
+          "top_inner": "燕麦色高领针织",
+          "bottom": "深棕色A字中长裙和厚连裤袜",
+          "shoes": "黑色短靴",
+          "outerwear_type": "short_coat",
+          "bottom_type": "brown_skirt"
+        },
+        {
+          "role": "look_d",
+          "outerwear": "深棕色短款摇粒绒外套",
+          "top_inner": "米白色圆领打底",
+          "bottom": "卡其色高腰工装长裤",
+          "shoes": "米色登山鞋",
+          "outerwear_type": "fleece_jacket",
+          "bottom_type": "cargo_pants"
+        }
+      ]
+    },
+    {
+      "family_id": "shopping_mall",
+      "angle_zh": "免税店商场购物日的室内外穿搭",
+      "scene_zh": "商场橱窗与免税店",
+      "palette_zh": "暖灰、奶白、黑、浅粉",
+      "background_color": "#E0DEDE",
+      "background_prompt": "均匀浅暖灰纯色背景",
+      "looks": [
+        {
+          "role": "look_a",
+          "outerwear": "暖灰色中长款宽松大衣",
+          "top_inner": "黑色薄高领针织",
+          "bottom": "黑色高腰直筒长裤",
+          "shoes": "黑色乐福鞋",
+          "outerwear_type": "long_coat",
+          "bottom_type": "black_pants"
+        },
+        {
+          "role": "look_b",
+          "outerwear": "奶白色短款休闲西装",
+          "top_inner": "浅粉色圆领针织",
+          "bottom": "中蓝色高腰直筒牛仔裤",
+          "shoes": "白色运动鞋",
+          "outerwear_type": "casual_blazer",
+          "bottom_type": "straight_jeans"
+        },
+        {
+          "role": "look_c",
+          "outerwear": "浅灰色短款飞行夹克",
+          "top_inner": "奶白色圆领针织",
+          "bottom": "暖白色A字中长裙",
+          "shoes": "黑白运动鞋",
+          "outerwear_type": "bomber",
+          "bottom_type": "white_skirt"
+        },
+        {
+          "role": "look_d",
+          "outerwear": "黑色短款金属扣针织外套",
+          "top_inner": "浅粉色圆领打底",
+          "bottom": "银灰色直筒中长裙",
+          "shoes": "黑色玛丽珍鞋",
+          "outerwear_type": "knit_jacket",
+          "bottom_type": "grey_skirt"
+        }
+      ]
+    }
+  ],
+  "planning_flow": "travel_two_step"
+}

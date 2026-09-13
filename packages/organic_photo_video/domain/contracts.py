@@ -696,6 +696,24 @@ CONTENT_RECIPE_SCHEMA_VERSION = "opv-content-recipe-v1"
 OUTFIT_PLAN_SCHEMA_VERSION = "opv-outfit-plan-v1"
 CONTENT_PACKAGE_SCHEMA_VERSION = "opv-content-package-v1"
 
+# --- Country-agnostic native-photo layer (VN scarf cross-market, Phase 2) ---
+# The v1 recipe hard-codes market/category/locale plus Thai labels inside the
+# travel contract.  The v2 recipe keeps the same executable business rules but
+# moves every locale/market binding out to Locale Packs, Market Packs and the
+# Destination Catalog, so one template can serve TH and VN unchanged.
+CONTENT_RECIPE_V2_SCHEMA_VERSION = "opv-content-recipe-v2"
+PHOTO_RECIPE_V2_SCHEMA_VERSION = "opv-photo-recipe-v2"
+LOCALE_PACK_SCHEMA_VERSION = "opv-photo-locale-pack-v1"
+DESTINATION_CATALOG_SCHEMA_VERSION = "opv-photo-destination-catalog-v1"
+PHOTO_EXECUTION_CONTEXT_SCHEMA_VERSION = "opv-photo-execution-context-v1"
+
+MARKET_POLICIES = ("MARKET_PACK_REQUIRED", "MARKET_OPTIONAL")
+LOCALE_LABEL_KINDS = ("travel_moments", "destinations", "temperature_bands", "generic")
+SNOW_SCENE_POLICIES = ("FORBIDDEN", "OPTIONAL_NOT_DEFAULT", "DEFAULT")
+# A destination catalog stores semantic facts only; publish language always
+# comes from the bound Locale Pack, never from the destination entry.
+DESTINATION_FORBIDDEN_KEYS = ("label", "labels", "locale", "name_localized", "copy")
+
 NARRATIVE_FUNCTIONS = ("HOOK", "CONTEXT", "TRANSFORMATION", "PROOF", "PAYOFF")
 
 # Product identity that recipes/themes/outfits may never change.
@@ -761,9 +779,252 @@ def validate_photo_recipe_spec_payload(payload: Mapping[str, Any]) -> List[str]:
     return errors
 
 
+def validate_locale_pack_payload(payload: Mapping[str, Any]) -> List[str]:
+    """Validate a Locale Pack: the only source of publish-language labels.
+
+    ``fallback_allowed`` must stay ``False``: a missing locale must fail loudly
+    instead of silently serving another language's copy to a market.
+    """
+    errors: List[str] = []
+    _check_schema_version(errors, payload, LOCALE_PACK_SCHEMA_VERSION)
+    _require_str(errors, payload, "locale_pack_id")
+    _require_locale(errors, payload, "locale")
+    _require_int(errors, payload, "locale_pack_version", minimum=1)
+    _require_enum(errors, payload, "status", ("draft", "active", "deprecated"))
+    if payload.get("fallback_allowed") is not False:
+        errors.append("fallback_allowed must be false; locale packs may not fall back silently")
+    labels = payload.get("labels")
+    if not _is_dict(labels):
+        errors.append("labels must be an object")
+        return errors
+    declared = 0
+    for kind in LOCALE_LABEL_KINDS:
+        block = labels.get(kind)
+        if not _is_dict(block):
+            errors.append(f"labels.{kind} must be an object")
+            continue
+        if block:
+            declared += 1
+        for key, value in block.items():
+            if not _is_str(key) or not str(key).strip():
+                errors.append(f"labels.{kind} keys must be non-empty strings")
+            if not _is_str(value) or not str(value).strip():
+                errors.append(f"labels.{kind}.{key} must be a non-empty string")
+    if not declared:
+        errors.append("labels must declare at least one locale label family")
+    # ``family_copy`` is the per-policy-family publish copy that the
+    # country-agnostic recipe v2 reads instead of the legacy ``*_th`` fields.
+    family_copy = payload.get("family_copy")
+    if family_copy is not None:
+        if not _is_dict(family_copy) or not family_copy:
+            errors.append("family_copy must be a non-empty object when present")
+        else:
+            for family_id, entry in family_copy.items():
+                if not _is_dict(entry):
+                    errors.append(f"family_copy.{family_id} must be an object")
+                    continue
+                for key in ("title", "cover", "caption"):
+                    if not _is_str(entry.get(key)) or not str(entry[key]).strip():
+                        errors.append(f"family_copy.{family_id}.{key} must be a non-empty string")
+                look_labels = entry.get("look_labels")
+                if look_labels is not None and (
+                        not _is_dict(look_labels) or not look_labels
+                        or any(not _is_str(value) or not str(value).strip()
+                               for value in look_labels.values())):
+                    errors.append(f"family_copy.{family_id}.look_labels must map roles to labels")
+    return errors
+
+
+def validate_destination_catalog_payload(payload: Mapping[str, Any]) -> List[str]:
+    """Validate a Destination Catalog: semantic travel facts, never copy."""
+    errors: List[str] = []
+    _check_schema_version(errors, payload, DESTINATION_CATALOG_SCHEMA_VERSION)
+    _require_str(errors, payload, "catalog_id")
+    _require_int(errors, payload, "catalog_version", minimum=1)
+    _require_enum(errors, payload, "status", ("draft", "active", "deprecated"))
+    _require_enum(errors, payload, "default_snow_scene_policy", SNOW_SCENE_POLICIES)
+    entries = payload.get("destinations")
+    if not _is_list(entries) or not entries:
+        errors.append("destinations must be a non-empty list")
+        return errors
+    seen: set = set()
+    for entry in entries:
+        if not _is_dict(entry):
+            errors.append("destination entry must be an object")
+            continue
+        destination_id = entry.get("destination_id")
+        if not _is_str(destination_id) or not str(destination_id).strip():
+            errors.append("destination_id must be a non-empty string")
+            label = "?"
+        else:
+            label = destination_id
+            if destination_id in seen:
+                errors.append(f"duplicate destination_id {destination_id}")
+            seen.add(destination_id)
+        for forbidden in DESTINATION_FORBIDDEN_KEYS:
+            if entry.get(forbidden) not in (None, "", {}, []):
+                errors.append(
+                    f"{label} must not store publish language ({forbidden}); "
+                    "language belongs to the Locale Pack"
+                )
+        _require_country(errors, entry, "destination_country")
+        _require_str(errors, entry, "destination_city")
+        _require_str(errors, entry, "climate_family")
+        for key in ("temperature_bands", "allowed_seasons", "travel_moments"):
+            values = entry.get(key)
+            if not _is_list(values) or not values:
+                errors.append(f"{label} {key} must be a non-empty list")
+            elif any(not _is_str(value) or not str(value).strip() for value in values):
+                errors.append(f"{label} {key} entries must be non-empty strings")
+        policy = entry.get("snow_scene_policy", "OPTIONAL_NOT_DEFAULT")
+        if policy not in SNOW_SCENE_POLICIES:
+            errors.append(f"{label} snow_scene_policy is invalid")
+        elif policy == "DEFAULT":
+            # Snow is opt-in only: a snow scene may default solely for an
+            # explicitly snow-typed destination, never for a cool/winter city.
+            climate = str(entry.get("climate_family") or "").lower()
+            if "snow" not in climate:
+                errors.append(
+                    f"{label} snow_scene_policy DEFAULT requires an explicit snow climate_family"
+                )
+    return errors
+
+
+def validate_photo_execution_context_payload(payload: Mapping[str, Any]) -> List[str]:
+    """Validate the frozen resolved execution snapshot (spec §4).
+
+    Every version, id and hash is frozen when the task is created; retries must
+    reuse the same snapshot, so an incomplete snapshot is a hard error.
+    """
+    errors: List[str] = []
+    _check_schema_version(errors, payload, PHOTO_EXECUTION_CONTEXT_SCHEMA_VERSION)
+    _require_dict(errors, payload, "recipe", non_empty=True)
+    recipe = payload.get("recipe") if _is_dict(payload.get("recipe")) else {}
+    _require_str(errors, recipe, "id")
+    _require_int(errors, recipe, "version", minimum=1)
+    _require_str(errors, recipe, "planning_flow")
+
+    _require_dict(errors, payload, "category", non_empty=True)
+    category = payload.get("category") if _is_dict(payload.get("category")) else {}
+    for key in ("key", "profile_id", "main_product_slot"):
+        _require_str(errors, category, key)
+    _require_int(errors, category, "profile_version", minimum=1)
+
+    _require_dict(errors, payload, "market", non_empty=True)
+    market = payload.get("market") if _is_dict(payload.get("market")) else {}
+    _require_country(errors, market, "country")
+    _require_str(errors, market, "market_pack_id")
+    _require_int(errors, market, "market_pack_version", minimum=1)
+
+    _require_dict(errors, payload, "locale", non_empty=True)
+    locale = payload.get("locale") if _is_dict(payload.get("locale")) else {}
+    _require_locale(errors, locale, "locale")
+    _require_str(errors, locale, "locale_pack_id")
+    _require_int(errors, locale, "locale_pack_version", minimum=1)
+    _require_str(errors, locale, "copy_pack_id")
+
+    destination = payload.get("destination")
+    if destination is not None:
+        if not _is_dict(destination):
+            errors.append("destination must be an object when present")
+        else:
+            _require_str(errors, destination, "destination_id")
+            _require_country(errors, destination, "destination_country")
+            _require_str(errors, destination, "destination_city")
+
+    reference = payload.get("reference")
+    if not _is_dict(reference):
+        errors.append("reference must be an object")
+    else:
+        _require_str(errors, reference, "mode")
+        _require_str(errors, reference, "input_fingerprint")
+        _require_list(errors, reference, "reference_hashes", non_empty=False)
+
+    product = payload.get("product")
+    if product is not None and not _is_dict(product):
+        errors.append("product must be an object when present")
+
+    persona = payload.get("persona")
+    if not _is_dict(persona):
+        errors.append("persona must be an object")
+    else:
+        _require_str(errors, persona, "persona_ref_id")
+        _require_str(errors, persona, "persona_pack_id")
+        _require_list(errors, persona, "reference_hashes", non_empty=False)
+    return errors
+
+
+def validate_photo_recipe_v2_spec_payload(payload: Mapping[str, Any]) -> List[str]:
+    """Validate the country-agnostic ``opv-photo-recipe-v2`` business rules.
+
+    v2 keeps every executable rule of v1 but forbids fixing a market, a category
+    or a locale inside the recipe: those bindings arrive from the Market Pack,
+    Category Adapter and Locale Pack at request time.
+    """
+    errors: List[str] = []
+    _check_schema_version(errors, payload, PHOTO_RECIPE_V2_SCHEMA_VERSION)
+    _require_enum(errors, payload, "media_kind", ("native_photo",))
+    _require_enum(errors, payload, "market_policy", MARKET_POLICIES)
+    _require_str(errors, payload, "planning_flow")
+    capabilities = payload.get("required_category_capabilities")
+    if (not _is_list(capabilities) or not capabilities
+            or any(not _is_str(value) or not str(value).strip() for value in capabilities)):
+        errors.append("required_category_capabilities must be a non-empty list of strings")
+    packs = payload.get("locale_copy_packs")
+    if not _is_dict(packs) or not packs:
+        errors.append("locale_copy_packs must map locales to copy pack ids")
+    else:
+        for locale, pack_id in packs.items():
+            if not _is_str(locale) or not _LOCALE_RE.match(str(locale)):
+                errors.append(f"locale_copy_packs key {locale!r} is not a supported locale")
+            if not _is_str(pack_id) or not str(pack_id).strip():
+                errors.append(f"locale_copy_packs[{locale!r}] must name a copy pack")
+
+    # Country-agnostic: a fixed market/category/locale silently re-creates the
+    # TH-only coupling this schema exists to remove.
+    for forbidden in ("markets", "category_key", "locale"):
+        if payload.get(forbidden) not in (None, "", [], {}):
+            errors.append(f"recipe v2 must not fix {forbidden}; bind it at request time")
+
+    _require_list(errors, payload, "theme_types", non_empty=True)
+    _require_list(errors, payload, "product_modes", non_empty=True)
+    for product_mode in payload.get("product_modes") or []:
+        if product_mode not in PRODUCT_MODES:
+            errors.append(
+                f"product_modes contains {product_mode!r}; expected one of {list(PRODUCT_MODES)}"
+            )
+    _require_dict(errors, payload, "variables_schema", non_empty=False)
+    from domain.photo_contracts import validate_execution_profiles
+    errors.extend(validate_execution_profiles(payload, require_profiles=False))
+    _require_str(errors, payload, "template_id")
+    _require_int(errors, payload, "template_version", minimum=1)
+    _require_dict(errors, payload, "visual_rules", non_empty=False)
+    asset_policy = payload.get("asset_policy")
+    if not _is_dict(asset_policy):
+        errors.append("asset_policy must be an object")
+    else:
+        _require_enum(errors, asset_policy, "default", PHOTO_ASSET_MODES)
+        _require_str(errors, asset_policy, "on_missing")
+
+    travel = payload.get("travel_contract")
+    if travel is not None:
+        if not _is_dict(travel):
+            errors.append("travel_contract must be an object")
+        else:
+            for key in ("destination_labels_th", "temperature_labels_th"):
+                if travel.get(key):
+                    errors.append(f"travel_contract v2 must not carry {key}; use the Locale Pack")
+            for moment in travel.get("moments") or []:
+                if _is_dict(moment) and moment.get("label_th"):
+                    errors.append("travel_contract v2 moments must not carry label_th; use the Locale Pack")
+    return errors
+
+
 def validate_content_recipe_payload(payload: Mapping[str, Any]) -> List[str]:
     errors: List[str] = []
-    _check_schema_version(errors, payload, CONTENT_RECIPE_SCHEMA_VERSION)
+    is_v2_recipe = payload.get("schema_version") == CONTENT_RECIPE_V2_SCHEMA_VERSION
+    if not is_v2_recipe:
+        _check_schema_version(errors, payload, CONTENT_RECIPE_SCHEMA_VERSION)
     _require_str(errors, payload, "recipe_id")
     _require_str(errors, payload, "recipe_key")
     _require_int(errors, payload, "recipe_version", minimum=1)
@@ -779,13 +1040,15 @@ def validate_content_recipe_payload(payload: Mapping[str, Any]) -> List[str]:
     recipe_spec = payload.get("recipe_spec")
     if recipe_spec is None:
         recipe_spec = payload.get("recipe_spec_json")
-    is_photo_recipe = (
-        _is_dict(recipe_spec)
-        and recipe_spec.get("schema_version") == PHOTO_RECIPE_SPEC_SCHEMA_VERSION
-    )
+    spec_schema = recipe_spec.get("schema_version") if _is_dict(recipe_spec) else None
+    is_photo_recipe = spec_schema in {
+        PHOTO_RECIPE_SPEC_SCHEMA_VERSION, PHOTO_RECIPE_V2_SCHEMA_VERSION,
+    }
     if recipe_spec is not None:
         if not _is_dict(recipe_spec):
             errors.append("recipe_spec must be an object")
+        elif spec_schema == PHOTO_RECIPE_V2_SCHEMA_VERSION:
+            errors.extend(validate_photo_recipe_v2_spec_payload(recipe_spec))
         else:
             errors.extend(validate_photo_recipe_spec_payload(recipe_spec))
     structure = payload.get("story_structure")
@@ -835,6 +1098,9 @@ def validate_content_recipe_payload(payload: Mapping[str, Any]) -> List[str]:
                 f"narrative functions must follow the {expected} arc, got {functions_seen}"
             )
     _require_dict(errors, payload, "copy_style")
+    if (is_v2_recipe and _is_dict(payload.get("copy_style"))
+            and str(payload["copy_style"].get("locale") or "").strip()):
+        errors.append("recipe v2 copy_style must not fix a locale; the Locale Pack owns it")
     _require_list(errors, payload, "suitable_topics", non_empty=True)
     if is_photo_recipe:
         if payload.get("render_profile_id") is not None:

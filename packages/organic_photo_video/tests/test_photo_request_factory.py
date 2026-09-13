@@ -212,7 +212,8 @@ class ShippedProfileTest(unittest.TestCase):
         recipes = [r for r in load_content_recipes() if r.recipe_id.startswith("PHOTO_")]
         # 2026-09-12: +1 dynamic-input recipe = daily thermal transition V1.
         # 2026-09-13: temperature-layering V2 retired (never deployed to RDS).
-        self.assertEqual(len(recipes), 13)
+        # 2026-09-13 (VN scarf Phase 2): +1 country-agnostic travel V3 canary.
+        self.assertEqual(len(recipes), 14)
         for recipe in recipes:
             with self.subTest(recipe=recipe.recipe_id):
                 self.assertEqual(validate_execution_profiles(recipe.recipe_spec_json), [])
@@ -223,8 +224,12 @@ class ShippedProfileTest(unittest.TestCase):
         result = preflight(PACKAGE_ROOT / "config")
         self.assertEqual(result["errors"], [])
         self.assertEqual(result["external_writes"], 0)
-        self.assertEqual(result["recipe_count"], 13)
-        self.assertEqual(result["profile_count"], 29)
+        # 2026-09-13 (VN scarf Phase 2): +1 country-agnostic travel V3 canary,
+        # which adds one execution profile and no market binding yet.
+        self.assertEqual(result["recipe_count"], 14)
+        self.assertEqual(result["profile_count"], 30)
+        self.assertEqual(result["canary_market_unbound"], ["PHOTO_TRAVEL_OUTFIT_V3"])
+        self.assertNotIn("PHOTO_TRAVEL_OUTFIT_V3", result["needs_asset"])
         self.assertIn("PHOTO_MX_FACE_SHAPE_MATCH_V1", result["needs_asset"])
         # The MX wig recipe ships without a seeded MX_WIG_CHOICE_GEN set;
         # per-row supply generates and qualifies its assets, so it lands in

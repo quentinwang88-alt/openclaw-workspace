@@ -47,15 +47,21 @@ def resolve_photo_copy(copy_block: Mapping[str, Any], *, assets: Sequence[Mappin
 
 
 def fill_travel_copy_tokens(text: str, *, travel_contract: Mapping[str, Any],
-                            variables: Mapping[str, Any]) -> str:
-    """Fill audited template tokens ({destination}/{temperature}) from contract labels."""
-    destination = str((travel_contract.get("destination_labels_th") or {}).get(
-        str(variables.get("destination") or ""), ""))
-    temperature = str((travel_contract.get("temperature_labels_th") or {}).get(
-        str(variables.get("temperature_band") or ""), ""))
+                            variables: Mapping[str, Any],
+                            locale_pack: Mapping[str, Any] | None = None) -> str:
+    """Fill audited template tokens ({destination}/{temperature}) from contract labels.
+
+    ``locale_pack=None`` keeps the legacy inline TH contract labels (byte-identical
+    to the pre-Phase-2 baseline); a bound Locale Pack supplies them instead, so the
+    country-agnostic recipe v2 never reads a ``_th`` field.
+    """
+    from services.photo_locale import travel_copy_tokens
+    token_values = travel_copy_tokens(
+        variables, travel_contract=travel_contract, locale_pack=locale_pack,
+    )
     return fill_contract_copy_tokens(
         text,
-        token_values={"destination": destination, "temperature": temperature},
+        token_values=token_values,
         contract_label="旅行",
     )
 
@@ -101,16 +107,15 @@ def fill_contract_copy_tokens(
     return filled
 
 
-def contract_copy_tokens(recipe_spec: Mapping[str, Any], variables: Mapping[str, Any]) -> dict[str, str]:
+def contract_copy_tokens(recipe_spec: Mapping[str, Any], variables: Mapping[str, Any],
+                         locale_pack: Mapping[str, Any] | None = None) -> dict[str, str]:
     """Resolve localized tokens from a Recipe-owned executable contract."""
     travel = dict(recipe_spec.get("travel_contract") or {})
     if travel:
-        return {
-            "destination": str((travel.get("destination_labels_th") or {}).get(
-                str(variables.get("destination") or ""), "")),
-            "temperature": str((travel.get("temperature_labels_th") or {}).get(
-                str(variables.get("temperature_band") or ""), "")),
-        }
+        from services.photo_locale import travel_copy_tokens
+        return travel_copy_tokens(
+            variables, travel_contract=travel, locale_pack=locale_pack,
+        )
     transition = dict(recipe_spec.get("thermal_transition_contract") or {})
     if transition:
         return _thermal_transition_copy_tokens(transition, variables)

@@ -17,6 +17,7 @@ if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
 from config.loader import load_board_layouts, load_content_recipes, load_categories
+from domain.contracts import PHOTO_RECIPE_V2_SCHEMA_VERSION
 from domain.models import AssetSet
 from domain.photo_contracts import validate_execution_profiles
 from services.asset_set_service import AssetSetService
@@ -34,7 +35,7 @@ class LocalAssetRepository:
 
 def preflight(config_dir: Path, *, verify_files: bool = False,
               recipe_ids=None) -> dict:
-    result = {"mode": "read_only", "external_writes": 0, "errors": [], "recipes": [], "needs_asset": [], "dynamic_input_required": [], "needs_content": []}
+    result = {"mode": "read_only", "external_writes": 0, "errors": [], "recipes": [], "needs_asset": [], "dynamic_input_required": [], "needs_content": [], "canary_market_unbound": []}
     try:
         recipes = [r for r in load_content_recipes(config_dir / "recipes")
                    if r.recipe_spec_json.get("media_kind") == "native_photo"]
@@ -76,18 +77,50 @@ def preflight(config_dir: Path, *, verify_files: bool = False,
     for recipe in recipes:
         spec = recipe.recipe_spec_json
         errors = validate_execution_profiles(spec)
-        if spec.get("category_key") not in categories:
+        # A country-agnostic recipe v2 keeps ``market_policy``,
+        # MARKET_PACK_REQUIRED: market and category are bound at request time, so
+        # the seed-time preflight verifies the declared capabilities against the
+        # shipped Category Adapters instead of a fixed ``category_key``.
+        is_v2 = str(spec.get("schema_version") or "") == PHOTO_RECIPE_V2_SCHEMA_VERSION
+        if is_v2:
+            from services.photo_category_registry import (
+                get_photo_category_adapter, registered_category_keys,
+            )
+            available_capabilities = {
+                capability
+                for key in registered_category_keys()
+                for capability in get_photo_category_adapter(key).capabilities
+            }
+            missing_capabilities = sorted(
+                set(spec.get("required_category_capabilities") or []) - available_capabilities
+            )
+            if missing_capabilities:
+                errors.append(
+                    "no shipped category provides " + ", ".join(missing_capabilities)
+                )
+        elif spec.get("category_key") not in categories:
             errors.append("category is missing")
         layout = layouts.get(spec.get("template_id"))
         if layout is None or layout.get("layout_version") != spec.get("template_version"):
             errors.append("layout version is missing or incompatible")
         report = {"recipe_id": recipe.recipe_id, "recipe_status": recipe.status, "profiles": [], "ready_profile_count": 0}
+        markets = list(spec.get("markets") or [])
         for profile in spec.get("execution_profiles") or []:
             if errors:
                 break
+            if not markets:
+                # Canary: there is no market binding to resolve assets against
+                # yet, so the profile is reported and left out of needs_asset.
+                report["profiles"].append({
+                    "profile_id": profile["profile_id"],
+                    "copy_variant_count": len(profile.get("copy_variants") or []),
+                    "matches": {},
+                    "status": "CANARY_MARKET_UNBOUND",
+                })
+                continue
             matches = {}
             render_candidates = []
-            for market in spec["markets"]:
+            for market in markets:
                 try:
                     candidates = selector.candidates(category_key=spec["category_key"], market=market,
                         tags={key: profile["variables"][key] for key in spec["asset_match_keys"] if key in profile["variables"]},
@@ -138,11 +171,16 @@ def preflight(config_dir: Path, *, verify_files: bool = False,
                 except Exception as exc:
                     errors.append(f"profile {profile['profile_id']} overlay: {exc}")
         if not report["ready_profile_count"]:
-            from services.photo_content_planner import recipe_has_planning_policy
-            target = (result["dynamic_input_required"]
-                      if recipe.status == "active" and recipe_has_planning_policy(recipe.recipe_id)
-                      else result["needs_asset"])
-            target.append(recipe.recipe_id)
+            if is_v2:
+                # A canary recipe has no live market binding yet; it must not
+                # pollute the actionable needs_asset queue.
+                result["canary_market_unbound"].append(recipe.recipe_id)
+            else:
+                from services.photo_content_planner import recipe_has_planning_policy
+                target = (result["dynamic_input_required"]
+                          if recipe.status == "active" and recipe_has_planning_policy(recipe.recipe_id)
+                          else result["needs_asset"])
+                target.append(recipe.recipe_id)
         result["errors"].extend(f"{recipe.recipe_id}: {error}" for error in errors)
         result["recipes"].append(report)
     result["recipe_count"] = len(recipes)
