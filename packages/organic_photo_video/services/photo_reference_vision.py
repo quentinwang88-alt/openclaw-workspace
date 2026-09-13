@@ -316,6 +316,32 @@ def _normalize_outfit_aesthetic(raw: Any) -> Dict[str, Any]:
     return aesthetic
 
 
+def _travel_copy_template(
+    locale_pack: Mapping[str, Any] | None, index: int,
+    travel_topic: Mapping[str, Any] | None, topic_zh: str = "",
+) -> Dict[str, Any]:
+    """Template used when the model's publish copy fails the language check.
+
+    Review fix (2026-09-13), P0-2: with a Locale Pack bound the degraded copy is
+    authored in the pack's own publish language, so a VN task can never fall
+    back to Thai.  With no pack bound this reproduces the legacy inline Thai
+    template byte-for-byte, so TH V2 degradation is unchanged.
+    """
+    from services.photo_locale import travel_copy_template
+    localized = travel_copy_template(locale_pack, index, topic_zh=topic_zh)
+    if localized is not None:
+        return localized
+    fallback = dict((travel_topic or {}).get("thai_fallback") or {})
+    return {
+        "title": str(fallback.get("title") or "4 ลุคทริป"),
+        "cover": str(fallback.get("cover") or topic_zh or "ลุคทริป"),
+        "caption": str(fallback.get("caption") or ""),
+        "cta": str(fallback.get("cta") or "คุณชอบลุคไหน?"),
+        "look_label": "ลุค {letter}",
+        "hashtags": [str(v) for v in fallback.get("hashtags") or []],
+    }
+
+
 class PhotoReferenceVisionService:
     def __init__(self, *, root: Path, client: Any = None):
         self.root = Path(root)
@@ -708,7 +734,8 @@ class PhotoReferenceVisionService:
         product_context: Mapping[str, Any] = None,
         reference_paths: Sequence[str] = (),
         product_reference_paths: Sequence[str] = (),
-    ) -> dict[str, Any]:
+        locale_pack: Mapping[str, Any] = None,
+    ) -> Dict[str, Any]:
         """Step 2: recipe-bound travel plan; strongly validated with one auto-revise.
 
         ``travel_topic``（地点+六类主题）present = new-theme branch: the four
@@ -768,7 +795,7 @@ class PhotoReferenceVisionService:
         plan, errors = self._normalize_travel_plan(
             raw, travel_contract, count, background_features=background_features,
             travel_topic=topic, outfit_reference_indices=outfit_reference_indices,
-            product_context=product_context)
+            product_context=product_context, locale_pack=locale_pack)
         if errors:
             revise_prompt = base_prompt + "\n\n上一次输出存在以下结构错误，必须全部修正后重新输出完整 JSON：\n- " + "\n- ".join(errors)
             response, model_routing = self._travel_planning_chat(
@@ -889,6 +916,16 @@ class PhotoReferenceVisionService:
                 not Path(value).is_file() for value in references + generated):
             raise PhotoReferenceVisionError("旅行语义质检缺少图片")
         contract = dict(travel_contract or {})
+        # 类目适配器声明本类目的逐项商品质检字段（review 修复 P0-3）。未注册
+        # 类目或 womenswear（qa_fields 为空）时全部退化为历史行为。
+        from services.photo_category_registry import adapter_for_product_category
+        adapter = adapter_for_product_category(
+            dict(product_context or {}).get("category"))
+        qa_fields = tuple(getattr(adapter, "qa_fields", ()) or ())
+        qa_rules = tuple(getattr(adapter, "qa_rules", ()) or ())
+        base_outfit_keys = ("outerwear", "top_inner", "bottom", "shoes")
+        main_slot = str(getattr(adapter, "main_product_slot", "") or "")
+        extra_slots = (main_slot,) if main_slot and main_slot not in base_outfit_keys else ()
         page_plans = []
         for look in look_plans:
             page_plans.append({
@@ -899,7 +936,7 @@ class PhotoReferenceVisionService:
                 "footwear_type": str(look.get("footwear_type") or ""),
                 "outfit": {
                     key: str(look.get(key) or "")
-                    for key in ("outerwear", "top_inner", "bottom", "shoes")
+                    for key in base_outfit_keys + extra_slots
                 },
             })
         prompt = self._travel_qa_prompt(
@@ -908,6 +945,7 @@ class PhotoReferenceVisionService:
             style_reference_count=len(style_references),
             image_count=len(generated), persona_based=persona_based,
             product_context=dict(product_context or {}), travel_place=travel_place,
+            qa_fields=qa_fields, qa_rules=qa_rules,
         )
         response, _ = self._chat(
             self._model_images(references + generated), prompt, max_tokens=2600,
@@ -920,6 +958,7 @@ class PhotoReferenceVisionService:
                 moment_rules=moment_rules_from_contract(contract),
                 footwear_types=FOOTWEAR_TYPES,
                 has_product=bool(product_context), travel_place=travel_place,
+                product_qa_fields=qa_fields,
             )
         except TravelSemanticQAError as first_error:
             retry_prompt = (
@@ -940,6 +979,7 @@ class PhotoReferenceVisionService:
                     moment_rules=moment_rules_from_contract(contract),
                     footwear_types=FOOTWEAR_TYPES,
                     has_product=bool(product_context), travel_place=travel_place,
+                    product_qa_fields=qa_fields,
                 )
             except TravelSemanticQAError as second_error:
                 raise PhotoReferenceVisionError(
@@ -1648,6 +1688,9 @@ class PhotoReferenceVisionService:
                 caption = str(copy_block.get("caption") or "").strip()
                 hashtags = [str(v) for v in copy_block.get("hashtags") or []]
                 slide_texts = [str(v).strip() for v in copy_block.get("slide_texts") or []]
+                # 发布语言纯度按绑定的 Locale Pack 判定；未绑定时仍是 th-TH
+                # 契约，TH V2 行为逐字不变（review 修复 P0-2）。
+                copy_locale = str((locale_pack or {}).get("locale") or "") or "th-TH"
                 copy_valid = bool(
                     title and caption and len(slide_texts) == 5 and all(slide_texts)
                     and not copy_locale_issues({
@@ -1655,27 +1698,29 @@ class PhotoReferenceVisionService:
                         "caption": caption,
                         "hashtags": hashtags,
                         "slide_texts": slide_texts,
-                    }, "th-TH")
+                    }, copy_locale)
                 )
                 if not copy_valid:
-                    # 方案 §7.3：文案结构无效→同主题泰语模板降级，
-                    # 不阻塞规划与生图；单页说明缺失退化为 Look 名称。
-                    fallback = dict(travel_topic.get("thai_fallback") or {})
-                    labels_th = [
-                        str(look.get("display_label") or f"ลุค {letter}")
+                    # 方案 §7.3：文案结构无效→同语言模板降级，不阻塞规划与生图；
+                    # 单页说明缺失退化为 Look 名称。绑定 Locale Pack 时模板取自
+                    # 该发布语言自身，未绑定时沿用主题内联泰语模板。
+                    template = _travel_copy_template(
+                        locale_pack, post_index, travel_topic, topic_zh)
+                    look_label = str(template.get("look_label") or "{letter}")
+                    localized_labels = [
+                        str(look.get("display_label") or look_label.replace("{letter}", letter))
                         for look, letter in zip(normalized_looks, "ABCD")
                     ]
-                    cta = str(fallback.get("cta") or "คุณชอบลุคไหน?")
                     slide_texts = [
-                        str(fallback.get("cover") or topic_zh or "ลุคทริป"),
-                        f"A · {labels_th[0]}",
-                        f"B · {labels_th[1]}",
-                        f"C · {labels_th[2]}",
-                        f"D · {labels_th[3]}\n{cta}",
+                        str(template.get("cover") or ""),
+                        f"A · {localized_labels[0]}",
+                        f"B · {localized_labels[1]}",
+                        f"C · {localized_labels[2]}",
+                        f"D · {localized_labels[3]}\n{str(template.get('cta') or '')}",
                     ]
-                    title = title or str(fallback.get("title") or "4 ลุคทริป")
-                    caption = caption or str(fallback.get("caption") or "")
-                    hashtags = hashtags or [str(v) for v in fallback.get("hashtags") or []]
+                    title = title or str(template.get("title") or "")
+                    caption = caption or str(template.get("caption") or "")
+                    hashtags = hashtags or [str(v) for v in template.get("hashtags") or []]
                     post["copy_degraded"] = True
                 if place:
                     if not place_localized:
@@ -1939,7 +1984,7 @@ pages 必须完整覆盖且只覆盖 {list(roles)}，不得输出 Markdown。"""
     def _travel_qa_prompt(*, page_plans, reference_count, image_count,
                           product_reference_count=0, style_reference_count=0,
                           product_context=None, travel_place="",
-                          persona_based=False):
+                          persona_based=False, qa_fields=(), qa_rules=()):
         plans_text = json.dumps(page_plans, ensure_ascii=False, indent=1)
         footwear_enum = "、".join(FOOTWEAR_TYPES)
         identity_clause = (
@@ -1956,12 +2001,30 @@ pages 必须完整覆盖且只覆盖 {list(roles)}，不得输出 Markdown。"""
             if product_reference_count else
             f"前 {reference_count} 张是环境、穿搭或画面风格参考，只提供对应职责的灵感。"
         )
+        # 类目声明的逐项商品质检字段（review 修复 P0-3）。womenswear 的
+        # qa_fields 为空，下面两项都退化为空串，提示词与历史逐字一致。
+        extra_fields = [
+            str(name) for name in qa_fields
+            if name not in {"role", "product_matches", "repair_instruction"}
+        ]
+        extra_json = "".join(f'"{name}":true,' for name in extra_fields)
+        extra_rules = ""
+        if extra_fields:
+            extra_rules = (
+                "\n【指定商品逐项判定】以下每个字段都必须是真正的布尔值，"
+                "任一为 false 即判定该页失败，不得按 MINOR 放行，"
+                "并在 repair_instruction 写明具体修复要求：\n"
+                + "\n".join(f"- {rule}" for rule in qa_rules)
+                + "\n- 本类目的指定商品必须完整出现在画面中；缺失、被遮挡占比过小、"
+                  "主色或图案家族不符、边缘或流苏结构错误、长度体积感明显变化、"
+                  "遮挡人物面部，一律按失败处理。"
+            )
         return f"""你是旅行图文逐页语义质检员。{product_clause}后 {image_count} 张是按顺序对应下列页面计划的生成图。穿搭灵感不要求同款。
 指定商品：{json.dumps(dict(product_context or {}), ensure_ascii=False) if product_context else '无'}
 指定旅行地点：{travel_place or '无具体地点'}
 【页面计划（按生成图顺序）】{plans_text}{identity_clause}
 逐页检查并只返回 JSON（本阶段图片没有叠加文字，不要评价标题或文字渲染）：
-{{"pages":[{{"role":"look_a","observed_moment":"airport_departure 或枚举 key；看不清就写 unknown","scene_evidence":["画面中实际看见的证据，逐条中文短语"],"product_matches":true,"outfit_matches":true,"outfit_severity":"NONE","weather_matches":true,"mobility_matches":true,"observed_footwear_type":"SNEAKER","person_flags":{{"face_or_limb_deformity":false,"obvious_unnatural_tilt":false,"similar_fixed_smile":false,"similar_gaze":false,"similar_head_pose":false}},"repair_instruction":"中文修复要求，未通过时必填"}}],"style_uniform":true,"destination_conflict":false,"destination_evidence":["画面可见的地点证据"],"notes":"中文简述"}}
+{{"pages":[{{"role":"look_a","observed_moment":"airport_departure 或枚举 key；看不清就写 unknown","scene_evidence":["画面中实际看见的证据，逐条中文短语"],"product_matches":true,{extra_json}"outfit_matches":true,"outfit_severity":"NONE","weather_matches":true,"mobility_matches":true,"observed_footwear_type":"SNEAKER","person_flags":{{"face_or_limb_deformity":false,"obvious_unnatural_tilt":false,"similar_fixed_smile":false,"similar_gaze":false,"similar_head_pose":false}},"repair_instruction":"中文修复要求，未通过时必填"}}],"style_uniform":true,"destination_conflict":false,"destination_evidence":["画面可见的地点证据"],"notes":"中文简述"}}
 person_flags 说明（只报告明显情况，轻微偏差一律 false）：face_or_limb_deformity=明显脸部或肢体畸形；obvious_unnatural_tilt=明显不自然的头部倾斜（轻微歪头算 false）；similar_fixed_smile/similar_gaze/similar_head_pose=该页与另一页出现明显相似的表情/视线/头姿。
 判定要求：
 - observed_moment 只能使用页面计划里出现过的 travel_moment 枚举 key，无法判断必须写 unknown；
@@ -1972,7 +2035,7 @@ person_flags 说明（只报告明显情况，轻微偏差一律 false）：face
 - mobility_matches：鞋履是否适合该场景的步行强度（高步行场景出现细跟鞋应为 false）；observed_footwear_type 从枚举中选最接近的：{footwear_enum}；
 - repair_instruction：未通过时必须给出具体修复要求；
 - style_uniform：只有四页人物明显换人，或照片风格彻底改变（例如其中一页变成插画）才为 false；室内外、白天傍晚、背景颜色及自然光线差异都应为 true；
-- destination_conflict：只有出现与指定地点明显矛盾的地标，或同组混入两个不可能共存的目的地时才为 true；没有地标、室内场景或普通街道不能判冲突。"""
+- destination_conflict：只有出现与指定地点明显矛盾的地标，或同组混入两个不可能共存的目的地时才为 true；没有地标、室内场景或普通街道不能判冲突。{extra_rules}"""
 
     def _normalize_contract(
         self, raw, source_hashes, content_requirement, count,

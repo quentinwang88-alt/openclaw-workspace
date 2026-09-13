@@ -12,6 +12,10 @@ from domain.photo_contracts import validate_copy, validate_execution_profiles, v
 from services.asset_set_service import AssetSetService, AssetSetError, validate_asset_set
 from services.photo_copy import contract_copy_tokens, resolve_photo_copy
 from services.photo_content import freeze_content_card
+from services.photo_recipe_contract import (
+    category_binding_errors, is_v2_recipe, market_binding_errors,
+    product_mode_errors,
+)
 from services.photo_wig_flow import recipe_is_mx_wig_choice, request_is_mx_wig_choice
 
 
@@ -46,9 +50,31 @@ def validate_frozen_request(request: Mapping[str, Any]) -> None:
     )
     if errors:
         raise PhotoRequestError("; ".join(errors))
-    if (recipe.recipe_id != request.get("recipe_id")
-            or request.get("category_key") != recipe.recipe_spec_json.get("category_key")
-            or request.get("market") not in recipe.recipe_spec_json.get("markets", [])
+    spec = recipe.recipe_spec_json or {}
+    if is_v2_recipe(spec):
+        # Country-agnostic recipes deliberately carry no ``category_key`` and no
+        # ``markets``; re-checking them as literals would reject every v2 Recipe.
+        # The binding is capability + market_policy instead (review fix P0-1).
+        identity_errors = category_binding_errors(
+            spec, category_key=str(request.get("category_key") or ""),
+            recipe_id=recipe.recipe_id)
+        if not str(spec.get("market_policy") or ""):
+            identity_errors.append(
+                f"{recipe.recipe_id}: v2 recipe must declare market_policy")
+        if not str(request.get("market") or ""):
+            identity_errors.append("frozen market is missing")
+        if not str(request.get("locale") or ""):
+            identity_errors.append("frozen locale is missing")
+        if recipe.recipe_id != request.get("recipe_id"):
+            identity_errors.append("frozen recipe id does not match request")
+        if request.get("asset_set_id") != request["asset_snapshot"]["asset_set_id"]:
+            identity_errors.append("frozen asset set id does not match request")
+        if identity_errors:
+            raise PhotoRequestError(
+                "frozen photo request identity mismatch: " + "; ".join(identity_errors))
+    elif (recipe.recipe_id != request.get("recipe_id")
+            or request.get("category_key") != spec.get("category_key")
+            or request.get("market") not in spec.get("markets", [])
             or request.get("asset_set_id") != request["asset_snapshot"]["asset_set_id"]):
         raise PhotoRequestError("frozen photo request identity mismatch")
 
@@ -115,6 +141,56 @@ def apply_travel_single_cover(
     return result
 
 
+def _bound_locale_pack(recipe_spec: Mapping[str, Any], locale: str):
+    """The Locale Pack that owns this request's publish language, or ``None``.
+
+    Only a country-agnostic recipe (one that declares ``locale_copy_packs``)
+    binds a pack.  A v1 recipe keeps reading its own inline Thai tables, so
+    TH V2 output is byte-identical (review fix P0-2).
+
+    The frozen copy already picks its variants per locale (``_localized_variants``);
+    this closes the *other* half — the audited ``{destination}``/``{temperature}``
+    tokens, which ``contract_copy_tokens`` otherwise resolves from the legacy
+    inline Thai tables and would silently blank out for a country-agnostic
+    recipe.  A missing pack is fatal rather than silently empty: an empty
+    destination in published copy is as wrong as a Thai one.
+    """
+    packs = dict((recipe_spec or {}).get("locale_copy_packs") or {})
+    if not packs:
+        return None
+    from config.loader import resolve_locale_pack
+    pack = resolve_locale_pack(str(locale or ""))
+    if pack is None:
+        raise PhotoRequestError(
+            "找不到发布语言对应的 Locale Pack：" + (str(locale or "") or "（空）")
+        )
+    return pack
+
+
+def _localized_variants(profile: Mapping[str, Any], locale: str) -> list:
+    """Copy variants for the request's publish language.
+
+    A country-agnostic recipe loads one copy pack per locale.  ``config.loader``
+    also writes the sorted-first locale into ``copy_variants`` for readers that
+    predate the split — which is Thai whenever ``th-TH`` is present.  Choosing
+    the request's own language is therefore mandatory, or a VN task would freeze
+    Thai copy (review fix P0-2).
+
+    A locale-bound profile that lacks the requested language fails loudly rather
+    than silently serving another language's copy.
+    """
+    by_locale = profile.get("copy_variants_by_locale")
+    if isinstance(by_locale, Mapping) and locale:
+        entry = by_locale.get(locale)
+        if isinstance(entry, Mapping) and entry.get("copy_variants"):
+            return list(entry["copy_variants"])
+        raise PhotoRequestError(
+            "文案包没有请求的发布语言 " + locale + "；可用语言："
+            + ", ".join(sorted(str(key) for key in by_locale))
+        )
+    return list(profile["copy_variants"])
+
+
 class PhotoRequestFactory:
     def __init__(self, repository: Any, *, layouts: Sequence[Mapping[str, Any]]):
         self.repository = repository
@@ -153,9 +229,21 @@ class PhotoRequestFactory:
             errors = validate_execution_profiles(recipe_spec)
             if errors:
                 raise PhotoRequestError(f"{spec.recipe_id}: " + "; ".join(errors))
-            if (recipe_spec.get("category_key") != category_key or spec.market not in recipe_spec.get("markets", [])
-                    or product_mode not in recipe_spec.get("product_modes", [])):
-                raise PhotoRequestError("preset market/category/product mode does not match Recipe")
+            binding_errors = category_binding_errors(
+                recipe_spec, category_key=category_key, recipe_id=spec.recipe_id)
+            binding_errors += market_binding_errors(
+                recipe_spec, market=spec.market, locale=spec.language,
+                repository=self.repository, account_id=spec.account_id)
+            binding_errors += product_mode_errors(
+                recipe_spec, product_mode=product_mode)
+            if binding_errors:
+                raise PhotoRequestError(
+                    "preset market/category/product mode does not match Recipe: "
+                    + "; ".join(binding_errors))
+            # Country-agnostic copy is language-owned end to end: variants *and*
+            # the audited travel tokens must come from the same Locale Pack, or a
+            # VN request would freeze Thai (or empty) text (review fix P0-2).
+            locale_pack = _bound_locale_pack(recipe_spec, str(spec.language or ""))
             layout = self.layouts.get(str(recipe_spec.get("template_id") or ""))
             if not layout or int(layout.get("layout_version") or layout.get("template_version") or 0) != recipe_spec.get("template_version"):
                 raise PhotoRequestError("Recipe layout is missing or version mismatched")
@@ -225,10 +313,11 @@ class PhotoRequestFactory:
                     available_signatures.add(signature)
                     if signature in used or signature in reserved:
                         continue
-                    for variant in profile["copy_variants"]:
+                    for variant in _localized_variants(profile, str(spec.language or "")):
                         copy_block = {**copy.deepcopy(variant["copy"]), **dict(override.get("copy") or {})}
                         try:
-                            extra_tokens = contract_copy_tokens(recipe_spec, variables)
+                            extra_tokens = contract_copy_tokens(
+                                recipe_spec, variables, locale_pack=locale_pack)
                         except ValueError as exc:
                             raise PhotoRequestError(str(exc)) from exc
                         try:

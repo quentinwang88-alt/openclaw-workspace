@@ -14,6 +14,10 @@ from services.asset_set_service import AssetSetService
 from services.photo_copy import resolve_photo_copy
 from services.locale_quality import copy_locale_issues
 from services.photo_content import freeze_content_card
+from services.photo_recipe_contract import (
+    category_binding_errors, is_supported_photo_recipe, is_v2_recipe,
+    market_binding_errors, product_mode_errors,
+)
 from services.photo_wig_flow import recipe_is_mx_wig_choice
 from services.content_package import ContentPackageService
 from services.workflow_v2 import RevisionService
@@ -73,14 +77,30 @@ class PhotoReusePlannerService:
         if recipe.recipe_id != recipe_id:
             raise PhotoPlannerError("frozen recipe id does not match request")
         spec = dict(recipe.recipe_spec_json or {})
-        if spec.get("schema_version") != "opv-photo-recipe-v1":
+        if not is_supported_photo_recipe(spec):
             raise PhotoPlannerError("recipe is not a native-photo recipe")
-        if spec.get("category_key") != task.category_key:
-            raise PhotoPlannerError("recipe category does not match task")
-        if task.target_country not in (spec.get("markets") or []):
-            raise PhotoPlannerError("recipe does not support the task market")
-        if task.product_mode not in (spec.get("product_modes") or []):
-            raise PhotoPlannerError("recipe does not support the task product mode")
+        market_pack = None
+        if is_v2_recipe(spec):
+            # A country-agnostic recipe defers its market to the Market Pack, so
+            # the pack must exist before anything else is validated.  Review fix
+            # P0-1: a draft pack is not producible, and silence here would let a
+            # recipe look market-independent when it is not.
+            pack_id = str(getattr(task, "market_pack_id", "") or "")
+            if not pack_id:
+                raise PhotoPlannerError("MARKET_PACK_REQUIRED: 任务未绑定 Market Pack")
+            market_pack = self.repository.get_market_pack(pack_id)
+            if market_pack is None:
+                raise PhotoPlannerError(
+                    f"MARKET_PACK_REQUIRED: Market Pack 不存在：{pack_id}")
+        binding_errors = category_binding_errors(
+            spec, category_key=task.category_key, recipe_id=recipe.recipe_id)
+        binding_errors += market_binding_errors(
+            spec, market=task.target_country, locale=task.target_locale,
+            market_pack=market_pack)
+        binding_errors += product_mode_errors(
+            spec, product_mode=task.product_mode)
+        if binding_errors:
+            raise PhotoPlannerError("; ".join(binding_errors))
         self._validate_variables(spec.get("variables_schema") or {}, variables)
         template_id = str(layout.get("template_id") or layout.get("layout_id") or "")
         template_version = int(layout.get("template_version") or layout.get("layout_version") or 0)

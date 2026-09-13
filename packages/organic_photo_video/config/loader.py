@@ -216,6 +216,26 @@ def load_locale_packs(directory: Path = LOCALE_DIR) -> List[Dict[str, Any]]:
     return [load_locale_pack_file(path) for path in sorted(directory.glob("*.json"))]
 
 
+def resolve_locale_pack(
+    locale: str, directory: Path = LOCALE_DIR,
+) -> Optional[Dict[str, Any]]:
+    """Return the Locale Pack that owns one publish language, or ``None``.
+
+    Publish labels and family copy are language-owned, so a task can only be
+    planned in a language a pack actually covers.  This never guesses a
+    fallback: the caller decides whether a missing pack is fatal, which is how a
+    country-agnostic recipe stays honest about the language it will publish in
+    (review fix P0-2).
+    """
+    wanted = str(locale or "").strip()
+    if not wanted:
+        return None
+    for pack in load_locale_packs(directory):
+        if str(pack.get("locale") or "") == wanted:
+            return pack
+    return None
+
+
 def load_destination_catalog_file(path: Path) -> Dict[str, Any]:
     payload = _load_json(Path(path))
     contracts.ensure_valid(

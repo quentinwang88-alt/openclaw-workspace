@@ -32,6 +32,35 @@ FOOTWEAR_TYPES = (
     "LOW_HEEL", "HIGH_HEEL", "STILETTO", "SANDAL",
 )
 
+#: Category-declared product fields whose ``false`` is a deterministic failure.
+#:
+#: Review fix (2026-09-13), P0-3.  ``SCARF_QA_FIELDS`` was a declarable contract
+#: with no runtime consumer, so a missing / obscured / restructured scarf was
+#: only ever visible through the generic ``product_matches`` boolean — while the
+#: prompt actively told the model that a missing 配饰 counts as MINOR.  Every
+#: field listed here blocks instead, and never degrades to a warning.
+PRODUCT_QA_FAILURE_FIELDS = {
+    "product_present": FAILURE_OUTFIT_MISMATCH,
+    "visibility_sufficient": FAILURE_OUTFIT_MISMATCH,
+    "dominant_color_matches": FAILURE_OUTFIT_MISMATCH,
+    "pattern_family_matches": FAILURE_OUTFIT_MISMATCH,
+    "edge_or_fringe_matches": FAILURE_OUTFIT_MISMATCH,
+    "length_volume_plausible": FAILURE_OUTFIT_MISMATCH,
+    "face_unobscured": FAILURE_PERSON_DISASTER,
+}
+
+#: Repair wording per blocked product field, so a targeted regeneration states
+#: which property of the product actually broke.
+PRODUCT_QA_REPAIR_ZH = {
+    "product_present": "指定商品在画面中缺失，必须重新生成并保留该商品",
+    "visibility_sufficient": "指定商品被遮挡或占比过小，必须重新生成并让商品清晰可见",
+    "dominant_color_matches": "指定商品主色与商品参考图不一致，必须按参考图恢复主色",
+    "pattern_family_matches": "指定商品的图案家族与参考图不符，必须按参考图恢复图案家族",
+    "edge_or_fringe_matches": "指定商品的边缘或流苏结构与参考图不符，必须按参考图恢复",
+    "length_volume_plausible": "指定商品的长度与体积感与参考图明显不符，必须按参考图恢复",
+    "face_unobscured": "指定商品遮挡了人物面部，必须重新生成并露出面部",
+}
+
 
 class TravelSemanticQAError(RuntimeError):
     """Structural QA failure; the raw model response stays with the caller."""
@@ -90,9 +119,15 @@ def normalize_travel_qa(
     moment_rules: Mapping[str, Mapping] = None,
     footwear_types: Sequence[str] = (),
     has_product: bool = False, travel_place: str = "", level: str = None,
+    product_qa_fields: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Convert a model verdict into per-role QA results with deterministic
-    failure codes and repair instructions. Nothing defaults to passed."""
+    failure codes and repair instructions. Nothing defaults to passed.
+
+    ``product_qa_fields`` carries the Category Adapter's declared per-product
+    checks (``SCARF_QA_FIELDS`` for a scarf).  Empty — womenswear's value — keeps
+    the historical generic-``product_matches``-only behaviour exactly.
+    """
     if not isinstance(raw, Mapping) or not isinstance(raw.get("pages"), list):
         raise TravelSemanticQAError("QA_SCHEMA_INCOMPLETE：旅行语义质检没有返回逐页结果")
     expected = moment_labels(look_plans)
@@ -125,6 +160,22 @@ def normalize_travel_qa(
         weather_ok = _require_bool(page, "weather_matches", role)
         mobility_claim = _require_bool(page, "mobility_matches", role)
         product_ok = _require_bool(page, "product_matches", role) if has_product else True
+        # 类目声明的逐项商品质检（review 修复 P0-3）：任一为 false 即确定性
+        # 失败，不因 outfit_severity 降级。字段由适配器声明，womenswear 为空。
+        product_qa: dict[str, bool] = {}
+        product_qa_failure = ""
+        product_qa_repair = ""
+        if has_product and product_qa_fields:
+            # 只取「声明了失败语义」的字段：适配器的 qa_fields 里还含 role /
+            # product_matches / repair_instruction 这类非布尔或已判定字段。
+            for field, code in PRODUCT_QA_FAILURE_FIELDS.items():
+                if field not in product_qa_fields:
+                    continue
+                value = _require_bool(page, field, role)
+                product_qa[field] = value
+                if not value and not product_qa_failure:
+                    product_qa_failure = code
+                    product_qa_repair = PRODUCT_QA_REPAIR_ZH.get(field, "")
         observed_footwear = _require_observed_footwear(page, role, footwear_types)
         observed_moments[role] = observed
         # 人物观察（2026-09-08）：灾难级旗标参与失败判定；相似表情/头姿/视线
@@ -153,6 +204,8 @@ def normalize_travel_qa(
             failure_code = FAILURE_INSUFFICIENT_EVIDENCE
         elif not product_ok:
             failure_code = FAILURE_OUTFIT_MISMATCH
+        elif product_qa_failure:
+            failure_code = product_qa_failure
         elif not outfit_ok and (
                 strict or str(page.get("outfit_severity") or "MINOR").upper() == "MAJOR"):
             failure_code = FAILURE_OUTFIT_MISMATCH
@@ -193,10 +246,19 @@ def normalize_travel_qa(
                 f"请改穿与计划一致的可行走鞋型（{plan_footwear or '舒适鞋履'}）"
             )
         if failure_code == FAILURE_PERSON_DISASTER and not repair:
-            reason = ("明显脸部或肢体畸形" if person_deformity
-                      else "明显不自然的头部倾斜")
-            repair = f"{reason}；保持人物身份与穿搭，重新生成本张并修正人物表现"
-        results.append({
+            # Only claim a person-cause when a person flag actually fired: a
+            # ``PERSON_DISASTER`` raised by the category's own product check
+            # (a scarf covering the face) must not be reported as a head tilt.
+            reason = "明显脸部或肢体畸形" if person_deformity else (
+                "明显不自然的头部倾斜" if person_tilt else "")
+            if reason:
+                repair = f"{reason}；保持人物身份与穿搭，重新生成本张并修正人物表现"
+        if product_qa_failure and not repair:
+            # The category-declared product repair answers for its own failure.
+            repair = product_qa_repair or (
+                "指定商品未通过逐项质检；请按商品参考图重新生成并保留商品身份"
+            )
+        result = {
             "role": role,
             "passed": failure_code == "",
             "failure_code": failure_code,
@@ -214,7 +276,12 @@ def normalize_travel_qa(
                 "obvious_unnatural_tilt": person_tilt,
             },
             "repair_instruction": repair if failure_code else "",
-        })
+        }
+        # 只在适配器声明了商品质检字段时附带逐项结果，womenswear 的输出形状
+        # 与历史逐字一致。
+        if product_qa_fields:
+            result["product_qa"] = product_qa
+        results.append(result)
 
     # Deterministic regression guard: one shared scene cannot honestly cover
     # four distinct travel moments, whatever the model claims per page.

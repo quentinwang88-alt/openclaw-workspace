@@ -417,6 +417,29 @@ def task_quantity(fields: Mapping[str, Any]) -> int:
     return quantity_value(value)
 
 
+def is_topic_travel_recipe(recipe_id: str, repository: Any = None) -> bool:
+    """Whether this Recipe publishes topic-linked travel copy.
+
+    Phase 2 made travel Recipes country-agnostic, so the old ``PHOTO_TH_TRAVEL``
+    prefix stopped identifying them: a VN travel Recipe was silently skipped by
+    the publishing gate (review P1-6).  The predicate is the contract itself,
+    with the legacy prefix retained so historical rows keep exact behaviour and
+    a stub without a repository still resolves.
+    """
+    if not recipe_id:
+        return False
+    if recipe_id.startswith("PHOTO_TH_TRAVEL"):
+        return True
+    if repository is None:
+        return False
+    recipe = repository.get_content_recipe(recipe_id)
+    spec = dict(getattr(recipe, "recipe_spec_json", None) or {})
+    if spec.get("travel_contract"):
+        return True
+    from services.photo_content_planner import get_planning_flow
+    return get_planning_flow(recipe_id) == "travel_two_step"
+
+
 @dataclass(frozen=True)
 class PresetTask:
     account_id: str
@@ -1149,6 +1172,23 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 if len(recipe_ids) == 1 else None
             )
             roles = list((((recipe_for_input.recipe_spec_json or {}).get("asset_requirements") or {}).get("required_roles") or [])) if recipe_for_input else []
+            # 发布语言与语言标签由 Locale Pack 拥有（review 修复 P0-2）。只有
+            # 配方自己声明了 ``locale_copy_packs``（国家无关配方 v2）时才绑定
+            # pack；v1 配方继续读内联泰语表，TH V2 输出逐字不变。
+            recipe_locale_packs = dict(
+                ((recipe_for_input.recipe_spec_json or {}) if recipe_for_input else {})
+                .get("locale_copy_packs") or {}
+            )
+            locale_pack = None
+            if recipe_locale_packs:
+                from config.loader import resolve_locale_pack
+                publish_locale = str(getattr(specs[0], "language", "") or "")
+                if not publish_locale:
+                    raise FeishuWorkflowError("国家无关图文配方缺少发布语言")
+                locale_pack = resolve_locale_pack(publish_locale)
+                if locale_pack is None:
+                    raise FeishuWorkflowError(
+                        "找不到发布语言对应的 Locale Pack：" + publish_locale)
             from services.photo_content_planner import get_planning_flow
             planning_flow = get_planning_flow(recipe_for_input.recipe_id) if recipe_for_input else ""
             from services.photo_flow_registry import (
@@ -1341,7 +1381,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                         analysis = reference_vision.analyze_reference(
                             record_id=record.record_id, paths=style_reference_paths,
                             theme=theme or variation_theme,
-                            category_key=str((recipe_for_input.recipe_spec_json or {}).get("category_key") or ""),
+                            category_key=str((recipe_for_input.recipe_spec_json or {}).get("category_key") or preset.get("category_key") or ""),
                             content_requirement=content_requirement,
                         )
                         plan = reference_vision.plan_travel_content(
@@ -1354,6 +1394,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                             product_reference_paths=list(
                                 style_product.get("reference_images") or []
                             ),
+                            locale_pack=locale_pack,
                         )
                         return analysis, plan
 
@@ -1375,7 +1416,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     style_profile = reference_vision.analyze(
                         record_id=record.record_id, paths=style_reference_paths,
                         theme=theme or variation_theme,
-                        category_key=str((recipe_for_input.recipe_spec_json or {}).get("category_key") or ""),
+                        category_key=str((recipe_for_input.recipe_spec_json or {}).get("category_key") or preset.get("category_key") or ""),
                         content_requirement=content_requirement, count=quantity,
                         product_context=product_context,
                         planning_flow=planning_flow, required_roles=roles,
@@ -1612,6 +1653,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                             record_id=item_id, reference_paths=paths, theme=theme,
                             account=account, persona=persona, variation=variation,
                             progress=_asset_progress, product=style_product,
+                            locale=str(getattr(specs[0], "language", "") or "th-TH"),
                         )
 
                     try:
@@ -2649,9 +2691,10 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
         from domain.photo_contracts import placeholder_errors
         from services.locale_quality import copy_locale_issues
 
+        repository = getattr(self, "repository", None)
         for task in tasks:
             recipe_id = str(getattr(task, "recipe_id", "") or "")
-            if not recipe_id.startswith("PHOTO_TH_TRAVEL"):
+            if not is_topic_travel_recipe(recipe_id, repository):
                 continue
             package = self.repository.get_content_package(
                 str(getattr(task, "content_package_id", "") or "")
@@ -2678,10 +2721,11 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     or theme_brief.get("theme_key") != frozen_theme.get("theme_key")):
                 raise FeishuWorkflowError("旅行图文的主题与最终发布包没有正确绑定")
             issues = placeholder_errors(copy_block)
-            issues.extend(copy_locale_issues(copy_block, "th-TH"))
+            issues.extend(copy_locale_issues(
+                copy_block, str(getattr(task, "target_locale", "") or "th-TH")))
             if issues:
                 raise FeishuWorkflowError(
-                    "旅行图文最终泰语文案未通过发布检查：" + "；".join(issues)
+                    "旅行图文最终发布文案未通过发布检查：" + "；".join(issues)
                 )
 
     def _approve_photo_packages(

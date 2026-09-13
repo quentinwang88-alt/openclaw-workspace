@@ -205,6 +205,7 @@ class PhotoStyleReferenceSupplyService:
         theme: Mapping[str, Any], account: Any, persona: Mapping[str, Any],
         variation: Mapping[str, Any] = None, progress: Any = None,
         product: Mapping[str, Any] = None,
+        locale: str = "th-TH",
     ) -> dict[str, Any]:
         variation = dict(variation or {})
         product = dict(product or {})
@@ -519,7 +520,10 @@ class PhotoStyleReferenceSupplyService:
                             "full_body_occupancy": "78-88%",
                             "reference_style_profile": style_profile,
                         },
-                        "locale": "th-TH",
+                        # 发布语言随任务走（review 修复 P0-2）：此前写死 th-TH，
+                        # 会让 VN 任务的生成请求带着泰语语言标记。默认值保持
+                        # th-TH，故既有 TH V2 调用方不传时输出逐字不变。
+                        "locale": str(locale or "th-TH"),
                         **(
                             {"human_presentation_contract": human_contract}
                             if human_contract else {}

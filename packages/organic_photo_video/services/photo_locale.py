@@ -28,6 +28,7 @@ __all__ = [
     "locale_pack_labels",
     "snow_scene_allowed",
     "temperature_labels",
+    "travel_copy_template",
     "travel_copy_tokens",
     "travel_moment_labels",
 ]
@@ -157,6 +158,36 @@ def complete_look_copy(locale_pack: Mapping[str, Any] | None) -> list[dict[str, 
             )
         variants.append(variant)
     return variants
+
+
+def travel_copy_template(
+    locale_pack: Mapping[str, Any] | None, index: int, *, topic_zh: str = "",
+) -> dict[str, Any] | None:
+    """Neutral degraded-copy template owned by a Locale Pack.
+
+    Review fix (2026-09-13), P0-2.  When the model's topic copy fails the
+    publish-language check the pipeline degrades to a template.  That template
+    used to be Thai unconditionally (``travel_topic["thai_fallback"]`` plus
+    ``ลุค``/``คุณชอบลุคไหน?`` literals), so a VN task would have published Thai.
+
+    ``None`` means "no pack bound": the caller then keeps the legacy inline Thai
+    template, so TH V2 stays byte-identical.  With a pack bound the result can
+    never contain Thai — it is the pack's own ``generic`` labels plus one
+    rotated ``complete_look_copy`` caption.
+    """
+    if not locale_pack:
+        return None
+    labels = locale_pack_labels(locale_pack, "generic")
+    variants = complete_look_copy(locale_pack)
+    entry = variants[(max(int(index), 1) - 1) % len(variants)]
+    return {
+        "title": str(labels.get("title") or entry["title"] or topic_zh),
+        "cover": str(labels.get("cover") or entry["cover"] or topic_zh),
+        "caption": str(entry["caption"] or ""),
+        "cta": str(labels.get("cta") or ""),
+        "look_label": str(labels.get("look_label") or "Look {letter}"),
+        "hashtags": [],
+    }
 
 
 def travel_copy_tokens(
