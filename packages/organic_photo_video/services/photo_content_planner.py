@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from domain.photo_contracts import normalize_publish_copy
 from services.photo_flow_registry import (
     PhotoFlowRegistryError, get_photo_flow_handler, is_layered_progression_flow,
     is_thermal_transition_flow, resolve_required_roles, role_marker,
@@ -474,7 +475,11 @@ def plan_th_choice_batch(
                                 policy=policy, style_profile=style_profile)
             if travel_flow and topic_linked:
                 # 主题联动分支：规划响应同时产出选题与发布文案，直接冻结。
-                model_copy = dict(value.get("copy") or {})
+                # 模型自由撰写的 title/caption 必须在这里就夹进发布契约——这是
+                # 机器文案的唯一入口。不加这一步，超限要等到封版校验（发生在
+                # 付费素材生成之后）才暴露，等于白烧一轮生图。人写的审核模板
+                # 走 template_fill 分支，保持严格校验不被夹。
+                model_copy = normalize_publish_copy(dict(value.get("copy") or {}))
                 item["copy"] = {
                     "copy_policy_version": 2,
                     "place_localized": str(model_copy.get("place_localized") or ""),

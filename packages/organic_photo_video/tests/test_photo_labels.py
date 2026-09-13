@@ -14,7 +14,9 @@ if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
 from config.loader import load_board_layouts
-from domain.photo_contracts import validate_copy
+from domain.photo_contracts import (
+    clamp_utf16, normalize_publish_copy, planned_copy_contract_errors, validate_copy,
+)
 from services.asset_set_service import validate_asset_set, AssetSetError
 from services.photo_copy import resolve_photo_copy
 from services.photo_package import _draw_choice_badges, _draw_overlay, normalize_photo_template, PhotoPackageError
@@ -104,6 +106,87 @@ class FrozenLabelTest(unittest.TestCase):
         request["request_sha256"] = fingerprint({k: v for k, v in request.items() if k != "request_sha256"})
         with self.assertRaisesRegex(PhotoRequestError, "placeholder"):
             validate_frozen_request(request)
+
+
+class PublishCopyContractTest(unittest.TestCase):
+    """发布契约（TikTok 标题 90 UTF-16 上限）在机器文案入口的夹取行为。"""
+
+    # 2026-09-13 线上实测：这条 91 单元的模型标题让 TH 旅行线一行在**付费生图
+    # 之后**整行失败——只超 1 个字符，是最难发现的那种形态。
+    MODEL_TITLE = (
+        "วัดโทไดจิ ฤดูใบไม้ร่วง ใส่ยังไงถ่ายรูปสวย? "
+        "4 ลุคฝรั่งเศสวินเทจ กางเกง หรือ กระโปรง เลือกได้"
+    )
+
+    @staticmethod
+    def _units(value):
+        return len(str(value).encode("utf-16-le")) // 2
+
+    def test_clamp_trims_only_what_overflows(self):
+        self.assertEqual(clamp_utf16("a" * 90, 90), "a" * 90)   # 恰好等于上限不动
+        self.assertEqual(clamp_utf16("สั้น", 90), "สั้น")         # 未超不动
+        self.assertEqual(self._units(clamp_utf16("a" * 91, 90)), 90)
+        self.assertEqual(clamp_utf16("a" * 200, 10), "a" * 10)  # 无空格则硬切
+
+    def test_clamp_backs_up_to_a_word_boundary(self):
+        clipped = clamp_utf16("hello world this is a fairly long sentence", 20)
+        self.assertEqual(clipped, "hello world this")           # 不回退到半个词
+        self.assertLessEqual(self._units(clipped), 20)
+
+    def test_clamp_never_splits_a_surrogate_pair(self):
+        # 每个 emoji 占 2 个 UTF-16 单元，按字符度量才不会留下孤立高位代理。
+        self.assertEqual(clamp_utf16("😀" * 60, 90), "😀" * 45)
+
+    def test_the_real_production_overflow_becomes_publishable(self):
+        normalized = normalize_publish_copy({"title": self.MODEL_TITLE})
+        self.assertEqual(self._units(normalized["title"]), 82)
+        self.assertTrue(self.MODEL_TITLE.startswith(normalized["title"]))
+
+    def test_normalize_keeps_every_other_key_and_only_touches_the_title(self):
+        copy_block = {"title": self.MODEL_TITLE, "caption": "สั้น", "hashtags": ["#a"],
+                      "slide_texts": ["x"] * 5, "place_localized": "วัดโทไดจิ"}
+        normalized = normalize_publish_copy(copy_block)
+        self.assertEqual(sorted(normalized), sorted(copy_block))
+        self.assertEqual(normalized["caption"], "สั้น")
+        self.assertEqual(normalized["slide_texts"], ["x"] * 5)
+        self.assertFalse(validate_copy(normalized))
+
+    def test_caption_absorbs_the_cut_when_hashtags_push_past_the_description_limit(self):
+        hashtags = ["#" + "ก" * 60, "#" + "ข" * 60]
+        normalized = normalize_publish_copy({
+            "title": "สั้น", "caption": "ค" * 5000, "hashtags": hashtags,
+        })
+        self.assertEqual(normalized["hashtags"], hashtags)       # hashtags 不动
+        self.assertLessEqual(
+            self._units(normalized["caption"]) + self._units(" ".join(hashtags)) + 1, 4000)
+
+    def test_human_authored_copy_is_still_rejected_not_silently_clamped(self):
+        # 配置侧（拷贝包 / 审核模板）超限必须继续报错，不能被静默夹掉。
+        over = {"title": "a" * 91, "caption": "c", "hashtags": ["#a"],
+                "slide_texts": ["x"] * 5}
+        self.assertTrue(validate_copy(over))
+
+    def test_planned_copy_check_tolerates_fields_the_theme_still_supplies(self):
+        # 规划阶段的文案本来就不完整：主题会兜底 caption / hashtags，slide_texts
+        # 要等素材到齐才拼。付费前预检必须容忍这些缺口，否则正常行会被误拦。
+        self.assertFalse(planned_copy_contract_errors({"title": "สั้น"}))
+        self.assertFalse(planned_copy_contract_errors({}))
+        self.assertFalse(planned_copy_contract_errors(
+            {"title": "สั้น", "caption": "c", "hashtags": ["#a"]}))
+
+    def test_planned_copy_check_still_catches_the_publish_limits(self):
+        self.assertTrue(planned_copy_contract_errors({"title": "a" * 91}))
+        self.assertFalse(planned_copy_contract_errors({"title": "a" * 90}))
+        self.assertTrue(planned_copy_contract_errors({"title": "   "}))
+        self.assertTrue(planned_copy_contract_errors({"hashtags": ["no-dash"]}))
+        self.assertTrue(planned_copy_contract_errors({"caption": ""}))
+
+    def test_planned_copy_check_measures_caption_plus_hashtags(self):
+        tags = ["#" + "ก" * 60, "#" + "ข" * 60]
+        self.assertTrue(planned_copy_contract_errors(
+            {"title": "สั้น", "caption": "ค" * 5000, "hashtags": tags}))
+        self.assertFalse(planned_copy_contract_errors(
+            {"title": "สั้น", "caption": "สั้น", "hashtags": tags}))
 
 
 class ChoiceBadgeTest(unittest.TestCase):

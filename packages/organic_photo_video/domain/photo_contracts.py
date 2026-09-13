@@ -14,6 +14,101 @@ def _utf16_units(value: str) -> int:
     return len(str(value or "").encode("utf-16-le")) // 2
 
 
+def clamp_utf16(value: str, limit: int, *, boundary: str = " ") -> str:
+    """Trim machine-authored text to ``limit`` UTF-16 units, at a word boundary.
+
+    Never splits a surrogate pair (the unit width of each character is measured
+    as it is consumed).  After cutting, the tail is backed up to the last space
+    so a sentence is not left severed mid-phrase.
+    """
+    text = str(value or "").strip()
+    if limit <= 0 or _utf16_units(text) <= limit:
+        return text
+    used = 0
+    kept: list[str] = []
+    for char in text:
+        width = len(char.encode("utf-16-le")) // 2
+        if used + width > limit:
+            break
+        kept.append(char)
+        used += width
+    clipped = "".join(kept).rstrip()
+    if boundary and boundary in clipped:
+        head = clipped.rsplit(boundary, 1)[0].rstrip()
+        if head:
+            clipped = head
+    return clipped.rstrip(" ,;:·-–—…")
+
+
+def normalize_publish_copy(copy_block: Any) -> Any:
+    """Clamp model-authored copy into the TikTok publish contract.
+
+    Only fields a language model writes freely are clamped (``title``, and
+    ``caption`` when caption + hashtags overflow).  Human-authored configuration
+    — copy packs, review templates — stays strict on purpose: a config error
+    must keep failing loudly instead of being silently trimmed.
+    """
+    if not isinstance(copy_block, Mapping):
+        return copy_block
+    normalized = dict(copy_block)
+    title = normalized.get("title")
+    if isinstance(title, str):
+        normalized["title"] = clamp_utf16(title, TIKTOK_PHOTO_TITLE_MAX_UTF16)
+    caption = normalized.get("caption")
+    hashtags = normalized.get("hashtags")
+    if isinstance(caption, str) and isinstance(hashtags, list):
+        tags = " ".join(str(tag).strip() for tag in hashtags if isinstance(tag, str))
+        description = " ".join(part for part in (caption.strip(), tags) if part)
+        if _utf16_units(description) > TIKTOK_PHOTO_DESCRIPTION_MAX_UTF16:
+            # Hashtags carry the reach signal, so the caption absorbs the cut.
+            budget = TIKTOK_PHOTO_DESCRIPTION_MAX_UTF16 - _utf16_units(tags) - (1 if tags else 0)
+            normalized["caption"] = clamp_utf16(caption, budget)
+    return normalized
+
+
+def planned_copy_contract_errors(copy_block: Any) -> list[str]:
+    """Publish-contract checks that must already hold on a *planned* copy.
+
+    Deliberately narrower than :func:`validate_copy`: a planned copy is still
+    incomplete, and the theme legitimately supplies the fields the model left
+    out (caption, hashtags) plus the assembled ``slide_texts``.  Checking the
+    publish-length limits here lets an over-long machine-written title be
+    rejected — or clamped — *before* the paid asset stage, instead of at freeze
+    time once four images have already been billed.
+    """
+    if not isinstance(copy_block, Mapping):
+        return ["copy must be an object"]
+    errors: list[str] = []
+    title = copy_block.get("title")
+    if title is not None:
+        if not isinstance(title, str) or not title.strip():
+            errors.append("copy.title must be a non-empty localized string")
+        elif _utf16_units(title.strip()) > TIKTOK_PHOTO_TITLE_MAX_UTF16:
+            errors.append(
+                f"copy.title exceeds TikTok's {TIKTOK_PHOTO_TITLE_MAX_UTF16} UTF-16 unit limit"
+            )
+    caption = copy_block.get("caption")
+    if caption is not None and (not isinstance(caption, str) or not caption.strip()):
+        errors.append("copy.caption must be a non-empty localized string")
+    hashtags = copy_block.get("hashtags")
+    if hashtags is not None:
+        if not isinstance(hashtags, list) or not all(
+                isinstance(tag, str) and tag.startswith("#") and len(tag) > 1
+                for tag in hashtags):
+            errors.append("copy.hashtags must be a list of hashtag strings")
+        elif isinstance(caption, str):
+            description = " ".join(part for part in (
+                caption.strip(),
+                " ".join(str(tag).strip() for tag in hashtags),
+            ) if part)
+            if _utf16_units(description) > TIKTOK_PHOTO_DESCRIPTION_MAX_UTF16:
+                errors.append(
+                    f"copy caption and hashtags exceed TikTok's "
+                    f"{TIKTOK_PHOTO_DESCRIPTION_MAX_UTF16} UTF-16 unit limit"
+                )
+    return errors
+
+
 def placeholder_errors(value: Any, *, allow_labels: bool = False) -> list[str]:
     """Templates may contain only the four known labels; frozen copy has none."""
     if isinstance(value, str):

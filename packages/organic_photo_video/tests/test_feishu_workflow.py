@@ -339,6 +339,49 @@ class ScanTest(unittest.TestCase):
         self.assertEqual(client.record_id, "rec_running")
 
 
+class PlannedCopyContractTest(unittest.TestCase):
+    """不合规的机器文案必须在**任何付费素材生成之前**拦下。"""
+
+    OVER_LIMIT_TITLE = (
+        "วัดโทไดจิ ฤดูใบไม้ร่วง ใส่ยังไงถ่ายรูปสวย? "
+        "4 ลุคฝรั่งเศสวินเทจ กางเกง หรือ กระโปรง เลือกได้"
+    )
+
+    def setUp(self):
+        self.runner = FeishuTaskWorkflow(
+            repository=object(), client=object(),
+            catalog=object(), generator=object(), renderer=object(),
+        )
+
+    @staticmethod
+    def _units(value):
+        return len(str(value).encode("utf-16-le")) // 2
+
+    def test_over_limit_model_title_is_clamped_in_place_before_paid_work(self):
+        variations = [{"copy": {
+            "title": self.OVER_LIMIT_TITLE, "caption": "สั้น", "hashtags": ["#a"],
+        }}]
+        self.runner._assert_planned_copy_contract(variations)
+        self.assertLessEqual(self._units(variations[0]["copy"]["title"]), 90)
+        self.assertEqual(variations[0]["copy"]["caption"], "สั้น")
+
+    def test_compliant_or_copyless_variations_are_left_alone(self):
+        variations = [
+            {"copy": {"title": "สั้น", "caption": "c", "hashtags": ["#a"]}},
+            {"angle_zh": "完全穿搭不产出模型文案"},
+            {},
+        ]
+        self.runner._assert_planned_copy_contract(variations)
+        self.assertEqual(variations[0]["copy"]["title"], "สั้น")
+
+    def test_unclampable_copy_fails_loudly_but_for_free(self):
+        variations = [{"copy": {"title": "t", "caption": "c", "hashtags": ["no-dash"]}}]
+        with self.assertRaisesRegex(FeishuWorkflowError, "未开始付费生图"):
+            self.runner._assert_planned_copy_contract(variations)
+        with self.assertRaisesRegex(FeishuWorkflowError, "未开始付费生图"):
+            self.runner._assert_planned_copy_contract([{"copy": {"title": ""}}])
+
+
 class RetakeRolesTest(unittest.TestCase):
     def test_parse_accepts_letters_full_names_and_cjk_commas(self):
         self.assertEqual(parse_retake_roles("C"), ["look_c"])

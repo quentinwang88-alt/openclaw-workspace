@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from domain.models import ProductionBatch
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from services.asset_resolver import LightTryonAssetReader
 from services.batch_diversity_planner import BatchDiversityPlanner
@@ -1496,6 +1496,10 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     }
                     for index in range(1, quantity + 1)
                 ]
+            # 发布契约预检（2026-09-13）：必须在**任何**付费素材生成之前完成。
+            # 全部变体文案此刻已定稿（含 COMPLETE_LOOK 合成项），而下方各分支
+            # 会真调视觉模型并逐张计费——文案不合规要在这里就拦下。
+            self._assert_planned_copy_contract(variations)
             pinned_asset_set_ids: list[str] = []
             prepared_source_groups: list[list[dict[str, Any]]] = []
             if (reference_mode == REFERENCE_MODE_COMPLETE_LOOK and recipe_for_input
@@ -2379,6 +2383,33 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 raise FeishuWorkflowError(
                     f"第 {index} 篇重拍后任务状态异常：{report.task_status}")
         self._write_fields(record.record_id, {FIELD_RETAKE_LOOK: ""})
+
+    def _assert_planned_copy_contract(self, variations: Sequence[Mapping[str, Any]]) -> None:
+        """Normalize then reject a planned copy that breaks the publish contract.
+
+        Runs before the paid asset stage.  Freeze-time validation
+        (``validate_frozen_request``) happens *after* four billed generations, so
+        a 90-UTF-16 title overflow used to cost a complete row's image budget
+        (2026-09-13: TH 旅行线实测，title 91 单元）。 Machine-authored copy is
+        clamped here so a resumed run carrying a previously frozen copy also
+        becomes publishable; anything normalization cannot fix (hashtag shape,
+        an oversized hashtag block) still fails loudly — but for free.
+        """
+        from domain.photo_contracts import (
+            normalize_publish_copy, planned_copy_contract_errors,
+        )
+        for index, variation in enumerate(variations, 1):
+            copy_block = variation.get("copy")
+            if not isinstance(copy_block, Mapping) or not copy_block:
+                continue
+            normalized = normalize_publish_copy(copy_block)
+            if normalized != copy_block:
+                variation["copy"] = normalized
+            errors = planned_copy_contract_errors(normalized)
+            if errors:
+                raise FeishuWorkflowError(
+                    f"第 {index} 篇文案不符合发布契约（未开始付费生图）："
+                    + "；".join(sorted(set(errors))))
 
     def _retake_photo_supply_roles(self, record, batch, entries, retake_roles,
                                    staging_root, producer) -> None:

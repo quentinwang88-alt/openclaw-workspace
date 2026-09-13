@@ -379,6 +379,39 @@ class CopySurvivalTest(unittest.TestCase):
         self.assertEqual(result["copy_policy_version"], 2)
 
 
+    def test_over_limit_model_title_is_clamped_when_the_copy_is_assembled(self):
+        # 2026-09-13 线上实测：模型写出的 title 只超 1 个 UTF-16 单元（91 vs 90），
+        # 却在**付费生图之后**的封版校验处炸掉整行。build_theme_copy 是最终装配点，
+        # 也是断点续跑复用已冻结文案的必经之路——必须在这里就夹回发布契约内。
+        theme = resolve_photo_theme("旅行·拍照穿搭")
+        assets = [{"role": f"look_{letter}", "display_label": {"th-TH": f"ลุค {letter}"}}
+                  for letter in "abcd"]
+        over = ("วัดโทไดจิ ฤดูใบไม้ร่วง ใส่ยังไงถ่ายรูปสวย? "
+                "4 ลุคฝรั่งเศสวินเทจ กางเกง หรือ กระโปรง เลือกได้")
+        self.assertEqual(len(over.encode("utf-16-le")) // 2, 91)
+        variation = {"copy": {
+            "place_localized": "วัดโทไดจิ", "title": over, "caption": "แคปชัน",
+            "hashtags": ["#tag"],
+            "slide_texts": ["ปก", "A หนึ่ง", "B สอง", "C สาม", "D สี่ เลือกลุคไหน"],
+        }}
+        result = build_theme_copy(theme, assets, variation)
+        self.assertLessEqual(len(result["title"].encode("utf-16-le")) // 2, 90)
+        self.assertTrue(over.startswith(result["title"]))
+        self.assertEqual(result["caption"], "แคปชัน")
+
+    def test_within_limit_model_title_is_left_untouched(self):
+        theme = resolve_photo_theme("旅行·拍照穿搭")
+        assets = [{"role": f"look_{letter}", "display_label": {"th-TH": f"ลุค {letter}"}}
+                  for letter in "abcd"]
+        variation = {"copy": {
+            "place_localized": "วัดโทไดจิ", "title": "ไตเติลสั้น", "caption": "แคปชัน",
+            "hashtags": ["#tag"],
+            "slide_texts": ["ปก", "A หนึ่ง", "B สอง", "C สาม", "D สี่ เลือกลุคไหน"],
+        }}
+        result = build_theme_copy(theme, assets, variation)
+        self.assertEqual(result["title"], "ไตเติลสั้น")
+
+
 class CacheKeyTest(unittest.TestCase):
     def test_travel_plan_cache_key_includes_topic(self):
         self.maxDiff = None

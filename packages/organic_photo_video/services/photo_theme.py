@@ -17,6 +17,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
+from domain.photo_contracts import normalize_publish_copy
+
 from services.photo_flow_registry import (
     PhotoFlowRegistryError, flow_contract_from, role_marker,
     validate_ordered_roles,
@@ -286,8 +288,12 @@ def build_theme_copy(
     topic_slides = _display_slide_texts(
         planned_copy.get("slide_texts") or [], cta=cta,
     )
+    # 发布契约兜底（2026-09-13）：theme copy 是最终被冻结进 request 的文案，而
+    # 它的 title 可能来自模型自由撰写，也可能来自**上一轮已冻结**的 variation
+    # copy（断点续跑不会重跑规划）。封版校验发生在付费素材生成之后，所以超限
+    # 必须在这里就夹掉——否则续跑会拿着同一个超限 title 再失败一次。
     if len(topic_slides) == 5 and all(topic_slides):
-        return {
+        return normalize_publish_copy({
             "copy_policy_version": 2,
             "place_localized": str(planned_copy.get("place_localized") or ""),
             "title": str(planned_copy.get("title") or theme["title"]),
@@ -298,12 +304,12 @@ def build_theme_copy(
                 planned_copy.get("language_review_status") or "DRAFT_TRAVEL_TOPIC"),
             **({"language_review": dict(planned_copy["language_review"])}
                if isinstance(planned_copy.get("language_review"), Mapping) else {}),
-        }
-    return {
+        })
+    return normalize_publish_copy({
         "place_localized": str(planned_copy.get("place_localized") or ""),
         "title": str(planned_copy.get("title") or variation.get("thai_hook") or theme["title"]),
         "caption": str(planned_copy.get("caption") or variation.get("thai_caption") or theme["caption"]),
         "hashtags": list(theme["hashtags"]),
         "slide_texts": [str(planned_copy.get("cover") or theme["cover"]), *labels],
         "language_review_status": "production_theme_profile",
-    }
+    })
