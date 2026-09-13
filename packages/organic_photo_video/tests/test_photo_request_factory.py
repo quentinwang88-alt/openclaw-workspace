@@ -229,8 +229,11 @@ class ShippedProfileTest(unittest.TestCase):
         # which adds one execution profile and no market binding yet.
         # 2026-09-13 (VN scarf Phase 4): +1 country-agnostic matching V3 canary
         # adds another recipe and execution profile, both still market-unbound.
+        # 2026-09-13 (VN scarf Phase 5): travel V3 gains a second execution
+        # profile (travel_scene_four_looks_vn) bound to VN_SCARF_CHOICE, so the
+        # travel line resolves a VN asset pool without touching profile[0].
         self.assertEqual(result["recipe_count"], 15)
-        self.assertEqual(result["profile_count"], 31)
+        self.assertEqual(result["profile_count"], 32)
         self.assertEqual(
             result["canary_market_unbound"],
             ["PHOTO_MATCHING_CHOICE_V3", "PHOTO_TRAVEL_OUTFIT_V3"],

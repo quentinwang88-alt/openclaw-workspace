@@ -30,9 +30,10 @@ Scope notes (deliberate, so the test cannot be mistaken for a launch gate):
   and that staying draft is still refused.
 * ``PHOTO_MATCHING_CHOICE_V3`` already ships ``asset_set_keys=["VN_SCARF_CHOICE"]``
   (the scarf line's own key), so the scarf freeze needs no override at all.
-  ``PHOTO_TRAVEL_OUTFIT_V3`` still ships the TH key — the Phase 4 canary declares
-  that as an unresolved binding — so the travel token check pins the VN asset set
-  explicitly and documents why.
+  ``PHOTO_TRAVEL_OUTFIT_V3`` reaches the same VN pack through a second execution
+  profile (``travel_scene_four_looks_vn``) while ``profile[0]`` keeps the TH key
+  the V2-equivalence contract pins, so the travel line also freezes VN with no
+  override.
 """
 from __future__ import annotations
 
@@ -554,11 +555,24 @@ class VnTravelV3FactoryTokenTest(unittest.TestCase):
         ).build_batch(
             record_id="vn-travel-record", specs=[self.spec],
             category_key="scarf",
-            # V3 still ships the TH asset-set key (Phase 4 canary declares this
-            # as an unresolved binding); pinning the VN pack is what Phase 5
-            # will encode in the recipe itself.
-            overrides=[{"asset_set_key": SCARF_ASSET_SET_KEY}],
+            # No override: the travel line's second execution profile
+            # (travel_scene_four_looks_vn) binds VN_SCARF_CHOICE itself, while
+            # profile[0] keeps the TH key pinned by the V2-equivalence contract.
         )[0]
+
+    def test_travel_line_resolves_the_vn_asset_set_with_no_override(self):
+        spec = loader.load_content_recipe_file(TRAVEL_RECIPE_PATH).recipe_spec_json
+        profiles = {p["profile_id"]: p for p in spec["execution_profiles"]}
+        # profile[0] stays the TH binding the V2 contract compares against...
+        self.assertEqual(profiles["travel_scene_four_looks"]["asset_set_keys"],
+                         ["TH_WOMENSWEAR_CHOICE"])
+        # ...and a VN profile carries the scarf pack, so a VN request freezes it
+        # without any per-request override.
+        self.assertEqual(profiles["travel_scene_four_looks_vn"]["asset_set_keys"],
+                         [SCARF_ASSET_SET_KEY])
+        request = self._freeze()
+        self.assertEqual(request["asset_set_key"], SCARF_ASSET_SET_KEY)
+        self.assertEqual(request["profile_id"], "travel_scene_four_looks_vn")
 
     def test_travel_tokens_resolve_to_vietnamese_labels(self):
         request = self._freeze()

@@ -201,6 +201,22 @@
         "asset_set_keys": [
           "TH_WOMENSWEAR_CHOICE"
         ]
+      },
+      {
+        "profile_id": "travel_scene_four_looks_vn",
+        "label": "旅行场景：四套完整 Look 选一（越南市场）",
+        "variables": {
+          "choice_axis": "pants_or_skirt",
+          "destination": "generic_cool_city",
+          "temperature_band": "15_22c",
+          "season": "autumn",
+          "style": "french_vintage",
+          "body_profile": "regular",
+          "travel_goal": "light_layering_city_trip"
+        },
+        "asset_set_keys": [
+          "VN_SCARF_CHOICE"
+        ]
       }
     ],
     "travel_contract": {

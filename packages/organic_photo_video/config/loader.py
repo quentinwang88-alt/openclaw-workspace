@@ -293,7 +293,15 @@ def load_content_recipe_file(path: Path) -> ContentRecipe:
                         pack_path,
                         expected_recipe_id=str(payload.get("recipe_id") or ""),
                         expected_profile_id=str(profile.get("profile_id") or ""),
+                        allow_empty=True,
                     )
+                    if not variants:
+                        # A profile may serve only a subset of the recipe's
+                        # locales (e.g. a market-bound asset profile).  A locale
+                        # carrying no rows for this profile is not offered rather
+                        # than failing the whole recipe; the default locale is
+                        # then the first one that does carry copy.
+                        continue
                     variants_by_locale[str(locale)] = {
                         "copy_pack_id": str(locale_pack_id),
                         "copy_variants": variants,
@@ -324,6 +332,7 @@ def _decode_copy_cell(value: str) -> str:
 
 def load_photo_copy_pack(
     path: Path, *, expected_recipe_id: str, expected_profile_id: str,
+    allow_empty: bool = False,
 ) -> List[Dict[str, Any]]:
     """Load an operator-friendly TSV copy pack and return recipe variants."""
     pack_path = Path(path)
@@ -372,7 +381,7 @@ def load_photo_copy_pack(
                 f"{pack_path.name}:{line_no}: " + "; ".join(copy_errors)
             )
         variants.append({"copy_id": copy_id, "copy": copy_block})
-    if not variants:
+    if not variants and not allow_empty:
         raise ConfigLoadError(
             f"{pack_path.name}: no active rows for {expected_recipe_id}/{expected_profile_id}"
         )
