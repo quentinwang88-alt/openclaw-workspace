@@ -191,9 +191,9 @@ canary 2 额外包含 **`product_application`**（同一围巾写入 `look_a..lo
 
 ## 7. 已知限制与下一阶段阻塞项
 
-### 7.1 本阶段**有意未做**的两项（Phase 3 交付文档曾列为「Phase 4 处理/必须解决」）
+### 7.1 本阶段**有意未做**的三项（Phase 3 交付文档曾列为「Phase 4 处理/必须解决」）
 
-规格 §7 Phase 4 的 5 条任务**不含**这两项；且规格 §7 明令「每个 Phase 独立提交；**不得把抽象重构、VN 文案和生产路由混在同一提交**」——两者都属于抽象/运行时改造，混入本提交会违反该条。故本阶段**按现状保留并显式上报**，请裁决归属：
+规格 §7 Phase 4 的 5 条任务**不含**这三项；且规格 §7 明令「每个 Phase 独立提交；**不得把抽象重构、VN 文案和生产路由混在同一提交**」——三者都属于抽象/运行时改造，混入本提交会违反该条。故本阶段**按现状保留并显式上报**，请裁决归属：
 
 1. **素材集仍绑泰国（`asset_set_keys: ["TH_WOMENSWEAR_CHOICE"]`）**。
    - 不能在本阶段改：`test_photo_travel_v3_equivalence.test_asset_and_variable_contract_match` 断言 **V3 的 `asset_set_keys` 必须等于 V2**（Phase 2 冻结的 TH 等价合同）；改动它会直接打破 Phase 2 的零行为变化证明。
@@ -204,6 +204,11 @@ canary 2 额外包含 **`product_application`**（同一围巾写入 `look_a..lo
    - 本阶段的目的地权重与 VN 包的目的地标签**严格限定在这 6 个可选键内**（`VnMarketPackTest` 断言权重 ⊆ 词表枚举、权重键集 == VN 包标签键集），因此 `hanoi`/`sa_pa`/`sapporo`/`harbin` 等**当前不可选**。
    - 影响面：规格 §5.1「越南国内…旅行」与 §10「越南国内凉爽旅行 2 篇」、§8.4 canary 3「Sapporo snow」需要该词表扩展（词表在**共享** recipe 里，扩键会同时改变 TH 的声明式 schema）。
    - **建议**：Phase 5 做 catalog-id 化（把 `destination` 的枚举切到 `EAST_ASIA_COOL_V1` 的 `destination_id`），并同步补齐 TH 包标签，避免 TH 侧静默取到空串。
+3. **围巾 10 字段 QA 尚未接入运行时质检修环**（Phase 3 交付文档 §7.1 第 1 条）。
+   - 现状核实：`services/photo_travel_qa.py` 的 `normalize_travel_qa` 仍只产出通用 `product_matches`（第 127、210 行），`photo_reference_vision._travel_qa_prompt` 也未要求 `product_present` / `pattern_family_matches` / `edge_or_fringe_matches` / `length_volume_plausible` / `face_unobscured` 等字段。`SCARF_QA_FIELDS`（Phase 3）目前仍是**可声明的合同**，不是逐页实际输出。
+   - 不能在本阶段做：质检修环跑在**已生成图片**之上，无法用离线 manifest 验证；而改动点是**共享**的旅行 QA（TH V2 走同一条），属适配器驱动的抽象改造——正是 §7 禁止与本提交混在一起的那类改动。若草率改 `_travel_qa_prompt`/`TRAVEL_QA_SCHEMA` 而不带图像级回归，会同时污染 TH 线。
+   - 影响面：规格 §11 DoD「指定围巾在 A-D 中持续存在且可辨认」「单页商品/场景失败可定向重生」在**真实出图**时尚未闭环。
+   - **建议**：Phase 5 首次真实生图前，把 QA 字段集改为**由类目适配器声明**（scarf → 10 字段；womenswear → 维持现状空集），并补图像级回归证明 TH 线逐字不变。
 
 ### 7.2 本阶段已知限制（有意为之 / 需知悉）
 
@@ -215,14 +220,14 @@ canary 2 额外包含 **`product_application`**（同一围巾写入 `look_a..lo
 ### 7.3 进入 Phase 5 的前提
 
 - 用户验收本 Phase。
-- Phase 5（发布与首批内容）需要先解决 §7.1 的两项（素材集解绑、目的地 catalog-id 化），以及 §7.2 第 1 条（越南语母语审校 → `NATIVE_APPROVED`）。
+- Phase 5（发布与首批内容）需要先解决 §7.1 的三项（素材集解绑、目的地 catalog-id 化、围巾 QA 接入运行时），以及 §7.2 第 1 条（越南语母语审校 → `NATIVE_APPROVED`）。
 - 规格 §9 发布门禁还要求：Market Pack 转 `active`、账号转 `active`、至少一个 VN 账号验证 `content_photo_capable=true`、CreatOK/TikTok Content Posting 连接健康、单篇真实发布验证通过。
 - 首次真实生图/写入前需按开工前对齐清单 §4 决定是否执行 `seed_reference_data.py --apply`（**本阶段未执行**）。
 
 ### 7.4 需要用户裁决的事项
 
 1. **`MATCHING_CHOICE_V2` → `PHOTO_MATCHING_CHOICE_V3` 的命名**：规格 §5.2 写作 `MATCHING_CHOICE_V2`，但该配方全仓零引用（开工前对齐清单 §5 已列为待拍板）。本阶段依据你的选择新建国家无关的 `PHOTO_MATCHING_CHOICE_V3`（落 native_photo 家族，复刻 `PHOTO_TH_PICK_YOUR_LOOK_V3` 骨架 + Phase 2 的 v2 参数化）。已写入该预设的 `disabled_reason` 与 `RECIPE_POLICY_FILES` 注释。如规格作者另有出处，请补充。
-2. **§7.1 两项的归属**（Phase 4 补做 / 归入 Phase 5）——理由见上，我倾向归入 Phase 5 以便保持「本 Phase 只含配置与离线产物」。
+2. **§7.1 三项的归属**（Phase 4 补做 / 归入 Phase 5）——理由见上，我倾向归入 Phase 5 以便保持「本 Phase 只含配置与离线产物」。
 3. **工作区其它进程的未提交改动**（`image_generator.py` billing 分类、`photo_wig_supply.py` OneRoute 环境键、`test_image_generator_channels.py`、`docs/TH_PHOTO_REFERENCE_MODULE_HANDOFF_20260907.md`、`scripts/run_feishu_scanner_locked.sh`，以及 `packages/remake_video_execution`、`skills/*` 等）**未包含在本次提交**，是否单独提交由你决定。
 4. 仍有两个疑似垃圾文件未处理（Phase 2 起遗留）：仓库根目录名为 `-` 的文件、`skills/short-video-auto-publisher/SHORT_VIDEO_AUTO_PUBLISH_DB_PATH`。
 
