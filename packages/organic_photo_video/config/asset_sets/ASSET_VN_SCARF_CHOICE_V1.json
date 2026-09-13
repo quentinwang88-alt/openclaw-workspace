@@ -1,0 +1,127 @@
+{
+  "schema_version": "opv-asset-set-v1",
+  "asset_set_id": "ASSET_VN_SCARF_CHOICE_V1",
+  "asset_set_key": "VN_SCARF_CHOICE",
+  "asset_set_version": 1,
+  "category_key": "scarf",
+  "market": "VN",
+  "status": "enabled",
+  "tags": {
+    "use_cases": [
+      "scarf_styling_choice",
+      "travel_outfit_choice"
+    ],
+    "choice_axis": [
+      "scarf_pairing",
+      "pants_or_skirt"
+    ],
+    "source": "ai_generated_vn_scarf_pilot",
+    "scene": [
+      "home_mirror_selfie"
+    ],
+    "style": [
+      "korean_clean",
+      "minimal"
+    ]
+  },
+  "assets": [
+    {
+      "asset_id": "vn_scarf_a",
+      "path": "../../../../shared/data/organic_photo_video/asset_sets/vn_scarf_choice/look_a.png",
+      "role": "look_a",
+      "tags": {
+        "outerwear": "cream_knit_cardigan",
+        "bottom": "navy_straight_jeans"
+      },
+      "display_label": {
+        "vi-VN": "Cardigan kem + quần jeans xanh",
+        "zh-CN": "米白开衫 + 深蓝牛仔"
+      },
+      "sha256": "5961805ae7803bf00a528d68dbdb283efbec03addfb17e4488a27162ec1f2556"
+    },
+    {
+      "asset_id": "vn_scarf_b",
+      "path": "../../../../shared/data/organic_photo_video/asset_sets/vn_scarf_choice/look_b.png",
+      "role": "look_b",
+      "tags": {
+        "outerwear": "black_leather_jacket",
+        "bottom": "black_a_line_skirt"
+      },
+      "display_label": {
+        "vi-VN": "Áo da đen + chân váy chữ A",
+        "zh-CN": "黑色皮夹克 + A 字半裙"
+      },
+      "sha256": "944dc80067437ece390abb503697a5074e72b96e217855a2640bcb4ecddbdf7e"
+    },
+    {
+      "asset_id": "vn_scarf_c",
+      "path": "../../../../shared/data/organic_photo_video/asset_sets/vn_scarf_choice/look_c.png",
+      "role": "look_c",
+      "tags": {
+        "outerwear": "oatmeal_trench_coat",
+        "bottom": "white_wide_leg_pants"
+      },
+      "display_label": {
+        "vi-VN": "Áo trench yến mạch + quần ống rộng trắng",
+        "zh-CN": "燕麦风衣 + 白色阔腿裤"
+      },
+      "sha256": "f66e0bedfdbff3d16f331d908b24499c6f9330f91410a29b6a73f4771157f6c2"
+    },
+    {
+      "asset_id": "vn_scarf_d",
+      "path": "../../../../shared/data/organic_photo_video/asset_sets/vn_scarf_choice/look_d.png",
+      "role": "look_d",
+      "tags": {
+        "outerwear": "sage_green_hoodie",
+        "bottom": "beige_cargo_pants"
+      },
+      "display_label": {
+        "vi-VN": "Hoodie xanh rêu + quần túi hộp be",
+        "zh-CN": "灰绿卫衣 + 米色工装裤"
+      },
+      "sha256": "e48274d417d3c9076b2171e1cc92207ec7984c8be88dd77d74fbf505a3666f03"
+    }
+  ],
+  "pairs": [],
+  "content_approval": {
+    "schema_version": "opv-source-qualification-v1",
+    "reviewer": "vn_scarf_pilot_visual_inspection",
+    "reviewer_type": "assistant",
+    "allowed_logic_keys": [
+      "scarf_styling_choice",
+      "travel_scene_outfit_choice"
+    ],
+    "excluded_claims": [
+      "temperature_dressing",
+      "travel_destination",
+      "layering_progression",
+      "single_variable_comparison",
+      "warmth_guarantee",
+      "native_language_approved"
+    ],
+    "source_hashes": {
+      "vn_scarf_a": "5961805ae7803bf00a528d68dbdb283efbec03addfb17e4488a27162ec1f2556",
+      "vn_scarf_b": "944dc80067437ece390abb503697a5074e72b96e217855a2640bcb4ecddbdf7e",
+      "vn_scarf_c": "f66e0bedfdbff3d16f331d908b24499c6f9330f91410a29b6a73f4771157f6c2",
+      "vn_scarf_d": "e48274d417d3c9076b2171e1cc92207ec7984c8be88dd77d74fbf505a3666f03"
+    },
+    "attributes": {
+      "vn_scarf_a": {
+        "outerwear_id": "cream_knit_cardigan",
+        "bottom_id": "navy_straight_jeans"
+      },
+      "vn_scarf_b": {
+        "outerwear_id": "black_leather_jacket",
+        "bottom_id": "black_a_line_skirt"
+      },
+      "vn_scarf_c": {
+        "outerwear_id": "oatmeal_trench_coat",
+        "bottom_id": "white_wide_leg_pants"
+      },
+      "vn_scarf_d": {
+        "outerwear_id": "sage_green_hoodie",
+        "bottom_id": "beige_cargo_pants"
+      }
+    }
+  }
+}
