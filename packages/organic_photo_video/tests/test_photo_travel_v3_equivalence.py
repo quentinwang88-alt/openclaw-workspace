@@ -86,7 +86,13 @@ class TravelV3BoundaryTest(unittest.TestCase):
         self.assertNotIn("category_key", spec)
         self.assertNotIn("locale", spec)
         self.assertNotIn("locale", self.v3.copy_style_json)
-        self.assertEqual(spec["locale_copy_packs"], {"th-TH": "TH_TRAVEL_OUTFIT_V3"})
+        # 2026-09-13 (VN scarf Phase 4): the country-agnostic template always
+        # shipped TH copy; Phase 4 adds the Vietnamese pack for the VN line, so
+        # the recipe now names one copy pack per locale instead of TH only.
+        self.assertEqual(
+            spec["locale_copy_packs"],
+            {"th-TH": "TH_TRAVEL_OUTFIT_V3", "vi-VN": "VN_TRAVEL_OUTFIT_V1"},
+        )
 
     def test_required_capabilities_are_provided_by_womenswear(self):
         required = set(self.v3.recipe_spec_json["required_category_capabilities"])
@@ -244,8 +250,14 @@ class TravelV3ThWomenswearEquivalenceTest(unittest.TestCase):
         v3_by_id = {item["copy_id"]: item["copy"] for item in v3_profile["copy_variants"]}
         self.assertEqual(set(v2_by_id), set(v3_by_id))
         self.assertEqual(v2_by_id, v3_by_id)
+        # ``copy_variants`` stays the TH set (Phase 4 adds vi-VN alongside it,
+        # and the loader still defaults to the first locale in sort order).
         self.assertEqual(
-            sorted(v3_profile["copy_variants_by_locale"]), ["th-TH"]
+            sorted(v3_profile["copy_variants_by_locale"]), ["th-TH", "vi-VN"]
+        )
+        self.assertEqual(
+            v3_profile["copy_variants"],
+            v3_profile["copy_variants_by_locale"]["th-TH"]["copy_variants"],
         )
 
     def test_family_plan_is_identical_under_the_th_binding(self):

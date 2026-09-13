@@ -37,6 +37,12 @@ RECIPE_POLICY_FILES = {
     # comes from a Locale Pack, so one recipe can serve TH and VN.  Registered
     # here so the canary is plannable; V2 keeps the live route until Phase 4.
     "PHOTO_TRAVEL_OUTFIT_V3": "TRAVEL_OUTFIT_V3.json",
+    # 2026-09-13 (VN scarf Phase 4): the daily matching line.  Spec §5.2 names it
+    # ``MATCHING_CHOICE_V2``, but that recipe never existed anywhere in the repo;
+    # per the pre-kickoff alignment note §5 the country-agnostic version is
+    # shipped as PHOTO_MATCHING_CHOICE_V3 next to the travel V3 skeleton.  It is
+    # a draft canary: no production preset routes to it until acceptance.
+    "PHOTO_MATCHING_CHOICE_V3": "MATCHING_CHOICE_V3.json",
 }
 
 
@@ -123,14 +129,29 @@ def _select_families(*, order: Sequence[str], count: int,
     return selected[:count]
 
 
-def _complete_look_plan(index: int, theme: Mapping[str, Any], policy: Mapping[str, Any]) -> dict[str, Any]:
+def _complete_look_plan(index: int, theme: Mapping[str, Any], policy: Mapping[str, Any],
+                        locale_pack: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    # ``locale_pack=None`` keeps the legacy inline Thai table, so the TH V2 plan
+    # stays byte-identical.  A bound Locale Pack owns the same four variants and
+    # the shared CTA, which is what stops a VN COMPLETE_LOOK plan from leaking
+    # Thai copy (spec §8.4 "越南语无泰语泄漏").
     neutral_copy = (
         ("วันนี้เลือกชุดไหนดี", "A B C หรือ D?", "วันนี้คุณชอบลุค A B C หรือ D มากที่สุด?"),
         ("4 ลุค เลือกหนึ่งชุด", "เลือกหนึ่งลุค\nA B C หรือ D?", "ถ้าเลือกได้หนึ่งลุค คุณจะเลือก A B C หรือ D?"),
         ("ลุคไหนตรงใจคุณ", "ลุคไหนตรงใจ?\nA B C หรือ D", "ใน 4 ลุคนี้ ชุดไหนตรงใจคุณที่สุด?"),
         ("ช่วยเลือกหนึ่งลุค", "ช่วยเลือกหน่อย\nA B C หรือ D?", "ช่วยเลือกหน่อย วันนี้ควรเป็นลุค A B C หรือ D?"),
     )
-    title, cover, caption = neutral_copy[(index - 1) % len(neutral_copy)]
+    default_cta = "คุณชอบลุคไหน?"
+    if locale_pack is None:
+        title, cover, caption = neutral_copy[(index - 1) % len(neutral_copy)]
+    else:
+        from services.photo_locale import complete_look_copy, locale_pack_labels
+        variants = complete_look_copy(locale_pack)
+        entry = variants[(index - 1) % len(variants)]
+        title, cover, caption = entry["title"], entry["cover"], entry["caption"]
+        default_cta = str(
+            locale_pack_labels(locale_pack, "generic").get("cta") or ""
+        )
     return {
         "schema_version": "opv-photo-content-plan-item-v1",
         "index": index, "policy_id": policy["policy_id"],
@@ -145,7 +166,7 @@ def _complete_look_plan(index: int, theme: Mapping[str, Any], policy: Mapping[st
         "looks": [],
         "copy": {
             "title": title, "cover": cover, "caption": caption,
-            "cta": str(theme.get("cta") or "คุณชอบลุคไหน?"),
+            "cta": str(theme.get("cta") or default_cta),
         },
         "difference_axes": {"asset_group": index},
     }
@@ -422,7 +443,10 @@ def plan_th_choice_batch(
         except PhotoLayeringFlowError as exc:
             raise PhotoContentPlanError(str(exc)) from exc
     if reference_mode == "COMPLETE_LOOK":
-        items = [_complete_look_plan(index, theme, policy) for index in range(1, count + 1)]
+        items = [
+            _complete_look_plan(index, theme, policy, locale_pack=locale_pack)
+            for index in range(1, count + 1)
+        ]
     elif (reference_mode == "STYLE" and style_profile
           and style_profile.get("analysis_method") == "doubao_seed_2_1"):
         recommendations = list(style_profile.get("recommended_sets") or [])

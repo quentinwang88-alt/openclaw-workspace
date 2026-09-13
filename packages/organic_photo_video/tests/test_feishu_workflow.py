@@ -105,7 +105,7 @@ class CatalogTest(unittest.TestCase):
         ))
         self.assertTrue(all(spec.look_ref == "" for spec in batch))
 
-    def test_shipped_catalog_exposes_eight_native_photo_presets(self):
+    def test_shipped_catalog_exposes_native_photo_presets(self):
         path = PACKAGE_ROOT / "config" / "feishu_production_presets.json"
         catalog = ProductionPresetCatalog(path)
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -116,10 +116,12 @@ class CatalogTest(unittest.TestCase):
         # 2026-09-13: the retired temperature-layering preset was dropped with
         # its recipe, leaving the disabled daily hot→cold transition preset as
         # the eighth native-photo entry.
-        self.assertEqual(len(photo_presets), 8)
+        # 2026-09-13 (VN scarf Phase 4): +2 disabled VN scarf presets (travel +
+        # daily matching) = 10 entries, and the scarf category joins the set.
+        self.assertEqual(len(photo_presets), 10)
         self.assertEqual(
             {item["category_key"] for item in photo_presets},
-            {"womenswear", "wig"},
+            {"womenswear", "wig", "scarf"},
         )
         expected_routes = {
             "图文｜TH｜四选一穿搭": (
@@ -127,6 +129,12 @@ class CatalogTest(unittest.TestCase):
             ),
             "图文｜TH｜旅行穿搭": (
                 "native_photo_style_plan_v1", "REUSE_THEN_GENERATE_MISSING",
+            ),
+            "图文｜VN｜围巾旅行": (
+                "native_photo_style_plan_v1", "REUSE_THEN_GENERATE_MISSING",
+            ),
+            "图文｜VN｜围巾搭配四选一": (
+                "native_photo_product_supply_v1", "REUSE_THEN_GENERATE_MISSING",
             ),
         }
         recipe_ids = set()

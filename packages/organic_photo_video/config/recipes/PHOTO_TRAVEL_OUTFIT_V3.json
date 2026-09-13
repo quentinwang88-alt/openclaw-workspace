@@ -397,7 +397,8 @@
       "product_embedding"
     ],
     "locale_copy_packs": {
-      "th-TH": "TH_TRAVEL_OUTFIT_V3"
+      "th-TH": "TH_TRAVEL_OUTFIT_V3",
+      "vi-VN": "VN_TRAVEL_OUTFIT_V1"
     }
   },
   "status": "draft"

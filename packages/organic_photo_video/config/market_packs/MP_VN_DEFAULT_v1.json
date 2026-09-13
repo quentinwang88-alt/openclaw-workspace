@@ -1,0 +1,105 @@
+{
+  "schema_version": "opv-market-pack-v1",
+  "market_pack_id": "MP_VN_DEFAULT_V1",
+  "pack_key": "MP_VN_DEFAULT",
+  "pack_version": 1,
+  "target_country": "VN",
+  "target_locale": "vi-VN",
+  "climate_zone": "tropical_monsoon",
+  "season_key": "cool_season_plus_travel",
+  "pack_name": "越南默认 Market Pack V1（围巾试点）",
+  "status": "draft",
+  "visual_rules": {
+    "aspect_ratio": "9:16",
+    "photographic_style": "realistic smartphone photo, natural handheld framing, no studio backdrop look",
+    "climate_constraints": [
+      "hot and humid most of the year; scarves are styled as an accent, never as proof of warmth",
+      "heavy winter outerwear only for travel, air-conditioned venues or explicit seasonal themes",
+      "northern cool season (Hanoi winter) may show light layering with a scarf"
+    ],
+    "preferred_scenes": [
+      "hanoi_old_quarter_street",
+      "local_cafe_corner",
+      "modern_apartment_room",
+      "shopping_mall",
+      "airport_terminal"
+    ],
+    "color_grading": "warm natural daylight, consistent tone across the 5-shot group",
+    "scarf_visibility": "the specified scarf must stay clearly readable; it may cover the neck and part of the chest but never the face"
+  },
+  "copy_rules": {
+    "locale": "vi-VN",
+    "fallback_allowed": false,
+    "fallback_note": "unsupported market/language combos must fail loudly, never silently fall back to Thai or English",
+    "title_max_chars": 80,
+    "caption_max_chars": 300,
+    "overlay_text_max_chars": 24,
+    "hashtag_count_range": [3, 6],
+    "style": "casual friendly Vietnamese as used by local young women on TikTok, avoid formal written Vietnamese and machine-translated wording",
+    "must_localize": ["title", "caption", "hashtags", "cover_text"],
+    "review_requirement": "every Vietnamese template actually used in production must reach NATIVE_APPROVED; DRAFT is allowed during development but blocks publishing"
+  },
+  "topic_rules": {
+    "destination_catalog_id": "EAST_ASIA_COOL_V1",
+    "destination_weights": {
+      "generic_cool_city": 3,
+      "seoul": 3,
+      "tokyo": 2,
+      "osaka": 1,
+      "shanghai": 1,
+      "beijing": 1
+    },
+    "_destination_weight_note": "相对抽样权重，键与 recipe variables_schema.destination 及 Locale Pack labels.destinations 一致。首批 12 篇的具体家族分配另见规格 §10；Tokyo/Shanghai 等 cool_city 不得默认生成雪景（由 Destination Catalog 的 snow_scene_policy 决定）。",
+    "_destination_weight_pending": "权重为开发期初值，待运营按目的地家族确认后调整。",
+    "content_family_weights": {
+      "scarf_matching": 5,
+      "scarf_travel": 7
+    },
+    "_content_family_weight_note": "首批 12 篇的两线配比（围巾日常搭配 5 / 围巾旅行穿搭 7），用于验证能力，不是长期固定比例。",
+    "posting_windows_local": [
+      "11:30-13:00",
+      "19:00-22:00"
+    ],
+    "_posting_window_pending": "发布时段为开发期默认值，待运营按越南本地数据确认。",
+    "core_scene_usage_ratio": {
+      "core": 0.7,
+      "exploration": 0.3
+    },
+    "look_source_priority": [
+      "successful_look",
+      "look_template",
+      "ai_exploration"
+    ],
+    "daily_content_volume": {
+      "min": 5,
+      "max": 10
+    },
+    "topic_frequency_rule": "avoid repeating the same topic_text within 7 days on one account",
+    "travel_theme_priority": [
+      "color_pairing",
+      "photo_friendly",
+      "four_look_choice",
+      "environment_coordination",
+      "photo_spot_outfit",
+      "temperature_dressing"
+    ],
+    "_travel_theme_note": "温度只作为整套服装语境，不允许声称单条围巾保证保暖（规格 §5.2）。"
+  },
+  "safety_rules": {
+    "banned": [
+      "politically sensitive landmarks or symbols",
+      "medical or health claims",
+      "visible brand watermarks",
+      "explicit content",
+      "claims that a single scarf guarantees warmth"
+    ],
+    "tiktok_ui_safe_area_px": {
+      "top": 220,
+      "bottom": 420,
+      "left": 60,
+      "right": 60
+    },
+    "face_visibility": "face must stay natural and unobscured; the scarf may not cover the face or distort the head-shoulder proportion",
+    "background_music": "never burn licensed BGM into the master when platform_hot_bgm is planned"
+  }
+}

@@ -1,0 +1,150 @@
+{
+  "schema_version": "opv-photo-canary-manifest-v1",
+  "canary_id": "VN_SCARF_COMPLETE_LOOK",
+  "canary_label_zh": "VN + scarf + COMPLETE_LOOK（上传四套完整穿搭，不生图）",
+  "spec_ref": "§8.4 canary 4",
+  "reference_mode": "COMPLETE_LOOK",
+  "destination_catalog_id": "EAST_ASIA_COOL_V1",
+  "context": {
+    "schema_version": "opv-photo-execution-context-v1",
+    "recipe": {
+      "id": "PHOTO_TRAVEL_OUTFIT_V3",
+      "version": 1,
+      "planning_flow": "travel_two_step"
+    },
+    "category": {
+      "key": "scarf",
+      "profile_id": "SCARF_V1",
+      "profile_version": 1,
+      "main_product_slot": "accessories"
+    },
+    "market": {
+      "country": "VN",
+      "market_pack_id": "MP_VN_DEFAULT_V1",
+      "market_pack_version": 1
+    },
+    "locale": {
+      "locale": "vi-VN",
+      "locale_pack_id": "LOCALE_VI_VN_V1",
+      "locale_pack_version": 1,
+      "copy_pack_id": "VN_TRAVEL_OUTFIT_V1"
+    },
+    "reference": {
+      "mode": "COMPLETE_LOOK",
+      "input_fingerprint": "896d8b6e66dd50e9d586eb5117c3804ee932fc696fe31c4dec355a4e6b0e98a7",
+      "reference_hashes": [
+        "a29db89070bde383ab658f16c7ba5cb1a47bee8202841a33754d8dfec48dde9f",
+        "8e41bd069300071b3f1354cfd64ef351e541a366f28f8d264ef290f2e9e2e948",
+        "045c19b1e7b767e958ff4372ce5bc6c26aeea6087768ec266b594cb043b54fb1",
+        "25a12b60e93713ec65da2610acbdadc68346759d33066081f36a0b98f0f36562"
+      ]
+    },
+    "persona": {
+      "persona_ref_id": "FIXTURE_PERSONA_REF_VN_SCARF",
+      "persona_pack_id": "FIXTURE_PERSONA_PACK_VN_SCARF_V1",
+      "reference_hashes": [
+        "3cdc5166df97072dc459df79a59f2c0eff94fd393876e271af34d0198d795247"
+      ]
+    },
+    "destination": {
+      "destination_id": "SEOUL_WINTER",
+      "destination_country": "KR",
+      "destination_city": "Seoul"
+    }
+  },
+  "content_plan": {
+    "schema_version": "opv-photo-content-plan-v1",
+    "policy_id": "TRAVEL_OUTFIT_V3",
+    "policy_version": 1,
+    "theme_key": "COOL_WEATHER_TRAVEL",
+    "reference_mode": "COMPLETE_LOOK",
+    "count": 1,
+    "planning_flow": "travel_two_step",
+    "required_roles": [
+      "look_a",
+      "look_b",
+      "look_c",
+      "look_d"
+    ],
+    "plan_sha256": "936cf487d4a2e3d4d14b68ca98b8434722a05180d4e7e47f0d5fccc53d7bf6d1",
+    "items": [
+      {
+        "schema_version": "opv-photo-content-plan-item-v1",
+        "index": 1,
+        "family_id": "complete_look_set_1",
+        "angle_zh": "完整穿搭素材第 1 组",
+        "scene_zh": "沿用上传素材",
+        "palette_zh": "沿用上传素材",
+        "presentation_type": "",
+        "copy": {
+          "title": "Hôm nay chọn set nào?",
+          "cover": "A B C hay D?",
+          "caption": "Hôm nay bạn thích look A B C hay D nhất?",
+          "cta": "Bạn thích look nào?"
+        },
+        "difference_axes": {
+          "asset_group": 1
+        },
+        "looks": []
+      }
+    ]
+  },
+  "account_binding": {
+    "account_id": "OPV_VN_TEST_001",
+    "status": "paused",
+    "target_country": "VN",
+    "default_locale": "vi-VN",
+    "persona_ref_id": "TH_APPAREL_REAL_03_001",
+    "allowed_persona_refs": [
+      "TH_APPAREL_REAL_03_001",
+      "TH_APPAREL_REAL_02_001",
+      "TH_APPAREL_REAL_01_001"
+    ],
+    "default_market_pack_id": "MP_VN_DEFAULT_V1",
+    "default_locale_pack_id": "LOCALE_VI_VN_V1",
+    "default_render_preset_id": "RP_STILL_FASTCUT_10S_V1",
+    "publishing_enabled": false
+  },
+  "unresolved": [
+    {
+      "binding": "asset_set_keys",
+      "declared": [
+        "TH_WOMENSWEAR_CHOICE"
+      ],
+      "delivered": false,
+      "blocks": "real_image_generation",
+      "note": "V3 keeps the TH asset-set key so the Phase 2 TH equivalence stays byte-identical (test_photo_travel_v3_equivalence). A VN/market-neutral asset set is a Phase 5 blocker: without it VN cannot render."
+    },
+    {
+      "binding": "copy_pack_language_review_status",
+      "declared": [
+        "DRAFT"
+      ],
+      "required": "NATIVE_APPROVED",
+      "delivered": false,
+      "blocks": "publishing",
+      "note": "Vietnamese copy is DRAFT until a native speaker reviews it (spec §9)."
+    },
+    {
+      "binding": "market_pack_status",
+      "declared": [
+        "draft"
+      ],
+      "required": "active",
+      "delivered": false,
+      "blocks": "publishing",
+      "note": "MP_VN_DEFAULT_V1 ships as draft; activation is a Phase 5 gate."
+    },
+    {
+      "binding": "account_status",
+      "declared": [
+        "paused"
+      ],
+      "required": "active",
+      "delivered": false,
+      "blocks": "publishing",
+      "note": "OPV_VN_TEST_001 is paused and publishing_enabled=false until TikTok Content Posting photo capability is confirmed on the VN account."
+    }
+  ],
+  "_fixture_note": "Phase 4（VN 围巾跨市场）三种参考模式的离线 canary manifest。context/content_plan 由 shipped 配置确定性重建，由 tests/test_photo_vn_activation.py 的再生成测试钉住，不会漂移成与代码不符的文档。persona 为 fixture 占位标识；输入哈希由 fixture 文本派生，非真实图片哈希。unresolved 列出所有「已声明但尚未交付」的绑定，本 manifest 不代表可发布。"
+}

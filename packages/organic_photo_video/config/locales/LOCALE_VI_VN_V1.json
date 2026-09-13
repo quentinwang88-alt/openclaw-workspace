@@ -1,0 +1,254 @@
+{
+  "schema_version": "opv-photo-locale-pack-v1",
+  "locale_pack_id": "LOCALE_VI_VN_V1",
+  "locale": "vi-VN",
+  "locale_pack_version": 1,
+  "status": "draft",
+  "fallback_allowed": false,
+  "labels": {
+    "travel_moments": {
+      "airport_departure": "Look đi sân bay",
+      "old_town_walk": "Look dạo phố cổ",
+      "cafe_visit": "Look đi cà phê",
+      "evening_stroll": "Look dạo phố chiều muộn",
+      "shopping_day": "Look ngày mua sắm",
+      "photo_spot": "Look chụp ảnh check-in",
+      "night_walk": "Look dạo phố ban đêm"
+    },
+    "destinations": {
+      "generic_cool_city": "Thành phố se lạnh",
+      "seoul": "Seoul",
+      "tokyo": "Tokyo",
+      "osaka": "Osaka",
+      "shanghai": "Thượng Hải",
+      "beijing": "Bắc Kinh"
+    },
+    "temperature_bands": {
+      "minus_10_0c": "-10-0°C",
+      "0_5c": "0-5°C",
+      "5_10c": "5-10°C",
+      "10_15c": "10-15°C",
+      "15_22c": "15-22°C"
+    },
+    "generic": {
+      "look_label": "Look {letter}",
+      "cta": "Bạn thích look nào?",
+      "title": "4 look du lịch",
+      "cover": "Look du lịch"
+    }
+  },
+  "_family_copy_note": "family_copy 为 vi-VN 发布文案：前 8 个家族对应 TRAVEL_OUTFIT_V3 的旅行家族，后 9 个家族对应 PHOTO_MATCHING_CHOICE_V3 的日常搭配家族。泰国语版本逐字保留在 LOCALE_TH_TH_V1.json 中，本包不做任何回退。",
+  "family_copy": {
+    "airport_transit": {
+      "title": "4 look thoải mái cho ngày ra sân bay",
+      "cover": "Look nào đi sân bay?\nA B C hay D?",
+      "caption": "Đi thành phố se lạnh, look nào thoải mái từ sân bay đến trung tâm? Bạn chọn A B C hay D?",
+      "look_labels": {
+        "look_a": "Khăn be, áo trench và jeans",
+        "look_b": "Khăn navy, áo quilted và quần kem",
+        "look_c": "Khăn xám, hoodie zip và chân váy jeans",
+        "look_d": "Khăn nâu, bomber và quần ống suông"
+      }
+    },
+    "city_walk": {
+      "title": "4 look dạo phố cổ",
+      "cover": "Dạo phố cổ mặc look nào?\nA B C hay D?",
+      "caption": "Ngày dạo phố cổ cả ngày, look nào vừa thoải mái vừa lên ảnh đẹp? Bạn chọn A B C hay D?",
+      "look_labels": {
+        "look_a": "Khăn nâu, áo field jacket và jeans",
+        "look_b": "Khăn đỏ rượu, blazer và quần be",
+        "look_c": "Khăn yến mạch, cardigan và chân váy xếp ly",
+        "look_d": "Khăn xanh nhạt, áo denim và chân váy suit"
+      }
+    },
+    "cafe_hopping": {
+      "title": "4 look đi cà phê phố cũ",
+      "cover": "Đi cà phê mặc look nào?\nA B C hay D?",
+      "caption": "Sáng nay có hẹn ở quán cà phê, look nào hợp không khí nhất? Bạn thích A B C hay D?",
+      "look_labels": {
+        "look_a": "Khăn kem, áo tweed và jeans",
+        "look_b": "Khăn caramel, trench ngắn và quần trắng",
+        "look_c": "Khăn cocoa, cardigan và chân váy kem",
+        "look_d": "Khăn nâu cà phê, jacket và chân váy jeans"
+      }
+    },
+    "night_market": {
+      "title": "4 look chợ đêm cho người mê mua sắm",
+      "cover": "Chợ đêm mặc look nào?\nA B C hay D?",
+      "caption": "Tối nay ra chợ đêm, trời se lạnh gió nhẹ. Bạn chọn look A B C hay D?",
+      "look_labels": {
+        "look_a": "Khăn đen, bomber và jeans đậm",
+        "look_b": "Khăn đỏ rượu, jacket và quần đen",
+        "look_c": "Khăn navy, blazer và chân váy xám",
+        "look_d": "Khăn đen, áo da và chân váy jeans"
+      }
+    },
+    "old_town_photo": {
+      "title": "4 look chụp ảnh kiến trúc cổ",
+      "cover": "Look nào lên ảnh đẹp nhất?\nA B C hay D?",
+      "caption": "Dừng lại chụp ảnh bên tường cũ, tông nào hợp bối cảnh nhất? Bạn chọn A B C hay D?",
+      "look_labels": {
+        "look_a": "Khăn xanh, coat và quần kem",
+        "look_b": "Khăn hồng, blazer và jeans",
+        "look_c": "Khăn nâu, cardigan và chân váy dài",
+        "look_d": "Khăn xám, áo tweed và chân váy xếp ly"
+      }
+    },
+    "seaside_stroll": {
+      "title": "4 look dạo biển buổi chiều",
+      "cover": "Chiều nay dạo ven biển?\nA B C hay D?",
+      "caption": "Gió biển buổi chiều mát lạnh, look nào đi dạo ven biển hợp nhất? Bạn chọn A B C hay D?",
+      "look_labels": {
+        "look_a": "Khăn kem, windbreaker và jeans",
+        "look_b": "Khăn be, trench và quần vải trắng",
+        "look_c": "Khăn xanh nhạt, áo denim và chân váy dài",
+        "look_d": "Khăn xanh, cardigan và quần dài"
+      }
+    },
+    "mountain_town": {
+      "title": "4 look sáng sớm ở thị trấn vùng núi",
+      "cover": "Thị trấn vùng núi trời lạnh?\nA B C hay D?",
+      "caption": "Buổi sáng ở thị trấn vùng núi lạnh thật, look nào vừa ấm vừa đẹp? Bạn chọn A B C hay D?",
+      "look_labels": {
+        "look_a": "Khăn lông cừu, jacket và jeans",
+        "look_b": "Khăn nâu, áo gilet giữ ấm và quần ống suông",
+        "look_c": "Khăn xanh rêu, coat ngắn và chân váy",
+        "look_d": "Khăn nâu, áo fleece và quần kaki"
+      }
+    },
+    "shopping_mall": {
+      "title": "4 look mua sắm trong thành phố lạnh",
+      "cover": "Ngày mua sắm mặc look nào?\nA B C hay D?",
+      "caption": "Mua sắm cả ngày, ra vào trung tâm thương mại máy lạnh. Bạn chọn look A B C hay D?",
+      "look_labels": {
+        "look_a": "Khăn xám, coat và quần đen",
+        "look_b": "Khăn trắng, áo suit và jeans",
+        "look_c": "Khăn xám, bomber và chân váy trắng",
+        "look_d": "Khăn đen, cardigan và chân váy xám"
+      }
+    },
+    "warm_neutral": {
+      "title": "4 look tông ấm dễ mặc hằng ngày",
+      "cover": "Look tông ấm nhẹ nhàng\nA B C hay D?",
+      "caption": "4 gợi ý tông ấm cho ngày se lạnh. Bạn thích look A B C hay D?",
+      "look_labels": {
+        "look_a": "Khăn nâu, blazer và jeans",
+        "look_b": "Khăn caramel, jacket và quần đen",
+        "look_c": "Khăn kem, cardigan và chân váy nâu",
+        "look_d": "Khăn xanh rêu, bomber và chân váy jeans"
+      }
+    },
+    "dark_clean": {
+      "title": "4 look tông đậm gọn gàng cuối tuần",
+      "cover": "Tông đậm trông thật gọn\nA B C hay D?",
+      "caption": "Ngày se lạnh bạn muốn mặc tông đậm kiểu nào? Bạn chọn A B C hay D?",
+      "look_labels": {
+        "look_a": "Khăn than chì, blazer và quần xám",
+        "look_b": "Khăn đỏ rượu, jacket và jeans đen",
+        "look_c": "Khăn navy, coat ngắn và chân váy xám",
+        "look_d": "Khăn đen, cardigan và chân váy jeans"
+      }
+    },
+    "denim_mix": {
+      "title": "4 look denim cho tiết trời se lạnh",
+      "cover": "Denim đón gió lạnh\nA B C hay D?",
+      "caption": "Denim phối với áo khoác kiểu nào đẹp nhất? Bạn chọn A B C hay D?",
+      "look_labels": {
+        "look_a": "Khăn be, áo denim và quần kem",
+        "look_b": "Khăn navy, áo quilted và jeans đậm",
+        "look_c": "Khăn nâu, blazer và chân váy jeans",
+        "look_d": "Khăn navy, cardigan và chân váy kem"
+      }
+    },
+    "soft_earth": {
+      "title": "4 look tông đất dịu cho ngày thư thái",
+      "cover": "Tông đất mềm mại\nA B C hay D?",
+      "caption": "Tông đất kiểu nào hợp với ngày thư thái nhất? Bạn chọn A B C hay D?",
+      "look_labels": {
+        "look_a": "Khăn xanh rêu, jacket và quần yến mạch",
+        "look_b": "Khăn yến mạch, cardigan và jeans nâu",
+        "look_c": "Khăn xám nâu, blazer và chân váy",
+        "look_d": "Khăn cocoa, jacket và chân váy kem"
+      }
+    },
+    "monochrome": {
+      "title": "4 look tối giản trắng đen xám",
+      "cover": "Trắng đen xám tối giản\nA B C hay D?",
+      "caption": "Nếu mặc trắng đen xám đi làm, bạn thích look A B C hay D?",
+      "look_labels": {
+        "look_a": "Khăn đen, blazer và quần trắng",
+        "look_b": "Khăn xám, jacket và quần đen",
+        "look_c": "Khăn trắng, jacket và chân váy đen",
+        "look_d": "Khăn than chì, cardigan và chân váy xám"
+      }
+    },
+    "sporty_layer": {
+      "title": "4 look thể thao cho ngày đi nhiều",
+      "cover": "Look thể thao mặc thoải mái\nA B C hay D?",
+      "caption": "Ngày phải đi lại nhiều, bạn muốn mặc look thể thao A B C hay D?",
+      "look_labels": {
+        "look_a": "Khăn navy, windbreaker và quần xám",
+        "look_b": "Khăn xám, hoodie zip và jeans đậm",
+        "look_c": "Khăn be, jacket varsity và chân váy",
+        "look_d": "Khăn kem, áo gilet và chân váy jeans"
+      }
+    },
+    "feminine_layer": {
+      "title": "4 look nữ tính nhẹ cho ngày se lạnh",
+      "cover": "Look nữ tính vừa phải\nA B C hay D?",
+      "caption": "Look nữ tính nhẹ nhàng, set nào bạn muốn mặc A B C hay D?",
+      "look_labels": {
+        "look_a": "Khăn kem, áo tweed và jeans",
+        "look_b": "Khăn hồng, cardigan và quần xám",
+        "look_c": "Khăn be, trench ngắn và chân váy xếp ly",
+        "look_d": "Khăn nâu, áo len và chân váy kem"
+      }
+    },
+    "travel_layer": {
+      "title": "4 look du lịch cho tiết trời se lạnh",
+      "cover": "Look du lịch trời se lạnh\nA B C hay D?",
+      "caption": "Chuyến đi se lạnh phải đi bộ và ra vào trong nhà, bạn chọn A B C hay D?",
+      "look_labels": {
+        "look_a": "Khăn be, trench và jeans",
+        "look_b": "Khăn navy, áo quilted và quần kem",
+        "look_c": "Khăn nâu, field jacket và chân váy",
+        "look_d": "Khăn kem, áo fleece và chân váy jeans"
+      }
+    },
+    "color_point": {
+      "title": "4 look điểm màu dễ mặc",
+      "cover": "Thêm màu cho ngày se lạnh\nA B C hay D?",
+      "caption": "Nếu thêm một màu nhấn cho look ngày lạnh, bạn thích A B C hay D?",
+      "look_labels": {
+        "look_a": "Khăn mù tạt, cardigan và jeans",
+        "look_b": "Khăn cam gạch, jacket và quần kem",
+        "look_c": "Khăn xanh lá, blazer và chân váy xám",
+        "look_d": "Khăn đỏ rượu, jacket và chân váy jeans"
+      }
+    }
+  },
+  "_complete_look_copy_note": "complete_look_copy 是国家无关的 COMPLETE_LOOK 中性文案（4 条，规划侧按下标轮换）。locale_pack=None 时规划侧仍读旧的内联泰语常量，TH V2 计划逐字不变。",
+  "complete_look_copy": [
+    {
+      "title": "Hôm nay chọn set nào?",
+      "cover": "A B C hay D?",
+      "caption": "Hôm nay bạn thích look A B C hay D nhất?"
+    },
+    {
+      "title": "4 look, chọn một set",
+      "cover": "Chọn một look\nA B C hay D?",
+      "caption": "Nếu chỉ được chọn một look, bạn sẽ chọn A B C hay D?"
+    },
+    {
+      "title": "Look nào đúng gu bạn?",
+      "cover": "Look nào đúng gu?\nA B C hay D",
+      "caption": "Trong 4 look này, set nào đúng gu bạn nhất?"
+    },
+    {
+      "title": "Chọn giúp mình một look",
+      "cover": "Chọn giúp mình nhé\nA B C hay D?",
+      "caption": "Chọn giúp mình nhé, hôm nay nên là look A B C hay D?"
+    }
+  ],
+  "_review_note": "开发期状态为 draft；正式发布前所有实际使用的越南语模板必须完成母语审校，并升为 NATIVE_APPROVED（见规格 §3.4 / §9）。"
+}

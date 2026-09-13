@@ -1,0 +1,68 @@
+{
+  "schema_version": "opv-account-profile-v1",
+  "account_id": "OPV_VN_TEST_001",
+  "account_code": "opv-vn-test-001",
+  "account_name": "OPV 越南测试账号 001（围巾试点，未启用发布）",
+  "platform": "tiktok",
+  "target_country": "VN",
+  "default_locale": "vi-VN",
+  "timezone": "Asia/Ho_Chi_Minh",
+  "status": "paused",
+  "persona_ref_id": "TH_APPAREL_REAL_03_001",
+  "persona_snapshot": {
+    "persona_name": "泰国真实感人物 03｜柔和短发粉妆（VN 试点候选 A）",
+    "source_db": "skills/lightweight-tryon-video/var/light_tryon.sqlite3",
+    "source_table": "persona_templates",
+    "markets": [
+      "TH"
+    ],
+    "reference_image_count": 4,
+    "note": "取自同一套公共人物模板库（规格 §5.5：不新建第二套人物机制）。四个角色证据齐备（正面脸 / 三四分之一脸 / 全身 / 运动全身），可通过 evaluate_persona_pack()。markets 字段仅为库内原始标注，账号层通过 allowed_persona_refs 决定可用池。"
+  },
+  "visual_identity": {
+    "tone": "warm natural daylight",
+    "wardrobe_palette": [
+      "cream",
+      "camel",
+      "navy",
+      "black"
+    ],
+    "signature": "pure-color fashion creator portraits with natural phone realism",
+    "proportion_rule": "自然比例，围巾可遮颈部与部分胸前但不能遮脸；不得为展示围巾改变脸型或造成头肩畸变"
+  },
+  "allowed_style_refs": [],
+  "allowed_look_refs": [],
+  "allowed_scene_refs": [],
+  "core_scene_refs": [],
+  "default_market_pack_id": "MP_VN_DEFAULT_V1",
+  "default_render_preset_id": "RP_STILL_FASTCUT_10S_V1",
+  "operating_rules": {
+    "look_selection_mode": "auto_library",
+    "exclude_look_refs": [],
+    "content_direction": "scarf_styling_and_cool_weather_travel",
+    "default_locale_pack_id": "LOCALE_VI_VN_V1",
+    "default_destination_catalog_id": "EAST_ASIA_COOL_V1",
+    "daily_publish_window_local": [
+      "11:30-13:00",
+      "19:00-22:00"
+    ],
+    "daily_volume": {
+      "min": 5,
+      "max": 10
+    },
+    "human_review_required": true,
+    "visual_qa_required": true,
+    "persona_authority": "original_persona_template_library",
+    "allowed_persona_refs": [
+      "TH_APPAREL_REAL_03_001",
+      "TH_APPAREL_REAL_02_001",
+      "TH_APPAREL_REAL_01_001"
+    ],
+    "persona_min_local_refs_testing": 1,
+    "persona_min_local_refs_active": 3,
+    "_persona_selection_note": "从公共人物模板库中挑出全部通过 evaluate_persona_pack() 的候选（脸+全身+≥3 张参考）：REAL_03（enabled，证据最全）、REAL_02（2026-09-07 对照实验 C 组胜出）、REAL_01。运营审核 VN 围巾账号定位后方可升为 active。",
+    "publishing_enabled": false,
+    "_publishing_note": "本账号 status=paused：尚未确认 TikTok Content Posting 原生图文能力，也未连接发布路由。生成侧可离线运行，发布侧在 Phase 5 门禁通过前保持关闭（规格 §9）。",
+    "note": "越南围巾试点账号。文案语言为 vi-VN，独立于泰语；locale/目的地均由配置绑定，未新增任何 PHOTO_VN_* 服务分支。"
+  }
+}

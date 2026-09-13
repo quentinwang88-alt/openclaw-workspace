@@ -24,6 +24,7 @@ from domain.contracts import (  # noqa: E402
     ContractViolationError, validate_destination_catalog_payload,
     validate_locale_pack_payload,
 )
+from services import photo_content_planner as planner  # noqa: E402
 from services import photo_locale  # noqa: E402
 
 V2_RECIPE_PATH = PACKAGE_ROOT / "config" / "recipes" / "PHOTO_TH_TRAVEL_OUTFIT_V2.json"
@@ -241,7 +242,8 @@ class DestinationCatalogFailureTest(unittest.TestCase):
         )
         self.assertEqual(
             [item["locale_pack_id"] for item in bundle.locale_packs],
-            ["LOCALE_TH_TH_V1"],
+            # 2026-09-13 (VN scarf Phase 4): +LOCALE_VI_VN_V1 (status=draft).
+            ["LOCALE_TH_TH_V1", "LOCALE_VI_VN_V1"],
         )
 
     def test_invalid_catalog_fails_at_load_time(self):
@@ -252,6 +254,57 @@ class DestinationCatalogFailureTest(unittest.TestCase):
                            encoding="utf-8")
             with self.assertRaises(ContractViolationError):
                 loader.load_destination_catalog_file(bad)
+
+
+class CompleteLookLegacyEquivalenceTest(unittest.TestCase):
+    """Phase 4 made ``_complete_look_plan`` Locale-Pack aware.
+
+    The ``locale_pack=None`` path must keep emitting the exact inline Thai table
+    (that is what every TH V2 / TH V3 COMPLETE_LOOK plan resolves today), and the
+    TH pack must reproduce those same four variants.  Without this the signature
+    change could silently reword Thai copy no Locale Pack has ever owned.
+    """
+
+    LEGACY_VARIANTS = (
+        ("วันนี้เลือกชุดไหนดี", "A B C หรือ D?", "วันนี้คุณชอบลุค A B C หรือ D มากที่สุด?"),
+        ("4 ลุค เลือกหนึ่งชุด", "เลือกหนึ่งลุค\nA B C หรือ D?",
+         "ถ้าเลือกได้หนึ่งลุค คุณจะเลือก A B C หรือ D?"),
+        ("ลุคไหนตรงใจคุณ", "ลุคไหนตรงใจ?\nA B C หรือ D",
+         "ใน 4 ลุคนี้ ชุดไหนตรงใจคุณที่สุด?"),
+        ("ช่วยเลือกหนึ่งลุค", "ช่วยเลือกหน่อย\nA B C หรือ D?",
+         "ช่วยเลือกหน่อย วันนี้ควรเป็นลุค A B C หรือ D?"),
+    )
+    # No theme CTA forces the legacy default CTA to be exercised.
+    THEME = {"theme_key": "COOL_WEATHER_TRAVEL"}
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.policy = planner.load_planning_policy("PHOTO_TH_TRAVEL_OUTFIT_V2")
+        cls.locale_pack = loader.load_locale_pack_file(LOCALE_PACK_PATH)
+
+    def test_inline_table_is_frozen_and_rotates(self):
+        for index in range(1, 7):
+            title, cover, caption = self.LEGACY_VARIANTS[(index - 1) % 4]
+            with self.subTest(index=index):
+                item = planner._complete_look_plan(index, self.THEME, self.policy)
+                self.assertEqual(item["copy"]["title"], title)
+                self.assertEqual(item["copy"]["cover"], cover)
+                self.assertEqual(item["copy"]["caption"], caption)
+                self.assertEqual(item["copy"]["cta"], "คุณชอบลุคไหน?")
+
+    def test_theme_cta_still_wins_over_the_default(self):
+        theme = {"theme_key": "COOL_WEATHER_TRAVEL", "cta": "คุณเลือก A B C หรือ D?"}
+        item = planner._complete_look_plan(1, theme, self.policy)
+        self.assertEqual(item["copy"]["cta"], "คุณเลือก A B C หรือ D?")
+
+    def test_th_pack_reproduces_the_inline_table_byte_for_byte(self):
+        for index in range(1, 5):
+            with self.subTest(index=index):
+                legacy = planner._complete_look_plan(index, self.THEME, self.policy)
+                bound = planner._complete_look_plan(
+                    index, self.THEME, self.policy, locale_pack=self.locale_pack
+                )
+                self.assertEqual(legacy, bound)
 
 
 class LocaleModulePurityTest(unittest.TestCase):

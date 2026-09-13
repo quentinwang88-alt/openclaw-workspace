@@ -336,6 +336,52 @@
      "scene_ref": ""
     }
    ]
+  },
+  {
+   "name": "图文｜VN｜围巾旅行",
+   "routing_policy": "native_photo_style_plan_v1",
+   "media_kind": "native_photo",
+   "category_key": "scarf",
+   "default_product_mode": "NO_PRODUCT",
+   "default_asset_mode": "REUSE_THEN_GENERATE_MISSING",
+   "tasks": [
+    {
+     "account_id": "OPV_VN_TEST_001",
+     "market": "VN",
+     "language": "vi-VN",
+     "recipe_id": "PHOTO_TRAVEL_OUTFIT_V3",
+     "theme_id": "",
+     "hook_strategy": "destination_temperature",
+     "persona_ref": "",
+     "look_ref": "",
+     "scene_ref": ""
+    }
+   ],
+   "status": "disabled",
+   "disabled_reason": "VN 围巾旅行线（PHOTO_TRAVEL_OUTFIT_V3 × SCARF_V1 × MP_VN_DEFAULT_V1 × LOCALE_VI_VN_V1）。越南语文案尚未母语审校（NATIVE_APPROVED）、VN 账号未确认 TikTok Content Posting 原生图文能力、离线 canary 未完成人工验收，故保持 disabled。验收通过后由运营改为 active。"
+  },
+  {
+   "name": "图文｜VN｜围巾搭配四选一",
+   "routing_policy": "native_photo_product_supply_v1",
+   "media_kind": "native_photo",
+   "category_key": "scarf",
+   "default_product_mode": "NO_PRODUCT",
+   "default_asset_mode": "REUSE_THEN_GENERATE_MISSING",
+   "tasks": [
+    {
+     "account_id": "OPV_VN_TEST_001",
+     "market": "VN",
+     "language": "vi-VN",
+     "recipe_id": "PHOTO_MATCHING_CHOICE_V3",
+     "theme_id": "",
+     "hook_strategy": "pick_one_of_four",
+     "persona_ref": "",
+     "look_ref": "",
+     "scene_ref": ""
+    }
+   ],
+   "status": "disabled",
+   "disabled_reason": "VN 围巾日常搭配线（PHOTO_MATCHING_CHOICE_V3 × SCARF_V1 × MP_VN_DEFAULT_V1 × LOCALE_VI_VN_V1）。规格 §5.2 原写 MATCHING_CHOICE_V2，该配方全仓不存在（开工前对齐清单 §5 已列为待拍板），本阶段按建议落为国家无关的 PHOTO_MATCHING_CHOICE_V3。VN 文案未母语审校、VN_SCARF_CHOICE 素材集尚未交付，故保持 disabled。"
   }
  ]
 }

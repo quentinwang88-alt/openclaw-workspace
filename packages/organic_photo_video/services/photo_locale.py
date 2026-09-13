@@ -20,6 +20,7 @@ from typing import Any, Mapping
 __all__ = [
     "PhotoLocaleError",
     "LOCALE_LABEL_KINDS",
+    "complete_look_copy",
     "destination_entry",
     "destination_labels",
     "destinations_for_country",
@@ -131,6 +132,31 @@ def family_copy(
             for key, value in dict(entry.get("look_labels") or {}).items()
         },
     }
+
+
+def complete_look_copy(locale_pack: Mapping[str, Any] | None) -> list[dict[str, str]]:
+    """Return the neutral COMPLETE_LOOK copy variants owned by a locale pack.
+
+    ``COMPLETE_LOOK`` re-uses the uploaded four outfits, so it has no policy
+    family to hang copy on: the planner used to carry four Thai title/cover/
+    caption triples inline.  They now live in the Locale Pack under
+    ``complete_look_copy`` so a VN plan cannot leak Thai copy.  The inline
+    constants stay untouched for the ``locale_pack=None`` path.
+    """
+    entries = (locale_pack or {}).get("complete_look_copy")
+    if not isinstance(entries, list) or not entries:
+        raise PhotoLocaleError("locale pack 缺少 complete_look_copy")
+    variants: list[dict[str, str]] = []
+    for position, entry in enumerate(entries, 1):
+        if not isinstance(entry, Mapping):
+            raise PhotoLocaleError(f"complete_look_copy 第 {position} 条必须是对象")
+        variant = {key: str(entry.get(key) or "") for key in ("title", "cover", "caption")}
+        if not all(variant.values()):
+            raise PhotoLocaleError(
+                f"complete_look_copy 第 {position} 条的 title/cover/caption 不能为空"
+            )
+        variants.append(variant)
+    return variants
 
 
 def travel_copy_tokens(

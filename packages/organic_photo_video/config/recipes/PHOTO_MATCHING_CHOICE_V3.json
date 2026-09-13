@@ -1,0 +1,222 @@
+{
+  "schema_version": "opv-content-recipe-v2",
+  "recipe_id": "PHOTO_MATCHING_CHOICE_V3",
+  "recipe_key": "MATCHING_CHOICE",
+  "recipe_version": 1,
+  "content_goal": "pick_your_look",
+  "anchor_slot": 2,
+  "shot_count": 5,
+  "hook_types": [
+    "pick_one_of_four",
+    "which_look"
+  ],
+  "story_structure": [
+    {
+      "slot_index": 1,
+      "role": "choice_grid",
+      "source_slots": [],
+      "layout_variant": "GRID_FOUR",
+      "purpose": "四宫格展示四套造型并提出选择问题",
+      "source_roles": [
+        "look_a",
+        "look_b",
+        "look_c",
+        "look_d"
+      ]
+    },
+    {
+      "slot_index": 2,
+      "role": "look_a",
+      "source_slots": [],
+      "layout_variant": "CHOICE_DETAIL",
+      "purpose": "展示第一套完整造型",
+      "source_roles": [
+        "look_a"
+      ]
+    },
+    {
+      "slot_index": 3,
+      "role": "look_b",
+      "source_slots": [],
+      "layout_variant": "CHOICE_DETAIL",
+      "purpose": "展示第二套完整造型，为下一页保留比较参照",
+      "source_roles": [
+        "look_b"
+      ]
+    },
+    {
+      "slot_index": 4,
+      "role": "look_c",
+      "source_slots": [],
+      "layout_variant": "CHOICE_DETAIL",
+      "purpose": "展示第三套完整造型",
+      "source_roles": [
+        "look_c"
+      ]
+    },
+    {
+      "slot_index": 5,
+      "role": "look_d_with_cta",
+      "source_slots": [],
+      "layout_variant": "CHOICE_DETAIL",
+      "purpose": "展示第四套完整造型并请读者选择",
+      "source_roles": [
+        "look_d"
+      ]
+    }
+  ],
+  "copy_style": {
+    "tone": "short_interactive",
+    "max_lines_per_block": 2
+  },
+  "suitable_topics": [
+    "scarf_styling_choice"
+  ],
+  "quality_profile_id": "QUALITY_STANDARD_V1",
+  "recipe_spec": {
+    "schema_version": "opv-photo-recipe-v2",
+    "media_kind": "native_photo",
+    "theme_types": [
+      "CHOICE"
+    ],
+    "product_modes": [
+      "NO_PRODUCT"
+    ],
+    "variables_schema": {
+      "choice_axis": {
+        "type": "enum",
+        "values": [
+          "scarf_pairing"
+        ],
+        "required": true
+      }
+    },
+    "template_id": "PHOTO_CHOICE_CARD_V2",
+    "template_version": 2,
+    "supported_presentations": [
+      "FLAT_LAY",
+      "MODEL_FULL_BODY",
+      "SCENE_MODEL"
+    ],
+    "visual_rules": {
+      "distinct_looks": 4
+    },
+    "asset_policy": {
+      "default": "ASSET_REUSE",
+      "on_missing": "NEEDS_ASSET"
+    },
+    "outfit_supply": {
+      "mode": "REUSE_THEN_GENERATE_MISSING",
+      "roles": [
+        {
+          "role": "look_a",
+          "bottom_axis": "pants"
+        },
+        {
+          "role": "look_b",
+          "bottom_axis": "pants"
+        },
+        {
+          "role": "look_c",
+          "bottom_axis": "skirt"
+        },
+        {
+          "role": "look_d",
+          "bottom_axis": "skirt"
+        }
+      ]
+    },
+    "asset_match_keys": [
+      "choice_axis"
+    ],
+    "asset_requirements": {
+      "required_roles": [
+        "look_a",
+        "look_b",
+        "look_c",
+        "look_d"
+      ],
+      "required_tags": {
+        "use_cases": "scarf_styling_choice"
+      },
+      "required_pairs": []
+    },
+    "execution_profiles": [
+      {
+        "profile_id": "scarf_four_looks",
+        "label": "围巾：四套日常搭配选一",
+        "variables": {
+          "choice_axis": "scarf_pairing"
+        },
+        "asset_set_keys": [
+          "VN_SCARF_CHOICE"
+        ]
+      }
+    ],
+    "content_card": {
+      "schema_version": "opv-photo-content-card-v1",
+      "summary_zh": "同一条围巾的四套日常搭配选一",
+      "audience_zh": "想找围巾日常搭配灵感的越南年轻女性",
+      "question_zh": "A/B/C/D 四套搭配里你最喜欢哪一套？",
+      "comparison_basis_zh": "只比较画面中可见的搭配与整体风格，不宣称保暖能力、城市或显高效果。",
+      "logic_key": "scarf_styling_choice",
+      "asset_gaps": [],
+      "pages": [
+        {
+          "index": 1,
+          "purpose_zh": "四宫格展示 A/B/C/D，提出四套搭配选择问题",
+          "layout": "grid_2x2",
+          "source_roles": [
+            "look_a",
+            "look_b",
+            "look_c",
+            "look_d"
+          ]
+        },
+        {
+          "index": 2,
+          "purpose_zh": "A：{{label_a}}",
+          "layout": "single",
+          "source_roles": [
+            "look_a"
+          ]
+        },
+        {
+          "index": 3,
+          "purpose_zh": "B：{{label_b}}",
+          "layout": "single",
+          "source_roles": [
+            "look_b"
+          ]
+        },
+        {
+          "index": 4,
+          "purpose_zh": "C：{{label_c}}",
+          "layout": "single",
+          "source_roles": [
+            "look_c"
+          ]
+        },
+        {
+          "index": 5,
+          "purpose_zh": "D：{{label_d}}，收束并请读者选择 A/B/C/D",
+          "layout": "single",
+          "source_roles": [
+            "look_d"
+          ]
+        }
+      ]
+    },
+    "planning_flow": "reference_contract_v1",
+    "market_policy": "MARKET_PACK_REQUIRED",
+    "required_category_capabilities": [
+      "wearable_styling",
+      "travel_look",
+      "product_embedding"
+    ],
+    "locale_copy_packs": {
+      "vi-VN": "VN_SCARF_MATCHING_V1"
+    }
+  },
+  "status": "draft"
+}

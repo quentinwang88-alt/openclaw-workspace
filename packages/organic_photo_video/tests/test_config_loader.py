@@ -27,7 +27,8 @@ class ShippedConfigTest(unittest.TestCase):
         # 2026-09-13 (VN scarf Phase 3): +1 category profile v2 (SCARF_V1, an
         # adapter contract rather than a copy profile) = 3 categories.
         self.assertEqual(len(self.bundle.categories), 3)
-        self.assertEqual(len(self.bundle.market_packs), 2)
+        # 2026-09-13 (VN scarf Phase 4): +MP_VN_DEFAULT_v1 (status=draft) = 3.
+        self.assertEqual(len(self.bundle.market_packs), 3)
         self.assertEqual(len(self.bundle.themes), 10)
         self.assertEqual(len(self.bundle.render_presets), 1)
         # 2026-09-13: temperature-layering V2 never reached RDS and was retired;
@@ -35,14 +36,16 @@ class ShippedConfigTest(unittest.TestCase):
         # unchanged from the 2026-09-12 layering baseline.
         # 2026-09-13 (VN scarf Phase 2): +1 country-agnostic travel template
         # (PHOTO_TRAVEL_OUTFIT_V3, status=draft canary) = 19 recipes, 14 photos.
-        self.assertEqual(len(self.bundle.content_recipes), 19)
+        # 2026-09-13 (VN scarf Phase 4): +1 country-agnostic daily matching
+        # template (PHOTO_MATCHING_CHOICE_V3, status=draft canary) = 20 / 15.
+        self.assertEqual(len(self.bundle.content_recipes), 20)
         self.assertEqual(len(self.bundle.render_profiles), 2)
         self.assertEqual(len(self.bundle.quality_profiles), 3)
         self.assertEqual(len(self.bundle.board_layouts), 11)
         self.assertEqual(len(self.bundle.variant_policies), 1)
-        # The country-agnostic layer ships with one TH locale pack and the V1
-        # East-Asia destination catalog.
-        self.assertEqual(len(self.bundle.locale_packs), 1)
+        # The country-agnostic layer ships with the TH locale pack plus the VN
+        # one added in Phase 4, and the V1 East-Asia destination catalog.
+        self.assertEqual(len(self.bundle.locale_packs), 2)
         self.assertEqual(len(self.bundle.destination_catalogs), 1)
         self.assertIsNotNone(self.bundle.account_example)
 
@@ -80,9 +83,10 @@ class ShippedConfigTest(unittest.TestCase):
                 "PHOTO_TH_PICK_YOUR_LOOK_V1", "PHOTO_TH_PICK_YOUR_LOOK_V2",
                 "PHOTO_TH_TEMPERATURE_DRESSING_V1", "PHOTO_TH_TRAVEL_OUTFIT_V1",
             } else "draft" if recipe.recipe_id in {
-                # Country-agnostic canary: shipped but not routed until Phase 4
+                # Country-agnostic canaries: shipped but not routed until Phase 4
                 # binds a Market Pack and passes acceptance.
                 "PHOTO_TRAVEL_OUTFIT_V3",
+                "PHOTO_MATCHING_CHOICE_V3",
             } else "active")
             if recipe.recipe_spec_json.get("media_kind") == "native_photo":
                 self.assertIsNone(recipe.render_profile_id)
@@ -157,7 +161,8 @@ class ShippedConfigTest(unittest.TestCase):
         # all other native-photo recipes, including the daily
         # thermal-transition line, use five.
         # 2026-09-13 (VN scarf Phase 2): +1 country-agnostic travel template = 14.
-        self.assertEqual(len(photos), 14)
+        # 2026-09-13 (VN scarf Phase 4): +1 country-agnostic matching template = 15.
+        self.assertEqual(len(photos), 15)
         layout_ids = {
             layout["layout_id"] for layout in self.bundle.board_layouts
             if layout["schema_version"] in {loader.PHOTO_LAYOUT_SCHEMA, "opv-photo-layout-v2"}
@@ -188,7 +193,16 @@ class ShippedConfigTest(unittest.TestCase):
                 self.assertNotIn("markets", spec)
                 self.assertNotIn("category_key", spec)
                 self.assertEqual(spec["market_policy"], "MARKET_PACK_REQUIRED")
-                self.assertEqual(spec["planning_flow"], "travel_two_step")
+                # 2026-09-13 (VN scarf Phase 4): two country-agnostic templates
+                # now share the v2 schema -- the travel line keeps
+                # ``travel_two_step`` and the daily matching line uses the
+                # reference contract flow.
+                self.assertEqual(
+                    spec["planning_flow"],
+                    "travel_two_step"
+                    if recipe.recipe_id == "PHOTO_TRAVEL_OUTFIT_V3"
+                    else "reference_contract_v1",
+                )
                 self.assertTrue(spec["required_category_capabilities"])
                 self.assertTrue(spec["locale_copy_packs"])
             self.assertIn("NO_PRODUCT", spec["product_modes"])

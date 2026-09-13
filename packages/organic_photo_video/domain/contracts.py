@@ -858,6 +858,22 @@ def validate_locale_pack_payload(payload: Mapping[str, Any]) -> List[str]:
                         or any(not _is_str(value) or not str(value).strip()
                                for value in look_labels.values())):
                     errors.append(f"family_copy.{family_id}.look_labels must map roles to labels")
+    # ``complete_look_copy`` is the neutral COMPLETE_LOOK copy (title/cover/
+    # caption per variant).  It used to be hard-coded Thai inside the planner.
+    complete_look = payload.get("complete_look_copy")
+    if complete_look is not None:
+        if not _is_list(complete_look) or not complete_look:
+            errors.append("complete_look_copy must be a non-empty list when present")
+        else:
+            for position, entry in enumerate(complete_look, 1):
+                if not _is_dict(entry):
+                    errors.append(f"complete_look_copy[{position}] must be an object")
+                    continue
+                for key in ("title", "cover", "caption"):
+                    if not _is_str(entry.get(key)) or not str(entry[key]).strip():
+                        errors.append(
+                            f"complete_look_copy[{position}].{key} must be a non-empty string"
+                        )
     return errors
 
 
