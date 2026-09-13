@@ -87,14 +87,20 @@ def legacy_style_supply_condition(product):
 
 class AdapterRegistryTest(unittest.TestCase):
     def test_womenswear_is_registered_and_resolvable(self):
-        self.assertEqual(registered_category_keys(), ("womenswear",))
+        # 2026-09-13 (VN scarf Phase 3): SCARF_V1 joined the registry. This is a
+        # deliberate, reviewed expansion — see tests/test_photo_scarf_category.py
+        # for the scarf contract itself.
+        self.assertEqual(registered_category_keys(), ("scarf", "womenswear"))
         adapter = get_photo_category_adapter("womenswear")
         self.assertIs(adapter, WOMENSWEAR_V1)
         # lookup is tolerant of padding/case, matching the registry convention
         self.assertIs(get_photo_category_adapter(" WOMENSWEAR "), WOMENSWEAR_V1)
 
     def test_unknown_category_raises(self):
-        for token in ("scarf", "wig", "", "nope"):
+        # "scarf" used to live here; Phase 3 registers it, so the guards are now
+        # the genuinely unregistered tokens. "shoes" is a *product* category,
+        # not a category_key, and must not resolve either.
+        for token in ("wig", "shoes", "", "nope"):
             with self.assertRaises(UnknownPhotoCategoryError):
                 get_photo_category_adapter(token)
 

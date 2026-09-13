@@ -24,7 +24,9 @@ class ShippedConfigTest(unittest.TestCase):
         cls.bundle = loader.load_seed_bundle()
 
     def test_bundle_counts_match_phase0_plan(self) -> None:
-        self.assertEqual(len(self.bundle.categories), 2)
+        # 2026-09-13 (VN scarf Phase 3): +1 category profile v2 (SCARF_V1, an
+        # adapter contract rather than a copy profile) = 3 categories.
+        self.assertEqual(len(self.bundle.categories), 3)
         self.assertEqual(len(self.bundle.market_packs), 2)
         self.assertEqual(len(self.bundle.themes), 10)
         self.assertEqual(len(self.bundle.render_presets), 1)
@@ -119,14 +121,32 @@ class ShippedConfigTest(unittest.TestCase):
 
     def test_photo_categories_are_config_only_and_active(self) -> None:
         categories = {item["category_key"]: item for item in self.bundle.categories}
-        self.assertEqual(set(categories), {"womenswear", "wig"})
+        # 2026-09-13 (VN scarf Phase 3): +SCARF_V1, the first
+        # opv-category-profile-v2 adapter contract. It shares the directory with
+        # the v1 copy profiles; the loader dispatches on schema_version.
+        self.assertEqual(set(categories), {"womenswear", "wig", "scarf"})
         for item in categories.values():
             self.assertEqual(item["status"], "active")
+        v1 = {
+            key: item for key, item in categories.items()
+            if item["schema_version"] == loader.CATEGORY_PROFILE_SCHEMA
+        }
+        self.assertEqual(set(v1), {"womenswear", "wig"})
+        for item in v1.values():
             self.assertEqual(
                 item["content_rules"]["allowed_product_modes"],
                 ["NO_PRODUCT", "SOFT_PRODUCT"],
             )
             self.assertEqual(item["content_rules"]["default_asset_mode"], "ASSET_REUSE")
+        # The v2 profile declares the machine-readable adapter contract instead
+        # of copy rules, and never binds a market or a publish language.
+        scarf = categories["scarf"]
+        self.assertEqual(scarf["schema_version"], loader.CATEGORY_PROFILE_V2_SCHEMA)
+        self.assertEqual(scarf["main_product_slot"], "accessories")
+        self.assertEqual(scarf["product_label_zh"], "目标围巾")
+        self.assertEqual(scarf["accepted_product_categories"], ["scarf"])
+        for forbidden in ("markets", "locale", "content_rules"):
+            self.assertNotIn(forbidden, scarf)
 
     def test_eight_photo_recipes_have_stable_contracts(self) -> None:
         photos = [

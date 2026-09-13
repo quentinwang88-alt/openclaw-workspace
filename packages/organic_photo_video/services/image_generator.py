@@ -29,7 +29,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from services.persona_pack import select_identity_references
-from services.photo_category_registry import resolve_product_display_label
+from services.photo_category_registry import (
+    adapter_for_product_category,
+    resolve_product_display_label,
+)
 from services.product_reference_resolver import (
     has_detail_reference,
     select_product_references_for_slot,
@@ -371,8 +374,15 @@ def compose_shot_prompt(request: ShotGenerationRequest) -> str:
     )
     background_color = str(presentation.get("background_color") or "#F6F5F2")
 
-    product_label = resolve_product_display_label(
-        str(product.get("category") or "").strip().lower()
+    product_category = str(product.get("category") or "").strip().lower()
+    product_label = resolve_product_display_label(product_category)
+    # Phase 3：类目适配器可以声明额外的"商品必须在场"指令（如围巾不得缺失、
+    # 不得换款、不得遮脸）。未声明该字段的类目（womenswear）拿到空元组，
+    # 提示词逐字不变。
+    product_adapter = adapter_for_product_category(product_category)
+    presence_lock_lines = (
+        tuple(product_adapter.presence_lock_lines)
+        if product_adapter is not None else ()
     )
     opening = (
         "生成一张竖屏 9:16 的真实服装平铺搭配照片：正上方俯拍，像当地穿搭创作者自行整理拍摄的图文素材。"
@@ -417,6 +427,7 @@ def compose_shot_prompt(request: ShotGenerationRequest) -> str:
                 f"目标商品：{product_label}。商品参考图是该商品颜色、图案、材质观感、形状和结构的最高视觉事实。",
                 "穿搭灵感只能调整配套单品、搭配比例和穿法，不能替换或重新设计指定商品。",
                 "忽略商品图中的模特、姿态、滤镜与背景。",
+                *presence_lock_lines,
             ])
         usage_lines = reference_usage_contract_lines(request)
         if usage_lines:
@@ -428,6 +439,10 @@ def compose_shot_prompt(request: ShotGenerationRequest) -> str:
             "商品名称、Look 名称、穿搭模板或其文案不得覆盖商品参考图中的颜色和材质。",
             "保持参考图中的颜色、版型、衣长、领型、前襟和袖口结构；禁止替换成相似款或重新设计。",
             "忽略商品参考图中的模特、脸、妆发、姿态、滤镜与背景。",
+        ])
+        if product and presence_lock_lines:
+            lines.extend(presence_lock_lines)
+        lines.extend([
             "",
             "【人物身份锁】",
         ])

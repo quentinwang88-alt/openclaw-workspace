@@ -49,6 +49,10 @@ LOCALE_DIR = CONFIG_DIR / "locales"
 DESTINATION_DIR = CONFIG_DIR / "destinations"
 
 CATEGORY_PROFILE_SCHEMA = "opv-category-profile-v1"
+# v2 is the machine-readable adapter contract (capabilities / product slot /
+# reference priority). Both schemas live in the same directory; the loader
+# dispatches on schema_version and leaves the v1 path byte-identical.
+CATEGORY_PROFILE_V2_SCHEMA = contracts.CATEGORY_PROFILE_V2_SCHEMA_VERSION
 PHOTO_LAYOUT_SCHEMA = "opv-photo-layout-v1"
 
 
@@ -75,7 +79,14 @@ def _load_validated(path: Path, validator, model_cls, label: str):
 
 
 def validate_category_profile(payload: Mapping[str, Any]) -> List[str]:
-    """Validate the small, config-only category profile used by photo recipes."""
+    """Validate the small, config-only category profile used by photo recipes.
+
+    Dispatches on ``schema_version``: ``opv-category-profile-v2`` is the
+    machine-readable Category Adapter contract and is validated in
+    ``domain.contracts``; everything else keeps the original v1 rules.
+    """
+    if payload.get("schema_version") == CATEGORY_PROFILE_V2_SCHEMA:
+        return contracts.validate_photo_category_profile_v2_payload(payload)
     errors: List[str] = []
     if payload.get("schema_version") != CATEGORY_PROFILE_SCHEMA:
         errors.append(f"schema_version must be {CATEGORY_PROFILE_SCHEMA}")

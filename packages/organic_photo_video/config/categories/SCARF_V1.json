@@ -1,0 +1,45 @@
+{
+  "schema_version": "opv-category-profile-v2",
+  "category_key": "scarf",
+  "category_name": "围巾",
+  "status": "active",
+  "capabilities": [
+    "wearable_styling",
+    "travel_look",
+    "product_embedding"
+  ],
+  "accepted_product_categories": [
+    "scarf"
+  ],
+  "main_product_slot": "accessories",
+  "product_label_zh": "目标围巾",
+  "required_product_roles": [
+    "look_a",
+    "look_b",
+    "look_c",
+    "look_d"
+  ],
+  "identity_attributes": [
+    "dominant_color",
+    "pattern_family",
+    "material_appearance",
+    "edge_or_fringe",
+    "length_volume"
+  ],
+  "product_reference_priority_by_slot": {
+    "full_look": [
+      "front",
+      "lifestyle",
+      "detail"
+    ],
+    "hero": [
+      "front",
+      "lifestyle",
+      "detail"
+    ],
+    "detail": [
+      "front",
+      "detail"
+    ]
+  }
+}

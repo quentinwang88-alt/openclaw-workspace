@@ -10,8 +10,22 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from services.image_generator import ShotGenerationRequest
-from services.photo_category_registry import WOMENSWEAR_V1, product_owns_slot
+from services.photo_category_registry import (
+    WOMENSWEAR_V1,
+    adapter_for_product_category,
+    product_owns_slot,
+)
 from services.photo_theme import style_look_specs
+
+
+def _product_adapter(product: Mapping[str, Any] | None):
+    """按商品类目取适配器（Phase 3）。
+
+    未被任何适配器认领的类目（wig、空类目）回退 ``WOMENSWEAR_V1``：这张表历史
+    上服务所有商品，回退才能保证这些商品的输出与 Phase 3 之前逐字一致。
+    """
+    token = str((product or {}).get("category") or "").lower()
+    return adapter_for_product_category(token) or WOMENSWEAR_V1
 
 
 def _product_targets_slot(product: Mapping[str, Any] | None, slot: str) -> bool:
@@ -26,7 +40,22 @@ def _product_targets_slot(product: Mapping[str, Any] | None, slot: str) -> bool:
     行为与搬迁前一致。
     """
     token = str((product or {}).get("category") or "").lower()
-    return product_owns_slot(WOMENSWEAR_V1, slot, token)
+    return product_owns_slot(_product_adapter(product), slot, token)
+
+
+def _target_slot_override(product: Mapping[str, Any] | None) -> str:
+    """商品应写入的 **额外** 冻结穿搭槽位；无则返回空串。
+
+    只认适配器声明的 ``main_product_slot``，且必须是该类目**自己拥有**的槽位。
+    这样 ``outerwear``（womenswear 的主槽位，已由上方既有分支处理）与
+    ``top``/``dress`` 等映射到别的槽位的类目都不会走到这里 —— 只有像 scarf
+    这样主槽位为 ``accessories`` 的类目才会新增一个键，TH V2 输出不变。
+    """
+    adapter = _product_adapter(product)
+    slot = str(adapter.main_product_slot or "")
+    if not slot or slot == "outerwear":
+        return ""
+    return slot if _product_targets_slot(product, slot) else ""
 
 
 MAX_GROUP_REPAIR_ATTEMPTS = 1
@@ -407,6 +436,40 @@ class PhotoStyleReferenceSupplyService:
                 repair_note = repair_notes.get(role, "")
                 if repair_note:
                     plan_shot["purpose"] = _with_repair_note(plan_shot["purpose"], repair_note)
+                outfit_state = {
+                    "top_inner": look["top_inner"], "bottom": look["bottom"],
+                    "shoes": look["shoes"], "style_direction": "；".join(filter(None, [
+                        str(theme["visual_brief"]), str(variation.get("style_modifier") or ""),
+                        (
+                            "穿搭比例与下装鞋履衔接："
+                            + str(look.get("styling_intent") or "")
+                            if str(look.get("styling_intent") or "").strip() else ""
+                        ),
+                        (
+                            "同一人物身份、同一目的地视觉体系、统一色彩基调；"
+                            "各 Look 场景互相独立，按各自 travel_moment 呈现"
+                            if travel_moment else ""
+                        ),
+                        (
+                            "全组摄影调色延续参考图气质；当套服装颜色严格执行冻结描述。"
+                            "参考图配色仅作为审美方向（"
+                            + "、".join(reference_palette[:4])
+                            + "），不得把四套配套单品强行收敛到同一色域"
+                            if reference_palette else ""
+                        ),
+                    ])),
+                    "outerwear": (
+                        "指定商品，以商品参考图的颜色、版型和结构为准"
+                        if _product_targets_slot(product, "outerwear")
+                        else look["outerwear"]
+                    ),
+                }
+                target_slot = _target_slot_override(product)
+                if target_slot:
+                    # Phase 3：主槽位不是 outerwear 的类目（scarf → accessories）
+                    # 把商品冻结在该槽位。声明 outerwear 主槽位的类目（womenswear）
+                    # 永远走不到这里，故 TH V2 输出不变。
+                    outfit_state[target_slot] = "指定商品，以商品参考图的颜色、版型和结构为准"
                 return ShotGenerationRequest(
                     task_id=f"photo_style_{self._safe(record_id)}",
                     slot_index=index, slot_role="full_look",
@@ -435,34 +498,7 @@ class PhotoStyleReferenceSupplyService:
                         ),
                     },
                     output_dir=str(output_dir), continuity_reference_images=references,
-                    outfit_state={
-                        "top_inner": look["top_inner"], "bottom": look["bottom"],
-                        "shoes": look["shoes"], "style_direction": "；".join(filter(None, [
-                            str(theme["visual_brief"]), str(variation.get("style_modifier") or ""),
-                            (
-                                "穿搭比例与下装鞋履衔接："
-                                + str(look.get("styling_intent") or "")
-                                if str(look.get("styling_intent") or "").strip() else ""
-                            ),
-                            (
-                                "同一人物身份、同一目的地视觉体系、统一色彩基调；"
-                                "各 Look 场景互相独立，按各自 travel_moment 呈现"
-                                if travel_moment else ""
-                            ),
-                            (
-                                "全组摄影调色延续参考图气质；当套服装颜色严格执行冻结描述。"
-                                "参考图配色仅作为审美方向（"
-                                + "、".join(reference_palette[:4])
-                                + "），不得把四套配套单品强行收敛到同一色域"
-                                if reference_palette else ""
-                            ),
-                        ])),
-                        "outerwear": (
-                            "指定商品，以商品参考图的颜色、版型和结构为准"
-                            if _product_targets_slot(product, "outerwear")
-                            else look["outerwear"]
-                        ),
-                    },
+                    outfit_state=outfit_state,
                     recipe_execution={
                         "content_goal": (
                             "layering_progression" if layered_planned else "multi_look"

@@ -35,6 +35,13 @@ PRODUCT_CATEGORY_ALIASES = {
     "针织衫": "top",
     "女装": "womenwear",
     "配饰": "accessory",
+    # VN scarf cross-market, Phase 3: the scarf category alias.  Only the
+    # operator-facing local names are added here; the sync mechanism itself is
+    # untouched, and ASCII categories pass through unchanged.
+    "围巾": "scarf",
+    "披肩": "scarf",
+    "丝巾": "scarf",
+    "脖套": "scarf",
 }
 IMAGE_SUFFIX_BY_MIME = {
     "image/jpeg": ".jpg",

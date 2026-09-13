@@ -67,6 +67,26 @@ class PhotoCategoryAdapter:
     #: preserves that discrepancy instead of harmonising it.
     product_own_category_by_slot: Mapping[str, Tuple[str, ...]] = field(
         default_factory=dict)
+    # --- adapter-declared contract (Phase 3) --------------------------------
+    #: Identity features the generator prompt must keep verbatim.  The default
+    #: is the womenswear/garment wording already shipped in the prompt.
+    must_keep: Tuple[str, ...] = (
+        "颜色", "图案", "材质观感", "形状与结构",
+        "版型", "衣长", "领型", "前襟", "袖口",
+    )
+    #: Mutations the generator prompt must refuse.  Same provenance as above.
+    forbidden: Tuple[str, ...] = (
+        "替换成相似款", "重新设计指定商品",
+        "用文案覆盖商品参考图的颜色和材质",
+    )
+    #: Per-page QA fields this category is judged on; empty means "identity
+    #: lock only" (the pre-Phase-3 behaviour, so womenswear is unchanged).
+    qa_fields: Tuple[str, ...] = ()
+    #: Deterministic pass/fail rules for :attr:`qa_fields`.
+    qa_rules: Tuple[str, ...] = ()
+    #: Extra generator-prompt lines that lock the product into the frame.
+    #: Empty for womenswear, so the shipped prompt is untouched there.
+    presence_lock_lines: Tuple[str, ...] = ()
 
 
 #: Product fields copied into ``look["target_product"]``.
@@ -133,8 +153,85 @@ WOMENSWEAR_V1 = PhotoCategoryAdapter(
 )
 
 
+#: Scarf QA observation fields (spec §5.6).  The first five mirror the generic
+#: identity lock; the rest are scarf-specific failure modes that must not be
+#: waved through as MINOR.
+SCARF_QA_FIELDS: Tuple[str, ...] = (
+    "role", "product_present", "product_matches", "visibility_sufficient",
+    "dominant_color_matches", "pattern_family_matches", "edge_or_fringe_matches",
+    "length_volume_plausible", "face_unobscured", "repair_instruction",
+)
+
+#: Deterministic verdicts for :data:`SCARF_QA_FIELDS` (spec §5.6).
+SCARF_QA_RULES: Tuple[str, ...] = (
+    "product_present=false：失败",
+    "product_matches=false：失败",
+    "visibility_sufficient=false：失败",
+    "主色或图案家族明显错误：失败",
+    "边缘或流苏轻微形变：warning；明显消失或换结构：失败",
+    "细密纹理微差：warning，不冒充像素级一致",
+    "普通非目标配饰缺失仍可为 MINOR；指定围巾不适用该宽松规则",
+    "失败继续使用 failed_roles_from_travel_qa() 定向重生",
+)
+
+
+SCARF_V1 = PhotoCategoryAdapter(
+    category_key="scarf",
+    capabilities=(
+        "wearable_styling",
+        "travel_look",
+        "product_embedding",
+    ),
+    accepted_product_categories=("scarf",),
+    main_product_slot="accessories",
+    product_label_zh="目标围巾",
+    required_product_roles=("look_a", "look_b", "look_c", "look_d"),
+    product_reference_priority_by_slot={
+        # Scarf packs are front/lifestyle/detail oriented: no back/side view
+        # exists for a scarf, so those roles are deliberately absent.
+        "hero": ("front", "lifestyle", "detail"),
+        "full_look": ("front", "lifestyle", "detail"),
+        "detail": ("front", "detail"),
+    },
+    identity_attributes=(
+        "dominant_color",
+        "pattern_family",
+        "material_appearance",
+        "edge_or_fringe",
+        "length_volume",
+    ),
+    product_slot_by_category={
+        "scarf": ("accessories", "围巾"),
+    },
+    product_display_label_by_category={
+        "scarf": "目标围巾",
+    },
+    product_own_category_by_slot={
+        # A scarf *is* the accessories item.  It never takes over a garment
+        # slot, which is why a scarf product must not overwrite outerwear.
+        "accessories": ("scarf",),
+    },
+    must_keep=(
+        "颜色", "图案家族", "材质观感", "边缘或流苏结构", "长度与体积感", "围法",
+    ),
+    forbidden=(
+        "替换成相似款", "重新设计指定围巾",
+        "用文案覆盖商品参考图的颜色和图案",
+        "改变围巾长度或体积感", "遮挡人物面部",
+    ),
+    qa_fields=SCARF_QA_FIELDS,
+    qa_rules=SCARF_QA_RULES,
+    presence_lock_lines=(
+        "本页必须出现指定围巾，不得缺失，也不得被外套、头发或围法完全遮挡。",
+        "围巾的颜色、图案家族、材质观感、边缘或流苏结构与长度体积感必须与商品参考图一致。",
+        "围巾可搭在颈部或肩部，但不得遮挡人物面部，不得改变脸型或拉伸颈部比例。",
+    ),
+)
+
+
 _ADAPTERS: Dict[str, PhotoCategoryAdapter] = {
     WOMENSWEAR_V1.category_key: WOMENSWEAR_V1,
+    SCARF_V1.category_key: SCARF_V1,
 }
 
 
@@ -268,9 +365,11 @@ def build_product_qa_contract(
     """Machine-readable form of the product identity lock.
 
     Mirrors what the generator prompt already asserts under
-    【指定商品身份锁】. Phase 1 only *describes* that contract -- no caller
-    consumes it yet, so wiring it cannot change today's output. Phase 3 uses it
-    for the scarf QA fields.
+    【指定商品身份锁】. Phase 1 only *describes* that contract; Phase 3 makes
+    the wording and the per-page QA fields adapter-declared, so a scarf is
+    judged on pattern family / edge-or-fringe / length-volume instead of a
+    garment's collar and placket. Categories that declare no ``qa_fields``
+    (womenswear) keep the identity-lock-only shape they had in Phase 1.
     """
     product = dict(product_snapshot or {})
     return {
@@ -282,14 +381,10 @@ def build_product_qa_contract(
         "accepted_product_categories": list(adapter.accepted_product_categories),
         "identity_attributes": list(adapter.identity_attributes),
         "required_product_roles": list(adapter.required_product_roles),
-        "must_keep": [
-            "颜色", "图案", "材质观感", "形状与结构",
-            "版型", "衣长", "领型", "前襟", "袖口",
-        ],
-        "forbidden": [
-            "替换成相似款", "重新设计指定商品",
-            "用文案覆盖商品参考图的颜色和材质",
-        ],
+        "must_keep": list(adapter.must_keep),
+        "forbidden": list(adapter.forbidden),
+        "qa_fields": list(adapter.qa_fields),
+        "qa_rules": list(adapter.qa_rules),
         "reference_pack_id": str(product.get("reference_pack_id") or ""),
         "reference_pack_version": product.get("reference_pack_version"),
     }

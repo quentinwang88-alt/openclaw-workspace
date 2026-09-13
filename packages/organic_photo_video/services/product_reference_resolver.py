@@ -15,7 +15,11 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from domain.models import ProductReferencePack
-from services.photo_category_registry import WOMENSWEAR_V1, role_priority_for_slot
+from services.photo_category_registry import (
+    WOMENSWEAR_V1,
+    adapter_for_product_category,
+    role_priority_for_slot,
+)
 
 PACK_READY = "ready"
 PACK_LIMITED = "limited"
@@ -74,10 +78,12 @@ def select_product_references_for_slot(
     if not roles:
         return fallback
     # Phase 1 等价搬迁：本表原为函数内联常量，现由 Category Adapter 提供。
-    # 注意它当前是"与商品类目无关"的（同一张表服务所有商品），所以这里按
-    # 现值表读取，而不是按 product.category 取适配器——后者会改变缺类目商品
-    # 的取图顺序。等第二个类目上线（Phase 3）再改成按适配器查表。
-    role_order = role_priority_for_slot(WOMENSWEAR_V1, slot_role)
+    # Phase 3 起按**商品类目**取适配器（scarf 与 womenswear 的参考图优先级不同）。
+    # 未被任何适配器认领的类目（如 wig，或缺 category）回退到 WOMENSWEAR 那张
+    # 旧表 —— 这张表历史上服务所有商品，回退而非改用共享默认序，才能保证
+    # 缺类目商品的取图顺序与迁移前逐字一致。
+    adapter = adapter_for_product_category(product.get("category")) or WOMENSWEAR_V1
+    role_order = role_priority_for_slot(adapter, slot_role)
     selected: List[str] = []
     for role in role_order:
         for value in roles.get(role, []):

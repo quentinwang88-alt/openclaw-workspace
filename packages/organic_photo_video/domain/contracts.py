@@ -714,6 +714,32 @@ SNOW_SCENE_POLICIES = ("FORBIDDEN", "OPTIONAL_NOT_DEFAULT", "DEFAULT")
 # comes from the bound Locale Pack, never from the destination entry.
 DESTINATION_FORBIDDEN_KEYS = ("label", "labels", "locale", "name_localized", "copy")
 
+# --- Category Adapter layer (VN scarf cross-market, Phase 3) ----------------
+# ``opv-category-profile-v1`` is a copy-only profile: name, interest drivers
+# and content rules.  v2 adds the machine-readable half the pipeline actually
+# needs -- which capabilities a recipe may demand, which product category owns
+# which outfit slot, which reference roles to prefer -- so a category can be
+# added without touching ``photo_reference_vision``/``image_generator``.
+CATEGORY_PROFILE_V2_SCHEMA_VERSION = "opv-category-profile-v2"
+# Outfit-state slots the generator knows how to render (image_generator
+# 【冻结穿搭】 label map).  A category may only claim one of these.
+PHOTO_OUTFIT_SLOTS = (
+    "outerwear", "top_inner", "onepiece", "bottom",
+    "shoes", "bag", "accessories", "socks",
+)
+# Product reference roles a pack may declare (product_reference_resolver
+# ASSET_ROLES).  Category reference priority may only name these.
+PRODUCT_REFERENCE_ROLES = (
+    "front", "back", "side", "detail", "lifestyle", "unknown",
+)
+# Storyboard roles a category may give a product-reference order for.
+# Unlisted roles fall back to the shared order in the registry.
+PRODUCT_REFERENCE_SLOTS = (
+    "hero", "full_look", "lifestyle", "detail", "second_angle",
+)
+# A category profile never carries publish language or a market binding.
+CATEGORY_FORBIDDEN_KEYS = ("markets", "locale", "labels", "label_th", "copy")
+
 NARRATIVE_FUNCTIONS = ("HOOK", "CONTEXT", "TRANSFORMATION", "PROOF", "PAYOFF")
 
 # Product identity that recipes/themes/outfits may never change.
@@ -951,6 +977,63 @@ def validate_photo_execution_context_payload(payload: Mapping[str, Any]) -> List
         _require_str(errors, persona, "persona_ref_id")
         _require_str(errors, persona, "persona_pack_id")
         _require_list(errors, persona, "reference_hashes", non_empty=False)
+    return errors
+
+
+def validate_photo_category_profile_v2_payload(payload: Mapping[str, Any]) -> List[str]:
+    """Validate the machine-readable ``opv-category-profile-v2`` adapter contract.
+
+    v2 is additive: the v1 copy fields are not required, and the v1 validator is
+    untouched, so existing ``WOMENSWEAR_V1``/``WIG_V1`` files keep loading as-is.
+    The rules below are what let the pipeline stop hard-coding garment names,
+    reference order and QA fields per category.
+    """
+    errors: List[str] = []
+    _check_schema_version(errors, payload, CATEGORY_PROFILE_V2_SCHEMA_VERSION)
+    for key in ("category_key", "category_name", "status", "main_product_slot",
+                "product_label_zh"):
+        if not _is_str(payload.get(key)) or not str(payload[key]).strip():
+            errors.append(f"{key} must be a non-empty string")
+    if payload.get("status") not in {"draft", "active", "deprecated"}:
+        errors.append("status must be draft, active, or deprecated")
+    # A category must not fix its own market or publish language: that binding
+    # arrives from the Market Pack / Locale Pack at request time (Phase 2).
+    for forbidden in CATEGORY_FORBIDDEN_KEYS:
+        if payload.get(forbidden) not in (None, "", {}, []):
+            errors.append(
+                f"category profile must not bind market or language ({forbidden}); "
+                "that belongs to the Market/Locale Pack"
+            )
+    slot = payload.get("main_product_slot")
+    if _is_str(slot) and slot not in PHOTO_OUTFIT_SLOTS:
+        errors.append(
+            f"main_product_slot must be one of {list(PHOTO_OUTFIT_SLOTS)}, got {slot!r}"
+        )
+    for key in ("capabilities", "accepted_product_categories",
+                "required_product_roles", "identity_attributes"):
+        values = payload.get(key)
+        if not _is_list(values) or not values:
+            errors.append(f"{key} must be a non-empty list")
+        elif any(not _is_str(value) or not str(value).strip() for value in values):
+            errors.append(f"{key} entries must be non-empty strings")
+
+    priority = payload.get("product_reference_priority_by_slot")
+    if not _is_dict(priority) or not priority:
+        errors.append("product_reference_priority_by_slot must be a non-empty object")
+        return errors
+    for role, order in priority.items():
+        if role not in PRODUCT_REFERENCE_SLOTS:
+            errors.append(
+                f"product_reference_priority_by_slot.{role} is not a storyboard role"
+            )
+        if not _is_list(order) or not order:
+            errors.append(f"product_reference_priority_by_slot.{role} must be a non-empty list")
+            continue
+        for token in order:
+            if token not in PRODUCT_REFERENCE_ROLES:
+                errors.append(
+                    f"product_reference_priority_by_slot.{role} has unknown role {token!r}"
+                )
     return errors
 
 
