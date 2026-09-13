@@ -14,6 +14,7 @@ from services.photo_flow_registry import (
     DEFAULT_TRAVEL_SOURCE_ROLES, PhotoFlowRegistryError,
     resolve_required_roles, validate_ordered_roles,
 )
+from services.photo_category_registry import apply_target_product_to_look
 
 from PIL import Image, ImageOps
 import requests
@@ -1620,29 +1621,12 @@ class PhotoReferenceVisionService:
                     "styling_intent": str(look.get("styling_intent") or ""),
                 }
                 product = dict(product_context or {})
-                product_id = str(product.get("product_id") or "")
-                if product_id:
-                    category = str(product.get("category") or "").strip().lower()
-                    normalized_look["target_product"] = {
-                        key: product.get(key)
-                        for key in ("product_id", "product_name", "category",
-                                    "reference_pack_id", "reference_pack_version")
-                        if product.get(key) not in (None, "")
-                    }
-                    target_fields = {
-                        "outerwear": ("outerwear", "外套"),
-                        "top": ("top_inner", "上装"),
-                        "bottom": ("bottom", "下装"),
-                        "dress": ("outerwear", "连衣裙"),
-                        "shoes": ("shoes", "鞋履"),
-                        "shoe": ("shoes", "鞋履"),
-                        "footwear": ("shoes", "鞋履"),
-                    }
-                    target = target_fields.get(category)
-                    if target:
-                        normalized_look[target[0]] = (
-                            f"指定商品{target[1]}（以商品参考图为准）"
-                        )
+                if str(product.get("product_id") or ""):
+                    # 类目→商品槽位映射改由 Category Adapter 提供（Phase 1 等价搬迁），
+                    # 未注册的类目只写 target_product、不做槽位覆盖，与搬迁前一致。
+                    normalized_look = apply_target_product_to_look(
+                        adapter=None, look=normalized_look, product_snapshot=product,
+                    )
                 normalized_looks.append(normalized_look)
             topic_active = bool(travel_topic and travel_topic.get("theme_type"))
             if (len(plan_moments) == len(ROLES)

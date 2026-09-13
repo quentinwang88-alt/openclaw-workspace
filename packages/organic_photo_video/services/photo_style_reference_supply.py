@@ -10,7 +10,23 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from services.image_generator import ShotGenerationRequest
+from services.photo_category_registry import WOMENSWEAR_V1, product_owns_slot
 from services.photo_theme import style_look_specs
+
+
+def _product_targets_slot(product: Mapping[str, Any] | None, slot: str) -> bool:
+    """商品类目**本身**是否就是占据该槽位的那件商品。
+
+    口径改由 Category Adapter 提供（Phase 1 等价搬迁）。注意这与规划侧的
+    "类目→槽位"映射不同：``dress`` 在规划侧写进 outerwear 槽位，但这里的
+    原条件是"商品类目就是 outerwear"，所以连衣裙**不**触发覆盖。这个差异
+    被原样保留，未做"统一"。
+
+    这里保留本文件原有的 ``lower()`` 归一（**不** strip），带空格的类目串
+    行为与搬迁前一致。
+    """
+    token = str((product or {}).get("category") or "").lower()
+    return product_owns_slot(WOMENSWEAR_V1, slot, token)
 
 
 MAX_GROUP_REPAIR_ATTEMPTS = 1
@@ -443,7 +459,7 @@ class PhotoStyleReferenceSupplyService:
                         ])),
                         "outerwear": (
                             "指定商品，以商品参考图的颜色、版型和结构为准"
-                            if product and str(product.get("category") or "").lower() == "outerwear"
+                            if _product_targets_slot(product, "outerwear")
                             else look["outerwear"]
                         ),
                     },

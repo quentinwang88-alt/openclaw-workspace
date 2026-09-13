@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from services.persona_pack import select_identity_references
+from services.photo_category_registry import resolve_product_display_label
 from services.product_reference_resolver import (
     has_detail_reference,
     select_product_references_for_slot,
@@ -370,12 +371,9 @@ def compose_shot_prompt(request: ShotGenerationRequest) -> str:
     )
     background_color = str(presentation.get("background_color") or "#F6F5F2")
 
-    product_label = {
-        "outerwear": "目标外套",
-        "dress": "目标连衣裙",
-        "top": "目标上装",
-        "bottom": "目标下装",
-    }.get(str(product.get("category") or "").strip().lower(), "目标商品")
+    product_label = resolve_product_display_label(
+        str(product.get("category") or "").strip().lower()
+    )
     opening = (
         "生成一张竖屏 9:16 的真实服装平铺搭配照片：正上方俯拍，像当地穿搭创作者自行整理拍摄的图文素材。"
         if flat_lay else

@@ -1174,7 +1174,6 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
             from services.photo_theme import resolve_photo_theme, build_theme_copy
             from services.photo_reference import (
                 REFERENCE_MODE_COMPLETE_LOOK, REFERENCE_MODE_PRODUCT, REFERENCE_MODE_STYLE,
-                resolve_reference_mode,
             )
             try:
                 theme = resolve_photo_theme(text_value(record.fields.get(FIELD_CONTENT_THEME)))
@@ -1189,6 +1188,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     )
             reference_mode = ""
             reference_attachments = []
+            product_context: dict[str, Any] = {}
             selected_reference_type = text_value(record.fields.get(FIELD_REFERENCE_TYPE))
             if layering_flow:
                 role_field_values = sum((
@@ -1225,40 +1225,33 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     raise FeishuWorkflowError(
                         f"{flow_label}必须显式选择{supported}，不支持自动判断/商品参考"
                     )
-            elif unified_attachments:
-                reference_attachments = unified_attachments
+            else:
+                # 非分层（旅行/通用）参考解析统一走公共门面；行为与旧内联分支逐字等价。
+                # 分层流禁止商品编码（上方已校验），故商品快照与上下文恒为空。
+                from services.photo_reference_context import resolve_photo_reference_context
                 try:
-                    reference_mode = resolve_reference_mode(
+                    reference_context = resolve_photo_reference_context(
                         selected_type=selected_reference_type,
-                        attachments=reference_attachments, product_id=product_id,
-                        required_role_count=len(roles), requested_count=quantity,
+                        unified_attachments=unified_attachments,
+                        legacy_complete=legacy_complete,
+                        legacy_product=legacy_product,
+                        product_id=product_id,
                         required_roles=roles,
+                        quantity=quantity,
+                        account_id=specs[0].account_id,
+                        record_id=record.record_id,
+                        product_reference_resolver=self.product_reference_resolver,
                     )
                 except ValueError as exc:
                     raise FeishuWorkflowError(str(exc)) from exc
-            elif legacy_complete:
-                reference_mode, reference_attachments = REFERENCE_MODE_COMPLETE_LOOK, legacy_complete
-            elif legacy_product or product_id:
-                reference_mode, reference_attachments = REFERENCE_MODE_PRODUCT, legacy_product
-            # Explicit STYLE + product code is a supported combination: the
-            # product pack remains the identity lock, while uploaded images are
-            # inspiration only and must never be written into that pack.
-            if reference_mode == REFERENCE_MODE_STYLE and product_id:
-                try:
-                    style_product = self.product_reference_resolver.resolve_snapshot(
-                        product_id, selection_key=record.record_id,
-                        account_id=specs[0].account_id,
-                    )
                 except ProductReferenceResolutionError as exc:
                     raise FeishuWorkflowError(
                         f"指定商品 {product_id} 缺少可用商品参考包：{exc}"
                     ) from exc
-            product_context = ({
-                key: style_product.get(key)
-                for key in ("product_id", "product_name", "category", "variant_key",
-                            "reference_pack_id", "reference_pack_version")
-                if style_product.get(key) not in (None, "")
-            } if style_product else {})
+                reference_mode = reference_context.reference_mode
+                reference_attachments = list(reference_context.reference_attachments)
+                style_product = reference_context.product_snapshot
+                product_context = reference_context.product_context
             requires_product_supply = bool(
                 recipe_for_input and (recipe_for_input.recipe_spec_json or {}).get("outfit_supply")
             )
