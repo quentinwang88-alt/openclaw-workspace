@@ -63,7 +63,7 @@
       "look_c",
       "look_d"
     ],
-    "plan_sha256": "7e6459aedaa4afc644a0254a2bdb2894f92ca937931186ba4ffbfe50bd84bc33",
+    "plan_sha256": "049c873602f2dc94fee52ff8e0c0dd16dbc7f4741be3e369fc39cace407482d3",
     "items": [
       {
         "schema_version": "opv-photo-content-plan-item-v3",
@@ -75,7 +75,7 @@
         "presentation_type": "SCENE_MODEL",
         "copy": {
           "title": "Đi Seoul mặc gì khi 0-5°C?",
-          "cover": "Đi Seoul mặc gì?\nThời tiết 0-5°C\nChọn A B C hay D",
+          "cover": "Đi Seoul mặc gì khi 0-5°C?\nChọn A B C hay D",
           "caption": "Thời tiết Seoul khoảng 0-5°C. Xem 4 look rồi chọn giúp mình A B C hay D nhé.",
           "cta": "Bạn chọn look nào?",
           "hashtags": [
@@ -84,7 +84,7 @@
             "#khanquang"
           ],
           "slide_texts": [
-            "Đi Seoul mặc gì?\nThời tiết 0-5°C\nChọn A B C hay D",
+            "Đi Seoul mặc gì khi 0-5°C?\nChọn A B C hay D",
             "A · {{label_a}}",
             "B · {{label_b}}",
             "C · {{label_c}}",
