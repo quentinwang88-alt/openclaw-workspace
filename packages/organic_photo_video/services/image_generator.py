@@ -12,13 +12,18 @@ product/persona/look/scene refs from the plan for cross-shot consistency.
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import itertools
 import json
 import os
 import struct
 import subprocess
 import tempfile
+import time
+import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -85,6 +90,10 @@ class GenerationOutcome:
     height: Optional[int] = None
     error: str = ""
     raw: Dict[str, Any] = field(default_factory=dict)
+    # Failure taxonomy consumed by the channel chain: ``config`` / ``auth`` are
+    # treated as fatal for the whole run, everything else is a transient hint
+    # that the next channel may still succeed.
+    error_kind: str = ""
 
 
 def prepare_sunburst_primary_reference(
@@ -728,6 +737,8 @@ def _load_skill_service():
 class OpenAIImageGenerator:
     """Adapter over skills/openai-image (lazy import; auth via codex OAuth)."""
 
+    channel_name = "codex"
+
     def __init__(self, service=None, size: str = OPV_SIZE, quality: str = OPV_QUALITY):
         self._service = service
         self._size = size
@@ -818,12 +829,14 @@ class OpenAIImageGenerator:
             getattr(result, "task_id", "") or f"{request.task_id}_P{request.slot_index}"
         )
         if status != "success" or not paths:
+            error = error_message or f"generator status {status!r}"
             return GenerationOutcome(
                 ok=False,
                 model=result_model,
                 request_id=request_id,
-                error=error_message or f"generator status {status!r}",
+                error=error,
                 raw={"status": status, **reference_canvas},
+                error_kind=classify_error_kind(error),
             )
         image_path = paths[0]
         dimensions = read_image_dimensions(image_path)
@@ -837,6 +850,7 @@ class OpenAIImageGenerator:
             height=dimensions[1] if dimensions else None,
             error="" if size_ok else f"image is not 9:16 portrait: {dimensions}",
             raw={"status": status, **reference_canvas},
+            error_kind="" if size_ok else "quality",
         )
 
     @staticmethod
@@ -895,6 +909,39 @@ def check_portrait_916(dimensions: Optional[tuple]) -> bool:
     return abs(width / height - 9 / 16) <= RATIO_TOLERANCE
 
 
+# Failure classes that no amount of channel hopping can fix: a missing key or a
+# rejected credential stays broken for the rest of the process, so the chain
+# skips that channel outright instead of paying its timeout on every shot.
+FATAL_ERROR_KINDS = frozenset({"config", "auth"})
+
+_ERROR_KIND_MARKERS = (
+    ("config", (
+        "not configured", "no such file", "command not found", "file not found",
+        "output dir unavailable", "invalid base url", "missing api key",
+    )),
+    ("auth", (
+        "401", "403", "unauthorized", "forbidden", "invalid_api_key",
+        "invalid api key", "authentication",
+    )),
+    ("rate_limit", (
+        "429", "rate limit", "too many requests", "usage_limit_reached",
+        "quota", "insufficient", "credit",
+    )),
+    ("timeout", ("timeout", "timed out", "deadline")),
+    ("content", ("content policy", "moderation", "safety system")),
+    ("quality", ("not 9:16 portrait", "9:16")),
+)
+
+
+def classify_error_kind(text: str) -> str:
+    """Coarse failure class used by the channel chain to pick its next move."""
+    lowered = str(text or "").lower()
+    for kind, markers in _ERROR_KIND_MARKERS:
+        if any(marker in lowered for marker in markers):
+            return kind
+    return "unknown"
+
+
 # tiny sys.path helpers so unit tests never import the real skill
 def sys_path() -> List[str]:
     import sys
@@ -930,6 +977,8 @@ class CreatokImageGenerator:
     failure surfaces as ``GenerationOutcome(ok=False)`` so the fallback
     channel can take over — this class never raises across the boundary.
     """
+
+    channel_name = "creatok"
 
     def __init__(
         self,
@@ -975,6 +1024,7 @@ class CreatokImageGenerator:
             return GenerationOutcome(
                 ok=False, provider=CREATOK_PROVIDER_NAME, model=self.model,
                 request_id=outcome_id, error="CREATOK_API_KEY not configured",
+                error_kind="config",
             )
         output_dir = Path(request.output_dir)
         run_dir = output_dir / f"creatok_{stem}"
@@ -984,6 +1034,7 @@ class CreatokImageGenerator:
             return GenerationOutcome(
                 ok=False, provider=CREATOK_PROVIDER_NAME, model=self.model,
                 request_id=outcome_id, error=f"output dir unavailable: {exc}",
+                error_kind="config",
             )
         reference_paths = OpenAIImageGenerator._reference_paths(request)
         command = [
@@ -1000,9 +1051,11 @@ class CreatokImageGenerator:
         try:
             completed = self._spawn_with_retry(command)
         except (subprocess.TimeoutExpired, OSError) as exc:
+            error = f"creatok cli failed: {exc}"
             return GenerationOutcome(
                 ok=False, provider=CREATOK_PROVIDER_NAME, model=self.model,
-                request_id=outcome_id, error=f"creatok cli failed: {exc}",
+                request_id=outcome_id, error=error,
+                error_kind=classify_error_kind(error),
             )
         envelope = self._parse_envelope(completed.stdout)
         (run_dir / "envelope.json").write_text(
@@ -1011,14 +1064,16 @@ class CreatokImageGenerator:
         )
         if not envelope.get("ok"):
             error = (envelope.get("error") or {})
+            message = (
+                f"creatok {error.get('kind', 'unknown')}: "
+                f"{error.get('message') or completed.stderr[-400:]}"
+            )
             return GenerationOutcome(
                 ok=False, provider=CREATOK_PROVIDER_NAME, model=self.model,
                 request_id=str(envelope.get("task_id") or outcome_id),
-                error=(
-                    f"creatok {error.get('kind', 'unknown')}: "
-                    f"{error.get('message') or completed.stderr[-400:]}"
-                ),
+                error=message,
                 raw={"envelope": envelope},
+                error_kind=classify_error_kind(message),
             )
         images = list(
             (((envelope.get("data") or {}).get("result") or {}).get("images") or [])
@@ -1029,6 +1084,7 @@ class CreatokImageGenerator:
                 request_id=str(envelope.get("task_id") or outcome_id),
                 error="creatok envelope has no image url",
                 raw={"envelope": envelope},
+                error_kind="server",
             )
         image_path = self._download(
             str(images[0]["url"]), output_dir / f"{stem}{self._suffix(images[0]['url'])}"
@@ -1039,6 +1095,7 @@ class CreatokImageGenerator:
                 request_id=str(envelope.get("task_id") or outcome_id),
                 error="creatok image download failed",
                 raw={"envelope": envelope},
+                error_kind="server",
             )
         dimensions = read_image_dimensions(str(image_path))
         size_ok = check_portrait_916(dimensions)
@@ -1052,6 +1109,7 @@ class CreatokImageGenerator:
             height=dimensions[1] if dimensions else None,
             error="" if size_ok else f"image is not 9:16 portrait: {dimensions}",
             raw={"envelope": envelope, "reference_count": len(reference_paths)},
+            error_kind="" if size_ok else "quality",
         )
 
     def _spawn_with_retry(self, command: List[str]):
@@ -1094,54 +1152,764 @@ class CreatokImageGenerator:
             return None
 
 
-class FallbackShotGenerator:
-    """Try the primary channel first; on any failure hand off to fallback."""
+ONEROUTE_PROVIDER_NAME = "1route"
+ONEROUTE_DEFAULT_BASE_URL = "https://image-api.1route.dev"
+ONEROUTE_DEFAULT_MODEL = "gpt-image-2.5-sunburst"
+ONEROUTE_DEFAULT_FALLBACK_MODEL = "gpt-image-2"
+ONEROUTE_DEFAULT_TIMEOUT = 300
+ONEROUTE_MAX_REFERENCE_IMAGES = 16
+# The relay honours the requested ``size`` literally (unlike the codex skill,
+# which re-interprets ``OPV_SIZE`` and returns 9:16 anyway).  Asking for the
+# OpenAI-standard ``1024x1536`` (=2:3) therefore produced 1024x1536 images that
+# the 9:16 gate rejected — the channel could never pass its own QC.  A true 9:16
+# request makes the relay return ~940x1672, which clears ``check_portrait_916``.
+ONEROUTE_DEFAULT_SIZE = "1088x1920"
+# ``multipart`` posts to /v1/images/edits (OpenAI-standard reference edits);
+# ``json`` posts data-URL references to /v1/images/generations, which some
+# relays prefer. Flip without a code change if the relay rejects one shape.
+ONEROUTE_EDIT_MODES = ("multipart", "json")
+ONEROUTE_DEFAULT_EDIT_MODE = "multipart"
 
-    def __init__(self, primary, fallback):
+_MIME_BY_SUFFIX = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
+
+
+def _mime_for(path: Path) -> str:
+    return _MIME_BY_SUFFIX.get(path.suffix.lower(), "image/png")
+
+
+def _encode_multipart(
+    fields: Dict[str, Any], files: List[tuple]
+) -> tuple:
+    """Minimal multipart/form-data encoder (stdlib only)."""
+    boundary = f"----opv-oneroute-{uuid.uuid4().hex}"
+    chunks: List[bytes] = []
+    for key, value in fields.items():
+        if value is None:
+            continue
+        chunks.append(f"--{boundary}\r\n".encode("ascii"))
+        chunks.append(
+            f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode("utf-8")
+        )
+        chunks.append(str(value).encode("utf-8"))
+        chunks.append(b"\r\n")
+    for name, filename, payload, mime in files:
+        chunks.append(f"--{boundary}\r\n".encode("ascii"))
+        chunks.append(
+            (
+                f'Content-Disposition: form-data; name="{name}"; '
+                f'filename="{filename}"\r\n'
+            ).encode("utf-8")
+        )
+        chunks.append(f"Content-Type: {mime}\r\n\r\n".encode("ascii"))
+        chunks.append(payload)
+        chunks.append(b"\r\n")
+    chunks.append(f"--{boundary}--\r\n".encode("ascii"))
+    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
+
+
+def _extract_image_payload(payload: Any) -> tuple:
+    """Pull (b64_json, url) out of an OpenAI-compatible image response."""
+    if not isinstance(payload, dict):
+        return None, None
+    for key in ("data", "images", "output"):
+        items = payload.get(key)
+        if isinstance(items, list) and items:
+            break
+    else:
+        return None, None
+    first = items[0]
+    if isinstance(first, str):
+        return (first if first.startswith(("http://", "https://")) else None), (
+            first if first.startswith(("http://", "https://")) else None
+        )
+    if not isinstance(first, dict):
+        return None, None
+    b64 = first.get("b64_json") or first.get("b64") or first.get("image_base64")
+    url = first.get("url") or first.get("image_url")
+    return (str(b64) if b64 else None), (str(url) if url else None)
+
+
+class OneRouteImageGenerator:
+    """Adapter over the 1route relay (OpenAI-compatible ``/v1/images``).
+
+    Channel-local model ladder: the primary model is tried first and the
+    secondary model catches only that attempt's failure, so a single broken
+    model name never burns the whole chain. Auth resolves from
+    ``OPV_ONEROUTE_API_KEY`` (falling back to ``ONEROUTE_API_KEY``). Every
+    failure returns ``GenerationOutcome(ok=False)``; nothing raises across the
+    boundary.
+    """
+
+    channel_name = "1route"
+
+    def __init__(
+        self,
+        model: str = "",
+        fallback_model: str = "",
+        base_url: str = "",
+        api_key: str = "",
+        edit_mode: str = "",
+        timeout: int = 0,
+        size: str = "",
+        opener: Any = None,
+    ):
+        self.model = model or _env("OPV_ONEROUTE_IMAGE_MODEL", ONEROUTE_DEFAULT_MODEL)
+        self.fallback_model = (
+            fallback_model
+            if fallback_model != ""
+            else _env("OPV_ONEROUTE_IMAGE_FALLBACK_MODEL", ONEROUTE_DEFAULT_FALLBACK_MODEL)
+        )
+        self.base_url = (
+            base_url or _env("OPV_ONEROUTE_API_BASE", ONEROUTE_DEFAULT_BASE_URL)
+        ).rstrip("/")
+        self.api_key = (
+            api_key
+            or _env("OPV_ONEROUTE_API_KEY", "")
+            or _env("ONEROUTE_API_KEY", "")
+        )
+        requested_mode = (edit_mode or _env(
+            "OPV_ONEROUTE_EDIT_MODE", ONEROUTE_DEFAULT_EDIT_MODE
+        )).lower()
+        self.edit_mode = (
+            requested_mode if requested_mode in ONEROUTE_EDIT_MODES
+            else ONEROUTE_DEFAULT_EDIT_MODE
+        )
+        self.timeout = timeout or int(
+            _env("OPV_ONEROUTE_TIMEOUT", str(ONEROUTE_DEFAULT_TIMEOUT))
+        )
+        self.size = size or _env("OPV_ONEROUTE_IMAGE_SIZE", ONEROUTE_DEFAULT_SIZE)
+        self.json_reference_field = _env(
+            "OPV_ONEROUTE_JSON_REFERENCE_FIELD", "image"
+        )
+        self._opener = opener or urllib.request.urlopen
+
+    def model_ladder(self) -> List[str]:
+        ladder = [self.model]
+        if self.fallback_model and self.fallback_model not in ladder:
+            ladder.append(self.fallback_model)
+        return ladder
+
+    def generate_shot(self, request: ShotGenerationRequest) -> GenerationOutcome:
+        stem = f"{request.task_id}_P{request.slot_index}_v{request.shot_version}"
+        if not self.api_key:
+            return GenerationOutcome(
+                ok=False, provider=ONEROUTE_PROVIDER_NAME, model=self.model,
+                request_id=f"1route:{stem}",
+                error="OPV_ONEROUTE_API_KEY not configured",
+                error_kind="config",
+            )
+        reference_paths = OpenAIImageGenerator._reference_paths(request)
+        base_prompt = request.prompt_override or compose_shot_prompt(request)
+        errors: List[str] = []
+        attempts: List[Dict[str, Any]] = []
+        for model in self.model_ladder():
+            outcome = self._attempt(
+                model=model,
+                request=request,
+                stem=stem,
+                base_prompt=base_prompt,
+                reference_paths=reference_paths,
+            )
+            if outcome.ok:
+                outcome.raw = {
+                    **(outcome.raw or {}),
+                    "model_ladder": self.model_ladder(),
+                    "model_attempts": attempts,
+                }
+                return outcome
+            errors.append(f"{model}: {outcome.error}")
+            attempts.append({
+                "model": model, "error": outcome.error,
+                "error_kind": outcome.error_kind,
+            })
+            # A bad credential or an unreachable host is model-independent.
+            if outcome.error_kind in FATAL_ERROR_KINDS:
+                break
+        return GenerationOutcome(
+            ok=False,
+            provider=ONEROUTE_PROVIDER_NAME,
+            model=self.model,
+            request_id=f"1route:{stem}",
+            error="; ".join(errors) or "1route produced no outcome",
+            raw={"model_ladder": self.model_ladder(), "model_attempts": attempts},
+            error_kind=classify_error_kind(errors[-1] if errors else ""),
+        )
+
+    def _attempt(
+        self,
+        *,
+        model: str,
+        request: ShotGenerationRequest,
+        stem: str,
+        base_prompt: str,
+        reference_paths: List[str],
+    ) -> GenerationOutcome:
+        outcome_id = f"1route:{stem}"
+        reference_canvas: Dict[str, Any] = {}
+        prompt = base_prompt
+        paths = list(reference_paths)
+        if paths and model.startswith(SUNBURST_MODEL_PREFIX):
+            # Same canvas inheritance problem as the codex path: Sunburst edits
+            # inherit the first input's canvas, so the primary reference is
+            # normalized onto a neutral 9:16 canvas before upload.
+            try:
+                original_primary = paths[0]
+                normalized_primary = prepare_sunburst_primary_reference(
+                    original_primary, request.output_dir
+                )
+            except Exception as exc:  # noqa: BLE001 - adapter boundary
+                error = f"sunburst canvas preparation failed: {type(exc).__name__}: {exc}"
+                return GenerationOutcome(
+                    ok=False, provider=ONEROUTE_PROVIDER_NAME, model=model,
+                    request_id=outcome_id, error=error,
+                    error_kind=classify_error_kind(error),
+                )
+            paths = [normalized_primary, *paths[1:]]
+            prompt = f"{prompt}\n\n{SUNBURST_CANVAS_PROMPT}"
+            reference_canvas = {
+                "sunburst_canvas_normalized": True,
+                "primary_reference_original": original_primary,
+                "primary_reference_canvas": normalized_primary,
+                "canvas_size": list(SUNBURST_CANVAS_SIZE),
+            }
+        try:
+            url, headers, body = self._build_request(
+                model=model, prompt=prompt, reference_paths=paths
+            )
+        except OSError as exc:
+            error = f"1route reference read failed: {exc}"
+            return GenerationOutcome(
+                ok=False, provider=ONEROUTE_PROVIDER_NAME, model=model,
+                request_id=outcome_id, error=error,
+                error_kind=classify_error_kind(error),
+            )
+
+        try:
+            payload = self._post(url, headers, body)
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read()[:400].decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001 - diagnostics only
+                detail = ""
+            error = f"1route http {exc.code}: {detail or exc.reason}"
+            return GenerationOutcome(
+                ok=False, provider=ONEROUTE_PROVIDER_NAME, model=model,
+                request_id=outcome_id, error=error,
+                raw=reference_canvas, error_kind=classify_error_kind(
+                    f"{exc.code} {detail}"
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - adapter boundary
+            error = f"1route transport: {type(exc).__name__}: {exc}"
+            return GenerationOutcome(
+                ok=False, provider=ONEROUTE_PROVIDER_NAME, model=model,
+                request_id=outcome_id, error=error,
+                raw=reference_canvas, error_kind=classify_error_kind(error),
+            )
+
+        b64_image, image_url = _extract_image_payload(payload)
+        if not b64_image and not image_url:
+            error = "1route response has no image payload"
+            return GenerationOutcome(
+                ok=False, provider=ONEROUTE_PROVIDER_NAME, model=model,
+                request_id=outcome_id, error=error,
+                raw={**reference_canvas, "response_keys": sorted(payload.keys())
+                     if isinstance(payload, dict) else []},
+                error_kind="server",
+            )
+        output_dir = Path(request.output_dir)
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            error = f"output dir unavailable: {exc}"
+            return GenerationOutcome(
+                ok=False, provider=ONEROUTE_PROVIDER_NAME, model=model,
+                request_id=outcome_id, error=error, error_kind="config",
+            )
+        if b64_image:
+            image_path: Optional[Path] = output_dir / f"{stem}.png"
+            try:
+                image_path.write_bytes(base64.b64decode(b64_image))
+            except Exception as exc:  # noqa: BLE001 - adapter boundary
+                error = f"1route base64 decode failed: {type(exc).__name__}: {exc}"
+                return GenerationOutcome(
+                    ok=False, provider=ONEROUTE_PROVIDER_NAME, model=model,
+                    request_id=outcome_id, error=error, error_kind="server",
+                )
+        else:
+            image_path = self._download(
+                str(image_url),
+                output_dir / f"{stem}{CreatokImageGenerator._suffix(str(image_url))}",
+            )
+            if not image_path:
+                return GenerationOutcome(
+                    ok=False, provider=ONEROUTE_PROVIDER_NAME, model=model,
+                    request_id=outcome_id, error="1route image download failed",
+                    error_kind="server",
+                )
+
+        dimensions = read_image_dimensions(str(image_path))
+        size_ok = check_portrait_916(dimensions)
+        recorded_payload = payload if isinstance(payload, dict) else {}
+        recorded_payload = {
+            key: value for key, value in recorded_payload.items() if key != "data"
+        }
+        return GenerationOutcome(
+            ok=size_ok,
+            image_path=str(image_path),
+            provider=ONEROUTE_PROVIDER_NAME,
+            model=model,
+            request_id=str(
+                (payload.get("id") if isinstance(payload, dict) else "") or outcome_id
+            ),
+            width=dimensions[0] if dimensions else None,
+            height=dimensions[1] if dimensions else None,
+            error="" if size_ok else f"image is not 9:16 portrait: {dimensions}",
+            raw={
+                "response": recorded_payload,
+                "reference_count": len(paths),
+                "edit_mode": self.edit_mode if paths else "generate",
+                **reference_canvas,
+            },
+            error_kind="" if size_ok else "quality",
+        )
+
+    def _build_request(
+        self, *, model: str, prompt: str, reference_paths: List[str]
+    ) -> tuple:
+        capped = list(reference_paths[:ONEROUTE_MAX_REFERENCE_IMAGES])
+        if capped and self.edit_mode == "multipart":
+            fields: Dict[str, Any] = {
+                "model": model, "prompt": prompt, "size": self.size,
+                "quality": OPV_QUALITY, "output_format": OPV_OUTPUT_FORMAT, "n": "1",
+            }
+            files = []
+            for path in capped:
+                source = Path(path)
+                files.append(
+                    ("image[]", source.name, source.read_bytes(), _mime_for(source))
+                )
+            body, content_type = _encode_multipart(fields, files)
+            return (
+                f"{self.base_url}/v1/images/edits",
+                {"Content-Type": content_type},
+                body,
+            )
+        payload: Dict[str, Any] = {
+            "model": model, "prompt": prompt, "size": self.size,
+            "quality": OPV_QUALITY, "output_format": OPV_OUTPUT_FORMAT, "n": 1,
+        }
+        if capped:
+            payload[self.json_reference_field] = [
+                self._data_url(Path(path)) for path in capped
+            ]
+        return (
+            f"{self.base_url}/v1/images/generations",
+            {"Content-Type": "application/json"},
+            json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        )
+
+    @staticmethod
+    def _data_url(path: Path) -> str:
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        return f"data:{_mime_for(path)};base64,{encoded}"
+
+    def _post(self, url: str, headers: Dict[str, str], body: bytes) -> Dict[str, Any]:
+        request = urllib.request.Request(url=url, data=body, method="POST")
+        for key, value in headers.items():
+            request.add_header(key, value)
+        request.add_header("Authorization", f"Bearer {self.api_key}")
+        request.add_header("Accept", "application/json")
+        with self._opener(request, timeout=self.timeout) as response:  # noqa: S310
+            raw = response.read()
+        try:
+            payload = json.loads(raw.decode("utf-8", "replace"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"non-JSON response: {exc}") from exc
+        return payload if isinstance(payload, dict) else {"data": payload}
+
+    @staticmethod
+    def _download(url: str, target: Path) -> Optional[Path]:
+        try:
+            with urllib.request.urlopen(url, timeout=120) as response:  # noqa: S310
+                target.write_bytes(response.read())
+            return target
+        except OSError:
+            return None
+
+
+class _ChannelHealth:
+    """Process-wide health ledger behind the channel chain's circuit breaker.
+
+    A batch is 24-30 shots; without this, one dead channel would pay its full
+    timeout on every single shot. Per-channel consecutive-failure counting is
+    shared across generator instances (the production scanner rebuilds the
+    generator per task) so an exhausted quota stays skipped inside the run.
+    """
+
+    def __init__(self, threshold: int, cooldown: float):
+        self.threshold = max(1, int(threshold))
+        self.cooldown = max(0.0, float(cooldown))
+        self.failures: Dict[str, int] = {}
+        self.opened_at: Dict[str, float] = {}
+        self.trip_reason: Dict[str, str] = {}
+
+    def is_open(self, name: str) -> bool:
+        """True while the channel is short-circuited. ``cooldown <= 0`` disables
+        the breaker entirely; otherwise the channel is half-open after the
+        cooldown expires (one probe attempt, then it closes or re-trips)."""
+        opened = self.opened_at.get(name)
+        if opened is None or self.cooldown <= 0:
+            return False
+        return (time.monotonic() - opened) < self.cooldown
+
+    def record_success(self, name: str) -> None:
+        self.reset(name)
+
+    def record_failure(self, name: str, *, fatal: bool) -> bool:
+        """Count a failure; return True when the channel just tripped open."""
+        if fatal:
+            self.failures[name] = self.threshold
+        else:
+            self.failures[name] = self.failures.get(name, 0) + 1
+        if self.failures[name] >= self.threshold and not self.is_open(name):
+            self.opened_at[name] = time.monotonic()
+            return True
+        return False
+
+    def reset(self, name: str) -> None:
+        self.failures.pop(name, None)
+        self.opened_at.pop(name, None)
+        self.trip_reason.pop(name, None)
+
+    def report(self) -> Dict[str, Any]:
+        return {
+            name: {
+                "consecutive_failures": count,
+                "open": self.is_open(name),
+                "reason": self.trip_reason.get(name, ""),
+            }
+            for name, count in self.failures.items()
+        }
+
+
+_CHANNEL_HEALTH: Optional[_ChannelHealth] = None
+# Monotonic source of breaker keys for channels that declare no channel_name.
+_ANON_CHANNEL_KEYS = itertools.count(1)
+# task_id → channel key that already served this task. Keeps one image group on
+# one model: a mid-group channel switch is what produced the mixed-provider
+# colour drift the 2026-09-11 re-shoot had to clean up.
+_CHANNEL_STICKY: Dict[str, str] = {}
+
+
+def _channel_health() -> _ChannelHealth:
+    """Process-wide breaker ledger, configured lazily from the environment."""
+    global _CHANNEL_HEALTH
+    if _CHANNEL_HEALTH is None:
+        try:
+            threshold = int(_env("OPV_PHOTO_CHANNEL_BREAKER_THRESHOLD", "3"))
+        except ValueError:
+            threshold = 3
+        try:
+            cooldown = float(_env("OPV_PHOTO_CHANNEL_BREAKER_COOLDOWN", "300"))
+        except ValueError:
+            cooldown = 300.0
+        _CHANNEL_HEALTH = _ChannelHealth(threshold=threshold, cooldown=cooldown)
+    return _CHANNEL_HEALTH
+
+
+def reset_channel_health() -> None:
+    """Clear breaker + sticky state so the next chain rebuilds from the env."""
+    global _CHANNEL_HEALTH
+    _CHANNEL_HEALTH = None
+    _CHANNEL_STICKY.clear()
+
+
+def channel_health_report() -> Dict[str, Any]:
+    return _channel_health().report()
+
+
+def sticky_channel_preference() -> Dict[str, str]:
+    """task_id → channel key currently pinned for that group."""
+    return dict(_CHANNEL_STICKY)
+
+
+def channel_health_key(channel: Any) -> str:
+    """Stable breaker key for a channel object.
+
+    Channels that declare a ``channel_name`` share one ledger entry across
+    generator rebuilds — that is what lets the breaker survive per-task
+    reconstruction. Anonymous channels (test doubles, one-off wrappers) get a
+    key minted once per object from a monotonic counter: ``id()`` would be
+    reused by the allocator and could hand a fresh channel a dead channel's
+    tripped breaker.
+    """
+    named = str(getattr(channel, "channel_name", "") or "")
+    if named:
+        return named
+    existing = getattr(channel, "_opv_health_key", "")
+    if existing:
+        return str(existing)
+    key = f"{type(channel).__name__}#{next(_ANON_CHANNEL_KEYS)}"
+    try:
+        channel._opv_health_key = key
+    except (AttributeError, TypeError):  # objects with __slots__
+        return f"{type(channel).__name__}#{id(channel)}"
+    return key
+
+
+class ChannelChainShotGenerator:
+    """Ordered channel chain: try each channel until one returns a good image.
+
+    Switching rules, in order:
+
+    1. **Priority** — channels run in the declared order (the chain is the
+       policy, no hidden ranking).
+    2. **Failure class** — ``config``/``auth`` failures skip the channel for the
+       rest of the process (no timeout paid again); everything else is treated
+       as transient and simply advances to the next channel.
+    3. **Circuit breaker** — a channel that fails
+       ``OPV_PHOTO_CHANNEL_BREAKER_THRESHOLD`` times in a row (default 3) is
+       short-circuited for ``OPV_PHOTO_CHANNEL_BREAKER_COOLDOWN`` seconds
+       (default 300), so an outage costs one timeout, not one per shot.
+    4. **Group stickiness** — once a channel serves a shot of a task, the rest
+       of that task's shots try it first, so one image group keeps one model.
+       A mid-group switch is exactly what caused the 2026-09-11 mixed-provider
+       colour drift that needed a manual re-shoot. Set
+       ``OPV_PHOTO_CHANNEL_STICKY=0`` for strict priority ordering instead.
+    5. **Traceability** — the winning outcome carries ``raw.channel`` /
+       ``channel_chain`` / ``channel_index``, and every hop is recorded in
+       ``raw.attempts``.
+    """
+
+    def __init__(
+        self,
+        channels: List[Any],
+        labels: Optional[List[str]] = None,
+        health: Optional[_ChannelHealth] = None,
+        health_keys: Optional[List[str]] = None,
+        sticky: Optional[bool] = None,
+    ):
+        if not channels:
+            raise ValueError("channel chain needs at least one channel")
+        self.channels = list(channels)
+        self.labels = list(
+            labels or [channel_health_key(channel) for channel in channels]
+        )
+        # Health is tracked per underlying provider, not per slot: a channel is
+        # just as unhealthy when it sits in the "primary" slot of one chain and
+        # the "fallback" slot of another.
+        self.health_keys = list(
+            health_keys or [channel_health_key(channel) for channel in channels]
+        )
+        self.health = health or _channel_health()
+        # Stickiness needs a stable channel identity: pinning an object id would
+        # silently match an unrelated recycled object later. Anonymous channels
+        # (test doubles, one-off wrappers) therefore run in strict priority mode.
+        every_channel_named = all(
+            str(getattr(channel, "channel_name", "") or "")
+            for channel in self.channels
+        )
+        self.sticky = (
+            _env("OPV_PHOTO_CHANNEL_STICKY", "1").lower() not in
+            {"0", "off", "false", "no"}
+            if sticky is None else bool(sticky)
+        ) and every_channel_named
+
+    @property
+    def channel_chain(self) -> List[str]:
+        return list(self.labels)
+
+    def _ordered_slots(self, task_id: str) -> List[int]:
+        """Slot order for one shot, honouring the task's sticky channel."""
+        order = list(range(len(self.channels)))
+        if not self.sticky or not task_id:
+            return order
+        preferred = _CHANNEL_STICKY.get(str(task_id))
+        if not preferred:
+            return order
+        for index in order:
+            if self.health_keys[index] == preferred:
+                return [index] + [item for item in order if item != index]
+        return order
+
+    def generate_shot(self, request: ShotGenerationRequest) -> GenerationOutcome:
+        attempts: List[Dict[str, Any]] = []
+        task_id = str(request.task_id or "")
+        preferred = _CHANNEL_STICKY.get(task_id) if self.sticky else None
+        for index in self._ordered_slots(task_id):
+            label = self.labels[index]
+            key = self.health_keys[index]
+            channel = self.channels[index]
+            if self.health.is_open(key):
+                attempts.append({
+                    "channel": label, "ok": False, "skipped": "breaker_open",
+                    "error": self.health.trip_reason.get(key, "circuit open"),
+                })
+                if preferred == key:
+                    _CHANNEL_STICKY.pop(task_id, None)
+                continue
+            try:
+                outcome = channel.generate_shot(request)
+            except Exception as exc:  # noqa: BLE001 - channel boundary
+                outcome = GenerationOutcome(
+                    ok=False, provider=label,
+                    error=f"{type(exc).__name__}: {exc}",
+                    error_kind=classify_error_kind(f"{type(exc).__name__}: {exc}"),
+                )
+            if outcome is not None and outcome.ok:
+                self.health.record_success(key)
+                if self.sticky and task_id:
+                    _CHANNEL_STICKY[task_id] = key
+                outcome.raw = {
+                    **(outcome.raw or {}),
+                    "channel": label,
+                    "channel_chain": self.channel_chain,
+                    "channel_index": index,
+                    "channel_preferred": preferred or "",
+                    "attempts": attempts,
+                }
+                return outcome
+            error = outcome.error if outcome is not None else "channel returned nothing"
+            kind = (outcome.error_kind if outcome is not None else "") or \
+                classify_error_kind(error)
+            fatal = kind in FATAL_ERROR_KINDS
+            tripped = self.health.record_failure(key, fatal=fatal)
+            if tripped:
+                self.health.trip_reason[key] = error
+            if preferred == key:
+                # The group's pinned channel just broke: unpin so the next shot
+                # re-evaluates the full priority order instead of chasing it.
+                _CHANNEL_STICKY.pop(task_id, None)
+                preferred = None
+            attempts.append({
+                "channel": label, "ok": False, "error": error,
+                "error_kind": kind, "breaker_tripped": tripped,
+            })
+
+        trace = "; ".join(
+            f"{item['channel']}: {item.get('skipped') or item.get('error', '')}"
+            for item in attempts
+        )
+        return GenerationOutcome(
+            ok=False,
+            provider="chain",
+            model="",
+            error=f"all channels failed ({trace})",
+            raw={
+                "channel": "",
+                "channel_chain": self.channel_chain,
+                "attempts": attempts,
+                "channel_health": self.health.report(),
+            },
+            error_kind="exhausted",
+        )
+
+
+class FallbackShotGenerator(ChannelChainShotGenerator):
+    """Two-link compatibility wrapper (primary → fallback).
+
+    Keeps the historical ``primary``/``fallback`` attributes and the
+    ``raw["channel"] == "primary"|"fallback"`` contract used by earlier
+    dashboards, while inheriting the chain's breaker and attempt trace.
+    """
+
+    def __init__(self, primary, fallback, health: Optional[_ChannelHealth] = None):
+        super().__init__([primary, fallback], labels=["primary", "fallback"],
+                         health=health)
         self.primary = primary
         self.fallback = fallback
 
     def generate_shot(self, request: ShotGenerationRequest) -> GenerationOutcome:
-        primary_error = ""
-        try:
-            outcome = self.primary.generate_shot(request)
-            if outcome is not None and outcome.ok:
-                outcome.raw = {**(outcome.raw or {}), "channel": "primary"}
-                return outcome
-            primary_error = outcome.error if outcome is not None else "no outcome"
-        except Exception as exc:  # noqa: BLE001 - channel boundary
-            primary_error = f"{type(exc).__name__}: {exc}"
-        try:
-            outcome = self.fallback.generate_shot(request)
-        except Exception as exc:  # noqa: BLE001 - channel boundary
-            return GenerationOutcome(
-                ok=False, provider="fallback", model="",
-                error=f"primary: {primary_error}; fallback: {type(exc).__name__}: {exc}",
-            )
-        if outcome is None:
-            return GenerationOutcome(
-                ok=False, provider="fallback", model="",
-                error=f"primary: {primary_error}; fallback returned nothing",
-            )
-        if not outcome.ok:
-            outcome.error = f"primary: {primary_error}; fallback: {outcome.error}"
-        outcome.raw = {**(outcome.raw or {}), "channel": "fallback", "primary_error": primary_error}
+        outcome = super().generate_shot(request)
+        attempts = (outcome.raw or {}).get("attempts") or []
+        primary_error = next(
+            (
+                item.get("skipped") or item.get("error", "")
+                for item in attempts
+                if item.get("channel") == "primary"
+            ),
+            "",
+        )
+        outcome.raw = {**(outcome.raw or {}), "primary_error": primary_error}
         return outcome
 
 
-def build_default_photo_generator():
-    """Production default: CreatOK primary, codex openai-image fallback.
+# Channel tokens accepted in ``OPV_PHOTO_CHANNEL``. Legacy names keep their
+# historical meaning so an existing deployment never silently changes route.
+CHANNEL_TOKENS = {
+    "1route": "1route",
+    "oneroute": "1route",
+    "codex": "codex",
+    "openai-image": "codex",
+    "creatok": "creatok",
+}
+LEGACY_CHANNEL_CHAINS = {
+    "1route_fallback": "1route>codex>creatok",
+    "oneroute_fallback": "1route>codex>creatok",
+    "codex_fallback": "codex>creatok",
+    "creatok_fallback": "creatok>codex",
+    "creatok_codx_fallback": "creatok>codex",
+}
+DEFAULT_CHANNEL_CHAIN = "1route>codex>creatok"
 
-    ``OPV_PHOTO_CHANNEL`` overrides: ``openai-image`` pins the legacy codex
-    channel, ``creatok`` drops the fallback, ``codex_fallback`` flips the
-    direction to codex primary with CreatOK catching quota/availability
-    failures. Defaults to ``creatok_fallback``.
+_CHANNEL_FACTORIES = {
+    "1route": OneRouteImageGenerator,
+    "codex": OpenAIImageGenerator,
+    "creatok": CreatokImageGenerator,
+}
+
+
+def parse_channel_chain(spec: str) -> List[str]:
+    """Normalize ``OPV_PHOTO_CHANNEL`` into an ordered list of channel tokens.
+
+    Accepts a chain (``1route>codex>creatok``, ``1route,codex``) or any legacy
+    alias (``codex_fallback`` / ``creatok_fallback`` / ``openai-image`` / …).
+    Unknown tokens are ignored so a typo degrades to the remaining chain
+    instead of crashing production.
     """
-    channel = _env("OPV_PHOTO_CHANNEL", "creatok_fallback").lower()
-    if channel == "openai-image":
-        return OpenAIImageGenerator()
-    if channel == "creatok":
-        return CreatokImageGenerator()
-    if channel == "codex_fallback":
-        return FallbackShotGenerator(OpenAIImageGenerator(), CreatokImageGenerator())
-    return FallbackShotGenerator(CreatokImageGenerator(), OpenAIImageGenerator())
+    raw = str(spec or "").strip().lower()
+    if not raw:
+        raw = DEFAULT_CHANNEL_CHAIN
+    if raw in LEGACY_CHANNEL_CHAINS:
+        raw = LEGACY_CHANNEL_CHAINS[raw]
+    chain: List[str] = []
+    for token in raw.replace(",", ">").replace("+", ">").split(">"):
+        resolved = CHANNEL_TOKENS.get(token.strip())
+        if resolved and resolved not in chain:
+            chain.append(resolved)
+    return chain or list(DEFAULT_CHANNEL_CHAIN.split(">"))
+
+
+def build_default_photo_generator():
+    """Production default: 1route primary, codex second, CreatOK last.
+
+    ``OPV_PHOTO_CHANNEL`` selects the route:
+
+    - chain expression: ``1route>codex>creatok`` (default), ``1route,codex``,
+      ``codex>1route`` — any order, any length;
+    - legacy aliases preserved verbatim: ``codex_fallback`` (codex→creatok),
+      ``creatok_fallback`` (creatok→codex), ``openai-image`` (codex only),
+      ``creatok`` (creatok only), ``1route`` (1route only).
+
+    A single-token spec builds that channel bare (no fallback). A two-token
+    spec builds the historical ``FallbackShotGenerator`` so existing callers
+    that inspect ``.primary``/``.fallback`` keep working. Three or more build
+    the generic chain.
+    """
+    chain = parse_channel_chain(_env("OPV_PHOTO_CHANNEL", DEFAULT_CHANNEL_CHAIN))
+    if len(chain) == 1:
+        return _CHANNEL_FACTORIES[chain[0]]()
+    if len(chain) == 2:
+        return FallbackShotGenerator(
+            _CHANNEL_FACTORIES[chain[0]](), _CHANNEL_FACTORIES[chain[1]]()
+        )
+    return ChannelChainShotGenerator(
+        [_CHANNEL_FACTORIES[token]() for token in chain], labels=chain
+    )
