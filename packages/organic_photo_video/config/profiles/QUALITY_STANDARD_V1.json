@@ -1,0 +1,73 @@
+{
+  "schema_version": "opv-quality-profile-v1",
+  "quality_profile_id": "QUALITY_STANDARD_V1",
+  "profile_key": "QUALITY_STANDARD",
+  "profile_version": 1,
+  "dimensions": {
+    "product_fidelity": {
+      "scope": ["single", "group"],
+      "min_score": 80,
+      "hard_gate": true,
+      "checks": [
+        "color",
+        "fit",
+        "material_look",
+        "key_details",
+        "cross_shot_consistency"
+      ],
+      "fail_action": "regenerate_offending_slot"
+    },
+    "outfit_quality": {
+      "scope": ["single", "group"],
+      "min_score": 78,
+      "hard_gate": false,
+      "checks": [
+        "color_harmony",
+        "proportion",
+        "theme_fit",
+        "scene_climate_fit",
+        "product_is_visual_center"
+      ],
+      "fail_action": "redo_outfit_plan"
+    },
+    "persona_consistency": {
+      "scope": ["single", "group"],
+      "min_score": 80,
+      "hard_gate": true,
+      "checks": [
+        "face_body_hair",
+        "limbs_normal",
+        "hands_and_garment_edges",
+        "real_creator_feel"
+      ],
+      "fail_action": "regenerate_offending_slot"
+    },
+    "narrative_quality": {
+      "scope": ["group"],
+      "min_score": 75,
+      "hard_gate": false,
+      "checks": [
+        "p1_has_hook",
+        "p2_p4_explain_outfit",
+        "p5_delivers_result",
+        "not_repeat_angles"
+      ],
+      "fail_action": "replan_storyboard"
+    },
+    "group_quality": {
+      "scope": ["group"],
+      "min_score": 75,
+      "hard_gate": false,
+      "checks": [
+        "visual_style_consistent",
+        "composition_variety",
+        "scene_continuity",
+        "order_logical",
+        "no_product_drift"
+      ],
+      "fail_action": "regenerate_offending_slot"
+    }
+  },
+  "status": "active",
+  "_note": "五维度分别记录，判定重生成哪张 / 重做穿搭 / 重新规划整套；不出单一总分"
+}

@@ -11,6 +11,10 @@
 **/config/profiles/backups/*.json
 **/config/profile_state.json
 **/config/profiles/*.json
+# 例外：organic_photo_video 的 config/profiles 是随代码发布的产品配置
+# （渲染档位/质检档位 profile，loader 按 schema 强校验），不是本机或密钥配置。
+# 上面那条通配规则本意是保护 skills/inventory-query/config/profiles/（店铺账号与 api 备份）。
+!packages/organic_photo_video/config/profiles/*.json
 **/config/alert_config.json
 **/config/*secret*.json
 **/config/*token*.json

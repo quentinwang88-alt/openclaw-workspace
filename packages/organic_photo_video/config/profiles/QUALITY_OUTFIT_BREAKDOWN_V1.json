@@ -1,0 +1,86 @@
+{
+  "schema_version": "opv-quality-profile-v1",
+  "quality_profile_id": "QUALITY_OUTFIT_BREAKDOWN_V1",
+  "profile_key": "QUALITY_OUTFIT_BREAKDOWN",
+  "profile_version": 2,
+  "dimensions": {
+    "anchor_naturalness": {
+      "scope": ["anchor"],
+      "min_score": 78,
+      "hard_gate": true,
+      "checks": ["natural_body_proportion", "coherent_face_and_body_detail", "no_distorted_limbs"],
+      "fail_action": "regenerate_anchor_candidate"
+    },
+    "anchor_composition": {
+      "scope": ["anchor"],
+      "min_score": 78,
+      "hard_gate": true,
+      "checks": ["full_body_visible", "scene_matches_plan", "usable_for_person_extraction"],
+      "fail_action": "regenerate_anchor_candidate"
+    },
+    "product_fidelity": {
+      "scope": ["anchor", "single", "group", "render"],
+      "min_score": 80,
+      "hard_gate": true,
+      "checks": ["target_product_matches_reference", "p1_matches_p2_p5"],
+      "fail_action": "regenerate_offending_slot"
+    },
+    "outfit_quality": {
+      "scope": ["anchor", "single", "group"],
+      "min_score": 78,
+      "hard_gate": true,
+      "checks": ["board_items_match_outfit_plan", "product_is_visual_center"],
+      "fail_action": "redo_outfit_plan"
+    },
+    "persona_consistency": {
+      "scope": ["anchor", "single", "group", "render"],
+      "min_score": 80,
+      "hard_gate": true,
+      "checks": ["p1_person_source_is_anchor", "p2_p5_same_persona"],
+      "fail_action": "regenerate_offending_slot"
+    },
+    "board_integrity": {
+      "scope": ["single", "group"],
+      "min_score": 100,
+      "hard_gate": true,
+      "checks": ["safe_area", "no_overlap", "no_text_overflow", "no_platform_ui", "no_fake_commerce_data"],
+      "fail_action": "recompose_board"
+    },
+    "narrative_quality": {
+      "scope": ["group"],
+      "min_score": 75,
+      "hard_gate": false,
+      "checks": ["p1_explains_outfit", "p2_p5_prove_same_look", "order_logical"],
+      "fail_action": "replan_storyboard"
+    },
+    "creator_naturalness": {
+      "scope": ["single", "group", "render"],
+      "min_score": 78,
+      "hard_gate": true,
+      "checks": ["natural_skin_texture", "coherent_face_body_detail", "no_beauty_filter"],
+      "fail_action": "regenerate_offending_slot"
+    },
+    "shot_role_fidelity": {
+      "scope": ["single", "group", "render"],
+      "min_score": 80,
+      "hard_gate": true,
+      "checks": ["match_planned_shot_role", "p4_garment_not_face_dominant", "p2_complete_full_body"],
+      "fail_action": "regenerate_offending_slot"
+    },
+    "render_framing": {
+      "scope": ["render"],
+      "min_score": 80,
+      "hard_gate": true,
+      "checks": ["text_readable", "no_new_crop_of_shoes_or_garment", "p1_first", "frozen_group_consistency"],
+      "fail_action": "rerender"
+    },
+    "group_quality": {
+      "scope": ["group"],
+      "min_score": 75,
+      "hard_gate": false,
+      "checks": ["p1_is_first", "story_order_logical", "no_product_drift"],
+      "fail_action": "regenerate_offending_slot"
+    }
+  },
+  "status": "active"
+}

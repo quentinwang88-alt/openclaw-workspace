@@ -1,0 +1,22 @@
+{
+  "schema_version": "opv-render-profile-v1",
+  "render_profile_id": "IMAGE_STORY_VIDEO_V1",
+  "profile_key": "IMAGE_STORY_VIDEO",
+  "profile_version": 1,
+  "aspect_ratio": "9:16",
+  "duration_min_ms": 10000,
+  "duration_max_ms": 15000,
+  "fps": 30,
+  "codec": "h264",
+  "hook_window_ms": 2000,
+  "motion_rules": {
+    "allowed": ["slow_push", "light_pan", "detail_zoom", "upper_body_focus", "before_after_switch", "mask_wipe", "partial_to_full", "beat_cut"],
+    "note": "hook must complete within the first 1-2 seconds; cuts land on BGM beats when beat data is available"
+  },
+  "transition_rules": {
+    "allowed": ["cut", "mask_wipe", "beat_cut"],
+    "default": "cut",
+    "note": "dissolves excluded per operator feedback 2026-08-31"
+  },
+  "status": "active"
+}

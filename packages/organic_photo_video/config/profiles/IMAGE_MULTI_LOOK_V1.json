@@ -1,0 +1,15 @@
+{
+  "schema_version": "opv-render-profile-v1",
+  "render_profile_id": "IMAGE_MULTI_LOOK_V1",
+  "profile_key": "IMAGE_MULTI_LOOK",
+  "profile_version": 2,
+  "aspect_ratio": "9:16",
+  "duration_min_ms": 6000,
+  "duration_max_ms": 6000,
+  "fps": 30,
+  "codec": "h264",
+  "hook_window_ms": 1600,
+  "motion_rules": {"allowed": ["static_hold"], "note": "完整全身contain静态；最多五套，不重复首图穿搭、不做局部细节页"},
+  "transition_rules": {"allowed": ["cut"], "default": "cut"},
+  "status": "active"
+}

@@ -1,0 +1,71 @@
+{
+  "schema_version": "opv-quality-profile-v1",
+  "quality_profile_id": "QUALITY_OUTFIT_BREAKDOWN_V2",
+  "profile_key": "QUALITY_OUTFIT_BREAKDOWN_V2",
+  "profile_version": 1,
+  "dimensions": {
+    "anchor_naturalness": {
+      "scope": ["anchor"], "min_score": 78, "hard_gate": false,
+      "applies_to": {"shot_kinds": ["generated_photo"]},
+      "checks": ["natural_body_proportion", "coherent_face_and_body_detail"],
+      "fail_action": "consider_more_natural_anchor"
+    },
+    "anchor_composition": {
+      "scope": ["anchor"], "min_score": 78, "hard_gate": true,
+      "applies_to": {"slot_roles": ["full_look"]},
+      "checks": ["full_body_visible", "scene_matches_plan", "usable_for_person_extraction"],
+      "fail_action": "regenerate_anchor_candidate"
+    },
+    "product_fidelity": {
+      "scope": ["anchor", "single", "group", "render"], "min_score": 80, "hard_gate": true,
+      "checks": ["visible_target_product_matches_reference", "no_invented_product_structure"],
+      "fail_action": "regenerate_offending_slot"
+    },
+    "outfit_quality": {
+      "scope": ["anchor", "single", "group"], "min_score": 78, "hard_gate": false,
+      "applies_to": {"exclude_slot_roles": ["detail"]},
+      "checks": ["visible_outfit_coherence", "product_is_visual_center"],
+      "fail_action": "consider_outfit_refinement"
+    },
+    "persona_consistency": {
+      "scope": ["anchor", "single", "group", "render"], "min_score": 80, "hard_gate": true,
+      "applies_to": {"exclude_slot_roles": ["detail"]},
+      "checks": ["visible_identity_matches_persona", "p1_person_matches_anchor", "no_obvious_identity_drift"],
+      "fail_action": "regenerate_offending_slot"
+    },
+    "board_integrity": {
+      "scope": ["single", "group"], "min_score": 80, "hard_gate": true,
+      "applies_to": {"shot_kinds": ["composite_board"]},
+      "checks": ["essential_labels_readable", "no_platform_ui", "no_fake_commerce_data", "no_accidental_content_occlusion"],
+      "fail_action": "recompose_board"
+    },
+    "narrative_quality": {
+      "scope": ["group"], "min_score": 75, "hard_gate": false,
+      "checks": ["p1_explains_outfit", "order_logical"],
+      "fail_action": "consider_story_order_refinement"
+    },
+    "creator_naturalness": {
+      "scope": ["single", "group", "render"], "min_score": 78, "hard_gate": false,
+      "applies_to": {"exclude_slot_roles": ["detail"]},
+      "checks": ["natural_skin_texture", "coherent_face_body_detail", "natural_creator_feel"],
+      "fail_action": "consider_more_natural_presentation"
+    },
+    "shot_role_fidelity": {
+      "scope": ["anchor", "single", "group", "render"], "min_score": 80, "hard_gate": true,
+      "checks": ["matches_current_shot_role", "no_obvious_extra_or_missing_visible_limbs", "planned_crops_are_not_missing_limbs"],
+      "fail_action": "regenerate_offending_slot"
+    },
+    "render_framing": {
+      "scope": ["render"], "min_score": 80, "hard_gate": true,
+      "checks": ["text_readable", "no_new_crop_of_shoes_or_garment", "p1_first", "frozen_group_consistency"],
+      "fail_action": "rerender"
+    },
+    "group_quality": {
+      "scope": ["group"], "min_score": 75, "hard_gate": false,
+      "checks": ["visual_style_coherent", "story_order_logical"],
+      "fail_action": "consider_group_refinement"
+    }
+  },
+  "status": "active",
+  "_note": "仅显式冻结assessment_schema_version=2的任务启用。软分数只建议；拼贴硬项检查实质缺陷，不要求模型给完美100分，允许设计性叠放。正常路径锚点一次、组图一次，疑点显式单图复核；保留真实成片终审。"
+}
