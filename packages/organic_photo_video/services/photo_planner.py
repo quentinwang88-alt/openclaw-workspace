@@ -134,7 +134,7 @@ class PhotoReusePlannerService:
         layout_types = {
             "FULL_BLEED": "single", "DETAIL": "single",
             "CHOICE_DETAIL": "single", "SPLIT_TWO": "split_vertical",
-            "GRID_FOUR": "grid_2x2",
+            "GRID_FOUR": "grid_2x2", "TRIPTYCH": "triptych_3",
         }
 
         frozen_card = None
@@ -165,6 +165,9 @@ class PhotoReusePlannerService:
                     "layout_snapshot": {
                         "template_id": template_id, "template_version": template_version,
                         "layout": str(page.get("layout") or "single"),
+                        **({
+                            "column_labels": list(page.get("column_labels") or []),
+                        } if page.get("column_labels") else {}),
                     },
                 })
         else:
@@ -192,6 +195,9 @@ class PhotoReusePlannerService:
                             str(story.get("layout_variant") or "DETAIL"),
                             str(story.get("layout") or "single"),
                         ),
+                        **({
+                            "column_labels": list((page or {}).get("column_labels") or []),
+                        } if (page or {}).get("column_labels") else {}),
                     },
                 })
         for index, source in enumerate(assets, 1):

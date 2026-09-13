@@ -141,6 +141,24 @@ class ChoiceBadgeTest(unittest.TestCase):
         self.assertIn("PHOTO_TH_TRAVEL_OUTFIT_V2", report["dynamic_input_required"])
         travel = next(r for r in report["recipes"] if r["recipe_id"] == "PHOTO_TH_TRAVEL_OUTFIT_V2")
         self.assertEqual(travel["profiles"][0]["status"], "DYNAMIC_INPUT_REQUIRED")
+        # 2026-09-13: the retired temperature-layering recipe is gone; the
+        # daily thermal-transition line is its dynamic-input replacement.
+        self.assertNotIn(
+            "PHOTO_TH_TEMPERATURE_DRESSING_V2",
+            {r["recipe_id"] for r in report["recipes"]},
+        )
+        transition = next(
+            r for r in report["recipes"]
+            if r["recipe_id"] == "PHOTO_TH_THERMAL_TRANSITION_V1"
+        )
+        self.assertEqual(transition["ready_profile_count"], 0)
+        self.assertEqual(
+            [item["profile_id"] for item in transition["profiles"]],
+            ["thermal_outdoor_bts_office_normal_office"],
+        )
+        self.assertEqual(
+            transition["profiles"][0]["status"], "DYNAMIC_INPUT_REQUIRED"
+        )
 
     def test_preflight_can_target_dynamic_travel_production(self):
         report = preflight(

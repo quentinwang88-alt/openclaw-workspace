@@ -29,6 +29,48 @@ def require_photo_content_allowed(repository: Any, task: Any) -> None:
         raise ReleaseGateError("CONTENT_REJECTED: 内容验收未通过，禁止该任务放行或发布；需另建修正样板")
 
 
+def require_photo_language_review(repository: Any, task: Any, package_manifest: dict) -> None:
+    """Apply an opt-in, Recipe-owned native-language release requirement.
+
+    Existing photo Recipes intentionally keep their historical human-confirmation
+    behavior.  New Recipes can make a frozen copy review status mandatory without
+    smuggling that policy into the Feishu checkbox semantics.
+    """
+    get_recipe = getattr(repository, "get_content_recipe", None)
+    if not callable(get_recipe):
+        return
+    recipe_id = str(getattr(task, "recipe_id", "") or "")
+    recipe = get_recipe(recipe_id) if recipe_id else None
+    spec = dict(getattr(recipe, "recipe_spec_json", None) or {})
+    required = str(
+        (spec.get("release_requirements") or {}).get(
+            "required_language_review_status"
+        ) or ""
+    )
+    if not required:
+        return
+    actual = str((package_manifest.get("copy") or {}).get("language_review_status") or "")
+    if actual != required:
+        raise ReleaseGateError(
+            f"LANGUAGE_REVIEW_REQUIRED: 发布要求 {required}，当前为 {actual or '未审校'}"
+        )
+    if required == "NATIVE_APPROVED":
+        frozen_copy = package_manifest.get("copy") or {}
+        audit = frozen_copy.get("language_review") or {}
+        if (not isinstance(audit, dict)
+                or not str(audit.get("reviewed_by") or "").strip()
+                or not str(audit.get("reviewed_at") or "").strip()
+                or len(str(audit.get("review_sha256") or "")) != 64):
+            raise ReleaseGateError(
+                "LANGUAGE_REVIEW_REQUIRED: NATIVE_APPROVED 缺少审校人、时间或内容哈希"
+            )
+        from services.photo_copy_review import frozen_copy_review_sha256
+        if str(audit.get("review_sha256") or "") != frozen_copy_review_sha256(frozen_copy):
+            raise ReleaseGateError(
+                "LANGUAGE_REVIEW_REQUIRED: 审校后的泰语文案已发生变化"
+            )
+
+
 def assert_main_queue_rework_allowed(task_id: str, **kwargs: Any) -> None:
     from services.main_schedule_bridge import assert_main_queue_rework_allowed as guard
     guard(task_id, **kwargs)
@@ -193,6 +235,7 @@ def freeze_photo_release(repository: Any, task: Any) -> dict:
             != revision.selection_hash):
         raise ReleaseGateError("图文输入或选图与当前冻结 revision 不一致")
     package_manifest = dict(getattr(package, "photo_manifest_json", None) or {})
+    require_photo_language_review(repository, task, package_manifest)
     slides = list(package_manifest.get("slides") or [])
     if (package_manifest.get("schema_version") != "opv-photo-package-v1"
             or package_manifest.get("media_kind") != "native_photo"

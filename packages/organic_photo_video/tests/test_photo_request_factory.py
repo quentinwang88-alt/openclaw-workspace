@@ -210,8 +210,9 @@ class FactoryTest(unittest.TestCase):
 class ShippedProfileTest(unittest.TestCase):
     def test_shipped_recipes_have_valid_profiles_copy_and_explicit_visual_keys(self):
         recipes = [r for r in load_content_recipes() if r.recipe_id.startswith("PHOTO_")]
-        # 2026-09-10: +1 shipped recipe = PHOTO_MX_PICK_YOUR_HAIR_V2 (mx_wig_choice_v1).
-        self.assertEqual(len(recipes), 12)
+        # 2026-09-12: +1 dynamic-input recipe = daily thermal transition V1.
+        # 2026-09-13: temperature-layering V2 retired (never deployed to RDS).
+        self.assertEqual(len(recipes), 13)
         for recipe in recipes:
             with self.subTest(recipe=recipe.recipe_id):
                 self.assertEqual(validate_execution_profiles(recipe.recipe_spec_json), [])
@@ -222,13 +223,19 @@ class ShippedProfileTest(unittest.TestCase):
         result = preflight(PACKAGE_ROOT / "config")
         self.assertEqual(result["errors"], [])
         self.assertEqual(result["external_writes"], 0)
-        self.assertEqual(result["recipe_count"], 12)
-        self.assertEqual(result["profile_count"], 28)
+        self.assertEqual(result["recipe_count"], 13)
+        self.assertEqual(result["profile_count"], 29)
         self.assertIn("PHOTO_MX_FACE_SHAPE_MATCH_V1", result["needs_asset"])
         # The MX wig recipe ships without a seeded MX_WIG_CHOICE_GEN set;
         # per-row supply generates and qualifies its assets, so it lands in
         # needs_asset like the other unseeded MX recipes.
         self.assertIn("PHOTO_MX_PICK_YOUR_HAIR_V2", result["needs_asset"])
+        # 2026-09-13: the retired layering recipe is gone; the daily
+        # thermal-transition line takes the dynamic-input slot.
+        self.assertNotIn(
+            "PHOTO_TH_TEMPERATURE_DRESSING_V2", result["dynamic_input_required"]
+        )
+        self.assertIn("PHOTO_TH_THERMAL_TRANSITION_V1", result["dynamic_input_required"])
 
 
 if __name__ == "__main__":

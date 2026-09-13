@@ -68,7 +68,7 @@ def freeze_content_card(card: Mapping[str, Any], asset_set: Any, visual_rules: M
         if page.get("index") != index or not page.get("purpose_zh"):
             raise ValueError("NEEDS_CONTENT: each page needs ordered index and responsibility")
         roles = page.get("source_roles")
-        count = {"single": 1, "split_vertical": 2, "grid_2x2": 4}.get(page.get("layout"))
+        count = {"single": 1, "split_vertical": 2, "grid_2x2": 4, "triptych_3": 3}.get(page.get("layout"))
         if (not isinstance(roles, list) or len(roles) != count or len(set(roles)) != len(roles)
                 or any(role not in by_role for role in roles)):
             raise ValueError("NEEDS_ASSET: page layout/source roles mismatch")

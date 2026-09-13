@@ -530,6 +530,9 @@ class PhotoPackageReviewService:
         slides = list(manifest.get("slides") or [])
         if manifest.get("schema_version") != "opv-photo-package-v1" or not slides:
             raise WorkflowV2Error("photo package manifest is missing or invalid")
+        if decision in {"passed", "waived"}:
+            from services.release_gate import require_photo_language_review
+            require_photo_language_review(self._repository, task, manifest)
         if task.task_status != "photo_packaging":
             raise WorkflowV2Error("photo package review requires photo_packaging status")
         revision = self._repository.get_task_revision(task.active_revision_id)

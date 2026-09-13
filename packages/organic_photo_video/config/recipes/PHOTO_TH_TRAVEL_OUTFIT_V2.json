@@ -2,7 +2,7 @@
   "schema_version": "opv-content-recipe-v1",
   "recipe_id": "PHOTO_TH_TRAVEL_OUTFIT_V2",
   "recipe_key": "TH_TRAVEL_OUTFIT",
-  "recipe_version": 6,
+  "recipe_version": 7,
   "content_goal": "travel_look_choice",
   "anchor_slot": 2,
   "shot_count": 5,
@@ -115,6 +115,16 @@
           "0_5c"
         ],
         "required": true
+      },
+      "thermal_sensitivity": {
+        "type": "enum",
+        "values": [
+          "feels_cold",
+          "normal",
+          "feels_warm"
+        ],
+        "required": false,
+        "default": "normal"
       },
       "season": {
         "type": "enum",

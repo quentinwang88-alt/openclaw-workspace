@@ -26,6 +26,9 @@ DEPLOYABLE_RECIPES = {
     "PHOTO_TH_TRAVEL_OUTFIT_V2": (
         PACKAGE_ROOT / "config/recipes/PHOTO_TH_TRAVEL_OUTFIT_V2.json"
     ),
+    "PHOTO_TH_THERMAL_TRANSITION_V1": (
+        PACKAGE_ROOT / "config/recipes/PHOTO_TH_THERMAL_TRANSITION_V1.json"
+    ),
 }
 
 

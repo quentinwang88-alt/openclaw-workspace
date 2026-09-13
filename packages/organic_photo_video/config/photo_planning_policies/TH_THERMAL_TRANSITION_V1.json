@@ -1,0 +1,101 @@
+{
+  "schema_version": "opv-photo-planning-policy-v1",
+  "policy_id": "TH_THERMAL_TRANSITION_V1",
+  "policy_version": 1,
+  "recipe_ids": ["PHOTO_TH_THERMAL_TRANSITION_V1"],
+  "planning_flow": "thermal_transition_two_step",
+  "supported_reference_modes": ["COMPLETE_LOOK"],
+  "supported_theme_keys": ["THERMAL_TRANSITION"],
+  "minimum_cross_post_axis_difference": 1,
+  "aesthetic_outlier_threshold": 12,
+  "maximum_replan_count": 1,
+  "canary_only": true,
+  "presentation_order": ["base", "mid", "outer"],
+  "generation_order": ["outer", "mid", "base"],
+  "theme_family_order": {
+    "THERMAL_TRANSITION": ["outdoor_bts_office_minimal_city"]
+  },
+  "families": [
+    {
+      "family_id": "outdoor_bts_office_minimal_city",
+      "series_id": "minimal_city",
+      "transition_key": "outdoor_bts_office",
+      "angle_zh": "同一天从室外热到办公室空调的三态穿脱穿搭",
+      "scene_zh": "室外街道 → BTS/商场 → 办公室工位",
+      "palette_zh": "象牙白、浅沙色、雾灰、浅驼",
+      "background_color": "#EFEBE3",
+      "background_prompt": "均匀浅暖灰纯色背景，同一机位、同一构图、同一光线高度",
+      "outline_plan": {
+        "anchor_role": "outer",
+        "silhouette_zh": "轻量有型外搭配高腰直筒长裤，上身利落，下装与鞋口连续",
+        "bottom_shoes_pair_zh": "雾灰高腰直筒长裤配浅驼乐福鞋，裤脚自然落下，不堆积也不截断鞋口"
+      },
+      "styling_intent_zh": "先冻结办公室强空调下最完整的轻量外搭轮廓，再依次减去外搭和薄层；三态始终保留同一件象牙白透气上衣、同一条雾灰长裤和同一双浅驼乐福鞋。室外炎热时以透气基础层出现，进入 BTS 后增加可穿脱薄衬衫，进入办公室后增加轻量有型外搭。",
+      "looks": [
+        {
+          "role": "base",
+          "thermal_context": "outdoor_hot",
+          "display_label": "ข้างนอกร้อน",
+          "expected_visible_layer_count": 1,
+          "expected_layer_stack": ["transition_core_base"],
+          "added_garment_id": "transition_core_base",
+          "items": [
+            {"slot": "base_top", "garment_id": "transition_core_base", "item_type": "breathable_top"},
+            {"slot": "bottom", "garment_id": "transition_grey_trousers", "item_type": "trousers"},
+            {"slot": "shoes", "garment_id": "transition_tan_loafers", "item_type": "loafer"}
+          ],
+          "stackability": {
+            "collar_profile": "crew_low",
+            "sleeve_volume": "slim",
+            "outer_sleeve_capacity": "not_applicable",
+            "length_zone": "hip"
+          },
+          "scene_prompt": "同一位女性正面全身站姿，室外街道环境，固定机位，只穿象牙白透气短袖上衣"
+        },
+        {
+          "role": "mid",
+          "thermal_context": "transit_cool",
+          "display_label": "รถไฟฟ้า/ห้างเย็น",
+          "expected_visible_layer_count": 2,
+          "expected_layer_stack": ["transition_core_base", "transition_light_shirt"],
+          "added_garment_id": "transition_light_shirt",
+          "items": [
+            {"slot": "base_top", "garment_id": "transition_core_base", "item_type": "breathable_top"},
+            {"slot": "mid_piece", "garment_id": "transition_light_shirt", "item_type": "cotton_shirt"},
+            {"slot": "bottom", "garment_id": "transition_grey_trousers", "item_type": "trousers"},
+            {"slot": "shoes", "garment_id": "transition_tan_loafers", "item_type": "loafer"}
+          ],
+          "stackability": {
+            "collar_profile": "button_placket",
+            "sleeve_volume": "regular",
+            "outer_sleeve_capacity": "regular",
+            "length_zone": "high_hip"
+          },
+          "scene_prompt": "与基础层完全相同的人物、站姿、机位、构图和光线，增加浅沙色可穿脱薄衬衫，衬衫敞开"
+        },
+        {
+          "role": "outer",
+          "thermal_context": "office_cold",
+          "display_label": "ออฟฟิศแอร์แรง",
+          "expected_visible_layer_count": 3,
+          "expected_layer_stack": ["transition_core_base", "transition_light_shirt", "transition_light_blazer"],
+          "added_garment_id": "transition_light_blazer",
+          "items": [
+            {"slot": "base_top", "garment_id": "transition_core_base", "item_type": "breathable_top"},
+            {"slot": "mid_piece", "garment_id": "transition_light_shirt", "item_type": "cotton_shirt"},
+            {"slot": "outerwear", "garment_id": "transition_light_blazer", "item_type": "light_blazer"},
+            {"slot": "bottom", "garment_id": "transition_grey_trousers", "item_type": "trousers"},
+            {"slot": "shoes", "garment_id": "transition_tan_loafers", "item_type": "loafer"}
+          ],
+          "stackability": {
+            "collar_profile": "open_lapel",
+            "sleeve_volume": "regular",
+            "outer_sleeve_capacity": "relaxed",
+            "length_zone": "upper_thigh"
+          },
+          "scene_prompt": "与前两态完全相同的人物、站姿、机位、构图和光线，最外增加浅驼色轻量无衬外搭"
+        }
+      ]
+    }
+  ]
+}

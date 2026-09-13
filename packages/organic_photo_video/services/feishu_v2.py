@@ -225,9 +225,11 @@ class FeishuV2Mixin:
             anchor = int((revision.plan_snapshot_json.get("plan") or {}).get("anchor_slot") or 1)
             if task.task_status == "anchor_review" and requested and anchor not in requested:
                 raise WorkflowV2Error(f"当前仍在锚点审核，请先确认锚点或重做 P{anchor}，不能直接重做下游镜头")
+            from services.feishu_workflow import MAIN_QUEUE_OCCUPIED_STATUSES
             state_reader = getattr(self.publish_scheduler, "get_task_state", None)
             state = state_reader(task.task_id) if callable(state_reader) else {}
-            if state and state.get("status") in {"待排期", "待排班", "已排期", "发布中", "已发布"}:
+            # 与投影共用同一集合：漏掉「提交中」会让在途任务被返工覆盖掉发布占位。
+            if state and str(state.get("status") or "") in MAIN_QUEUE_OCCUPIED_STATUSES:
                 raise WorkflowV2Error("该任务已进入发布队列，请先明确处理排程后再返工")
         self._write_fields(record.record_id, {FIELD_REVIEW: REVIEW_NOT_REQUIRED, FIELD_REVIEW_MODE: None, FIELD_RETRY_REVIEW: False})
         for task in tasks:

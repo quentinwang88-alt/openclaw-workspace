@@ -97,7 +97,8 @@ def _fit_source(path: str, size: tuple[int, int]) -> Image.Image:
 
 def _compose(
     source_paths: Sequence[str], *, layout: str, width: int, height: int,
-    background: str,
+    background: str, template: Optional[Mapping[str, Any]] = None,
+    column_labels: Sequence[str] = (),
 ) -> Image.Image:
     if not source_paths:
         raise PhotoPackageError("each final slide needs at least one source image")
@@ -125,7 +126,83 @@ def _compose(
             y = (index // 2) * (cell_height + gap)
             canvas.paste(_fit_source(path, (cell_width, cell_height)), (x, y))
         return canvas
+    if layout == "triptych_3":
+        # Three equal vertical columns, in frozen role order.  Every column is
+        # centre-cropped (never stretched) so the same person keeps the same
+        # proportions across the whole progression.
+        if len(source_paths) != 3:
+            raise PhotoPackageError("triptych_3 requires exactly three source images")
+        cell_width = (width - gap * 2) // 3
+        for index, path in enumerate(source_paths):
+            x = index * (cell_width + gap)
+            canvas.paste(_fit_source(path, (cell_width, height)), (x, 0))
+        _draw_column_labels(
+            canvas, column_labels, template, columns=3, gap=gap, cell_width=cell_width,
+        )
+        return canvas
     raise PhotoPackageError(f"unsupported photo layout {layout!r}")
+
+
+def _fit_column_font(
+    draw: ImageDraw.ImageDraw, label: str, template: Mapping[str, Any], *,
+    preferred: int, floor: int, available: int,
+) -> tuple[Any, int, int]:
+    """Largest font size at which ``label`` still fits inside one column.
+
+    Shrinking beats overflowing, but only down to ``floor``: a label that still
+    does not fit is a content problem and must fail loudly instead of spilling
+    into the neighbouring column.
+    """
+    for size in range(preferred, floor - 1, -1):
+        font = _font({**template, "font_size": size}, required=True)
+        bbox = draw.multiline_textbbox((0, 0), label, font=font, align="center")
+        width, height = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        if width <= available:
+            return font, width, height
+    raise PhotoPackageError(
+        f"column label {label!r} does not fit its column at minimum font size"
+    )
+
+
+def _draw_column_labels(
+    image: Image.Image, labels: Sequence[str], template: Optional[Mapping[str, Any]], *,
+    columns: int, gap: int, cell_width: int,
+) -> None:
+    """Label each column of a multi-column layout at the safe bottom strip.
+
+    Labels are pinned to the very bottom so they can never enter a face or the
+    headline/CTA text block drawn by :func:`_draw_overlay`.
+    """
+    values = [str(value or "").strip() for value in labels]
+    values = values[:columns]
+    if not values or not any(values):
+        return
+    template = dict(template or {})
+    draw = ImageDraw.Draw(image)
+    background = str(template.get("cta_background") or template.get("text_background") or "#000000D9")
+    color = str(template.get("cta_text_color") or template.get("text_color") or "#FFFFFF")
+    inset_x = max(8, round(cell_width * 0.05))
+    available = cell_width - inset_x * 2
+    preferred = max(28, min(46, round(cell_width * 0.10)))
+    floor = max(20, min(preferred, int(template.get("min_font_size") or 20)))
+    bottom_gap = max(16, round(image.height * 0.016))
+    for index, label in enumerate(values):
+        if not label:
+            continue
+        font, text_width, text_height = _fit_column_font(
+            draw, label, template, preferred=preferred, floor=floor,
+            available=available,
+        )
+        padding = max(6, round(font.size * 0.42))
+        cell_left = index * (cell_width + gap)
+        left = cell_left + inset_x + (available - text_width) // 2
+        top = image.height - bottom_gap - text_height
+        draw.rounded_rectangle(
+            (left - padding, top - padding // 2,
+             left + text_width + padding, top + text_height + padding // 2),
+            radius=max(8, round(padding * 0.9)), fill=background,
+        )
+        draw.multiline_text((left, top), label, font=font, fill=color, align="center")
 
 
 def _draw_overlay(
@@ -304,6 +381,12 @@ class PhotoPackageExporter:
                 [item["path"] for item in source_assets],
                 layout=str(spec.get("layout") or "single"), width=width, height=height,
                 background=str(template.get("background") or "#FFFFFF"),
+                template=template,
+                column_labels=(
+                    spec.get("column_labels")
+                    or (spec.get("layout_snapshot") or {}).get("column_labels")
+                    or ()
+                ),
             )
             _draw_overlay(
                 image, str(spec.get("overlay_text") or ""), template,
@@ -401,7 +484,7 @@ class NativePhotoProductionFlow:
             manifest = self.exporter.export(
                 task_id, template=template, slide_specs=slide_specs,
             )
-            self._run_travel_final_page_qa(task, manifest)
+            self._run_final_page_qa(task, manifest)
             return {"task_id": task_id, "status": statuses.TASK_PHOTO_PACKAGING,
                     "photo_manifest": manifest}
         if task.task_status == statuses.TASK_PHOTO_PACKAGING:
@@ -482,5 +565,118 @@ class NativePhotoProductionFlow:
                 str(manifest.get("content_package_id") or ""),
                 photo_manifest_json=manifest,
                 content_fingerprint=manifest["package_fingerprint"],
+            )
+        return qa
+
+    def _run_final_page_qa(self, task: Any, manifest: Dict[str, Any]) -> Any:
+        """Route the composited-page QA through the planning-flow registry."""
+        from services.photo_content_planner import get_planning_flow
+        from services.photo_flow_registry import (
+            is_layered_progression_flow, is_thermal_transition_flow,
+        )
+        recipe_id = str(getattr(task, "recipe_id", "") or "")
+        flow = get_planning_flow(recipe_id)
+        if is_thermal_transition_flow(flow):
+            return self._run_thermal_transition_final_page_qa(task, manifest)
+        if is_layered_progression_flow(flow):
+            return self._run_layering_final_page_qa(task, manifest)
+        return self._run_travel_final_page_qa(task, manifest)
+
+    def _run_thermal_transition_final_page_qa(
+        self, task: Any, manifest: Dict[str, Any]
+    ) -> Any:
+        """Strictly check all five composited daily-transition pages."""
+        from services.photo_reference_vision import PhotoReferenceVisionService
+        vision = self.vision_service or PhotoReferenceVisionService(root=self.output_root)
+        slides = list(manifest.get("slides") or [])
+        expected_texts = [
+            str(text) for text in (manifest.get("copy") or {}).get("slide_texts") or []
+        ]
+        roles = ["hook", "state_base", "state_mid", "state_outer", "cta"]
+        if len(slides) != 5 or len(expected_texts) != 5:
+            raise PhotoPackageError(
+                "冷热切换最终页面 QA 必须覆盖 hook/base/mid/outer/cta 五页"
+            )
+        # The composited-page QA only judges text rendering on the finished
+        # pages, which is flow-agnostic; the transition semantics were already
+        # enforced on the source group by photo_thermal_transition_qa.
+        qa = vision.review_layering_final_pages(
+            image_paths=[str(slide["path"]) for slide in slides],
+            expected_texts=expected_texts, role_order=roles,
+        )
+        manifest["thermal_transition_final_page_qa"] = qa
+        manifest["package_fingerprint"] = canonical_hash(manifest)
+        self.repository.update_content_package(
+            str(manifest.get("content_package_id") or ""),
+            photo_manifest_json=manifest,
+            content_fingerprint=manifest["package_fingerprint"],
+        )
+        if not qa.get("passed"):
+            issues = []
+            for page in qa.get("pages") or []:
+                flags = [name for name in (
+                    "text_readable", "text_matches_expected", "text_clipped",
+                    "text_garbled", "subject_obscured",
+                ) if (
+                    page.get(name) is False
+                    if name in {"text_readable", "text_matches_expected"}
+                    else page.get(name) is True
+                )]
+                issues.append(
+                    f"P{page.get('index')}：" + "、".join(
+                        flags + [str(value) for value in page.get("issues") or []]
+                    )
+                )
+            raise PhotoPackageError(
+                "冷热切换最终页面 QA 未通过，已阻止进入技术完成："
+                + "；".join(issues)
+            )
+        return qa
+
+    def _run_layering_final_page_qa(
+        self, task: Any, manifest: Dict[str, Any]
+    ) -> Any:
+        """Strictly check all five composited temperature-layering pages."""
+        from services.photo_reference_vision import PhotoReferenceVisionService
+        vision = self.vision_service or PhotoReferenceVisionService(root=self.output_root)
+        slides = list(manifest.get("slides") or [])
+        expected_texts = [
+            str(text) for text in (manifest.get("copy") or {}).get("slide_texts") or []
+        ]
+        roles = ["hook", "layer_base", "layer_mid", "layer_outer", "cta"]
+        if len(slides) != 5 or len(expected_texts) != 5:
+            raise PhotoPackageError(
+                "温度分层最终页面 QA 必须覆盖 hook/base/mid/outer/cta 五页"
+            )
+        qa = vision.review_layering_final_pages(
+            image_paths=[str(slide["path"]) for slide in slides],
+            expected_texts=expected_texts, role_order=roles,
+        )
+        manifest["layering_final_page_qa"] = qa
+        manifest["package_fingerprint"] = canonical_hash(manifest)
+        self.repository.update_content_package(
+            str(manifest.get("content_package_id") or ""),
+            photo_manifest_json=manifest,
+            content_fingerprint=manifest["package_fingerprint"],
+        )
+        if not qa.get("passed"):
+            issues = []
+            for page in qa.get("pages") or []:
+                flags = [name for name in (
+                    "text_readable", "text_matches_expected", "text_clipped",
+                    "text_garbled", "subject_obscured",
+                ) if (
+                    page.get(name) is False
+                    if name in {"text_readable", "text_matches_expected"}
+                    else page.get(name) is True
+                )]
+                issues.append(
+                    f"P{page.get('index')}：" + "、".join(
+                        flags + [str(value) for value in page.get("issues") or []]
+                    )
+                )
+            raise PhotoPackageError(
+                "温度分层最终页面 QA 未通过，已阻止进入技术完成："
+                + "；".join(issues)
             )
         return qa

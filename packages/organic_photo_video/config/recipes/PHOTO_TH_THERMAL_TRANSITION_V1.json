@@ -1,0 +1,288 @@
+{
+  "schema_version": "opv-content-recipe-v1",
+  "recipe_id": "PHOTO_TH_THERMAL_TRANSITION_V1",
+  "recipe_key": "TH_THERMAL_TRANSITION",
+  "recipe_version": 1,
+  "content_goal": "thermal_transition_solution",
+  "anchor_slot": 1,
+  "shot_count": 5,
+  "hook_types": [
+    "thermal_contrast",
+    "transition_scene"
+  ],
+  "story_structure": [
+    {
+      "slot_index": 1,
+      "role": "hook",
+      "source_slots": [4],
+      "layout_variant": "TRIPTYCH",
+      "purpose": "三栏并列展示同一人从室外热到交通工具到办公室空调的三个状态，并提出冷热切换问题",
+      "source_roles": ["base", "mid", "outer"]
+    },
+    {
+      "slot_index": 2,
+      "role": "state_base",
+      "source_slots": [],
+      "layout_variant": "FULL_BLEED",
+      "purpose": "展示室外炎热时的透气基础层",
+      "source_roles": ["base"]
+    },
+    {
+      "slot_index": 3,
+      "role": "state_mid",
+      "source_slots": [2],
+      "layout_variant": "FULL_BLEED",
+      "purpose": "展示进入 BTS 或商场偏凉环境后增加的薄层",
+      "source_roles": ["mid"]
+    },
+    {
+      "slot_index": 4,
+      "role": "state_outer",
+      "source_slots": [3],
+      "layout_variant": "FULL_BLEED",
+      "purpose": "展示办公室强空调下增加的可穿脱外搭",
+      "source_roles": ["outer"]
+    },
+    {
+      "slot_index": 5,
+      "role": "cta",
+      "source_slots": [4],
+      "layout_variant": "TRIPTYCH",
+      "purpose": "三栏复述冷热切换并给出怕热还是怕空调的互动问题",
+      "source_roles": ["base", "mid", "outer"]
+    }
+  ],
+  "copy_style": {
+    "locale": "th-TH",
+    "tone": "saveable_guide",
+    "max_lines_per_block": 2,
+    "example": "ข้างนอกร้อน แต่ออฟฟิศแอร์แรง แต่งตัวยังไงดี?",
+    "language_review_status": "pending_native_review"
+  },
+  "suitable_topics": [
+    "thermal_transition",
+    "aircon_dressing",
+    "daily_layering"
+  ],
+  "quality_profile_id": "QUALITY_STANDARD_V1",
+  "recipe_spec": {
+    "schema_version": "opv-photo-recipe-v1",
+    "media_kind": "native_photo",
+    "category_key": "womenswear",
+    "markets": ["TH"],
+    "theme_types": ["GUIDE", "CHECKLIST"],
+    "product_modes": ["NO_PRODUCT"],
+    "variables_schema": {
+      "transition_key": {
+        "type": "enum",
+        "values": ["outdoor_bts_office", "outdoor_mall_cinema", "campus_outdoor_classroom"],
+        "required": true
+      },
+      "thermal_sensitivity": {
+        "type": "enum",
+        "values": ["feels_cold", "normal", "feels_warm"],
+        "required": true
+      },
+      "dress_code": {
+        "type": "enum",
+        "values": ["office", "campus", "weekend"],
+        "required": true
+      },
+      "style_series": {
+        "type": "enum",
+        "values": ["minimal_city", "soft_casual"],
+        "required": true
+      },
+      "temperature_label_mode": {
+        "type": "enum",
+        "values": ["QUALITATIVE", "EXPLICIT_INPUT"],
+        "required": true
+      }
+    },
+    "template_id": "PHOTO_THERMAL_ROUTE_V1",
+    "template_version": 1,
+    "supported_presentations": ["MODEL_FULL_BODY"],
+    "visual_rules": {
+      "same_identity": true,
+      "same_camera_scale": true,
+      "layering_progression": true,
+      "show_full_body": true
+    },
+    "asset_policy": {
+      "default": "ASSET_REUSE",
+      "on_missing": "NEEDS_ASSET"
+    },
+    "asset_match_keys": [
+      "transition_key",
+      "thermal_sensitivity",
+      "dress_code",
+      "style_series"
+    ],
+    "asset_requirements": {
+      "required_roles": ["base", "mid", "outer"],
+      "required_tags": {
+        "use_cases": ["thermal_transition"]
+      },
+      "required_pairs": [
+        {
+          "relation": "layering_progression_group",
+          "roles": ["base", "mid", "outer"]
+        }
+      ]
+    },
+    "execution_profiles": [
+      {
+        "profile_id": "thermal_outdoor_bts_office_normal_office",
+        "label": "室外热→BTS→办公室空调｜正常体感｜办公室着装",
+        "variables": {
+          "transition_key": "outdoor_bts_office",
+          "thermal_sensitivity": "normal",
+          "dress_code": "office",
+          "style_series": "minimal_city",
+          "temperature_label_mode": "QUALITATIVE"
+        },
+        "asset_set_keys": ["TH_WOMENSWEAR_THERMAL_TRANSITION_OUTDOOR_BTS_OFFICE"],
+        "copy_pack_id": "TH_THERMAL_TRANSITION_V1"
+      }
+    ],
+    "thermal_transition_contract": {
+      "schema_version": "opv-photo-thermal-transition-contract-v1",
+      "source_roles": ["base", "mid", "outer"],
+      "presentation_order": ["base", "mid", "outer"],
+      "generation_order": ["outer", "mid", "base"],
+      "progression_relation": "STRICT_STACK_INCLUSION",
+      "progression_required": true,
+      "same_identity": true,
+      "same_base_bottom_shoes": true,
+      "stackability_required": true,
+      "temperature_label_modes": ["QUALITATIVE", "EXPLICIT_INPUT"],
+      "states": [
+        {
+          "role": "base",
+          "thermal_context": "outdoor_hot",
+          "label_zh": "室外炎热",
+          "label_th": "ข้างนอกร้อน",
+          "expected_visible_layer_count": 1
+        },
+        {
+          "role": "mid",
+          "thermal_context": "transit_cool",
+          "label_zh": "BTS/商场偏凉",
+          "label_th": "รถไฟฟ้า/ห้างเย็น",
+          "expected_visible_layer_count": 2
+        },
+        {
+          "role": "outer",
+          "thermal_context": "office_cold",
+          "label_zh": "办公室空调强",
+          "label_th": "ออฟฟิศแอร์แรง",
+          "expected_visible_layer_count": 3
+        }
+      ],
+      "transitions": [
+        {
+          "key": "outdoor_bts_office",
+          "label_zh": "室外热→BTS→办公室空调",
+          "label_th": "ข้างนอกร้อน → รถไฟฟ้า → ออฟฟิศแอร์แรง",
+          "thermal_contexts": ["outdoor_hot", "transit_cool", "office_cold"],
+          "context_labels_th": {
+            "outdoor_hot": "ข้างนอกร้อน",
+            "transit_cool": "รถไฟฟ้า/ห้างเย็น",
+            "office_cold": "ออฟฟิศแอร์แรง"
+          }
+        }
+      ],
+      "sensitivity_rules": {
+        "feels_cold": {
+          "label_zh": "怕冷",
+          "label_th": "ขี้หนาว",
+          "layer_bias": "CARRY_EXTRA_MID"
+        },
+        "normal": {
+          "label_zh": "正常体感",
+          "label_th": "รู้สึกปกติ",
+          "layer_bias": "AS_PLANNED"
+        },
+        "feels_warm": {
+          "label_zh": "怕热",
+          "label_th": "ขี้ร้อน",
+          "layer_bias": "OUTER_REMOVABLE"
+        }
+      },
+      "dress_code_rules": {
+        "office": {
+          "label_zh": "办公室着装",
+          "label_th": "ชุดไปออฟฟิศ"
+        },
+        "campus": {
+          "label_zh": "校园着装",
+          "label_th": "ชุดไปเรียน"
+        },
+        "weekend": {
+          "label_zh": "周末休闲",
+          "label_th": "ชุดวันหยุด"
+        }
+      },
+      "allowed_item_types": [
+        "breathable_top", "cotton_shirt", "light_cardigan", "light_blazer",
+        "trousers", "linen_pants", "jeans", "loafer", "sneaker"
+      ],
+      "forbidden_item_types": [
+        "puffer_jacket", "heavy_wool_coat", "snow_boot", "thermal_top",
+        "shorts", "sandal"
+      ],
+      "claim_rules": {
+        "allowed_phrasing_th": ["ใช้เป็นไอเดีย", "ปรับตามความรู้สึกของคุณ"],
+        "forbidden_phrasing_th": ["รับประกันว่าอุ่น", "ไม่ร้อนแน่นอน"]
+      }
+    },
+    "release_requirements": {
+      "required_language_review_status": "NATIVE_APPROVED"
+    },
+    "content_card": {
+      "schema_version": "opv-photo-content-card-v1",
+      "summary_zh": "同一人物在同一天从室外炎热进入 BTS/商场再进入办公室强空调，逐层增加可穿脱的上身层",
+      "audience_zh": "每天在室外高温与室内强空调之间来回切换的泰国女装用户",
+      "question_zh": "室外很热但办公室空调很强，今天该怎么穿？",
+      "comparison_basis_zh": "只展示同一套基础穿搭在三种环境温度下的穿脱变化，作为按体感、着装要求和活动量调整的参考；不承诺保暖或降温效果。",
+      "logic_key": "thermal_transition_progression",
+      "asset_gaps": [],
+      "layering_roles": ["base", "mid", "outer"],
+      "pages": [
+        {
+          "index": 1,
+          "purpose_zh": "三栏并列展示室外热→交通工具→办公室空调的三个状态并提出问题",
+          "layout": "triptych_3",
+          "source_roles": ["base", "mid", "outer"],
+          "column_labels": ["ข้างนอกร้อน", "รถไฟฟ้า/ห้างเย็น", "ออฟฟิศแอร์แรง"]
+        },
+        {
+          "index": 2,
+          "purpose_zh": "展示室外炎热时的透气基础层",
+          "layout": "single",
+          "source_roles": ["base"]
+        },
+        {
+          "index": 3,
+          "purpose_zh": "展示进入 BTS 或商场后增加的可穿脱薄层",
+          "layout": "single",
+          "source_roles": ["mid"]
+        },
+        {
+          "index": 4,
+          "purpose_zh": "展示办公室强空调下增加的外搭",
+          "layout": "single",
+          "source_roles": ["outer"]
+        },
+        {
+          "index": 5,
+          "purpose_zh": "三栏复述冷热切换并给出互动问题",
+          "layout": "triptych_3",
+          "source_roles": ["base", "mid", "outer"],
+          "column_labels": ["ข้างนอกร้อน", "รถไฟฟ้า/ห้างเย็น", "ออฟฟิศแอร์แรง"]
+        }
+      ]
+    }
+  },
+  "status": "active"
+}

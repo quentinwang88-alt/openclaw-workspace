@@ -113,6 +113,9 @@ class CatalogTest(unittest.TestCase):
             item for item in payload["presets"]
             if item.get("media_kind") == "native_photo"
         ]
+        # 2026-09-13: the retired temperature-layering preset was dropped with
+        # its recipe, leaving the disabled daily hot→cold transition preset as
+        # the eighth native-photo entry.
         self.assertEqual(len(photo_presets), 8)
         self.assertEqual(
             {item["category_key"] for item in photo_presets},
@@ -242,6 +245,33 @@ class PublicationProjectionTest(unittest.TestCase):
         ])
         self.assertEqual(progress, "已发布")
         self.assertIn("已发布2", note)
+
+    def test_submitting_is_never_reported_as_pending_schedule(self):
+        """「提交中」是在途占位，不是待排班；曾整批被误报成待排班。"""
+        progress, note = FeishuTaskWorkflow._publication_projection([
+            {"status": "提交中", "account_name": "泰国养号视频-2",
+             "planned_publish_at": "2026-09-12 15:00:00",
+             "error_message": "提交结果不明；仅对账，禁止自动重发：本地命令解析失败"},
+        ])
+        self.assertEqual(progress, "提交中")
+        self.assertIn("提交中1", note)
+        self.assertNotIn("待排班1", note)
+
+    def test_submitting_outranks_scheduled_in_mixed_batch(self):
+        progress, note = FeishuTaskWorkflow._publication_projection([
+            {"status": "已排期", "account_name": "账号A"},
+            {"status": "提交中", "account_name": "账号B"},
+        ])
+        self.assertEqual(progress, "提交中")
+        self.assertIn("已排期1", note)
+        self.assertIn("提交中1", note)
+
+    def test_confirmed_failure_still_outranks_submitting(self):
+        progress, _ = FeishuTaskWorkflow._publication_projection([
+            {"status": "提交中"},
+            {"status": "发布失败"},
+        ])
+        self.assertEqual(progress, "发布失败")
 
 
 class ScanTest(unittest.TestCase):

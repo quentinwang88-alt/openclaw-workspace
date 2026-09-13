@@ -209,7 +209,7 @@
    ]
   },
   {
-   "name": "图文｜TH｜温度穿搭",
+   "name": "图文｜TH｜冷热切换",
    "routing_policy": "native_photo_v1",
    "media_kind": "native_photo",
    "category_key": "womenswear",
@@ -220,16 +220,16 @@
      "account_id": "OPV_TH_TEST_001",
      "market": "TH",
      "language": "th-TH",
-     "recipe_id": "PHOTO_TH_TEMPERATURE_DRESSING_V1",
+     "recipe_id": "PHOTO_TH_THERMAL_TRANSITION_V1",
      "theme_id": "",
-     "hook_strategy": "temperature_question",
+     "hook_strategy": "thermal_contrast",
      "persona_ref": "",
      "look_ref": "",
      "scene_ref": ""
     }
    ],
    "status": "disabled",
-   "disabled_reason": "技术样本内容验收未通过；待具有已核验内容合同的新版本"
+   "disabled_reason": "日常冷热切换线 V1；仅开放 outdoor_bts_office/normal/office/minimal_city 的 COMPLETE_LOOK canary。待三张实拍素材、泰语母语审校和人工验收通过后开放"
   },
   {
    "name": "图文｜TH｜四选一穿搭",

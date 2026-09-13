@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import copy
+import re
 from typing import Any, Mapping, Sequence
 
 from domain.photo_contracts import LABEL_PLACEHOLDER, validate_copy
+
+
+CONTRACT_TOKEN = re.compile(r"(?<!\{)\{([a-z][a-z0-9_]*)\}(?!\})")
 
 
 def resolve_photo_copy(copy_block: Mapping[str, Any], *, assets: Sequence[Mapping[str, Any]],
@@ -49,9 +53,95 @@ def fill_travel_copy_tokens(text: str, *, travel_contract: Mapping[str, Any],
         str(variables.get("destination") or ""), ""))
     temperature = str((travel_contract.get("temperature_labels_th") or {}).get(
         str(variables.get("temperature_band") or ""), ""))
+    return fill_contract_copy_tokens(
+        text,
+        token_values={"destination": destination, "temperature": temperature},
+        contract_label="旅行",
+    )
+
+
+def _thermal_transition_copy_tokens(
+    contract: Mapping[str, Any], variables: Mapping[str, Any],
+) -> dict[str, str]:
+    """Resolve the daily hot→cold transition labels from its own contract."""
+    transition_key = str(variables.get("transition_key") or "")
+    entry = next(
+        (dict(item) for item in contract.get("transitions") or []
+         if str(item.get("key") or "") == transition_key),
+        None,
+    )
+    if entry is None:
+        raise ValueError(f"冷热切换合同不支持场景 {transition_key or '未填写'}")
+    sensitivity_key = str(variables.get("thermal_sensitivity") or "")
+    sensitivity = dict((contract.get("sensitivity_rules") or {}).get(sensitivity_key) or {})
+    dress_code_key = str(variables.get("dress_code") or "")
+    dress_code = dict((contract.get("dress_code_rules") or {}).get(dress_code_key) or {})
+    return {
+        "transition_label": str(entry.get("label_th") or ""),
+        "sensitivity_label": str(sensitivity.get("label_th") or sensitivity_key),
+        "dress_code_label": str(dress_code.get("label_th") or dress_code_key),
+    }
+
+
+def fill_contract_copy_tokens(
+    text: str, *, token_values: Mapping[str, Any], contract_label: str = "图文",
+) -> str:
+    """Fill audited contract tokens and reject unresolved values.
+
+    The caller owns the mapping from business variables to localized labels;
+    this helper deliberately stays neutral between travel and layering flows.
+    """
     filled = str(text or "")
-    if "{destination}" in filled and not destination:
-        raise ValueError("旅行文案模板缺少目的地泰语标签")
-    if "{temperature}" in filled and not temperature:
-        raise ValueError("旅行文案模板缺少温度泰语标签")
-    return filled.replace("{destination}", destination).replace("{temperature}", temperature)
+    values = {str(key): str(value) for key, value in token_values.items()
+              if value not in (None, "")}
+    for token in sorted(set(CONTRACT_TOKEN.findall(filled))):
+        if token not in values:
+            raise ValueError(f"{contract_label}文案模板缺少 {token} 的已审核填充值")
+        filled = filled.replace("{" + token + "}", values[token])
+    return filled
+
+
+def contract_copy_tokens(recipe_spec: Mapping[str, Any], variables: Mapping[str, Any]) -> dict[str, str]:
+    """Resolve localized tokens from a Recipe-owned executable contract."""
+    travel = dict(recipe_spec.get("travel_contract") or {})
+    if travel:
+        return {
+            "destination": str((travel.get("destination_labels_th") or {}).get(
+                str(variables.get("destination") or ""), "")),
+            "temperature": str((travel.get("temperature_labels_th") or {}).get(
+                str(variables.get("temperature_band") or ""), "")),
+        }
+    transition = dict(recipe_spec.get("thermal_transition_contract") or {})
+    if transition:
+        return _thermal_transition_copy_tokens(transition, variables)
+    layering = dict(recipe_spec.get("layering_contract") or {})
+    if not layering:
+        return {}
+    band_key = str(variables.get("band_key") or variables.get("temperature_band") or "")
+    band = next(
+        (dict(item) for item in layering.get("bands") or []
+         if str(item.get("key") or "") == band_key),
+        {},
+    )
+    if not band:
+        raise ValueError(f"温度穿搭合同不支持温度档 {band_key or '未填写'}")
+    sensitivity_key = str(variables.get("thermal_sensitivity") or "")
+    sensitivity = dict((layering.get("sensitivity_rules") or {}).get(sensitivity_key) or {})
+    scene_key = str(variables.get("scene") or "")
+    scene = next(
+        (dict(item) for item in layering.get("scene_modifiers") or []
+         if str(item.get("key") or "") == scene_key),
+        {},
+    )
+    bounds = dict(band.get("final_visible_layer_bounds") or {})
+    lower, upper = int(bounds.get("min") or 0), int(bounds.get("max") or 0)
+    choice = str(sensitivity.get("layer_choice") or "DEFAULT")
+    layer_count = upper if choice == "UPPER_BOUND" else lower
+    if choice == "DEFAULT" and lower and upper:
+        layer_count = (lower + upper) // 2
+    return {
+        "temperature": str(band.get("label_th") or ""),
+        "layer_count": str(layer_count or ""),
+        "sensitivity_label": str(sensitivity.get("label_th") or sensitivity_key),
+        "scene_label": str(scene.get("label_th") or scene_key),
+    }

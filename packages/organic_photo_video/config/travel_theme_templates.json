@@ -68,8 +68,22 @@
     },
     "TEMPERATURE": {
       "label_zh": "旅行·温度穿搭",
-      "version": 1,
+      "version": 2,
       "planning_focus": "按明确温度条件规划层搭与活动需求，兼顾保暖、透气和行动方便",
+      "thermal_sensitivity_planning": {
+        "default": "normal",
+        "scope": "article",
+        "modifiers": {
+          "feels_cold": "同温度档下整体偏保暖：优先更厚实的外层与可叠加的内搭层次，减少露肤面积与单薄材质，叠穿后仍要保证旅行行动方便",
+          "normal": "按当前温度档常规搭配，不额外增加或减少保暖层级",
+          "feels_warm": "同温度档下整体偏轻量：优先更透气轻薄的材质与更少的层数，保留方便穿脱的调节空间"
+        },
+        "constraints": [
+          "体感只作用于整篇文章，四套 Look 必须使用同一体感",
+          "A/B/C/D 仍比较风格、轮廓与配色，不得分别代表怕冷或怕热",
+          "不得出现具体温度数字，温度只以文章级温度档呈现"
+        ]
+      },
       "topic_patterns": [
         "{place}现在穿什么合适？",
         "{place}旅行温度穿搭指南"

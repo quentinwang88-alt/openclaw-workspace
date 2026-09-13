@@ -28,12 +28,13 @@ class ShippedConfigTest(unittest.TestCase):
         self.assertEqual(len(self.bundle.market_packs), 2)
         self.assertEqual(len(self.bundle.themes), 10)
         self.assertEqual(len(self.bundle.render_presets), 1)
-        # 2026-09-10: +1 content recipe (PHOTO_MX_PICK_YOUR_HAIR_V2)
-        # and +1 board layout (PHOTO_MX_HAIR_CARD_V1) for mx_wig_choice_v1.
-        self.assertEqual(len(self.bundle.content_recipes), 17)
+        # 2026-09-13: temperature-layering V2 never reached RDS and was retired;
+        # the daily thermal-transition line took its slot, so the totals are
+        # unchanged from the 2026-09-12 layering baseline.
+        self.assertEqual(len(self.bundle.content_recipes), 18)
         self.assertEqual(len(self.bundle.render_profiles), 2)
         self.assertEqual(len(self.bundle.quality_profiles), 3)
-        self.assertEqual(len(self.bundle.board_layouts), 10)
+        self.assertEqual(len(self.bundle.board_layouts), 11)
         self.assertEqual(len(self.bundle.variant_policies), 1)
         self.assertIsNotNone(self.bundle.account_example)
 
@@ -122,10 +123,10 @@ class ShippedConfigTest(unittest.TestCase):
             recipe for recipe in self.bundle.content_recipes
             if recipe.recipe_spec_json.get("media_kind") == "native_photo"
         ]
-        # 2026-09-10: +1 photo recipe = PHOTO_MX_PICK_YOUR_HAIR_V2, which is
-        # asserted against its own four-page mx_wig_choice_v1 contract below;
-        # every other photo recipe keeps the original five-page assertions.
-        self.assertEqual(len(photos), 12)
+        # PHOTO_MX_PICK_YOUR_HAIR_V2 keeps its explicit four-page contract;
+        # all other native-photo recipes, including the daily
+        # thermal-transition line, use five.
+        self.assertEqual(len(photos), 13)
         layout_ids = {
             layout["layout_id"] for layout in self.bundle.board_layouts
             if layout["schema_version"] in {loader.PHOTO_LAYOUT_SCHEMA, "opv-photo-layout-v2"}
@@ -140,6 +141,7 @@ class ShippedConfigTest(unittest.TestCase):
                 "PHOTO_CHOICE_CARD_V2",
                 "PHOTO_TRAVEL_CARD_V3",
                 "PHOTO_MX_HAIR_CARD_V1",
+                "PHOTO_THERMAL_ROUTE_V1",
             },
         )
         for recipe in photos:
@@ -198,7 +200,9 @@ class ShippedConfigTest(unittest.TestCase):
             if item.recipe_id == "PHOTO_TH_TRAVEL_OUTFIT_V2"
         )
         self.assertEqual(recipe.status, "active")
-        self.assertEqual(recipe.recipe_version, 6)
+        # 2026-09-13: travel v7 adds the optional article-level
+        # ``thermal_sensitivity`` variable consumed only by the TEMPERATURE theme.
+        self.assertEqual(recipe.recipe_version, 7)
         self.assertEqual(recipe.story_structure_json[0]["layout_variant"], "FULL_BLEED")
         self.assertEqual(recipe.story_structure_json[0]["source_roles"], ["look_a"])
         self.assertEqual(

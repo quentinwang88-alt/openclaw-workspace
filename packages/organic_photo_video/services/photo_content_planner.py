@@ -7,6 +7,12 @@ import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from services.photo_flow_registry import (
+    PhotoFlowRegistryError, get_photo_flow_handler, is_layered_progression_flow,
+    is_thermal_transition_flow, resolve_required_roles, role_marker,
+    validate_ordered_roles,
+)
+
 
 class PhotoContentPlanError(ValueError):
     pass
@@ -22,6 +28,10 @@ POLICY_DIR = (
 RECIPE_POLICY_FILES = {
     "PHOTO_TH_PICK_YOUR_LOOK_V3": "TH_PICK_YOUR_LOOK_V2.json",
     "PHOTO_TH_TRAVEL_OUTFIT_V2": "TH_TRAVEL_OUTFIT_V1.json",
+    # 2026-09-13: PHOTO_TH_TEMPERATURE_DRESSING_V2 (layering_two_step) was
+    # retired — it never reached RDS, and its slot is taken by the daily
+    # thermal-transition line.  The 0-15°C job moves to the travel line.
+    "PHOTO_TH_THERMAL_TRANSITION_V1": "TH_THERMAL_TRANSITION_V1.json",
 }
 
 
@@ -222,6 +232,16 @@ def validate_batch_plan(plan: Mapping[str, Any]) -> None:
         raise PhotoContentPlanError("批次内容计划数量不完整")
     reference_mode = str(plan.get("reference_mode") or "")
     style_profile = dict(plan.get("style_profile") or {})
+    planning_flow = str(
+        plan.get("planning_flow") or style_profile.get("planning_flow") or ""
+    )
+    try:
+        required_roles = resolve_required_roles(
+            planning_flow=planning_flow,
+            required_roles=plan.get("required_roles") or (),
+        )
+    except PhotoFlowRegistryError as exc:
+        raise PhotoContentPlanError(str(exc)) from exc
     seen_families, seen_looks = set(), set()
     for expected, item in enumerate(items, 1):
         if item.get("index") != expected or not item.get("angle_zh") or not item.get("copy"):
@@ -229,8 +249,12 @@ def validate_batch_plan(plan: Mapping[str, Any]) -> None:
         if reference_mode == "COMPLETE_LOOK":
             continue
         looks = list(item.get("looks") or [])
-        if [look.get("role") for look in looks] != ["look_a", "look_b", "look_c", "look_d"]:
-            raise PhotoContentPlanError(f"第 {expected} 篇缺少有序 A/B/C/D 穿搭")
+        try:
+            validate_ordered_roles(
+                looks, planning_flow=planning_flow, required_roles=required_roles,
+            )
+        except PhotoFlowRegistryError as exc:
+            raise PhotoContentPlanError(f"第 {expected} 篇{exc}") from exc
         travel_moments = [str(look.get("travel_moment") or "") for look in looks]
         if looks[0].get("travel_moment") is not None:
             if any(not moment for moment in travel_moments):
@@ -317,6 +341,9 @@ def plan_th_choice_batch(
     reference_mode: str, count: int, style_profile: Mapping[str, Any] | None = None,
     travel_contract: Mapping[str, Any] = None,
     copy_templates: Sequence[Mapping[str, Any]] = None,
+    required_roles: Sequence[str] = (),
+    recipe_spec: Mapping[str, Any] = None,
+    variables: Mapping[str, Any] = None,
 ) -> dict[str, Any]:
     policy = load_planning_policy(recipe_id)
     if recipe_id not in policy["recipe_ids"]:
@@ -331,8 +358,49 @@ def plan_th_choice_batch(
         raise PhotoContentPlanError(f"该生产预设尚未支持主题：{theme_key or '自动'}")
     travel_topic = dict((style_profile or {}).get("travel_topic") or {})
     topic_linked = False
+    planning_flow = str(
+        (style_profile or {}).get("planning_flow")
+        or policy.get("planning_flow")
+        or "reference_contract_v1"
+    )
+    try:
+        flow_handler = get_photo_flow_handler(planning_flow)
+        frozen_required_roles = flow_handler.resolve_source_roles(required_roles)
+    except PhotoFlowRegistryError as exc:
+        raise PhotoContentPlanError(str(exc)) from exc
     if count < 1 or count > 9:
         raise PhotoContentPlanError("生成篇数必须是 1 到 9")
+    if is_layered_progression_flow(planning_flow):
+        if count != 1:
+            raise PhotoContentPlanError("分层图文首版每条记录只生成一篇")
+        if is_thermal_transition_flow(planning_flow):
+            from services.photo_thermal_transition_flow import (
+                PhotoThermalTransitionFlowError,
+                build_thermal_transition_content_plan,
+            )
+            try:
+                return build_thermal_transition_content_plan(
+                    record_id=record_id, recipe_id=recipe_id,
+                    recipe_spec=dict(recipe_spec or {}), policy=policy,
+                    theme=theme, reference_mode=reference_mode,
+                    variables=dict(variables or {}),
+                    copy_templates=copy_templates or (),
+                )
+            except PhotoThermalTransitionFlowError as exc:
+                raise PhotoContentPlanError(str(exc)) from exc
+        from services.photo_layering_flow import (
+            PhotoLayeringFlowError, build_layering_content_plan,
+        )
+        try:
+            return build_layering_content_plan(
+                record_id=record_id, recipe_id=recipe_id,
+                recipe_spec=dict(recipe_spec or {}), policy=policy,
+                theme=theme, reference_mode=reference_mode,
+                variables=dict(variables or {}),
+                copy_templates=copy_templates or (),
+            )
+        except PhotoLayeringFlowError as exc:
+            raise PhotoContentPlanError(str(exc)) from exc
     if reference_mode == "COMPLETE_LOOK":
         items = [_complete_look_plan(index, theme, policy) for index in range(1, count + 1)]
     elif (reference_mode == "STYLE" and style_profile
@@ -340,7 +408,17 @@ def plan_th_choice_batch(
         recommendations = list(style_profile.get("recommended_sets") or [])
         if len(recommendations) < count:
             raise PhotoContentPlanError("视觉合同没有提供足够的穿搭方案")
-        travel_flow = str(style_profile.get("planning_flow") or "") == "travel_two_step"
+        # A generic vision contract may still be consumed by the travel
+        # recipe (legacy/test fixtures).  Travel-specific copy is activated
+        # only when the upstream visual plan explicitly declares that flow.
+        # The lookup is registry-driven while preserving that old behavior.
+        try:
+            profile_flow_handler = get_photo_flow_handler(
+                style_profile.get("planning_flow") or ""
+            )
+        except PhotoFlowRegistryError as exc:
+            raise PhotoContentPlanError(str(exc)) from exc
+        travel_flow = profile_flow_handler.travel_semantics
         travel_topic = dict(style_profile.get("travel_topic") or {})
         topic_linked = bool(travel_flow and travel_topic.get("theme_type"))
         if travel_flow and not topic_linked and (
@@ -394,11 +472,16 @@ def plan_th_choice_batch(
                          reference_mode=reference_mode, style_profile=style_profile)
             for index, family in enumerate(selected, 1)
         ]
+    for item in items:
+        item.setdefault("planning_flow", planning_flow)
+        item.setdefault("required_roles", list(frozen_required_roles))
     plan = {
         "schema_version": "opv-photo-content-plan-v1",
         "policy_id": policy["policy_id"], "policy_version": policy["policy_version"],
         "record_id": record_id, "recipe_id": recipe_id,
         "theme_key": theme_key, "reference_mode": reference_mode, "count": count,
+        "planning_flow": planning_flow,
+        "required_roles": list(frozen_required_roles),
         "travel_theme_type": travel_topic.get("theme_type") or "",
         "travel_place": str(travel_topic.get("place") or ""),
         "allow_repeated_travel_moments": topic_linked,
@@ -431,13 +514,14 @@ def summarize_batch_plan(plan: Mapping[str, Any]) -> str:
     for item in plan.get("items") or []:
         looks = list(item.get("looks") or [])
         look_text = "；".join(
-            f"{look['role'][-1].upper()}={look.get('outerwear')} + {look.get('bottom')}"
-            for look in looks
-        ) if looks else "按上传的 A/B/C/D 完整穿搭"
+            f"{role_marker(look.get('role'), index)}="
+            f"{look.get('outerwear')} + {look.get('bottom')}"
+            for index, look in enumerate(looks)
+        ) if looks else "按上传的冻结角色使用完整穿搭"
         topic = str(item.get("topic_zh") or "")
         topic_text = f"｜选题：{topic}" if topic else ""
         cover_role = str((item.get("cover_selection") or {}).get("role") or "")
-        cover_text = f"｜封面：{cover_role[-1:].upper()}" if cover_role else ""
+        cover_text = f"｜封面：{role_marker(cover_role, 0)}" if cover_role else ""
         lines.append(
             f"{item['index']}. {item['angle_zh']}｜配色：{item['palette_zh']}"
             f"{topic_text}{cover_text}｜{look_text}"

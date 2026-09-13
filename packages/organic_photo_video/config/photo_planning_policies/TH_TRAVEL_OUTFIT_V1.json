@@ -1,7 +1,7 @@
 {
   "schema_version": "opv-photo-planning-policy-v1",
   "policy_id": "TH_TRAVEL_OUTFIT_V1",
-  "policy_version": 2,
+  "policy_version": 3,
   "recipe_ids": [
     "PHOTO_TH_TRAVEL_OUTFIT_V2"
   ],

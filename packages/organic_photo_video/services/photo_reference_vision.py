@@ -10,15 +10,20 @@ import re
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from services.photo_flow_registry import (
+    DEFAULT_TRAVEL_SOURCE_ROLES, PhotoFlowRegistryError,
+    resolve_required_roles, validate_ordered_roles,
+)
+
 from PIL import Image, ImageOps
 import requests
 
 
 PROMPT_VERSION = "opv-photo-reference-v2"
-TRAVEL_PROMPT_VERSION = "opv-photo-travel-plan-v8-astra-visual"
+TRAVEL_PROMPT_VERSION = "opv-photo-travel-plan-v9-thermal-sensitivity"
 PRESENTATIONS = {"FLAT_LAY", "MODEL_FULL_BODY", "SCENE_MODEL", "EDITORIAL_COLLAGE"}
-ROLES = ["look_a", "look_b", "look_c", "look_d"]
-REFERENCE_USES = {"OUTFIT", "ENVIRONMENT", "VISUAL_STYLE"}
+ROLES = list(DEFAULT_TRAVEL_SOURCE_ROLES)  # compatibility alias for travel-only helpers
+REFERENCE_USES = {"OUTFIT", "ENVIRONMENT", "VISUAL_STYLE", "LAYER_PROGRESSION"}
 
 TRAVEL_WEATHER_TEMP_PATTERN = re.compile(r"\d+\s*(?:°\s*C|℃|摄氏度|度)")
 from services.photo_travel_qa import FOOTWEAR_TYPES
@@ -83,7 +88,7 @@ def _normalize_reference_uses(raw: Any) -> list[str]:
 
 def _classified_reference_summary(per_reference: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Build small, purpose-separated summaries without a second model call."""
-    outfit, environment, visual, normalized_items = [], [], [], []
+    outfit, environment, visual, layering, normalized_items = [], [], [], [], []
     for position, raw in enumerate(per_reference, 1):
         item = dict(raw or {})
         index = int(item.get("index") or position)
@@ -121,6 +126,14 @@ def _classified_reference_summary(per_reference: Sequence[Mapping[str, Any]]) ->
                 "lighting": str(item.get("lighting") or ""),
                 "composition": str(item.get("composition") or ""),
             })
+        if "LAYER_PROGRESSION" in uses:
+            layering.append({
+                "index": index,
+                "garment_cues": list(item.get("garment_cues") or []),
+                "outfit_formula": str(item.get("outfit_formula") or ""),
+                "styling_details": str(item.get("styling_details") or ""),
+                "composition": str(item.get("composition") or ""),
+            })
     outfit_palette = list(dict.fromkeys(
         str(value) for item in outfit for value in item.get("palette_cues") or [] if value
     ))
@@ -140,6 +153,9 @@ def _classified_reference_summary(per_reference: Sequence[Mapping[str, Any]]) ->
                                   "items": environment},
         "visual_style_reference": {"indices": [v["index"] for v in visual],
                                    "visual_styles": visual_styles, "items": visual},
+        "layer_progression_reference": {
+            "indices": [v["index"] for v in layering], "items": layering,
+        },
     }
 
 
@@ -469,11 +485,18 @@ class PhotoReferenceVisionService:
         self, *, record_id: str, paths: Sequence[str], theme: Mapping[str, Any],
         category_key: str, content_requirement: str = "", count: int = 1,
         product_context: Mapping[str, Any] = None,
+        planning_flow: str = "", required_roles: Sequence[str] = (),
     ) -> dict[str, Any]:
         images = [str(Path(value).expanduser().resolve()) for value in paths]
         if not images or any(not Path(value).is_file() for value in images):
             raise PhotoReferenceVisionError("参考图缺失或不可读取")
         source_hashes = [hashlib.sha256(Path(value).read_bytes()).hexdigest() for value in images]
+        try:
+            frozen_required_roles = resolve_required_roles(
+                planning_flow=planning_flow, required_roles=required_roles,
+            )
+        except PhotoFlowRegistryError as exc:
+            raise PhotoReferenceVisionError(str(exc)) from exc
         input_contract = {
             "prompt_version": PROMPT_VERSION, "model": self.model,
             "reference_hashes": source_hashes, "theme": dict(theme),
@@ -482,6 +505,13 @@ class PhotoReferenceVisionService:
             "product_context": dict(product_context or {}),
             "routing": self.provider_signature(),
         }
+        # Preserve the frozen hash contract for historical choice tasks.  New
+        # flows explicitly carry both fields and therefore get an isolated cache.
+        if planning_flow or required_roles:
+            input_contract["planning_flow"] = str(
+                planning_flow or "reference_contract_v1"
+            )
+            input_contract["required_roles"] = list(frozen_required_roles)
         input_sha256 = _hash(input_contract)
         folder = self.root / "reference_contracts" / self._safe(record_id)
         folder.mkdir(parents=True, exist_ok=True)
@@ -495,12 +525,16 @@ class PhotoReferenceVisionService:
             theme=theme, category_key=category_key,
             content_requirement=content_requirement, count=count,
             product_context=product_context,
+            required_roles=frozen_required_roles,
         )
         raw, provider_used = self._chat(
             self._model_images(images), prompt, max_tokens=min(9000, 1400 + count * 800),
         )
         raw = parse_vision_envelope(raw)
-        contract = self._normalize_contract(raw, source_hashes, content_requirement, count)
+        contract = self._normalize_contract(
+            raw, source_hashes, content_requirement, count,
+            planning_flow=planning_flow, required_roles=frozen_required_roles,
+        )
         # 穿搭审美自评只记录：模型应在上一次规划内自行把关，
         # 不因自评低分再调一次模型（2026-09-07 用户裁决）。
         contract["vision_provider"] = provider_used
@@ -912,6 +946,172 @@ class PhotoReferenceVisionService:
                     f"原始响应已保留：{json.dumps(raw_retry, ensure_ascii=False)[:1200]}"
                 ) from second_error
 
+    def observe_layering_pages(
+        self, *, image_paths: Sequence[str], roles: Sequence[str],
+        band_key: str, reference_paths: Sequence[str] = (),
+        look_plans: Sequence[Mapping[str, Any]] = (),
+        allowed_item_types: Sequence[str] = (),
+        forbidden_item_types: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        """Return visual facts for one base/mid/outer progression group.
+
+        The model only observes.  Pass/fail remains in photo_layering_qa so an
+        incomplete response can never default to success.
+        """
+        references = [str(Path(value).resolve()) for value in reference_paths]
+        images = [str(Path(value).resolve()) for value in image_paths]
+        if (not images or len(images) != len(roles)
+                or any(not Path(value).is_file() for value in references + images)):
+            raise PhotoReferenceVisionError("温度分层质检缺少完整的角色图片")
+        prompt = self._layering_qa_prompt(
+            roles=roles, band_key=band_key, reference_count=len(references),
+            look_plans=look_plans, allowed_item_types=allowed_item_types,
+            forbidden_item_types=forbidden_item_types,
+        )
+        response, _ = self._chat(
+            self._model_images(references + images), prompt, max_tokens=2600,
+            prefer="fast",
+        )
+        return parse_vision_envelope(response)
+
+    def review_layering_pages(
+        self, *, reference_paths: Sequence[str] = (),
+        look_plans: Sequence[Mapping[str, Any]], image_paths: Sequence[str],
+        layering_contract: Mapping[str, Any],
+        profile_binding: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Observe and deterministically judge one layering source group."""
+        from services.photo_layering_qa import (
+            LayeringSemanticQAError, normalize_layering_qa,
+        )
+        roles = [str(value) for value in layering_contract.get("source_roles") or ()]
+        band_key = str(profile_binding.get("band_key") or "")
+        band = next(
+            (item for item in layering_contract.get("bands") or []
+             if isinstance(item, Mapping) and str(item.get("key") or "") == band_key),
+            {},
+        )
+        raw = self.observe_layering_pages(
+            image_paths=image_paths, roles=roles, band_key=band_key,
+            reference_paths=reference_paths, look_plans=look_plans,
+            allowed_item_types=list(band.get("allowed_item_types") or []),
+            forbidden_item_types=list(band.get("forbidden_item_types") or []),
+        )
+        try:
+            return normalize_layering_qa(
+                raw, look_plans=look_plans, profile_binding=profile_binding,
+                layering_contract=layering_contract,
+            )
+        except LayeringSemanticQAError as first_error:
+            prompt = self._layering_qa_prompt(
+                roles=roles, band_key=band_key,
+                reference_count=len(reference_paths), look_plans=look_plans,
+                allowed_item_types=list(band.get("allowed_item_types") or []),
+                forbidden_item_types=list(band.get("forbidden_item_types") or []),
+            ) + (
+                "\n\n上一次输出结构不完整（" + str(first_error)
+                + "）。重新输出完整 JSON；不得缺字段，不得把布尔值写成字符串。"
+            )
+            all_paths = [str(Path(value).resolve()) for value in reference_paths]
+            all_paths += [str(Path(value).resolve()) for value in image_paths]
+            response, _ = self._chat(
+                self._model_images(all_paths), prompt, max_tokens=2600,
+                prefer="fast",
+            )
+            raw_retry = parse_vision_envelope(response)
+            try:
+                return normalize_layering_qa(
+                    raw_retry, look_plans=look_plans,
+                    profile_binding=profile_binding,
+                    layering_contract=layering_contract,
+                )
+            except LayeringSemanticQAError as second_error:
+                raise PhotoReferenceVisionError(
+                    f"温度分层质检两次结构不完整：{second_error}；"
+                    f"原始响应已保留：{json.dumps(raw_retry, ensure_ascii=False)[:1200]}"
+                ) from second_error
+
+    def observe_thermal_transition_pages(
+        self, *, image_paths: Sequence[str], roles: Sequence[str],
+        transition_key: str, contexts: Sequence[str],
+        reference_paths: Sequence[str] = (),
+        look_plans: Sequence[Mapping[str, Any]] = (),
+        allowed_item_types: Sequence[str] = (),
+        forbidden_item_types: Sequence[str] = (),
+    ) -> Mapping[str, Any]:
+        prompt = self._thermal_transition_qa_prompt(
+            roles=roles, transition_key=transition_key, contexts=contexts,
+            reference_count=len(reference_paths), look_plans=look_plans,
+            allowed_item_types=allowed_item_types,
+            forbidden_item_types=forbidden_item_types,
+        )
+        all_paths = [str(Path(value).resolve()) for value in reference_paths]
+        all_paths += [str(Path(value).resolve()) for value in image_paths]
+        response, _ = self._chat(
+            self._model_images(all_paths), prompt, max_tokens=2600, prefer="fast",
+        )
+        return parse_vision_envelope(response)
+
+    def review_thermal_transition_pages(
+        self, *, reference_paths: Sequence[str] = (),
+        look_plans: Sequence[Mapping[str, Any]], image_paths: Sequence[str],
+        thermal_transition_contract: Mapping[str, Any],
+        profile_binding: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Observe one daily hot→cold source group and judge it deterministically."""
+        from services.photo_layering_qa import LayeringSemanticQAError
+        from services.photo_thermal_transition_qa import (
+            ThermalTransitionQAError, evaluate_thermal_transition_qa,
+        )
+        roles = [
+            str(value) for value in thermal_transition_contract.get("source_roles") or ()
+        ]
+        transition_key = str(profile_binding.get("transition_key") or "")
+        entry = next(
+            (item for item in thermal_transition_contract.get("transitions") or []
+             if isinstance(item, Mapping) and str(item.get("key") or "") == transition_key),
+            {},
+        )
+        contexts = [str(value) for value in entry.get("thermal_contexts") or []]
+        allowed = list(thermal_transition_contract.get("allowed_item_types") or [])
+        forbidden = list(thermal_transition_contract.get("forbidden_item_types") or [])
+        raw = self.observe_thermal_transition_pages(
+            image_paths=image_paths, roles=roles, transition_key=transition_key,
+            contexts=contexts, reference_paths=reference_paths, look_plans=look_plans,
+            allowed_item_types=allowed, forbidden_item_types=forbidden,
+        )
+        try:
+            return evaluate_thermal_transition_qa(
+                raw, look_plans=look_plans, profile_binding=profile_binding,
+                thermal_transition_contract=thermal_transition_contract,
+            )
+        except (ThermalTransitionQAError, LayeringSemanticQAError) as first_error:
+            prompt = self._thermal_transition_qa_prompt(
+                roles=roles, transition_key=transition_key, contexts=contexts,
+                reference_count=len(reference_paths), look_plans=look_plans,
+                allowed_item_types=allowed, forbidden_item_types=forbidden,
+            ) + (
+                "\n\n上一次输出结构不完整（" + str(first_error)
+                + "）。重新输出完整 JSON；不得缺字段，不得把布尔值写成字符串。"
+            )
+            all_paths = [str(Path(value).resolve()) for value in reference_paths]
+            all_paths += [str(Path(value).resolve()) for value in image_paths]
+            response, _ = self._chat(
+                self._model_images(all_paths), prompt, max_tokens=2600, prefer="fast",
+            )
+            raw_retry = parse_vision_envelope(response)
+            try:
+                return evaluate_thermal_transition_qa(
+                    raw_retry, look_plans=look_plans,
+                    profile_binding=profile_binding,
+                    thermal_transition_contract=thermal_transition_contract,
+                )
+            except (ThermalTransitionQAError, LayeringSemanticQAError) as second_error:
+                raise PhotoReferenceVisionError(
+                    f"冷热切换质检两次结构不完整：{second_error}；"
+                    f"原始响应已保留：{json.dumps(raw_retry, ensure_ascii=False)[:1200]}"
+                ) from second_error
+
     MX_WIG_PLAN_PROMPT_VERSION = "opv-photo-mx-wig-plan-v1"
 
     def plan_wig_choice_content(
@@ -1264,6 +1464,19 @@ class PhotoReferenceVisionService:
             "notes": str(raw.get("notes") or ""),
         }
 
+    def review_layering_final_pages(
+        self, *, image_paths: Sequence[str], expected_texts: Sequence[str],
+        role_order: Sequence[str],
+    ) -> dict[str, Any]:
+        """Reuse the proven overlay QA contract for the five layering pages."""
+        if list(role_order) != ["hook", "layer_base", "layer_mid", "layer_outer", "cta"]:
+            raise PhotoReferenceVisionError("温度分层最终页面角色顺序无效")
+        qa = self.review_travel_final_pages(
+            image_paths=image_paths, expected_texts=expected_texts,
+            role_order=role_order,
+        )
+        return {**qa, "schema_version": "opv-photo-layering-final-qa-v1"}
+
     def _normalize_reference_analysis(self, raw, source_hashes):
         if not isinstance(raw, Mapping):
             raise PhotoReferenceVisionError("参考图分析返回结构无效")
@@ -1296,6 +1509,7 @@ class PhotoReferenceVisionService:
             "outfit_reference": classified["outfit_reference"],
             "environment_reference": classified["environment_reference"],
             "visual_style_reference": classified["visual_style_reference"],
+            "layer_progression_reference": classified["layer_progression_reference"],
             "presentation_type": presentation,
             "season": str(aggregate.get("season") or ""),
             "palette": outfit_palette if typed_uses else list(aggregate.get("palette") or []),
@@ -1594,6 +1808,31 @@ class PhotoReferenceVisionService:
                 "地点是旅行内容最大的吸引力点，绝不允许只写泛泛的\u201c旅行穿搭\u201d。\n"
             ).format(tt=topic_theme_type, place=topic.get("place") or "未指定（使用参考图目的地氛围，不猜测具体地名）",
                      focus=topic.get("planning_focus") or "")
+        # 旅行温度增强：只有 TEMPERATURE 主题渲染体感块，其余五个旅行主题的
+        # 提示词与 v8 完全一致（体感指引来自 travel_theme_templates.json）。
+        sensitivity_block = ""
+        if topic_theme_type == "TEMPERATURE":
+            sensitivity_planning = dict(topic.get("thermal_sensitivity_planning") or {})
+            modifiers = {
+                str(key): str(value)
+                for key, value in dict(sensitivity_planning.get("modifiers") or {}).items()
+            }
+            sensitivity = str(
+                topic.get("thermal_sensitivity")
+                or sensitivity_planning.get("default") or ""
+            )
+            modifier = modifiers.get(sensitivity, "")
+            if modifier:
+                constraints = [
+                    str(item) for item in sensitivity_planning.get("constraints") or []
+                    if str(item or "").strip()
+                ]
+                sensitivity_block = (
+                    "\n【体感倾向（仅温度主题消费，作用于整篇文章）】"
+                    f"体感：{sensitivity}；同温度档下的调整方向：{modifier}\n"
+                    + ("体感规则：\n" + "".join(f"- {item}\n" for item in constraints)
+                       if constraints else "")
+                )
         difference_rule = (
             "四套 Look 要提供读者第一眼就能感知的不同搭配选择；区别主要来自整体轮廓、配色关系、"
             "层次或穿法。只更换场景、姿势、面料名称、配饰或相近颜色称呼，不算新的搭配方向。"
@@ -1625,7 +1864,7 @@ class PhotoReferenceVisionService:
 【指定商品】{json.dumps(product, ensure_ascii=False) if product else '无；可自由规划完整穿搭'}
 【运营补充要求】{content_requirement or '无'}
 【旅行场景枚举（travel_moment 只能取以下 key{moment_rule}）】
-{moments_text}{topic_block}
+{moments_text}{topic_block}{sensitivity_block}
 规则：
 1. 每篇 looks 必须是有序 look_a..look_d；{same_moment_rule}
 2. {difference_rule}
@@ -1643,6 +1882,60 @@ class PhotoReferenceVisionService:
 只返回 JSON 对象：
 {topic_schema}
 posts 数量必须等于 {count}。不要输出 Markdown。"""
+
+    @staticmethod
+    def _layering_qa_prompt(*, roles, band_key, reference_count, look_plans=(),
+                            allowed_item_types=(), forbidden_item_types=()):
+        return f"""你是温度分层穿搭的视觉观察员。输入图片中前 {reference_count} 张是参考图，后 {len(roles)} 张依次对应 {list(roles)}。
+只报告画面可见事实，不自行决定通过或失败。温度档：{band_key}。
+冻结计划：{json.dumps(list(look_plans or []), ensure_ascii=False)}
+observed_item_types 允许枚举：{list(allowed_item_types)}
+禁用单品枚举：{list(forbidden_item_types)}
+
+要求：
+1. 三张必须分别观察人物身份、机位/构图、全身完整度和可见上身服装层。
+2. garment_signature 是本组三图内稳定的短 ID；同一件衣服跨页必须使用同一个 ID。
+3. visible_layer_stack 按由内到外排列，只包含视觉上有证据的上身层；裤装、鞋、包、帽、围巾等配件不得算作新增上身层。
+4. collar_compatible 表示本页相邻层领口关系可叠；sleeve_conflict/hem_conflict 只在出现明显冲突时为 true。
+5. layer_evidence 至少写一条具体可见证据；所有布尔字段必须是真正的 true/false。
+6. observed_item_types 必须只使用上面的允许/禁用枚举中最接近的值，不得自造同义词。
+7. temperature_claim_matches 只判断画面是否支持该温度档的参考性穿搭，不得声称保证保暖。
+
+只返回 JSON：
+{{"thermal_index":0,"notes":"","pages":[
+{{"role":"base","observed_band":"{band_key}","visible_layer_count":1,"visible_layer_stack":[{{"garment_signature":"core_base"}}],"observed_item_types":["shirt"],"layer_evidence":["可见一件基础上衣"],"identity_id":"person_1","camera_signature":"camera_1","full_body":true,"collar_compatible":true,"sleeve_conflict":false,"hem_conflict":false,"temperature_claim_matches":true,"person_flags":{{"face_or_limb_deformity":false,"obvious_unnatural_tilt":false}},"repair_instruction":""}}
+]}}
+pages 必须完整覆盖且只覆盖 {list(roles)}，不得输出 Markdown。"""
+
+    @staticmethod
+    def _thermal_transition_qa_prompt(*, roles, transition_key, contexts,
+                                      reference_count, look_plans=(),
+                                      allowed_item_types=(), forbidden_item_types=()):
+        context_list = list(contexts)
+        return f"""你是日常冷热切换穿搭的视觉观察员。输入图片中前 {reference_count} 张是参考图，后 {len(roles)} 张依次对应 {list(roles)}。
+只报告画面可见事实，不自行决定通过或失败。切换场景：{transition_key}。
+体感顺序（必须按此顺序逐页对应）：{context_list}
+冻结计划：{json.dumps(list(look_plans or []), ensure_ascii=False)}
+observed_item_types 允许枚举：{list(allowed_item_types)}
+禁用单品枚举：{list(forbidden_item_types)}
+
+要求：
+1. 三张必须分别观察人物身份、机位/构图、全身完整度和可见上身服装层。
+2. observed_thermal_context 只能使用上面体感顺序里的枚举值，必须与所在页一一对应。
+3. garment_signature 是本组三图内稳定的短 ID；同一件衣服跨页必须使用同一个 ID。
+4. visible_layer_stack 按由内到外排列，只包含视觉上有证据的上身层；裤装、鞋、包、帽、围巾等配件不得算作新增上身层。
+5. observed_base_signature / observed_bottom_signature / observed_shoes_signature 分别是本页基础上衣、下装、鞋的稳定短 ID；三者跨页必须一致才代表同一套基础穿搭。
+6. added_garment_visible：本页是否真的能看见比上一态多出的那一件可穿上身层；base 页也填 true。
+7. collar_compatible 表示本页相邻层领口关系可叠；sleeve_conflict/hem_conflict 只在出现明显冲突时为 true。
+8. layer_evidence 至少写一条具体可见证据；所有布尔字段必须是真正的 true/false。
+9. temperature_claim_matches 只判断画面是否支持该环境下的参考性穿搭，不得声称保证保暖或保证降温。
+10. temperature_claim_text 只填画面上真实出现过的温度文字（没有就留空字符串），不要自己编造温度数字。
+
+只返回 JSON：
+{{"thermal_index":0,"notes":"","pages":[
+{{"role":"base","observed_thermal_context":"{context_list[0] if context_list else ''}","visible_layer_count":1,"visible_layer_stack":[{{"garment_signature":"core_base"}}],"observed_item_types":["breathable_top"],"layer_evidence":["可见一件透气基础上衣"],"identity_id":"person_1","camera_signature":"camera_1","full_body":true,"collar_compatible":true,"sleeve_conflict":false,"hem_conflict":false,"temperature_claim_matches":true,"temperature_claim_text":"","observed_base_signature":"core_base","observed_bottom_signature":"bottom_main","observed_shoes_signature":"shoes_main","added_garment_visible":true,"person_flags":{{"face_or_limb_deformity":false,"obvious_unnatural_tilt":false}},"repair_instruction":""}}
+]}}
+pages 必须完整覆盖且只覆盖 {list(roles)}，不得输出 Markdown。"""
 
     @staticmethod
     def _travel_qa_prompt(*, page_plans, reference_count, image_count,
@@ -1683,7 +1976,10 @@ person_flags 说明（只报告明显情况，轻微偏差一律 false）：face
 - style_uniform：只有四页人物明显换人，或照片风格彻底改变（例如其中一页变成插画）才为 false；室内外、白天傍晚、背景颜色及自然光线差异都应为 true；
 - destination_conflict：只有出现与指定地点明显矛盾的地标，或同组混入两个不可能共存的目的地时才为 true；没有地标、室内场景或普通街道不能判冲突。"""
 
-    def _normalize_contract(self, raw, source_hashes, content_requirement, count):
+    def _normalize_contract(
+        self, raw, source_hashes, content_requirement, count,
+        planning_flow: str = "", required_roles: Sequence[str] = (),
+    ):
         if not isinstance(raw, Mapping):
             raise PhotoReferenceVisionError("参考图视觉分析返回结构无效")
         aggregate = dict(raw.get("aggregate") or {})
@@ -1697,13 +1993,24 @@ person_flags 说明（只报告明显情况，轻微偏差一律 false）：face
         if len(sets) < count:
             raise PhotoReferenceVisionError("视觉模型没有返回足够的内容方案")
         color_plan = _normalize_color_grading_plan(raw.get("color_grading_plan"))
+        try:
+            frozen_required_roles = resolve_required_roles(
+                planning_flow=planning_flow, required_roles=required_roles,
+            )
+        except PhotoFlowRegistryError as exc:
+            raise PhotoReferenceVisionError(str(exc)) from exc
         normalized_sets = []
         valid_reference_indices = set(range(1, len(source_hashes) + 1))
         for index, item in enumerate(sets[:count], 1):
             value = dict(item or {})
             looks = list(value.get("looks") or [])
-            if [look.get("role") for look in looks] != ROLES:
-                raise PhotoReferenceVisionError(f"第 {index} 篇视觉方案缺少有序 A/B/C/D")
+            try:
+                validate_ordered_roles(
+                    looks, planning_flow=planning_flow,
+                    required_roles=frozen_required_roles,
+                )
+            except PhotoFlowRegistryError as exc:
+                raise PhotoReferenceVisionError(f"第 {index} 篇视觉方案{exc}") from exc
             for look in looks:
                 if any(not str(look.get(key) or "").strip() for key in (
                     "display_label", "outerwear", "top_inner", "bottom", "shoes"
@@ -1742,10 +2049,13 @@ person_flags 说明（只报告明显情况，轻微偏差一律 false）：face
             "analysis_method": "doubao_seed_2_1",
             "prompt_version": PROMPT_VERSION, "model": self.model,
             "source_hashes": list(source_hashes), "content_requirement": content_requirement,
+            "planning_flow": str(planning_flow or "reference_contract_v1"),
+            "required_roles": list(frozen_required_roles),
             "per_reference": classified["per_reference"], "aggregate": aggregate,
             "outfit_reference": classified["outfit_reference"],
             "environment_reference": classified["environment_reference"],
             "visual_style_reference": classified["visual_style_reference"],
+            "layer_progression_reference": classified["layer_progression_reference"],
             "recommended_sets": normalized_sets,
             "color_grading_plan": color_plan,
             # Compatibility fields consumed by the current planner/generator.
@@ -1769,34 +2079,76 @@ person_flags 说明（只报告明显情况，轻微偏差一律 false）：face
 
     @staticmethod
     def _analysis_prompt(*, theme, category_key, content_requirement, count,
-                         product_context=None):
+                         product_context=None, required_roles=()):
+        roles = tuple(required_roles or DEFAULT_TRAVEL_SOURCE_ROLES)
+        role_sequence = "/".join(roles)
+        role_examples = []
+        for role in roles:
+            role_examples.append({
+                "role": role,
+                "display_label": "简短自然泰语标签",
+                "outfit_reference_indices": [1],
+                "styling_intent": "保留参考搭配的比例、层次和穿法，允许更换具体款式",
+                "outerwear": "中文具体描述",
+                "top_inner": "中文具体描述",
+                "bottom": "中文具体描述",
+                "shoes": "中文具体描述",
+                "outerwear_type": "",
+                "bottom_type": "",
+                "palette_hex": ["#C9B99A", "#F5F1E8"],
+                "outfit_aesthetic": {
+                    "harmony": 0, "layering": 0, "color_balance": 0,
+                    "proportion": 0, "issues": [], "revise_zh": "",
+                },
+            })
+        output_example = {
+            "per_reference": [{
+                "index": 1, "reference_uses": ["OUTFIT", "VISUAL_STYLE"],
+                "use_source": "auto", "presentation": "SCENE_MODEL",
+                "visual_styles": [], "scenes": [], "garment_cues": [],
+                "palette_cues": [], "material_cues": [], "background_cues": [],
+                "outfit_formula": "", "palette_relation": "",
+                "styling_details": "", "lighting": "", "composition": "",
+                "layout_cues": [], "notes_zh": "",
+            }],
+            "aggregate": {
+                "primary_presentation": "SCENE_MODEL", "secondary_presentations": [],
+                "visual_styles": [], "season": "autumn", "palette": [],
+                "temperature": "warm", "materials": [], "scenes": [],
+                "garment_cues": [], "accent_cues": [], "lighting": "",
+                "background": "", "composition": "", "layout_inspiration": [],
+                "avoid_tags": [], "confidence": 0.0,
+            },
+            "color_grading_plan": {
+                "temperature": "warm_4800k", "saturation": "medium_soft",
+                "contrast": "gentle",
+                "skin_tone_anchor": "冷白透亮带自然血色，以人物参考图为唯一标准",
+                "tone_note_zh": "全组统一暖调自然光，低对比轻饱和",
+            },
+            "recommended_sets": [{
+                "content_angle_zh": "", "scene_zh": "", "palette_zh": "",
+                "background_prompt": "", "style_modifier": "",
+                "looks": role_examples,
+                "copy": {"title": "泰语标题", "cover": "两行以内泰语封面文案",
+                         "caption": "自然泰语短文案", "cta": "泰语互动句"},
+            }],
+        }
         return f"""你是图文穿搭内容的视觉分析与内容规划器。按输入顺序逐张理解参考图，不要使用肤色比例等像素规则猜测。
 业务类目：{category_key}
 固定主题：{theme.get('label_zh') or theme.get('theme_key')}
 运营补充要求：{content_requirement or '无'}
 指定商品：{json.dumps(dict(product_context or {}), ensure_ascii=False) if product_context else '无'}
-需要规划：{count} 篇，每篇 A/B/C/D 四套不同完整穿搭。
-如有指定商品，四套必须保留该商品，只借鉴参考图的其他搭配关系；参考图中的同类单品不能替换指定商品。
+需要规划：{count} 篇，每篇按 {role_sequence} 的顺序输出完整穿搭。
+如有指定商品，每个角色必须保留该商品，只借鉴参考图的其他搭配关系；参考图中的同类单品不能替换指定商品。
 
 必须区分：FLAT_LAY=无人物服装平铺；MODEL_FULL_BODY=真人纯色/简单背景；SCENE_MODEL=真人生活场景；EDITORIAL_COLLAGE=信息卡或拼贴。若参考图既有真人又有信息卡，为四选一单页选择最适合展示完整穿搭的 primary_presentation，信息卡仅作为 layout_inspiration。
-每张图的 reference_uses 可多选 OUTFIT/ENVIRONMENT/VISUAL_STYLE。运营补充要求明确指定逐图用途时 use_source=operator，否则自动判断。OUTFIT 只提取服装审美、完整搭配比例/层次/配色关系/穿法；ENVIRONMENT 只提取场所与景观；VISUAL_STYLE 只提取光线、色调、构图与摄影氛围。环境图服装不得进入搭配依据，穿搭图背景不得进入环境依据。
+每张图的 reference_uses 可多选 OUTFIT/ENVIRONMENT/VISUAL_STYLE/LAYER_PROGRESSION。运营补充要求明确指定逐图用途时 use_source=operator，否则自动判断。OUTFIT 只提取服装审美、完整搭配比例/层次/配色关系/穿法；ENVIRONMENT 只提取场所与景观；VISUAL_STYLE 只提取光线、色调、构图与摄影氛围；LAYER_PROGRESSION 只提取层数、累计层栈、人物机位一致性和逐层轮廓变化。环境图服装不得进入搭配依据，穿搭图背景不得进入环境依据。
 提取可迁移的风格、场景、构图、服装语言、配色和点缀；禁止复刻人物身份、Logo、水印、来源文字和具体品牌。运营补充要求优先于参考图的非硬事实。
 穿搭审美规则：每套（外套/内搭/下装/鞋履）必须是整体协调、有审美水准的成套日常穿搭——主色不超过三种且上下有颜色呼应；鞋型与裤型平衡，避免笨重厚底鞋配阔腿裤的沉重组合；外套与内搭层次清楚；整体显高显瘦、气质干净高级，像会认真搭配的时尚博主，不要随机单品堆叠。规划后按 rubric 自评每一套：harmony（单品协调）、layering（层次）、color_balance（配色平衡）、proportion（显高显瘦比例），0-100 整数，低于 85 必须自行重配并在 revise_zh 说明改法。
-全局调色计划：为整组内容制定统一 color_grading_plan（temperature 色温基准 / saturation 饱和度倾向 / contrast 对比度倾向 / skin_tone_anchor 肤色基准说明 / tone_note_zh 一句中文调色说明）；四篇与每篇四张必须共用同一份计划，画面之间不允许色调漂移。
+全局调色计划：为整组内容制定统一 color_grading_plan（temperature 色温基准 / saturation 饱和度倾向 / contrast 对比度倾向 / skin_tone_anchor 肤色基准说明 / tone_note_zh 一句中文调色说明）；所有篇与每篇所有角色必须共用同一份计划，画面之间不允许色调漂移。
 
 只返回 JSON 对象：
-{{
-  "per_reference":[{{"index":1,"reference_uses":["OUTFIT","VISUAL_STYLE"],"use_source":"auto","presentation":"SCENE_MODEL","visual_styles":[],"scenes":[],"garment_cues":[],"palette_cues":[],"material_cues":[],"background_cues":[],"outfit_formula":"","palette_relation":"","styling_details":"","lighting":"","composition":"","layout_cues":[],"notes_zh":""}}],
-  "aggregate":{{"primary_presentation":"SCENE_MODEL","secondary_presentations":[],"visual_styles":[],"season":"autumn","palette":[],"temperature":"warm","materials":[],"scenes":[],"garment_cues":[],"accent_cues":[],"lighting":"","background":"","composition":"","layout_inspiration":[],"avoid_tags":[],"confidence":0.0}},
-  "color_grading_plan":{{"temperature":"warm_4800k","saturation":"medium_soft","contrast":"gentle","skin_tone_anchor":"冷白透亮带自然血色，以人物参考图为唯一标准","tone_note_zh":"全组统一暖调自然光，低对比轻饱和"}},
-  "recommended_sets":[{{"content_angle_zh":"","scene_zh":"","palette_zh":"","background_prompt":"","style_modifier":"","looks":[
-    {{"role":"look_a","display_label":"简短自然泰语标签","outfit_reference_indices":[1],"styling_intent":"保留参考搭配的比例、层次和穿法，允许更换具体款式","outerwear":"中文具体描述","top_inner":"中文具体描述","bottom":"中文具体描述","shoes":"中文具体描述","outerwear_type":"","bottom_type":"","palette_hex":["#C9B99A","#F5F1E8"],"outfit_aesthetic":{{"harmony":0,"layering":0,"color_balance":0,"proportion":0,"issues":[],"revise_zh":""}}}},
-    {{"role":"look_b","display_label":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":"","palette_hex":[],"outfit_aesthetic":{{"harmony":0,"layering":0,"color_balance":0,"proportion":0,"issues":[],"revise_zh":""}}}},
-    {{"role":"look_c","display_label":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":"","palette_hex":[],"outfit_aesthetic":{{"harmony":0,"layering":0,"color_balance":0,"proportion":0,"issues":[],"revise_zh":""}}}},
-    {{"role":"look_d","display_label":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":"","palette_hex":[],"outfit_aesthetic":{{"harmony":0,"layering":0,"color_balance":0,"proportion":0,"issues":[],"revise_zh":""}}}}],
-    "copy":{{"title":"泰语标题","cover":"两行以内泰语封面文案","caption":"自然泰语短文案","cta":"泰语互动句"}}
-  }}]
-}}
+{json.dumps(output_example, ensure_ascii=False)}
 recommended_sets 数量必须等于 {count}；不同篇要有明显内容角度和服装差异。palette_hex 每套 2-4 个该套主色（#RRGGBB）。不要输出 Markdown。"""
 
     @staticmethod

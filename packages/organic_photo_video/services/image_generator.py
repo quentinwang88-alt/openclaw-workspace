@@ -356,6 +356,9 @@ def compose_shot_prompt(request: ShotGenerationRequest) -> str:
     flat_lay = presentation_type == "FLAT_LAY"
     pure_color = str(presentation.get("background_mode") or "") == "solid_color"
     style_reference = str(recipe_execution.get("reference_mode") or "").upper() == "STYLE"
+    layering_reference = (
+        recipe_execution.get("transform_mode") == "layering_reference_reduction"
+    )
     background_color = str(presentation.get("background_color") or "#F6F5F2")
 
     product_label = {
@@ -382,13 +385,21 @@ def compose_shot_prompt(request: ShotGenerationRequest) -> str:
         visual_style_reference = dict(reference_profile.get("visual_style_reference") or {})
         lines.extend([
             "【风格参考合同】",
-            "每张参考图只按已标注用途工作：穿搭图提供版型比例、层次、配色关系和穿法；环境图提供场所与背景；画面风格图提供光线、色调和构图。",
+            (
+                "层结构参考图只用于锁定层数、层间可叠关系和逐层轮廓变化；穿搭图提供版型比例、配色关系和穿法；环境图提供场所与背景；画面风格图提供光线、色调和构图。"
+                if layering_reference else
+                "每张参考图只按已标注用途工作：穿搭图提供版型比例、层次、配色关系和穿法；环境图提供场所与背景；画面风格图提供光线、色调和构图。"
+            ),
             "穿搭参考允许借鉴完整搭配关系但不要求同款；不得复制人物身份、品牌 Logo、文字或截图界面。环境图中的服装不得控制穿搭，穿搭图的背景不得控制场景。",
             f"本篇主题：{theme.get('label_zh') or '穿搭灵感'}；{theme.get('visual_brief') or ''}",
             f"环境参考：{json.dumps(environment_reference, ensure_ascii=False)}",
             f"穿搭参考：{json.dumps(outfit_reference, ensure_ascii=False)}",
             f"画面风格参考：{json.dumps(visual_style_reference, ensure_ascii=False)}",
-            "当前页执行冻结穿搭；四页保持可比较的区别，不为凑差异拆散协调搭配。",
+            (
+                "当前页执行冻结层态；全组是同一套穿搭的减层序列，不得当成互不相关的多套造型。"
+                if layering_reference else
+                "当前页执行冻结穿搭；四页保持可比较的区别，不为凑差异拆散协调搭配。"
+            ),
             "",
             "【平铺展示合同】" if flat_lay else "【人物身份锁】",
         ])
@@ -512,7 +523,19 @@ def compose_shot_prompt(request: ShotGenerationRequest) -> str:
     # prompt_core and target_outer may contain legacy target-garment colors.
     # Structured companion items above are safe; the target garment always
     # comes from the selected product reference pack.
-    if style_reference:
+    if layering_reference:
+        expected_stack = list(look_recipe.get("expected_layer_stack") or [])
+        lines.append(
+            "严格执行本页冻结层态。生成顺序为 outer→mid→base：以更厚的上一态为视觉锚，"
+            "只减去当前计划不再包含的最外层；人物身份、脸、发型、体型、站姿、机位、景别、"
+            "背景、光线、基础层、下装和鞋履必须保持不变。"
+        )
+        if expected_stack:
+            lines.append("本页由内到外必须可见的上身层栈：" + " → ".join(
+                str(item.get("garment_id") if isinstance(item, dict) else item)
+                for item in expected_stack
+            ))
+    elif style_reference:
         lines.append(
             "严格执行本页冻结穿搭；借鉴选中穿搭参考的比例、层次、配色关系和穿法，"
             "不要求同款。" + ("指定商品必须保持不变。" if product else "")
@@ -589,7 +612,12 @@ def compose_shot_prompt(request: ShotGenerationRequest) -> str:
         elif composition.get("prop_policy") == "no_new_props":
             lines.append("本张不得新增任何道具。")
     if request.continuity_reference_images:
-        if style_reference:
+        if layering_reference:
+            lines.append(
+                "连续性输入中的上一层态是人物、站姿、机位、景别、背景、光线和未移除服装的唯一锚点；"
+                "必须像固定相机连续拍摄，只移除冻结计划指定的最外层，禁止换裤子、换鞋、换基础层、换人或换机位。"
+            )
+        elif style_reference:
             lines.append(
                 "连续性输入用于保持参考图的平铺构图、背景质感、色温和光线；不得出现人物，"
                 "也不得复制参考图的品牌或具体单品。"
@@ -604,7 +632,9 @@ def compose_shot_prompt(request: ShotGenerationRequest) -> str:
             )
         else:
             lines.append("连续性参考图用于锁定人物、商品、穿搭和光线。")
-        if recipe_execution.get("content_goal") == "multi_look" and not flat_lay:
+        if layering_reference:
+            pass
+        elif recipe_execution.get("content_goal") == "multi_look" and not flat_lay:
             lines.append("本系列的新鲜感来自当前页不同的穿搭，不靠夸张换机位；保持接近的全身占比、背景与腰位平视，只小幅自然换姿。")
         else:
             lines.append(
@@ -635,7 +665,9 @@ def compose_shot_prompt(request: ShotGenerationRequest) -> str:
             "【通用负向要求】",
             "不要文字、字幕、水印、Logo 杜撰；不要尺寸标注；不要多余人物或多余肢体；不要畸形手指。",
             (
-                "保持跨图一致：同一平铺构图、背景质感、色温和光线；每页严格执行不同的冻结穿搭。"
+                "保持跨图一致：同一人物、同一站姿、同一机位、同一景别、同一背景与光线；仅按 outer→mid→base 减去最外层，剩余衣物、下装和鞋履不得变化。"
+                if layering_reference
+                else "保持跨图一致：同一平铺构图、背景质感、色温和光线；每页严格执行不同的冻结穿搭。"
                 if style_reference and flat_lay
                 else "保持跨图一致：同一人物、同一类场景语义与光线；每页严格执行不同的冻结穿搭。"
                 if style_reference

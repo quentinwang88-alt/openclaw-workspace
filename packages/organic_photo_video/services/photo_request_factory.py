@@ -10,7 +10,7 @@ from typing import Any, Mapping, Sequence
 from domain.models import ContentRecipe, AssetSet
 from domain.photo_contracts import validate_copy, validate_execution_profiles, validate_variables
 from services.asset_set_service import AssetSetService, AssetSetError, validate_asset_set
-from services.photo_copy import resolve_photo_copy
+from services.photo_copy import contract_copy_tokens, resolve_photo_copy
 from services.photo_content import freeze_content_card
 from services.photo_wig_flow import recipe_is_mx_wig_choice, request_is_mx_wig_choice
 
@@ -227,19 +227,10 @@ class PhotoRequestFactory:
                         continue
                     for variant in profile["copy_variants"]:
                         copy_block = {**copy.deepcopy(variant["copy"]), **dict(override.get("copy") or {})}
-                        travel_contract = recipe_spec.get("travel_contract") or {}
-                        extra_tokens = {}
-                        if travel_contract:
-                            destination = str((travel_contract.get("destination_labels_th") or {}).get(
-                                str(variables.get("destination") or ""), ""))
-                            temperature = str((travel_contract.get("temperature_labels_th") or {}).get(
-                                str(variables.get("temperature_band") or ""), ""))
-                            serialized = json.dumps(copy_block, ensure_ascii=False)
-                            if "{destination}" in serialized and not destination:
-                                raise PhotoRequestError("旅行文案缺少目的地泰语标签，无法冻结")
-                            if "{temperature}" in serialized and not temperature:
-                                raise PhotoRequestError("旅行文案缺少温度泰语标签，无法冻结")
-                            extra_tokens = {"destination": destination, "temperature": temperature}
+                        try:
+                            extra_tokens = contract_copy_tokens(recipe_spec, variables)
+                        except ValueError as exc:
+                            raise PhotoRequestError(str(exc)) from exc
                         try:
                             copy_block = resolve_photo_copy(copy_block, assets=candidate.manifest_json["assets"], locale=spec.language, extra_tokens=extra_tokens)
                         except ValueError as exc:

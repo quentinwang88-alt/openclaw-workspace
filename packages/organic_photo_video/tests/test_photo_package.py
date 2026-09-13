@@ -20,6 +20,7 @@ from services.photo_package import (
     NativePhotoProductionFlow, PhotoPackageExporter, PhotoPackageError, _draw_overlay,
     normalize_photo_template,
 )
+from services.photo_copy_review import frozen_copy_review_sha256
 from services.release_gate import (
     ReleaseGateError, contract_hash, freeze_photo_release, validate_photo_upload,
 )
@@ -260,6 +261,53 @@ class PhotoPackageTest(unittest.TestCase):
             validate_photo_upload(
                 context, media_paths=paths, script_id="photo-task", title="เลือกหนึ่งลุค"
             )
+
+    def test_recipe_can_require_native_approved_copy_before_release(self):
+        self.repo.task.recipe_id = "PHOTO_TH_THERMAL_TRANSITION_V1"
+        self.repo.get_content_recipe = lambda recipe_id: SimpleNamespace(
+            recipe_id=recipe_id,
+            recipe_spec_json={
+                "release_requirements": {
+                    "required_language_review_status": "NATIVE_APPROVED",
+                }
+            },
+        )
+        PhotoPackageExporter(
+            self.repo, output_root=self.root / "outputs-language-gate"
+        ).export("photo-task", template=self.template, slide_specs=self.specs)
+        with self.assertRaisesRegex(ReleaseGateError, "LANGUAGE_REVIEW_REQUIRED"):
+            PhotoPackageReviewService(self.repo).record(
+                "photo-task", decision="passed", dimensions={
+                    "operator_preview": True,
+                    "content_alignment": True,
+                    "language_confirmed": True,
+                }, reviewer_type="human", reviewer="alice",
+            )
+        self.repo.package.photo_manifest_json["copy"]["language_review_status"] = "NATIVE_APPROVED"
+        with self.assertRaisesRegex(ReleaseGateError, "缺少审校人"):
+            PhotoPackageReviewService(self.repo).record(
+                "photo-task", decision="passed", dimensions={
+                    "operator_preview": True,
+                    "content_alignment": True,
+                    "language_confirmed": True,
+                }, reviewer_type="human", reviewer="alice",
+            )
+        self.repo.package.photo_manifest_json["copy"]["language_review"] = {
+            "reviewed_by": "native-reviewer",
+            "reviewed_at": "2026-09-12T12:00:00+00:00",
+            "review_sha256": frozen_copy_review_sha256(
+                self.repo.package.photo_manifest_json["copy"]
+            ),
+        }
+        PhotoPackageReviewService(self.repo).record(
+            "photo-task", decision="passed", dimensions={
+                "operator_preview": True,
+                "content_alignment": True,
+                "language_confirmed": True,
+            }, reviewer_type="human", reviewer="alice",
+        )
+        release = freeze_photo_release(self.repo, self.repo.task)
+        self.assertEqual(release["copy"]["language_review_status"], "NATIVE_APPROVED")
 
     def test_content_rejection_blocks_later_pass_waiver_and_release(self):
         PhotoPackageExporter(self.repo, output_root=self.root / "outputs").export(

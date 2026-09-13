@@ -19,6 +19,13 @@ class PhotoAssetSupplyError(ValueError):
     pass
 
 
+# ``use_cases`` values whose flows freeze one base outfit across ordered
+# states.  One set of source photos can only honestly represent one of them.
+LAYERED_PROGRESSION_USE_CASE = frozenset({
+    "temperature_dressing", "thermal_transition",
+})
+
+
 def _register_heif_support() -> None:
     """Best-effort HEIC/HEIF decode registration (iPhone uploads)."""
     try:
@@ -78,11 +85,12 @@ class PhotoAssetSupplyService:
         return f"需要 {len(roles)} 张完整穿搭图（{', '.join(roles)}）{relation_text}"
 
     def stage(self, *, record_id: str, attachments: Sequence[Mapping[str, Any]],
-              required_roles: Sequence[str]) -> dict[str, Any]:
+              required_roles: Sequence[str], metadata: Mapping[str, Any] = None,
+              verified_attributes: Mapping[str, Mapping[str, Any]] = None) -> dict[str, Any]:
         if len(attachments) != len(required_roles):
             raise PhotoAssetSupplyError(
                 f"上传了 {len(attachments)} 张，当前主题需要 {len(required_roles)} 张完整穿搭图；"
-                "请按 A、B、C、D 顺序上传"
+                "请按当前主题要求的角色顺序上传"
             )
         folder = self.root / "staging" / self._safe(record_id)
         folder.mkdir(parents=True, exist_ok=True)
@@ -101,14 +109,20 @@ class PhotoAssetSupplyService:
             dimensions = read_image_dimensions(str(path))
             if dimensions is None:
                 raise PhotoAssetSupplyError(f"第 {index} 张图片无法解码")
+            role_attributes = dict((verified_attributes or {}).get(str(role)) or {})
             files.append({
                 "role": str(role), "path": str(path.resolve()), "sha256": digest,
                 "width": dimensions[0], "height": dimensions[1],
                 "source_file_token": str(attachment["file_token"]),
+                **({"verified_attributes": role_attributes} if role_attributes else {}),
             })
+        hashes = [str(item["sha256"]) for item in files]
+        if len(set(hashes)) != len(hashes):
+            raise PhotoAssetSupplyError("完整穿搭角色图不能使用内容完全相同的图片")
         manifest = {
             "schema_version": "opv-photo-asset-staging-v1",
             "record_id": record_id, "status": "pending_content_review", "files": files,
+            "metadata": dict(metadata or {}),
         }
         manifest_path = folder / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -208,7 +222,10 @@ class PhotoAssetSupplyService:
 
     def qualify(self, *, record_id: str, recipe: Any, repository: Any,
                 reviewer: str = "feishu_human_operator", reviewer_type: str = "human",
-                source: str = "feishu_human_confirmed_upload") -> AssetSet:
+                source: str = "feishu_human_confirmed_upload",
+                profile_binding: Mapping[str, Any] = None,
+                approval_attributes: Mapping[str, Mapping[str, Any]] = None,
+                approval_evidence: Mapping[str, Any] = None) -> AssetSet:
         """Promote the exact staged bytes after the operator confirms the theme."""
         staged = self.load_staged(record_id)
         existing = None
@@ -217,25 +234,40 @@ class PhotoAssetSupplyService:
             if existing is not None:
                 return existing
         spec = dict(getattr(recipe, "recipe_spec_json", {}) or {})
-        profile = (spec.get("execution_profiles") or [None])[0]
+        binding = dict(profile_binding or {})
+        profiles = list(spec.get("execution_profiles") or [])
+        requested_profile_id = str(binding.get("profile_id") or "")
+        profile = next(
+            (item for item in profiles
+             if not requested_profile_id or str(item.get("profile_id") or "") == requested_profile_id),
+            None,
+        )
         if not isinstance(profile, Mapping):
-            raise PhotoAssetSupplyError("Recipe 缺少可执行方案")
-        key = str((profile.get("asset_set_keys") or [""])[0])
+            raise PhotoAssetSupplyError(
+                "Recipe 缺少可执行方案" if not requested_profile_id
+                else f"Recipe 不包含 profile {requested_profile_id}"
+            )
+        key = str(binding.get("asset_set_key") or (profile.get("asset_set_keys") or [""])[0])
+        if not key:
+            raise PhotoAssetSupplyError("Recipe/profile binding 缺少 asset_set_key")
         market = str((spec.get("markets") or [""])[0])
         category = str(spec.get("category_key") or "")
         current = repository.list_asset_sets(category_key=category, market=market, status="enabled")
         version = max((item.asset_set_version for item in current if item.asset_set_key == key), default=0) + 1
         assets = []
-        approval_attributes = {}
+        frozen_approval_attributes = {}
         source_hashes = {}
         for index, item in enumerate(staged["files"]):
             role = str(item["role"])
             letter = chr(65 + index)
             asset_id = f"{self._safe(record_id)}_{role}_{item['sha256'][:10]}"
             source_hashes[asset_id] = item["sha256"]
-            approval_attributes[asset_id] = {
+            verified = dict(item.get("verified_attributes") or {})
+            verified.update(dict((approval_attributes or {}).get(role) or {}))
+            frozen_approval_attributes[asset_id] = {
                 "outerwear_id": f"human_confirmed_{asset_id}_outerwear",
                 "bottom_id": f"human_confirmed_{asset_id}_bottom",
+                **verified,
             }
             assets.append({
                 "asset_id": asset_id, "role": role, "path": item["path"],
@@ -265,16 +297,33 @@ class PhotoAssetSupplyService:
                         (record_id + ":" + ":".join(sorted(relation_roles))).encode()
                     ).hexdigest()[:12]
                     for member in members:
-                        approval_attributes[member["asset_id"]]["outerwear_id"] = shared
+                        frozen_approval_attributes[member["asset_id"]]["outerwear_id"] = shared
         required_tags = dict((spec.get("asset_requirements") or {}).get("required_tags") or {})
-        match_tags = {
-            key_name: profile.get("variables", {}).get(key_name)
-            for key_name in spec.get("asset_match_keys") or []
-            if key_name in profile.get("variables", {})
+        frozen_variables = {
+            **dict(profile.get("variables") or {}),
+            **dict(binding.get("variables") or {}),
         }
-        identity = hashlib.sha256(
-            ":".join(item["sha256"] for item in staged["files"]).encode()
-        ).hexdigest()[:16]
+        # Flow bindings may expose the variables directly for callers that do
+        # not need to wrap them in a second ``variables`` object.
+        for key_name in spec.get("asset_match_keys") or []:
+            if key_name in binding:
+                frozen_variables[key_name] = binding[key_name]
+        match_tags = {
+            key_name: frozen_variables.get(key_name)
+            for key_name in spec.get("asset_match_keys") or []
+            if key_name in frozen_variables
+        }
+        if binding:
+            identity_bytes = json.dumps({
+                "source_hashes": [item["sha256"] for item in staged["files"]],
+                "profile_binding": binding,
+            }, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        else:
+            # Preserve historical ids for legacy complete-look retries.
+            identity_bytes = ":".join(
+                item["sha256"] for item in staged["files"]
+            ).encode()
+        identity = hashlib.sha256(identity_bytes).hexdigest()[:16]
         asset_set_id = f"ASSET_{market}_{category.upper()}_UPLOAD_{identity}"
         # Content-addressed idempotency: retries of the same record regenerate
         # the staging manifest as pending, but identical content must reuse the
@@ -287,6 +336,34 @@ class PhotoAssetSupplyService:
             path = Path(staged["files"][0]["path"]).parent / "manifest.json"
             path.write_text(json.dumps(staged, ensure_ascii=False, indent=2), encoding="utf-8")
             return existing
+        if LAYERED_PROGRESSION_USE_CASE & set(required_tags.get("use_cases") or []):
+            # Every layered line (temperature layering and the daily hot→cold
+            # transition) freezes base/bottom/shoes across its states, so one
+            # set of source photos can never honestly represent two families.
+            incoming_hashes = set(source_hashes.values())
+            for candidate in current:
+                candidate_use_cases = set(
+                    (candidate.tags_json or {}).get("use_cases") or []
+                )
+                if not (LAYERED_PROGRESSION_USE_CASE & candidate_use_cases):
+                    continue
+                old_hashes = set(
+                    ((candidate.manifest_json or {}).get("content_approval") or {})
+                    .get("source_hashes", {}).values()
+                )
+                if incoming_hashes & old_hashes:
+                    raise PhotoAssetSupplyError(
+                        "分层图文不同资产集不得复用相同源图；请为当前组合提供独立实拍"
+                    )
+        by_asset_role = {str(item["role"]): str(item["asset_id"]) for item in assets}
+        frozen_pairs = []
+        for required_pair in (spec.get("asset_requirements") or {}).get("required_pairs") or []:
+            pair_roles = [str(value) for value in required_pair.get("roles") or []]
+            if pair_roles and all(role in by_asset_role for role in pair_roles):
+                frozen_pairs.append({
+                    "relation": str(required_pair.get("relation") or ""),
+                    "asset_ids": [by_asset_role[role] for role in pair_roles],
+                })
         asset_set = AssetSet(
             asset_set_id=asset_set_id,
             asset_set_key=key, asset_set_version=version,
@@ -294,13 +371,15 @@ class PhotoAssetSupplyService:
             tags_json={**required_tags, **match_tags, "source": source,
                        "theme_key": str((staged.get("metadata") or {}).get("theme_key") or "")},
             manifest_json={
-                "assets": assets, "pairs": [],
+                "assets": assets, "pairs": frozen_pairs,
                 "content_approval": {
                     "schema_version": "opv-source-qualification-v1",
                     "reviewer": reviewer, "reviewer_type": reviewer_type,
                     "allowed_logic_keys": [str((spec.get("content_card") or {}).get("logic_key") or "")],
-                    "source_hashes": source_hashes, "attributes": approval_attributes,
+                    "source_hashes": source_hashes, "attributes": frozen_approval_attributes,
+                    **({"evidence": dict(approval_evidence)} if approval_evidence else {}),
                 },
+                "profile_binding": binding,
             },
         )
         saved = AssetSetService(repository).save(asset_set)

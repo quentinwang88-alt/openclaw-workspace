@@ -270,6 +270,14 @@ def load_photo_copy_pack(
                 row.get("language_review_status") or "production_copy_pack"
             ).strip(),
         }
+        if copy_block["language_review_status"] == "NATIVE_APPROVED":
+            from services.photo_copy_review import (
+                PhotoCopyReviewError, validate_native_approval,
+            )
+            try:
+                copy_block["language_review"] = validate_native_approval(row)
+            except PhotoCopyReviewError as exc:
+                raise ConfigLoadError(f"{pack_path.name}:{line_no}: {exc}") from exc
         from domain.photo_contracts import validate_copy
         copy_errors = validate_copy(copy_block, allow_placeholders=True)
         if copy_errors:

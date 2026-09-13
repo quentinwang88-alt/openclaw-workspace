@@ -63,10 +63,30 @@ FIELD_REFERENCE_TYPE = "参考图类型"
 FIELD_CONTENT_THEME = "图文主题"
 FIELD_CONTENT_REQUIREMENT = "内容要求（可选）"
 FIELD_TRAVEL_PLACE = "旅行地点（可选）"
+FIELD_TEMPERATURE_BAND = "温度档"
+FIELD_THERMAL_SENSITIVITY = "体感倾向"
+FIELD_TEMPERATURE_SCENE = "温度穿搭场景"
+FIELD_TRANSITION_SCENE = "冷热切换场景"
+FIELD_TRANSITION_SENSITIVITY = "体感"
+FIELD_DRESS_CODE = "着装要求"
+FIELD_LAYER_BASE_REFERENCE = "基础层图"
+FIELD_LAYER_MID_REFERENCE = "中间层图"
+FIELD_LAYER_OUTER_REFERENCE = "外层图"
 FIELD_FAILURE_REASON = "图文生成失败的原因"
 FIELD_RETAKE_LOOK = "重拍 Look（可选）"
 FIELD_MUSIC_MODE = "配乐方式"
 FIELD_PHOTO_ASSET_STATUS = "素材状态"
+
+TEMPERATURE_BAND_OPTIONS = ("15°C 左右", "10°C 左右", "5°C 左右", "0°C 左右")
+THERMAL_SENSITIVITY_OPTIONS = ("怕冷", "正常体感", "怕热")
+TEMPERATURE_SCENE_OPTIONS = ("通勤", "室内", "户外")
+# Daily hot→cold transition line.  These tuples are the single source of truth
+# for both the shipped Bitable schema and ``resolve_thermal_transition_variables``
+# — the accepted operator values must never drift from the column options.
+TRANSITION_SCENE_OPTIONS = (
+    "室外热→BTS→办公室空调", "室外热→商场→影院", "校园室外→教室",
+)
+DRESS_CODE_OPTIONS = ("办公室", "校园", "周末")
 
 PROGRESS_PENDING = "待执行"
 PROGRESS_RUNNING = "生成中"
@@ -80,9 +100,18 @@ PROGRESS_DONE = "已完成"
 PROGRESS_ACTION = "需处理"
 PROGRESS_QUEUED = "待排班"
 PROGRESS_SCHEDULED = "已排期"
+PROGRESS_SUBMITTING = "提交中"
 PROGRESS_PUBLISHING = "发布中"
 PROGRESS_PUBLISHED = "已发布"
 PROGRESS_PUBLISH_FAILED = "发布失败"
+
+# 主发布队列表示「已占用、不可覆盖」的状态。投影与返工守卫必须共用此集合：
+# 遗漏任一状态都会把在途任务误判成「未排班」（曾把「提交中」显示成「待排班」）。
+MAIN_QUEUE_SUBMITTING_STATUSES = {PROGRESS_SUBMITTING, "提交结果不明"}
+MAIN_QUEUE_OCCUPIED_STATUSES = {
+    "待排期", PROGRESS_QUEUED, *MAIN_QUEUE_SUBMITTING_STATUSES,
+    PROGRESS_SCHEDULED, PROGRESS_PUBLISHING, PROGRESS_PUBLISHED,
+}
 
 IN_FLIGHT_PROGRESS = {
     PROGRESS_RUNNING, PROGRESS_PLANNING, PROGRESS_PREPARING_ASSETS,
@@ -111,6 +140,216 @@ def parse_retake_roles(raw: Any) -> list[str]:
 
 class FeishuWorkflowError(RuntimeError):
     pass
+
+
+def resolve_temperature_variables(fields: Mapping[str, Any]) -> dict[str, str]:
+    band = text_value(fields.get(FIELD_TEMPERATURE_BAND))
+    sensitivity = text_value(fields.get(FIELD_THERMAL_SENSITIVITY))
+    scene = text_value(fields.get(FIELD_TEMPERATURE_SCENE))
+    band_key = {
+        "15°C 左右": "t15", "15°C": "t15", "t15": "t15",
+        "10°C 左右": "t10", "10°C": "t10", "t10": "t10",
+        "5°C 左右": "t5", "5°C": "t5", "t5": "t5",
+        "0°C 左右": "t0", "0°C": "t0", "t0": "t0",
+    }.get(band, "")
+    sensitivity_key = {
+        "怕冷": "feels_cold", "feels_cold": "feels_cold",
+        "正常体感": "normal", "normal": "normal",
+        "怕热": "feels_warm", "feels_warm": "feels_warm",
+    }.get(sensitivity, "")
+    scene_key = {
+        "通勤": "Commute", "Commute": "Commute",
+        "室内": "Indoor", "Indoor": "Indoor",
+        "户外": "Outdoor", "Outdoor": "Outdoor",
+    }.get(scene, "")
+    missing = [label for label, value in (
+        (FIELD_TEMPERATURE_BAND, band_key),
+        (FIELD_THERMAL_SENSITIVITY, sensitivity_key),
+        (FIELD_TEMPERATURE_SCENE, scene_key),
+    ) if not value]
+    if missing:
+        raise FeishuWorkflowError("温度穿搭必须填写：" + "、".join(missing))
+    return {
+        "band_key": band_key,
+        "thermal_sensitivity": sensitivity_key,
+        "scene": scene_key,
+        "style_series": "minimal_city",
+    }
+
+
+TRANSITION_SCENE_KEYS = {
+    "室外热→BTS→办公室空调": "outdoor_bts_office",
+    "outdoor_bts_office": "outdoor_bts_office",
+    "室外热→商场→影院": "outdoor_mall_cinema",
+    "outdoor_mall_cinema": "outdoor_mall_cinema",
+    "校园室外→教室": "campus_outdoor_classroom",
+    "campus_outdoor_classroom": "campus_outdoor_classroom",
+}
+DRESS_CODE_KEYS = {
+    "办公室": "office", "office": "office",
+    "校园": "campus", "campus": "campus",
+    "周末": "weekend", "weekend": "weekend",
+}
+
+# The shipped column options and the accepted operator values are two views of
+# one list.  Drift would let an operator pick an option the resolver rejects,
+# so it is checked at import time instead of at 3am in production.
+assert set(TRANSITION_SCENE_OPTIONS) <= set(TRANSITION_SCENE_KEYS), (
+    "冷热切换场景字段选项与解析映射不一致"
+)
+assert set(DRESS_CODE_OPTIONS) <= set(DRESS_CODE_KEYS), (
+    "着装要求字段选项与解析映射不一致"
+)
+assert set(THERMAL_SENSITIVITY_OPTIONS) <= {
+    "怕冷", "正常体感", "怕热",
+}, "体感字段选项与解析映射不一致"
+
+# Travel temperature enhancement.  ``thermal_sensitivity`` is an *optional*
+# variable on the travel recipe and only the TEMPERATURE travel theme consumes
+# it: the operator picks it through the existing 体感倾向 column, and an empty
+# column falls back to the default declared by the recipe's variables_schema.
+# Every other travel theme never reads this field, so their planning prompt
+# stays byte-identical (see ``build_travel_topic``).
+TRAVEL_THERMAL_THEME_TYPE = "TEMPERATURE"
+TRAVEL_THERMAL_SENSITIVITY_VARIABLE = "thermal_sensitivity"
+TRAVEL_THERMAL_SENSITIVITY_LABELS = {
+    "怕冷": "feels_cold", "feels_cold": "feels_cold",
+    "正常体感": "normal", "normal": "normal",
+    "怕热": "feels_warm", "feels_warm": "feels_warm",
+}
+TRAVEL_THERMAL_SENSITIVITY_FALLBACK = "normal"
+assert set(TRAVEL_THERMAL_SENSITIVITY_LABELS) >= set(
+    THERMAL_SENSITIVITY_OPTIONS
+), "体感倾向字段选项必须都能解析为旅行体感枚举"
+
+
+def resolve_thermal_transition_variables(fields: Mapping[str, Any]) -> dict[str, str]:
+    """Freeze one daily hot→cold transition profile from operator fields."""
+    scene = text_value(fields.get(FIELD_TRANSITION_SCENE))
+    sensitivity = text_value(fields.get(FIELD_TRANSITION_SENSITIVITY))
+    dress_code = text_value(fields.get(FIELD_DRESS_CODE))
+    scene_key = TRANSITION_SCENE_KEYS.get(scene, "")
+    sensitivity_key = {
+        "怕冷": "feels_cold", "feels_cold": "feels_cold",
+        "正常体感": "normal", "normal": "normal",
+        "怕热": "feels_warm", "feels_warm": "feels_warm",
+    }.get(sensitivity, "")
+    dress_code_key = DRESS_CODE_KEYS.get(dress_code, "")
+    missing = [label for label, value in (
+        (FIELD_TRANSITION_SCENE, scene_key),
+        (FIELD_TRANSITION_SENSITIVITY, sensitivity_key),
+        (FIELD_DRESS_CODE, dress_code_key),
+    ) if not value]
+    if missing:
+        raise FeishuWorkflowError("冷热切换必须填写：" + "、".join(missing))
+    return {
+        "transition_key": scene_key,
+        "thermal_sensitivity": sensitivity_key,
+        "dress_code": dress_code_key,
+        "style_series": "minimal_city",
+        "temperature_label_mode": "QUALITATIVE",
+    }
+
+
+def resolve_travel_thermal_sensitivity(
+    fields: Mapping[str, Any],
+    variables_schema: Mapping[str, Any] | None = None,
+) -> str:
+    """Resolve the optional travel ``thermal_sensitivity`` for one task.
+
+    The allowed values and the default both come from the recipe's own
+    ``variables_schema`` so the operator surface, the recipe contract and the
+    planner can never drift apart.  An empty column means "operator did not
+    specify", which must behave like the legacy tasks: default to ``normal``.
+    """
+    rule = dict((variables_schema or {}).get(
+        TRAVEL_THERMAL_SENSITIVITY_VARIABLE) or {})
+    allowed = [str(value) for value in rule.get("values") or []]
+    default = str(rule.get("default") or TRAVEL_THERMAL_SENSITIVITY_FALLBACK)
+    raw = text_value(fields.get(FIELD_THERMAL_SENSITIVITY))
+    if not raw:
+        return default
+    resolved = TRAVEL_THERMAL_SENSITIVITY_LABELS.get(raw, "")
+    if not resolved or (allowed and resolved not in allowed):
+        raise FeishuWorkflowError(
+            f"{FIELD_THERMAL_SENSITIVITY}只能填写：怕冷、正常体感、怕热"
+        )
+    return resolved
+
+
+def build_travel_topic(
+    *, theme: Mapping[str, Any], travel_place: str,
+    travel_variables: Mapping[str, Any], content_requirement: str = "",
+    fields: Mapping[str, Any] | None = None,
+    recipe_spec: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Freeze the topic-linked travel brief for one task.
+
+    Only the TEMPERATURE theme adds the resolved ``thermal_sensitivity`` and the
+    theme's own adjustment guidance.  All five other travel themes return the
+    exact brief they returned before, so their planning prompt cannot change.
+    """
+    if not travel_place:
+        raise FeishuWorkflowError(
+            "当前选择的是具体旅行主题，请填写旅行地点；"
+            "如不需要具体目的地，请改选“凉爽旅行”"
+        )
+    theme_type = str(theme.get("travel_theme_type") or "")
+    band = str(travel_variables.get("temperature_band") or "")
+    topic: dict[str, Any] = {
+        "theme_type": theme_type,
+        "theme_version": int(theme.get("travel_theme_version") or 1),
+        "theme_label_zh": str(theme.get("label_zh") or ""),
+        "planning_focus": str(theme.get("visual_brief") or ""),
+        "topic_patterns": list(theme.get("topic_patterns") or []),
+        "body_copy_focus": str(theme.get("body_copy_focus") or ""),
+        "cta_patterns": list(theme.get("cta_patterns") or []),
+        "place": travel_place,
+        "temperature_band": band,
+        "temperature_context": {"value": band, "source": "execution_profile"},
+        "thai_fallback": {
+            "title": str(theme.get("title") or ""),
+            "cover": str(theme.get("cover") or ""),
+            "caption": str(theme.get("caption") or ""),
+            "hashtags": list(theme.get("hashtags") or []),
+            "cta": str(theme.get("cta") or ""),
+        },
+        "content_requirement": content_requirement,
+    }
+    if theme_type == TRAVEL_THERMAL_THEME_TYPE:
+        topic[TRAVEL_THERMAL_SENSITIVITY_VARIABLE] = (
+            resolve_travel_thermal_sensitivity(
+                fields or {},
+                (recipe_spec or {}).get("variables_schema") or {},
+            )
+        )
+        topic["thermal_sensitivity_planning"] = dict(
+            theme.get("thermal_sensitivity_planning") or {}
+        )
+    return topic
+
+
+def layering_approval_attributes(qa: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Translate deterministic layering observations into frozen source evidence."""
+    output: dict[str, dict[str, Any]] = {}
+    for page in qa.get("roles") or []:
+        role = str(page.get("role") or "")
+        if not role:
+            continue
+        stack = [str(value) for value in page.get("visible_layer_stack") or []]
+        output[role] = {
+            "identity_id": str(page.get("identity_id") or ""),
+            "camera_signature": str(page.get("camera_signature") or ""),
+            # The content-card contract compares a stable scale enum, while
+            # semantic QA keeps the more precise camera signature separately.
+            "camera_scale": "FULL_BODY",
+            "full_body": page.get("full_body") is True,
+            "upper_layers": stack,
+            "visible_layer_count": int(page.get("visible_layer_count") or 0),
+            "observed_item_types": list(page.get("observed_item_types") or []),
+            "stackability": dict(page.get("stackability") or {}),
+        }
+    return output
 
 
 class _RecordFlock:
@@ -337,6 +576,24 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
     @staticmethod
     def _complete_look_attachments(fields: Dict[str, Any]) -> List[Dict[str, Any]]:
         return list(fields.get(FIELD_PHOTO_INPUT) or fields.get(FIELD_PHOTO_INPUT_LEGACY) or [])
+
+    @staticmethod
+    def _layering_role_attachments(
+        fields: Dict[str, Any], *, label: str = "温度穿搭",
+    ) -> List[Dict[str, Any]]:
+        ordered = []
+        for field_name in (
+            FIELD_LAYER_BASE_REFERENCE,
+            FIELD_LAYER_MID_REFERENCE,
+            FIELD_LAYER_OUTER_REFERENCE,
+        ):
+            values = list(fields.get(field_name) or [])
+            if len(values) != 1:
+                raise FeishuWorkflowError(
+                    f"{label} COMPLETE_LOOK 要求“{field_name}”恰好一张"
+                )
+            ordered.append(values[0])
+        return ordered
 
     @staticmethod
     def _is_replannable_photo_error(exc: Exception) -> bool:
@@ -892,6 +1149,28 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 if len(recipe_ids) == 1 else None
             )
             roles = list((((recipe_for_input.recipe_spec_json or {}).get("asset_requirements") or {}).get("required_roles") or [])) if recipe_for_input else []
+            from services.photo_content_planner import get_planning_flow
+            planning_flow = get_planning_flow(recipe_for_input.recipe_id) if recipe_for_input else ""
+            from services.photo_flow_registry import (
+                is_layered_progression_flow, is_thermal_transition_flow,
+            )
+            # 分层图文（温度分层 / 冷热切换）共享同一套三态素材、生成与质检机制，
+            # 差别只在业务变量与合同；因此统一由 registry 谓词路由，不再逐处写
+            # flow 字符串比较。
+            thermal_transition_flow = is_thermal_transition_flow(planning_flow)
+            layering_flow = is_layered_progression_flow(planning_flow)
+            flow_label = "冷热切换" if thermal_transition_flow else "温度分层"
+            temperature_variables: dict[str, str] = {}
+            if layering_flow:
+                if quantity != 1:
+                    raise FeishuWorkflowError(f"{flow_label}首版每条记录只允许生成一篇")
+                if product_id:
+                    raise FeishuWorkflowError(f"{flow_label}不支持商品参考模式")
+                temperature_variables = (
+                    resolve_thermal_transition_variables(record.fields)
+                    if thermal_transition_flow
+                    else resolve_temperature_variables(record.fields)
+                )
             from services.photo_theme import resolve_photo_theme, build_theme_copy
             from services.photo_reference import (
                 REFERENCE_MODE_COMPLETE_LOOK, REFERENCE_MODE_PRODUCT, REFERENCE_MODE_STYLE,
@@ -901,15 +1180,59 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 theme = resolve_photo_theme(text_value(record.fields.get(FIELD_CONTENT_THEME)))
             except ValueError as exc:
                 raise FeishuWorkflowError(str(exc)) from exc
+            if layering_flow:
+                expected_theme = "THERMAL_TRANSITION" if thermal_transition_flow else "TEMPERATURE_DRESSING"
+                if str((theme or {}).get("theme_key") or "") != expected_theme:
+                    theme_label = "冷热切换" if thermal_transition_flow else "温度穿搭"
+                    raise FeishuWorkflowError(
+                        f"{flow_label}必须选择图文主题“{theme_label}”"
+                    )
             reference_mode = ""
             reference_attachments = []
-            if unified_attachments:
+            selected_reference_type = text_value(record.fields.get(FIELD_REFERENCE_TYPE))
+            if layering_flow:
+                role_field_values = sum((
+                    list(record.fields.get(name) or []) for name in (
+                        FIELD_LAYER_BASE_REFERENCE,
+                        FIELD_LAYER_MID_REFERENCE,
+                        FIELD_LAYER_OUTER_REFERENCE,
+                    )
+                ), [])
+                if selected_reference_type == "完整穿搭":
+                    if unified_attachments or legacy_complete:
+                        raise FeishuWorkflowError(
+                            f"{flow_label} COMPLETE_LOOK 请只填写基础层图/中间层图/外层图，不要混用通用参考图字段"
+                        )
+                    reference_mode = REFERENCE_MODE_COMPLETE_LOOK
+                    reference_attachments = self._layering_role_attachments(
+                        record.fields, label=flow_label,
+                    )
+                elif selected_reference_type == "风格参考":
+                    if thermal_transition_flow:
+                        raise FeishuWorkflowError(
+                            "冷热切换 Phase 1 仅开放“完整穿搭”三张素材，尚未开放风格参考"
+                        )
+                    if role_field_values or legacy_complete:
+                        raise FeishuWorkflowError(
+                            "温度分层 STYLE 请只填写“参考图（可选）”，不要混用三张完整穿搭角色图"
+                        )
+                    if not unified_attachments:
+                        raise FeishuWorkflowError("温度分层 STYLE 至少需要一张风格参考图")
+                    reference_mode = REFERENCE_MODE_STYLE
+                    reference_attachments = unified_attachments
+                else:
+                    supported = "“完整穿搭”" if thermal_transition_flow else "“完整穿搭”或“风格参考”"
+                    raise FeishuWorkflowError(
+                        f"{flow_label}必须显式选择{supported}，不支持自动判断/商品参考"
+                    )
+            elif unified_attachments:
                 reference_attachments = unified_attachments
                 try:
                     reference_mode = resolve_reference_mode(
-                        selected_type=text_value(record.fields.get(FIELD_REFERENCE_TYPE)),
+                        selected_type=selected_reference_type,
                         attachments=reference_attachments, product_id=product_id,
                         required_role_count=len(roles), requested_count=quantity,
+                        required_roles=roles,
                     )
                 except ValueError as exc:
                     raise FeishuWorkflowError(str(exc)) from exc
@@ -965,6 +1288,28 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
             travel_copy_templates = None
             travel_topic: dict[str, Any] = {}
             planning_flow = get_planning_flow(recipe_for_input.recipe_id) if recipe_for_input else ""
+            layering_copy_templates = None
+            if layering_flow:
+                recipe_spec_input = recipe_for_input.recipe_spec_json or {}
+                # 分层图文按各自合同的主变量匹配 execution_profile：温度分层用
+                # 温度档，冷热切换用切换场景。
+                profile_variable_key = (
+                    "transition_key" if thermal_transition_flow else "band_key"
+                )
+                profile_variable_value = str(
+                    temperature_variables.get(profile_variable_key) or ""
+                )
+                profile_for_band = next(
+                    (item for item in recipe_spec_input.get("execution_profiles") or []
+                     if str((item.get("variables") or {}).get(profile_variable_key) or "")
+                     == profile_variable_value),
+                    None,
+                )
+                if not isinstance(profile_for_band, Mapping):
+                    raise FeishuWorkflowError(
+                        f"{flow_label}尚未配置 {profile_variable_value} profile"
+                    )
+                layering_copy_templates = list(profile_for_band.get("copy_variants") or [])
             if planning_flow == "travel_two_step":
                 recipe_spec_input = recipe_for_input.recipe_spec_json or {}
                 travel_contract = dict(recipe_spec_input.get("travel_contract") or {})
@@ -976,34 +1321,12 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     if profiles_input else []
                 ) or None
                 if theme and theme.get("travel_theme_type"):
-                    if not travel_place:
-                        raise FeishuWorkflowError(
-                            "当前选择的是具体旅行主题，请填写旅行地点；"
-                            "如不需要具体目的地，请改选“凉爽旅行”"
-                        )
-                    travel_topic = {
-                        "theme_type": str(theme.get("travel_theme_type")),
-                        "theme_version": int(theme.get("travel_theme_version") or 1),
-                        "theme_label_zh": str(theme.get("label_zh") or ""),
-                        "planning_focus": str(theme.get("visual_brief") or ""),
-                        "topic_patterns": list(theme.get("topic_patterns") or []),
-                        "body_copy_focus": str(theme.get("body_copy_focus") or ""),
-                        "cta_patterns": list(theme.get("cta_patterns") or []),
-                        "place": travel_place,
-                        "temperature_band": str(travel_variables.get("temperature_band") or ""),
-                        "temperature_context": {
-                            "value": str(travel_variables.get("temperature_band") or ""),
-                            "source": "execution_profile",
-                        },
-                        "thai_fallback": {
-                            "title": str(theme.get("title") or ""),
-                            "cover": str(theme.get("cover") or ""),
-                            "caption": str(theme.get("caption") or ""),
-                            "hashtags": list(theme.get("hashtags") or []),
-                            "cta": str(theme.get("cta") or ""),
-                        },
-                        "content_requirement": content_requirement,
-                    }
+                    travel_topic = build_travel_topic(
+                        theme=theme, travel_place=travel_place,
+                        travel_variables=travel_variables,
+                        content_requirement=content_requirement,
+                        fields=record.fields, recipe_spec=recipe_spec_input,
+                    )
             if reference_mode == REFERENCE_MODE_STYLE and recipe_for_input:
                 if theme is None:
                     raise FeishuWorkflowError("风格参考模式需要选择图文主题")
@@ -1062,6 +1385,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                         category_key=str((recipe_for_input.recipe_spec_json or {}).get("category_key") or ""),
                         content_requirement=content_requirement, count=quantity,
                         product_context=product_context,
+                        planning_flow=planning_flow, required_roles=roles,
                     )
                 if product_context:
                     style_profile["product_context"] = dict(product_context)
@@ -1088,6 +1412,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     "content_requirement": content_requirement,
                     "travel_topic": travel_topic or {},
                     "travel_place": travel_place,
+                    "temperature_variables": temperature_variables,
                 }
                 plan_store = PhotoContentPlanStore(staging_root)
 
@@ -1100,7 +1425,14 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                             theme=theme, reference_mode=reference_mode, count=quantity,
                             style_profile=style_profile,
                             travel_contract=travel_contract or None,
-                            copy_templates=travel_copy_templates,
+                            copy_templates=(
+                                layering_copy_templates
+                                if planning_flow == "layering_two_step"
+                                else travel_copy_templates
+                            ),
+                            required_roles=roles,
+                            recipe_spec=recipe_for_input.recipe_spec_json or {},
+                            variables=temperature_variables,
                         ),
                     )
 
@@ -1142,15 +1474,85 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 for index in range(quantity):
                     item_id = f"{record.record_id}_item_{index + 1}"
                     begin, end = index * len(roles), (index + 1) * len(roles)
+                    variation = variations[index]
+                    profile_binding = dict(variation.get("profile_binding") or {})
                     staged = asset_supply.stage(
                         record_id=item_id, attachments=reference_attachments[begin:end],
                         required_roles=roles,
+                        metadata={
+                            "theme_key": str((theme or {}).get("theme_key") or ""),
+                            "reference_mode": reference_mode,
+                            "batch_variation": variation,
+                            "profile_binding": profile_binding,
+                        },
                     )
                     prepared_source_groups.append(list(staged["files"]))
+                    approval_attributes = None
+                    approval_evidence = None
+                    reviewer = "feishu_operator_execution"
+                    reviewer_type = "technical"
+                    if layering_flow:
+                        from services.photo_reference_vision import PhotoReferenceVisionService
+                        reference_vision = self.photo_reference_vision or PhotoReferenceVisionService(
+                            root=staging_root
+                        )
+                        self.photo_reference_vision = reference_vision
+                        self._write_fields(record.record_id, {FIELD_PROGRESS: PROGRESS_QA})
+                        if thermal_transition_flow:
+                            approval_evidence = reference_vision.review_thermal_transition_pages(
+                                reference_paths=(),
+                                look_plans=list(variation.get("looks") or []),
+                                image_paths=[str(item["path"]) for item in staged["files"]],
+                                thermal_transition_contract=dict(
+                                    (recipe.recipe_spec_json or {}).get(
+                                        "thermal_transition_contract"
+                                    ) or {}
+                                ),
+                                profile_binding=profile_binding,
+                            )
+                            from services.photo_thermal_transition_qa import (
+                                thermal_transition_qa_note_zh,
+                            )
+                            qa_note = thermal_transition_qa_note_zh(approval_evidence)
+                            semantic_reviewer = "system_thermal_transition_semantic_qa"
+                        else:
+                            approval_evidence = reference_vision.review_layering_pages(
+                                reference_paths=(),
+                                look_plans=list(variation.get("looks") or []),
+                                image_paths=[str(item["path"]) for item in staged["files"]],
+                                layering_contract=dict(
+                                    (recipe.recipe_spec_json or {}).get("layering_contract") or {}
+                                ),
+                                profile_binding=profile_binding,
+                            )
+                            from services.photo_layering_report import layering_qa_note_zh
+                            qa_note = layering_qa_note_zh(approval_evidence)
+                            semantic_reviewer = "system_layering_semantic_qa"
+                        self._write_fields(record.record_id, {
+                            FIELD_NOTES: qa_note,
+                        })
+                        if not approval_evidence.get("passed"):
+                            failure_codes = sorted({
+                                str(code)
+                                for page in approval_evidence.get("roles") or []
+                                for code in page.get("failure_codes") or []
+                                if str(code)
+                            })
+                            raise FeishuWorkflowError(
+                                "LAYER_SOURCE_INCONSISTENT：完整穿搭三态未通过分层证据校验（"
+                                + "、".join(failure_codes or ["证据不足"])
+                                + "）"
+                            )
+                        approval_attributes = layering_approval_attributes(approval_evidence)
+                        reviewer = semantic_reviewer
+                        reviewer_type = "model"
                     saved = asset_supply.qualify(
                         record_id=item_id, recipe=recipe, repository=self.repository,
-                        reviewer="feishu_operator_execution", reviewer_type="technical",
+                        reviewer=reviewer, reviewer_type=reviewer_type,
                         source="feishu_complete_look_input",
+                        profile_binding=profile_binding,
+                        approval_attributes=approval_attributes,
+                        approval_evidence=approval_evidence,
                     )
                     pinned_asset_set_ids.append(saved.asset_set_id)
             if (reference_mode == REFERENCE_MODE_STYLE and recipe_for_input
@@ -1179,7 +1581,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                         FIELD_PROGRESS: PROGRESS_PREPARING_ASSETS,
                     })
                     asset_counter = {"done": 0}
-                    total_assets = len(variations) * 4
+                    total_assets = len(variations) * len(roles)
 
                     def _asset_progress(event: str, **data: Any) -> None:
                         if event == "asset_generated":
@@ -1237,7 +1639,9 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                             "reason_zh": "第一套穿搭直接承担首图，不另选并重复一张素材",
                         }
                     from services.photo_content_check import validate_prepared_sources
-                    validate_prepared_sources(variation, prepared["sources"])
+                    validate_prepared_sources(
+                        variation, prepared["sources"], required_roles=roles,
+                    )
                     quality_summary = str(
                         (prepared.get("quality") or {}).get("quality_summary_zh") or ""
                     )
@@ -1255,10 +1659,21 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                                   ),
                                   "batch_variation": variation},
                     )
+                    style_approval_evidence = dict(
+                        (prepared.get("group_alignment") or {}).get("layering_qa") or {}
+                    ) if layering_flow else None
                     saved = asset_supply.qualify(
                         record_id=item_id, recipe=recipe, repository=self.repository,
                         reviewer="system_style_reference_generation", reviewer_type="technical",
                         source="feishu_style_reference_generated",
+                        profile_binding=dict(variation.get("profile_binding") or {}),
+                        approval_attributes=(
+                            layering_approval_attributes(style_approval_evidence)
+                            if style_approval_evidence else None
+                        ),
+                        approval_evidence=(
+                            style_approval_evidence or dict(prepared.get("quality") or {})
+                        ),
                     )
                     pinned_asset_set_ids.append(saved.asset_set_id)
             if (reference_mode == REFERENCE_MODE_PRODUCT and recipe_for_input
@@ -1339,7 +1754,10 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     pinned_asset_set_ids.append(saved.asset_set_id)
             if len(prepared_source_groups) > 1:
                 from services.photo_content_check import validate_batch_sources
-                validate_batch_sources(prepared_source_groups)
+                validate_batch_sources(
+                    prepared_source_groups, required_roles=roles,
+                    planning_flow=planning_flow,
+                )
             if recipe_for_input and recipe_for_input.recipe_id.startswith("PHOTO_TH_TRAVEL"):
                 for variation in variations:
                     variation["cover_selection"] = {
@@ -1355,15 +1773,19 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
             if pinned_asset_set_ids:
                 if len(pinned_asset_set_ids) != quantity:
                     raise FeishuWorkflowError("批次素材集数量与生成篇数不一致")
-                if overrides:
-                    overrides = [
-                        {**dict(item), "asset_set_id": asset_set_id}
-                        for item, asset_set_id in zip(overrides, pinned_asset_set_ids)
-                    ]
-                else:
-                    overrides = [
-                        {"asset_set_id": asset_set_id} for asset_set_id in pinned_asset_set_ids
-                    ]
+                base_overrides = list(overrides or [{} for _ in pinned_asset_set_ids])
+                overrides = []
+                for item, asset_set_id, variation in zip(
+                        base_overrides, pinned_asset_set_ids, variations):
+                    binding = dict(variation.get("profile_binding") or {})
+                    override = {**dict(item), "asset_set_id": asset_set_id}
+                    if binding:
+                        override.setdefault("profile_id", str(binding.get("profile_id") or ""))
+                        override["variables"] = {
+                            **dict(binding.get("variables") or {}),
+                            **dict(override.get("variables") or {}),
+                        }
+                    overrides.append(override)
             try:
                 requests = PhotoRequestFactory(self.repository, layouts=load_board_layouts()).build_batch(
                     record_id=record.record_id, specs=specs,
@@ -2547,6 +2969,12 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
         ]
         retrying = [index for index, error in enumerate(errors) if "等待自动重试" in error]
         failed = [index for index, status in enumerate(statuses) if status == "发布失败"]
+        # 「提交中」= 已占位但结果未确认，禁止重发。它既不是「待排班」也不是
+        # 确定的失败，必须单独呈现，否则整批会被误报成「待排班」而掩盖在途任务。
+        submitting = [
+            index for index, status in enumerate(statuses)
+            if status in MAIN_QUEUE_SUBMITTING_STATUSES
+        ]
         needs_action = sorted(set(stopped + failed))
 
         if statuses and all(status == "已发布" for status in statuses):
@@ -2555,6 +2983,8 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
             progress = PROGRESS_PUBLISH_FAILED
         elif any(status == "发布中" for status in statuses):
             progress = PROGRESS_PUBLISHING
+        elif submitting:
+            progress = PROGRESS_SUBMITTING
         elif any(status == "已排期" for status in statuses):
             progress = PROGRESS_SCHEDULED
         else:
@@ -2563,6 +2993,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
         counts = {
             "已发布": statuses.count("已发布"),
             "已排期": statuses.count("已排期"),
+            "提交中": len(submitting),
             "发布中": statuses.count("发布中"),
             "待排班": sum(status in {"", "待排班"} for status in statuses),
             "重试中": len(retrying),
@@ -2571,15 +3002,16 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
         summary = "，".join(
             f"{label}{count}" for label, count in counts.items() if count
         ) or "待排班0"
+        attention = set(needs_action) | set(retrying) | set(submitting)
         details = []
         for index, item in enumerate(states):
             values = [
-                str(item.get("task_id") or "").strip() if index in needs_action or index in retrying else "",
+                str(item.get("task_id") or "").strip() if index in attention else "",
                 str(item.get("account_name") or "").strip(),
                 str(item.get("planned_publish_at") or "").strip(),
                 f"BGM: {item.get('bgm_title')}" if item.get("bgm_title") else "",
             ]
-            if index in needs_action or index in retrying:
+            if index in attention:
                 values.append(errors[index][:180])
             detail = "｜".join(value for value in values if value)
             if detail:

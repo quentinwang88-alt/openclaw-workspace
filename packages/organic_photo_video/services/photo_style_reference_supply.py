@@ -229,6 +229,17 @@ class PhotoStyleReferenceSupplyService:
             attempt_history[-1].get("repair_notes") or {}
         ) if attempt_history else {}
         style_profile = dict(variation.get("style_profile") or {})
+        planning_flow = str(
+            variation.get("planning_flow") or style_profile.get("planning_flow") or ""
+        )
+        # 分层图文线（温度分层 / 冷热切换）共享同一套三态生成机制：外层锚点、
+        # 反向生成顺序、LAYER_PROGRESSION 参考用途、禁并行预取。差异只在各自的
+        # 语义质检模块，因此统一由 registry 谓词判定，避免散落的 flow 字符串比较。
+        from services.photo_flow_registry import (
+            is_layered_progression_flow, is_thermal_transition_flow,
+        )
+        thermal_transition_planned = is_thermal_transition_flow(planning_flow)
+        layered_planned = is_layered_progression_flow(planning_flow)
         presentation_type = str(
             variation.get("presentation_type") or style_profile.get("presentation_type")
             or "MODEL_FULL_BODY"
@@ -273,7 +284,7 @@ class PhotoStyleReferenceSupplyService:
             # Human-scene identity comes from the approved persona pack only;
             # a previously generated page is never used as an identity anchor
             # (head-tilt/expression pollution — TH persona realism handoff 6.4).
-            identity_anchor = "" if (flat_lay or persona_bound) else next(
+            identity_anchor = "" if (flat_lay or (persona_bound and not layered_planned)) else next(
                 (str(completed[role]["path"]) for role in role_order if role in completed), ""
             )
             # 参考图签名配色（全组共享）：生成端颜色不得偏移出色系。
@@ -298,14 +309,16 @@ class PhotoStyleReferenceSupplyService:
                     uses = {str(value) for value in item.get("reference_uses") or []}
                     include = (not typed or "ENVIRONMENT" in uses
                                or "VISUAL_STYLE" in uses
+                               or (layered_planned and "LAYER_PROGRESSION" in uses)
                                or ("OUTFIT" in uses
                                    and (not selected_outfit or position in selected_outfit)))
                     if include:
                         selected_style_paths.append(path)
-                references = selected_style_paths + (
-                    identity_paths if persona_bound
-                    else [identity_anchor] if identity_anchor else []
-                )
+                references = list(dict.fromkeys(
+                    selected_style_paths
+                    + (identity_paths if persona_bound else [])
+                    + ([identity_anchor] if identity_anchor else [])
+                ))
                 travel_moment = str(look.get("travel_moment") or "")
                 travel_scene_prompt = str(look.get("scene_prompt") or "")
                 if flat_lay:
@@ -321,7 +334,7 @@ class PhotoStyleReferenceSupplyService:
                 else:
                     pose_contract = (
                         POSE_CONTRACTS.get(role)
-                        if human_scene and not travel_moment else None
+                        if human_scene and not travel_moment and not layered_planned else None
                     )
                     camera_hint = (
                         TRAVEL_CAMERA_HINTS.get(travel_moment)
@@ -435,8 +448,14 @@ class PhotoStyleReferenceSupplyService:
                         ),
                     },
                     recipe_execution={
-                        "content_goal": "multi_look", "reference_mode": "STYLE",
-                        "transform_mode": "style_reference_variation",
+                        "content_goal": (
+                            "layering_progression" if layered_planned else "multi_look"
+                        ),
+                        "reference_mode": "STYLE",
+                        "transform_mode": (
+                            "layering_reference_reduction"
+                            if layered_planned else "style_reference_variation"
+                        ),
                         "theme_brief": {**dict(theme), "variation": variation},
                         "presentation_profile": {
                             "presentation_type": presentation_type,
@@ -475,6 +494,8 @@ class PhotoStyleReferenceSupplyService:
                             if 0 < value <= len(paths)
                         ],
                         "identity_anchor": identity_anchor,
+                        **({"layer_progression_anchor": identity_anchor}
+                           if layered_planned and identity_anchor else {}),
                         **({"product_identity_images": list(product.get("reference_images") or [])}
                            if product else {}),
                         **(
@@ -484,16 +505,27 @@ class PhotoStyleReferenceSupplyService:
                     },
                 )
 
+            generation_order = [
+                str(value) for value in variation.get("generation_order") or []
+            ]
+            by_generation_role = {str(item.get("role") or ""): item for item in looks}
+            generation_looks = (
+                [by_generation_role[role] for role in generation_order]
+                if (layered_planned and generation_order
+                    and set(generation_order) == set(by_generation_role))
+                else list(looks)
+            )
             # 并行预取：无生成图锚点的路径（人物场景/平铺）B/C/D 与 Look A
             # 门禁并行生成，整组墙钟时间约减半。门禁彻底失败时预取结果
             # 直接丢弃（不入 manifest，不进链路，仅损失生图费）。
-            parallelizable = (flat_lay or human_scene) and len(looks) > 2
+            parallelizable = ((flat_lay or human_scene) and len(looks) > 2
+                              and not layered_planned)
             prefetch: dict[str, Any] = {}
             executor = None
             if parallelizable:
                 from concurrent.futures import ThreadPoolExecutor
                 executor = ThreadPoolExecutor(max_workers=2)
-                for index, look in enumerate(looks, 1):
+                for index, look in enumerate(generation_looks, 1):
                     role = str(look["role"])
                     if index == 1 or role in completed:
                         continue
@@ -508,7 +540,7 @@ class PhotoStyleReferenceSupplyService:
                     return future.result()
                 return self.generator.generate_shot(build_request(index, look))
 
-            for index, look in enumerate(looks, 1):
+            for index, look in enumerate(generation_looks, 1):
                 role = str(look["role"])
                 planned_look_signature = self._look_signature(look)
                 if role in completed:
@@ -626,7 +658,9 @@ class PhotoStyleReferenceSupplyService:
                         **({"human_gate_qa": human_gate} if human_gate is not None else {}),
                     } if persona_bound else {}),
                 }
-                if not flat_lay and not persona_bound:
+                if layered_planned:
+                    identity_anchor = str(output)
+                elif not flat_lay and not persona_bound:
                     identity_anchor = identity_anchor or str(output)
                 generated_this_run += 1
                 self._save(manifest_path, input_hash, record_id, theme, paths, completed,
@@ -723,9 +757,61 @@ class PhotoStyleReferenceSupplyService:
                                    reason="color_consistency",
                                    notes="；".join(group_consistency_qa["program"]["issues"][:2]))
                     continue
-            if style_profile.get("analysis_method") == "doubao_seed_2_1" and not consistency_failed:
+            if (layered_planned or style_profile.get("analysis_method") == "doubao_seed_2_1") and not consistency_failed:
                 _emit_progress(progress, "qa_started")
-                if travel_planned and hasattr(reviewer, "review_travel_pages"):
+                if thermal_transition_planned:
+                    if not hasattr(reviewer, "review_thermal_transition_pages"):
+                        raise PhotoStyleReferenceError(
+                            "冷热切换供图缺少 review_thermal_transition_pages，禁止无语义质检进入资产集"
+                        )
+                    semantic = reviewer.review_thermal_transition_pages(
+                        reference_paths=qa_reference_paths,
+                        look_plans=looks,
+                        image_paths=[str(item["path"]) for item in ordered],
+                        thermal_transition_contract=(
+                            style_profile.get("thermal_transition_contract") or {}
+                        ),
+                        profile_binding=variation.get("profile_binding") or {},
+                    )
+                    from services.photo_thermal_transition_qa import (
+                        failed_roles_from_thermal_qa,
+                        thermal_qa_as_alignment,
+                    )
+                    group_alignment = thermal_qa_as_alignment(semantic)
+                    repair_notes = {
+                        str(item.get("role")): str(item.get("repair_instruction") or "")
+                        for item in semantic.get("roles") or []
+                    }
+                    if not semantic["passed"]:
+                        failed_roles = failed_roles_from_thermal_qa(
+                            semantic, role_order
+                        )
+                elif layered_planned:
+                    if not hasattr(reviewer, "review_layering_pages"):
+                        raise PhotoStyleReferenceError(
+                            "温度分层供图缺少 review_layering_pages，禁止无语义质检进入资产集"
+                        )
+                    semantic = reviewer.review_layering_pages(
+                        reference_paths=qa_reference_paths,
+                        look_plans=looks,
+                        image_paths=[str(item["path"]) for item in ordered],
+                        layering_contract=style_profile.get("layering_contract") or {},
+                        profile_binding=variation.get("profile_binding") or {},
+                    )
+                    from services.photo_layering_qa import (
+                        failed_roles_from_layering_qa,
+                        layering_qa_as_alignment,
+                    )
+                    group_alignment = layering_qa_as_alignment(semantic)
+                    repair_notes = {
+                        str(item.get("role")): str(item.get("repair_instruction") or "")
+                        for item in semantic.get("roles") or []
+                    }
+                    if not semantic["passed"]:
+                        failed_roles = failed_roles_from_layering_qa(
+                            semantic, role_order
+                        )
+                elif travel_planned and hasattr(reviewer, "review_travel_pages"):
                     semantic = reviewer.review_travel_pages(
                         reference_paths=qa_reference_paths, look_plans=looks,
                         product_reference_paths=[
@@ -778,7 +864,7 @@ class PhotoStyleReferenceSupplyService:
                             role: dict(completed[role].get("pose_contract") or {})
                             for role in role_order
                         },
-                        group_rules=True,
+                        group_rules=not layered_planned,
                     )
                     if not group_human_qa["passed"]:
                         for item in group_human_qa["roles"]:

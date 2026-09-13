@@ -17,9 +17,14 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
+from services.photo_flow_registry import (
+    PhotoFlowRegistryError, flow_contract_from, role_marker,
+    validate_ordered_roles,
+)
 
-THEME_OPTIONS = ("自动", "秋季穿搭", "凉爽旅行", "日常通勤", "咖啡约会",
-                 "旅行·打卡穿搭", "旅行·环境协调", "旅行·拍照穿搭",
+
+THEME_OPTIONS = ("自动", "秋季穿搭", "凉爽旅行", "日常通勤", "咖啡约会", "冷热切换",
+                 "温度穿搭", "旅行·打卡穿搭", "旅行·环境协调", "旅行·拍照穿搭",
                  "旅行·温度穿搭", "旅行·四选一", "旅行·配色参考")
 
 _TRAVEL_THEME_CONFIG = (
@@ -67,6 +72,27 @@ _PROFILES = {
         "hashtags": ["#ลุคคาเฟ่", "#ไอเดียแต่งตัว", "#OOTD"],
         "cta": "ไปคาเฟ่จะเลือกลุคไหน?",
     },
+    "冷热切换": {
+        "theme_key": "THERMAL_TRANSITION",
+        "label_zh": "日常冷热切换穿搭",
+        "hook_strategy": "thermal_contrast",
+        "visual_brief": "同一人物同一天从室外炎热进入 BTS/商场再进入办公室强空调，逐层增加可穿脱的上身层",
+        "title": "ร้อนข้างนอก แอร์แรงข้างใน",
+        "cover": "ร้อนข้างนอก แอร์แรงข้างใน\nแต่งตัวยังไงดี?",
+        "caption": "ไอเดียแต่งตัวสำหรับวันที่ต้องเจอทั้งความร้อนข้างนอกและแอร์แรงในออฟฟิศ ลองใช้เป็นแนวทางแล้วปรับตามความรู้สึกของคุณ",
+        "hashtags": ["#แอร์แรง", "#แต่งตัวไปออฟฟิศ", "#ไอเดียแต่งตัว"],
+        "cta": "คุณแพ้ร้อนหรือแพ้แอร์มากกว่ากัน?",
+    },
+    "温度穿搭": {
+        "theme_key": "TEMPERATURE_DRESSING",
+        "label_zh": "温度分层穿搭",
+        "visual_brief": "同一人物、同一机位，从基础层到中间层再到外层逐层增加服装",
+        "title": "อากาศแบบนี้ควรใส่กี่ชั้น?",
+        "cover": "อากาศแบบนี้\nควรใส่กี่ชั้น?",
+        "caption": "ไอเดียแต่งตัวแบบเพิ่มทีละชั้น ปรับตามอุณหภูมิ กิจกรรม และความรู้สึกหนาวของคุณ",
+        "hashtags": ["#แต่งตัวตามอากาศ", "#ไอเดียแต่งตัว", "#OOTD"],
+        "cta": "เซฟไว้แล้วปรับตามความรู้สึกของคุณ",
+    },
 }
 
 _ALIASES = {
@@ -74,6 +100,9 @@ _ALIASES = {
     "autumn": "秋季穿搭", "autumn outfit": "秋季穿搭",
     "冷天气旅行": "凉爽旅行", "旅行穿搭": "凉爽旅行",
     "通勤": "日常通勤", "咖啡": "咖啡约会",
+    "温度": "温度穿搭", "分层穿搭": "温度穿搭", "temperature dressing": "温度穿搭",
+    "冷热切换": "冷热切换", "冷热": "冷热切换", "空调穿搭": "冷热切换",
+    "thermal transition": "冷热切换", "thermal_transition": "冷热切换",
 }
 
 
@@ -103,6 +132,11 @@ def _travel_theme_profile(theme_type: str, label: str,
         "topic_patterns": list(template.get("topic_patterns") or []),
         "body_copy_focus": str(template.get("body_copy_focus") or ""),
         "cta_patterns": list(template.get("cta_patterns") or []),
+        # Only the TEMPERATURE theme ships this block; every other travel theme
+        # must stay without it so the planning prompt stays unchanged for them.
+        "thermal_sensitivity_planning": dict(
+            template.get("thermal_sensitivity_planning") or {}
+        ),
     }
 
 
@@ -140,10 +174,13 @@ def style_look_specs(
     """Return the exact frozen Looks when the content planner supplied them."""
     planned = list((variation or {}).get("looks") or [])
     if planned:
-        if [item.get("role") for item in planned] != [
-            "look_a", "look_b", "look_c", "look_d"
-        ]:
-            raise ValueError("冻结内容计划必须按 A/B/C/D 提供四套穿搭")
+        try:
+            flow, roles = flow_contract_from(variation)
+            validate_ordered_roles(
+                planned, planning_flow=flow, required_roles=roles,
+            )
+        except PhotoFlowRegistryError as exc:
+            raise ValueError("冻结内容计划" + str(exc)) from exc
         return deepcopy(planned)
 
     # Compatibility for already-frozen historical tasks that predate the
@@ -229,12 +266,17 @@ def build_theme_copy(
     variation: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     by_role = {str(item.get("role") or ""): item for item in assets}
+    try:
+        _flow, frozen_roles = flow_contract_from(variation)
+    except PhotoFlowRegistryError as exc:
+        raise ValueError(str(exc)) from exc
     labels = []
-    for letter, role in zip("ABCD", ("look_a", "look_b", "look_c", "look_d")):
+    for index, role in enumerate(frozen_roles):
+        marker = role_marker(role, index)
         raw_label = by_role.get(role, {}).get("display_label") or {}
         label = (raw_label.get("th-TH") if isinstance(raw_label, Mapping)
                  else str(raw_label).strip())
-        labels.append(f"{letter} · {label or ('ลุค ' + letter)}")
+        labels.append(f"{marker} · {label or ('ลุค ' + marker)}")
     variation = dict(variation or {})
     planned_copy = dict(variation.get("copy") or {})
     cta = str(planned_copy.get("cta") or theme["cta"])
@@ -254,6 +296,8 @@ def build_theme_copy(
             "slide_texts": topic_slides,
             "language_review_status": str(
                 planned_copy.get("language_review_status") or "DRAFT_TRAVEL_TOPIC"),
+            **({"language_review": dict(planned_copy["language_review"])}
+               if isinstance(planned_copy.get("language_review"), Mapping) else {}),
         }
     return {
         "place_localized": str(planned_copy.get("place_localized") or ""),

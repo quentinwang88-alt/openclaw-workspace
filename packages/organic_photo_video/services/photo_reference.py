@@ -13,6 +13,7 @@ REFERENCE_MODE_COMPLETE_LOOK = "COMPLETE_LOOK"
 def resolve_reference_mode(
     *, selected_type: Any, attachments: Sequence[Any], product_id: str,
     required_role_count: int, requested_count: int = 1,
+    required_roles: Sequence[str] = (),
 ) -> str:
     """Return one explicit frozen mode; AUTO uses only safe deterministic facts."""
     selected = str(selected_type or "自动判断").strip() or "自动判断"
@@ -33,8 +34,12 @@ def resolve_reference_mode(
         mode = REFERENCE_MODE_STYLE
     expected = required_role_count * requested_count
     if mode == REFERENCE_MODE_COMPLETE_LOOK and len(attachments) != expected:
+        role_hint = (
+            "/".join(str(value) for value in required_roles)
+            if required_roles else f"{required_role_count} 个角色"
+        )
         raise ValueError(
-            f"完整穿搭模式生成 {requested_count} 篇需要按每篇 A/B/C/D 上传 {expected} 张图片"
+            f"完整穿搭模式生成 {requested_count} 篇需要按每篇 {role_hint} 上传 {expected} 张图片"
         )
     if mode in {REFERENCE_MODE_STYLE, REFERENCE_MODE_PRODUCT} and not attachments and not product_id:
         raise ValueError("当前参考图模式至少需要上传一张图片或填写产品编码")

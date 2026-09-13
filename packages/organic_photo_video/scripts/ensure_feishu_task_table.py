@@ -23,6 +23,11 @@ from services.feishu_workflow import (  # noqa: E402
     FIELD_PRODUCT_REFERENCE, FIELD_PHOTO_ASSET_STATUS, FIELD_REFERENCE,
     FIELD_REFERENCE_TYPE, FIELD_CONTENT_THEME, FIELD_MUSIC_MODE,
     FIELD_CONTENT_REQUIREMENT,
+    FIELD_TEMPERATURE_BAND, FIELD_THERMAL_SENSITIVITY, FIELD_TEMPERATURE_SCENE,
+    FIELD_TRANSITION_SCENE, FIELD_TRANSITION_SENSITIVITY, FIELD_DRESS_CODE,
+    FIELD_LAYER_BASE_REFERENCE, FIELD_LAYER_MID_REFERENCE, FIELD_LAYER_OUTER_REFERENCE,
+    TEMPERATURE_BAND_OPTIONS, THERMAL_SENSITIVITY_OPTIONS, TEMPERATURE_SCENE_OPTIONS,
+    TRANSITION_SCENE_OPTIONS, DRESS_CODE_OPTIONS,
     FIELD_REVIEW_MODE, FIELD_REVIEW_STAGE, FIELD_RETRY_REVIEW, FIELD_REVIEW_TOKEN,
     ProductionPresetCatalog,
 )
@@ -142,6 +147,56 @@ def consolidate_reference_field(client, by_name, *, dry_run: bool) -> dict:
     }
 
 
+def task_field_specs(catalog) -> list:
+    """Return the shipped task-table field definitions (local definition only).
+
+    Kept as a module-level function so the declared schema can be inspected and
+    regression-tested without touching the online Bitable.
+    """
+    return [
+        (FIELD_STORE, 3, "SingleSelect", options(publish_store_options())),
+        (FIELD_PRESET, 3, "SingleSelect", options(catalog.names)),
+        (FIELD_EXECUTE, 7, "Checkbox", None),
+        (FIELD_QUANTITY, 2, "Number", {"formatter": "0"}),
+        (FIELD_CONTENT_THEME, 3, "SingleSelect", options(THEME_OPTIONS)),
+        (FIELD_CONTENT_REQUIREMENT, 1, "Text", None),
+        (FIELD_TEMPERATURE_BAND, 3, "SingleSelect", options(TEMPERATURE_BAND_OPTIONS)),
+        (FIELD_THERMAL_SENSITIVITY, 3, "SingleSelect", options(THERMAL_SENSITIVITY_OPTIONS)),
+        (FIELD_TEMPERATURE_SCENE, 3, "SingleSelect", options(TEMPERATURE_SCENE_OPTIONS)),
+        # 日常冷热切换线：切换场景 / 体感 / 着装要求。仅在本地 schema 定义中
+        # 声明，是否同步到线上表由使用者显式执行，本任务不触发写入。
+        (FIELD_TRANSITION_SCENE, 3, "SingleSelect", options(TRANSITION_SCENE_OPTIONS)),
+        (FIELD_TRANSITION_SENSITIVITY, 3, "SingleSelect", options(THERMAL_SENSITIVITY_OPTIONS)),
+        (FIELD_DRESS_CODE, 3, "SingleSelect", options(DRESS_CODE_OPTIONS)),
+        (FIELD_LAYER_BASE_REFERENCE, 17, "Attachment", None),
+        (FIELD_LAYER_MID_REFERENCE, 17, "Attachment", None),
+        (FIELD_LAYER_OUTER_REFERENCE, 17, "Attachment", None),
+        ("旅行地点（可选）", 1, "Text", None),
+        ("重拍 Look（可选）", 1, "Text", None),
+        (FIELD_REFERENCE_TYPE, 3, "SingleSelect", options(REFERENCE_TYPE_OPTIONS)),
+        (FIELD_REFERENCE, 17, "Attachment", None),
+        (FIELD_PHOTO_SUMMARY, 1, "Text", None),
+        (FIELD_PHOTO_INPUT, 17, "Attachment", None),
+        (FIELD_PHOTO_ASSET_STATUS, 1, "Text", None),
+        (FIELD_PROGRESS, 3, "SingleSelect", options([
+            "待执行", "生成中", "待审核", "已完成", "需处理",
+            "待排班", "已排期", "提交中", "发布中", "已发布", "发布失败",
+        ])),
+        (FIELD_OUTPUT, 17, "Attachment", None),
+        (FIELD_REVIEW, 3, "SingleSelect", options([
+            "待审核", "无需审核", "通过", "重做P1", "重做P2", "重做P3", "重做P4",
+            "重做P5", "重做成片", "整组重做", "排期发布",
+        ])),
+        (FIELD_CONFIRM_PUBLISH, 7, "Checkbox", None),
+        (FIELD_MUSIC_MODE, 1, "Text", None),
+        (FIELD_REVIEW_MODE, 3, "SingleSelect", options(["自动审核", "人工确认"])),
+        (FIELD_REVIEW_STAGE, 3, "SingleSelect", options(["锚点审核", "组图审核", "成片终审", "图文终审", "素材审核", "已验收", "处理中", "锚点技术检查", "组图技术检查", "成片技术检查", "技术完成"])),
+        (FIELD_RETRY_REVIEW, 7, "Checkbox", None),
+        (FIELD_REVIEW_TOKEN, 1, "Text", None),
+        (FIELD_NOTES, 1, "Text", None),
+    ]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--wiki-token", default="TR10wxEXHiCYIhk8clActVdenpc")
@@ -225,37 +280,7 @@ def main() -> int:
         rename_field(client, old, FIELD_QUANTITY)
         renamed.append({"from": FIELD_QUANTITY_LEGACY, "to": FIELD_QUANTITY})
         by_name[FIELD_QUANTITY] = old
-    specs = [
-        (FIELD_STORE, 3, "SingleSelect", options(publish_store_options())),
-        (FIELD_PRESET, 3, "SingleSelect", options(catalog.names)),
-        (FIELD_EXECUTE, 7, "Checkbox", None),
-        (FIELD_QUANTITY, 2, "Number", {"formatter": "0"}),
-        (FIELD_CONTENT_THEME, 3, "SingleSelect", options(THEME_OPTIONS)),
-        (FIELD_CONTENT_REQUIREMENT, 1, "Text", None),
-        ("旅行地点（可选）", 1, "Text", None),
-        ("重拍 Look（可选）", 1, "Text", None),
-        (FIELD_REFERENCE_TYPE, 3, "SingleSelect", options(REFERENCE_TYPE_OPTIONS)),
-        (FIELD_REFERENCE, 17, "Attachment", None),
-        (FIELD_PHOTO_SUMMARY, 1, "Text", None),
-        (FIELD_PHOTO_INPUT, 17, "Attachment", None),
-        (FIELD_PHOTO_ASSET_STATUS, 1, "Text", None),
-        (FIELD_PROGRESS, 3, "SingleSelect", options([
-            "待执行", "生成中", "待审核", "已完成", "需处理",
-            "待排班", "已排期", "发布中", "已发布", "发布失败",
-        ])),
-        (FIELD_OUTPUT, 17, "Attachment", None),
-        (FIELD_REVIEW, 3, "SingleSelect", options([
-            "待审核", "无需审核", "通过", "重做P1", "重做P2", "重做P3", "重做P4",
-            "重做P5", "重做成片", "整组重做", "排期发布",
-        ])),
-        (FIELD_CONFIRM_PUBLISH, 7, "Checkbox", None),
-        (FIELD_MUSIC_MODE, 1, "Text", None),
-        (FIELD_REVIEW_MODE, 3, "SingleSelect", options(["自动审核", "人工确认"])),
-        (FIELD_REVIEW_STAGE, 3, "SingleSelect", options(["锚点审核", "组图审核", "成片终审", "图文终审", "素材审核", "已验收", "处理中", "锚点技术检查", "组图技术检查", "成片技术检查", "技术完成"])),
-        (FIELD_RETRY_REVIEW, 7, "Checkbox", None),
-        (FIELD_REVIEW_TOKEN, 1, "Text", None),
-        (FIELD_NOTES, 1, "Text", None),
-    ]
+    specs = task_field_specs(catalog)
     for name, field_type, ui_type, property_value in specs:
         if name in by_name:
             field = by_name[name]
