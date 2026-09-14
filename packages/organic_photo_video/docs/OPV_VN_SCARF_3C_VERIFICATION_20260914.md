@@ -307,8 +307,9 @@ raise FeishuWorkflowError("该图文批次已取消；请新增一行重新发�
 - **门禁**：五道全关（`check_gates_3c.py` 报 `NOT ARMED`）——两条预设 `disabled`、
   两条 recipe `draft`、`MP_VN_DEFAULT_V1` `draft`、账号 `paused`、素材集保持原状。
 - **测试行**：三条 `OPV端到端生图测试｜3C-*` 行**有意保留**（A/A2/C）。它们带着**真实付费产物**
-  （共 9 张 look + 3 个批次），且均为惰性——`执行=false`、`进度=已完成`（`_action()` 显式排除
-  `PROGRESS_DONE`）、无「重拍Look」、`确认发布` 非真。**不删除**：删行会连带丢掉可复核的证据链。
+  （共 9 张 look + 3 个批次），且均为惰性——`执行=false`、`确认发布=false`、无「重拍Look」；
+  A2/C 的 `进度=已完成`（`_action()` 显式排除 `PROGRESS_DONE`），A 行因批次已取消停在
+  `进度=需处理`（该行已永久只读）。**不删除**：删行会连带丢掉可复核的证据链。
 - **全表惰性自检**：205 行里 `执行=True` 仅 2 行（`recvuvT5naJqTW`/`recvuU4zgVtJ3s`，
   均为 TH `已完成` 行），无「重拍Look」⇒ 惰性、不烧图；`进度=生成中` **0** 行。
 - **遗留（3C-5）**：真实「重拍一个 Look」按用户裁决**本轮不跑**（会产生真实生图费用），
