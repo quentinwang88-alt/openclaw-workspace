@@ -121,6 +121,83 @@ class PhotoAssetSupplyTest(unittest.TestCase):
             self.assertEqual(second.asset_set_id, first.asset_set_id)
             self.assertEqual(second.asset_set_version, first.asset_set_version)
 
+    def test_agnostic_recipe_takes_category_and_market_from_caller(self):
+        """国家无关配方（V3）不声明 category_key/markets：调用方必须能补上，
+        否则素材集造不出来，流程会在付费生成之后才失败（生产回归：
+        recvv9wN5IeRLg 四套 look 已生成、整组质检通过，却卡在
+        『asset set category_key is required』）。"""
+        class Repo:
+            def __init__(self): self.items = []
+            def list_asset_sets(self, **kwargs): return list(self.items)
+            def get_asset_set(self, identity):
+                return next((x for x in self.items if x.asset_set_id == identity), None)
+            def upsert_asset_set(self, item): self.items.append(item)
+
+        recipe = next(item for item in load_content_recipes()
+                      if item.recipe_id == "PHOTO_MATCHING_CHOICE_V3")
+        spec = recipe.recipe_spec_json
+        self.assertFalse(spec.get("category_key"))
+        self.assertFalse(spec.get("markets"))
+        with tempfile.TemporaryDirectory() as tmp:
+            service = PhotoAssetSupplyService(Client(), root=Path(tmp))
+            service.stage(
+                record_id="rec-vn", required_roles=["look_a", "look_b", "look_c", "look_d"],
+                attachments=[{"file_token": str(i), "name": f"{i}.png"} for i in range(4)],
+            )
+            repo = Repo()
+            saved = service.qualify(
+                record_id="rec-vn", recipe=recipe, repository=repo,
+                category_key="scarf", market="VN",
+            )
+            self.assertEqual(saved.category_key, "scarf")
+            self.assertEqual(saved.market, "VN")
+            self.assertEqual(saved.asset_set_key, "VN_SCARF_CHOICE")
+            self.assertEqual(saved.status, "enabled")
+            self.assertTrue(saved.asset_set_id.startswith("ASSET_VN_SCARF_UPLOAD_"))
+
+    def test_agnostic_recipe_without_category_anywhere_fails_loudly(self):
+        class Repo:
+            def __init__(self): self.items = []
+            def list_asset_sets(self, **kwargs): return list(self.items)
+            def get_asset_set(self, identity): return None
+            def upsert_asset_set(self, item): self.items.append(item)
+
+        recipe = next(item for item in load_content_recipes()
+                      if item.recipe_id == "PHOTO_MATCHING_CHOICE_V3")
+        with tempfile.TemporaryDirectory() as tmp:
+            service = PhotoAssetSupplyService(Client(), root=Path(tmp))
+            service.stage(
+                record_id="rec-vn-2", required_roles=["look_a", "look_b", "look_c", "look_d"],
+                attachments=[{"file_token": str(i), "name": f"{i}.png"} for i in range(4)],
+            )
+            with self.assertRaisesRegex(PhotoAssetSupplyError, "素材集缺少类别"):
+                service.qualify(record_id="rec-vn-2", recipe=recipe, repository=Repo())
+
+    def test_legacy_recipe_ignores_empty_caller_binding(self):
+        """旧配方（TH_V3 声明了 category_key/markets）仍以配方为准：
+        调用方传空值时不得把类别抹成空串。"""
+        class Repo:
+            def __init__(self): self.items = []
+            def list_asset_sets(self, **kwargs): return list(self.items)
+            def get_asset_set(self, identity):
+                return next((x for x in self.items if x.asset_set_id == identity), None)
+            def upsert_asset_set(self, item): self.items.append(item)
+
+        recipe = next(item for item in load_content_recipes()
+                      if item.recipe_id == "PHOTO_TH_PICK_YOUR_LOOK_V3")
+        with tempfile.TemporaryDirectory() as tmp:
+            service = PhotoAssetSupplyService(Client(), root=Path(tmp))
+            service.stage(
+                record_id="rec-th", required_roles=["look_a", "look_b", "look_c", "look_d"],
+                attachments=[{"file_token": str(i), "name": f"{i}.png"} for i in range(4)],
+            )
+            saved = service.qualify(
+                record_id="rec-th", recipe=recipe, repository=Repo(),
+                category_key="", market="",
+            )
+            self.assertEqual(saved.category_key, "womenswear")
+            self.assertEqual(saved.market, "TH")
+
     def test_existing_outfit_sources_are_staged_without_copy_or_model_call(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

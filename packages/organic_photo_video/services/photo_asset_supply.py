@@ -225,8 +225,16 @@ class PhotoAssetSupplyService:
                 source: str = "feishu_human_confirmed_upload",
                 profile_binding: Mapping[str, Any] = None,
                 approval_attributes: Mapping[str, Mapping[str, Any]] = None,
-                approval_evidence: Mapping[str, Any] = None) -> AssetSet:
-        """Promote the exact staged bytes after the operator confirms the theme."""
+                approval_evidence: Mapping[str, Any] = None,
+                category_key: str = "", market: str = "") -> AssetSet:
+        """Promote the exact staged bytes after the operator confirms the theme.
+
+        ``category_key`` / ``market`` are caller-supplied overrides: 国家无关
+        配方（V3）按设计不再在 recipe_spec 里声明这两项（见
+        VN_SCARF_CROSS_MARKET_IMPLEMENTATION_SPEC §通用 Recipe 删除项：市场由
+        Market Pack 拥有、类别由预设/行级声明提供）。未传时回落配方声明，
+        既有 TH 线路逐字不变。
+        """
         staged = self.load_staged(record_id)
         existing = None
         if staged.get("status") == "qualified" and staged.get("asset_set_id"):
@@ -250,8 +258,15 @@ class PhotoAssetSupplyService:
         key = str(binding.get("asset_set_key") or (profile.get("asset_set_keys") or [""])[0])
         if not key:
             raise PhotoAssetSupplyError("Recipe/profile binding 缺少 asset_set_key")
-        market = str((spec.get("markets") or [""])[0])
-        category = str(spec.get("category_key") or "")
+        # 国家无关配方（V3）不声明 markets/category_key：调用方传入优先，未传
+        # 时回落配方声明。两者皆缺时报明确错误，而不是造出 ASSET__UPLOAD_ 这种
+        # 无类别素材集后在下游炸出一句难以归因的 AssetSetError。
+        market = str(market or (spec.get("markets") or [""])[0])
+        category = str(category_key or spec.get("category_key") or "")
+        if not category:
+            raise PhotoAssetSupplyError(
+                "素材集缺少类别：配方未声明 category_key，调用方也未提供"
+            )
         current = repository.list_asset_sets(category_key=category, market=market, status="enabled")
         version = max((item.asset_set_version for item in current if item.asset_set_key == key), default=0) + 1
         assets = []

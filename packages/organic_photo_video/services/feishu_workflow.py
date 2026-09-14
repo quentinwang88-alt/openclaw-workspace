@@ -1162,6 +1162,24 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
             if any(not spec.account_id for spec in specs):
                 raise FeishuWorkflowError("该图文预设尚未绑定 OPV 生产账号")
             preset = self.catalog.metadata(preset_name)
+
+            def _agnostic_asset_binding(recipe_obj: Any) -> dict[str, str]:
+                """国家无关配方（V3）的素材集类别与市场来源。
+
+                《VN_SCARF_CROSS_MARKET_IMPLEMENTATION_SPEC》§通用 Recipe 删除项
+                明确要求 V3 配方不再固定 ``markets`` / ``category_key``：市场由
+                Market Pack 拥有、类别由预设（行级声明）提供。因此配方未声明这两项
+                时，由本函数把预设类别与该篇市场传给素材集入库；声明齐全的旧配方
+                返回空 dict，调用参数与行为逐字不变。
+                """
+                spec_json = dict(getattr(recipe_obj, "recipe_spec_json", {}) or {})
+                if spec_json.get("category_key") and spec_json.get("markets"):
+                    return {}
+                return {
+                    "category_key": str(preset.get("category_key") or ""),
+                    "market": str(specs[0].market or ""),
+                }
+
             product_id = text_value(record.fields.get(FIELD_PRODUCT))
             unified_attachments = list(record.fields.get(FIELD_REFERENCE) or [])
             legacy_complete = self._complete_look_attachments(record.fields)
@@ -1321,6 +1339,25 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
             travel_copy_templates = None
             travel_topic: dict[str, Any] = {}
             planning_flow = get_planning_flow(recipe_for_input.recipe_id) if recipe_for_input else ""
+            # 主题是否必填（2026-09-14）：声明了 ``locale_copy_packs`` 的国家无关配方
+            # 由 Locale Pack 拥有发布文案与家族文案，主题只影响家族排序；而方案 §5.4
+            # 的运营输入只有「参考图类型 / 参考图 / 产品编码」三项，没有「图文主题」。
+            # 因此这类**非主题驱动**流程不再强制主题；v1 配方（靠 theme 携带内联泰语
+            # 文案）与旅行 / 分层（温度分层、冷热切换）流程保持原样拦截。
+            theme_optional = bool(
+                locale_pack is not None
+                and not layering_flow
+                and not thermal_transition_flow
+                and planning_flow != "travel_two_step"
+            )
+            theme_supplied = theme is not None
+            # ``effective_theme`` 才是下游真正使用的主题：运营未选主题且本流程允许时，
+            # 给一个中性主题（生成提示需要 label_zh，发布文案不依赖它），theme_key 留空
+            # 表示「运营未选」。这样 ``theme`` 本身仍为 None，用于判定"是否用主题文案
+            # 覆盖发布文案"（见下方 ``if theme_supplied``）。
+            effective_theme = theme
+            if theme is None and theme_optional:
+                effective_theme = {**dict(variation_theme), "theme_key": ""}
             layering_copy_templates = None
             if layering_flow:
                 recipe_spec_input = recipe_for_input.recipe_spec_json or {}
@@ -1361,7 +1398,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                         fields=record.fields, recipe_spec=recipe_spec_input,
                     )
             if reference_mode == REFERENCE_MODE_STYLE and recipe_for_input:
-                if theme is None:
+                if effective_theme is None:
                     raise FeishuWorkflowError("风格参考模式需要选择图文主题")
                 from services.photo_asset_supply import PhotoAssetSupplyService
                 from services.photo_reference_vision import PhotoReferenceVisionService
@@ -1415,7 +1452,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 else:
                     style_profile = reference_vision.analyze(
                         record_id=record.record_id, paths=style_reference_paths,
-                        theme=theme or variation_theme,
+                        theme=effective_theme or variation_theme,
                         category_key=str((recipe_for_input.recipe_spec_json or {}).get("category_key") or preset.get("category_key") or ""),
                         content_requirement=content_requirement, count=quantity,
                         product_context=product_context,
@@ -1426,7 +1463,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
             content_plan = None
             if (recipe_for_input
                     and recipe_has_planning_policy(recipe_for_input.recipe_id)
-                    and theme is not None
+                    and effective_theme is not None
                     and reference_mode in {
                         REFERENCE_MODE_COMPLETE_LOOK, REFERENCE_MODE_PRODUCT,
                         REFERENCE_MODE_STYLE,
@@ -1434,7 +1471,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 input_contract = {
                     "recipe_id": recipe_for_input.recipe_id,
                     "recipe_version": recipe_for_input.recipe_version,
-                    "theme_key": theme["theme_key"],
+                    "theme_key": str(effective_theme.get("theme_key") or ""),
                     "reference_mode": reference_mode,
                     "quantity": quantity,
                     "product_id": product_id,
@@ -1456,7 +1493,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                         create=lambda: plan_th_choice_batch(
                             record_id=record.record_id,
                             recipe_id=recipe_for_input.recipe_id,
-                            theme=theme, reference_mode=reference_mode, count=quantity,
+                            theme=effective_theme, reference_mode=reference_mode, count=quantity,
                             style_profile=style_profile,
                             travel_contract=travel_contract or None,
                             copy_templates=(
@@ -1467,6 +1504,10 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                             required_roles=roles,
                             recipe_spec=recipe_for_input.recipe_spec_json or {},
                             variables=temperature_variables,
+                            # Locale Pack 必须传下去：``_family_plan`` / ``_vision_plan``
+                            # 都靠它取发布文案，漏传会回落到已被剥离的内联泰语字段
+                            # （得到空串），再由主题文案兜成泰语（2026-09-14）。
+                            locale_pack=locale_pack,
                         ),
                     )
 
@@ -1591,11 +1632,12 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                         profile_binding=profile_binding,
                         approval_attributes=approval_attributes,
                         approval_evidence=approval_evidence,
+                        **_agnostic_asset_binding(recipe),
                     )
                     pinned_asset_set_ids.append(saved.asset_set_id)
             if (reference_mode == REFERENCE_MODE_STYLE and recipe_for_input
                     and asset_status not in {"已确认，正在生成", "已匹配可用素材"}):
-                if theme is None:
+                if effective_theme is None:
                     raise FeishuWorkflowError("风格参考模式需要选择图文主题")
                 recipe = recipe_for_input
                 from services.photo_asset_supply import PhotoAssetSupplyService
@@ -1654,7 +1696,8 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
 
                     def _prepare_style_sources():
                         return supply_service.prepare(
-                            record_id=item_id, reference_paths=paths, theme=theme,
+                            record_id=item_id, reference_paths=paths,
+                            theme=effective_theme or variation_theme,
                             account=account, persona=persona, variation=variation,
                             progress=_asset_progress, product=style_product,
                             locale=str(getattr(specs[0], "language", "") or "th-TH"),
@@ -1690,7 +1733,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     prepared_source_groups.append(list(prepared["sources"]))
                     asset_supply.stage_existing(
                         record_id=item_id, sources=prepared["sources"], required_roles=roles,
-                        metadata={"theme_key": theme["theme_key"],
+                        metadata={"theme_key": str((effective_theme or {}).get("theme_key") or ""),
                                   "reference_mode": reference_mode,
                                   "product_id": str(style_product.get("product_id") or ""),
                                   "product_reference_pack_id": str(
@@ -1706,6 +1749,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                         reviewer="system_style_reference_generation", reviewer_type="technical",
                         source="feishu_style_reference_generated",
                         profile_binding=dict(variation.get("profile_binding") or {}),
+                        **_agnostic_asset_binding(recipe),
                         approval_attributes=(
                             layering_approval_attributes(style_approval_evidence)
                             if style_approval_evidence else None
@@ -1789,6 +1833,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                         record_id=item_id, recipe=recipe, repository=self.repository,
                         reviewer="system_product_outfit_generation", reviewer_type="technical",
                         source="feishu_product_outfit_generated",
+                        **_agnostic_asset_binding(recipe),
                     )
                     pinned_asset_set_ids.append(saved.asset_set_id)
             if len(prepared_source_groups) > 1:
@@ -1846,7 +1891,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                         frozen_manifest = request["asset_snapshot"].get("manifest_json") or {}
                         if isinstance(frozen_manifest, str):
                             frozen_manifest = json.loads(frozen_manifest)
-                        if theme:
+                        if theme_supplied:
                             request["copy"] = build_theme_copy(
                                 theme, frozen_manifest.get("assets") or [], variations[index]
                             )
