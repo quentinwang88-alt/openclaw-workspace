@@ -224,6 +224,8 @@ cd packages/organic_photo_video
 PYTHONPATH=.:tests /usr/bin/python3 tmp/real_gen_e2e_3rows/probe_additive_locale_c1.py
 PYTHONPATH=.:tests /usr/bin/python3 tmp/real_gen_e2e_3rows/probe_copy_only_repair_c2.py
 PYTHONPATH=.:tests /usr/bin/python3 tmp/real_gen_e2e_3rows/probe_copy_only_repair_e2e_c2.py
+PYTHONPATH=.:tests /usr/bin/python3 tmp/real_gen_e2e_3rows/preflight_a_row_hash.py   # §7.4
+PYTHONPATH=.:tests /usr/bin/python3 tmp/real_gen_e2e_3rows/prove_a_row_zero_gen.py  # §7.4
 ```
 
 **C1（真实行 `recvvcgz2Kk41n`，PHOTO_MATCHING_CHOICE_V3，契约缺 `publish_locale`、文案已是越南语）**
@@ -244,14 +246,71 @@ PYTHONPATH=.:tests /usr/bin/python3 tmp/real_gen_e2e_3rows/probe_copy_only_repai
 第 4 趟的价值：既覆盖了 `allow_copy_only_rebaseline` 全路径，又证明**新代码路径复现了上一轮手工脚本
 的结果**（同一个 hash），而不是另生一套口径。
 
+### 7.4 方案 §五.5：旅行 A 行的四张已付费图 → 越南语成片（已达成，附证据）
+
+```bash
+PYTHONPATH=.:tests /usr/bin/python3 tmp/real_gen_e2e_3rows/preflight_a_row_hash.py
+PYTHONPATH=.:tests /usr/bin/python3 tmp/real_gen_e2e_3rows/prove_a_row_zero_gen.py
+```
+
+**结论：该目标已由 A2 行达成；A 行本身按代码口径只读，不应重跑。** 依据如下。
+
+1. **四张已付费 look 完好。** `style_reference_supply/recvvcgvz0LsIh_item_1/` 的
+   `P1–P4_v1.png`（mtime 20:30–20:34）实测 sha256 与清单 `sources[]` **逐一相同**：
+   `5c2609c0…` / `8e05a92a…` / `ea363794…` / `d15115bb…`。
+
+2. **它们已经被“复用”成了越南语成片（零付费生成）。** A2 行 `recvvcD2x9br89`
+   （同一预设 `图文｜VN｜围巾旅行`、同一主题 `凉爽旅行`）：
+   · 进度 = **已完成**，`预览/成片` = **5 个附件**，全部 `1080×1920`；
+   · 任务 `opv_task_20260914_6e72edc87635` = `photo_packaging`，批次
+     `opv_batch_cccb19dcb6cbda76626ccde979b331cd` = `waiting`（22:09 冻结）；
+   · 四个镜头 `generation_provider='asset-reuse'` + `generation_model='file-copy-v1'`，
+     `image_sha256` = 上面那四个值 ⇒ **纯文件复用，无一次付费生成**；
+   · 该批次的四个 look 绑定的是**同一个** `asset_set_id`
+     `ASSET_VN_SCARF_UPLOAD_cf7e3d7614e0392b`(v4)，即 A 行那四张图；
+   · 冻结文案为**纯越南语**（`title=Gợi ý phối đồ du lịch Thành phố se lạnh`、`caption`、
+     `hashtags=['#phoidodulich','#khanquang','#OOTD']`、`slide_texts`）：**泰文字符 0**、
+     无 `{{ }}` 占位符、`locale/market = vi-VN/VN`。
+
+3. **A 行不能重跑，这是代码明文规定的“出路”，不是缺省行为。**
+   `services/feishu_workflow.py:1321`：
+
+   ```python
+   if batch and batch.batch_status == "cancelled":
+       raise FeishuWorkflowError("该图文批次已取消；请新增一行重新发起，历史记录保持只读")
+   ```
+
+   A 行的批次 `opv_batch_2e8ac79d473ede2ad833dc47bbd57fcb` 正是 `cancelled`
+   （21:47 作废；其冻结文案还是修复前的泰语 `ไอเดียแต่งตัวเที่ยวThành phố se lạnh`）。
+   方案 §五.5 明写「**不删除批次强行回到首跑**」⇒ 不重置也不删除该批次。
+
+4. **在稳定版本（HEAD）上，A 行素材段实测仍返回 `generated_this_run: 0`。**
+   `prove_a_row_zero_gen.py` 把 A 行素材段原样拷进临时数据根，用 HEAD 的真实
+   `PhotoStyleReferenceSupplyService.prepare()` 真跑（哨兵生成器被调用即抛）：
+
+   ```
+   generated_this_run = 0    生成器调用次数 = 0    generated_count = 4
+   look_a/b/c/d sha256 与清单一致 = True（全部）
+   临时副本内素材字节与生产一致 = True
+   生产侧数据在本次证明前后字节不变 = True        RESULT: PASS
+   ```
+
+   即：`prior.input_hash == 现算 input_hash`（同为 `4f6af55e45d5604e…`）、清单 `complete`
+   且四角色齐备 ⇒ 走 `prepare` 的 early-return 分支。这条既是 §五.5 的前置证明，也是
+   **修复 C 在稳定版本上的真实数据验收**（"旧计划语言升级和文案修正不重新调用图片生成器"）。
+
+5. **不新建行**：`style_reference_supply` 以**记录号**为目录键，新建行的素材段没有这份缓存，
+   会真调图片生成器 = 付费；且与 A2 的成片（同文案、同四张图）重复。故按方案 §五.5 的
+   「先检查修订路径」执行，不新造一行。A 行保持**永久只读留档**（不删历史批次/任务/图片）。
+
 ---
 
 ## 8. 未做 / 未验收（如实列出，不用模拟测试代替）
 
 | 项 | 状态 | 说明 |
 | --- | --- | --- |
-| 方案 §五.5：复用 A 行（`recvvcgvz0LsIh`）现有四张图片完成越南语成片 | **未做** | 属生产写操作（飞书进度字段 + RDS 任务/批次 + 回写成片），且需在有并发任务时确认窗口。当前该行：任务 `opv_task_20260914_ff90abf5` = `draft`、**无批次**、素材段 `complete` 且 `input_hash` 与现役计划一致 ⇒ 重跑应 **0 张新图**。**待授权** |
-| 方案 §五.6：选一条围巾四选一三篇任务验证恢复 | **未做** | 同上（付费/生产写）。`recvvcgz2Kk41n` 目前任务已 `photo_packaging` |
+| 方案 §五.5：复用 A 行（`recvvcgvz0LsIh`）现有四张图片完成越南语成片 | **已达成** | 见 §7.4：四张图完好，已由 A2 行 `recvvcD2x9br89` 以 `asset-reuse/file-copy-v1` **零付费**复用成 5 页越南语成片（进度=已完成）；A 行因批次 `cancelled` 被 `feishu_workflow.py:1321` 判为只读，按方案**不删批次强行首跑** |
+| 方案 §五.6：选一条围巾四选一三篇任务验证恢复 | **未做（受阻）** | 该验证需要在**指定商品**下真实重拍 = 付费调用，且需真实同款商品资料；方案 §五.6 本身写明「未备齐时不阻塞已验证的自由搭配能力，但不能宣称商品模式已验收」。**待授权 + 待商品资料** |
 | 商品模式（指定围巾）真实验收 | **未验收** | 本轮 B 的验收全部是流程/视觉层断言；真实同款商品资料未备齐，**不宣称商品模式已验收** |
 | 真实发布到 VNPS01 | **未做** | 按方案 §五.7，不因修复完成自动发布；沿用既有确认发布授权与渠道 |
 | A3 的 TH 行恢复 | **不做** | 缺可靠旧快照，保持 `disabled` 并记录原因（§4.3） |
@@ -282,7 +341,8 @@ git diff --check
 
 ## 10. 下一步（需明确授权后才动生产）
 
-1. **§五.5**：`recvvcgvz0LsIh` 走一次续跑以复用四张已付费图完成越南语成片（预期 `generated_this_run == 0`），
-   若该行已有冻结批次则先走修订路径、不删批次。
-2. **§五.6**：一条围巾四选一三篇任务的恢复验证。
-3. A 行与四选一都通过后，再按既有授权决定是否确认发布到 `VNPS01`。
+1. ~~**§五.5**：`recvvcgvz0LsIh` 走一次续跑以复用四张已付费图完成越南语成片~~ ⇒ **已达成，见 §7.4**：
+   目标由 A2 行以零付费复用完成；A 行按代码口径保持只读（批次已取消），**不删批次强行首跑**。
+2. **§五.6**（需授权 + 需商品资料）：一条围巾四选一三篇任务的恢复验证。需要真实同款商品资料，
+   且真实重拍会产生生图费用；未备齐前保持「未验收」，不宣称商品模式已验收。
+3. A 行与四选一都通过后，再按既有授权决定是否确认发布到 `VNPS01`（§五.7：不自动发布）。
