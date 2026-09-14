@@ -16,7 +16,9 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
-from services.feishu_workflow import FeishuTaskWorkflow, FIELD_PHOTO_SUMMARY, FIELD_STORE
+from services.feishu_workflow import (
+    FeishuTaskWorkflow, FIELD_FAILURE_REASON, FIELD_PHOTO_SUMMARY, FIELD_STORE,
+)
 from services.image_generator import GenerationOutcome
 from services.photo_request_factory import fingerprint
 from test_photo_planner import PlannerRepo
@@ -450,6 +452,15 @@ class PhotoBatchTest(unittest.TestCase):
         report = self.scan()
         self.assertTrue(report["errors"])
         self.assertIn("必须选择店铺", report["errors"][0]["error"])
+        # 补上店铺重试成功后，残留的失败原因必须自愈，否则已发布的行会长期挂着
+        # 这条文案（线上曾出现 7 行「已发布」仍显示「确认发布前必须选择店铺」）。
+        self.assertIn("必须选择店铺", self.client.fields[FIELD_FAILURE_REASON])
+        self.client.fields[FIELD_STORE] = "THFZ01"
+        self.client.fields["确认发布"] = True
+        retried = self.scan()
+        self.assertEqual(retried["errors"], [])
+        self.assertEqual(self.client.fields["进度"], "待排班")
+        self.assertIsNone(self.client.fields.get(FIELD_FAILURE_REASON))
 
     def test_committed_review_projection_replays_without_new_review(self):
         self.scan()
@@ -481,7 +492,20 @@ class PhotoBatchTest(unittest.TestCase):
         report = self.scan()
         self.assertTrue(report["errors"])
         self.assertIn("不允许自由覆盖文案", report["errors"][0]["error"])
+        # 有业务语义的拒绝必须逐字呈现，不能被兜底处理器加上系统错误前缀。
+        self.assertNotIn("系统内部错误", self.client.fields[FIELD_FAILURE_REASON])
         self.assertIsNone(self.repo.batch)
+
+    def test_unexpected_internal_error_is_labelled_with_its_type(self):
+        # 真实案例 recvuMrl4BEn0U：兜底处理器把 KeyError 的裸 repr 原样写进
+        # 「图文生成失败的原因」，运营整列只看到 'source_record_id'，
+        # 无法判断是业务拦截、缺填字段还是系统故障。未预期异常必须自带类型标注。
+        with patch.object(FeishuTaskWorkflow, "_generate",
+                          side_effect=KeyError("source_record_id")):
+            report = self.scan()
+        self.assertTrue(report["errors"])
+        self.assertEqual(self.client.fields[FIELD_FAILURE_REASON],
+                         "系统内部错误（KeyError）：'source_record_id'")
 
     def test_batch_lease_loser_does_not_consume_execute(self):
         self.scan()

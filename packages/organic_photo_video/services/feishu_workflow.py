@@ -124,6 +124,13 @@ REVIEW_NOT_REQUIRED = "无需审核"
 REVIEW_REDO_ALL = "整组重做"
 REVIEW_SCHEDULE = "排期发布"
 
+# 工作台兜底异常处理器把这类异常显式标注成「系统内部错误」。它们几乎都代表代码缺陷
+# 而不是业务拒绝，且 str(exc) 常常只是一个裸 repr —— 例如 KeyError 只会给出
+# 'source_record_id'，运营看到这一行无法判断是业务拦截、缺填字段还是系统故障
+# （真实案例：recvuMrl4BEn0U 的失败原因整列就是这个字符串）。
+# 有业务语义的拒绝请抛带人话消息的领域异常（如 FeishuWorkflowError），不要落进这里。
+OPAQUE_INTERNAL_ERRORS = (KeyError, TypeError, AttributeError, IndexError, AssertionError)
+
 
 def parse_retake_roles(raw: Any) -> list[str]:
     """解析“重拍 Look（可选）”列：C / C,D / look_c 均可，中英逗号均可；非法 token 忽略。"""
@@ -835,6 +842,10 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 report["errors"].append({"record_id": record.record_id, "error": str(exc), "projection_pending": True})
             except Exception as exc:  # noqa: BLE001 - isolate workbench rows
                 message = str(exc).strip()[:900] or exc.__class__.__name__
+                if isinstance(exc, OPAQUE_INTERNAL_ERRORS):
+                    # 裸 KeyError/TypeError 的 str() 只是一个字段名，运营无从下手；
+                    # 显式标注为系统内部错误，避免被误读成业务拒绝。业务异常消息逐字不变。
+                    message = f"系统内部错误（{exc.__class__.__name__}）：{message}"
                 failure_fields = {
                     FIELD_EXECUTE: False,
                     FIELD_PROGRESS: PROGRESS_ACTION,
@@ -3005,6 +3016,10 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
         self._write_fields(record.record_id, {
             FIELD_PROGRESS: progress,
             FIELD_CONFIRM_PUBLISH: False,
+            # 本次排期成功即代表上一次失败（本函数内的「必须选择店铺」「尚未通过终审」等）
+            # 已被解决；不清掉会让已发布的行长期挂着失败原因（曾出现 7 行已发布却显示
+            # 「原生图文确认发布前必须选择店铺」）。
+            FIELD_FAILURE_REASON: None,
             FIELD_MUSIC_MODE: (
                 "TikTok 平台自动推荐" if photo_only and enqueue_main
                 else "发布窗口自动选曲"
