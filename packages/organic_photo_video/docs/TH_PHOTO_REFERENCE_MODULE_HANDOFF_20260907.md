@@ -195,17 +195,53 @@ OPV_PHOTO_VISION_API_KEY
 
 服务只从 `.env.local` 加载这三个白名单变量，并且不会覆盖进程已经设置的同名环境变量。
 
-### 8.1 生图通道（2026-09-07 起默认 CreatOK，codex 兜底）
+### 8.1 生图通道（2026-09-13 起默认 1route → codex → CreatOK 三线链）
 
-成片/供给图生成通道改为 `services/image_generator.py::build_default_photo_generator()`：
+成片/供给图生成通道入口不变，仍是 `services/image_generator.py::build_default_photo_generator()`；
+区别是它现在返回**有序通道链**，而不是写死的双通道兜底。
 
-- **主通道**：`CreatokImageGenerator` —— 通过 `creatok` CLI（`image generate`）调 CreatOK，默认 `gpt-image-2-official` / `1K` / `quality=low` / `9:16`；CLI 只回 envelope 和 `result.json`，图片由适配器从返回 URL 下载。鉴权依赖 `CREATOK_API_KEY`（工作区根 `.env` 已配置，入口脚本 `load_repo_env()` 会带上）。
-- **兜底通道**：`OpenAIImageGenerator`（`skills/openai-image`，codex OAuth）。主通道任何失败（缺 key、CLI 报错、超时、下载失败、9:16 QC 不过）自动落到兜底，`outcome.raw.channel=fallback` + `primary_error` 可追溯。
-- 计费注意：gpt-image-2-official 按 quality 分档，1K 下 low=1 / medium=2 / high=8 credits/张，参考图每 2 张加 1 credit。批量一篇约 24-30 张（low 档约 24-30 credits/篇）。
-- 开关（env，均有默认）：
-  - `OPV_PHOTO_CHANNEL`：`creatok_fallback`（默认）｜`creatok`（无兜底）｜`openai-image`（回旧通道）；
-  - `OPV_CREATOK_IMAGE_MODEL` / `_RESOLUTION` / `_QUALITY`（置空表示不传 quality）/ `_ASPECT_RATIO` / `_BIN` / `_POLL_TIMEOUT`。
-- 2026-09-07 已实测：CLI envelope、1K 9:16 输出 1088x1920（过 `check_portrait_916`）、适配器端到端冒烟、13 项单测；全量 631/631。
+优先级（`OPV_PHOTO_CHANNEL` 一行可改）：
+
+| 顺位 | 通道 | 实现 | 鉴权 | 默认模型 |
+| --- | --- | --- | --- | --- |
+| 1 | 1route | `OneRouteImageGenerator`（OpenAI 兼容 HTTP） | `OPV_ONEROUTE_API_KEY` | `gpt-image-2.5-sunburst`（备选 `gpt-image-2`） |
+| 2 | codex | `OpenAIImageGenerator`（`skills/openai-image`） | codex OAuth | `gpt-image-2.5-sunburst`（`OPENAI_CODEX_IMAGE_MODEL`） |
+| 3 | CreatOK | `CreatokImageGenerator`（`creatok` CLI） | `CREATOK_API_KEY` | `gpt-image-2-official` |
+
+切换规则（`ChannelChainShotGenerator`）：
+
+1. **顺序即优先级** —— 按声明顺序依次尝试，没有隐藏排序；第一个通过的胜出。
+2. **通道内模型阶梯** —— 1route 先试主模型，失败后仅对该次尝试降级到备选模型（`gpt-image-2`）；密钥/基址类错误不空跑第二模型。
+3. **失败分类** —— `config`（缺 key、目录不可用）与 `auth`（401/403）视为**致命**，该通道本轮直接跳过，不再为每张图重复付超时；`rate_limit` / `timeout` / `server` / `quality` / `content` 视为**瞬时**，直接落下一顺位通道。
+4. **熔断** —— 同一通道连续失败 `OPV_PHOTO_CHANNEL_BREAKER_THRESHOLD`（默认 3）次即短路 `OPV_PHOTO_CHANNEL_BREAKER_COOLDOWN`（默认 300 秒）。一篇 24–30 张的批里，某通道挂掉只付一次超时，不是每张一次。熔断状态按通道（不是按槽位）进程内共享，跨任务重建依然生效；`reset_channel_health()` / `channel_health_report()` 供测试与诊断调用。
+5. **组内粘性** —— 某个通道一旦服务了某任务的首张图，该任务后续镜头**先试同一通道**，保证一组图只用一个模型。中途换通道正是 2026-09-11 那次需要人工重拍的四张组内混模型色差的来源。被钉住的通道失败时立即解钉，下一张重新走完整优先级。`OPV_PHOTO_CHANNEL_STICKY=0` 可退回严格优先级；未声明 `channel_name` 的自定义通道自动不参与粘性。
+6. **可追溯** —— 胜出的 `GenerationOutcome.raw` 带 `channel` / `channel_chain` / `channel_index` / `channel_preferred` / `attempts`；全链失败时 `error_kind="exhausted"`，`error` 里按顺序列出每一跳的原因。旧字段 `raw.channel=primary|fallback`、`raw.primary_error` 在双通道配置下保持兼容。
+
+开关（env，均有默认）：
+
+- `OPV_PHOTO_CHANNEL`：链式表达式 `1route>codex>creatok`（默认）｜`1route,codex`｜任意顺序任意长度；单通道 `1route` / `codex` / `creatok` / `openai-image`；历史别名原义保留 `codex_fallback`（codex→creatok）、`creatok_fallback`（creatok→codex）。未知 token 被忽略并降级到剩余链，不炸生产。
+- `OPV_ONEROUTE_API_KEY`（或 `ONEROUTE_API_KEY`）｜`OPV_ONEROUTE_API_BASE`（默认 `https://image-api.1route.dev`）｜`OPV_ONEROUTE_IMAGE_MODEL`｜`OPV_ONEROUTE_IMAGE_FALLBACK_MODEL`｜`OPV_ONEROUTE_TIMEOUT`（默认 300s）｜`OPV_ONEROUTE_EDIT_MODE`（`multipart` 默认，走 `/v1/images/edits`；`json` 走 `/v1/images/generations` 的 data-URL 参考图）｜`OPV_ONEROUTE_JSON_REFERENCE_FIELD`（默认 `image`）。
+- `OPV_PHOTO_CHANNEL_BREAKER_THRESHOLD` / `_BREAKER_COOLDOWN`（置 0 关闭熔断）。
+- `OPV_PHOTO_CHANNEL_STICKY`（默认 1）：组内粘住首个成功通道；置 0 退回严格优先级。
+- `OPV_CREATOK_IMAGE_MODEL` / `_RESOLUTION` / `_QUALITY`（置空表示不传 quality）/ `_ASPECT_RATIO` / `_BIN` / `_POLL_TIMEOUT`。
+
+1route 输出同样过 `check_portrait_916`（≥896px 宽、比例 9:16±2%）；Sunburst 模型的主参考图沿用
+`prepare_sunburst_primary_reference` 归一化到 1080×1920 画布（与 codex 路径同一条逻辑）。
+
+上线前必须实跑探活（会真实计费，但只出 1–2 张）：
+
+```bash
+cd packages/organic_photo_video
+/usr/bin/python3 scripts/probe_oneroute_channel.py            # A 文本生图 + B 参考图改图
+/usr/bin/python3 scripts/probe_oneroute_channel.py --edit-mode json   # multipart 被拒时试 json
+```
+
+探活输出会打印实际响应结构与失败分类；`/v1/images/edits` 返回 404 说明该中转站只吃
+`json` 形态，改 `OPV_ONEROUTE_EDIT_MODE` 即可，不用改代码。
+
+- 历史记录：2026-09-07 默认 `creatok_fallback`（CreatOK 主、codex 兜底）；2026-09-11 切 `codex_fallback`；
+  2026-09-13 起默认三线链，`run_feishu_scanner_locked.sh` 已同步为 `1route>codex>creatok`。
+- 计费注意：gpt-image-2-official 按 quality 分档，1K 下 low=1 / medium=2 / high=8 credits/张，参考图每 2 张加 1 credit。1route 为独立计费通道，注意别在三线都失败时反复重跑同一批。
 
 ## 9. 规划与生成规则
 
