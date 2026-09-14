@@ -287,6 +287,53 @@ self._write_fields(record.record_id, {
 > W2 #2 是**语义设计**（不是配置开关），建议与 W1 **分开排期**，
 > 否则会把「参考图生效」这个可独立验收的目标拖进一个大改动里。
 
+#### 6.2.1 二轮只读复核（2026-09-14 晚）：上表 #1 是错的，#2 也不在搭配线上
+
+把代码逐处读到行号后，上表的落点判断需要更正 —— **请以本节为准**：
+
+| # | 已核事实（带行号） | 结论 |
+|---|---|---|
+| 1 | `photo_request_factory.py:203`：`if product_mode != "NO_PRODUCT": raise PhotoRequestError("automatic photo requests currently require NO_PRODUCT")` | **不能**把配方/预设改成 `PRODUCT` 或 `SOFT_PRODUCT`，改了会直接抛错。放行商品的正解是方案 §5.4 B（V1 推荐）：`参考图类型=风格参考` + `商品编码` ⇒ `reference_mode=STYLE` + `product_snapshot`（`photo_reference_context.py:143-153`），`product_mode` 保持 `NO_PRODUCT` |
+| 2 | 商品身份**已经**能进生成请求：`photo_style_reference_supply.py:555` 写 `reference_roles["product_identity_images"]`；`feishu_workflow.py:1880-1888` 把 `product_id`/`product_snapshot` 冻结进 request 并重算指纹 | STYLE + 商品编码 这条路**已经通了**，W2 不需要新的落点 |
+| 3 | `photo_content_planner.py:183-186`（`_family_plan`）把 `look["outerwear"]` 硬写成"目标商品外套" | 只有走**「商品参考」模式**（`reference_mode=PRODUCT`）才进入，不是 §5.4 B 的路径。但若真用商品参考跑围巾，会与 `SCARF_V1.main_product_slot="accessories"` 矛盾 —— 需修，优先级低 |
+| 4 | 方案 §5.6 的逐项商品判定（`product_present`/`visibility_sufficient`/`dominant_color_matches`/`pattern_family_matches`/`edge_or_fringe_matches`/`length_volume_plausible`/`face_unobscured`，见 `photo_travel_qa.py:40-59`）**只接在旅行线**：`photo_reference_vision.py:2092 _travel_qa_prompt` ← `review_travel_pages` | 搭配线走的组级质检是 `review_alignment`/`_alignment_prompt`（`:2324`），其 `:2350` **明确把「配饰有无」列为不受罚**、把"主体单品"定义为外套等主体服装。⇒ **指定围巾缺失、或四套look围巾各不相同，都不会被判失败**。这是"四套围巾各不相同也全过"的机制原因（该轮还没带商品，所以只暴露了现象） |
+| 5 | RDS `opv_product_reference_pack` 实况：共 6 条，`category` 全部为 `outerwear`（1 条为 NULL），**无 scarf 条目** | 现在往围巾行填商品编码，只会抛「指定商品 X 缺少可用商品参考包」。**真实阻塞是"没有围巾商品图包"，而造包需要真实围巾商品图（front/lifestyle/detail）** |
+
+⇒ W2 的真实待办变为三项：**(a) 造围巾商品图包（阻塞项，需真实商品图）；(b) 把 §5.6 逐项商品判定接到搭配线，并限定"仅有指定商品时生效"以保零漂移；(c) 修 `_family_plan` 的商品槽位硬编码（低优先）。**
+
+#### 6.2.2 占位商品包 + 链路自证（2026-09-14，已执行）
+
+裁决：**(a) 先用现有素材拼占位包（只验链路与冻结字段）；(b) 质检口径暂不动。**
+
+**占位包坐标**（`tmp/real_gen_e2e_3rows/make_placeholder_scarf_pack.py`，dry-run 默认 / `--apply` 才写）：
+
+| 项 | 值 |
+|---|---|
+| `product_id` / `variant_key` | `PLACEHOLDER_SCARF_VN_001` / `placeholder_v1` |
+| `pack_id` / `pack_version` / `status` | `opv_prp_910463de81625ec3f856` / `1` / `limited`（`RESOLVABLE_STATUSES` 含 `limited`，可解析） |
+| `category` | `scarf` ⇒ 走 `SCARF_V1` 适配器，主槽位 `accessories` |
+| 角色 | `front`=`look_a.png`、`lifestyle`=`look_c.png`、`detail`=`look_d.png`（源：`asset_sets/vn_scarf_choice/`，**不追求商品一致**） |
+| 落盘 | `product_references/PLACEHOLDER_SCARF_VN_001/`（沿用 `NN_<sha16>.png` 命名约定） |
+| 幂等 | 重跑 `--apply` 命中同指纹 ⇒ 复用同 `pack_id`/`version`，不新增版本 |
+| 旁证 | RDS `opv_product_reference_pack` 6 → 7 条；**其余 6 条逐字段未变**（对照 `/tmp/prp_before.json`） |
+
+**链路自证**（`tmp/real_gen_e2e_3rows/l1_vn_matching_with_product.py`，Stub 生成器 + 视觉质检标 NOT_EXECUTED ⇒ **零付费**）：同输入跑两次对照 —— A 无商品 / B 带商品快照，**18/18 通过**。
+
+| 验证点 | 结果 |
+|---|---|
+| 两次各产出 4 个生成请求；provider 全 `stub`；视觉模型未被调用 | ✅ |
+| B 的 `outfit_state["accessories"]` = 「指定商品，以商品参考图的颜色、版型和结构为准」 | ✅ |
+| **A/B 的 `outerwear`/`top_inner`/`bottom`/`shoes` 逐字相同**，且 `outerwear` 从不被写成指定商品 ⇒ **围巾不替换外套** | ✅ |
+| B 的 4 个请求都带 `product_id`、提示词含【指定商品身份锁】与逐页「本页必须出现指定围巾」 | ✅ |
+| 按 `SCARF_V1` 取图序每请求选中 3 张商品参考图（front/lifestyle/detail），同时保留风格参考图 | ✅ |
+| A 既无 `accessories` 槽、也无身份锁（**有商品才有差异**） | ✅ |
+
+**本轮未覆盖的边界（不要当成已验证）**：
+
+- `PhotoRequestFactory.build_batch` → 冻结 request 带 `product_id`/`product_snapshot`（`feishu_workflow.py:1880-1888`）**只有代码证据，无离线用例**：Phase 4 canary 的 `STYLE_PRODUCT` 落在**旅行线**，搭配线这一段仍是零覆盖。
+- 未做**真实付费生图**，故「占位围巾能否在四套 look 里保持一致」未验证（占位素材本就不追求一致）。
+
+
 ### 6.3 验收结果（W1）
 
 | 验收项 | 结果 |
