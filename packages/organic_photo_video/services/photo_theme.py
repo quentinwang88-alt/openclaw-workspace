@@ -17,7 +17,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
-from domain.photo_contracts import normalize_publish_copy
+from domain.photo_contracts import LABEL_PLACEHOLDER, normalize_publish_copy
 
 from services.photo_flow_registry import (
     PhotoFlowRegistryError, flow_contract_from, role_marker,
@@ -263,6 +263,41 @@ def _display_slide_texts(values: Sequence[Any], *, cta: str) -> list[str]:
     return slides
 
 
+def _fill_label_placeholders(
+    values: Sequence[Any], labels_by_letter: Mapping[str, str],
+) -> list[str]:
+    """Substitute deferred ``{{label_x}}`` tokens with the frozen asset labels.
+
+    The travel copy packs deliberately keep ``A · {{label_a}}`` … in their
+    ``slide_texts``: the label can only be bound once the exact source photo is
+    chosen, so ``PhotoRequestFactory`` resolves them at freeze time.  Theme copy
+    *replaces* that resolved copy afterwards, so it must bind the same labels
+    here — otherwise a literal ``{{label_a}}`` reaches the frozen request and
+    ``validate_frozen_request`` rejects the row (2026-09-14: TH 旅行线 5 行全被
+    堵死，且失败发生在付费素材生成之后).
+    """
+    filled: list[str] = []
+    for value in values:
+        text = str(value or "")
+        replaced = LABEL_PLACEHOLDER.sub(
+            lambda match: labels_by_letter.get(match.group(1), match.group(0)),
+            text,
+        )
+        filled.append(replaced)
+    unresolved = [
+        text for text in filled if "{{" in text or "}}" in text
+    ]
+    if unresolved:
+        # Fail loudly instead of freezing a literal template token: the row
+        # would otherwise be rejected later by the publish contract anyway,
+        # but with a message that hides which label was missing.
+        raise ValueError(
+            "主题文案存在无法解析的占位符（缺少对应 Look 标签）："
+            + "；".join(unresolved[:2])
+        )
+    return filled
+
+
 def build_theme_copy(
     theme: Mapping[str, Any], assets: Sequence[Mapping[str, Any]],
     variation: Optional[Mapping[str, Any]] = None,
@@ -273,20 +308,27 @@ def build_theme_copy(
     except PhotoFlowRegistryError as exc:
         raise ValueError(str(exc)) from exc
     labels = []
+    labels_by_letter: dict[str, str] = {}
     for index, role in enumerate(frozen_roles):
         marker = role_marker(role, index)
         raw_label = by_role.get(role, {}).get("display_label") or {}
         label = (raw_label.get("th-TH") if isinstance(raw_label, Mapping)
                  else str(raw_label).strip())
-        labels.append(f"{marker} · {label or ('ลุค ' + marker)}")
+        label = label or ("ลุค " + marker)
+        labels.append(f"{marker} · {label}")
+        if len(marker) == 1:
+            labels_by_letter[marker.lower()] = label
     variation = dict(variation or {})
     planned_copy = dict(variation.get("copy") or {})
     cta = str(planned_copy.get("cta") or theme["cta"])
     labels[-1] += "\n" + cta
     # 主题联动（2026-09-08）：规划产出的逐页 slide_texts 是围绕同一选题的
     # 完整文案，优先使用，不得被标签重组覆盖；缺失时退回旧组装路径。
-    topic_slides = _display_slide_texts(
-        planned_copy.get("slide_texts") or [], cta=cta,
+    # 2026-09-14：这条分支还必须把文案包里推迟到冻结点才替换的 {{label_x}}
+    # 解析掉，否则主题覆盖会把字面占位符冻进发布文案。
+    topic_slides = _fill_label_placeholders(
+        _display_slide_texts(planned_copy.get("slide_texts") or [], cta=cta),
+        labels_by_letter,
     )
     # 发布契约兜底（2026-09-13）：theme copy 是最终被冻结进 request 的文案，而
     # 它的 title 可能来自模型自由撰写，也可能来自**上一轮已冻结**的 variation

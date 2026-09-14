@@ -411,6 +411,50 @@ class CopySurvivalTest(unittest.TestCase):
         result = build_theme_copy(theme, assets, variation)
         self.assertEqual(result["title"], "ไตเติลสั้น")
 
+    def test_deferred_label_placeholders_are_bound_to_asset_labels(self):
+        # 2026-09-14 线上实测（TH 旅行线表格 143–147 行）：旅行文案包把
+        # `A · {{label_a}}` 推迟到冻结点才替换，而「运营填了图文主题」会让
+        # feishu_workflow 用 build_theme_copy 覆盖已经解析好的 request copy。
+        # 这条主题联动分支若不绑定标签，字面占位符就会冻进请求，被
+        # validate_frozen_request 拒掉整行——而且失败发生在**付费生图之后**。
+        from domain.photo_contracts import validate_copy
+
+        theme = resolve_photo_theme("凉爽旅行")
+        assets = [
+            {"role": "look_a", "display_label": {"th-TH": "ลุคเดินเล่นในเมืองเก่า"}},
+            {"role": "look_b", "display_label": {"th-TH": "ลุควันช้อปปิ้ง"}},
+            {"role": "look_c", "display_label": {"th-TH": "ลุคไปคาเฟ่"}},
+            {"role": "look_d", "display_label": {"th-TH": "ลุคเดินเล่นช่วงเย็น"}},
+        ]
+        variation = {"copy": {
+            "title": "ลุคไหนไปเมืองอากาศเย็นดี", "caption": "แคปชัน",
+            "hashtags": ["#tag"],
+            "slide_texts": [
+                "อากาศ 15-22°C ใส่ลุคไหนดี?\nA B C หรือ D",
+                "A · {{label_a}}", "B · {{label_b}}", "C · {{label_c}}",
+                "D · {{label_d}}\nลุคไหนพร้อมลุยทั้งวัน?",
+            ],
+        }}
+        result = build_theme_copy(theme, assets, variation)
+        self.assertEqual(result["slide_texts"][1], "A · ลุคเดินเล่นในเมืองเก่า")
+        self.assertEqual(result["slide_texts"][3], "C · ลุคไปคาเฟ่")
+        self.assertEqual(result["slide_texts"][4].splitlines()[0], "D · ลุคเดินเล่นช่วงเย็น")
+        self.assertFalse(
+            [slide for slide in result["slide_texts"] if "{{" in slide or "}}" in slide])
+        self.assertEqual(validate_copy(result), [])
+
+    def test_unbindable_placeholder_fails_loudly(self):
+        # 打错的占位符（如多了空格）不能静默冻进发布文案：宁可当场报错，
+        # 也不要等到封版校验用一句看不出原因的话拒掉整行。
+        theme = resolve_photo_theme("凉爽旅行")
+        assets = [{"role": f"look_{letter}", "display_label": {"th-TH": f"ลุค {letter}"}}
+                  for letter in "abcd"]
+        variation = {"copy": {"slide_texts": [
+            "ปก", "A · {{label_a }}", "B สอง", "C สาม", "D สี่",
+        ]}}
+        with self.assertRaisesRegex(ValueError, "占位符"):
+            build_theme_copy(theme, assets, variation)
+
 
 class CacheKeyTest(unittest.TestCase):
     def test_travel_plan_cache_key_includes_topic(self):
