@@ -8,7 +8,11 @@
 | 线 | 预设 | 飞书行 | 结果 | 证据 |
 | --- | --- | --- | --- | --- |
 | 搭配四选一（非旅行流程） | 图文｜VN｜围巾搭配四选一 | `recvvcgz2Kk41n` | **PASS** | 进度=已完成、出 5 张 1080×1920 成片、批次 `waiting`→`photo_packaging` |
-| 围巾旅行（旅行流程） | 图文｜VN｜围巾旅行 | `recvvcgvz0LsIh` | **BLOCKED** | 卡在发布契约：VN 行拿到**泰语文案**（下详 §4 D3） |
+| 围巾旅行（旅行流程，首次） | 图文｜VN｜围巾旅行 | `recvvcgvz0LsIh` | **BLOCKED** | 卡在发布契约：VN 行拿到**泰语文案**（下详 §4 D3） |
+| 围巾旅行（修 D3 后换行重跑） | 图文｜VN｜围巾旅行 | `recvvcD2x9br89` | **PASS** | 进度=已完成、出 5 张 1080×1920 成片、**零付费复用** 4 张 look（§9） |
+
+`recvvcgvz0LsIh` 的批次已取消（该行永久只读），按官方出路**换新行** `recvvcD2x9br89`
+承接；未删除任何历史批次/任务/图片。
 
 两条线都**没有**"配置上线即批量放行"：六道生产门禁在收尾时已全部回到关闭态（§6）。
 
@@ -241,3 +245,18 @@ raise FeishuWorkflowError("该图文批次已取消；请新增一行重新发�
 | `services/photo_asset_supply.py` | `qualify` 改用共享选择器（保留原兜底语义） |
 | `services/photo_request_factory.py` | `_localized_variants` 改为薄适配器，消除第二份实现 |
 | `tests/test_photo_copy_locale_binding.py` | 新增 15 条 |
+
+### 9.5 铁证：同一配方、同一主题、修复前后
+
+从 `opv_production_batch.manifest_json` 的 `entries[0].request.copy` 直读（只读查询）：
+
+| 行 | 批次建立时间 | `copy.title` | 判定 |
+| --- | --- | --- | --- |
+| `recvvcgvz0LsIh`（修复前，已取消） | 20:56 | `ไอเดียแต่งตัวเที่ยวThành phố se lạnh` | **泰语句式 + 越南语地名** ⇒ D3 现场 |
+| `recvvcD2x9br89`（修复后，换行重跑） | 22:09 | `Gợi ý phối đồ du lịch Thành phố se lạnh` | 纯越南语 ⇒ 已修 |
+| `recvvcgz2Kk41n`（搭配线，对照） | 21:02 | `Một chiếc khăn, bốn cách phối` | 纯越南语 |
+
+对照组说明 D3 的**边界**：搭配线（`PHOTO_MATCHING_CHOICE_V3`）在修复前就是对的——它的
+发布文案早已由 Locale Pack 供给（Phase 2 / P0-2），**只有旅行流程的文案被主题模板抢走**。
+故本轮改动只作用于旅行分支，TH/MX 逐字不变由
+`tests/test_photo_copy_locale_binding.py::RealRecipeLanguageFollowsMarketTest` 锁死。
