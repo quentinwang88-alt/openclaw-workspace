@@ -2,8 +2,23 @@
 """Read-only native-photo configuration and asset coverage preflight.
 
 No environment loading, database connection, image generation or remote writes.
-Exit 2 means invalid configuration; --require-ready also exits 3 if a Recipe
-has no usable execution profile. --verify-files checks local bytes and fonts.
+
+两种检查，输出里用 ``check`` 明确区分：
+
+* ``config``（默认）：普通配置检查 —— 配方合同、类目能力、版式版本、素材覆盖。
+  只要配置本身没毛病就 ``exit 0``。
+* ``production_ready``（``--require-ready``）：生产就绪检查 —— 在此之上要求所选范围内
+  **没有静态素材缺口（``needs_asset``）、没有未绑定市场的通用 Recipe
+  （``canary_market_unbound``）**，并且（用 ``--preset-name`` 圈定时）所选预设已经
+  enabled。未绑定市场的通用 Recipe 不会因为 ``needs_asset`` 为空就被当成就绪。
+  动态输入线（素材按任务补的现役产线）只出 ``ready_notes``，不算拦截。
+
+``--preset-name`` 可重复，用来把检查圈到运营真正要开的入口上；它会解析预设的
+配方/市场/语言，而不是只比字符串。历史视频入口不在本预检范围内，被点名时报错而
+不是静默通过。
+
+Exit 2 means invalid configuration; --require-ready also exits 3 if the selected
+scope is not production-ready. --verify-files checks local bytes and fonts.
 """
 from __future__ import annotations
 
@@ -33,14 +48,150 @@ class LocalAssetRepository:
         return self.assets
 
 
+def resolve_preset_scope(config_dir: Path, preset_names, native_photo_ids) -> tuple:
+    """把 ``--preset-name`` 解析成「被检查的配方」+ 目录行 + 报错。
+
+    只认原生图文配方：预设指向的其它配方（历史视频线）不算通过，而是明确报出来 ——
+    否则 ``--require-ready --preset-name <历史视频预设>`` 会因为"没检查到任何东西"
+    而退出 0，那正是本轮要消掉的假就绪。
+    """
+    from services.feishu_workflow import ProductionPresetCatalog
+
+    catalog = ProductionPresetCatalog(config_dir / "feishu_production_presets.json")
+    selected: set = set()
+    rows: list = []
+    errors: list = []
+    for name in preset_names:
+        raw = catalog.metadata(name)
+        tasks = list(raw.get("tasks") or [])
+        # deterministic_one 预设本身没有 tasks，只指向候选项；跟一层即可，
+        # 与 ProductionPresetCatalog.resolve 的语义一致。
+        for candidate in raw.get("tasks_from") or []:
+            tasks.extend(catalog.metadata(str(candidate)).get("tasks") or [])
+        recipe_ids = sorted({str(item.get("recipe_id") or "")
+                             for item in tasks if item.get("recipe_id")})
+        photo_ids = [value for value in recipe_ids if value in native_photo_ids]
+        skipped = [value for value in recipe_ids if value not in native_photo_ids]
+        row = {
+            "name": name,
+            "entry_group": catalog.entry_group(name),
+            "status": str(raw.get("status", "active")),
+            "enabled": str(raw.get("status", "active")) == "active",
+            "markets": sorted({str(item.get("market") or "")
+                               for item in tasks if item.get("market")}),
+            "languages": sorted({str(item.get("language") or "")
+                                 for item in tasks if item.get("language")}),
+            "native_photo_recipe_ids": photo_ids,
+            "outside_native_photo": skipped,
+        }
+        rows.append(row)
+        if not photo_ids:
+            errors.append(
+                f"预设「{name}」不指向任何原生图文配方（"
+                + ("、".join(skipped) or "没有配方") + "），不在本预检范围内"
+            )
+        selected.update(photo_ids)
+        missing = [value for value in recipe_ids if value not in native_photo_ids
+                   and value not in skipped]
+        if missing:
+            errors.append(f"预设「{name}」指向未知配方：" + "、".join(missing))
+    return selected, rows, errors
+
+
+def readiness_blockers(result: dict, presets: list) -> list:
+    """硬拦截项（人话版）：这些东西不解决就不算生产就绪。
+
+    只有两类是真拦截：**静态素材缺口**（``needs_asset``）与**未绑定市场的通用
+    Recipe**（``canary_market_unbound``，2026-09-14 起不再因为 needs_asset 为空
+    就被当成就绪）。动态输入线不在这里 —— 见 ``readiness_notes``。
+    """
+    blockers: list = []
+    for report in result["recipes"]:
+        statuses = sorted({str(profile.get("status") or "")
+                           for profile in report["profiles"]})
+        if "NEEDS_ASSET" in statuses:
+            blockers.append(
+                f"{report['recipe_id']} 缺静态素材（NEEDS_ASSET），"
+                "没有可用的素材集"
+            )
+        elif "CANARY_MARKET_UNBOUND" in statuses:
+            blockers.append(
+                f"{report['recipe_id']} 未绑定市场（CANARY_MARKET_UNBOUND），"
+                "无法证明这条线能取到素材"
+            )
+    for row in presets or []:
+        if not row["enabled"]:
+            blockers.append(
+                f"预设「{row['name']}」仍为 {row['status']}，运营还看不到这个入口"
+            )
+    return blockers
+
+
+def readiness_notes(result: dict) -> list:
+    """说明性提示：不拦生产就绪，但要让人知道运行时会补给什么。"""
+    notes: list = []
+    for report in result["recipes"]:
+        statuses = sorted({str(profile.get("status") or "")
+                           for profile in report["profiles"]})
+        if "DYNAMIC_INPUT_REQUIRED" in statuses:
+            notes.append(
+                f"{report['recipe_id']} 的素材按任务动态输入"
+                "（参考图 / 商品编码 / 主题），不使用静态素材集"
+            )
+    for recipe_id in result["needs_content"]:
+        notes.append(f"{recipe_id} 的内容卡需要在运行前落定（needs_content）")
+    return notes
+
+
+def settle_readiness(result: dict) -> dict:
+    """把就绪判定补齐到结果里；任何返回路径都要经过它，保证 JSON 形状一致。
+
+    生产就绪 = 没有配置错误 + 无硬拦截（静态素材缺口 / 未绑定市场 / 预设未启用）。
+    未绑定市场的通用 Recipe 落在 canary_market_unbound，needs_asset 空也照样不就绪；
+    动态输入线只出提示，不拦 —— 它本来就是按任务补素材的现役产线。
+    """
+    result.setdefault("recipe_count", 0)
+    result.setdefault("profile_count", 0)
+    result.setdefault("file_checks", False)
+    result["file_checks"] = result.get("file_checks") or False
+    result["not_ready"] = sorted(
+        set(result.get("needs_asset") or []) | set(result.get("canary_market_unbound") or [])
+    )
+    result["ready_blockers"] = readiness_blockers(result, result.get("presets") or [])
+    result["ready_notes"] = readiness_notes(result)
+    result["ready"] = not result.get("errors") and not result["ready_blockers"]
+    return result
+
+
 def preflight(config_dir: Path, *, verify_files: bool = False,
-              recipe_ids=None) -> dict:
-    result = {"mode": "read_only", "external_writes": 0, "errors": [], "recipes": [], "needs_asset": [], "dynamic_input_required": [], "needs_content": [], "canary_market_unbound": []}
+              recipe_ids=None, preset_names=None, require_ready: bool = False) -> dict:
+    result = {"mode": "read_only",
+              "check": "production_ready" if require_ready else "config",
+              "external_writes": 0, "errors": [], "recipes": [], "presets": [],
+              "needs_asset": [], "dynamic_input_required": [], "needs_content": [],
+              "canary_market_unbound": [], "not_ready": [], "ready_blockers": [],
+              "ready_notes": [], "ready": False,
+              "recipe_count": 0, "profile_count": 0, "file_checks": False}
     try:
         recipes = [r for r in load_content_recipes(config_dir / "recipes")
                    if r.recipe_spec_json.get("media_kind") == "native_photo"]
+        native_photo_ids = {recipe.recipe_id for recipe in recipes}
         selected = {str(value) for value in (recipe_ids or []) if str(value)}
-        if selected:
+        # 圈定范围后即使交集为空也必须真的筛成 0 条：把"筛没了"当成"没筛"会
+        # 静默放大成整个目录（那正是 preflight 最不该做的事）。
+        filtering = bool(selected)
+        if preset_names:
+            try:
+                preset_recipe_ids, result["presets"], preset_errors = resolve_preset_scope(
+                    config_dir, preset_names, native_photo_ids)
+            except Exception as exc:
+                result["errors"].append(str(exc))
+                return settle_readiness(result)
+            result["errors"].extend(preset_errors)
+            # 同时给了 --recipe-id 时取交集：两个筛选器都要满足。
+            selected = (selected & preset_recipe_ids) if selected else set(preset_recipe_ids)
+            filtering = True
+        if filtering:
             recipes = [recipe for recipe in recipes if recipe.recipe_id in selected]
             missing = sorted(selected.difference(recipe.recipe_id for recipe in recipes))
             if missing:
@@ -49,7 +200,7 @@ def preflight(config_dir: Path, *, verify_files: bool = False,
         categories = {item["category_key"] for item in load_categories(config_dir / "categories")}
     except Exception as exc:
         result["errors"].append(str(exc))
-        return result
+        return settle_readiness(result)
     assets = []
     for path in sorted((config_dir / "asset_sets").glob("*.json")):
         try:
@@ -186,25 +337,36 @@ def preflight(config_dir: Path, *, verify_files: bool = False,
     result["recipe_count"] = len(recipes)
     result["profile_count"] = sum(len(r["profiles"]) for r in result["recipes"])
     result["file_checks"] = verify_files
-    return result
+    return settle_readiness(result)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config-dir", type=Path, default=PACKAGE_ROOT / "config")
     parser.add_argument("--verify-files", action="store_true")
-    parser.add_argument("--require-ready", action="store_true")
+    parser.add_argument("--require-ready", action="store_true",
+                        help="生产就绪检查：每条被检查的配方必须有已绑定市场的就绪 profile")
     parser.add_argument(
         "--recipe-id", action="append", default=[],
         help="preflight only the selected Recipe; repeat for multiple Recipes",
     )
+    parser.add_argument(
+        "--preset-name", action="append", default=[],
+        help="preflight only the native-photo Recipes reachable from this preset; "
+             "repeat for multiple presets",
+    )
     args = parser.parse_args()
     result = preflight(
         args.config_dir.resolve(), verify_files=args.verify_files,
-        recipe_ids=args.recipe_id,
+        recipe_ids=args.recipe_id, preset_names=args.preset_name,
+        require_ready=args.require_ready,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 2 if result["errors"] else 3 if args.require_ready and result["needs_asset"] else 0
+    if result["errors"]:
+        return 2
+    if args.require_ready and not result["ready"]:
+        return 3
+    return 0
 
 
 if __name__ == "__main__":

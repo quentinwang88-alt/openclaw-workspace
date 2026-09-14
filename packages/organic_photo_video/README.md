@@ -191,12 +191,22 @@ TikTok 自动推荐音乐，系统记录 `platform_auto`，不会伪装成指定
 python3 scripts/preflight_native_photo.py
 python3 scripts/preflight_native_photo.py --verify-files
 python3 scripts/preflight_native_photo.py --verify-files --require-ready
+python3 scripts/preflight_native_photo.py --preset-name "图文｜VN｜围巾搭配四选一" --require-ready
 ```
 
 预检区分配置错误、`NEEDS_ASSET` 和 `NEEDS_CONTENT`。`--verify-files` 额外检查本地字节、资格 hash 和文字字体。
 当前只有新 TH 四选一样板 ready；未完成内容卡/源资格的 MX 和小个子方案不自动生产，旧冻结批次按原快照续跑。
 `--require-ready` 会因这些缺口返回非零，不能用预检无语法错误冒充全目录内容就绪。
 预检只检查配置与文件，不连接 RDS 扣除已冻结内容；实际新请求还会检查未占用库存，样板冻结后同图同逻辑不能再新建一篇。
+
+输出里的 `check` 明确区分两种检查：默认 `config`＝普通配置检查（配置没毛病就退出 0）；
+`--require-ready` 时是 `production_ready`＝生产就绪检查，额外要求所选范围内没有静态素材缺口
+（`needs_asset`）、没有未绑定市场的通用 Recipe（`canary_market_unbound`），并且所选预设已 enabled。
+拦截项与说明分别写在 `ready_blockers` / `ready_notes`：素材按任务动态输入的现役产线（如 TH 旅行）
+只出提示，不算未就绪；未绑定市场的通用 Recipe（如两条 VN 围巾线）**不会**因为 `needs_asset`
+为空就被当成就绪。
+`--preset-name` 可重复，用来把检查圈到运营真正要开的入口上，会解析预设的配方/市场/语言；
+点到历史视频入口（不在原生图文范围内）会直接报错，而不是静默通过。
 
 首次部署需要应用 migration 009 并导入更新后的 Recipe、账号和市场包；仅修改本地 JSON
 不会更新 RDS。以下均为显式部署命令，不属于预检：
