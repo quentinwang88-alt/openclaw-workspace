@@ -14,7 +14,7 @@
 `recvvcgvz0LsIh` 的批次已取消（该行永久只读），按官方出路**换新行** `recvvcD2x9br89`
 承接；未删除任何历史批次/任务/图片。
 
-两条线都**没有**"配置上线即批量放行"：六道生产门禁在收尾时已全部回到关闭态（§6）。
+两条线都**没有**"配置上线即批量放行"：全部生产门禁在收尾时已回到关闭态（§6、§十一）。
 
 ## 二、C 行验收（端到端 PASS）
 
@@ -164,7 +164,12 @@ elif travel_flow:
 2. D1 的根因（版本号只统计 enabled 行）仍在：建议把版本计算改为"同键**所有**状态行的
    最大版本 + 1"，或给该唯一索引加 `status`——本轮只加了"响亮失败"护栏，没有动口径。
 3. VN 旅行线的 `photo_locale.travel_copy_template.hashtags` 恒为空列表（既有缺口）。
-4. 发布：本轮未点"确认发布"。C 行成片已在 `预览/成片`，具备走既有确认发布的全部条件。
+4. ~~发布：本轮未点"确认发布"。C 行成片已在 `预览/成片`，具备走既有确认发布的全部条件。~~
+   —— **已按用户裁决处理为「只验桥接、不真发」**（见 §十）。真实阻塞点已查清且**不是代码**：
+   VN 唯一账号 `OPV_VN_TEST_001` 是 `paused` + `publishing_enabled=false`，配置原文写明
+   需等 TikTok **图文直发能力**在该账号上确认后才启用。桥接侧（市场→`VNPS01`、冻结契约、
+   入队载荷）已用真实服务全链路自证通过，一旦账号就绪即可直接勾选发布。
+5. 3C-5「真实重拍一个 Look」按用户裁决本轮不跑（会产生真实生图费用），保留单测与离线证据。
 
 ## 九、D3 修复后的真实验证（2026-09-14 夜，A2 行）
 
@@ -260,3 +265,51 @@ raise FeishuWorkflowError("该图文批次已取消；请新增一行重新发�
 发布文案早已由 Locale Pack 供给（Phase 2 / P0-2），**只有旅行流程的文案被主题模板抢走**。
 故本轮改动只作用于旅行分支，TH/MX 逐字不变由
 `tests/test_photo_copy_locale_binding.py::RealRecipeLanguageFollowsMarketTest` 锁死。
+
+## 十、3C-6「走既有确认发布」——只验桥接、不真发（2026-09-14 夜，用户裁决）
+
+**为什么不做真实发布**：VN 唯一账号 `config/accounts/OPV_VN_TEST_001.json` 是
+`status=paused` + `operating_rules.publishing_enabled=false`，配置与 canary fixture 均注明
+「等 TikTok Content Posting 的**图文直发能力**在 VN 账号上确认后才启用」。也就是说
+**VN 侧今天没有具备图文直发能力的账号**，真实发布必然卡在账号层；这不是代码断点，
+而是外部前置条件未就绪。故按用户裁决：**把既有发布链跑到「入队主排班池」为止自证，不真发。**
+
+**做法**（脚本 `tmp/real_gen_e2e_3rows/verify_publish_bridge_3c.py`，34 项断言全 PASS）：
+
+| 环节 | 用什么 | 是否真实 |
+| --- | --- | --- |
+| RDS 读（task / revision / package / 复核历史） | 生产 RDS | **真实** |
+| 路由表 | `config/main_publish_routes.json` | **真实** |
+| 「人已确认」这一步 | 内存副本 + 拦截 `insert_quality_review` / `release_revision` | **不落库**（本轮刻意不做的那一步） |
+| 复核服务 | `PhotoPackageReviewService.record` | **真实服务** |
+| 发布冻结 | `services/release_gate.freeze_photo_release` | **真实** |
+| 入队 | `MainScheduleBridge.enqueue_task` | **真实** |
+| 发布队列库 | `/tmp` 一次性 sqlite（跑完即删） | **不碰生产库** |
+
+**实测结果**：
+
+| 项 | 实测 |
+| --- | --- |
+| 路由 | `TH→THFZ01`、`MX→MXJF01`、**`VN→VNPS01`**；未配置国家响亮失败 |
+| 反证 | 未放行时 `enqueue_task` 被拒（「没有已冻结并审核放行的原生图文包」）⇒ release 确为必需前提 |
+| 放行 | revision→`released`、package→`ready`、task pin `released_revision_id`，**全部只在内存**（RDS 复核仍为 `working`/`qa_review`、`photo_package` 复核数 0） |
+| 入队返回 | `store_id=VNPS01`、`media_kind=native_photo`、`status=待排期` |
+| 入队载荷 | `schema_version=opv-main-publish-v2`、`workflow_version=2`、`publish_store_id=VNPS01`、`audio_mode=platform_auto_bgm`、`target_country=VN` |
+| 发布标题 | `Gợi ý phối đồ du lịch Thành phố se lạnh`（**无泰文**） |
+| 冻结契约 | `opv-photo-release-v1`、5 页、页序连续且文件在盘、`hashtags=[#phoidodulich,#khanquang,#OOTD]`、末页带 CTA |
+| 生产发布库 | 开工/收工快照一致（`script_metadata=5533` / `video_assets=1897`），且**无本任务记录、无槽位** |
+
+**结论**：VN 原生图文的**发布侧接线是正确的**——市场→店铺、冻结契约、入队载荷都对；
+真正待补的只有「VN 账号拿到 TikTok 图文直发能力」这一条外部前置。
+
+## 十一、3C 收尾状态
+
+- **门禁**：五道全关（`check_gates_3c.py` 报 `NOT ARMED`）——两条预设 `disabled`、
+  两条 recipe `draft`、`MP_VN_DEFAULT_V1` `draft`、账号 `paused`、素材集保持原状。
+- **测试行**：三条 `OPV端到端生图测试｜3C-*` 行**有意保留**（A/A2/C）。它们带着**真实付费产物**
+  （共 9 张 look + 3 个批次），且均为惰性——`执行=false`、`进度=已完成`（`_action()` 显式排除
+  `PROGRESS_DONE`）、无「重拍Look」、`确认发布` 非真。**不删除**：删行会连带丢掉可复核的证据链。
+- **全表惰性自检**：205 行里 `执行=True` 仅 2 行（`recvuvT5naJqTW`/`recvuU4zgVtJ3s`，
+  均为 TH `已完成` 行），无「重拍Look」⇒ 惰性、不烧图；`进度=生成中` **0** 行。
+- **遗留（3C-5）**：真实「重拍一个 Look」按用户裁决**本轮不跑**（会产生真实生图费用），
+  只保留单测与离线证据；需要时可随时按 §5.10 的口径补跑。
