@@ -668,15 +668,30 @@ class PhotoReferenceVisionService:
         contract: Mapping[str, Any], scope: str,
         generated_roles: Sequence[str] = None,
         persona_based: bool = False,
+        product_reference_paths: Sequence[str] = (),
+        product_context: Mapping[str, Any] = None,
     ) -> dict[str, Any]:
-        references = [str(Path(value).resolve()) for value in reference_paths]
+        # 指定商品参考图必须排在最前，并且**真的进模型输入**：提示词里说"有商品"
+        # 而图片没送到，等于没有检查（review 修复 P0-3 的同源要求）。
+        # 风格参考列表保持原样（含顺序与重复）：没指定商品时参考图数量必须逐字不变。
+        product_references = list(dict.fromkeys(
+            str(Path(value).resolve()) for value in product_reference_paths
+            if Path(str(value)).is_file()
+        ))
+        references = product_references + [
+            str(Path(item).resolve()) for item in reference_paths
+            if str(Path(item).resolve()) not in product_references
+        ]
         generated = [str(Path(value).resolve()) for value in generated_paths]
-        if not references or not generated or any(not Path(value).is_file() for value in references + generated):
+        if not references or not generated or any(
+                not Path(value).is_file() for value in references + generated):
             raise PhotoReferenceVisionError("视觉一致性检查缺少图片")
         prompt = self._alignment_prompt(
             reference_count=len(references), generated_count=len(generated),
             contract=contract, scope=scope, generated_roles=generated_roles,
             persona_based=persona_based,
+            product_reference_count=len(product_references),
+            product_context=dict(product_context or {}),
         )
         response, provider_used = self._chat(
             self._model_images(references + generated), prompt, max_tokens=1800,
@@ -2322,7 +2337,8 @@ recommended_sets 数量必须等于 {count}；不同篇要有明显内容角度�
 
     @staticmethod
     def _alignment_prompt(*, reference_count, generated_count, contract, scope,
-                          generated_roles=None, persona_based=False):
+                          generated_roles=None, persona_based=False,
+                          product_reference_count=0, product_context=None):
         identity_clause = (
             "\n人物身份规则：生成图的人物来自系统人物资产（有独立的身份参考与检查），"
             "风格参考图中的人物仅用于提取风格、场景、配色与氛围。"
@@ -2340,14 +2356,48 @@ recommended_sets 数量必须等于 {count}；不同篇要有明显内容角度�
                 "missing_major_garment 仅在该张完全缺失计划中的主体单品（如计划有外套但整张没有外套）时为 true；"
                 "款式或颜色细节偏差不算缺失。"
             )
-        return f"""你是独立图文内容质检员。前 {reference_count} 张是原始风格参考，后 {generated_count} 张是生成结果。直接对照原图判断，不能只相信给定合同。
-检查范围：{scope}{identity_clause}
+        # 指定商品属于核心商品（review 修复，2026-09-14）：本段宽松边界把"配饰有无"
+        # 列为不受罚，那对围巾线是自相矛盾的——围巾本身就是被指定的那件商品。类目
+        # 适配器（如 SCARF_V1）已声明主槽位在 accessories，这里按同一语义把指定商品
+        # 从"可免责配饰"里摘出来。只有真的指定了商品才追加，且只拦明显的缺失/换款/
+        # 主色图案结构错误，围法、褶皱与细微纹理仍按 MINOR 记录，不加新的评分门槛。
+        product_clause = ""
+        if product_context:
+            product_label = str(
+                product_context.get("product_name")
+                or product_context.get("product_id") or "指定商品"
+            )
+            product_clause = (
+                f"\n【核心商品】指定商品「{product_label}」是本次画面的核心商品，"
+                "不是可以免责的普通配饰。"
+                + (f"前 {product_reference_count} 张是它的商品参考图。" if product_reference_count
+                   else "注意：本轮未随附商品参考图，只能按合同描述判断，不得据此放宽。")
+                + "以下三种情况必须判 passed=false 并在 per_look.issues 写明是哪一张："
+                "该张完全看不到指定商品；指定商品被换成明显不同的款式或另一颜色家族；"
+                "主色、图案家族或结构（如围巾边缘与流苏）明显错误。"
+                "指定商品所在槽位之外的普通配饰仍按原宽松规则处理；"
+                "围法、褶皱、佩戴位置与细微纹理差异只写 notes，不作为失败理由。"
+            )
+        # 没有指定商品时保持原文逐字不变（TH 普通配饰线不漂移）。
+        if product_reference_count:
+            intro = (
+                f"前 {product_reference_count} 张是指定商品参考图，"
+                f"随后 {reference_count - product_reference_count} 张是原始风格参考，"
+                f"后 {generated_count} 张是生成结果。"
+            )
+        else:
+            intro = (
+                f"前 {reference_count} 张是原始风格参考，"
+                f"后 {generated_count} 张是生成结果。"
+            )
+        return f"""你是独立图文内容质检员。{intro}直接对照原图判断，不能只相信给定合同。
+检查范围：{scope}{identity_clause}{product_clause}
 {"本次是首张（Look A）单张灾难门禁：只有出现展示方式错配（真人变平铺/平铺出人物/场景退化为纯色棚拍）、明显肢体畸形、明显多人等灾难级问题时 passed 才为 false；风格、场景氛围、配色倾向、穿搭呈现与参考图的偏差一律写入 notes 供参考，不得作为本次单张的失败理由——这些属于后续整组检查。" if str(scope).startswith("FIRST_LOOK") else ""}
 目标合同：{json.dumps(dict(contract), ensure_ascii=False)}
 参考用途规则：逐图 reference_uses 是比较边界。ENVIRONMENT 只比较环境，OUTFIT 只比较搭配关系，VISUAL_STYLE 只比较摄影表达；不得用环境图中的衣服或穿搭图中的背景判定失败。穿搭参考不要求同款。
 如目标合同包含 product_context，前置的商品参考图用于检查指定商品身份；指定商品被明显替换或核心颜色、版型、结构明显错误时才判失败，细微纹理与配饰差异记录即可。
 核心要求：真人参考不能变成平铺；平铺参考不能出现人物；场景参考不能退化成纯色棚拍；核心风格、场景、配色和服装语言必须肉眼可见；不得复制 Logo、水印、来源文字或人物身份。{"整组还要检查 A/B/C/D 差异和风格统一。" if generated_count > 1 else ""}
-宽容边界：只在整体维度（展示方式/风格/场景/配色/构图完整性）偏离时判失败；单品级呈现细节不作为失败理由，可写入 notes 供参考——生成模型不保证像素级服从单品描述。具体不受罚的例子：内搭少一层开衫或薄衫、配饰有无、鞋型款式差异、衣服颜色深浅微差——这些只写 notes。真正的失败仅限：完全缺失计划中的主体单品（有外套计划但整张无外套）、场景类型完全错配、展示方式退化。
+宽容边界：只在整体维度（展示方式/风格/场景/配色/构图完整性）偏离时判失败；单品级呈现细节不作为失败理由，可写入 notes 供参考——生成模型不保证像素级服从单品描述。具体不受罚的例子：内搭少一层开衫或薄衫、配饰有无、鞋型款式差异、衣服颜色深浅微差——这些只写 notes。真正的失败仅限：完全缺失计划中的主体单品（有外套计划但整张无外套）、场景类型完全错配、展示方式退化。{"（上一条「配饰有无不受罚」不适用于上面【核心商品】里点名的指定商品。）" if product_clause else ""}
 只返回 JSON：{{"passed":true,"scores":{{"presentation_alignment":0,"style_alignment":0,"scene_alignment":0,"palette_alignment":0,"look_difference":0}},"reason_codes":[],"notes":"中文简述"}}。任一必要维度低于75时 passed 必须为 false。{role_clause}"""
 
     def review_human_presentation(

@@ -432,6 +432,96 @@ class PhotoThemeReferenceTest(unittest.TestCase):
             self.assertEqual([item["sha256"] for item in second["sources"]],
                              [item["sha256"] for item in first["sources"]])
 
+    def test_no_theme_retake_recovers_the_frozen_theme_from_the_manifest(self):
+        """无主题首跑后的重拍：主题必须从供给清单恢复，而不是重读空表格。
+
+        2026-09-14 复现：无主题 STYLE 首跑用的是 ``effective_theme``（中性主题），
+        表格里仍是空的；重拍重读表格得到 ``None``，而 ``_input_hash`` 会执行
+        ``dict(theme)`` ⇒ ``TypeError: 'NoneType' object is not iterable``，
+        该行的重拍被永久堵死。
+        """
+        from services.feishu_workflow import retake_theme
+
+        with tempfile.TemporaryDirectory() as folder:
+            reference = Path(folder) / "reference.png"
+            Image.new("RGB", (120, 180), (100, 90, 80)).save(reference)
+            generator = FakeGenerator()
+            service = PhotoStyleReferenceSupplyService(
+                generator=generator, root=Path(folder),
+                vision_service=FakeVisionReviewer([True] * 12))
+            variation = scene_model_variation()
+            # 与 feishu_workflow 的无主题首跑逐字一致（theme_key 留空 = 运营未选）。
+            neutral = {
+                "theme_key": "", "label_zh": "自动差异化穿搭",
+                "visual_brief": "保持同一商品或参考风格，变化场景、配色和穿搭组合",
+            }
+            account = SimpleNamespace(persona_ref_id="P")
+            first = service.prepare(
+                record_id="rec-no-theme_item_1", reference_paths=[str(reference)],
+                theme=neutral, account=account, persona=pack_persona(folder),
+                variation=variation,
+            )
+            manifest = json.loads(
+                Path(first["supply_manifest"]).read_text(encoding="utf-8"))
+            self.assertEqual(manifest["theme_brief"], neutral)
+
+            recovered = retake_theme(None, manifest)
+            self.assertEqual(recovered, neutral)
+            # 恢复出来的主题必须能复现首跑的 input_hash——那才叫「同一身份」。
+            self.assertEqual(
+                service.input_fingerprint(
+                    [str(reference)], recovered, variation, account),
+                manifest["input_hash"],
+            )
+            # 表格空 + 直接重读（修复前的行为）会当场炸。
+            with self.assertRaises(TypeError):
+                service.input_fingerprint([str(reference)], None, variation, account)
+
+            # 真重拍 look_b：只有 b 被重生，其余沿用（与运营重拍的实际顺序一致）。
+            calls_before = len(generator.requests)
+            item_dir = Path(first["supply_manifest"]).parent
+            service.regenerate_roles(
+                item_dir=item_dir, roles=["look_b"], reason="运营手动重拍")
+            retaken = service.prepare(
+                record_id="rec-no-theme_item_1", reference_paths=[str(reference)],
+                theme=recovered, account=account, persona=pack_persona(folder),
+                variation=variation,
+            )
+            self.assertEqual(retaken["generated_this_run"], 1)
+            self.assertEqual(len(generator.requests) - calls_before, 1,
+                             "重拍只能新增一次生成调用")
+            for role in ("look_a", "look_c", "look_d"):
+                self.assertEqual(
+                    next(s["sha256"] for s in retaken["sources"] if s["role"] == role),
+                    next(s["sha256"] for s in manifest["sources"] if s["role"] == role),
+                    f"{role} 不应被重拍重生",
+                )
+
+            # 再跑一次（模拟重拍中断后重勾执行）：不该重复处理已完成素材。
+            again = service.prepare(
+                record_id="rec-no-theme_item_1", reference_paths=[str(reference)],
+                theme=recovered, account=account, persona=pack_persona(folder),
+                variation=variation,
+            )
+            self.assertEqual(again["generated_this_run"], 0)
+
+    def test_retake_theme_still_surfaces_a_real_theme_change(self):
+        """真改了主题不能靠「恢复清单」被悄悄放过。"""
+        from services.feishu_workflow import retake_theme
+
+        frozen = {"theme_key": "AUTO", "label_zh": "自动差异化穿搭"}
+        manifest = {"theme_brief": frozen}
+        # 表格仍为空 ⇒ 沿用冻结值。
+        self.assertEqual(retake_theme(None, manifest), frozen)
+        # 表格与冻结一致 ⇒ 等价，仍走冻结值。
+        self.assertEqual(retake_theme(dict(frozen), manifest), frozen)
+        # 真换了主题 ⇒ 原样交回表格值，让既有身份检查拒绝。
+        changed = resolve_photo_theme("凉爽旅行")
+        self.assertEqual(retake_theme(changed, manifest), changed)
+        # 旧清单没有 theme_brief ⇒ 保持历史兼容（表格值直通），不擅自补主题。
+        self.assertEqual(retake_theme(changed, {}), changed)
+        self.assertIsNone(retake_theme(None, {}))
+
     def test_repair_identity_tolerates_theme_keys_added_after_freeze(self):
         """冻结清单缺「之后才新增的主题键」时，重拍不应被判成换主题。
 

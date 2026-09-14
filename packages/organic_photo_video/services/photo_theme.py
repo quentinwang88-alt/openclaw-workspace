@@ -23,6 +23,12 @@ from services.photo_flow_registry import (
     PhotoFlowRegistryError, flow_contract_from, role_marker,
     validate_ordered_roles,
 )
+from services.photo_locale import travel_copy_template
+
+#: Publish language the inline Thai copy was authored for.  It stays the default
+#: so every existing (TH) caller keeps its byte-identical output.
+DEFAULT_PUBLISH_LOCALE = "th-TH"
+LEGACY_LOOK_LABEL_PREFIX = "ลุค "
 
 
 THEME_OPTIONS = ("自动", "秋季穿搭", "凉爽旅行", "日常通勤", "咖啡约会", "冷热切换",
@@ -298,29 +304,112 @@ def _fill_label_placeholders(
     return filled
 
 
+def is_thai_locale(locale: Any) -> bool:
+    """Whether this publish language may use the inline Thai labels and copy."""
+    return str(locale or "").strip().lower().startswith("th")
+
+
+def bound_look_label(
+    raw_label: Any, *, locale: str, locale_pack: Optional[Mapping[str, Any]],
+    marker: str,
+) -> str:
+    """Resolve one Look label in the task's own language.
+
+    Priority: the frozen asset's ``display_label`` for this locale → the bound
+    Locale Pack's generic Look label → (Thai only) the legacy ``ลุค X`` literal.
+
+    A non-Thai task must never silently inherit Thai.  On 2026-09-14 a VN run
+    whose assets only carried ``vi-VN`` labels resolved every ``{{label_x}}``
+    to ``A · ลุค A``.  Failing here instead surfaces "your language pack is
+    missing a Look label" while the failure is still free, rather than after
+    four images have been billed.
+    """
+    if isinstance(raw_label, Mapping):
+        # Mirror ``photo_copy.resolve_photo_copy``: an asset may be tagged with
+        # the full tag or only its primary subtag.
+        value = str(
+            raw_label.get(locale) or raw_label.get(str(locale).split("-")[0]) or ""
+        ).strip()
+        if value:
+            return value
+    elif raw_label:
+        return str(raw_label).strip()
+    if isinstance(locale_pack, Mapping):
+        generic = dict((locale_pack.get("labels") or {})).get("generic") or {}
+        pattern = str(dict(generic).get("look_label") or "").strip()
+        if pattern:
+            return pattern.replace("{letter}", marker)
+    if is_thai_locale(locale):
+        return LEGACY_LOOK_LABEL_PREFIX + marker
+    raise ValueError(
+        "缺少 " + (str(locale or "").strip() or "未指定语言")
+        + " 的 Look 标签，且语言包未提供通用 Look 标签；非泰语任务不得回退泰文"
+    )
+
+
+def theme_copy_fallback(
+    theme: Mapping[str, Any], *, locale: str,
+    locale_pack: Optional[Mapping[str, Any]], variation_index: int = 1,
+) -> dict[str, Any]:
+    """Theme-supplied copy fields in the task's own language.
+
+    Every built-in theme authors its inline ``title``/``cover``/``caption``/
+    ``cta``/``hashtags`` in Thai, so a non-Thai run must take the bound Locale
+    Pack instead.  The theme keeps supplying the *semantics* (``label_zh``,
+    ``visual_brief``, ``travel_theme_type``); it never supplies the published
+    language to a market it was not written for.
+    """
+    if is_thai_locale(locale) or not isinstance(locale_pack, Mapping):
+        return {
+            "title": str(theme.get("title") or ""),
+            "cover": str(theme.get("cover") or ""),
+            "caption": str(theme.get("caption") or ""),
+            "cta": str(theme.get("cta") or ""),
+            "hashtags": [str(value) for value in theme.get("hashtags") or []],
+        }
+    template = dict(travel_copy_template(locale_pack, variation_index) or {})
+    return {
+        "title": str(template.get("title") or ""),
+        "cover": str(template.get("cover") or ""),
+        "caption": str(template.get("caption") or ""),
+        "cta": str(template.get("cta") or ""),
+        "hashtags": [str(value) for value in template.get("hashtags") or []],
+    }
+
+
 def build_theme_copy(
     theme: Mapping[str, Any], assets: Sequence[Mapping[str, Any]],
-    variation: Optional[Mapping[str, Any]] = None,
+    variation: Optional[Mapping[str, Any]] = None, *,
+    locale: str = DEFAULT_PUBLISH_LOCALE,
+    locale_pack: Optional[Mapping[str, Any]] = None,
+    variation_index: int = 1,
 ) -> dict[str, Any]:
     by_role = {str(item.get("role") or ""): item for item in assets}
     try:
         _flow, frozen_roles = flow_contract_from(variation)
     except PhotoFlowRegistryError as exc:
         raise ValueError(str(exc)) from exc
+    # 2026-09-14：主题内联文案（title/cover/caption/cta/hashtags）都是泰语，
+    # 非 TH 任务必须改取绑定语言包，否则 VN 帖会带着泰语标题、CTA 和 hashtags
+    # 发布。TH 走同一函数但返回主题原值，输出逐字不变。
+    fallback = theme_copy_fallback(
+        theme, locale=locale, locale_pack=locale_pack,
+        variation_index=variation_index,
+    )
     labels = []
     labels_by_letter: dict[str, str] = {}
     for index, role in enumerate(frozen_roles):
         marker = role_marker(role, index)
-        raw_label = by_role.get(role, {}).get("display_label") or {}
-        label = (raw_label.get("th-TH") if isinstance(raw_label, Mapping)
-                 else str(raw_label).strip())
-        label = label or ("ลุค " + marker)
+        label = bound_look_label(
+            by_role.get(role, {}).get("display_label"),
+            locale=locale, locale_pack=locale_pack, marker=marker,
+        )
         labels.append(f"{marker} · {label}")
         if len(marker) == 1:
             labels_by_letter[marker.lower()] = label
     variation = dict(variation or {})
     planned_copy = dict(variation.get("copy") or {})
-    cta = str(planned_copy.get("cta") or theme["cta"])
+    cta = str(planned_copy.get("cta") or fallback["cta"])
     labels[-1] += "\n" + cta
     # 主题联动（2026-09-08）：规划产出的逐页 slide_texts 是围绕同一选题的
     # 完整文案，优先使用，不得被标签重组覆盖；缺失时退回旧组装路径。
@@ -338,20 +427,30 @@ def build_theme_copy(
         return normalize_publish_copy({
             "copy_policy_version": 2,
             "place_localized": str(planned_copy.get("place_localized") or ""),
-            "title": str(planned_copy.get("title") or theme["title"]),
-            "caption": str(planned_copy.get("caption") or theme["caption"]),
-            "hashtags": [str(v) for v in planned_copy.get("hashtags") or theme["hashtags"]],
+            "title": str(planned_copy.get("title") or fallback["title"]),
+            "caption": str(planned_copy.get("caption") or fallback["caption"]),
+            "hashtags": [
+                str(value)
+                for value in (planned_copy.get("hashtags") or fallback["hashtags"])
+            ],
             "slide_texts": topic_slides,
             "language_review_status": str(
                 planned_copy.get("language_review_status") or "DRAFT_TRAVEL_TOPIC"),
             **({"language_review": dict(planned_copy["language_review"])}
                if isinstance(planned_copy.get("language_review"), Mapping) else {}),
         })
+    # 旧组装路径（规划未给出完整 5 页）：``thai_hook``/``thai_caption`` 是 v1 计划
+    # 遗留的内联泰语字段，非 TH 任务直接跳过，改由语言包兜底。
+    legacy_hook = str(variation.get("thai_hook") or "") if is_thai_locale(locale) else ""
+    legacy_caption = (
+        str(variation.get("thai_caption") or "") if is_thai_locale(locale) else ""
+    )
     return normalize_publish_copy({
         "place_localized": str(planned_copy.get("place_localized") or ""),
-        "title": str(planned_copy.get("title") or variation.get("thai_hook") or theme["title"]),
-        "caption": str(planned_copy.get("caption") or variation.get("thai_caption") or theme["caption"]),
-        "hashtags": list(theme["hashtags"]),
-        "slide_texts": [str(planned_copy.get("cover") or theme["cover"]), *labels],
+        "title": str(planned_copy.get("title") or legacy_hook or fallback["title"]),
+        "caption": str(
+            planned_copy.get("caption") or legacy_caption or fallback["caption"]),
+        "hashtags": list(fallback["hashtags"]),
+        "slide_texts": [str(planned_copy.get("cover") or fallback["cover"]), *labels],
         "language_review_status": "production_theme_profile",
     })

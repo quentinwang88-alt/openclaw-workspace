@@ -565,6 +565,36 @@ class PhotoBatchTest(unittest.TestCase):
         request = self.repo.batch.manifest_json["entries"][0]["request"]
         self.assertEqual(request["asset_snapshot"]["asset_set_id"], "aset-1")
 
+    def test_theme_overridden_copy_is_bound_and_freezeable(self):
+        """真实入口链路：有主题 → 素材 → build_batch → copy 覆盖 → 封版校验。
+
+        这是 2026-09-14 表格 143–147 行被堵死的现场：运营填了「图文主题」，
+        冻结后 `build_theme_copy` 会把已解析的 request copy 整个换掉。若这一步
+        不绑定素材标签，字面 `{{label_x}}` 就会进请求，被
+        `validate_frozen_request` 拒掉整行，而失败发生在四张图已付费之后。
+        """
+        from services.photo_request_factory import validate_frozen_request
+        self.client.fields.update({
+            "生成数量": 1, "素材状态": "",
+            "图文主题": "凉爽旅行",
+            "图文参考图": [{"file_token": str(index)} for index in range(1, 5)],
+        })
+        report = self.scan()
+        self.assertEqual(report["errors"], [])
+        self.assertEqual(report["processed"][0]["action"], "generate_native_photo")
+        request = self.repo.batch.manifest_json["entries"][0]["request"]
+        copy = request["copy"]
+        blob = json.dumps(copy, ensure_ascii=False)
+        self.assertNotIn("{{", blob)
+        self.assertNotIn("}}", blob)
+        # 标签绑定到冻结素材的 display_label，而不是字面模板或空串。
+        self.assertTrue(all(
+            "·" in slide for slide in copy["slide_texts"][1:4]), copy["slide_texts"])
+        for slide in copy["slide_texts"][1:4]:
+            self.assertNotRegex(slide, r"\{\{label_[a-d]\}\}")
+        validate_frozen_request(request)
+        self.assertTrue(copy["title"] and copy["caption"] and copy["hashtags"])
+
     def test_unexpected_internal_error_is_labelled_with_its_type(self):
         # 真实案例 recvuMrl4BEn0U：兜底处理器把 KeyError 的裸 repr 原样写进
         # 「图文生成失败的原因」，运营整列只看到 'source_record_id'，

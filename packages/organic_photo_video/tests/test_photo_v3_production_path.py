@@ -388,6 +388,67 @@ class VnScarfProductionPathTest(unittest.TestCase):
         with self.assertRaises(PhotoRequestError):
             self._freeze()
 
+    # --- the theme override must stay in the request's own language ---------
+    def test_theme_overridden_copy_stays_vietnamese_and_freezeable(self):
+        """运营填了「图文主题」后，最终 copy 覆盖必须仍是越南语且可封版。
+
+        2026-09-14 的线上现场：`build_theme_copy` 固定按 ``th-TH`` 取素材标签，
+        并用主题内联泰语兜底 title/CTA/hashtags。VN 行于是在四张图付费之后才
+        被封版检查拒掉——要么带着 `A · ลุค A`，要么带着字面 `{{label_a}}`。
+        这里走的是与 ``_generate_native_photo`` 相同的顺序：冻结请求 → 主题覆盖
+        → 重算指纹 → ``validate_frozen_request``。
+        """
+        from services.photo_theme import build_theme_copy, resolve_photo_theme
+
+        request = self._freeze()[0]
+        spec = self._spec_of(request)
+        locale_pack = _bound_locale_pack(spec, request["locale"])
+        self.assertEqual((locale_pack or {}).get("locale"), LOCALE)
+        variant = spec["execution_profiles"][0]["copy_variants_by_locale"][LOCALE][
+            "copy_variants"][0]
+        planned_copy = copy.deepcopy(variant["copy"])
+        # 文案包刻意把四个 Look 标签推迟到冻结点才绑定（与 TH 旅行包同源机制）。
+        self.assertTrue(
+            any("{{label_" in text for text in planned_copy["slide_texts"]))
+        planned_copy["place_localized"] = "Seoul"
+        planned_copy["title"] = "Seoul se lạnh mặc gì? 4 look cho chuyến đi"
+        variation = {
+            "planning_flow": spec.get("planning_flow"),
+            "required_roles": spec["asset_requirements"]["required_roles"],
+            "copy": planned_copy,
+        }
+        # 主题内联文案是泰语——正是修复前会漏进 VN 帖的那一份。
+        theme = resolve_photo_theme("凉爽旅行")
+        self.assertIsNotNone(THAI_RANGE.search(theme["title"]))
+        manifest = request["asset_snapshot"]["manifest_json"]
+        assets = json.loads(manifest)["assets"] if isinstance(manifest, str) else manifest["assets"]
+
+        request["copy"] = build_theme_copy(
+            theme, assets, variation,
+            locale=request["locale"], locale_pack=locale_pack, variation_index=1,
+        )
+        request["request_sha256"] = fingerprint({
+            key: value for key, value in request.items() if key != "request_sha256"})
+        validate_frozen_request(request)
+
+        copy_block = request["copy"]
+        visible = (
+            [copy_block["title"], copy_block["caption"]]
+            + list(copy_block["slide_texts"]) + list(copy_block["hashtags"])
+            + [copy_block.get("place_localized") or ""]
+        )
+        for text in visible:
+            with self.subTest(text=text):
+                self.assertIsNone(THAI_RANGE.search(text), "VN 文案不得含泰文")
+                self.assertIsNone(CJK_RANGE.search(text), "VN 文案不得含中文")
+                self.assertNotIn("{{", text)
+                self.assertNotIn("}}", text)
+        # 标签绑定到冻结素材自己的 vi-VN display_label。
+        self.assertEqual(copy_block["slide_texts"][1], "A · Khăn A")
+        # 规划给出的目的地必须保留下来。
+        self.assertIn("Seoul", copy_block["title"])
+        self.assertEqual(copy_block["place_localized"], "Seoul")
+
     # --- STYLE+PRODUCT ------------------------------------------------------
     def test_style_plus_product_freezes_the_scarf_onto_the_request(self):
         request = self._attach_product(self._freeze()[0])

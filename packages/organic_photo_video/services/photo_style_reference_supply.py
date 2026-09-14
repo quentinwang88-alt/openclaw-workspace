@@ -28,6 +28,27 @@ def _product_adapter(product: Mapping[str, Any] | None):
     return adapter_for_product_category(token) or WOMENSWEAR_V1
 
 
+def _product_qa_context(product: Mapping[str, Any] | None) -> dict[str, Any]:
+    """组级视觉质检要用的指定商品身份（图像必须真实存在）。
+
+    ``reference_images`` 里缺文件的条目会被丢掉：提示词只能对**真的送进模型**
+    的商品参考图说"这是商品参考图"，否则等于只声称有商品而实际没检查。
+    """
+    product = dict(product or {})
+    return {
+        "product_reference_paths": [
+            str(value) for value in product.get("reference_images") or []
+            if Path(str(value)).is_file()
+        ],
+        "product_context": {
+            key: product.get(key)
+            for key in ("product_id", "product_name", "category",
+                        "reference_pack_id", "reference_pack_version")
+            if product.get(key) not in (None, "")
+        },
+    }
+
+
 def _product_targets_slot(product: Mapping[str, Any] | None, slot: str) -> bool:
     """商品类目**本身**是否就是占据该槽位的那件商品。
 
@@ -870,23 +891,14 @@ class PhotoStyleReferenceSupplyService:
                 elif travel_planned and hasattr(reviewer, "review_travel_pages"):
                     semantic = reviewer.review_travel_pages(
                         reference_paths=qa_reference_paths, look_plans=looks,
-                        product_reference_paths=[
-                            str(value) for value in product.get("reference_images") or []
-                            if Path(str(value)).is_file()
-                        ],
                         style_reference_paths=paths,
-                        product_context={
-                            key: product.get(key)
-                            for key in ("product_id", "product_name", "category",
-                                        "reference_pack_id", "reference_pack_version")
-                            if product.get(key) not in (None, "")
-                        },
                         travel_place=str(
                             (style_profile.get("travel_topic") or {}).get("place") or ""
                         ),
                         image_paths=[str(item["path"]) for item in ordered],
                         travel_contract=style_profile.get("travel_contract") or {},
                         persona_based=bool(persona),
+                        **_product_qa_context(product),
                     )
                     from services.photo_travel_qa import (
                         failed_roles_from_travel_qa, travel_qa_as_alignment,
@@ -899,12 +911,16 @@ class PhotoStyleReferenceSupplyService:
                     if not semantic["passed"]:
                         failed_roles = failed_roles_from_travel_qa(semantic, role_order)
                 else:
+                    # 指定商品（如 SCARF_V1 的围巾，主槽位 accessories）在这里
+                    # 属于**核心商品**：组级检查必须拿到真实商品参考图与上下文，
+                    # 否则提示词会把围巾当"配饰有无不受罚"放过（2026-09-14 修复）。
                     group_alignment = reviewer.review_alignment(
                         reference_paths=qa_reference_paths,
                         generated_paths=[str(item["path"]) for item in ordered],
                         contract=style_profile, scope="FULL_LOOK_GROUP",
                         generated_roles=role_order,
                         persona_based=bool(persona),
+                        **_product_qa_context(product),
                     )
                     if not group_alignment["passed"]:
                         failed_roles, has_attribution = self._failed_roles(

@@ -10,6 +10,8 @@ from types import SimpleNamespace
 
 from PIL import Image
 
+from domain.photo_contracts import validate_copy
+
 from services.photo_content_planner import (
     PhotoContentPlanError, plan_th_choice_batch, summarize_batch_plan,
     validate_batch_plan,
@@ -454,6 +456,95 @@ class CopySurvivalTest(unittest.TestCase):
         ]}}
         with self.assertRaisesRegex(ValueError, "占位符"):
             build_theme_copy(theme, assets, variation)
+
+    # --- 2026-09-14 语言绑定（V3 国家无关配方 / VN 围巾线）---------------------
+    # 主题内联文案（title/cover/caption/cta/hashtags）都是泰语，素材标签也只按
+    # th-TH 取。非 TH 任务必须改取绑定语言包，否则 VN 帖会带着泰语 Look 标签、
+    # 泰语 CTA 与泰语 hashtags 发布，而且是在付费生图之后才被发布检查拦下。
+
+    @staticmethod
+    def _vi_pack():
+        from config.loader import resolve_locale_pack
+        return resolve_locale_pack("vi-VN")
+
+    def test_non_thai_task_binds_labels_in_its_own_language(self):
+        from services.locale_quality import copy_locale_issues
+        theme = resolve_photo_theme("凉爽旅行")
+        assets = [
+            {"role": "look_a", "display_label": {"vi-VN": "Look dạo phố cổ"}},
+            {"role": "look_b", "display_label": {"vi-VN": "Look đi cà phê"}},
+            {"role": "look_c", "display_label": {"vi-VN": "Look ngày mua sắm"}},
+            {"role": "look_d", "display_label": {"vi-VN": "Look dạo biển"}},
+        ]
+        variation = {"copy": {
+            "place_localized": "Seoul",
+            "title": "Seoul se lạnh mặc gì?", "caption": "Chuyến đi Seoul",
+            "hashtags": ["#OOTD"],
+            "slide_texts": [
+                "Seoul se lạnh\nA B C hay D?",
+                "A · {{label_a}}", "B · {{label_b}}", "C · {{label_c}}",
+                "D · {{label_d}}\nBạn thích look nào?",
+            ],
+        }}
+        result = build_theme_copy(
+            theme, assets, variation, locale="vi-VN", locale_pack=self._vi_pack())
+        self.assertEqual(result["slide_texts"][1], "A · Look dạo phố cổ")
+        self.assertEqual(result["slide_texts"][4].splitlines()[0], "D · Look dạo biển")
+        self.assertEqual(result["title"], "Seoul se lạnh mặc gì?")
+        # 四个输出位（封面 / 逐页标签 / CTA / hashtags）都不许出现泰文。
+        self.assertNotIn("ลุค", json.dumps(result, ensure_ascii=False))
+        self.assertEqual(copy_locale_issues(result, "vi-VN"), [])
+        self.assertEqual(validate_copy(result), [])
+
+    def test_non_thai_task_never_borrows_the_inline_thai_copy(self):
+        """规划没给完整 5 页时，兜底也必须来自语言包而不是主题泰语。"""
+        theme = resolve_photo_theme("凉爽旅行")
+        pack = self._vi_pack()
+        assets = [
+            {"role": f"look_{letter}", "display_label": {"vi-VN": f"Look {letter}"}}
+            for letter in "abcd"
+        ]
+        result = build_theme_copy(
+            theme, assets, {"copy": {}}, locale="vi-VN", locale_pack=pack)
+        blob = json.dumps(result, ensure_ascii=False)
+        self.assertNotIn("ลุค", blob)
+        self.assertEqual(result["title"], "4 look du lịch")   # pack generic title
+        self.assertEqual(result["slide_texts"][0], "Look du lịch")
+        self.assertEqual(validate_copy(result), [])
+
+    def test_missing_non_thai_look_label_fails_loudly(self):
+        """非 TH 任务没有可用 Look 标签时必须当场报错，不得静默回退泰文。"""
+        theme = resolve_photo_theme("凉爽旅行")
+        assets = [{"role": "look_a", "display_label": {"th-TH": "ลุค A"}}]
+        with self.assertRaisesRegex(ValueError, "不得回退泰文"):
+            build_theme_copy(
+                theme, assets, {"copy": {}}, locale="vi-VN", locale_pack=None)
+
+    def test_thai_task_with_a_pack_keeps_the_inline_copy(self):
+        """TH 传入语言包也不能改变输出：内联泰语仍是 TH 的权威文案。"""
+        from config.loader import resolve_locale_pack
+        theme = resolve_photo_theme("凉爽旅行")
+        assets = [{"role": f"look_{letter}", "display_label": {"th-TH": f"ลุค {letter}"}}
+                  for letter in "abcd"]
+        variation = {"copy": {
+            "title": "ไตเติลสั้น", "caption": "แคปชัน", "hashtags": ["#tag"],
+            "slide_texts": ["ปก", "A หนึ่ง", "B สอง", "C สาม", "D สี่ เลือกลุคไหน"],
+        }}
+        without_pack = build_theme_copy(theme, assets, variation, locale="th-TH")
+        with_pack = build_theme_copy(
+            theme, assets, variation, locale="th-TH",
+            locale_pack=resolve_locale_pack("th-TH"))
+        self.assertEqual(with_pack, without_pack)
+        bare_without = build_theme_copy(
+            theme, assets[:1], {"copy": {}}, locale="th-TH")
+        bare_with = build_theme_copy(
+            theme, assets[:1], {"copy": {}}, locale="th-TH",
+            locale_pack=resolve_locale_pack("th-TH"))
+        self.assertEqual(bare_with, bare_without)
+        self.assertEqual(
+            bare_with["hashtags"], theme["hashtags"],
+            "TH 旧组装路径的 hashtags 必须仍是主题内联值",
+        )
 
 
 class CacheKeyTest(unittest.TestCase):

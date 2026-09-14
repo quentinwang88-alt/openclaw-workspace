@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -172,6 +173,108 @@ class PhotoReferenceVisionTest(unittest.TestCase):
             generated_roles=["look_a"],
         )
         self.assertEqual(bare["role_findings"], [], "缺少逐张归因时必须返回空列表以触发整组重做")
+
+    # --- 指定商品（围巾）属于核心商品，不适用「配饰有无不受罚」(2026-09-14) ----
+    # 围巾搭配线走的是组级 alignment 检查：它原本把「配饰有无」列进不受罚清单，
+    # 而类目适配器（SCARF_V1）声明围巾的主槽位正是 accessories —— 于是指定围巾
+    # 丢了也不会失败。这里守住「类目适配器说的主槽位就是核心商品」这条边界。
+
+    @staticmethod
+    def _passing_response():
+        return {"passed": True, "scores": {
+            "presentation_alignment": 90, "style_alignment": 88,
+            "scene_alignment": 86, "palette_alignment": 90, "look_difference": 84,
+        }, "reason_codes": [], "notes": "通过"}
+
+    @staticmethod
+    def _digest(path: str) -> str:
+        """服务会把每张图归一化复制成 reference_contracts/_model_inputs/<sha256>.jpg。
+
+        因此"商品图有没有真的进模型输入"只能按**文件内容**比对，比原路径必然对不上。
+        """
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+    def _product_image(self) -> str:
+        path = self.root / "product-scarf.jpg"
+        Image.new("RGB", (60, 90), (200, 60, 40)).save(path)
+        return str(path)
+
+    def _generated_image(self) -> str:
+        path = self.root / "generated-look-a.jpg"
+        Image.new("RGB", (60, 90), (12, 34, 56)).save(path)
+        return str(path)
+
+    def test_group_alignment_puts_the_designated_product_first_and_names_it(self):
+        product = self._product_image()
+        generated = self._generated_image()
+        client = FakeVisionClient([self._passing_response()])
+        service = PhotoReferenceVisionService(root=self.root, client=client)
+        service.review_alignment(
+            reference_paths=self.images,
+            generated_paths=[generated],
+            contract={"presentation_type": "SCENE_MODEL"},
+            scope="FULL_LOOK_GROUP", generated_roles=["look_a", "look_b"],
+            product_reference_paths=[product],
+            product_context={"product_id": "P1", "product_name": "格纹羊毛围巾",
+                             "category": "scarf"},
+        )
+        sent_paths, prompt, _ = client.calls[0]
+        # 检查端必须真的看到商品参考图，而不只是提示词声称有商品：
+        # 商品图排最前，其后依次是风格参考与生成结果，且进模型的字节与源文件一致。
+        self.assertEqual(Path(sent_paths[0]).stem, self._digest(product))
+        self.assertEqual(
+            [Path(value).stem for value in sent_paths],
+            [self._digest(product)] + [self._digest(value) for value in self.images]
+            + [self._digest(generated)],
+        )
+        self.assertIn("【核心商品】", prompt)
+        self.assertIn("格纹羊毛围巾", prompt)
+        self.assertIn("前 1 张是指定商品参考图", prompt)
+        # 明确写出「配饰有无不受罚」不覆盖这个指定商品。
+        self.assertIn("不适用于上面【核心商品】里点名的指定商品", prompt)
+        self.assertIn("围法、褶皱、佩戴位置与细微纹理差异只写 notes", prompt)
+
+    def test_group_alignment_without_a_product_keeps_the_accessory_leniency(self):
+        """无指定商品的围巾内容保持自由搭配：不得要求四套围巾一致。"""
+        generated = self._generated_image()
+        # 故意重复一张风格参考：无指定商品时服务必须原样保留顺序与重复，
+        # 参考图数量与旧行为逐字一致（不得顺手去重）。
+        repeated = list(self.images) + self.images[:1]
+        client = FakeVisionClient([self._passing_response()])
+        service = PhotoReferenceVisionService(root=self.root, client=client)
+        service.review_alignment(
+            reference_paths=repeated, generated_paths=[generated],
+            contract={"presentation_type": "SCENE_MODEL"}, scope="FULL_LOOK_GROUP",
+            generated_roles=["look_a"],
+        )
+        sent_paths, prompt, _ = client.calls[0]
+        self.assertEqual(
+            [Path(value).stem for value in sent_paths],
+            [self._digest(value) for value in repeated] + [self._digest(generated)],
+        )
+        self.assertNotIn("【核心商品】", prompt)
+        self.assertNotIn("不适用于上面", prompt)
+        # 原宽松规则仍在：配饰有无只写 notes。
+        self.assertIn("配饰有无", prompt)
+
+    def test_a_missing_product_image_is_not_claimed_as_sent(self):
+        """商品参考图文件缺失时，提示词不得声称"前 N 张是商品参考图"。"""
+        generated = self._generated_image()
+        client = FakeVisionClient([self._passing_response()])
+        service = PhotoReferenceVisionService(root=self.root, client=client)
+        service.review_alignment(
+            reference_paths=self.images, generated_paths=[generated],
+            contract={}, scope="FULL_LOOK_GROUP", generated_roles=["look_a"],
+            product_reference_paths=[str(self.root / "does-not-exist.jpg")],
+            product_context={"product_id": "P1", "product_name": "格纹羊毛围巾"},
+        )
+        sent_paths, prompt, _ = client.calls[0]
+        self.assertEqual(
+            [Path(value).stem for value in sent_paths],
+            [self._digest(value) for value in self.images] + [self._digest(generated)],
+        )
+        self.assertNotIn("是指定商品参考图", prompt)
+        self.assertIn("未随附商品参考图", prompt)
 
 
 class ParseVisionEnvelopeTest(unittest.TestCase):

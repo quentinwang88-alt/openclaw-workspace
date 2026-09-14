@@ -458,6 +458,35 @@ def asset_supply_must_run(asset_status: str, fields: Mapping[str, Any]) -> bool:
             or not confirmed_asset_set_pins(fields))
 
 
+def retake_theme(table_theme: Optional[Mapping[str, Any]],
+                 supply_manifest: Mapping[str, Any]) -> Optional[dict[str, Any]]:
+    """重拍要用的主题：优先沿用首跑冻结的那一个。
+
+    首跑的无主题 STYLE 行用的是 ``effective_theme``（中性主题），表格里仍是空的。
+    重拍若重读表格就会拿到 ``None``，而 ``_input_hash`` 会执行 ``dict(theme)``
+    ⇒ ``TypeError: 'NoneType' object is not iterable``（2026-09-14 复现）。
+
+    恢复源是**供给清单里的 ``theme_brief``**：``PhotoStyleReferenceSupplyService._save``
+    往那里写的是首跑传入的那个纯主题对象（``dict(theme)``），也正是一次
+    ``_input_hash`` 的输入。冻结请求里的 ``theme_brief`` 是另一个东西——它包了
+    ``reference_mode`` / ``batch_variation`` / ``variation``，拿它当主题参与原
+    hash 只会永远对不上，因此这里刻意不读请求。
+
+    表格填了真实不同的主题时不覆盖：交给既有身份检查照原样拒绝，避免用「消除
+    异常」的名义放过真的换题。
+    """
+    frozen = (supply_manifest or {}).get("theme_brief")
+    if not isinstance(frozen, Mapping) or not frozen:
+        # 旧清单没有该字段：沿用历史兼容路径（表格值直通）。
+        return dict(table_theme) if isinstance(table_theme, Mapping) else None
+    if table_theme is None:
+        return dict(frozen)
+    if dict(table_theme) == dict(frozen):
+        return dict(frozen)
+    # 运营真的改了主题：把表格值原样交给身份检查，它会报「主题与原生成不一致」。
+    return dict(table_theme)
+
+
 def is_topic_travel_recipe(recipe_id: str, repository: Any = None) -> bool:
     """Whether this Recipe publishes topic-linked travel copy.
 
@@ -1243,9 +1272,13 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 .get("locale_copy_packs") or {}
             )
             locale_pack = None
+            # 发布语言由 Locale Pack 拥有（review 修复 P0-2），主题文案覆盖
+            # （``build_theme_copy``）也必须知道本任务的语言：否则非 TH 行会从
+            # 主题内联文案拿到泰语 title/CTA/hashtags 兜底（2026-09-14 VN 围巾线）。
+            # v1 配方不带 language，留空即沿用 TH 默认行为。
+            publish_locale = str(getattr(specs[0], "language", "") or "")
             if recipe_locale_packs:
                 from config.loader import resolve_locale_pack
-                publish_locale = str(getattr(specs[0], "language", "") or "")
                 if not publish_locale:
                     raise FeishuWorkflowError("国家无关图文配方缺少发布语言")
                 locale_pack = resolve_locale_pack(publish_locale)
@@ -1934,7 +1967,11 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                             frozen_manifest = json.loads(frozen_manifest)
                         if theme_supplied:
                             request["copy"] = build_theme_copy(
-                                theme, frozen_manifest.get("assets") or [], variations[index]
+                                theme, frozen_manifest.get("assets") or [],
+                                variations[index],
+                                locale=publish_locale or "th-TH",
+                                locale_pack=locale_pack,
+                                variation_index=index + 1,
                             )
                         request["theme_brief"] = {
                             **dict(variation_theme), "reference_mode": reference_mode,
@@ -2520,7 +2557,9 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
             generator=self.generator, root=staging_root,
             vision_service=self.photo_reference_vision,
         )
-        theme = resolve_photo_theme(text_value(record.fields.get(FIELD_CONTENT_THEME)))
+        # 表格主题只在「真实改题」时才有权威性（见 ``retake_theme``）：无主题首跑
+        # 行的表格列一直是空的，重拍必须从供给清单恢复首跑真正用的那个。
+        table_theme = resolve_photo_theme(text_value(record.fields.get(FIELD_CONTENT_THEME)))
         content_items = list(
             ((batch.manifest_json or {}).get("content_plan") or {}).get("items") or [])
         task_by_source = {
@@ -2535,6 +2574,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 raise FeishuWorkflowError(
                     f"第 {index} 篇没有素材供给清单；只有风格参考模式生成的行支持重拍 Look")
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            item_theme = retake_theme(table_theme, manifest)
             old_sources = {
                 str(item.get("role") or ""): item for item in manifest.get("sources") or []
             }
@@ -2568,11 +2608,11 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 )
             expected_hash = str(manifest.get("input_hash") or "")
             if expected_hash and supply_service.input_fingerprint(
-                    reference_paths, theme, variation, account, product) != expected_hash:
+                    reference_paths, item_theme, variation, account, product) != expected_hash:
                 # 冻结内容计划可能在供给之后被补写（如旅行 cover_selection 兜底），
                 # 组合 hash 无法直接复现；逐组件核对参考图/主题/穿搭/人物后重定基线。
                 supply_service.verify_and_rebaseline_identity(
-                    item_dir=item_dir, paths=reference_paths, theme=theme,
+                    item_dir=item_dir, paths=reference_paths, theme=item_theme,
                     account=account, variation=variation, persona=persona, product=product)
             # 幂等：上次重拍中断时目标角色可能已被摘除，直接续跑重生即可。
             to_retire = [role for role in retake_roles if role in old_sources]
@@ -2583,8 +2623,11 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 FIELD_PROGRESS: f"素材重拍 {index}/{len(entries)} 篇",
             })
             prepared = supply_service.prepare(
-                record_id=item_id, reference_paths=reference_paths, theme=theme,
+                record_id=item_id, reference_paths=reference_paths, theme=item_theme,
                 account=account, persona=persona, variation=variation, product=product,
+                # 发布语言走冻结请求自己记下的那一个（首跑按 ``specs[0].language``
+                # 写入），重拍不重读预设，避免与首跑不一致。
+                locale=str(item_request.get("locale") or "th-TH"),
             )
             new_sources = {
                 str(item.get("role") or ""): item for item in prepared.get("sources") or []
