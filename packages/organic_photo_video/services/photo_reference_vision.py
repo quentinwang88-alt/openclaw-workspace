@@ -7,6 +7,7 @@ import json
 import mimetypes
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -232,6 +233,44 @@ def _vision_failure_detail(response: Any) -> str:
         return "响应结构未知"
 
 
+def _trace_vision_call(route: str, image_count: int, max_tokens: int,
+                       response: Any, outcome: str = "ok") -> None:
+    """Opt-in one-line accounting for every vision call attempt.
+
+    Set ``OPV_VISION_DEBUG=1`` to see which route answered, how much of the
+    output budget was actually consumed and how close the reply came to the
+    truncation limit.  Silent unless asked for.
+    """
+    if not os.environ.get("OPV_VISION_DEBUG"):
+        return
+    try:
+        choice = (response.get("choices") or [{}])[0]
+        content = str((choice.get("message") or {}).get("content") or "")
+        usage = response.get("usage") or {}
+        print(
+            f"[vision] route={route} outcome={outcome} images={image_count} "
+            f"max_tokens={max_tokens} finish={choice.get('finish_reason')} "
+            f"completion_tokens={usage.get('completion_tokens')} "
+            f"prompt_tokens={usage.get('prompt_tokens')} chars={len(content)}",
+            file=sys.stderr, flush=True,
+        )
+    except Exception:  # noqa: BLE001 - 诊断日志自身不允许再抛
+        pass
+
+
+def _trace_vision_exception(route: str, image_count: int, max_tokens: int,
+                            exc: Exception, response: Any = None) -> None:
+    """Same accounting for the failing attempt, so truncation is attributable."""
+    if not os.environ.get("OPV_VISION_DEBUG"):
+        return
+    print(f"[vision] route={route} outcome=raised images={image_count} "
+          f"max_tokens={max_tokens} error={exc}"[:1500],
+          file=sys.stderr, flush=True)
+    if response is not None:
+        _trace_vision_call(route, image_count, max_tokens, response,
+                           outcome="raised_with_response")
+
+
 def parse_vision_envelope(response: Any) -> Dict[str, Any]:
     """Tolerant JSON extraction shared by every vision provider envelope."""
     try:
@@ -429,23 +468,36 @@ class PhotoReferenceVisionService:
                     response = doubao.chat_with_multiple_images(
                         paths, prompt, max_tokens)
                     parse_vision_envelope(response)
+                    _trace_vision_call("fast_path_doubao", len(paths), max_tokens, response)
                     return response, "doubao"
                 except Exception as exc:  # noqa: BLE001 - fallback boundary
+                    _trace_vision_exception(
+                        "fast_path_doubao", len(paths), max_tokens, exc,
+                        locals().get("response"))
                     doubao_error = exc
             del doubao_error
         try:
             client = self._client()
             response = client.chat_with_multiple_images(paths, prompt, max_tokens)
             parse_vision_envelope(response)
+            _trace_vision_call(self.provider, len(paths), max_tokens, response)
             return response, self.provider
-        except Exception:  # noqa: BLE001 - fallback boundary
+        except Exception as exc:  # noqa: BLE001 - fallback boundary
+            _trace_vision_exception(
+                self.provider, len(paths), max_tokens, exc, locals().get("response"))
             injectable = self.client is not None
             doubao_ready = self.model and self.api_url and self.api_key
             if self.provider != "codex" or injectable or not doubao_ready:
                 raise
             doubao = self._build_client("doubao")
             response = doubao.chat_with_multiple_images(paths, prompt, max_tokens)
-            parse_vision_envelope(response)
+            try:
+                parse_vision_envelope(response)
+            except Exception as exc:  # noqa: BLE001 - 归因后原样抛出
+                _trace_vision_exception(
+                    "doubao_fallback", len(paths), max_tokens, exc, response)
+                raise
+            _trace_vision_call("doubao_fallback", len(paths), max_tokens, response)
             return response, "doubao_fallback"
 
     def provider_signature(self) -> Dict[str, str]:
@@ -554,8 +606,12 @@ class PhotoReferenceVisionService:
             product_context=product_context,
             required_roles=frozen_required_roles,
         )
-        raw, provider_used = self._chat(
-            self._model_images(images), prompt, max_tokens=min(9000, 1400 + count * 800),
+        raw, provider_used = self._chat_with_truncation_retry(
+            self._model_images(images), prompt,
+            self.analysis_token_budget(
+                count=count, image_count=len(images),
+                role_count=len(frozen_required_roles),
+            ),
         )
         raw = parse_vision_envelope(raw)
         contract = self._normalize_contract(
@@ -682,6 +738,58 @@ class PhotoReferenceVisionService:
     # Travel two-step flow: describe references, then plan per-moment looks.
     # ------------------------------------------------------------------
 
+    # Output budgets for the two planning prompts.  Both emit a per-reference
+    # description (13~18 fields per image) plus one look panel per requested
+    # post, so a budget keyed only on the post count truncates as soon as a line
+    # carries several references at once — 2026-09-14 越南围巾线：3 张参考图 +
+    # 1 篇四选一算得 2200 tokens，doubao 正好把 2200 用尽（finish_reason=length）
+    # 导致整行规划失败。两份预算都随「参考图张数 × 每篇 look 数」增长。
+    VISION_OUTPUT_CEILING = 12000
+    VISION_RETRY_CEILING = 16000
+    REFERENCE_ANALYSIS_BASE_TOKENS = 2200
+    REFERENCE_ANALYSIS_TOKENS_PER_IMAGE = 1000
+    ANALYSIS_BASE_TOKENS = 2600
+    ANALYSIS_TOKENS_PER_IMAGE = 700
+    ANALYSIS_TOKENS_PER_LOOK = 700
+
+    def reference_analysis_token_budget(self, image_count: int) -> int:
+        """Scale the description budget with the number of reference images."""
+        count = max(1, int(image_count))
+        return min(
+            self.VISION_OUTPUT_CEILING,
+            self.REFERENCE_ANALYSIS_BASE_TOKENS
+            + self.REFERENCE_ANALYSIS_TOKENS_PER_IMAGE * count,
+        )
+
+    def analysis_token_budget(self, *, count: int, image_count: int,
+                              role_count: int) -> int:
+        """Scale the analysis contract budget with references and look panels."""
+        posts = max(1, int(count))
+        images = max(1, int(image_count))
+        looks = max(1, int(role_count)) * posts
+        return min(
+            self.VISION_OUTPUT_CEILING,
+            self.ANALYSIS_BASE_TOKENS
+            + self.ANALYSIS_TOKENS_PER_IMAGE * images
+            + self.ANALYSIS_TOKENS_PER_LOOK * looks,
+        )
+
+    def _chat_with_truncation_retry(self, paths: Sequence[str], prompt: str,
+                                    budget: int) -> tuple[Any, str]:
+        """One retry with a doubled budget when the reply was cut off.
+
+        Truncation is a budget accident, not a bad reference set: the identical
+        request with more room succeeds (verified 2026-09-14).  Anything else —
+        unreadable image, invalid structure — must bubble up unchanged.
+        """
+        try:
+            return self._chat(paths, prompt, max_tokens=budget)
+        except PhotoReferenceVisionError as exc:
+            enlarged = min(self.VISION_RETRY_CEILING, budget * 2)
+            if "截断" not in str(exc) or enlarged <= budget:
+                raise
+            return self._chat(paths, prompt, max_tokens=enlarged)
+
     def analyze_reference(
         self, *, record_id: str, paths: Sequence[str], theme: Mapping[str, Any],
         category_key: str, content_requirement: str = "",
@@ -708,12 +816,12 @@ class PhotoReferenceVisionService:
                     "参考图或内容要求已变化；请新建任务避免混用旧参考分析"
                 )
             return dict(cached["analysis"])
-        response, _ = self._chat(
-            self._model_images(images),
-            self._reference_analysis_prompt(theme=theme, category_key=category_key,
-                                            content_requirement=content_requirement),
-            max_tokens=2600,
-        )
+        prompt = self._reference_analysis_prompt(
+            theme=theme, category_key=category_key,
+            content_requirement=content_requirement)
+        budget = self.reference_analysis_token_budget(len(images))
+        response, _ = self._chat_with_truncation_retry(
+            self._model_images(images), prompt, budget)
         raw = parse_vision_envelope(response)
         analysis = self._normalize_reference_analysis(raw, source_hashes)
         payload = {
