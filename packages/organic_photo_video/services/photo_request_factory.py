@@ -268,6 +268,13 @@ class PhotoRequestFactory:
             for profile in recipe_spec["execution_profiles"]:
                 if override.get("profile_id") and override["profile_id"] != profile["profile_id"]:
                     continue
+                # 声明了 markets 的档位只服务该市场。PHOTO_TRAVEL_OUTFIT_V3 有两个
+                # 变量完全相同、只有 asset_set_keys 不同的档位（TH / VN）；不按市场
+                # 收敛的话，VN 请求会命中 profiles[0]（泰国档），既用错素材集命名
+                # 空间，也和「VN 请求必须落到 *_vn 档」的契约相矛盾。未声明
+                # markets 的档位对所有市场开放 ⇒ 既有 TH/MX 线路逐字不变。
+                if profile.get("markets") and spec.market not in list(profile.get("markets") or []):
+                    continue
                 variables = {**copy.deepcopy(profile["variables"]), **dict(override.get("variables") or {})}
                 errors = validate_variables(recipe_spec.get("variables_schema") or {}, variables)
                 if errors:

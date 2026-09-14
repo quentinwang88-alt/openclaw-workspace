@@ -245,11 +245,35 @@ class PhotoAssetSupplyService:
         binding = dict(profile_binding or {})
         profiles = list(spec.get("execution_profiles") or [])
         requested_profile_id = str(binding.get("profile_id") or "")
-        profile = next(
-            (item for item in profiles
-             if not requested_profile_id or str(item.get("profile_id") or "") == requested_profile_id),
-            None,
-        )
+        # 国家无关配方（V3）不声明 markets/category_key：调用方传入优先，未传
+        # 时回落配方声明。两者皆缺时报明确错误，而不是造出 ASSET__UPLOAD_ 这种
+        # 无类别素材集后在下游炸出一句难以归因的 AssetSetError。
+        # 市场要在选档**之前**算出来：下面按市场选 profile 需要它。
+        market = str(market or (spec.get("markets") or [""])[0])
+        category = str(category_key or spec.get("category_key") or "")
+        if not requested_profile_id:
+            # 调用方没指名 profile 时（自动风格参考供给走的就是这条路），必须按
+            # **本次请求的市场**选档。否则回落 ``profiles[0]``——对
+            # ``PHOTO_TRAVEL_OUTFIT_V3`` 而言 profiles[0] 是泰国档，VN 请求会把
+            # 素材集登记进 TH 的 asset_set_key 命名空间，而该键的版本槽位由泰国
+            # 线路持有：``uq_opv_asset_set_version`` 是 (asset_set_key,
+            # asset_set_version) 唯一索引，INSERT 会静默改写那行、保留它原来的
+            # asset_set_id，本次算出来的 content-addressed id 根本不存在，
+            # 下游按 id 查不到就报 NEEDS_ASSET——图已经付过费。
+            # 声明了 markets 的档位只服务该市场；未声明的档位对所有市场开放，
+            # 因此未声明 markets 的配方（全部 TH/MX 既有线路）逐字不变。
+            profile = next(
+                (item for item in profiles
+                 if not item.get("markets")
+                 or market in list(item.get("markets") or [])),
+                None,
+            ) or next(iter(profiles), None)
+        else:
+            profile = next(
+                (item for item in profiles
+                 if str(item.get("profile_id") or "") == requested_profile_id),
+                None,
+            )
         if not isinstance(profile, Mapping):
             raise PhotoAssetSupplyError(
                 "Recipe 缺少可执行方案" if not requested_profile_id
@@ -258,11 +282,6 @@ class PhotoAssetSupplyService:
         key = str(binding.get("asset_set_key") or (profile.get("asset_set_keys") or [""])[0])
         if not key:
             raise PhotoAssetSupplyError("Recipe/profile binding 缺少 asset_set_key")
-        # 国家无关配方（V3）不声明 markets/category_key：调用方传入优先，未传
-        # 时回落配方声明。两者皆缺时报明确错误，而不是造出 ASSET__UPLOAD_ 这种
-        # 无类别素材集后在下游炸出一句难以归因的 AssetSetError。
-        market = str(market or (spec.get("markets") or [""])[0])
-        category = str(category_key or spec.get("category_key") or "")
         if not category:
             raise PhotoAssetSupplyError(
                 "素材集缺少类别：配方未声明 category_key，调用方也未提供"
@@ -398,6 +417,25 @@ class PhotoAssetSupplyService:
             },
         )
         saved = AssetSetService(repository).save(asset_set)
+        # 写入后必须回读自证：``uq_opv_asset_set_version`` 唯一索引建在
+        # (asset_set_key, asset_set_version) 上，而版本号是按「该类别+该市场下
+        # **enabled** 的同键行」算的——一条**停用**的历史行同样占着槽位却不在
+        # 计数里。此时 INSERT 会走 ON DUPLICATE KEY UPDATE 改写那条历史行并保留
+        # 它原来的 asset_set_id，本次算出的 content-addressed id 永远不存在；而
+        # ``AssetSetService.save`` 恰好会在回读为空时回落返回内存对象，于是调用方
+        # 带着一个悬空 id 往下走，最终在冻结阶段报 NEEDS_ASSET——图却已经付过费。
+        # 把这种静默失败改成响亮失败（同键同版本的合法自增不会命中这里）。
+        persisted = repository.get_asset_set(asset_set.asset_set_id)
+        if (persisted is None or str(persisted.asset_set_key) != key
+                or int(persisted.asset_set_version) != int(version)):
+            raise PhotoAssetSupplyError(
+                "素材集写入未落到预期行（asset_set_key/asset_set_version 槽位被占）："
+                f"期望 id={asset_set.asset_set_id} key={key} v={version}，"
+                f"实际回读到 {getattr(persisted, 'asset_set_id', None)!r} "
+                f"key={getattr(persisted, 'asset_set_key', None)!r} "
+                f"v={getattr(persisted, 'asset_set_version', None)!r}。"
+                "请先清理该槽位上的历史停用行后重跑；已生成的素材可复用，不会重复付费。"
+            )
         path = Path(staged["files"][0]["path"]).parent / "manifest.json"
         staged.update(status="qualified", asset_set_id=saved.asset_set_id,
                       asset_set_version=saved.asset_set_version, reviewer=reviewer)

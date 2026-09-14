@@ -200,6 +200,9 @@
         },
         "asset_set_keys": [
           "TH_WOMENSWEAR_CHOICE"
+        ],
+        "markets": [
+          "TH"
         ]
       },
       {
@@ -216,6 +219,9 @@
         },
         "asset_set_keys": [
           "VN_SCARF_CHOICE"
+        ],
+        "markets": [
+          "VN"
         ]
       }
     ],

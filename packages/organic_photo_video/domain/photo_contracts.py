@@ -251,6 +251,17 @@ def validate_execution_profiles(spec: Mapping[str, Any], *, require_profiles: bo
         keys = profile.get("asset_set_keys")
         if not isinstance(keys, list) or not keys or not all(isinstance(k, str) and k for k in keys) or len(set(keys)) != len(keys):
             errors.append(f"profile {identity} requires unique stable asset_set_keys")
+        # ``markets`` 可选：声明后该档位只服务这些市场（同一配方里 TH/VN 两档
+        # 变量相同、只有素材集键不同，必须能按市场收敛）。不声明 = 对所有市场
+        # 开放，因此既有 TH/MX 配方不受影响。
+        profile_markets = profile.get("markets")
+        if profile_markets is not None and (
+                not isinstance(profile_markets, list) or not profile_markets
+                or any(not isinstance(item, str) or not item for item in profile_markets)
+                or len(set(profile_markets)) != len(profile_markets)):
+            errors.append(
+                f"profile {identity} markets must be a non-empty list of unique market codes"
+            )
         variants = profile.get("copy_variants")
         copy_pack_id = profile.get("copy_pack_id")
         if (not isinstance(variants, list) or not variants) and not (
