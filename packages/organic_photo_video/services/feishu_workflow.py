@@ -424,6 +424,40 @@ def task_quantity(fields: Mapping[str, Any]) -> int:
     return quantity_value(value)
 
 
+# 素材状态把行标成「已确认/已匹配」时，首跑路径会跳过素材段、直接复用已冻结的
+# 素材集。可复用的前提是**真的有一个 asset_set_id 可用**：要么来自冻结批次
+# （此时根本不走首跑路径），要么来自「图文任务JSON」里随人工确认写入的 pin。
+# 两者都没有却仍然跳过，只会得到空 overrides ⇒ 落到内容池回退路径
+# ⇒ ``NEEDS_CONTENT: 仅找到 0 份未占用的有效内容``。
+# 真实成因见 2026-09-14 恢复死角排查：素材审核确认把 素材状态 写进飞书，
+# 却只把 asset_set_id 留在内存里，那次 _generate 一失败，该行就再也跑不起来。
+SETTLED_ASSET_STATUSES = ("已确认，正在生成", "已匹配可用素材")
+
+
+def confirmed_asset_set_pins(fields: Mapping[str, Any]) -> list[str]:
+    """「图文任务JSON」里随人工确认冻结下来的 asset_set_id pin（可多个）。"""
+    raw = text_value((fields or {}).get(FIELD_PHOTO_REQUEST))
+    if not raw:
+        return []
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, dict):
+        return []
+    items = payload.get("items") if "items" in payload else [payload]
+    if not isinstance(items, list):
+        return []
+    return [str(item["asset_set_id"]) for item in items
+            if isinstance(item, dict) and item.get("asset_set_id")]
+
+
+def asset_supply_must_run(asset_status: str, fields: Mapping[str, Any]) -> bool:
+    """首跑路径是否必须（重新）派生素材集，而不是直接复用。"""
+    return (asset_status not in SETTLED_ASSET_STATUSES
+            or not confirmed_asset_set_pins(fields))
+
+
 def is_topic_travel_recipe(recipe_id: str, repository: Any = None) -> bool:
     """Whether this Recipe publishes topic-linked travel copy.
 
@@ -1555,9 +1589,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
             pinned_asset_set_ids: list[str] = []
             prepared_source_groups: list[list[dict[str, Any]]] = []
             if (reference_mode == REFERENCE_MODE_COMPLETE_LOOK and recipe_for_input
-                    and asset_status not in {
-                        "已确认，正在生成", "已匹配可用素材",
-                    }):
+                    and asset_supply_must_run(asset_status, record.fields)):
                 recipe = recipe_for_input
                 from services.photo_asset_supply import PhotoAssetSupplyService
                 asset_supply = PhotoAssetSupplyService(self.client, root=staging_root)
@@ -1647,7 +1679,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     )
                     pinned_asset_set_ids.append(saved.asset_set_id)
             if (reference_mode == REFERENCE_MODE_STYLE and recipe_for_input
-                    and asset_status not in {"已确认，正在生成", "已匹配可用素材"}):
+                    and asset_supply_must_run(asset_status, record.fields)):
                 if effective_theme is None:
                     raise FeishuWorkflowError("风格参考模式需要选择图文主题")
                 recipe = recipe_for_input
@@ -1771,9 +1803,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     )
                     pinned_asset_set_ids.append(saved.asset_set_id)
             if (reference_mode == REFERENCE_MODE_PRODUCT and recipe_for_input
-                    and asset_status not in {
-                        "已确认，正在生成", "已匹配可用素材",
-                    }):
+                    and asset_supply_must_run(asset_status, record.fields)):
                 recipe = recipe_for_input
                 if recipe is None or recipe.status != "active":
                     raise FeishuWorkflowError("图文 Recipe 不存在或已停用")
@@ -2644,15 +2674,21 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
         saved = PhotoAssetSupplyService(self.client, root=staging_root).qualify(
             record_id=record.record_id, recipe=recipe, repository=self.repository,
         )
+        # Pin this run to the exact human-confirmed upload without asking the
+        # operator to maintain the compatibility JSON field. The pin is written
+        # to Feishu as well: keeping it only in memory made the row
+        # unrecoverable whenever _generate failed after the status write below
+        # (素材状态 already says "已确认" ⇒ the next run skips the asset section,
+        # yet nothing pins an asset set ⇒ NEEDS_CONTENT from the content pool).
+        pinned_payload = json.dumps({"asset_set_id": saved.asset_set_id})
         self._write_fields(record.record_id, {
             FIELD_REVIEW: REVIEW_NOT_REQUIRED, FIELD_PHOTO_ASSET_STATUS: "已确认，正在生成",
+            FIELD_PHOTO_REQUEST: pinned_payload,
             FIELD_NOTES: f"已按确认发布冻结素材集 {saved.asset_set_id} V{saved.asset_set_version}；开始生成原生图文。",
         })
         record.fields[FIELD_PHOTO_ASSET_STATUS] = "已确认，正在生成"
         record.fields[FIELD_REVIEW] = REVIEW_PENDING
-        # Pin this run to the exact human-confirmed upload without asking the
-        # operator to maintain the compatibility JSON field.
-        record.fields[FIELD_PHOTO_REQUEST] = json.dumps({"asset_set_id": saved.asset_set_id})
+        record.fields[FIELD_PHOTO_REQUEST] = pinned_payload
         result = self._generate(record)
         result["qualified_asset_set_id"] = saved.asset_set_id
         return result

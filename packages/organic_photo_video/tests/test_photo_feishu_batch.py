@@ -496,6 +496,75 @@ class PhotoBatchTest(unittest.TestCase):
         self.assertNotIn("系统内部错误", self.client.fields[FIELD_FAILURE_REASON])
         self.assertIsNone(self.repo.batch)
 
+    def test_confirmed_staged_assets_persist_the_asset_set_pin(self):
+        """人工确认素材时必须把 asset_set_id 一并写进「图文任务JSON」。
+
+        审核确认写下的「素材状态=已确认，正在生成」会先落地；若 asset_set_id 只
+        留在内存里，那一次 _generate 中途失败后该行就永久卡死：重跑既跳过素材段
+        （素材状态已确认）又没有 pin 可复用 ⇒ 落到内容池报 NEEDS_CONTENT。
+        """
+        from services.photo_asset_supply import PhotoAssetSupplyService
+        PhotoAssetSupplyService(self.client, root=Path(self.temp.name)).stage(
+            record_id="rec",
+            attachments=[{"file_token": str(index)} for index in range(1, 5)],
+            required_roles=["look_a", "look_b", "look_c", "look_d"],
+        )
+        self.client.fields.update({
+            "生成数量": 1, "素材状态": "待内容审核", "审核": "通过", "执行": False,
+        })
+        report = self.scan()
+        self.assertEqual(report["errors"], [])
+        self.assertEqual(report["processed"][0]["action"], "generate_native_photo")
+        pin = json.loads(self.client.fields["图文任务JSON"])
+        self.assertEqual(pin["asset_set_id"],
+                         report["processed"][0]["qualified_asset_set_id"])
+        self.assertTrue(pin["asset_set_id"])
+
+    def test_settled_asset_status_without_a_pin_rebuilds_the_supply(self):
+        """素材状态「已确认/已匹配」但没有 pin 也没有批次时，素材段必须照常跑。
+
+        跳过素材段只会得到空 overrides ⇒ 落到内容池回退路径 ⇒ NEEDS_CONTENT。
+        """
+        from services.photo_asset_supply import PhotoAssetSupplyService
+        calls: list[str] = []
+        original = PhotoAssetSupplyService.qualify
+
+        def spy(inner_self, **kwargs):
+            calls.append(str(kwargs.get("record_id") or ""))
+            return original(inner_self, **kwargs)
+
+        self.client.fields.update({
+            "生成数量": 1, "素材状态": "已确认，正在生成",
+            "图文参考图": [{"file_token": str(index)} for index in range(1, 5)],
+        })
+        with patch.object(PhotoAssetSupplyService, "qualify", spy):
+            produced = self.scan()
+        self.assertEqual(produced["errors"], [])
+        self.assertEqual(produced["processed"][0]["action"], "generate_native_photo")
+        self.assertTrue(calls, "素材段被跳过了：该状态下行既无批次也无 pin")
+        self.assertIsNotNone(self.repo.batch)
+
+    def test_persisted_pin_keeps_the_asset_section_skipped(self):
+        """有 pin 的行仍按原语义跳过素材段，直接复用已冻结素材集。"""
+        from services.photo_asset_supply import PhotoAssetSupplyService
+        calls: list[str] = []
+        original = PhotoAssetSupplyService.qualify
+
+        def spy(inner_self, **kwargs):
+            calls.append(str(kwargs.get("record_id") or ""))
+            return original(inner_self, **kwargs)
+
+        self.client.fields.update({
+            "生成数量": 1, "素材状态": "已匹配可用素材",
+            "图文任务JSON": json.dumps({"asset_set_id": "aset-1"}),
+        })
+        with patch.object(PhotoAssetSupplyService, "qualify", spy):
+            produced = self.scan()
+        self.assertEqual(produced["errors"], [])
+        self.assertEqual(calls, [])
+        request = self.repo.batch.manifest_json["entries"][0]["request"]
+        self.assertEqual(request["asset_snapshot"]["asset_set_id"], "aset-1")
+
     def test_unexpected_internal_error_is_labelled_with_its_type(self):
         # 真实案例 recvuMrl4BEn0U：兜底处理器把 KeyError 的裸 repr 原样写进
         # 「图文生成失败的原因」，运营整列只看到 'source_record_id'，
