@@ -15,6 +15,7 @@ Resolvers are pure: no IO, no network, no Feishu, no filesystem access.
 """
 from __future__ import annotations
 
+import copy
 from typing import Any, Mapping
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     "destinations_for_country",
     "family_copy",
     "locale_pack_labels",
+    "profile_copy_variants",
     "snow_scene_allowed",
     "temperature_labels",
     "travel_copy_template",
@@ -158,6 +160,46 @@ def complete_look_copy(locale_pack: Mapping[str, Any] | None) -> list[dict[str, 
             )
         variants.append(variant)
     return variants
+
+
+def profile_copy_variants(
+    profile: Mapping[str, Any] | None, *, locale: str,
+) -> list[dict[str, Any]]:
+    """Return the audited publish-copy variants this profile offers for ``locale``.
+
+    ``config/loader.load_content_recipe_file`` fans a country-agnostic recipe's
+    ``locale_copy_packs`` out into a per-profile ``copy_variants_by_locale`` map
+    and then sets ``copy_variants`` to ``sorted(by_locale)[0]`` — alphabetically
+    ``th-TH`` for every recipe that ships Thai.  Reading ``copy_variants``
+    therefore hands a VN task the *Thai* template body while ``{destination}`` /
+    ``{temperature}`` are already filled with Vietnamese labels, which is how a
+    VN post ends up flagged "contains Thai characters for locale vi-VN".
+
+    Language follows the market: read the entry for this task's locale.  A
+    profile that carries no ``copy_variants_by_locale`` (every v1 recipe, whose
+    loader path keys copy on ``copy_pack_id`` instead) and a task with no
+    declared locale both keep the legacy default, so TH is byte-identical.
+
+    A recipe that *does* declare this locale but whose profile ships no active
+    rows for it is a configuration gap, not a reason to publish another
+    language: it fails loudly.
+    """
+    profile = dict(profile or {})
+    by_locale = profile.get("copy_variants_by_locale")
+    legacy = copy.deepcopy(list(profile.get("copy_variants") or []))
+    if not isinstance(by_locale, Mapping) or not by_locale:
+        return legacy
+    wanted = str(locale or "")
+    if not wanted:
+        return legacy
+    entry = by_locale.get(wanted)
+    if isinstance(entry, Mapping) and entry.get("copy_variants"):
+        # 深拷贝：调用方会把这份文案冻进请求并被哈希，不该与配方配置共享可变对象。
+        return copy.deepcopy(list(entry["copy_variants"]))
+    raise PhotoLocaleError(
+        f"profile {profile.get('profile_id') or '未命名档位'} 没有 {wanted} 的发布文案"
+        f"（已配置：{'、'.join(sorted(str(key) for key in by_locale))}）"
+    )
 
 
 def travel_copy_template(

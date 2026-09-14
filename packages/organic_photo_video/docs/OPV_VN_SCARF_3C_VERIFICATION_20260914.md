@@ -70,7 +70,7 @@ copy_source = "template_fill"
 与 `tests/test_photo_v3_production_path.py::test_travel_line_resolves_the_vn_asset_set_with_no_override`
 钉死的契约相矛盾。
 
-### D3 —— 旅行流程的文案由主题模板拥有（泰语），Locale Pack 的越语文案被跳过（**未修，待决策**）
+### D3 —— 旅行流程的文案由主题模板拥有（泰语），Locale Pack 的越语文案被跳过（**已修，2026-09-14 夜**）
 
 `services/photo_content_planner.py`：
 
@@ -88,6 +88,26 @@ elif travel_flow:
 泰国语版本逐字保留在 LOCALE_TH_TH_V1.json 中"——即越语旅行文案**已就绪但没接线**。
 
 因此：**VN 旅行线目前不可能通过发布契约**，与是否填旅行地点无关；这条必须修（见 §7）。
+
+**2026-09-14 夜已修（方案 §8.1 的另一条实施路径）**。最终没有改
+`locale_pack=None if travel_flow else locale_pack` 的作用域，而是把"文案随发布语言走"
+收敛为**唯一归属**并让旅行分支按新口径取模板：
+
+- 新增 `services/photo_locale.py::profile_copy_variants(profile, *, locale)`：按
+  `copy_variants_by_locale[locale]` 取该语言的**已审核**文案包，缺该语言则**响亮失败**
+  （列出已配置语言）；未声明映射的 v1 配方走原 `copy_variants`，逐字不变。
+- 旅行分支的两处来源**双双改为按市场/语言解析**：档位用
+  `domain.photo_contracts.select_execution_profile(profiles, market=本行市场)`
+  （不再取 `profiles[0]`），文案模板用 `profile_copy_variants(travel_profile,
+  locale=publish_locale)`。
+- `services/photo_request_factory.py::_localized_variants` 从"自己实现一遍"改为
+  同一实现的薄适配器，保留自己的异常类型。**这一处是佐证**：请求层**早就**按
+  `spec.language` 取文案了——「语言跟国家走」这条约定在请求层已落地，缺的只是
+  规划段与主题覆盖段没跟上。
+- `input_contract` 增加 `publish_locale`：否则同一行改语言会**静默复用旧语言的计划**，
+  契约比对发现不了，一路走到发布契约才炸、而图片已经付过费。
+
+真实验证见 §九。
 
 ## 五、本轮改动
 
@@ -132,11 +152,92 @@ elif travel_flow:
 
 ## 八、遗留与下一步（需拍板）
 
-1. **D3 必须先修**，否则 VN 旅行线永远出不了片。建议：旅行流程的 `template_fill`
-   分支优先取 `locale_pack.family_copy[family_id]`（越南语已交付），TH 侧要求
-   `LOCALE_TH_TH_V1.family_copy` 与现主题模板填出的结果**逐字相同**并加断言锁死，
-   再改 `locale_pack=None if travel_flow else locale_pack` 的作用域。
+1. ~~**D3 必须先修**，否则 VN 旅行线永远出不了片。~~ —— **已修并真实验证**（见 §四 D3
+   与 §九）。最终走了另一条实施路径：不改 `locale_pack=None if travel_flow` 的传参
+   作用域，而是让旅行分支**按市场选档 + 按发布语言取已审核文案**，并把
+   `publish_locale` 纳入冻结契约。TH 侧"逐字不变"由
+   `tests/test_photo_copy_locale_binding.py` 的断言锁死。
 2. D1 的根因（版本号只统计 enabled 行）仍在：建议把版本计算改为"同键**所有**状态行的
    最大版本 + 1"，或给该唯一索引加 `status`——本轮只加了"响亮失败"护栏，没有动口径。
 3. VN 旅行线的 `photo_locale.travel_copy_template.hashtags` 恒为空列表（既有缺口）。
 4. 发布：本轮未点"确认发布"。C 行成片已在 `预览/成片`，具备走既有确认发布的全部条件。
+
+## 九、D3 修复后的真实验证（2026-09-14 夜，A2 行）
+
+### 9.1 为什么要换行
+
+A 行 `recvvcgvz0LsIh` 的批次在修复前已冻结了**泰语请求**，重跑会沿用它。要释放它就
+必须取消批次，而 `_generate_native_photo` 对 `cancelled` 批次**直接报错**：
+
+```python
+raise FeishuWorkflowError("该图文批次已取消；请新增一行重新发起，历史记录保持只读")
+```
+
+⇒ 该行永久只读。官方出路是**新增一行**，故建 A2 行 `recvvcD2x9br89`，字段与 A 行
+逐项一致（预设 / 主题「凉爽旅行」/ 风格参考 3 张 / 篇数=1）。
+
+### 9.2 换行复用预批状态时的真坑：`reference_tokens`
+
+四处缓存的键**都不含 record_id**，理论上搬目录即可复用：
+
+| 缓存 | 复用判据 | 含 record_id？ |
+| --- | --- | --- |
+| `reference_contracts/reference_analysis.json` | `input_sha256`（参考图内容 sha256 + 主题 + category + prompt/routing） | 否 |
+| `reference_contracts/travel_plan.json` | `input_sha256`（analysis_sha256 + moments + variables + route…） | 否 |
+| `content_plans/plan.json` | `input_sha256`（**含 `reference_tokens`**） | 否 |
+| `style_reference_supply/…/supply_manifest.json` | `input_hash`（参考图内容 sha256 + theme + variation + persona） | 否 |
+
+**但 `input_contract["reference_tokens"]` 存的是飞书附件的 `file_token`**，换行必须重新
+上传参考图 ⇒ token 全变（实测旧 `QLxjbUrw…/A2FNbItE…/UKVKbyHnSo…`
+→ 新 `WJftbRK1Oo…/Nm4KbJevio…/TrDJbdIS3o…`）⇒ 计划契约不匹配，而
+`_is_replannable_photo_error` 把它判为"可重规划" ⇒ `_archive_photo_planning_state`
+**连带把 `style_reference_supply/<rid>_item_*` 整目录搬走**（实测归档到
+`replan_archive/recvvcD2x9br89_20260914_135618_544828/`）⇒ **已付费的 4 张 look 被
+归档并重新生成**（实测烧掉 1 张后才止损）。
+
+而重试时的重新规划**不是确定性的**：同一输入抽到了另一条文案变体
+（`Diện gì để chụp ảnh ở…` vs 归档里的 `Gợi ý phối đồ du lịch…`）⇒ 素材段
+`input_hash`（哈希整个 `variation`，含 `copy`）也匹配不上 ⇒ 只能重新生图。
+
+**正确处置**（`tmp/real_gen_e2e_3rows/refix_row_a2_plan.py`）：
+
+1. **恢复归档里那份旧计划**（它才与已付费素材同源）；
+2. 只把 `input_contract["reference_tokens"]` 改写为**新行实际的 file_token**（同一批
+   参考图，仅标识不同），用 `PhotoContentPlanStore` 真正使用的 `_fingerprint`
+   重算 `input_sha256`；
+3. **同时重算 `plan_sha256`**——`plan` 内部也带 `record_id`，改名后不重算会报
+   「冻结内容计划校验失败」（该错**不在**可重规划白名单，不触发归档，但会直接终止该行）。
+
+改后本地模拟 `load_or_create` 的两道校验 + 素材 `input_fingerprint` 全过，再跑一次即
+零生成复用。
+
+### 9.3 结果（端到端 PASS）
+
+| 项 | 实测 |
+| --- | --- |
+| 飞书 | 进度=**已完成**；`预览/成片` **5 个附件** |
+| 备注 | 「已完成 1/1 篇原生图文，共 5 张；技术检查已通过；勾选确认发布后冻结当前成品并进入发布队列。」 |
+| 批次 | `opv_batch_cccb19dcb6cbda76626ccde979b331cd`（`waiting`），`created_at=22:09:44` |
+| 任务 | `opv_task_20260914_6e72edc87635`（`photo_packaging`，正常终态）；镜头 **4** |
+| 成片 | 5 张 **1080×1920** JPEG；镜头图文件名带 **`_reuse`** 后缀 |
+| 素材 | 4 张 look 的 **mtime 与 sha256 全未变**（仍为 20:30:31 / 20:32:24 / 20:33:20 / 20:34:37）⇒ **零生成、零付费** |
+| 文案 | 批次 `entries[0].request.copy`：**零泰文**、零未替换 `{{ }}`；`title=Gợi ý phối đồ du lịch Thành phố se lạnh`；`hashtags=[#phoidodulich, #khanquang, #OOTD]`；末页 `slide_texts[4]` 带 CTA |
+| 计划契约 | `publish_locale=vi-VN`；`copy_source=template_fill`；`input_sha256=a4ea1f93…` |
+
+**意义**：D3 修完后，VN 旅行线不仅能出片，**发布契约预检（在任何付费生图之前）也不会
+再拦**——文案在计划冻结时就已经是越南语。
+
+> 本次运行的推进由**定时扫描器**完成（22:09:44），手工 `--record-id` 拿到
+> `{"eligible": 0}` 属正常（并发扫描器抢活）；进度为「生成中」时手工重跑需要
+> `--resume-running`。
+
+### 9.4 本轮代码改动（已全量回归 1305 OK）
+
+| 文件 | 改动 |
+| --- | --- |
+| `services/photo_locale.py` | 新增 `profile_copy_variants`——"发布文案随语言走"的唯一归属；缺语言响亮失败；`deepcopy` 隔离 |
+| `domain/photo_contracts.py` | 新增 `select_execution_profile`——"档位随市场选"的唯一归属 |
+| `services/feishu_workflow.py` | 旅行分支按市场选档 + 按语言取文案；`input_contract` 增 `publish_locale` |
+| `services/photo_asset_supply.py` | `qualify` 改用共享选择器（保留原兜底语义） |
+| `services/photo_request_factory.py` | `_localized_variants` 改为薄适配器，消除第二份实现 |
+| `tests/test_photo_copy_locale_binding.py` | 新增 15 条 |

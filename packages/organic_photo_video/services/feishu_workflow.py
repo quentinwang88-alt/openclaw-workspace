@@ -1520,6 +1520,10 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
             effective_theme = theme
             if theme is None and theme_optional:
                 effective_theme = {**dict(variation_theme), "theme_key": ""}
+            # 档位与文案都必须按「本任务的市场 + 发布语言」解析：国家无关配方的一
+            # 个档位可以只服务某些市场，也可以只提供某些语言的已审核文案。
+            from domain.photo_contracts import select_execution_profile
+            from services.photo_locale import profile_copy_variants
             layering_copy_templates = None
             if layering_flow:
                 recipe_spec_input = recipe_for_input.recipe_spec_json or {}
@@ -1541,16 +1545,26 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     raise FeishuWorkflowError(
                         f"{flow_label}尚未配置 {profile_variable_value} profile"
                     )
-                layering_copy_templates = list(profile_for_band.get("copy_variants") or [])
+                layering_copy_templates = profile_copy_variants(
+                    profile_for_band, locale=publish_locale,
+                )
             if planning_flow == "travel_two_step":
                 recipe_spec_input = recipe_for_input.recipe_spec_json or {}
                 travel_contract = dict(recipe_spec_input.get("travel_contract") or {})
                 profiles_input = list(recipe_spec_input.get("execution_profiles") or [])
-                travel_variables = dict((profiles_input[0].get("variables") or {})
-                                        if profiles_input else {})
-                travel_copy_templates = list(
-                    (profiles_input[0].get("copy_variants") or [])
-                    if profiles_input else []
+                # 档位按**本任务的市场**选，而不是取 profiles[0]。国家无关配方的
+                # 档位可以声明 ``markets``：PHOTO_TRAVEL_OUTFIT_V3 的两档变量逐字
+                # 相同、只有 asset_set_keys 不同（泰国档 / 越南档），取第一档会把
+                # VN 任务绑到泰国的素材命名空间与泰语文案包上。未声明 markets 的
+                # 档位对所有市场开放 ⇒ 既有 TH/MX 线路逐字不变。
+                travel_profile = select_execution_profile(
+                    profiles_input, market=str(specs[0].market or ""),
+                ) or {}
+                travel_variables = dict(travel_profile.get("variables") or {})
+                # 文案语言跟着国家走：读**本次发布语言**的文案包，而不是
+                # ``copy_variants``（loader 把它固定成按字母序第一个语言 = 泰语）。
+                travel_copy_templates = profile_copy_variants(
+                    travel_profile, locale=publish_locale,
                 ) or None
                 if theme and theme.get("travel_theme_type"):
                     travel_topic = build_travel_topic(
@@ -1647,6 +1661,13 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     "travel_place": travel_place,
                     "temperature_variables": temperature_variables,
                 }
+                if recipe_locale_packs:
+                    # 发布语言决定计划内容（文案模板来自语言文案包）⇒ 语言必须进
+                    # 冻结契约。否则同一行改语言会静默复用旧语言的计划：契约比对
+                    # 发现不了，VN 行会带着泰语文案一路走到发布契约才炸，而图片
+                    # 已经付过费。只有声明了 ``locale_copy_packs`` 的国家无关配方
+                    # 才带该键，v1 配方（泰语内联文案、与语言无关）契约逐字不变。
+                    input_contract["publish_locale"] = publish_locale
                 plan_store = PhotoContentPlanStore(staging_root)
 
                 def _load_content_plan():

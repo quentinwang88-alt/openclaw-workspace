@@ -12,6 +12,7 @@ from PIL import Image, ImageOps
 
 from services.image_generator import read_image_dimensions
 from domain.models import AssetSet
+from domain.photo_contracts import select_execution_profile
 from services.asset_set_service import AssetSetService
 
 
@@ -248,32 +249,24 @@ class PhotoAssetSupplyService:
         # 国家无关配方（V3）不声明 markets/category_key：调用方传入优先，未传
         # 时回落配方声明。两者皆缺时报明确错误，而不是造出 ASSET__UPLOAD_ 这种
         # 无类别素材集后在下游炸出一句难以归因的 AssetSetError。
-        # 市场要在选档**之前**算出来：下面按市场选 profile 需要它。
+        # 市场要在选档**之前**算出来：选 profile 需要它。
         market = str(market or (spec.get("markets") or [""])[0])
         category = str(category_key or spec.get("category_key") or "")
-        if not requested_profile_id:
-            # 调用方没指名 profile 时（自动风格参考供给走的就是这条路），必须按
-            # **本次请求的市场**选档。否则回落 ``profiles[0]``——对
-            # ``PHOTO_TRAVEL_OUTFIT_V3`` 而言 profiles[0] 是泰国档，VN 请求会把
-            # 素材集登记进 TH 的 asset_set_key 命名空间，而该键的版本槽位由泰国
-            # 线路持有：``uq_opv_asset_set_version`` 是 (asset_set_key,
-            # asset_set_version) 唯一索引，INSERT 会静默改写那行、保留它原来的
-            # asset_set_id，本次算出来的 content-addressed id 根本不存在，
-            # 下游按 id 查不到就报 NEEDS_ASSET——图已经付过费。
-            # 声明了 markets 的档位只服务该市场；未声明的档位对所有市场开放，
-            # 因此未声明 markets 的配方（全部 TH/MX 既有线路）逐字不变。
-            profile = next(
-                (item for item in profiles
-                 if not item.get("markets")
-                 or market in list(item.get("markets") or [])),
-                None,
-            ) or next(iter(profiles), None)
-        else:
-            profile = next(
-                (item for item in profiles
-                 if str(item.get("profile_id") or "") == requested_profile_id),
-                None,
-            )
+        # 调用方没指名 profile 时（自动风格参考供给走的就是这条路），必须按
+        # **本次请求的市场**选档，规则与发布链路共用 ``select_execution_profile``。
+        # 否则回落 ``profiles[0]``——对 ``PHOTO_TRAVEL_OUTFIT_V3`` 而言 profiles[0]
+        # 是泰国档，VN 请求会把素材集登记进 TH 的 asset_set_key 命名空间，而该键的
+        # 版本槽位由泰国线路持有：``uq_opv_asset_set_version`` 是 (asset_set_key,
+        # asset_set_version) 唯一索引，INSERT 会静默改写那行、保留它原来的
+        # asset_set_id，本次算出来的 content-addressed id 根本不存在，下游按 id
+        # 查不到就报 NEEDS_ASSET——图已经付过费。
+        # 没有任何档位服务本市场时保持既有兜底（取第一档），让下游按既有错误路径
+        # 报错，而不是在这里改变语义。
+        profile = select_execution_profile(
+            profiles, market=market, profile_id=requested_profile_id,
+        )
+        if not isinstance(profile, Mapping) and not requested_profile_id:
+            profile = next(iter(profiles), None)
         if not isinstance(profile, Mapping):
             raise PhotoAssetSupplyError(
                 "Recipe 缺少可执行方案" if not requested_profile_id

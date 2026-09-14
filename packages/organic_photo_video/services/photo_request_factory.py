@@ -170,25 +170,18 @@ def _bound_locale_pack(recipe_spec: Mapping[str, Any], locale: str):
 def _localized_variants(profile: Mapping[str, Any], locale: str) -> list:
     """Copy variants for the request's publish language.
 
-    A country-agnostic recipe loads one copy pack per locale.  ``config.loader``
-    also writes the sorted-first locale into ``copy_variants`` for readers that
-    predate the split — which is Thai whenever ``th-TH`` is present.  Choosing
-    the request's own language is therefore mandatory, or a VN task would freeze
-    Thai copy (review fix P0-2).
-
-    A locale-bound profile that lacks the requested language fails loudly rather
-    than silently serving another language's copy.
+    Thin adapter over :func:`services.photo_locale.profile_copy_variants`, which
+    is the single owner of "the publish language follows the market": a
+    country-agnostic recipe loads one copy pack per locale, and
+    ``config.loader`` also writes the sorted-first locale into
+    ``copy_variants`` for readers that predate the split — which is Thai
+    whenever ``th-TH`` is present.  The request path keeps its own error type.
     """
-    by_locale = profile.get("copy_variants_by_locale")
-    if isinstance(by_locale, Mapping) and locale:
-        entry = by_locale.get(locale)
-        if isinstance(entry, Mapping) and entry.get("copy_variants"):
-            return list(entry["copy_variants"])
-        raise PhotoRequestError(
-            "文案包没有请求的发布语言 " + locale + "；可用语言："
-            + ", ".join(sorted(str(key) for key in by_locale))
-        )
-    return list(profile["copy_variants"])
+    from services.photo_locale import PhotoLocaleError, profile_copy_variants
+    try:
+        return profile_copy_variants(profile, locale=str(locale or ""))
+    except PhotoLocaleError as exc:
+        raise PhotoRequestError(str(exc)) from exc
 
 
 class PhotoRequestFactory:

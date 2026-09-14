@@ -1,7 +1,7 @@
 """Pure validation shared by photo configuration, planning and preflight."""
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 import re
 
 
@@ -284,3 +284,38 @@ def validate_execution_profiles(spec: Mapping[str, Any], *, require_profiles: bo
                     expected_slide_count=expected_slides,
                 ))
     return errors
+
+
+def select_execution_profile(
+    profiles: Sequence[Mapping[str, Any]] | None, *, market: str, profile_id: str = "",
+) -> Mapping[str, Any] | None:
+    """Pick the execution profile that serves ``market``.
+
+    ``markets`` on a profile is optional and defaults to "open to every market",
+    which is what every pre-2026-09-14 recipe relies on.  A profile that declares
+    ``markets`` serves **only** those markets.  ``PHOTO_TRAVEL_OUTFIT_V3`` ships
+    two profiles with byte-identical variables that differ only in
+    ``asset_set_keys`` (``TH_WOMENSWEAR_CHOICE`` / ``VN_SCARF_CHOICE``): taking
+    the first one would bind a VN task to the Thai asset-set namespace *and* to
+    the Thai copy pack, which is exactly how a VN post ended up carrying Thai
+    publish copy.  Language and asset namespace both follow the market.
+
+    An explicit ``profile_id`` wins over market narrowing, preserving the
+    "caller already knows the profile" path.  ``None`` means "no profile serves
+    this market" — callers decide whether to fall back or fail loudly.
+
+    Selection order matches the pre-existing rule (declaration order, with
+    undeclared profiles open to all markets), so no shipped recipe changes.
+    """
+    items = [item for item in (profiles or []) if isinstance(item, Mapping)]
+    wanted = str(profile_id or "")
+    if wanted:
+        return next(
+            (item for item in items if str(item.get("profile_id") or "") == wanted), None,
+        )
+    target = str(market or "")
+    return next(
+        (item for item in items
+         if not item.get("markets") or target in list(item.get("markets") or [])),
+        None,
+    )
