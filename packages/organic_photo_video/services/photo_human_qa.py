@@ -5,6 +5,11 @@ family, AI-face signs). This module owns the deterministic verdict: score
 thresholds, hard-fail conditions, and group repetition rules. A model-side
 ``passed`` flag is never trusted — in fact the observation prompt does not
 even ask for one.
+
+Standard level additionally re-checks AI-face labels for corroboration
+(``_corroborated_ai_face_signs``): a lone ``PLASTIC_SKIN`` is recorded as
+evidence instead of triggering a paid regeneration round. Strict level keeps
+the original, uncorroborated regime.
 """
 from __future__ import annotations
 
@@ -28,6 +33,22 @@ SCORE_THRESHOLDS = {
 }
 
 HARD_FAIL_AI_FACE_SIGNS = {"PLASTIC_SKIN", "DOLL_EYES", "FACE_GEOMETRY_ARTIFACT"}
+
+# 标准档（OPV_PHOTO_QA_LEVEL 默认值）下，**孤证**的 PLASTIC_SKIN 不判死，降级为质量提示。
+#
+# 依据（2026-09-14 越南围巾搭配线 real-gen 实测）：
+#   * 同一张图两次结论相反 —— 首关判 `ai_face_signs=[]` 通过，同一 sha256 的文件
+#     在随后的整组复核被判 PLASTIC_SKIN；
+#   * 同一次调用的 4 张里两张判塑料、两张判干净，把图调出来肉眼比对，被否的与
+#     判干净的皮肤质感接近，差别主要在脸的大小与角度（正脸大特写 vs 低头小脸）。
+# 一次孤证误判的代价是整组重做（4 张生成图 + 一轮付费重跑），所以要求佐证。
+#
+# 「有佐证」= 满足任一：
+#   a) 同时给出另一个硬失败 AI 脸特征（DOLL_EYES / FACE_GEOMETRY_ARTIFACT）；
+#   b) face_realism 低于标准档阈值（80）。
+# 佐证不足时该标签只进 quality_warnings（code=PLASTIC_SKIN_UNCONFIRMED），证据仍保留。
+# strict 档完全不受影响：任何硬失败 AI 脸特征照旧判死。
+PLASTIC_SKIN_CORROBORATION_FACE_REALISM = SCORE_THRESHOLDS["face_realism"]
 
 HEAD_TILT_LEVELS = {"NONE", "MINOR", "OBVIOUS"}
 GAZE_VALUES = {"CAMERA", "FORWARD", "SIDE", "DOWN"}
@@ -182,7 +203,9 @@ def evaluate_human_presentation(
             instruction = _merge_instruction(
                 instruction, pose_contracts.get(item["role"]) or {}
             )
-        quality_warnings.extend(_role_warnings(item, pose_contracts.get(item["role"]) or {}))
+        quality_warnings.extend(
+            _role_warnings(item, pose_contracts.get(item["role"]) or {}, strict=strict)
+        )
         role_verdicts.append({
             "role": item["role"], "passed": passed, "scores": dict(item["scores"]),
             "observations": dict(item["observations"]), "issues": issues,
@@ -226,13 +249,44 @@ def evaluate_human_presentation(
     }
 
 
+def _corroborated_ai_face_signs(
+    signs: Sequence[str], scores: Mapping[str, Any],
+) -> List[str]:
+    """Standard level: keep only the AI-face labels that carry corroboration.
+
+    A lone ``PLASTIC_SKIN`` with a healthy ``face_realism`` score is the one
+    label the model is known to issue inconsistently, so it needs a second
+    signal before it may cost a whole regeneration round.  Every other hard
+    label, and any ``PLASTIC_SKIN`` next to one of them, passes through
+    untouched.  See ``PLASTIC_SKIN_CORROBORATION_FACE_REALISM`` for evidence.
+    """
+    remaining = [sign for sign in signs if sign != "PLASTIC_SKIN"]
+    if remaining:
+        return list(signs)
+    if _score(scores.get("face_realism")) < PLASTIC_SKIN_CORROBORATION_FACE_REALISM:
+        return list(signs)
+    return []
+
+
 def _role_warnings(item: Mapping[str, Any],
-                   pose_contract: Mapping[str, Any]) -> List[Dict[str, str]]:
+                   pose_contract: Mapping[str, Any],
+                   *, strict: bool = False) -> List[Dict[str, str]]:
     """Non-blocking observations worth recording for human review."""
     role = str(item.get("role") or "")
     observations = dict(item.get("observations") or {})
     scores = dict(item.get("scores") or {})
     warnings: List[Dict[str, str]] = []
+    raw_signs = sorted(set(observations.get("ai_face_signs") or []) & HARD_FAIL_AI_FACE_SIGNS)
+    if not strict and raw_signs and not _corroborated_ai_face_signs(raw_signs, scores):
+        warnings.append({
+            "role": role, "code": "PLASTIC_SKIN_UNCONFIRMED",
+            "message": (
+                f"仅一处『塑料皮肤』标签且 face_realism "
+                f"{_score(scores.get('face_realism')):.0f} 未低于 "
+                f"{PLASTIC_SKIN_CORROBORATION_FACE_REALISM}，按孤证处理不触发重生；"
+                "证据保留，请人工复核"
+            ),
+        })
     if observations.get("head_tilt") == "MINOR":
         warnings.append({
             "role": role, "code": "HEAD_TILT_MINOR",
@@ -282,6 +336,8 @@ def _role_issues(item: Mapping[str, Any], *, strict: bool = False) -> tuple[List
         issues.append("pose_family=STATIC_MANNEQUIN")
         repair_parts.append("姿势像静态人台")
     ai_signs = sorted(set(observations.get("ai_face_signs") or []) & HARD_FAIL_AI_FACE_SIGNS)
+    if ai_signs and not strict:
+        ai_signs = _corroborated_ai_face_signs(ai_signs, scores)
     if ai_signs:
         issues.append("ai_face_signs=" + ",".join(ai_signs))
         repair_parts.append("AI 脸特征（" + "、".join(ai_signs) + "）")

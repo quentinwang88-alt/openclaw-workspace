@@ -118,7 +118,9 @@ class HumanPresentationEvaluateTest(unittest.TestCase):
         self.assertIn("look_a", verdict["failed_roles"])
 
     def test_ai_face_hard_failures(self):
-        for sign in ("PLASTIC_SKIN", "DOLL_EYES", "FACE_GEOMETRY_ARTIFACT"):
+        # DOLL_EYES / FACE_GEOMETRY_ARTIFACT 单独出现即判死。
+        # PLASTIC_SKIN 例外，见紧随其后的四条（2026-09-14 口径修订）。
+        for sign in ("DOLL_EYES", "FACE_GEOMETRY_ARTIFACT"):
             review = passing_group_review()
             review["roles"][2] = role_observation(
                 "look_c", pose_family="SCENE_INTERACTION", gaze="SIDE",
@@ -130,6 +132,67 @@ class HumanPresentationEvaluateTest(unittest.TestCase):
             self.assertTrue(any(
                 item.startswith("ai_face_signs=") for item in finding["issues"]
             ), sign)
+
+    def test_lone_plastic_skin_with_healthy_face_realism_is_warning_only(self):
+        """孤证 PLASTIC_SKIN 不再判死：留证据、不烧一轮整组重生。
+
+        实测依据见 services/photo_human_qa.py 的
+        PLASTIC_SKIN_CORROBORATION_FACE_REALISM 注释。
+        """
+        review = passing_group_review()
+        review["roles"][0] = role_observation(
+            "look_a", pose_family="RELAXED_STAND",
+            ai_face_signs=["PLASTIC_SKIN"],
+            scores={"face_realism": 82, "head_posture": 95, "body_posture": 80,
+                    "gesture_naturalness": 78, "expression_naturalness": 85,
+                    "creator_photo_feel": 80},
+        )
+        verdict = evaluate_human_presentation(review)
+        self.assertTrue(verdict["passed"], verdict["failed_roles"])
+        self.assertNotIn("look_a", verdict["failed_roles"])
+        self.assertEqual(verdict["roles"][0]["issues"], [])
+        # 降级不等于抹掉：原始观察照旧留在证据里供人工复核。
+        self.assertEqual(
+            verdict["roles"][0]["observations"]["ai_face_signs"], ["PLASTIC_SKIN"]
+        )
+        codes = [warning["code"] for warning in verdict["quality_warnings"]]
+        self.assertIn("PLASTIC_SKIN_UNCONFIRMED", codes)
+
+    def test_lone_plastic_skin_with_low_face_realism_still_fails(self):
+        review = passing_group_review()
+        review["roles"][0] = role_observation(
+            "look_a", ai_face_signs=["PLASTIC_SKIN"],
+            scores={"face_realism": 72, "head_posture": 90, "body_posture": 85,
+                    "gesture_naturalness": 80, "expression_naturalness": 84,
+                    "creator_photo_feel": 80},
+        )
+        verdict = evaluate_human_presentation(review)
+        self.assertIn("look_a", verdict["failed_roles"])
+        self.assertIn("ai_face_signs=PLASTIC_SKIN", verdict["roles"][0]["issues"])
+
+    def test_plastic_skin_next_to_another_sign_still_fails(self):
+        review = passing_group_review()
+        review["roles"][1] = role_observation(
+            "look_b", pose_family="WALKING_CANDID", gaze="FORWARD",
+            ai_face_signs=["PLASTIC_SKIN", "DOLL_EYES"],
+        )
+        verdict = evaluate_human_presentation(review)
+        self.assertIn("look_b", verdict["failed_roles"])
+        self.assertIn("ai_face_signs=DOLL_EYES,PLASTIC_SKIN",
+                      verdict["roles"][1]["issues"])
+
+    def test_strict_level_still_fails_lone_plastic_skin(self):
+        """strict 档完整保留旧口径：任何硬失败 AI 脸特征都判死。"""
+        review = passing_group_review()
+        review["roles"][0] = role_observation(
+            "look_a", ai_face_signs=["PLASTIC_SKIN"],
+        )
+        strict = evaluate_human_presentation(review, level="strict")
+        self.assertIn("look_a", strict["failed_roles"])
+        self.assertNotIn(
+            "PLASTIC_SKIN_UNCONFIRMED",
+            [warning["code"] for warning in strict["quality_warnings"]],
+        )
 
     def test_limb_hard_failure_and_identity_drift_is_observed_only(self):
         review = passing_group_review()
