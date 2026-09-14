@@ -19,6 +19,246 @@ class PhotoContentPlanError(ValueError):
     pass
 
 
+class LegacyPlanLocaleUpgrade(PhotoContentPlanError):
+    """A frozen plan predates one additive contract key (``publish_locale``).
+
+    Raised only when the additive key is the *sole* contract difference and the
+    store therefore cannot decide on its own.  ``reason`` tells the caller which
+    decision it has to make:
+
+    * ``"copy_language"`` — the frozen publish copy is provably in another
+      language.  Only the copy may be rebuilt; the already-paid source images
+      stay exactly where they are (``adopt_repaired_copy`` replaces the copy
+      keys and nothing else, and the supply service re-baselines that
+      copy-only change).
+    * ``"unverified"`` — the script cannot prove the frozen copy belongs to the
+      current locale.  Nothing may be archived or regenerated; a human decides.
+    * ``"visual_changed"`` — rebuilding under the current locale would also
+      change fields that reach the image generator (looks, scene, angle …).
+      The old plan and its paid images must not be reused, and the repair must
+      not pretend otherwise: nothing is archived automatically here either.
+
+    No message matches ``_is_replannable_photo_error``'s whitelist, so an
+    unrecognised case can never silently archive paid assets.
+    """
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = str(reason)
+
+
+# The script boundary of Thai.  Distinguishing Thai from Latin is enough for the
+# locales that exist (``th-TH`` / ``vi-VN``) and is the exact axis the publish
+# language validator uses when it rejects Thai copy on a non-Thai row.
+THAI_SCRIPT_START = "\u0e00"
+THAI_SCRIPT_END = "\u0e7f"
+
+# Additive contract keys an older frozen plan may legitimately predate.
+ADDITIVE_CONTRACT_KEYS = ("publish_locale",)
+
+
+def copy_language_matches_locale(texts: Any, *, locale: str) -> bool:
+    """Whether frozen publish copy uses the script of ``locale``.
+
+    Returns ``True``/``False`` when the script settles it and ``None`` when it
+    cannot (empty or mixed content, or two languages sharing a script).  A
+    ``None`` must never be read as "yes" — the caller keeps the old plan and
+    asks a human instead of guessing a language.
+    """
+    joined = "".join(str(value or "") for value in texts)
+    if not any(char.isalpha() for char in joined):
+        return None
+    has_thai = any(THAI_SCRIPT_START <= char <= THAI_SCRIPT_END for char in joined)
+    if str(locale or "").lower().startswith("th"):
+        # 泰语行里一个泰文字符都没有 ⇒ 证不出来（可能只是这批文案恰好全用拉丁字母）。
+        return True if has_thai else None
+    return not has_thai
+
+
+def plan_copy_texts(plan: Mapping[str, Any] | None) -> list[str]:
+    """Every publish-copy string a frozen plan carries (for the script check).
+
+    包含每张 look 的 ``display_label``：它同样由 Locale Pack 拥有、同样会上片
+    （``services/photo_copy``），所以一行「文案已换成越南语但标签还是泰语」也必须
+    被认成语言不符，而不是靠 copy 字段蒙混过关。
+    """
+    texts: list[str] = []
+    for item in (plan or {}).get("items") or []:
+        if not isinstance(item, Mapping):
+            continue
+        copy_block = item.get("copy")
+        if isinstance(copy_block, Mapping):
+            for key in ("title", "caption", "cover", "cta"):
+                texts.append(copy_block.get(key))
+            for key in ("hashtags", "slide_texts"):
+                texts.extend(copy_block.get(key) or [])
+        for look in item.get("looks") or []:
+            if isinstance(look, Mapping):
+                texts.append(look.get("display_label"))
+        texts.append(item.get("topic_zh"))
+    return texts
+
+
+def additive_only_contract_change(
+    stored: Mapping[str, Any], incoming: Mapping[str, Any],
+    keys: Sequence[str],
+) -> str:
+    """Return the tolerated additive key, or ``""`` when the change is real.
+
+    The plan is only "additively newer" when every tolerated key is absent from
+    the stored contract, present in the incoming one, and **everything else is
+    identical**.  Any other difference is a genuine input change and must keep
+    the existing hard failure.
+    """
+    for key in keys:
+        if key in stored or key not in incoming:
+            continue
+        expected = {name: value for name, value in stored.items() if name != key}
+        actual = {name: value for name, value in incoming.items() if name != key}
+        if expected == actual:
+            return str(key)
+    return ""
+
+
+# Publish-copy fields of one plan item.  ``adopt_repaired_copy`` may replace
+# exactly these and must leave every other key byte-identical: the frozen plan's
+# looks/scene/angle/palette are what the already-paid images were generated
+# from, so a language rebuild must never be able to move them.
+COPY_ONLY_PLAN_ITEM_KEYS = ("copy", "copy_source", "template_review_status")
+
+# 每张 look 的 ``display_label`` 同样归 Locale Pack 所有（``photo_locale.family_copy``
+# 的 ``look_labels`` 与旅行 moment 标签）：它是上片标签文字，由 ``services/photo_copy``
+# 消费，**不进图片生成提示词**。所以语言修复必须连它一起换掉，而 look 的其余字段
+# （穿搭／场景／角度）仍然逐字冻结。
+COPY_ONLY_LOOK_KEYS = ("display_label",)
+
+
+def _item_visual(item: Mapping[str, Any]) -> dict[str, Any]:
+    """One plan item minus everything the Locale Pack owns (copy and labels)."""
+    visual = {
+        key: value for key, value in dict(item).items()
+        if key not in COPY_ONLY_PLAN_ITEM_KEYS
+    }
+    looks = visual.get("looks")
+    if isinstance(looks, list):
+        visual["looks"] = [
+            ({key: value for key, value in dict(look).items()
+              if key not in COPY_ONLY_LOOK_KEYS} if isinstance(look, Mapping) else look)
+            for look in looks
+        ]
+    return visual
+
+
+def _item_look_labels(item: Mapping[str, Any]) -> list[Any] | None:
+    looks = dict(item).get("looks")
+    if not isinstance(looks, list):
+        return None
+    return [dict(look).get("display_label") if isinstance(look, Mapping) else None
+            for look in looks]
+
+
+def adopt_repaired_copy(
+    stored_plan: Mapping[str, Any] | None, rebuilt_plan: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Take the rebuilt **copy** and keep every other frozen field as-is.
+
+    The caller has to rebuild the plan with the current locale pack — that is
+    the only way to obtain correct labels, hashtags and CTA.  But the
+    already-paid images were generated from the *frozen* plan, and
+    「重新生成整个内容计划后假定新计划与旧图仍相符」 is exactly what must not
+    happen.  So this adopts the locale-owned text (the ``copy`` block, its
+    source markers, and each look's ``display_label``) item by item and refuses
+    whenever any other field differs: a genuine visual change keeps the existing
+    archive/regenerate path instead of being folded into a language fix.
+    """
+    stored_items = list((stored_plan or {}).get("items") or [])
+    rebuilt_items = list((rebuilt_plan or {}).get("items") or [])
+    if not stored_items or len(stored_items) != len(rebuilt_items):
+        raise LegacyPlanLocaleUpgrade(
+            f"冻结计划有 {len(stored_items)} 篇，按当前语言重建后是 {len(rebuilt_items)} 篇；"
+            "篇数不一致时不能只替换文案，旧计划与已付费素材一律保留，"
+            "请人工确认后再决定是否新建任务",
+            reason="visual_changed",
+        )
+    stored_visual_top = {
+        key: value for key, value in (stored_plan or {}).items()
+        if key not in ("items", "plan_sha256")
+    }
+    rebuilt_visual_top = {
+        key: value for key, value in (rebuilt_plan or {}).items()
+        if key not in ("items", "plan_sha256")
+    }
+    if stored_visual_top != rebuilt_visual_top:
+        changed = sorted(
+            key for key in set(stored_visual_top) | set(rebuilt_visual_top)
+            if stored_visual_top.get(key) != rebuilt_visual_top.get(key)
+        )
+        raise LegacyPlanLocaleUpgrade(
+            f"按当前语言重建后，计划的顶层画面字段也变了（{'、'.join(changed)}）："
+            "不能只替换文案，旧计划与已付费素材一律保留，"
+            "请人工确认后再决定是否新建任务",
+            reason="visual_changed",
+        )
+    items: list[dict[str, Any]] = []
+    for index, (stored, rebuilt) in enumerate(zip(stored_items, rebuilt_items), 1):
+        if _item_visual(stored) != _item_visual(rebuilt):
+            stored_visual = _item_visual(stored)
+            rebuilt_visual = _item_visual(rebuilt)
+            changed = sorted(
+                key for key in set(stored_visual) | set(rebuilt_visual)
+                if stored_visual.get(key) != rebuilt_visual.get(key)
+            )
+            raise LegacyPlanLocaleUpgrade(
+                f"第 {index} 篇按当前语言重建后，除文案外还有画面字段发生变化"
+                f"（{'、'.join(changed)}）：不能按旧图复用；"
+                "旧计划与已付费素材一律保留，请人工确认后再决定是否新建任务",
+                reason="visual_changed",
+            )
+        rebuilt_copy = rebuilt.get("copy")
+        if not isinstance(rebuilt_copy, Mapping) or not rebuilt_copy:
+            raise LegacyPlanLocaleUpgrade(
+                f"第 {index} 篇按当前语言重建后没有拿到可用文案；"
+                "旧计划与已付费素材一律保留，不自动归档，也不会重新生图",
+                reason="unverified",
+            )
+        item = {
+            key: copy.deepcopy(value) for key, value in stored.items()
+            if key not in COPY_ONLY_PLAN_ITEM_KEYS
+        }
+        item.update({
+            key: copy.deepcopy(rebuilt[key]) for key in COPY_ONLY_PLAN_ITEM_KEYS
+            if key in rebuilt
+        })
+        # 旧 look 的穿搭／场景原样保留，只把 Locale Pack 拥有的标签换成新语言的。
+        stored_looks = stored.get("looks")
+        if isinstance(stored_looks, list) and stored_looks:
+            rebuilt_looks = rebuilt.get("looks")
+            if not isinstance(rebuilt_looks, list) or len(rebuilt_looks) != len(stored_looks):
+                raise LegacyPlanLocaleUpgrade(
+                    f"第 {index} 篇按当前语言重建后 look 条数与冻结计划不一致；"
+                    "旧计划与已付费素材一律保留，请人工确认后再决定是否新建任务",
+                    reason="visual_changed",
+                )
+            merged = []
+            for stored_look, rebuilt_look in zip(stored_looks, rebuilt_looks):
+                look = copy.deepcopy(dict(stored_look))
+                if isinstance(rebuilt_look, Mapping) and "display_label" in rebuilt_look:
+                    look["display_label"] = copy.deepcopy(rebuilt_look["display_label"])
+                else:
+                    look.pop("display_label", None)
+                merged.append(look)
+            item["looks"] = merged
+        items.append(item)
+    repaired = {
+        key: copy.deepcopy(value) for key, value in dict(stored_plan).items()
+        if key != "plan_sha256"
+    }
+    repaired["items"] = items
+    validate_batch_plan(repaired)
+    repaired["plan_sha256"] = _fingerprint(repaired)
+    return repaired
+
+
 POLICY_DIR = (
     Path(__file__).resolve().parents[1]
     / "config" / "photo_planning_policies"
@@ -657,17 +897,78 @@ class PhotoContentPlanStore:
     def load_or_create(
         self, *, record_id: str, input_contract: Mapping[str, Any],
         create: Any,
+        tolerate_additive_keys: Sequence[str] = (),
+        repair_copy: Any = None,
     ) -> dict[str, Any]:
+        """Return the frozen plan for this contract, creating it when absent.
+
+        ``tolerate_additive_keys`` names contract keys that older frozen plans
+        legitimately predate (today: ``publish_locale``).  When such a key is the
+        *only* difference, the stored copy is asked to prove its own language
+        before the key is backfilled and the contract hash re-frozen:
+
+        * provably the right language ⇒ backfill and reuse the plan (and the
+          already-paid images);
+        * provably another language ⇒ :class:`LegacyPlanLocaleUpgrade` with
+          ``reason="copy_language"``.  **Nothing is written on this pass.**  The
+          caller archives the old plan for evidence, then calls again with
+          ``repair_copy``;
+        * cannot tell ⇒ ``reason="unverified"``.  Nothing is archived.
+
+        ``repair_copy`` is that second pass: a zero-argument callable rebuilding
+        the plan under the current locale, from which :func:`adopt_repaired_copy`
+        takes only the publish copy.  The frozen plan therefore keeps every
+        visual field, and no image generator is ever called for a language fix.
+        """
         folder = self.root / "content_plans" / self._safe(record_id)
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / "plan.json"
         input_sha256 = _fingerprint(dict(input_contract))
         if path.is_file():
             payload = json.loads(path.read_text(encoding="utf-8"))
+            stored_contract = dict(payload.get("input_contract") or {})
             if payload.get("input_sha256") != input_sha256:
-                raise PhotoContentPlanError(
-                    "该任务的主题、预设、参考模式或生成数量已变化；请新建任务，避免混用旧内容计划"
+                additive_key = additive_only_contract_change(
+                    stored_contract, dict(input_contract), tolerate_additive_keys,
                 )
+                if not additive_key:
+                    raise PhotoContentPlanError(
+                        "该任务的主题、预设、参考模式或生成数量已变化；请新建任务，避免混用旧内容计划"
+                    )
+                locale = str(input_contract.get(additive_key) or "")
+                verdict = copy_language_matches_locale(
+                    plan_copy_texts(payload.get("plan")), locale=locale,
+                )
+                if verdict is False and repair_copy is None:
+                    raise LegacyPlanLocaleUpgrade(
+                        f"冻结内容计划里的发布文案与当前发布语言（{locale or '未声明'}）不符："
+                        "该计划早于发布语言字段，文案仍是别的语言。"
+                        "旧计划与已付费素材均已保留，按文案重建路径只替换文案、"
+                        "不重新生图",
+                        reason="copy_language",
+                    )
+                if verdict is False:
+                    # 第二趟：只把文案换成当前语言的，画面字段由
+                    # ``adopt_repaired_copy`` 逐条断言逐字不变。
+                    repaired = adopt_repaired_copy(payload.get("plan"), repair_copy())
+                    validate_batch_plan(repaired)
+                    payload["plan"] = repaired
+                elif verdict is None:
+                    raise LegacyPlanLocaleUpgrade(
+                        f"冻结内容计划早于发布语言字段，且无法从冻结文案证明其语言与 "
+                        f"{locale or '当前发布语言'} 一致：旧计划与已付费素材一律保留，"
+                        "不自动归档源图，也不会重新生图",
+                        reason="unverified",
+                    )
+                # 语言自证通过、或文案已按当前语言就地重建：补记该键并重存契约 hash。
+                stored_contract[additive_key] = input_contract[additive_key]
+                payload["input_contract"] = stored_contract
+                payload["input_sha256"] = _fingerprint(stored_contract)
+                temporary = path.with_suffix(".tmp")
+                temporary.write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                temporary.replace(path)
             plan = dict(payload.get("plan") or {})
             validate_batch_plan(plan)
             if plan.get("plan_sha256") != _fingerprint({
@@ -690,6 +991,17 @@ class PhotoContentPlanStore:
         )
         temporary.replace(path)
         return plan
+
+    def read_frozen(self, record_id: str) -> dict[str, Any]:
+        """The frozen plan file's whole payload (``{}`` when there is none).
+
+        Read-only: the copy-repair path needs the old items as the "what the
+        paid images were generated from" reference before it overwrites them.
+        """
+        path = self.root / "content_plans" / self._safe(record_id) / "plan.json"
+        if not path.is_file():
+            return {}
+        return dict(json.loads(path.read_text(encoding="utf-8")))
 
     @staticmethod
     def _safe(value: str) -> str:

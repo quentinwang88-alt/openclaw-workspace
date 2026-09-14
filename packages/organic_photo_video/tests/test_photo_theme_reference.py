@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import tempfile
 import unittest
@@ -88,6 +90,38 @@ def group_failure_with_look_b_blamed():
             {"role": "look_b", "passed": False, "issues": ["场景退化成纯色背景"]},
             {"role": "look_c", "passed": True, "issues": []},
             {"role": "look_d", "passed": True, "issues": []},
+        ],
+    }
+
+
+def core_product_failure_look_b():
+    """2026-09-14 真实复现：issues 全部是中文，且都不在 FAILURE_HINTS 白名单里。
+
+    供给侧按旧实现会把它们当"细节提示"⇒ failed_roles 为空 ⇒ 不重生任何图、
+    只把组级重做次数烧完（QA 空转）。修好后由 core_product_mismatch 这个结构化
+    硬信号直接定为 look_b 失败。
+    """
+    return {
+        "passed": False, "notes": "look_b 的围巾不是指定商品",
+        "reason_codes": ["PRODUCT_MISMATCH"],
+        "role_findings": [
+            {"role": "look_a", "passed": True, "issues": []},
+            {"role": "look_b", "passed": False,
+             "issues": ["围巾颜色家族错误", "围巾结构错误", "指定围巾完全看不到"],
+             "core_product_mismatch": True},
+            {"role": "look_c", "passed": True, "issues": []},
+            {"role": "look_d", "passed": True, "issues": []},
+        ],
+    }
+
+
+def attributed_but_nothing_repairable():
+    """逐张都有归因、但没有任何一张被判失败：既定位不到单张，组级又没过。"""
+    return {
+        "passed": False, "notes": "整组配色略偏，说不上是哪一张",
+        "role_findings": [
+            {"role": role, "passed": True, "issues": []}
+            for role in ("look_a", "look_b", "look_c", "look_d")
         ],
     }
 
@@ -358,6 +392,327 @@ class PhotoThemeReferenceTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "已用尽"):
                 service.prepare(**kwargs)
             self.assertEqual(len(reviewer.calls), 3, "续跑必须直接失败，不允许再次调用视觉模型")
+
+    # --- 只改发布文案（语言修复）⇒ 复用已付费图片，生成器零调用 (2026-09-14) --
+
+    def _frozen_supply(self, folder, variation, reviewer=None):
+        """跑一次完整供给，返回 (service, generator, kwargs, 首次结果)。"""
+        reference = Path(folder) / "reference.png"
+        Image.new("RGB", (120, 180), (130, 95, 75)).save(reference)
+        # 真实链路里参考分析合同一定在（149 个目录中 132 个有 ``reference_analysis.json``），
+        # 所以这里也建上：否则 ``assert_identity_unchanged`` 的「参考图哈希」一项会被
+        # 静默跳过，测出来的复用比生产松。
+        contract = Path(folder) / "reference_contracts" / "rec-copy-only"
+        contract.mkdir(parents=True, exist_ok=True)
+        (contract / "reference_analysis.json").write_text(json.dumps({
+            "reference_hashes": [hashlib.sha256(reference.read_bytes()).hexdigest()],
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        generator = FakeGenerator()
+        service = PhotoStyleReferenceSupplyService(
+            generator=generator, root=Path(folder),
+            vision_service=reviewer or FakeVisionReviewer([True, True]),
+        )
+        kwargs = {
+            "record_id": "rec-copy-only", "reference_paths": [str(reference)],
+            "theme": resolve_photo_theme("秋季穿搭"),
+            "account": SimpleNamespace(persona_ref_id="P"),
+            "persona": pack_persona(folder), "variation": variation,
+        }
+        return service, generator, kwargs, service.prepare(**kwargs)
+
+    @staticmethod
+    def _variation_with(copy_block):
+        variation = scene_model_variation()
+        variation["copy"] = dict(copy_block)
+        return variation
+
+    def test_copy_only_change_reuses_paid_looks_without_generating(self):
+        """验收 2：旧泰文文案换成越南语 ⇒ 保留原四张付费图，生成器零调用。"""
+        with tempfile.TemporaryDirectory() as folder:
+            thai = self._variation_with({
+                "title": "ลุคเดิม", "cover": "ลุคเดิม", "caption": "ลุคเดิม",
+                "hashtags": [], "slide_texts": ["ลุค A"],
+            })
+            service, generator, kwargs, first = self._frozen_supply(folder, thai)
+            requests_after_first = len(generator.requests)
+            self.assertEqual(len(first["sources"]), 4)
+            manifest_path = (Path(folder) / "style_reference_supply" / "rec-copy-only"
+                             / "supply_manifest.json")
+            stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(stored["status"], "complete")
+            old_hash = stored["input_hash"]
+
+            vietnamese = copy.deepcopy(thai)
+            vietnamese["copy"] = {
+                "title": "Gợi ý phối đồ du lịch", "cover": "Look du lịch",
+                "caption": "Bạn thích look nào?", "hashtags": ["#OOTD"],
+                "slide_texts": ["Look A"],
+            }
+            # 清单从不保存 variation，所以「只改了文案」只能由握着新旧两版计划
+            # 的调用方给出对照物：这里就是被就地重建前的那一条旧计划条目。
+            second = service.prepare(
+                **{**kwargs, "variation": vietnamese, "copy_repaired_from": thai})
+
+            self.assertEqual(second["generated_this_run"], 0, "只改文案不得重新生图")
+            self.assertEqual(len(generator.requests), requests_after_first,
+                             "图片生成器一次都不该再被调用")
+            self.assertEqual([item["path"] for item in second["sources"]],
+                             [item["path"] for item in first["sources"]])
+            self.assertEqual([item["sha256"] for item in second["sources"]],
+                             [item["sha256"] for item in first["sources"]])
+            rebaselined = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertNotEqual(rebaselined["input_hash"], old_hash, "基线必须重写")
+            self.assertEqual(rebaselined["status"], "complete")
+            evidence = rebaselined["copy_rebaseline"]
+            self.assertEqual(evidence["reason"], "copy_only_language_fix")
+            self.assertNotEqual(evidence["former_copy_sha256"], evidence["new_copy_sha256"])
+
+    def test_look_label_change_alone_also_reuses_the_paid_looks(self):
+        """look 的上片标签归 Locale Pack：只换标签同样零生成、复用旧图。"""
+        with tempfile.TemporaryDirectory() as folder:
+            thai = self._variation_with({
+                "title": "T", "cover": "C", "caption": "P",
+            })
+            for letter, look in zip("ABCD", thai["looks"]):
+                look["display_label"] = f"ลุค {letter}"
+            service, generator, kwargs, first = self._frozen_supply(folder, thai)
+            requests_after_first = len(generator.requests)
+
+            vietnamese = copy.deepcopy(thai)
+            for letter, look in zip("ABCD", vietnamese["looks"]):
+                look["display_label"] = f"Look {letter}"
+            second = service.prepare(
+                **{**kwargs, "variation": vietnamese, "copy_repaired_from": thai})
+            self.assertEqual(second["generated_this_run"], 0)
+            self.assertEqual(len(generator.requests), requests_after_first)
+
+            # 但 look 的穿搭字段仍受保护：标签之外再动画面就必须拦下。
+            restyled = copy.deepcopy(vietnamese)
+            restyled["looks"][0]["bottom"] = "换一条完全不同的下装"
+            with self.assertRaisesRegex(ValueError, "参考图或主题已变化"):
+                service.prepare(
+                    **{**kwargs, "variation": restyled, "copy_repaired_from": thai})
+            self.assertEqual(len(generator.requests), requests_after_first)
+
+    def test_a_copy_change_without_the_old_plan_item_is_refused(self):
+        """没有旧计划条目作对照时，拒绝复用（保守默认，不猜「只是文案」）。"""
+        with tempfile.TemporaryDirectory() as folder:
+            thai = self._variation_with({
+                "title": "ลุคเดิม", "cover": "ลุคเดิม", "caption": "ลุคเดิม",
+                "hashtags": [], "slide_texts": ["ลุค A"],
+            })
+            service, generator, kwargs, first = self._frozen_supply(folder, thai)
+            requests_after_first = len(generator.requests)
+            manifest_path = (Path(folder) / "style_reference_supply" / "rec-copy-only"
+                             / "supply_manifest.json")
+            before = json.loads(manifest_path.read_text(encoding="utf-8"))["input_hash"]
+
+            vietnamese = copy.deepcopy(thai)
+            vietnamese["copy"]["caption"] = "Bạn thích look nào?"
+            with self.assertRaisesRegex(ValueError, "参考图或主题已变化"):
+                service.prepare(**{**kwargs, "variation": vietnamese})
+            self.assertEqual(len(generator.requests), requests_after_first)
+            self.assertEqual(
+                json.loads(manifest_path.read_text(encoding="utf-8"))["input_hash"], before,
+                "被拒的路径不得动基线")
+
+    def test_an_identical_copy_change_is_not_a_rebaseline_reason(self):
+        """文案没变时不得重定基线：差异另有出处，交给原路径拦截。"""
+        with tempfile.TemporaryDirectory() as folder:
+            thai = self._variation_with({
+                "title": "ลุคเดิม", "cover": "ลุคเดิม", "caption": "ลุคเดิม",
+                "hashtags": [], "slide_texts": ["ลุค A"],
+            })
+            service, generator, kwargs, first = self._frozen_supply(folder, thai)
+            requests_after_first = len(generator.requests)
+            manifest_path = (Path(folder) / "style_reference_supply" / "rec-copy-only"
+                             / "supply_manifest.json")
+            before = json.loads(manifest_path.read_text(encoding="utf-8"))["input_hash"]
+
+            # 文案逐字未动，但画面字典里多了一个无关键 ⇒ hash 仍会变。
+            shifted = copy.deepcopy(thai)
+            shifted["unexpected_note"] = "同一份文案，别的字段变了"
+            with self.assertRaisesRegex(ValueError, "参考图或主题已变化"):
+                service.prepare(
+                    **{**kwargs, "variation": shifted, "copy_repaired_from": thai})
+            self.assertEqual(len(generator.requests), requests_after_first)
+            self.assertEqual(
+                json.loads(manifest_path.read_text(encoding="utf-8"))["input_hash"], before)
+
+    def test_copy_only_rebaseline_cannot_smuggle_in_a_real_visual_change(self):
+        """验收 3：真改参考图/画面输入不被这条兼容吞掉，仍要求新建任务。"""
+        with tempfile.TemporaryDirectory() as folder:
+            thai = self._variation_with({
+                "title": "ลุคเดิม", "cover": "ลุคเดิม", "caption": "ลุคเดิม",
+                "hashtags": [], "slide_texts": ["ลุค A"],
+            })
+            service, generator, kwargs, first = self._frozen_supply(folder, thai)
+            requests_after_first = len(generator.requests)
+
+            vietnamese = copy.deepcopy(thai)
+            vietnamese["copy"]["title"] = "Gợi ý phối đồ du lịch"
+            # 同一时刻把参考图换成另外一张：文案变了、画面输入也变了。
+            # 即使调用方给出了旧计划条目（= 声称「只改了文案」），也必须被拦下。
+            Image.new("RGB", (120, 180), (10, 20, 30)).save(kwargs["reference_paths"][0])
+            with self.assertRaisesRegex(ValueError, "参考图或主题已变化"):
+                service.prepare(
+                    **{**kwargs, "variation": vietnamese, "copy_repaired_from": thai})
+            self.assertEqual(len(generator.requests), requests_after_first,
+                             "被拒的路径同样不得生图")
+
+            # 真改穿搭规格（画面）：同样拦。
+            Image.new("RGB", (120, 180), (130, 95, 75)).save(kwargs["reference_paths"][0])
+            restyled = copy.deepcopy(vietnamese)
+            restyled["looks"][1]["outerwear"] = "换一件完全不同的外套"
+            with self.assertRaisesRegex(ValueError, "参考图或主题已变化"):
+                service.prepare(
+                    **{**kwargs, "variation": restyled, "copy_repaired_from": thai})
+            self.assertEqual(len(generator.requests), requests_after_first)
+
+    def test_an_untouched_variation_still_reuses_without_rebaselining(self):
+        """没改任何输入时走原路径：不重写基线，也不生图。"""
+        with tempfile.TemporaryDirectory() as folder:
+            variation = self._variation_with({"title": "T", "cover": "C", "caption": "P"})
+            service, generator, kwargs, first = self._frozen_supply(folder, variation)
+            manifest_path = (Path(folder) / "style_reference_supply" / "rec-copy-only"
+                             / "supply_manifest.json")
+            before = json.loads(manifest_path.read_text(encoding="utf-8"))["input_hash"]
+            again = service.prepare(**kwargs)
+            self.assertEqual(again["generated_this_run"], 0)
+            self.assertEqual(
+                json.loads(manifest_path.read_text(encoding="utf-8"))["input_hash"], before)
+
+    # --- 指定商品的核心商品失败：定向重拍 + 不许 QA 空转 (2026-09-14) --------
+
+    def _core_product_kwargs(self, folder, reference, product_ref):
+        return {
+            "record_id": "rec-core-product", "reference_paths": [str(reference)],
+            "theme": resolve_photo_theme("秋季穿搭"),
+            "account": SimpleNamespace(persona_ref_id="P"),
+            "persona": pack_persona(folder),
+            "variation": scene_model_variation(),
+            "product": {"product_id": "SCARF-1", "category": "scarf",
+                        "reference_images": [str(product_ref)]},
+        }
+
+    def test_core_product_failure_repairs_only_the_blamed_look(self):
+        """验收 1／4：判定来自结构化信号，只重拍 look_b，且不产生空转轮。"""
+        with tempfile.TemporaryDirectory() as folder:
+            reference = Path(folder) / "reference.png"
+            product_ref = Path(folder) / "product.png"
+            for path, colour in ((reference, (130, 95, 75)), (product_ref, (205, 190, 175))):
+                Image.new("RGB", (120, 180), colour).save(path)
+            generator = FakeGenerator()
+            reviewer = FakeVisionReviewer([True, core_product_failure_look_b(), True])
+            service = PhotoStyleReferenceSupplyService(
+                generator=generator, root=Path(folder), vision_service=reviewer,
+            )
+            result = service.prepare(**self._core_product_kwargs(folder, reference, product_ref))
+
+            self.assertTrue(result["group_alignment"]["passed"])
+            self.assertEqual(result["group_repair_attempts"], 1)
+            self.assertEqual(result["repaired_roles_this_run"], ["look_b"])
+            # 整个流程只调用三次视觉模型：首图门禁 + 一次组级检查 + 修复后的复检。
+            # 旧实现在这里会因为 failed_roles 为空而多烧一轮"再查一次"。
+            self.assertEqual([call["scope"] for call in reviewer.calls],
+                             ["FIRST_LOOK_A", "FULL_LOOK_GROUP", "FULL_LOOK_GROUP"])
+            # 只重生 look_b：生成器只被多调用一次，且落在 slot_index 2 / v2。
+            self.assertEqual(len(generator.requests), 5)
+            self.assertEqual(
+                [(item.slot_index, item.shot_version) for item in generator.requests[4:]],
+                [(2, 2)],
+            )
+            # A/C/D 仍指向第一轮的 v1 文件（从未被重写），只有 B 换成了 v2。
+            self.assertEqual(
+                [Path(item["path"]).name for item in result["sources"]],
+                ["look-1_v1.png", "look-2_v2.png", "look-3_v1.png", "look-4_v1.png"],
+            )
+            manifest = json.loads(
+                (Path(folder) / "style_reference_supply" / "rec-core-product"
+                 / "supply_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["status"], "complete")
+            self.assertEqual(manifest["attempt_history"][0]["failed_roles"], ["look_b"])
+            self.assertEqual(
+                [item["role"] for item in manifest["attempt_history"][0]["retired"]],
+                ["look_b"],
+            )
+
+    def test_failed_product_repair_stops_at_the_existing_attempt_cap(self):
+        """验收 2：商品修复仍失败时按现有次数上限结束，不增加新 QA 轮次。"""
+        with tempfile.TemporaryDirectory() as folder:
+            reference = Path(folder) / "reference.png"
+            product_ref = Path(folder) / "product.png"
+            for path, colour in ((reference, (130, 95, 75)), (product_ref, (205, 190, 175))):
+                Image.new("RGB", (120, 180), colour).save(path)
+            generator = FakeGenerator()
+            reviewer = FakeVisionReviewer([
+                True, core_product_failure_look_b(), core_product_failure_look_b(),
+            ])
+            service = PhotoStyleReferenceSupplyService(
+                generator=generator, root=Path(folder), vision_service=reviewer,
+            )
+            with self.assertRaisesRegex(ValueError, "重做次数已用尽"):
+                service.prepare(**self._core_product_kwargs(folder, reference, product_ref))
+
+            manifest = json.loads(
+                (Path(folder) / "style_reference_supply" / "rec-core-product"
+                 / "supply_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["status"], "group_failed")
+            # MAX_GROUP_REPAIR_ATTEMPTS=1：一次定向重拍即用尽；全程三次模型调用。
+            self.assertEqual(manifest["group_repair_attempts"], 1)
+            self.assertEqual(len(reviewer.calls), 3)
+            self.assertEqual(len(generator.requests), 5)
+
+    def test_failure_without_a_repairable_role_does_not_count_a_phantom_round(self):
+        """不允许把"对原图再查一次"记成一轮修复：直接给出可读的无法归因错误。"""
+        with tempfile.TemporaryDirectory() as folder:
+            reference = Path(folder) / "reference.png"
+            Image.new("RGB", (120, 180), (130, 95, 75)).save(reference)
+            generator = FakeGenerator()
+            reviewer = FakeVisionReviewer([True, attributed_but_nothing_repairable()])
+            service = PhotoStyleReferenceSupplyService(
+                generator=generator, root=Path(folder), vision_service=reviewer,
+            )
+            with self.assertRaisesRegex(ValueError, "无法归因到任何单张"):
+                service.prepare(
+                    record_id="rec-no-role", reference_paths=[str(reference)],
+                    theme=resolve_photo_theme("秋季穿搭"),
+                    account=SimpleNamespace(persona_ref_id="P"),
+                    persona=pack_persona(folder), variation=scene_model_variation(),
+                )
+            # 只调用两次：首图门禁 + 一次组级检查。没有为了"再查一次"多跑一轮。
+            self.assertEqual(len(reviewer.calls), 2)
+            # 也没有重生任何图（旧实现会把重做次数烧掉而图一张不变）。
+            self.assertEqual(len(generator.requests), 4)
+            manifest = json.loads(
+                (Path(folder) / "style_reference_supply" / "rec-no-role"
+                 / "supply_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["status"], "group_failed")
+            self.assertEqual(manifest["group_repair_attempts"], 0)
+            self.assertEqual(manifest["attempt_history"], [])
+
+    def test_without_a_product_the_same_chinese_issues_stay_lenient(self):
+        """验收 3：未指定商品时这三条中文描述不触发重拍（自由搭配保持宽松）。"""
+        with tempfile.TemporaryDirectory() as folder:
+            reference = Path(folder) / "reference.png"
+            Image.new("RGB", (120, 180), (130, 95, 75)).save(reference)
+            generator = FakeGenerator()
+            # 旗标缺失（自由搭配线上不会返回它）⇒ 回落原关键词路径 ⇒ 判为细节提示。
+            lenient = core_product_failure_look_b()
+            for item in lenient["role_findings"]:
+                item.pop("core_product_mismatch", None)
+            reviewer = FakeVisionReviewer([True, lenient])
+            service = PhotoStyleReferenceSupplyService(
+                generator=generator, root=Path(folder), vision_service=reviewer,
+            )
+            with self.assertRaisesRegex(ValueError, "无法归因到任何单张"):
+                service.prepare(
+                    record_id="rec-lenient", reference_paths=[str(reference)],
+                    theme=resolve_photo_theme("秋季穿搭"),
+                    account=SimpleNamespace(persona_ref_id="P"),
+                    persona=pack_persona(folder), variation=scene_model_variation(),
+                )
+            self.assertEqual(len(generator.requests), 4, "宽松路径不得触发任何重拍")
 
     def test_resume_after_repair_interruption_regenerates_only_invalid_roles(self):
         with tempfile.TemporaryDirectory() as folder:

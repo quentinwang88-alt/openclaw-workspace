@@ -22,6 +22,7 @@ if str(PACKAGE_ROOT) not in sys.path:
 
 from domain import statuses
 from domain.models import (
+    AssetSet,
     ContentShot,
     ContentTask,
     FeishuOutbox,
@@ -407,6 +408,259 @@ class UpsertAndOutboxTest(unittest.TestCase):
         repo.update_outbox_status("o1", statuses.OUTBOX_HOLDING, statuses.OUTBOX_PENDING)
         with self.assertRaises(Exception):
             repo.update_outbox_status("o1", statuses.OUTBOX_HOLDING, statuses.OUTBOX_SENT)
+
+
+class FakeAssetSetStore:
+    """Stateful stand-in for ``opv_asset_set`` that models BOTH unique keys.
+
+    The scripted :class:`FakeConnection` above cannot express a real constraint,
+    and a double that simply raises proves nothing: the behaviour under test is
+    that a version collision **never rewrites another id's row**.  So this store
+    enforces the two keys the real table declares::
+
+        PRIMARY KEY (asset_set_id)
+        UNIQUE KEY uq_opv_asset_set_version (asset_set_key, asset_set_version)
+
+    A conflicting INSERT raises ``IntegrityError(1062)`` and leaves the table
+    untouched, exactly like MySQL does once the failed statement is rolled back
+    on connection close.
+    """
+
+    def __init__(self, rows=()):
+        self.rows = {row["asset_set_id"]: dict(row) for row in rows}
+        self.insertions = []       # every attempted INSERT (including failures)
+        self.commits = 0
+
+    # -- DBAPI surface used by RdsRepository -------------------------------
+    def cursor(self):
+        return FakeAssetSetCursor(self)
+
+    def commit(self):
+        self.commits += 1
+
+    def close(self):
+        pass
+
+    def rollback(self):  # pragma: no cover - the failed statement never landed
+        pass
+
+    # -- storage semantics -------------------------------------------------
+    def insert(self, row):
+        self.insertions.append(dict(row))
+        if row["asset_set_id"] in self.rows:
+            raise pymysql.err.IntegrityError(
+                1062, f"Duplicate entry '{row['asset_set_id']}' for key 'PRIMARY'"
+            )
+        for existing in self.rows.values():
+            if (existing["asset_set_key"] == row["asset_set_key"]
+                    and int(existing["asset_set_version"]) == int(row["asset_set_version"])):
+                raise pymysql.err.IntegrityError(
+                    1062,
+                    f"Duplicate entry '{row['asset_set_key']}-{row['asset_set_version']}' "
+                    "for key 'uq_opv_asset_set_version'",
+                )
+        self.rows[row["asset_set_id"]] = dict(row)
+
+    def snapshot(self):
+        return {key: dict(value) for key, value in self.rows.items()}
+
+
+class FakeAssetSetCursor:
+    """Parses only the statements the asset-set methods issue."""
+
+    def __init__(self, store):
+        self._store = store
+        self.rowcount = 0
+        self._rows = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self):
+        return self._rows
+
+    def execute(self, sql, params=None):
+        store = self._store
+        flat = " ".join(sql.split())
+        args = tuple(params or ())
+        if flat.startswith("INSERT INTO opv_asset_set"):
+            columns = flat.split("(", 1)[1].split(")", 1)[0].split(",")
+            store.insert(dict(zip(columns, args)))
+            self.rowcount = 1
+            self._rows = []
+            return
+        if flat.startswith("SELECT * FROM opv_asset_set WHERE asset_set_id="):
+            row = store.rows.get(args[0])
+            self._rows = [dict(row)] if row else []
+            return
+        if flat.startswith("SELECT * FROM opv_asset_set WHERE asset_set_key="):
+            key, version = args
+            matched = [
+                row for row in store.rows.values()
+                if row["asset_set_key"] == key
+                and int(row["asset_set_version"]) == int(version)
+            ]
+            self._rows = [dict(matched[0])] if matched else []
+            return
+        if "SELECT MAX(asset_set_version)" in flat:
+            versions = [
+                int(row["asset_set_version"]) for row in store.rows.values()
+                if row["asset_set_key"] == args[0]
+            ]
+            self._rows = [{"max_version": max(versions) if versions else None}]
+            return
+        if flat.startswith("UPDATE opv_asset_set SET status="):
+            status, asset_set_id = args
+            row = store.rows.get(asset_set_id)
+            if row is None:
+                self.rowcount = 0
+                return
+            # MySQL reports *changed* rows, not matched rows.
+            self.rowcount = 0 if row["status"] == status else 1
+            row["status"] = status
+            return
+        raise AssertionError(f"unexpected SQL: {flat}")
+
+
+def sample_asset_set(asset_set_id, *, key="VN_SCARF_CHOICE", version=1,
+                     category="scarf", market="VN", status="enabled", seed="a"):
+    return AssetSet(
+        asset_set_id=asset_set_id,
+        asset_set_key=key,
+        asset_set_version=version,
+        category_key=category,
+        market=market,
+        status=status,
+        tags_json={"seed": seed},
+        manifest_json={
+            "assets": [{
+                "asset_id": f"{seed}-look-a", "role": "look_a",
+                "path": "/tmp/does-not-need-to-exist.png", "sha256": seed * 64,
+            }]
+        },
+    )
+
+
+class AssetSetRegistrationTest(unittest.TestCase):
+    """``opv_asset_set`` writes must never rewrite another asset_set_id.
+
+    Regression: the generic ``_upsert`` used ``ON DUPLICATE KEY UPDATE``, so an
+    insert that collided on ``uq_opv_asset_set_version`` silently overwrote the
+    historical row that held the slot (keeping *its* id) while the caller's
+    content-addressed id was never written.  The images had already been paid
+    for before anyone noticed.
+    """
+
+    def test_disabled_row_still_owns_its_slot_and_is_never_modified(self):
+        """验收 1：同 key 的最高版本已 disabled ⇒ 新增用更高版本，旧行逐字段不变。"""
+        old = sample_asset_set("ASSET_OLD_DISABLED", version=3, status="disabled",
+                               category="womenswear", market="TH")
+        store = FakeAssetSetStore([old.to_row()])
+        before = store.snapshot()
+        repo = RdsRepository(lambda: store)
+
+        self.assertEqual(repo.next_asset_set_version("VN_SCARF_CHOICE"), 3)
+        version = repo.next_asset_set_version("VN_SCARF_CHOICE") + 1
+        landed = repo.upsert_asset_set(sample_asset_set("ASSET_NEW", version=version))
+
+        self.assertEqual(landed.asset_set_version, 4)
+        self.assertEqual(store.snapshot()["ASSET_OLD_DISABLED"], before["ASSET_OLD_DISABLED"])
+
+    def test_another_markets_row_is_not_overwritten_on_a_version_guess(self):
+        """验收 2：同 key 已有其他 category/market 的版本，新插入不得覆盖它。"""
+        other = sample_asset_set("ASSET_TH_ROW", version=1, category="womenswear", market="TH")
+        store = FakeAssetSetStore([other.to_row()])
+        before = store.snapshot()
+        repo = RdsRepository(lambda: store)
+
+        # 调用方按「本市场 enabled」的旧口径只算出 v1——正是历史 bug 的输入。
+        landed = repo.upsert_asset_set(
+            sample_asset_set("ASSET_VN_ROW", version=1, category="scarf", market="VN")
+        )
+
+        self.assertEqual(landed.asset_set_id, "ASSET_VN_ROW")
+        self.assertEqual(landed.asset_set_version, 2)
+        self.assertEqual(store.snapshot()["ASSET_TH_ROW"], before["ASSET_TH_ROW"])
+
+    def test_two_assets_racing_for_one_version_both_survive(self):
+        """验收 3：两个素材争同 key/version ⇒ 各自存在，谁都不覆盖谁。"""
+        store = FakeAssetSetStore()
+        repo = RdsRepository(lambda: store)
+
+        first = repo.upsert_asset_set(sample_asset_set("ASSET_R1", version=1, seed="a"))
+        second = repo.upsert_asset_set(sample_asset_set("ASSET_R2", version=1, seed="b"))
+
+        self.assertEqual((first.asset_set_id, first.asset_set_version), ("ASSET_R1", 1))
+        self.assertEqual((second.asset_set_id, second.asset_set_version), ("ASSET_R2", 2))
+        self.assertEqual(sorted(store.rows), ["ASSET_R1", "ASSET_R2"])
+        self.assertEqual(store.rows["ASSET_R1"]["manifest_json"],
+                         sample_asset_set("ASSET_R1", version=1, seed="a").to_row()["manifest_json"])
+
+    def test_same_id_retry_reuses_the_stored_version(self):
+        """验收 4：同素材重复登记返回同一实际 ID/version，不新增记录。"""
+        store = FakeAssetSetStore()
+        repo = RdsRepository(lambda: store)
+        repo.upsert_asset_set(sample_asset_set("ASSET_SAME", version=1))
+        # 并发下这次算出来的版本号更高，但 id 相同 ⇒ 必须复用库里的实际版本，
+        # 不能因为「版本不同」就判成内容变化。
+        again = repo.upsert_asset_set(sample_asset_set("ASSET_SAME", version=7))
+
+        self.assertEqual(again.asset_set_version, 1)
+        self.assertEqual(list(store.rows), ["ASSET_SAME"])
+
+    def test_same_id_with_different_content_refuses_in_place_edit(self):
+        store = FakeAssetSetStore()
+        repo = RdsRepository(lambda: store)
+        repo.upsert_asset_set(sample_asset_set("ASSET_SAME", version=1, seed="a"))
+        with self.assertRaisesRegex(RepositoryError, "different content"):
+            repo.upsert_asset_set(sample_asset_set("ASSET_SAME", version=1, seed="b"))
+        self.assertEqual(store.rows["ASSET_SAME"]["manifest_json"],
+                         sample_asset_set("ASSET_SAME", version=1, seed="a").to_row()["manifest_json"])
+
+    def test_retries_are_bounded_and_change_nothing(self):
+        """重试上限：槽位一直被抢时有限次重试后响亮失败，且不动任何行。"""
+
+        class HostileSlotStore(FakeAssetSetStore):
+            def insert(self, row):
+                self.insertions.append(dict(row))
+                raise pymysql.err.IntegrityError(
+                    1062, "Duplicate entry for key 'uq_opv_asset_set_version'"
+                )
+
+        blocker = sample_asset_set("ASSET_BLOCKER", version=9, category="womenswear",
+                                   market="TH")
+        store = HostileSlotStore([blocker.to_row()])
+        before = store.snapshot()
+        repo = RdsRepository(lambda: store)
+
+        with self.assertRaisesRegex(RepositoryError, "素材登记冲突，可重试登记"):
+            repo.upsert_asset_set(sample_asset_set("ASSET_LOSER", version=1))
+
+        self.assertEqual(len(store.insertions), RdsRepository.ASSET_SET_REGISTRATION_ATTEMPTS)
+        # 每次重试都从真实唯一键口径重新取版本，且严格递增（不是原地重投）。
+        seen = [row["asset_set_version"] for row in store.insertions]
+        self.assertEqual(seen, sorted(seen))
+        self.assertEqual(len(set(seen)), len(seen))
+        self.assertEqual(store.snapshot(), before)
+
+    def test_status_retirement_touches_only_the_status_column(self):
+        store = FakeAssetSetStore([sample_asset_set("ASSET_A", version=1).to_row()])
+        repo = RdsRepository(lambda: store)
+        repo.update_asset_set_status("ASSET_A", "disabled")
+
+        row = store.rows["ASSET_A"]
+        self.assertEqual(row["status"], "disabled")
+        self.assertEqual(row["asset_set_key"], "VN_SCARF_CHOICE")
+        self.assertEqual(row["manifest_json"],
+                         sample_asset_set("ASSET_A", version=1).to_row()["manifest_json"])
+        with self.assertRaises(StaleStatusError):
+            repo.update_asset_set_status("ASSET_MISSING", "disabled")
 
 
 class ConnectionConfigTest(unittest.TestCase):

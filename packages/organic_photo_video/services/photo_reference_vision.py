@@ -714,7 +714,9 @@ class PhotoReferenceVisionService:
             "reason_codes": [str(value) for value in raw.get("reason_codes") or []],
             "notes": str(raw.get("notes") or ""), "model": self.model,
             "provider_used": provider_used,
-            "role_findings": self._normalize_role_findings(raw, generated_roles),
+            "role_findings": self._normalize_role_findings(
+                raw, generated_roles, product_specified=bool(product_context),
+            ),
             "model_routing": {
                 "provider_used": provider_used,
                 "model_used": (
@@ -728,7 +730,8 @@ class PhotoReferenceVisionService:
 
     @staticmethod
     def _normalize_role_findings(raw: Mapping[str, Any],
-                                 generated_roles: Sequence[str]) -> list[dict[str, Any]]:
+                                 generated_roles: Sequence[str],
+                                 *, product_specified: bool = False) -> list[dict[str, Any]]:
         """Map group-level failures onto roles; empty list means no attribution."""
         if not generated_roles:
             return []
@@ -746,6 +749,12 @@ class PhotoReferenceVisionService:
                     "role": role, "passed": bool(item["passed"]),
                     "issues": [str(value) for value in item.get("issues") or []],
                     "missing_major_garment": bool(item.get("missing_major_garment")),
+                    # 结构化硬信号，只在「本篇指定了商品」时才有意义。自由搭配的
+                    # 配饰/围巾变化仍走原宽松路径；旧响应没有这个键 ⇒ False ⇒
+                    # 处理路径与新增字段之前逐字一致，不追溯拦历史任务。
+                    "core_product_mismatch": bool(
+                        product_specified and item.get("core_product_mismatch")
+                    ),
                 })
         return findings
 
@@ -2375,8 +2384,11 @@ recommended_sets 数量必须等于 {count}；不同篇要有明显内容角度�
                 + "以下三种情况必须判 passed=false 并在 per_look.issues 写明是哪一张："
                 "该张完全看不到指定商品；指定商品被换成明显不同的款式或另一颜色家族；"
                 "主色、图案家族或结构（如围巾边缘与流苏）明显错误。"
+                "上述任一情况成立时，还必须在该张的 per_look 里把 core_product_mismatch 置为 true；"
+                "三种情况都不成立时置为 false。"
                 "指定商品所在槽位之外的普通配饰仍按原宽松规则处理；"
-                "围法、褶皱、佩戴位置与细微纹理差异只写 notes，不作为失败理由。"
+                "围法、褶皱、佩戴位置与细微纹理差异只写 notes，不作为失败理由，"
+                "core_product_mismatch 也必须为 false。"
             )
         # 没有指定商品时保持原文逐字不变（TH 普通配饰线不漂移）。
         if product_reference_count:

@@ -227,6 +227,7 @@ class PhotoStyleReferenceSupplyService:
         variation: Mapping[str, Any] = None, progress: Any = None,
         product: Mapping[str, Any] = None,
         locale: str = "th-TH",
+        copy_repaired_from: Mapping[str, Any] = None,
     ) -> dict[str, Any]:
         variation = dict(variation or {})
         product = dict(product or {})
@@ -247,7 +248,17 @@ class PhotoStyleReferenceSupplyService:
         if manifest_path.is_file():
             prior = json.loads(manifest_path.read_text(encoding="utf-8"))
             if prior.get("input_hash") != input_hash:
-                raise PhotoStyleReferenceError("参考图或主题已变化；请新建任务，避免混用旧生成结果")
+                # 只改发布文案（语言修复）时允许受限重定基线：身份组件逐项复核
+                # 通过才复用已付费图片，否则按原错误路径走（可能归档重生成）。
+                # ``copy_repaired_from`` 是本行旧计划的那一条：清单从不保存
+                # variation，只有调用方同时握着新旧两版计划，才证明得了「只改了文案」。
+                if not self.allow_copy_only_rebaseline(
+                        prior, manifest_path=manifest_path, input_hash=input_hash,
+                        paths=paths, theme=theme, variation=variation,
+                        former_variation=copy_repaired_from, role_order=role_order,
+                        persona=persona):
+                    raise PhotoStyleReferenceError(
+                        "参考图或主题已变化；请新建任务，避免混用旧生成结果")
             prior_status = str(prior.get("status") or "")
             prior_group_alignment = prior.get("group_alignment")
             prior_group_human = prior.get("group_human_presentation_qa")
@@ -1018,6 +1029,27 @@ class PhotoStyleReferenceSupplyService:
                                if consistency_failed else "")
                             + f"；QA 证据保留于 {manifest_path}，请新建飞书任务"
                         )
+                    # 组级判不过，却没有任何可执行的修复角色：绝不能带着空
+                    # failed_roles 进修复轮——那一轮既不重生任何图、也不改变任何
+                    # 字节（completed 里四个角色原样留着），只把重做次数烧掉，
+                    # 下一轮再对同一批图查一次，最后以 group_failed 收场。这就是
+                    # 「QA 空转」。这里直接给出可读错误并保留 QA 证据与全部成片，
+                    # 不新增质检轮次、不额外付费。
+                    if not failed_roles:
+                        self._save(manifest_path, input_hash, record_id, theme, paths, completed,
+                                  "group_failed", group_alignment=group_alignment,
+                                  group_human_presentation_qa=group_human_qa,
+                                  group_consistency_qa=group_consistency_qa,
+                                  group_repair_attempts=group_repair_attempts,
+                                  attempt_history=attempt_history, persona_pack_id=persona_pack_id)
+                        raise PhotoStyleReferenceError(
+                            "整组质检未通过，但无法归因到任何单张、没有可修复角色："
+                            + str((group_alignment or {}).get("notes") or "")
+                            + ("；人物表现：" + "；".join(group_human_qa["group_issues"])
+                               if human_failed_flag else "")
+                            + "；未重生成任何图片（避免空转），QA 证据与成片保留于 "
+                            + f"{manifest_path}，请人工复核或新建飞书任务"
+                        )
                     # 每张最多重生一次：已重生过的角色不再进入修复轮；
                     # 剔除后仍有失败角色时任务直接失败（费用上限保护）。
                     overrun = [r for r in failed_roles if r in regenerated_roles]
@@ -1287,6 +1319,16 @@ class PhotoStyleReferenceSupplyService:
             if finding.get("missing_major_garment"):
                 failed.append(role)
                 continue
+            # 指定商品的核心商品错误是**结构化硬信号**，不经过中文关键词白名单。
+            # 2026-09-14 复现：「围巾颜色家族错误／围巾结构错误／指定围巾完全看
+            # 不到」三个中文短语一个都不在白名单里，被判成细节提示 ⇒ failed_roles
+            # 为空 ⇒ 不重生任何图、只把组级重做次数烧完，最后 group_failed。
+            # 该字段只在指定商品时为真（见 _normalize_role_findings），所以自由
+            # 搭配的围巾/配饰变化仍按原宽松规则处理；修法是把判据搬到结构化信号，
+            # 而不是继续往词表里补词。
+            if finding.get("core_product_mismatch"):
+                failed.append(role)
+                continue
             if finding.get("passed") is False:
                 issues = [str(v) for v in finding.get("issues") or []]
                 blocking = any(
@@ -1299,12 +1341,14 @@ class PhotoStyleReferenceSupplyService:
         if detail_notes:
             alignment = dict(alignment)
             alignment["detail_level_notes"] = detail_notes
-        # 穿搭主体缺失是硬门禁：模型整体 passed 也按角色失败处理。
-        missing = [
+        # 穿搭主体缺失与指定商品核心错误都是硬门禁：模型整体 passed 也按角色失败
+        # 处理，聚合结果不得覆盖逐 Look 的明确硬失败。
+        hard = [
             role for role in role_order
-            if role in findings and findings[role].get("missing_major_garment")
+            if role in findings and (findings[role].get("missing_major_garment")
+                                     or findings[role].get("core_product_mismatch"))
         ]
-        failed = list(dict.fromkeys(failed + missing))
+        failed = list(dict.fromkeys(failed + hard))
         # 无归因（模型没给 per_look）时整组重做，避免重复检查同一组图。
         return failed, attributed or bool(failed)
 
@@ -1330,10 +1374,27 @@ class PhotoStyleReferenceSupplyService:
         参考图文件哈希、主题字典、各角色穿搭规格签名、人物包 ID。全部一致
         才允许按当前输入重写 input_hash，供 prepare 断点续跑。
         """
-        import re as _re
         item_dir = Path(item_dir)
         manifest_path = item_dir / "supply_manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assert_identity_unchanged(
+            manifest=manifest, paths=paths, theme=theme, variation=variation,
+            persona=persona,
+        )
+        resolved = [str(Path(value).expanduser().resolve()) for value in paths]
+        manifest["input_hash"] = self._input_hash(
+            resolved, theme, style_look_specs(theme, variation), account, variation, product)
+        self._write_manifest(manifest_path, manifest)
+
+    def assert_identity_unchanged(self, *, manifest: Mapping[str, Any], paths, theme,
+                                  variation, persona=None) -> None:
+        """Raise unless every component that **affects generation** is unchanged.
+
+        Shared by the re-shoot pre-check and by the copy-only re-baseline, so a
+        language / 文案 change can never smuggle in a different reference set,
+        theme, outfit spec or persona.
+        """
+        import re as _re
         resolved = [str(Path(value).expanduser().resolve()) for value in paths]
         current_refs = [hashlib.sha256(Path(value).read_bytes()).hexdigest()
                         for value in resolved]
@@ -1386,12 +1447,135 @@ class PhotoStyleReferenceSupplyService:
             from services.persona_pack import build_persona_pack
             if str(build_persona_pack(persona).get("persona_pack_id") or "") != stored_pack_id:
                 raise PhotoStyleReferenceError("账号绑定的人物模板与原生成不一致；不能换人重拍")
-        manifest["input_hash"] = self._input_hash(
-            resolved, theme, looks, account, variation, product)
-        temporary = manifest_path.with_suffix(".tmp")
+
+    @staticmethod
+    def _write_manifest(manifest_path: Path, manifest: Mapping[str, Any]) -> None:
+        temporary = Path(manifest_path).with_suffix(".tmp")
         temporary.write_text(json.dumps(manifest, ensure_ascii=False, indent=2),
                              encoding="utf-8")
         temporary.replace(manifest_path)
+
+    # ``_input_hash`` 把整段 variation（含发布文案）都哈希进去，所以只改文案的
+    # 语言修复看起来也像"输入变了"。这几个键是**唯一**允许在重定基线时变化的字段。
+    COPY_ONLY_VARIATION_KEYS = ("copy", "copy_source", "template_review_status", "topic_zh")
+    # 每张 look 的 ``display_label`` 也归 Locale Pack（上片标签文字，
+    # ``services/photo_copy`` 消费，不进图片生成提示词）⇒ 语言修复时它必然变，
+    # 而 look 的穿搭／场景字段仍必须逐字冻结。
+    COPY_ONLY_LOOK_KEYS = ("display_label",)
+
+    @classmethod
+    def _projection(cls, variation: Mapping[str, Any] | None, keys) -> dict[str, Any]:
+        def comparable(value):
+            if value in (None, "", {}, []):
+                return ""
+            if isinstance(value, (dict, list)):
+                return json.dumps(value, ensure_ascii=False, sort_keys=True)
+            return str(value)
+
+        wanted = None if keys is None else set(keys)
+        return {
+            str(key): comparable(value)
+            for key, value in dict(variation or {}).items()
+            if wanted is None or key in wanted
+        }
+
+    @classmethod
+    def _looks_without_labels(cls, variation: Mapping[str, Any] | None) -> str:
+        looks = (variation or {}).get("looks")
+        if not isinstance(looks, list):
+            return ""
+        return json.dumps([
+            {key: value for key, value in dict(look).items()
+             if key not in cls.COPY_ONLY_LOOK_KEYS} if isinstance(look, Mapping) else look
+            for look in looks
+        ], ensure_ascii=False, sort_keys=True)
+
+    @classmethod
+    def _look_labels(cls, variation: Mapping[str, Any] | None) -> str:
+        looks = (variation or {}).get("looks")
+        if not isinstance(looks, list):
+            return ""
+        return json.dumps([
+            dict(look).get("display_label") if isinstance(look, Mapping) else None
+            for look in looks
+        ], ensure_ascii=False, sort_keys=True)
+
+    def allow_copy_only_rebaseline(self, prior: Mapping[str, Any], *,
+                                   manifest_path: Path, input_hash: str, paths, theme,
+                                   variation, former_variation, role_order,
+                                   persona=None) -> bool:
+        """Let a frozen supply keep its paid images when only the **copy** changed.
+
+        2026-09-14「发布语言跟着市场走」把冻结计划里的文案从泰语换成越南语，而
+        ``_input_hash`` 连文案一起哈希 ⇒ 已付费的 4 张 look 会被判成"输入变了"并
+        归档重生成。这里做**受限**兼容，四个条件全部成立才重定基线：
+
+        * 清单必须是 ``complete`` 且各角色齐备（否则没有值得复用的图片）；
+        * 调用方给出这次改动的**旧 plan 条目**（``former_variation``，清单本身从不
+          保存 variation，所以只能由掌握新旧两版计划的调用方提供）；
+        * 摘掉文案相关键后，旧条目与当前 variation 逐字相同（画面输入没变）；
+        * 文案本身确实变了（否则差异另有出处，交给原路径）；
+        * ``assert_identity_unchanged`` 复核参考图哈希/主题/各角色穿搭规格/人物包，
+          任何一项不一致就返回 ``False``，由调用方按原「参考图或主题已变化」报错。
+
+        绝不做的是：全局删掉哈希里的字段，或无条件重设基线。返回 ``True`` 表示
+        基线已重写（并在清单里留痕）、可以直接复用现有图片（图片生成器调用次数
+        为 0）。缺少 ``former_variation`` 时一律拒绝——证不出「仅文案变化」就不
+        复用，保持原有的保守默认。
+        """
+        if not former_variation:
+            return False
+        if str(prior.get("status") or "") != "complete":
+            return False
+        stored_roles = {str(item.get("role") or "") for item in prior.get("sources") or []}
+        if not all(str(role) in stored_roles for role in role_order):
+            return False
+        if (self._visual_projection(former_variation) != self._visual_projection(variation)
+                or self._copy_projection(former_variation) == self._copy_projection(variation)):
+            return False
+        try:
+            self.assert_identity_unchanged(manifest=prior, paths=paths, theme=theme,
+                                           variation=variation, persona=persona)
+        except PhotoStyleReferenceError:
+            return False
+        prior["input_hash"] = input_hash
+        # 留痕：这条基线的重写理由、旧/新文案指纹与时间，便于事后审计而不必
+        # 反推清单；不含任何图片字节。
+        prior["copy_rebaseline"] = {
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "reason": "copy_only_language_fix",
+            "former_copy_sha256": self._projection_sha256(
+                self._copy_projection(former_variation)),
+            "new_copy_sha256": self._projection_sha256(
+                self._copy_projection(variation)),
+        }
+        self._write_manifest(manifest_path, prior)
+        return True
+
+    @staticmethod
+    def _projection_sha256(projection: Mapping[str, Any]) -> str:
+        return hashlib.sha256(json.dumps(
+            dict(projection), ensure_ascii=False, sort_keys=True,
+        ).encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _visual_projection(cls, variation: Mapping[str, Any] | None) -> dict[str, Any]:
+        """Everything in a variation that can reach the image generator."""
+        projected = {
+            str(key): value for key, value in cls._projection(variation, None).items()
+            if key not in cls.COPY_ONLY_VARIATION_KEYS
+        }
+        if isinstance((variation or {}).get("looks"), list):
+            # look 的标签是上片文字、不是画面：从画面投影里摘掉，其余字段照旧比对。
+            projected["looks"] = cls._looks_without_labels(variation)
+        return projected
+
+    @classmethod
+    def _copy_projection(cls, variation: Mapping[str, Any] | None) -> dict[str, Any]:
+        """Only the publish-copy fields of a variation (including look labels)."""
+        projected = cls._projection(variation, cls.COPY_ONLY_VARIATION_KEYS)
+        projected["look_labels"] = cls._look_labels(variation)
+        return projected
 
     @staticmethod
     def _input_hash(paths, theme, looks, account, variation, product=None) -> str:

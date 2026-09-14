@@ -29,7 +29,8 @@ from PIL import Image
 
 from config import loader
 from domain.photo_contracts import validate_execution_profiles
-from services.photo_asset_supply import PhotoAssetSupplyError, PhotoAssetSupplyService
+from services.asset_set_service import AssetSetError
+from services.photo_asset_supply import PhotoAssetSupplyService
 
 TRAVEL_RECIPE_PATH = (
     Path(__file__).resolve().parents[1] / "config" / "recipes" / "PHOTO_TRAVEL_OUTFIT_V3.json"
@@ -67,8 +68,13 @@ class QuietRepo:
 
 
 class HijackingRepo(QuietRepo):
-    """模拟 (asset_set_key, asset_set_version) 槽位被占：写入被改道到别的行，
-    因此按新算出的 id 永远回读不到。"""
+    """模拟仓储层写入后回读不到本次登记的 id（写入被改道到别的行）。
+
+    「槽位被占」本身现在由 ``RdsRepository.upsert_asset_set`` 的真实唯一键语义
+    处理（冲突 ⇒ 回滚 + 按索引口径重取版本 + 有界重试），覆盖在
+    ``tests/test_rds_repository.py::AssetSetRegistrationTest``。这里钉的是上一层
+    的契约：写入没有落到本次 id 时，``qualify`` 绝不能把悬空 id 记进 staging。
+    """
 
     def get_asset_set(self, identity):
         return None
@@ -137,17 +143,28 @@ class ExecutionProfileMarketBindingTest(unittest.TestCase):
             )
             self.assertEqual(saved.asset_set_key, "VN_SCARF_CHOICE")
 
-    def test_taken_key_version_slot_fails_loudly_instead_of_pinning_a_ghost_id(self):
-        """槽位被占时必须响亮失败：悬空 pin 会在冻结阶段表现为 NEEDS_ASSET，
+    def test_write_that_cannot_be_read_back_fails_loudly_instead_of_pinning_a_ghost_id(self):
+        """写入回读不到时必须响亮失败：悬空 pin 会在冻结阶段表现为 NEEDS_ASSET，
         而图已经付过费（本次 3C 真跑就是这么损失一次的）。"""
+        class ClientCountingDownloads(Client):
+            downloads = 0
+
+            def download_attachment_bytes(self, attachment):
+                ClientCountingDownloads.downloads += 1
+                return super().download_attachment_bytes(attachment)
+
         with tempfile.TemporaryDirectory() as tmp:
-            service = PhotoAssetSupplyService(Client(), root=Path(tmp))
+            service = PhotoAssetSupplyService(ClientCountingDownloads(), root=Path(tmp))
             self._stage(service, "rec-slot-taken")
-            with self.assertRaisesRegex(PhotoAssetSupplyError, "槽位被占"):
+            downloads_after_stage = ClientCountingDownloads.downloads
+            with self.assertRaisesRegex(AssetSetError, "回读不到记录"):
                 service.qualify(
                     record_id="rec-slot-taken", recipe=self.recipe,
                     repository=HijackingRepo(), category_key="scarf", market="VN",
                 )
+            # 登记失败不得重新生图/重新下载源图，暂存清单也不能被标成 qualified。
+            self.assertEqual(ClientCountingDownloads.downloads, downloads_after_stage)
+            self.assertNotEqual(service.load_staged("rec-slot-taken").get("status"), "qualified")
 
     def test_profiles_without_markets_stay_open_to_every_market(self):
         """既有一切配方都不声明 markets ⇒ 校验零错误、选档仍是 profiles[0]。

@@ -280,7 +280,21 @@ class PhotoAssetSupplyService:
                 "素材集缺少类别：配方未声明 category_key，调用方也未提供"
             )
         current = repository.list_asset_sets(category_key=category, market=market, status="enabled")
-        version = max((item.asset_set_version for item in current if item.asset_set_key == key), default=0) + 1
+        # 版本槽位的真实口径是唯一索引 ``uq_opv_asset_set_version``：
+        # ``(asset_set_key, asset_set_version)``，与 status / market / category
+        # **无关**。一条**停用**的历史行、或属于另一个市场的行同样占着槽位，
+        # 只数「本类别+本市场下 enabled 的同键行」会算出一个已被占用的版本，
+        # 于是 INSERT 命中唯一索引去改写那条行。仓储能按索引口径给出权威最大值
+        # 时优先用它；替身没有该方法时退化为本地候选集估算——首算偏保守只会多
+        # 花一次重试，写入侧已不会再覆盖任何行。
+        allocate_version = getattr(repository, "next_asset_set_version", None)
+        if callable(allocate_version):
+            version = int(allocate_version(key)) + 1
+        else:
+            version = max(
+                (item.asset_set_version for item in current if item.asset_set_key == key),
+                default=0,
+            ) + 1
         assets = []
         frozen_approval_attributes = {}
         source_hashes = {}
@@ -409,31 +423,26 @@ class PhotoAssetSupplyService:
                 "profile_binding": binding,
             },
         )
-        saved = AssetSetService(repository).save(asset_set)
-        # 写入后必须回读自证：``uq_opv_asset_set_version`` 唯一索引建在
-        # (asset_set_key, asset_set_version) 上，而版本号是按「该类别+该市场下
-        # **enabled** 的同键行」算的——一条**停用**的历史行同样占着槽位却不在
-        # 计数里。此时 INSERT 会走 ON DUPLICATE KEY UPDATE 改写那条历史行并保留
-        # 它原来的 asset_set_id，本次算出的 content-addressed id 永远不存在；而
-        # ``AssetSetService.save`` 恰好会在回读为空时回落返回内存对象，于是调用方
-        # 带着一个悬空 id 往下走，最终在冻结阶段报 NEEDS_ASSET——图却已经付过费。
-        # 把这种静默失败改成响亮失败（同键同版本的合法自增不会命中这里）。
+        AssetSetService(repository).save(asset_set)
+        # 写入后独立回读自证：``AssetSetService.save`` 已保证返回值来自存储，这里
+        # 再核对一次「本次 content-addressed id 真的落了行、且落在预期的 key 上」。
+        # 不成立就说明写入语义又绕回了「版本冲突改写了别人的行」，宁可在冻结之前
+        # 响亮失败，也不能让调用方带着悬空 id 往下走——下游报 NEEDS_ASSET 时图已经
+        # 付过费。登记失败不重新生图：暂存清单与已生成的图片都原样留在盘上。
         persisted = repository.get_asset_set(asset_set.asset_set_id)
-        if (persisted is None or str(persisted.asset_set_key) != key
-                or int(persisted.asset_set_version) != int(version)):
+        if persisted is None or str(persisted.asset_set_key) != key:
             raise PhotoAssetSupplyError(
-                "素材集写入未落到预期行（asset_set_key/asset_set_version 槽位被占）："
-                f"期望 id={asset_set.asset_set_id} key={key} v={version}，"
+                "素材集写入后回读不到本次登记的 id："
+                f"期望 id={asset_set.asset_set_id} key={key}，"
                 f"实际回读到 {getattr(persisted, 'asset_set_id', None)!r} "
-                f"key={getattr(persisted, 'asset_set_key', None)!r} "
-                f"v={getattr(persisted, 'asset_set_version', None)!r}。"
-                "请先清理该槽位上的历史停用行后重跑；已生成的素材可复用，不会重复付费。"
+                f"key={getattr(persisted, 'asset_set_key', None)!r}。"
+                "已生成的素材与暂存清单均保留，可重试登记，不会重复付费。"
             )
         path = Path(staged["files"][0]["path"]).parent / "manifest.json"
-        staged.update(status="qualified", asset_set_id=saved.asset_set_id,
-                      asset_set_version=saved.asset_set_version, reviewer=reviewer)
+        staged.update(status="qualified", asset_set_id=persisted.asset_set_id,
+                      asset_set_version=persisted.asset_set_version, reviewer=reviewer)
         path.write_text(json.dumps(staged, ensure_ascii=False, indent=2), encoding="utf-8")
-        return saved
+        return persisted
 
     @staticmethod
     def _safe(value: str) -> str:

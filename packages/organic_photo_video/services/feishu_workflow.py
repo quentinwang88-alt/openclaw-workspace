@@ -834,6 +834,39 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
         }, ensure_ascii=False, indent=2), encoding="utf-8")
         return archive
 
+    @staticmethod
+    def _archive_frozen_plan_copy(
+        root: Path, record_id: str, *, payload: Mapping[str, Any], reason: str,
+    ) -> Optional[Path]:
+        """Keep a **copy** of the frozen plan before its copy fields are rebuilt.
+
+        ``_archive_photo_planning_state`` *moves* state aside, which is right for
+        a real replan but wrong here: the paid images must stay in place and the
+        row must keep running.  So this only preserves the old plan (the Thai
+        original, in the 2026-09-14 case) under the same ``replan_archive``
+        convention for audit, and touches nothing else.
+        """
+        if not payload:
+            return None
+        safe_record_id = "".join(
+            char if char.isalnum() or char in "-_" else "_" for char in record_id
+        )
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+        archive = root / "replan_archive" / f"{safe_record_id}_{stamp}"
+        target = archive / "content_plans" / safe_record_id / "plan.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(dict(payload), ensure_ascii=False, indent=2), encoding="utf-8")
+        (archive / "copy_repair.json").write_text(json.dumps({
+            "record_id": record_id,
+            "archived_at": datetime.now(timezone.utc).isoformat(),
+            "reason": reason,
+            "note": "只归档旧计划副本（文案语言错的那一版）；"
+                    "content_plan 与 style_reference_supply 原地保留，图片生成器不会被调用",
+            "copied": [str(target.relative_to(archive))],
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        return archive
+
     def scan(
         self,
         *,
@@ -1488,8 +1521,8 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 )
             from services.photo_batch_variation import plan_batch_variations
             from services.photo_content_planner import (
-                PhotoContentPlanStore, get_planning_flow, plan_th_choice_batch,
-                recipe_has_planning_policy,
+                ADDITIVE_CONTRACT_KEYS, LegacyPlanLocaleUpgrade, PhotoContentPlanStore,
+                get_planning_flow, plan_th_choice_batch, recipe_has_planning_policy,
             )
             variation_theme = theme or {
                 "theme_key": "AUTO", "label_zh": "自动差异化穿搭",
@@ -1670,32 +1703,62 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     input_contract["publish_locale"] = publish_locale
                 plan_store = PhotoContentPlanStore(staging_root)
 
-                def _load_content_plan():
-                    return plan_store.load_or_create(
-                        record_id=record.record_id, input_contract=input_contract,
-                        create=lambda: plan_th_choice_batch(
-                            record_id=record.record_id,
-                            recipe_id=recipe_for_input.recipe_id,
-                            theme=effective_theme, reference_mode=reference_mode, count=quantity,
-                            style_profile=style_profile,
-                            travel_contract=travel_contract or None,
-                            copy_templates=(
-                                layering_copy_templates
-                                if planning_flow == "layering_two_step"
-                                else travel_copy_templates
-                            ),
-                            required_roles=roles,
-                            recipe_spec=recipe_for_input.recipe_spec_json or {},
-                            variables=temperature_variables,
-                            # Locale Pack 必须传下去：``_family_plan`` / ``_vision_plan``
-                            # 都靠它取发布文案，漏传会回落到已被剥离的内联泰语字段
-                            # （得到空串），再由主题文案兜成泰语（2026-09-14）。
-                            locale_pack=locale_pack,
+                def _build_content_plan():
+                    return plan_th_choice_batch(
+                        record_id=record.record_id,
+                        recipe_id=recipe_for_input.recipe_id,
+                        theme=effective_theme, reference_mode=reference_mode, count=quantity,
+                        style_profile=style_profile,
+                        travel_contract=travel_contract or None,
+                        copy_templates=(
+                            layering_copy_templates
+                            if planning_flow == "layering_two_step"
+                            else travel_copy_templates
                         ),
+                        required_roles=roles,
+                        recipe_spec=recipe_for_input.recipe_spec_json or {},
+                        variables=temperature_variables,
+                        # Locale Pack 必须传下去：``_family_plan`` / ``_vision_plan``
+                        # 都靠它取发布文案，漏传会回落到已被剥离的内联泰语字段
+                        # （得到空串），再由主题文案兜成泰语（2026-09-14）。
+                        locale_pack=locale_pack,
                     )
 
+                def _load_content_plan(repair_copy=None):
+                    return plan_store.load_or_create(
+                        record_id=record.record_id, input_contract=input_contract,
+                        create=_build_content_plan,
+                        # 只有声明了语言文案包的配方才可能出现新增的 publish_locale：
+                        # 老计划缺这个键时允许走「冻结文案自证语言」的窄兼容，
+                        # v1 泰语配方（契约逐字不含该键）完全不受影响。
+                        tolerate_additive_keys=(
+                            ADDITIVE_CONTRACT_KEYS if recipe_locale_packs else ()
+                        ),
+                        repair_copy=repair_copy,
+                    )
+
+                # 只有本行的旧计划是「文案语言错」时才会有内容：它是供给层证明
+                # 「只改了文案」的对照物（清单从不保存 variation）。
+                former_variations: list[dict[str, Any]] = []
                 try:
                     content_plan = _load_content_plan()
+                except LegacyPlanLocaleUpgrade as exc:
+                    # 旧计划的文案语言是错的，但源图仍可用。检测这一趟**不写任何
+                    # 东西**：先把旧计划归档一份副本留证，再走第二趟只替换文案字段
+                    # （``adopt_repaired_copy`` 会断言除文案外的画面字段逐字不变，
+                    # 不一致就拒绝）。全程不搬 content_plan、不搬
+                    # style_reference_supply —— 已付费素材原地复用，图片生成器
+                    # 调用次数为 0。证不出语言一致（reason="unverified"）或画面
+                    # 会变（reason="visual_changed"）时直接抛，什么都不动。
+                    if exc.reason != "copy_language":
+                        raise
+                    former_payload = plan_store.read_frozen(record.record_id)
+                    former_variations = list(
+                        (former_payload.get("plan") or {}).get("items") or [])
+                    self._archive_frozen_plan_copy(
+                        staging_root, record.record_id, payload=former_payload,
+                        reason=str(exc))
+                    content_plan = _load_content_plan(repair_copy=_build_content_plan)
                 except Exception as exc:
                     if not self._is_replannable_photo_error(exc):
                         raise
@@ -1882,6 +1945,12 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                             account=account, persona=persona, variation=variation,
                             progress=_asset_progress, product=style_product,
                             locale=str(getattr(specs[0], "language", "") or "th-TH"),
+                            # 本行刚从「文案语言错」就地重建过时，给出旧计划的同一条目：
+                            # 供给侧据此证明这次差异只在文案，直接复用已付费图片。
+                            copy_repaired_from=(
+                                former_variations[index - 1]
+                                if index <= len(former_variations) else None
+                            ),
                         )
 
                     try:

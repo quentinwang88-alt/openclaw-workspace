@@ -257,6 +257,82 @@ class PhotoReferenceVisionTest(unittest.TestCase):
         # 原宽松规则仍在：配饰有无只写 notes。
         self.assertIn("配饰有无", prompt)
 
+    # --- 核心商品错误必须是结构化硬信号，不靠中文关键词白名单 (2026-09-14) ----
+    # 复现：role_findings 里 look_b passed=false，issues 是「围巾颜色家族错误／
+    # 围巾结构错误／指定围巾完全看不到」——三个短语一个都不在供给侧的
+    # FAILURE_HINTS 白名单里，被判成细节提示 ⇒ 不重生任何图、只烧组级重做次数
+    # ⇒ group_failed（QA 空转）。修法是在模型响应里带一个布尔硬信号，并在
+    # 「没指定商品」时**强制**为假，自由搭配的配饰变化保持原宽松路径。
+
+    @staticmethod
+    def _core_product_failure_response():
+        return {
+            "passed": False,
+            "scores": {"presentation_alignment": 90, "style_alignment": 88,
+                       "scene_alignment": 86, "palette_alignment": 90,
+                       "look_difference": 84},
+            "reason_codes": ["PRODUCT_MISMATCH"], "notes": "look_b 的围巾不是指定商品",
+            "per_look": [
+                {"role": "look_a", "passed": True, "issues": []},
+                {"role": "look_b", "passed": False,
+                 "issues": ["围巾颜色家族错误", "围巾结构错误", "指定围巾完全看不到"],
+                 "core_product_mismatch": True},
+            ],
+        }
+
+    def test_core_product_mismatch_is_kept_for_a_designated_product(self):
+        product = self._product_image()
+        client = FakeVisionClient([self._core_product_failure_response()])
+        result = PhotoReferenceVisionService(
+            root=self.root, client=client,
+        ).review_alignment(
+            reference_paths=self.images[:1], generated_paths=[self._generated_image()],
+            contract={}, scope="FULL_LOOK_GROUP", generated_roles=["look_a", "look_b"],
+            product_reference_paths=[product],
+            product_context={"product_id": "P1", "product_name": "格纹羊毛围巾"},
+        )
+        findings = {item["role"]: item for item in result["role_findings"]}
+        self.assertTrue(findings["look_b"]["core_product_mismatch"])
+        self.assertFalse(findings["look_a"]["core_product_mismatch"])
+        self.assertEqual(findings["look_b"]["issues"],
+                         ["围巾颜色家族错误", "围巾结构错误", "指定围巾完全看不到"])
+        # 提示词必须明确要求这个字段，否则模型不会返回。
+        prompt = client.calls[0][1]
+        self.assertIn("core_product_mismatch", prompt)
+        self.assertIn("【核心商品】", prompt)
+
+    def test_core_product_flag_is_forced_off_without_a_designated_product(self):
+        """同一份响应：没指定商品时旗标必须为假，自由搭配仍按原宽松路径。"""
+        client = FakeVisionClient([self._core_product_failure_response()])
+        result = PhotoReferenceVisionService(
+            root=self.root, client=client,
+        ).review_alignment(
+            reference_paths=self.images[:1], generated_paths=[self._generated_image()],
+            contract={}, scope="FULL_LOOK_GROUP", generated_roles=["look_a", "look_b"],
+        )
+        findings = {item["role"]: item for item in result["role_findings"]}
+        self.assertFalse(findings["look_b"]["core_product_mismatch"])
+        # 无指定商品时提示词逐字不变：既不出现【核心商品】，也不要求该字段。
+        prompt = client.calls[0][1]
+        self.assertNotIn("【核心商品】", prompt)
+        self.assertNotIn("core_product_mismatch", prompt)
+
+    def test_legacy_response_without_the_field_keeps_the_old_path(self):
+        """旧响应没有这个键 ⇒ 视为假，不追溯把历史任务拦成硬失败。"""
+        response = self._core_product_failure_response()
+        for item in response["per_look"]:
+            item.pop("core_product_mismatch", None)
+        result = PhotoReferenceVisionService(
+            root=self.root, client=FakeVisionClient([response]),
+        ).review_alignment(
+            reference_paths=self.images[:1], generated_paths=[self._generated_image()],
+            contract={}, scope="FULL_LOOK_GROUP", generated_roles=["look_a", "look_b"],
+            product_reference_paths=[self._product_image()],
+            product_context={"product_id": "P1", "product_name": "格纹羊毛围巾"},
+        )
+        findings = {item["role"]: item for item in result["role_findings"]}
+        self.assertFalse(findings["look_b"]["core_product_mismatch"])
+
     def test_a_missing_product_image_is_not_claimed_as_sent(self):
         """商品参考图文件缺失时，提示词不得声称"前 N 张是商品参考图"。"""
         generated = self._generated_image()

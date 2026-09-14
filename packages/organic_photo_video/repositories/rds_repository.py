@@ -16,6 +16,7 @@ Design rules
 
 from __future__ import annotations
 
+import dataclasses
 import os
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
@@ -305,14 +306,152 @@ class RdsRepository:
     # Native-photo reusable asset sets
     # ------------------------------------------------------------------
 
-    def upsert_asset_set(self, asset_set: AssetSet) -> None:
-        self._upsert("opv_asset_set", "asset_set_id", asset_set.to_row())
+    # ``opv_asset_set`` carries TWO unique keys: the primary key on
+    # ``asset_set_id`` and ``uq_opv_asset_set_version`` on
+    # ``(asset_set_key, asset_set_version)``.  ``_upsert`` must therefore never
+    # be used for this table: ``ON DUPLICATE KEY UPDATE`` fires on *either* key,
+    # so a version collision silently rewrote whichever historical row already
+    # held that slot (keeping its original ``asset_set_id``) while the
+    # content-addressed id computed by the caller was never inserted.  The row
+    # count check that followed could only notice the dangling id *after* the
+    # other row had already been damaged.  Registration is explicit instead:
+    # plain INSERT, then resolve the conflict in favour of the existing row.
+    ASSET_SET_REGISTRATION_ATTEMPTS = 3
+
+    def insert_asset_set(self, asset_set: AssetSet) -> None:
+        """INSERT one asset set row.  Never rewrites an existing row.
+
+        A duplicate key surfaces as :class:`pymysql.err.IntegrityError` and the
+        failed statement is rolled back when the connection closes, so the
+        caller can retry cleanly.
+        """
+        row = asset_set.to_row()
+        sql = (
+            f"INSERT INTO opv_asset_set ({','.join(row)}) "
+            f"VALUES ({_placeholders(len(row))})"
+        )
+        self._run(sql, [row[column] for column in row], commit=True)
 
     def get_asset_set(self, asset_set_id: str) -> Optional[AssetSet]:
         row = self._fetch_one(
             "SELECT * FROM opv_asset_set WHERE asset_set_id=%s", [asset_set_id]
         )
         return AssetSet.from_row(row) if row else None
+
+    def get_asset_set_by_key_version(
+        self, asset_set_key: str, asset_set_version: int
+    ) -> Optional[AssetSet]:
+        row = self._fetch_one(
+            "SELECT * FROM opv_asset_set WHERE asset_set_key=%s AND asset_set_version=%s",
+            [asset_set_key, int(asset_set_version)],
+        )
+        return AssetSet.from_row(row) if row else None
+
+    def next_asset_set_version(self, asset_set_key: str) -> int:
+        """Highest version in use for ``asset_set_key``.
+
+        The scope deliberately matches ``uq_opv_asset_set_version`` exactly:
+        every status, market and category.  A ``disabled`` row from another
+        market still owns its slot, so allocating from ``enabled`` rows alone
+        hands out a version that is already taken.
+        """
+        row = self._fetch_one(
+            "SELECT MAX(asset_set_version) AS max_version FROM opv_asset_set "
+            "WHERE asset_set_key=%s",
+            [asset_set_key],
+        )
+        return int((row or {}).get("max_version") or 0)
+
+    def update_asset_set_status(self, asset_set_id: str, status: str) -> None:
+        """Change only ``status`` on one explicitly identified row.
+
+        Content columns are never touched here: a status transition (retiring
+        an asset set) must not be able to rewrite bytes, market or category.
+        """
+        _, rowcount = self._run_scoped(
+            "UPDATE opv_asset_set SET status=%s WHERE asset_set_id=%s",
+            [status, asset_set_id],
+            commit=True,
+        )
+        if rowcount == 0:
+            raise StaleStatusError(
+                f"asset set {asset_set_id} disappeared while updating its status"
+            )
+
+    @staticmethod
+    def _asset_set_content(asset_set: AssetSet) -> Tuple[Any, ...]:
+        """Identity of an asset set *excluding* its version slot and status.
+
+        ``asset_set_version`` is intentionally left out: two racing attempts at
+        the same content compute the same content-addressed id but may request
+        different versions, and that must not be mistaken for a content change.
+        """
+        return (
+            str(asset_set.asset_set_key),
+            str(asset_set.category_key),
+            asset_set.market,
+            asset_set.tags_json,
+            asset_set.manifest_json,
+        )
+
+    def upsert_asset_set(self, asset_set: AssetSet) -> AssetSet:
+        """Register an asset set without ever overwriting another id.
+
+        Kept under its historical name because every caller already uses it;
+        the semantics are now asset-specific:
+
+        * a new ``asset_set_id`` is INSERTed into its version slot;
+        * the same ``asset_set_id`` retried is idempotent — the stored row wins
+          and its ``asset_set_version`` is returned even when this attempt
+          computed a different one;
+        * a ``(asset_set_key, asset_set_version)`` slot held by *another*
+          ``asset_set_id`` is a conflict: the failed INSERT is discarded, the
+          version is re-read from the real unique-key scope and the write is
+          retried a bounded number of times.  Exhausting the retries raises
+          without touching any row, so the staged bytes and the generated
+          images stay on disk and nothing is regenerated.
+        """
+        attempt = asset_set
+        holder: Optional[AssetSet] = None
+        for _ in range(max(1, int(self.ASSET_SET_REGISTRATION_ATTEMPTS))):
+            try:
+                self.insert_asset_set(attempt)
+            except Exception as exc:  # noqa: BLE001 - narrowed below
+                if not self._is_duplicate(exc):
+                    raise
+            else:
+                persisted = self.get_asset_set(attempt.asset_set_id)
+                if persisted is None:  # pragma: no cover - defensive
+                    raise RepositoryError(
+                        f"asset set {attempt.asset_set_id} disappeared right after insert"
+                    )
+                return persisted
+            stored = self.get_asset_set(attempt.asset_set_id)
+            if stored is not None:
+                if self._asset_set_content(stored) != self._asset_set_content(attempt):
+                    raise RepositoryError(
+                        f"asset set {attempt.asset_set_id} already exists with different "
+                        "content; use a new id/version (status retirement is allowed)"
+                    )
+                if stored.status != attempt.status:
+                    self.update_asset_set_status(stored.asset_set_id, attempt.status)
+                    stored.status = attempt.status
+                return stored
+            holder = self.get_asset_set_by_key_version(
+                attempt.asset_set_key, attempt.asset_set_version
+            )
+            reallocated = int(attempt.asset_set_version) + 1
+            authoritative = self.next_asset_set_version(attempt.asset_set_key) + 1
+            if authoritative > reallocated:
+                reallocated = authoritative
+            attempt = dataclasses.replace(attempt, asset_set_version=reallocated)
+        raise RepositoryError(
+            "素材登记冲突，可重试登记："
+            f"asset_set_key={asset_set.asset_set_key} 的版本槽位连续 "
+            f"{int(self.ASSET_SET_REGISTRATION_ATTEMPTS)} 次被其他素材集占用"
+            + (f"（当前占用者 {holder.asset_set_id}）" if holder is not None else "")
+            + "；已暂存的原图与已生成的图片均保留，不会重新生图。"
+        )
 
     def list_asset_sets(
         self, *, category_key: str, market: Optional[str] = None,

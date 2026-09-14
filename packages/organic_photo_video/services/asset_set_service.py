@@ -66,14 +66,31 @@ class AssetSetService:
         self.repository = repository
 
     def save(self, asset_set: AssetSet) -> AssetSet:
+        """Persist an asset set and return the row that actually exists.
+
+        The writer is the authority on the version slot: a competing insert may
+        have taken it, in which case the repository re-allocates and reports the
+        version it settled on.  Never hand the caller an in-memory object that
+        was not read back from storage — that is how a dangling
+        ``asset_set_id`` used to travel downstream and only surface much later
+        as ``NEEDS_ASSET``, after the images had already been paid for.
+        """
         validate_asset_set(asset_set, verify_files=asset_set.status == "enabled")
         existing = self.repository.get_asset_set(asset_set.asset_set_id)
         if existing:
             immutable = ("asset_set_key", "asset_set_version", "category_key", "market", "tags_json", "manifest_json")
             if any(getattr(existing, field) != getattr(asset_set, field) for field in immutable):
                 raise AssetSetError("asset set content is immutable; use a new id/version (status retirement is allowed)")
-        self.repository.upsert_asset_set(asset_set)
-        return self.repository.get_asset_set(asset_set.asset_set_id) or asset_set
+        registered = self.repository.upsert_asset_set(asset_set)
+        persisted = registered if isinstance(registered, AssetSet) else self.repository.get_asset_set(
+            asset_set.asset_set_id
+        )
+        if persisted is None:
+            raise AssetSetError(
+                "素材集写入后回读不到记录（asset_set_id="
+                f"{asset_set.asset_set_id}）；拒绝把未持久化的内存对象当作已登记素材继续使用"
+            )
+        return persisted
 
     @staticmethod
     def tags_match(available: Mapping[str, Any], required: Mapping[str, Any]) -> bool:
