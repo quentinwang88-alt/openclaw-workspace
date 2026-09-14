@@ -3,10 +3,12 @@ set -eu
 
 # cron 的默认 PATH 不含 /usr/local/bin，会导致 creatok 等本地 CLI 找不到。
 export PATH="/usr/local/bin:$PATH"
-# 2026-09-11：codex 额度已重置，切回 codex 主力 + CreatoK 兜底（codex_fallback）。
-# 额度再耗尽时会自动切 CreatoK，不会像独占通道那样全线失败。
-# 想彻底独占 codex 或只用 CreatOK 时，把值改为 openai-image / creatok。
-export OPV_PHOTO_CHANNEL="codex_fallback"
+# 2026-09-13：生图通道改为 1route 主力（gpt-image-2.5-sunburst），
+# codex 二线（额度/限流时接管），CreatOK 三线兜底。三线任一失败自动落下一线，
+# 不会像独占通道那样全线失败。想看/改优先级只改这一行即可：
+#   1route 独占 → "1route"；codex 主力 → "codex>1route>creatok"；
+#   回旧行为 → "codex_fallback"（codex→creatok）或 "creatok_fallback"。
+export OPV_PHOTO_CHANNEL="1route>codex>creatok"
 export OPENAI_CODEX_IMAGE_MODEL="gpt-image-2.5-sunburst"
 # codex 图像流偶发慢响应：总闸门 240s，给慢响应留完成时间。
 export OPENAI_IMAGE_TOTAL_TIMEOUT="240"

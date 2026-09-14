@@ -26,6 +26,7 @@ from services.image_generator import (  # noqa: E402
     OneRouteImageGenerator,
     OpenAIImageGenerator,
     ShotGenerationRequest,
+    FATAL_ERROR_KINDS,
     _ChannelHealth,
     build_default_photo_generator,
     check_portrait_916,
@@ -630,6 +631,34 @@ class OneRouteImageGeneratorTest(unittest.TestCase):
         # A rejected credential is model-independent → no second model attempt.
         self.assertEqual(len(opener.calls), 1)
 
+    def test_billing_failure_still_tries_the_fallback_model(self):
+        """余额不足按模型/账户分账 → 阶梯必须继续试备选模型。
+
+        1route 对空账户报 ``403 {"code":"INSUFFICIENT_BALANCE"}``；若主力模型
+        的额度池空了而备选模型还有钱，只试一个模型就会白白整体失败。
+        """
+        import urllib.error
+
+        error = urllib.error.HTTPError(
+            "https://image-api.1route.dev/v1/images/generations", 403,
+            "Forbidden", {},
+            io.BytesIO(
+                b'{"code":"INSUFFICIENT_BALANCE","message":"Insufficient account balance"}'
+            ),
+        )
+        opener = self._opener(
+            error, {"data": [{"b64_json": self._png_b64()}]},
+        )
+        generator = OneRouteImageGenerator(
+            api_key=self.API_KEY, base_url="https://image-api.1route.dev", opener=opener
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            outcome = generator.generate_shot(make_request(tmp))
+        self.assertTrue(outcome.ok, outcome.error)
+        self.assertEqual(outcome.model, "gpt-image-2")
+        self.assertEqual(len(opener.calls), 2)
+        self.assertEqual(outcome.raw["model_attempts"][0]["error_kind"], "billing")
+
     def test_non_portrait_output_fails_quality_gate(self):
         opener = self._opener({"data": [{"b64_json": self._png_b64(1024, 1024)}]})
         generator = OneRouteImageGenerator(
@@ -882,6 +911,20 @@ class ErrorClassificationTest(unittest.TestCase):
         self.assertEqual(classify_error_kind("content policy violation"), "content")
         self.assertEqual(classify_error_kind("image is not 9:16 portrait: (1, 1)"), "quality")
         self.assertEqual(classify_error_kind("weird failure"), "unknown")
+
+    def test_empty_account_is_billing_not_auth(self):
+        """1route 余额耗尽的真实响应：必须归为计费类，不能被 403 吞成鉴权类。"""
+        raw = ('1route http 403: {"code":"INSUFFICIENT_BALANCE",'
+               '"message":"Insufficient account balance"}')
+        self.assertEqual(classify_error_kind(raw), "billing")
+        self.assertEqual(
+            classify_error_kind('{"error":{"message":"insufficient balance",'
+                                '"type":"billing_error"}}'),
+            "billing",
+        )
+        self.assertIn("billing", FATAL_ERROR_KINDS)
+        # A genuine credential rejection still lands in auth.
+        self.assertEqual(classify_error_kind("1route http 401: bad key"), "auth")
 
 
 if __name__ == "__main__":

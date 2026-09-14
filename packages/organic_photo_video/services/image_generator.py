@@ -925,12 +925,27 @@ def check_portrait_916(dimensions: Optional[tuple]) -> bool:
 # Failure classes that no amount of channel hopping can fix: a missing key or a
 # rejected credential stays broken for the rest of the process, so the chain
 # skips that channel outright instead of paying its timeout on every shot.
-FATAL_ERROR_KINDS = frozenset({"config", "auth"})
+FATAL_ERROR_KINDS = frozenset({"config", "auth", "billing"})
+
+# The model ladder only short-circuits on failures where swapping the model
+# cannot possibly help: a missing credential or a bad one is environment-level.
+# Billing is deliberately NOT here — relays such as 1route bill per configured
+# account/model ("not supported by any configured account"), so an exhausted
+# primary model may still have a funded fallback. Let the ladder try.
+LADDER_SHORT_CIRCUIT_KINDS = frozenset({"config", "auth"})
 
 _ERROR_KIND_MARKERS = (
     ("config", (
         "not configured", "no such file", "command not found", "file not found",
         "output dir unavailable", "invalid base url", "missing api key",
+    )),
+    # Balance/billing sits BEFORE ``auth`` on purpose: relays report an empty
+    # account as ``403 {"code":"INSUFFICIENT_BALANCE"}``, and the bare "403"
+    # marker would otherwise swallow it as an auth failure, sending whoever
+    # debugs it hunting for a credential problem that does not exist.
+    ("billing", (
+        "insufficient_balance", "insufficient balance", "account balance",
+        "billing_error", "payment required", "402", "欠费", "余额不足",
     )),
     ("auth", (
         "401", "403", "unauthorized", "forbidden", "invalid_api_key",
@@ -1340,8 +1355,8 @@ class OneRouteImageGenerator:
                 "model": model, "error": outcome.error,
                 "error_kind": outcome.error_kind,
             })
-            # A bad credential or an unreachable host is model-independent.
-            if outcome.error_kind in FATAL_ERROR_KINDS:
+            # A bad credential or a missing config is model-independent.
+            if outcome.error_kind in LADDER_SHORT_CIRCUIT_KINDS:
                 break
         return GenerationOutcome(
             ok=False,

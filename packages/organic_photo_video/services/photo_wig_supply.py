@@ -463,6 +463,11 @@ class PhotoWigSupplyService:
 
         return {
             "photo_channel": os.environ.get("OPV_PHOTO_CHANNEL", ""),
+            "oneroute_image_model": os.environ.get("OPV_ONEROUTE_IMAGE_MODEL", ""),
+            "oneroute_image_fallback_model": os.environ.get(
+                "OPV_ONEROUTE_IMAGE_FALLBACK_MODEL", ""
+            ),
+            "oneroute_api_base": os.environ.get("OPV_ONEROUTE_API_BASE", ""),
             "codex_image_model": os.environ.get("OPENAI_CODEX_IMAGE_MODEL", ""),
             "creatok_image_model": os.environ.get("OPV_CREATOK_IMAGE_MODEL", ""),
         }
