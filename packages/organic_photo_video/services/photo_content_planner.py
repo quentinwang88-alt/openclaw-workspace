@@ -202,7 +202,7 @@ def _family_plan(
         "index": index, "policy_id": policy["policy_id"],
         "policy_version": policy["policy_version"],
         "family_id": family["family_id"], "variation_id": family["family_id"],
-        "theme_key": theme["theme_key"], "angle_zh": family["angle_zh"],
+        "theme_key": str(theme.get("theme_key") or ""), "angle_zh": family["angle_zh"],
         "scene_zh": family["scene_zh"], "palette_zh": family["palette_zh"],
         "background_color": family["background_color"],
         "background_prompt": family["background_prompt"],
@@ -210,7 +210,7 @@ def _family_plan(
             f"本篇严格使用{family['palette_zh']}；A/B/C/D 必须执行各自冻结单品，"
             "并保持参考图的展示方式、色温、光线和背景质感"
             if style_profile else
-            f"{theme['visual_brief']}；本篇严格使用{family['palette_zh']}；"
+            f"{str(theme.get('visual_brief') or '')}；本篇严格使用{family['palette_zh']}；"
             "A/B/C/D 必须执行各自冻结单品，不得回退成其他篇的服装"
         ),
         "presentation_type": str((style_profile or {}).get("presentation_type") or "MODEL_FULL_BODY"),
@@ -218,7 +218,7 @@ def _family_plan(
         "looks": looks,
         "copy": {
             "title": locale_copy["title"], "cover": locale_copy["cover"],
-            "caption": locale_copy["caption"], "cta": str(theme["cta"]),
+            "caption": locale_copy["caption"], "cta": str(theme.get("cta") or ""),
         },
         "difference_axes": {
             "family": family["family_id"], "palette": family["palette_zh"],
@@ -227,13 +227,53 @@ def _family_plan(
     }
 
 
+def _neutral_four_choice_copy(
+    locale_pack: Mapping[str, Any], *, index: int,
+) -> dict[str, str]:
+    """Locale-owned publish copy for a **model-planned** four-choice batch.
+
+    ``_vision_plan`` takes its four looks from the vision model (the model is the
+    one that actually reads the reference images), but the publish text must not
+    come from it: ``PhotoReferenceVisionService._analysis_prompt`` explicitly asks
+    for **Thai** copy and ``_normalize_contract`` rejects a set without it, so a
+    VN run would otherwise publish Thai.  A model-planned batch has no policy
+    ``family_id`` to key ``family_copy`` on, so the locale pack's four neutral
+    variants (the same ones ``COMPLETE_LOOK`` uses) are the right owner here.
+    """
+    from services.photo_locale import complete_look_copy, locale_pack_labels
+    variants = list(complete_look_copy(locale_pack))
+    if not variants:
+        raise PhotoContentPlanError("locale pack 未提供四选一通用文案")
+    entry = dict(variants[(index - 1) % len(variants)])
+    labels = locale_pack_labels(locale_pack, "generic")
+    return {
+        "title": str(entry.get("title") or labels.get("title") or ""),
+        "cover": str(entry.get("cover") or labels.get("cover") or ""),
+        "caption": str(entry.get("caption") or ""),
+        "cta": str(labels.get("cta") or ""),
+    }
+
+
 def _vision_plan(
     *, index: int, recommendation: Mapping[str, Any], theme: Mapping[str, Any],
     policy: Mapping[str, Any], style_profile: Mapping[str, Any],
+    locale_pack: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Convert a model-reviewed semantic recommendation into the frozen plan."""
+    theme = dict(theme or {})
     value = copy.deepcopy(dict(recommendation))
     looks = list(value.get("looks") or [])
+    if locale_pack is not None:
+        from services.photo_locale import locale_pack_labels
+        # 模型给的 look 标签是泰语（prompt 明写「简短自然泰语标签」），绑定了
+        # Locale Pack 时换成该语言的通用标签，避免越南语稿件夹泰语标签（2026-09-14）。
+        look_label = str(
+            locale_pack_labels(locale_pack, "generic").get("look_label") or "Look {letter}"
+        )
+        for position, look in enumerate(looks):
+            look["display_label"] = look_label.format(
+                letter=role_marker(str(look.get("role") or ""), position)
+            )
     outerwear_types = sorted({str(item.get("outerwear_type") or item.get("outerwear") or "") for item in looks})
     bottom_types = sorted({str(item.get("bottom_type") or item.get("bottom") or "") for item in looks})
     aggregate = dict(style_profile.get("aggregate") or {})
@@ -253,7 +293,13 @@ def _vision_plan(
         "presentation_type": str(style_profile.get("presentation_type") or "MODEL_FULL_BODY"),
         "style_profile": dict(style_profile),
         "looks": looks,
-        "copy": dict(value.get("copy") or {}),
+        # 发布文案归 Locale Pack（见 ``_neutral_four_choice_copy``）：视觉模型只负责
+        # 四套 look，文案不能让模型写——它的 prompt 明确要求泰语（2026-09-14）。
+        "copy": (
+            _neutral_four_choice_copy(locale_pack, index=index)
+            if locale_pack is not None
+            else dict(value.get("copy") or {})
+        ),
         "difference_axes": {
             "family": f"vision_dynamic_{index}",
             "palette": str(value.get("palette_zh") or ""),
@@ -395,9 +441,14 @@ def plan_th_choice_batch(
             f"该生产预设不支持参考模式：{reference_mode or '未选择'}"
             f"（支持：{'、'.join(policy['supported_reference_modes'])}）"
         )
-    theme_key = str(theme.get("theme_key") or "")
+    theme_key = str((theme or {}).get("theme_key") or "")
     if theme_key not in policy["supported_theme_keys"]:
-        raise PhotoContentPlanError(f"该生产预设尚未支持主题：{theme_key or '自动'}")
+        # 国家无关配方（声明了 ``locale_copy_packs`` ⇒ 调用方会传入 ``locale_pack``）
+        # 的发布文案与家族文案都归 Locale Pack 所有，主题只影响家族排序；而方案
+        # §5.4 的运营输入只有「参考图类型 / 参考图 / 产品编码」，没有「图文主题」。
+        # 因此未选主题（theme_key 为空）不得拦在这里（2026-09-14）。
+        if not (locale_pack is not None and not theme_key):
+            raise PhotoContentPlanError(f"该生产预设尚未支持主题：{theme_key or '自动'}")
     travel_topic = dict((style_profile or {}).get("travel_topic") or {})
     topic_linked = False
     planning_flow = str(
@@ -472,7 +523,13 @@ def plan_th_choice_batch(
         items = []
         for index, value in enumerate(recommendations[:count], 1):
             item = _vision_plan(index=index, recommendation=value, theme=theme,
-                                policy=policy, style_profile=style_profile)
+                                policy=policy, style_profile=style_profile,
+                                # 作用域（2026-09-14）：旅行流程的文案与 look 标签由旅行
+                                # 合同 / 主题体系拥有（且 TH 旅行线已在生产交付），不得被
+                                # 这里的 Locale Pack 覆盖。因此仅**非旅行**的 STYLE 线
+                                # （如 VN 围巾搭配线，planning_flow=reference_contract_v1）
+                                # 才接手 Locale Pack 的文案与标签。
+                                locale_pack=None if travel_flow else locale_pack)
             if travel_flow and topic_linked:
                 # 主题联动分支：规划响应同时产出选题与发布文案，直接冻结。
                 # 模型自由撰写的 title/caption 必须在这里就夹进发布契约——这是
@@ -506,7 +563,13 @@ def plan_th_choice_batch(
             items.append(item)
     else:
         by_id = {item["family_id"]: item for item in policy["families"]}
-        order = list(policy["theme_family_order"][theme_key])
+        order = list(policy["theme_family_order"].get(theme_key) or [])
+        if not order:
+            # 未选主题（theme_key 为空）且本次没走到视觉模型方案分支时，方案族顺序
+            # 无从确定。给明确错误，而不是让它以 KeyError 的形式暴露（2026-09-14）。
+            raise PhotoContentPlanError(
+                "该生产预设未选图文主题，且本次参考模式没有提供可用的穿搭方案"
+            )
         if reference_mode == "STYLE" and style_profile:
             selected_ids = _select_families(
                 order=order, count=count, style_profile=style_profile, policy=policy,

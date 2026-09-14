@@ -33,7 +33,8 @@ from config import loader  # noqa: E402
 from domain.contracts import validate_locale_pack_payload  # noqa: E402
 from services import photo_locale  # noqa: E402
 from services.photo_content_planner import (  # noqa: E402
-    get_planning_flow, plan_th_choice_batch, recipe_has_planning_policy,
+    PhotoContentPlanError, get_planning_flow, plan_th_choice_batch,
+    recipe_has_planning_policy,
 )
 from services.photo_execution_context import build_execution_context  # noqa: E402
 from services.photo_locale import PhotoLocaleError  # noqa: E402
@@ -448,6 +449,125 @@ class VnOfflinePlanningTest(unittest.TestCase):
                 MATCHING_RECIPE_ID, reference_mode="NOT_A_MODE", locale_pack=self.pack,
                 record_id="vn-bad-mode", style_profile=None,
             )
+
+
+class VnMatchingLineAcceptsSpecOperatorInputTest(unittest.TestCase):
+    """Spec §5.4 lists **three** operator fields: 参考图类型 / 参考图 / 产品编码.
+
+    There is no 「图文主题」, so the matching line has to start from
+    `风格参考 + 无主题`.  The four looks come from the vision contract (the model
+    is the one that reads the reference images) while the publish copy stays
+    locale-owned — the vision prompt asks for **Thai** copy, so letting the model
+    own the text would publish Thai on a Vietnamese line.
+
+    This pins the input that used to fail **before the planner ran**
+    (`feishu_workflow.py` required a theme) and the copy split that used to leak
+    Thai labels.  Earlier coverage missed both because it always passed a theme,
+    which silently satisfied the planner's own preconditions.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.pack = _vi_pack()
+        cls.spec = copy.deepcopy(
+            loader.load_content_recipe_file(MATCHING_RECIPE_PATH).recipe_spec_json
+        )
+
+    @staticmethod
+    def _vision_contract() -> dict:
+        """The four looks a vision model returns, including its Thai labels."""
+        return {
+            "analysis_method": "doubao_seed_2_1",
+            "planning_flow": "reference_contract_v1",
+            "presentation_type": "SCENE_MODEL",
+            "palette": ["camel"],
+            "temperature": "cool",
+            "recommended_sets": [{
+                "content_angle_zh": "围巾四套日常搭配",
+                "scene_zh": "河内转凉街头",
+                "palette_zh": "驼色、深蓝",
+                "looks": [
+                    {
+                        "role": f"look_{letter}",
+                        "display_label": f"ลุค {letter.upper()}",
+                        "outerwear": f"外套 {letter.upper()}",
+                        "top_inner": f"内搭 {letter.upper()}",
+                        "bottom": f"下装 {letter.upper()}",
+                        "shoes": f"鞋履 {letter.upper()}",
+                        "outerwear_type": f"outerwear_{letter}",
+                        "bottom_type": f"bottom_{letter}",
+                    }
+                    for letter in "abcd"
+                ],
+                "copy": {
+                    "title": "ลุคไหน", "cover": "ลุคไหน",
+                    "caption": "ลุคไหน", "cta": "ลุคไหน",
+                },
+            }],
+        }
+
+    def _plan_without_theme(self, *, locale_pack, style_profile):
+        return plan_th_choice_batch(
+            record_id="vn-matching-no-theme", recipe_id=MATCHING_RECIPE_ID,
+            theme={}, reference_mode="STYLE", count=1,
+            style_profile=style_profile, travel_contract=None,
+            copy_templates=None, recipe_spec=self.spec,
+            variables={"choice_axis": "scarf_pairing"},
+            locale_pack=locale_pack,
+        )
+
+    def test_no_theme_is_accepted_when_a_locale_pack_owns_the_copy(self):
+        plan = self._plan_without_theme(
+            locale_pack=self.pack, style_profile=self._vision_contract(),
+        )
+        item = plan["items"][0]
+        self.assertEqual(plan["theme_key"], "")
+        # The four looks are the model's, and they are all frozen into the plan.
+        self.assertEqual(len(item["looks"]), 4)
+        self.assertEqual(
+            [look["outerwear"] for look in item["looks"]],
+            ["外套 A", "外套 B", "外套 C", "外套 D"],
+        )
+
+    def test_publish_copy_stays_locale_owned_and_never_thai(self):
+        plan = self._plan_without_theme(
+            locale_pack=self.pack, style_profile=self._vision_contract(),
+        )
+        item = plan["items"][0]
+        expected = photo_locale.complete_look_copy(self.pack)[0]
+        generic = photo_locale.locale_pack_labels(self.pack, "generic")
+        self.assertEqual(item["copy"]["title"], expected["title"])
+        self.assertEqual(item["copy"]["cover"], expected["cover"])
+        self.assertEqual(item["copy"]["caption"], expected["caption"])
+        self.assertEqual(item["copy"]["cta"], generic["cta"])
+        # `item["style_profile"]` deliberately echoes the vision contract (including
+        # the Thai labels the model returned), so only the *published* surfaces are
+        # checked here: the copy block and the frozen looks.
+        published = [*_all_strings(item["copy"]), *_all_strings(item["looks"])]
+        for text in published:
+            self.assertIsNone(THAI_RANGE.search(text), text)
+
+    def test_model_supplied_look_labels_are_replaced_by_the_locale_ones(self):
+        plan = self._plan_without_theme(
+            locale_pack=self.pack, style_profile=self._vision_contract(),
+        )
+        labels = [look["display_label"] for look in plan["items"][0]["looks"]]
+        self.assertEqual(labels, ["Look A", "Look B", "Look C", "Look D"])
+
+    def test_the_theme_guard_still_holds_for_lines_without_a_locale_pack(self):
+        # A v1 recipe carries its copy inline in the theme, so a missing theme is
+        # still a hard error — the relaxation is scoped to locale-owned recipes.
+        with self.assertRaises(Exception):
+            self._plan_without_theme(
+                locale_pack=None, style_profile=self._vision_contract(),
+            )
+
+    def test_a_theme_less_plan_that_falls_back_to_families_fails_cleanly(self):
+        # STYLE without a vision contract would need the family path, whose order
+        # comes from `theme_family_order[theme_key]`.  It must raise a planner
+        # error rather than surfacing a KeyError.
+        with self.assertRaises(PhotoContentPlanError):
+            self._plan_without_theme(locale_pack=self.pack, style_profile=None)
 
 
 class VnBindsOnlyMarketAndLocaleTest(unittest.TestCase):
