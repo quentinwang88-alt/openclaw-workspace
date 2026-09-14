@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import sys
@@ -444,6 +445,38 @@ class PhotoPackageTest(unittest.TestCase):
         context = __import__("json").loads(metadata["script_text"])
         self.assertEqual(context["audio_mode"], "platform_auto_bgm")
         self.assertNotIn("video_duration_ms", context)
+
+    def test_vn_photo_package_enqueues_to_the_configured_vn_store_once(self):
+        """2026-09-14（方案 §3B）：VN 店铺路由补上后，已验收的原生图文包
+        必须能按既有桥接入队到 VNPS01，且重复入队不产生重复候选。"""
+        _package, _review, release = self._export_and_release()
+        self.repo.task.target_country = "VN"
+        self.repo.task.target_locale = "vi-VN"
+        self.repo.task.account_id = "OPV_VN_TEST_001"
+        self.repo.task.product_id = None
+        self.repo.task.category_key = "scarf"
+        self.repo.task.theme_id = None
+        self.repo.task.recipe_id = "PHOTO_TRAVEL_OUTFIT_V3"
+        self.repo.task.feishu_record_id = None
+        self.repo.task.source_record_id = "vn-photo-source"
+        self.repo.task.plan_json = copy.deepcopy(self.repo.revision.plan_snapshot_json["plan"])
+        self.repo.task.copy_json = copy.deepcopy(release["copy"])
+        db = AutoPublishDB(self.root / "publisher-vn.sqlite3")
+        bridge = MainScheduleBridge(self.repo, db=db)
+
+        result = bridge.enqueue_task("photo-task")
+        bridge.enqueue_task("photo-task")
+
+        self.assertEqual(result["media_kind"], "native_photo")
+        self.assertEqual(result["store_id"], "VNPS01")
+        rows = [row for row in db.list_script_metadata()
+                if row.source_record_id == "vn-photo-source"]
+        self.assertEqual(len(rows), 1, "VN 图文重复入队不得产生重复候选")
+        self.assertEqual(rows[0].store_id, "VNPS01")
+        context = json.loads(rows[0].script_text)
+        self.assertEqual(context["publish_store_id"], "VNPS01")
+        self.assertEqual(context["media_kind"], "native_photo")
+        self.assertEqual(context["audio_mode"], "platform_auto_bgm")
 
     def test_feishu_operator_approval_releases_actual_photo_package(self):
         PhotoPackageExporter(

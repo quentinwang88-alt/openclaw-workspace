@@ -172,7 +172,7 @@ class EntryCatalogDocumentTest(unittest.TestCase):
             "scripts/photo_entry_catalog.py --output docs/OPV_ENTRY_CATALOG_20260914.md",
         )
 
-    def test_every_vn_preset_row_shows_its_language_pack_and_missing_route(self):
+    def test_every_vn_preset_row_shows_its_language_pack_and_vn_store(self):
         payload = build_payload()
         vn = [item for item in payload["presets"]
               if item["entry_group"] == "trial" and item["category_key"] == "scarf"]
@@ -184,8 +184,9 @@ class EntryCatalogDocumentTest(unittest.TestCase):
                 # 该配方的语言包必须覆盖 vi-VN；旅行线同时也服务 th-TH，属正常。
                 self.assertIn("vi-VN", task["recipe"]["locale_packs"])
                 self.assertNotIn("th-TH", item["name"])
-                self.assertEqual(task["store_id"], "",
-                                 "VN 发布店铺尚未配置，清单必须如实写「未配置路由」")
+                # 2026-09-14：VN 店铺路由已补（方案 §3B），清单必须如实写出
+                # 实际店铺，不能再写「未配置路由」。
+                self.assertEqual(task["store_id"], "VNPS01")
 
 
 class PresetMetadataTest(unittest.TestCase):

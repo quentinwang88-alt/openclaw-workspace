@@ -6,6 +6,9 @@
     },
     "MX": {
       "default_store_id": "MXJF01"
+    },
+    "VN": {
+      "default_store_id": "VNPS01"
     }
   }
 }

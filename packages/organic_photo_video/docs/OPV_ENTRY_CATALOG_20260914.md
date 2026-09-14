@@ -156,7 +156,7 @@
   - 主题缺省：必填
   - 文案来源：语言包 `th-TH` → `TH_TRAVEL_OUTFIT_V3`；`vi-VN` → `VN_TRAVEL_OUTFIT_V1`
   - 排版：版式 `FULL_BLEED`、`CHOICE_DETAIL`；角色 `travel_cover`、`look_a`、`look_b`、`look_c`、`look_d_with_cta`
-  - 输出形式：`native_photo` 5 页；发布店铺（VN）**未配置路由**
+  - 输出形式：`native_photo` 5 页；发布店铺（VN）=`VNPS01`
 
 ### 图文｜VN｜围巾搭配四选一
 
@@ -169,7 +169,7 @@
   - 主题缺省：可空（文案已由语言包承担）
   - 文案来源：语言包 `vi-VN` → `VN_SCARF_MATCHING_V1`
   - 排版：版式 `GRID_FOUR`、`CHOICE_DETAIL`；角色 `choice_grid`、`look_a`、`look_b`、`look_c`、`look_d_with_cta`
-  - 输出形式：`native_photo` 5 页；发布店铺（VN）**未配置路由**
+  - 输出形式：`native_photo` 5 页；发布店铺（VN）=`VNPS01`
 
 ### TH｜五套穿搭｜拆解首图
 

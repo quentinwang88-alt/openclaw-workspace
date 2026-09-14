@@ -149,9 +149,32 @@ class MainScheduleBridgeTest(unittest.TestCase):
         self.assertEqual(second_row["script_slot"], "OPV:task-2")
 
     def test_unconfigured_country_fails_closed(self):
-        self.task.target_country = "VN"
-        with self.assertRaisesRegex(MainScheduleBridgeError, "未配置 VN"):
+        # 2026-09-14：VN 已补上真实店铺路由（VNPS01，见下方 test_vietnam_*）。
+        # 这条用例的本意是「缺路由必须保留待处理」，与具体国家无关，因此换成
+        # 一个仍未配置的国家代码，而不是为了测试全绿放宽断言。
+        self.task.target_country = "ID"
+        with self.assertRaisesRegex(MainScheduleBridgeError, "未配置 ID"):
             MainScheduleBridge(self.repo, db=self.db).enqueue_task("task-1")
+
+    def test_vietnam_routes_to_the_configured_vn_store(self):
+        self.task.target_country = "VN"
+        bridge = MainScheduleBridge(self.repo, db=self.db)
+        self.assertEqual(bridge._store_id("VN"), "VNPS01")
+        result = bridge.enqueue_task("task-1")
+        self.assertEqual(result["store_id"], "VNPS01")
+        metadata = self.db.get_script_metadata("opv:task-1")
+        self.assertEqual(metadata["store_id"], "VNPS01")
+        self.assertEqual(json.loads(metadata["script_text"])["publish_store_id"], "VNPS01")
+
+    def test_vietnam_enqueue_is_idempotent_and_creates_no_duplicate_candidate(self):
+        self.task.target_country = "VN"
+        bridge = MainScheduleBridge(self.repo, db=self.db)
+        bridge.enqueue_task("task-1")
+        bridge.enqueue_task("task-1")
+        rows = [row for row in self.db.list_script_metadata()
+                if row.source_record_id == "rec-1"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].store_id, "VNPS01")
 
     def test_mexico_wig_routes_to_existing_mx_store(self):
         self.task.target_country = "MX"

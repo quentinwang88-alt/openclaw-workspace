@@ -9,8 +9,10 @@ that make the activation safe:
 * the VN config loads and declares no silent fallback (vi-VN or nothing);
 * no Thai text leaks into any Vietnamese artefact;
 * binding the country-agnostic V3 to VN changes **only** market and locale;
-* VN stays unreachable from production: presets disabled, no publish route,
-  account paused, copy DRAFT, market pack draft;
+* VN stays unreachable from production: presets disabled, account paused,
+  copy DRAFT, market pack draft.  The publish route added on 2026-09-14 only
+  makes the VN store selectable — it is a configuration change, not an
+  activation, and the gate below must still read as shut;
 * the three canary manifests are reproducible from the shipped configs.
 """
 from __future__ import annotations
@@ -630,7 +632,12 @@ class VnBindsOnlyMarketAndLocaleTest(unittest.TestCase):
 
 
 class VnProductionGateTest(unittest.TestCase):
-    """Spec §9: nothing about VN may be reachable from production yet."""
+    """Spec §9: the VN line is configured but not activated.
+
+    2026-09-14 added the real VN publish route (VNPS01) so the existing Feishu
+    店铺 field can offer it; the reachability gate itself is unchanged —
+    presets disabled, account paused, copy DRAFT, market pack draft.
+    """
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -659,9 +666,20 @@ class VnProductionGateTest(unittest.TestCase):
         }
         self.assertEqual(recipes, {TRAVEL_RECIPE_ID, MATCHING_RECIPE_ID})
 
-    def test_no_vn_publish_route_exists(self):
+    def test_vn_publish_route_now_exists_but_the_production_gate_stays_shut(self):
+        # 2026-09-14（方案 §3B）：补上真实 VN 店铺路由 VNPS01。旧断言是
+        # 「VN 没有路由」，现在按业务变化改为「路由已有 + 闸门仍关」，而不是
+        # 放宽任何一条门禁：路由只让店铺变得可被选中，可达性仍然由禁用预设与
+        # paused 账号把住，配置上线不等于生产上线。
         routes = _read(ROUTES_PATH)["routes"]
-        self.assertNotIn("VN", routes)
+        self.assertEqual(routes["VN"]["default_store_id"], "VNPS01")
+        for preset in self._vn_presets():
+            with self.subTest(preset=preset["name"]):
+                self.assertEqual(preset["status"], "disabled")
+                self.assertTrue(preset["disabled_reason"])
+        account = _read(ACCOUNT_PATH)
+        self.assertEqual(account["status"], "paused")
+        self.assertIs(account["operating_rules"]["publishing_enabled"], False)
 
     def test_vn_account_is_paused_and_cannot_publish(self):
         account = _read(ACCOUNT_PATH)
