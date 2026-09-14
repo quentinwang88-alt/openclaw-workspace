@@ -487,6 +487,28 @@ def retake_theme(table_theme: Optional[Mapping[str, Any]],
     return dict(table_theme)
 
 
+def theme_is_optional(*, locale_pack: Optional[Mapping[str, Any]],
+                      layering_flow: bool, thermal_transition_flow: bool,
+                      planning_flow: str) -> bool:
+    """本流程是否允许运营不选「图文主题」（主题缺省规则，唯一归属）。
+
+    只有「发布文案已经不依赖主题」的流程才豁免：声明了 ``locale_copy_packs`` 的
+    国家无关配方由 Locale Pack 拥有发布文案与家族文案，主题只影响家族排序；而
+    VN 围巾线的运营输入本来就只有「参考图类型 / 参考图 / 产品编码」三项，没有
+    「图文主题」。v1 配方（靠 theme 携带内联泰语文案）与旅行 / 分层（温度分层、
+    冷热切换）流程保持原样拦截。
+
+    2026-09-14 起从这里统一回答，工作流与入口清单共用同一实现，避免出现第二份
+    「哪些线可以空主题」的口径。
+    """
+    return bool(
+        locale_pack is not None
+        and not layering_flow
+        and not thermal_transition_flow
+        and planning_flow != "travel_two_step"
+    )
+
+
 def is_topic_travel_recipe(recipe_id: str, repository: Any = None) -> bool:
     """Whether this Recipe publishes topic-linked travel copy.
 
@@ -523,6 +545,35 @@ class PresetTask:
     scene_ref: str
 
 
+#: 目录/视图用的展示分组。**只控制目录与视图**，不改变启用语义——启用与否仍由
+#: 预设的 ``status`` 决定（见 ``ProductionPresetCatalog._require_enabled``）。
+#: production=运营日常入口；trial=已配置待验收；legacy=保留的历史入口。
+PRESET_ENTRY_GROUPS = ("production", "trial", "legacy")
+
+
+def preset_entry_group(raw: Mapping[str, Any]) -> str:
+    """解析一条预设的展示分组：显式 ``entry_group`` 优先，否则按入口性质推导。
+
+    推导规则（与 config/feishu_production_presets.json 里写入的值一致）：
+    ``status != active`` ⇒ trial；``media_kind == native_photo`` ⇒ production；
+    其余（历史视频入口）⇒ legacy。写成推导是为了让**将来新增**的预设即使漏写
+    ``entry_group`` 也能落进正确分组，而不是悄悄掉出目录。
+    """
+    declared = str(raw.get("entry_group") or "").strip()
+    if declared:
+        if declared not in PRESET_ENTRY_GROUPS:
+            raise FeishuWorkflowError(
+                "未知的预设展示分组：" + declared + "；可选："
+                + "、".join(PRESET_ENTRY_GROUPS)
+            )
+        return declared
+    if str(raw.get("status", "active")) != "active":
+        return "trial"
+    if raw.get("media_kind") == "native_photo":
+        return "production"
+    return "legacy"
+
+
 class ProductionPresetCatalog:
     def __init__(self, path: Optional[Path] = None):
         default = Path(__file__).resolve().parents[1] / "config" / "feishu_production_presets.json"
@@ -536,6 +587,44 @@ class ProductionPresetCatalog:
     @property
     def names(self) -> List[str]:
         return [name for name, raw in self._raw.items() if raw.get("status", "active") == "active"]
+
+    def entry_group(self, name: str) -> str:
+        """该预设落在目录的哪一组（常用 / 试验 / 历史）。"""
+        return preset_entry_group(self.metadata(name))
+
+    def entries(self, group: Optional[str] = None) -> List[Dict[str, Any]]:
+        """只读目录视图：把预设按展示分组列出来。
+
+        纯展示用途 —— 不参与生成、发布或任何校验决策。启用语义只由 ``status``
+        承担：``production`` 组里 status=disabled 的预设同样 resolve 不了。
+        """
+        if group is not None and group not in PRESET_ENTRY_GROUPS:
+            raise FeishuWorkflowError(
+                "未知的预设展示分组：" + str(group) + "；可选："
+                + "、".join(PRESET_ENTRY_GROUPS)
+            )
+        rows: List[Dict[str, Any]] = []
+        for name, raw in self._raw.items():
+            current = preset_entry_group(raw)
+            if group is not None and current != group:
+                continue
+            tasks = list(raw.get("tasks") or [])
+            rows.append({
+                "name": name,
+                "entry_group": current,
+                "status": str(raw.get("status", "active")),
+                "enabled": str(raw.get("status", "active")) == "active",
+                "media_kind": str(raw.get("media_kind") or ""),
+                "routing_policy": str(raw.get("routing_policy") or ""),
+                "markets": sorted({str(item.get("market") or "")
+                                   for item in tasks if item.get("market")}),
+                "recipe_ids": sorted({str(item.get("recipe_id") or "")
+                                      for item in tasks if item.get("recipe_id")}),
+                # deterministic_one 预设（如「随机养号组合」）本身没有 tasks，
+                # 只指向候选项；目录里一并显示，避免看成空入口。
+                "tasks_from": list(raw.get("tasks_from") or []),
+            })
+        return rows
 
     def _require_enabled(self, name: str) -> None:
         raw = self.metadata(name)
@@ -1417,16 +1506,11 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
             travel_copy_templates = None
             travel_topic: dict[str, Any] = {}
             planning_flow = get_planning_flow(recipe_for_input.recipe_id) if recipe_for_input else ""
-            # 主题是否必填（2026-09-14）：声明了 ``locale_copy_packs`` 的国家无关配方
-            # 由 Locale Pack 拥有发布文案与家族文案，主题只影响家族排序；而方案 §5.4
-            # 的运营输入只有「参考图类型 / 参考图 / 产品编码」三项，没有「图文主题」。
-            # 因此这类**非主题驱动**流程不再强制主题；v1 配方（靠 theme 携带内联泰语
-            # 文案）与旅行 / 分层（温度分层、冷热切换）流程保持原样拦截。
-            theme_optional = bool(
-                locale_pack is not None
-                and not layering_flow
-                and not thermal_transition_flow
-                and planning_flow != "travel_two_step"
+            # 主题是否必填：唯一归属在 ``theme_is_optional``（见其 docstring）。
+            theme_optional = theme_is_optional(
+                locale_pack=locale_pack, layering_flow=layering_flow,
+                thermal_transition_flow=thermal_transition_flow,
+                planning_flow=planning_flow,
             )
             theme_supplied = theme is not None
             # ``effective_theme`` 才是下游真正使用的主题：运营未选主题且本流程允许时，

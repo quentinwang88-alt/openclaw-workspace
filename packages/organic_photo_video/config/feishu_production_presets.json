@@ -4,6 +4,7 @@
  "presets": [
   {
    "name": "TH｜五套穿搭｜拆解首图",
+   "entry_group": "legacy",
    "tasks": [
     {
      "account_id": "OPV_TH_TEST_001",
@@ -20,6 +21,7 @@
   },
   {
    "name": "TH｜小个子显高｜轻文字",
+   "entry_group": "legacy",
    "tasks": [
     {
      "account_id": "OPV_TH_TEST_001",
@@ -36,6 +38,7 @@
   },
   {
    "name": "TH｜咖啡约会｜轻文字",
+   "entry_group": "legacy",
    "tasks": [
     {
      "account_id": "OPV_TH_TEST_001",
@@ -52,6 +55,7 @@
   },
   {
    "name": "TH｜一衣多穿｜轻文字",
+   "entry_group": "legacy",
    "tasks": [
     {
      "account_id": "OPV_TH_TEST_001",
@@ -68,6 +72,7 @@
   },
   {
    "name": "TH｜三配方套装｜轻文字",
+   "entry_group": "legacy",
    "tasks": [
     {
      "account_id": "OPV_TH_TEST_001",
@@ -106,6 +111,7 @@
   },
   {
    "name": "TH｜自动匹配穿搭组合｜轻文字",
+   "entry_group": "legacy",
    "tasks": [
     {
      "account_id": "OPV_TH_TEST_001",
@@ -144,6 +150,7 @@
   },
   {
    "name": "TH｜穿搭拆解首图｜均衡变体",
+   "entry_group": "legacy",
    "tasks": [
     {
      "account_id": "OPV_TH_TEST_001",
@@ -160,6 +167,7 @@
   },
   {
    "name": "TH｜随机养号组合｜轻文字",
+   "entry_group": "legacy",
    "selection": "deterministic_one",
    "routing_policy": "multi_look_6s_v2",
    "tasks_from": [
@@ -168,6 +176,7 @@
   },
   {
    "name": "图文｜TH｜旅行穿搭",
+   "entry_group": "production",
    "routing_policy": "native_photo_style_plan_v1",
    "media_kind": "native_photo",
    "category_key": "womenswear",
@@ -189,6 +198,7 @@
   },
   {
    "name": "图文｜TH｜小个子显高",
+   "entry_group": "production",
    "routing_policy": "native_photo_v1",
    "media_kind": "native_photo",
    "category_key": "womenswear",
@@ -210,6 +220,7 @@
   },
   {
    "name": "图文｜TH｜冷热切换",
+   "entry_group": "trial",
    "routing_policy": "native_photo_v1",
    "media_kind": "native_photo",
    "category_key": "womenswear",
@@ -233,6 +244,7 @@
   },
   {
    "name": "图文｜TH｜四选一穿搭",
+   "entry_group": "production",
    "routing_policy": "native_photo_product_supply_v1",
    "media_kind": "native_photo",
    "category_key": "womenswear",
@@ -255,6 +267,7 @@
   },
   {
    "name": "图文｜MX｜假发前后对比",
+   "entry_group": "production",
    "routing_policy": "native_photo_v1",
    "media_kind": "native_photo",
    "category_key": "wig",
@@ -276,6 +289,7 @@
   },
   {
    "name": "图文｜MX｜四选一发型",
+   "entry_group": "production",
    "routing_policy": "native_photo_v1",
    "media_kind": "native_photo",
    "category_key": "wig",
@@ -297,6 +311,7 @@
   },
   {
    "name": "图文｜MX｜脸型匹配发型",
+   "entry_group": "production",
    "routing_policy": "native_photo_v1",
    "media_kind": "native_photo",
    "category_key": "wig",
@@ -318,6 +333,7 @@
   },
   {
    "name": "图文｜MX｜场景发型",
+   "entry_group": "production",
    "routing_policy": "native_photo_v1",
    "media_kind": "native_photo",
    "category_key": "wig",
@@ -339,6 +355,7 @@
   },
   {
    "name": "图文｜VN｜围巾旅行",
+   "entry_group": "trial",
    "routing_policy": "native_photo_style_plan_v1",
    "media_kind": "native_photo",
    "category_key": "scarf",
@@ -362,6 +379,7 @@
   },
   {
    "name": "图文｜VN｜围巾搭配四选一",
+   "entry_group": "trial",
    "routing_policy": "native_photo_product_supply_v1",
    "media_kind": "native_photo",
    "category_key": "scarf",
