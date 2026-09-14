@@ -432,6 +432,45 @@ class PhotoThemeReferenceTest(unittest.TestCase):
             self.assertEqual([item["sha256"] for item in second["sources"]],
                              [item["sha256"] for item in first["sources"]])
 
+    def test_repair_identity_tolerates_theme_keys_added_after_freeze(self):
+        """冻结清单缺「之后才新增的主题键」时，重拍不应被判成换主题。
+
+        2026-09-14 实测：5 行历史旅行图文因为 theme 多出
+        ``thermal_sensitivity_planning``（旧清单里还没这个键）而报
+        「旅行·打卡穿搭」改为「旅行·打卡穿搭」—— 两个值一模一样，
+        运营无法据以操作，重拍被永久堵死。
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            reference = Path(folder) / "reference.png"
+            Image.new("RGB", (120, 180), (130, 95, 75)).save(reference)
+            service = PhotoStyleReferenceSupplyService(
+                generator=FakeGenerator(), root=Path(folder),
+            )
+            theme = {**resolve_photo_theme("秋季穿搭"),
+                     "thermal_sensitivity_planning": {}}
+            frozen = {key: value for key, value in theme.items()
+                      if key != "thermal_sensitivity_planning"}
+            item_dir = Path(folder) / "style_reference_supply" / "rec-freeze_item_1"
+            item_dir.mkdir(parents=True)
+            (item_dir / "supply_manifest.json").write_text(json.dumps({
+                "record_id": "rec-freeze_item_1", "theme_brief": frozen,
+                "sources": [], "persona_pack_id": "", "input_hash": "stale",
+            }, ensure_ascii=False), encoding="utf-8")
+            variation = scene_model_variation()
+            account = SimpleNamespace(persona_ref_id="P")
+
+            # 同一主题，只是多出一个冻结之后才新增的空值键 ⇒ 必须放行。
+            service.verify_and_rebaseline_identity(
+                item_dir=item_dir, paths=[str(reference)], theme=theme,
+                account=account, variation=variation)
+
+            # 真换了主题 ⇒ 仍然拦截，并且错误里要能看出是哪个字段变了。
+            with self.assertRaisesRegex(ValueError, "差异字段"):
+                service.verify_and_rebaseline_identity(
+                    item_dir=item_dir, paths=[str(reference)],
+                    theme=resolve_photo_theme("咖啡约会"),
+                    account=account, variation=variation)
+
 
 if __name__ == "__main__":
     unittest.main()

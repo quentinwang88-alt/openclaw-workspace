@@ -1331,10 +1331,28 @@ class PhotoStyleReferenceSupplyService:
                 raise PhotoStyleReferenceError(
                     "参考图与原生成不一致（文件哈希不匹配）；不能按新参考重拍旧素材")
         stored_theme = dict(manifest.get("theme_brief") or {})
-        if stored_theme and dict(theme) != stored_theme:
+        # 比较「影响生成的主题字段」，并容忍「冻结清单里还没有这个键」。
+        # 清单冻结之后代码新增的次要键（如 ``thermal_sensitivity_planning``）会让
+        # 整字典相等判断把同一个主题判成"已改主题"，报出「旅行·打卡穿搭」改为
+        # 「旅行·打卡穿搭」这种无法据以操作的错误（2026-09-14 实测：5 行历史
+        # 旅行图文全部因此无法重拍）。缺失与空值视为等价；任一侧出现非空值的
+        # 差异仍然拦截，真实换主题/新体感输入不会被放行。
+        def _theme_field(value):
+            if value in (None, "", {}, []):
+                return ""
+            if isinstance(value, (dict, list)):
+                return json.dumps(value, ensure_ascii=False, sort_keys=True)
+            return str(value)
+
+        changed_theme_fields = [
+            key for key in sorted(set(stored_theme) | set(theme))
+            if _theme_field(theme.get(key)) != _theme_field(stored_theme.get(key))
+        ]
+        if stored_theme and changed_theme_fields:
             original_label = str(stored_theme.get("label_zh") or "原主题")
             raise PhotoStyleReferenceError(
-                f"图文主题已从「{original_label}」改为「{theme.get('label_zh') or '当前所选'}」，"
+                f"图文主题已从「{original_label}」改为「{theme.get('label_zh') or '当前所选'}」"
+                f"（差异字段：{'、'.join(changed_theme_fields)}），"
                 "不能按新主题重拍旧素材；请把该行图文主题改回原值后重拍，"
                 "或新建一行按新主题整组重做")
         looks = style_look_specs(theme, variation)
