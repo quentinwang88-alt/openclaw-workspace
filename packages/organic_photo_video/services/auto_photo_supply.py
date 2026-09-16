@@ -427,6 +427,11 @@ class AutoPhotoSupply:
         }
         if product_code:
             fields[FIELD_PRODUCT] = product_code
+        if destination.get("country"):
+            # 执行侧从行字段读目的地（本篇明确值）；不覆盖为空值
+            fields[FIELD_TRAVEL_COUNTRY] = destination["country"]
+        if destination.get("place"):
+            fields["旅行地点（可选）"] = destination["place"]
         if attachments:
             fields[FIELD_REFERENCE] = attachments
 
