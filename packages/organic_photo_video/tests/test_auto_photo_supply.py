@@ -27,9 +27,11 @@ class FixedSelectionClient:
         self.adoption = adoption
         self.pages = pages
         self.calls = 0
+        self.last_prompt = ""
 
     def chat_with_multiple_images(self, paths, prompt, max_tokens):
         self.calls += 1
+        self.last_prompt = prompt
         return {
             "choices": [{"message": {"content": json.dumps({
                 "main_note_id": self.main_note_id,
@@ -360,19 +362,45 @@ class AutoPhotoSupplyTest(unittest.TestCase):
         self.assertTrue(
             fields["内容要求（可选）"].startswith("参考优先选题："))
 
-    def test_product_rotation(self):
+    def test_product_rotation_thermal_gate(self):
+        # 热学门禁（2026-09-16）：主题「旅行穿搭」→ 本篇温度带 15-22°C；
+        # 棉服（5-12°C）失配被跳过，轮换顺延到下一个应季商品。
         ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
         client = FakeTaskTableClient()
         binding = make_binding(profile_extra={
-            "product_mode": "使用指定商品", "product_codes": "P1,P2",
+            "product_mode": "使用指定商品", "product_codes": "P1,P2,P3",
             "daily_limit": 2})
         resolver = self._fake_product_resolver({
             "P1": {"category": "开衫", "product_name": "A", "variant_key": "v1"},
-            "P2": {"category": "棉服", "product_name": "B", "variant_key": "v2"}})
-        self._supply(client, ledger, vision=self._vision_ok(),
+            "P2": {"category": "棉服", "product_name": "加厚棉服B", "variant_key": "v2"},
+            "P3": {"category": "长袖针织", "product_name": "C", "variant_key": "v3"}})
+        vision = self._vision_ok()
+        self._supply(client, ledger, vision=vision,
                      product_resolver=resolver).run([binding], apply=True)
         codes = [row["fields"].get("产品编码") for row in client.created]
-        self.assertEqual(codes, ["P1", "P2"])   # 轮换不重复
+        self.assertEqual(codes, ["P1", "P3"])   # P2 棉服被热学门禁跳过
+        # 温度带约束进入内容要求、行字段与终选 prompt（三处同源）
+        self.assertIn("温度带 15–22°C", client.created[0]["fields"]["内容要求（可选）"])
+        self.assertEqual(client.created[0]["fields"]["温度档"], "15°C 左右")
+        self.assertIn("温度带约束", vision.last_prompt)
+
+    def test_product_all_thermal_mismatch_skips_row(self):
+        # 全部商品失配：记缺口不建行，不静默降级为自由搭配
+        ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
+        client = FakeTaskTableClient()
+        binding = make_binding(profile_extra={
+            "product_mode": "使用指定商品", "product_codes": "P1",
+            "daily_limit": 1})
+        resolver = self._fake_product_resolver({
+            "P1": {"category": "棉服", "product_name": "蓬松棉服", "variant_key": ""}})
+        results = self._supply(client, ledger, vision=self._vision_ok(),
+                               product_resolver=resolver).run([binding], apply=True)
+        self.assertEqual(results[0].slots[0].status, "no_material")
+        self.assertIn("温度带", results[0].slots[0].detail)
+        self.assertEqual(client.created, [])
+        gaps = ledger._conn.execute(
+            "SELECT reason FROM material_gaps").fetchall()
+        self.assertTrue(any(r["reason"] == "no_thermal_match" for r in gaps))
 
     def test_no_material_records_gap(self):
         ledger = MaterialLedger(str(self.root / "ledger3.sqlite3"))  # 无分析缓存

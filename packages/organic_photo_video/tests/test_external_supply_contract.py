@@ -56,7 +56,8 @@ class ExternalContractStoreTest(unittest.TestCase):
         base["contract_fingerprint"] = contract_fingerprint(
             adoption=base["adoption"], main_note_id=base["main_note_id"],
             selected_pages=base["selected_pages"], product=base["product"],
-            destination=base["destination"], policy_version=base["policy_version"])
+            destination=base["destination"], policy_version=base["policy_version"],
+            temperature_band=base.get("temperature_band", ""))
         return base
 
     def test_persist_intent_then_attach_record(self):
@@ -109,7 +110,11 @@ class ExternalContractStoreTest(unittest.TestCase):
         # 策略版本变化
         self.assertNotEqual(
             base["contract_fingerprint"],
-            self._contract(policy_version="external-reference-exec-v2")["contract_fingerprint"])
+            self._contract(policy_version="external-reference-exec-v3")["contract_fingerprint"])
+        # 温度带变化（2026-09-16：文案声明的温度进入视觉约束）
+        self.assertNotEqual(
+            base["contract_fingerprint"],
+            self._contract(temperature_band="15-22°C")["contract_fingerprint"])
 
 
 class TravelDestinationTest(unittest.TestCase):

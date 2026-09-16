@@ -27,7 +27,11 @@ from services.material_adapter import (
     Candidate,
     ProductBrief,
     narrow_candidates,
+    parse_thermal_band,
     select_reference,
+    thermal_overlap,
+    thermal_window,
+    theme_thermal_band,
 )
 from services.material_analysis import ANALYSIS_VERSION, MaterialLedger
 from services.material_source import MaterialPackage, MaterialSource
@@ -62,6 +66,10 @@ FIELD_SOURCE_TAG = "来源标记"
 FIELD_REFERENCE = "参考图（可选）"
 FIELD_REFERENCE_TYPE = "参考图类型"
 FIELD_TRAVEL_COUNTRY = "旅行国家"
+# 温度档（SingleSelect，选项 15/10/5/0°C 左右）：供给明确知道本篇温度带时
+# 落行字段，保证文案声明的温度与选品/选材约束同源。
+FIELD_TEMPERATURE_BAND = "温度档"
+_TEMPERATURE_BAND_OPTIONS = ("15°C 左右", "10°C 左右", "5°C 左右", "0°C 左右")
 
 MARKER_PREFIX = "auto_supply"
 MAX_REFERENCE_IMAGES = 6
@@ -127,6 +135,7 @@ class AutoPhotoSupply:
         max_reference_images: int = MAX_REFERENCE_IMAGES,
         contract_store: Any = None,   # ExternalSupplyContractStore；None=同库默认
         product_snapshot_resolver: Any = None,  # callable(code)->snapshot dict
+        thermal_band: str = "",       # 显式温度带（如 "15-22°C"）；空=按主题推导
     ):
         self.client = client
         self.source = source
@@ -141,6 +150,7 @@ class AutoPhotoSupply:
             contract_store = ExternalSupplyContractStore()
         self.contract_store = contract_store
         self.product_snapshot_resolver = product_snapshot_resolver
+        self.thermal_band = parse_thermal_band(thermal_band) if thermal_band else None
 
     # ---- 主入口 ----
     def run(
@@ -252,22 +262,89 @@ class AutoPhotoSupply:
                 plan.detail = "台账已完成（对账跳过）"
                 return plan
 
+        # 本篇温度带：显式参数 > 主题默认（未映射主题=None → 不启用检查）
+        band = self.thermal_band or theme_thermal_band(default_theme)
+
+        # 指定商品（先解析，真实摘要同时供初筛与终选）：
+        # - 热学门禁：商品适用窗口与本篇温度带不重叠 → 换下一个轮换编码；
+        # - 全部失配 → 记缺口不建行（不静默降级为自由搭配）；
+        # - 解析失败同样顺延，全部失败才明确暂停。
         product_code = ""
+        product_snapshot: Dict[str, Any] = {}
+        product_brief: Optional[ProductBrief] = None
         if specified:
-            product_code = pick_product_code(
-                codes, self.ledger.product_usage_counts(binding.account_id))
-            if not product_code:
+            usage_counts = self.ledger.product_usage_counts(binding.account_id)
+            ordered_codes = sorted(
+                codes, key=lambda c: (usage_counts.get(c, 0), codes.index(c)))
+            if not ordered_codes:
                 self.ledger.record_gap(
                     scope=f"supply:{binding.account_id}", reason="no_product_code",
                     detail="specified 模式但未配置产品编码")
                 plan.status = "no_material"
                 plan.detail = "商品使用方式=指定但无产品编码"
                 return plan
+            if not apply:
+                product_code = ordered_codes[0]
+            elif self.product_snapshot_resolver is None:
+                self.ledger.record_gap(
+                    scope=f"supply:{binding.account_id}", reason="product_resolver_missing",
+                    detail="指定商品模式需要商品解析器（RDS 商品参考包）")
+                plan.status = "error"
+                plan.detail = "指定商品但无商品解析器，暂停本任务"
+                return plan
+            else:
+                accepted = None
+                failures: List[str] = []
+                thermal_skips: List[str] = []
+                for code in ordered_codes:
+                    try:
+                        snapshot = dict(self.product_snapshot_resolver(code) or {})
+                    except Exception as exc:  # noqa: BLE001 - 单码失败顺延下一码
+                        failures.append(f"{code}: {str(exc)[:120]}")
+                        continue
+                    window = thermal_window(
+                        snapshot.get("product_name"), snapshot.get("category"),
+                        snapshot.get("variant_key"))
+                    if band and window and not thermal_overlap(window, band):
+                        thermal_skips.append(
+                            f"{code}（适用{window[0]}-{window[1]}°C）")
+                        continue
+                    accepted = (code, snapshot)
+                    break
+                if accepted is None:
+                    if thermal_skips and not failures:
+                        self.ledger.record_gap(
+                            scope=f"supply:{binding.account_id}",
+                            reason="no_thermal_match",
+                            detail=(f"本篇温度带 {band[0]}-{band[1]}°C，全部商品失配："
+                                    + "、".join(thermal_skips)))
+                        plan.status = "no_material"
+                        plan.detail = (f"全部商品与温度带 {band[0]}-{band[1]}°C 失配，"
+                                       "本轮不建行（请补充应季商品）")
+                        return plan
+                    self.ledger.record_gap(
+                        scope=f"supply:{binding.account_id}",
+                        reason="product_snapshot_failed",
+                        detail="；".join(failures + thermal_skips)[:280])
+                    plan.status = "error"
+                    plan.detail = "商品资料缺失或全部失配，暂停本任务"
+                    return plan
+                product_code, product_snapshot = accepted
+            if product_code and product_snapshot:
+                product_name = str(product_snapshot.get("product_name") or "")
+                product_brief = ProductBrief(
+                    product_code,
+                    str(product_snapshot.get("category") or ""),
+                    form=str(product_snapshot.get("variant_key") or ""),
+                    key_features=[product_name] if product_name else [])
+        narrow_brief = product_brief or (
+            ProductBrief(product_code, "") if product_code else None)
 
         candidates = self._collect_candidates(scope_themes)
         recent = self.ledger.recent_note_ids(account_id=binding.account_id)
-        narrowed = self._narrow(candidates, default_theme if positioning_first else "",
-                                product_code, recent)
+        narrowed = self._narrow(
+            candidates, default_theme if positioning_first else "",
+            narrow_brief, recent, band)
         if not narrowed:
             self.ledger.record_gap(
                 scope=f"supply:{binding.account_id}", reason="no_material",
@@ -285,47 +362,20 @@ class AutoPhotoSupply:
         if self.analyzer is not None and len(narrowed) < 3:
             self.analyzer.analyze_pending(limit=5)
             candidates = self._collect_candidates(scope_themes)
-            narrowed = self._narrow(candidates, default_theme if positioning_first else "",
-                                    product_code, recent)
+            narrowed = self._narrow(
+                candidates, default_theme if positioning_first else "",
+                narrow_brief, recent, band)
 
         if self.vision_client is None:
             plan.status = "error"
             plan.detail = "apply 模式需要 vision_client（选材调用）"
             return plan
 
-        # 指定商品：先解析真实商品摘要（品类/名称/variant），解析失败明确
-        # 暂停本任务——不再以 ProductBrief(code, "") 假装商品匹配已完成。
-        product_snapshot: Dict[str, Any] = {}
-        product_brief: Optional[ProductBrief] = None
-        if product_code:
-            if self.product_snapshot_resolver is None:
-                self.ledger.record_gap(
-                    scope=f"supply:{binding.account_id}", reason="product_resolver_missing",
-                    detail="指定商品模式需要商品解析器（RDS 商品参考包）")
-                plan.status = "error"
-                plan.detail = "指定商品但无商品解析器，暂停本任务"
-                return plan
-            try:
-                product_snapshot = dict(
-                    self.product_snapshot_resolver(product_code) or {})
-            except Exception as exc:  # noqa: BLE001 - 商品资料缺失＝暂停，不降级为自由搭配
-                self.ledger.record_gap(
-                    scope=f"supply:{binding.account_id}", reason="product_snapshot_failed",
-                    detail=f"{product_code}: {str(exc)[:200]}")
-                plan.status = "error"
-                plan.detail = f"商品资料缺失（{product_code}），暂停本任务：{str(exc)[:80]}"
-                return plan
-            product_name = str(product_snapshot.get("product_name") or "")
-            product_brief = ProductBrief(
-                product_code,
-                str(product_snapshot.get("category") or ""),
-                form=str(product_snapshot.get("variant_key") or ""),
-                key_features=[product_name] if product_name else [])
-
         selection = select_reference(
             self.vision_client, narrowed,
             theme=default_theme if positioning_first else "",
-            product=product_brief)
+            product=product_brief,
+            temperature_band=band)
         if selection is None:
             self.ledger.record_gap(
                 scope=f"supply:{binding.account_id}", reason="no_material",
@@ -359,7 +409,8 @@ class AutoPhotoSupply:
 
         requirement = self._content_requirement_text(
             selection=selection, analysis=main_analysis, topic=topic,
-            destination=destination, product=product_snapshot)
+            destination=destination, product=product_snapshot,
+            temperature_band=band)
         theme_value = default_theme or ""
         if not theme_value:
             # STYLE 执行路径必须携带图文主题（feishu_workflow 硬校验）；
@@ -388,6 +439,7 @@ class AutoPhotoSupply:
                 "variant": str(product_snapshot.get("variant_key") or ""),
             } if product_code else {},
             "destination": {k: v for k, v in destination.items() if v},
+            "temperature_band": (f"{band[0]}-{band[1]}°C" if band else ""),
             "content_requirement": requirement,
             "policy_version": SUPPLY_POLICY_VERSION,
         }
@@ -397,7 +449,8 @@ class AutoPhotoSupply:
             selected_pages=selected_pages,
             product=contract["product"],
             destination=contract["destination"],
-            policy_version=SUPPLY_POLICY_VERSION)
+            policy_version=SUPPLY_POLICY_VERSION,
+            temperature_band=contract["temperature_band"])
         # 建行前先持久化供稿意图（崩溃可恢复）；执行侧付费前凭此合同放行。
         stored = self.contract_store.persist_intent(contract)
         plan.contract_id = str(stored.get("contract_id") or "")
@@ -427,6 +480,13 @@ class AutoPhotoSupply:
         }
         if product_code:
             fields[FIELD_PRODUCT] = product_code
+        if band:
+            # 温度档落行字段，与文案声明的温度同源（15-22 → 「15°C 左右」）
+            band_option = next(
+                (opt for opt in _TEMPERATURE_BAND_OPTIONS
+                 if opt.startswith(f"{band[0]}°C")), "")
+            if band_option:
+                fields[FIELD_TEMPERATURE_BAND] = band_option
         if destination.get("country"):
             # 执行侧从行字段读目的地（本篇明确值）；不覆盖为空值
             fields[FIELD_TRAVEL_COUNTRY] = destination["country"]
@@ -468,13 +528,13 @@ class AutoPhotoSupply:
         return out
 
     def _narrow(self, candidates: Dict[str, tuple], theme: str,
-                product_code: str, recent: set) -> List[Candidate]:
+                brief: Optional[ProductBrief], recent: set,
+                band: Optional[tuple] = None) -> List[Candidate]:
         packages = [pair[0] for pair in candidates.values()]
         analyses = {note_id: pair[1] for note_id, pair in candidates.items() if pair[1]}
         return narrow_candidates(
-            packages, analyses, theme=theme,
-            product=ProductBrief(product_code, "") if product_code else None,
-            recent_note_ids=recent)
+            packages, analyses, theme=theme, product=brief,
+            recent_note_ids=recent, temperature_band=band)
 
     # ---- 页级供图（Phase 1/3）：只上传选材结果指定的页面 ----
     def _stage_reference_pages(
@@ -508,11 +568,12 @@ class AutoPhotoSupply:
             })
         return attachments, selected
 
-    # ---- 内容要求（Phase 2）：adoption 语义 + 目的地 + 商品约束进执行提示 ----
+    # ---- 内容要求（Phase 2）：adoption 语义 + 目的地 + 温度带 + 商品约束 ----
     @staticmethod
     def _content_requirement_text(
         *, selection: Any, analysis: Dict[str, Any], topic: str,
         destination: Dict[str, Any], product: Dict[str, Any],
+        temperature_band: Optional[tuple] = None,
     ) -> str:
         adoption = str(selection.adoption or "overall")
         lines: List[str] = [f"参考优先选题：{topic}"]
@@ -546,6 +607,11 @@ class AutoPhotoSupply:
             dest = "、".join(x for x in (country, place) if x)
             lines.append(f"旅行目的地设定：{dest}；场景按目的地重新规划，"
                          "不照搬参考图拍摄地")
+        if temperature_band:
+            lines.append(
+                f"温度带 {temperature_band[0]}–{temperature_band[1]}°C：主单品须为"
+                "该温度带适用品类（如薄外套/开衫/夹克/长袖/衬衫），"
+                "禁止羽绒、棉服、蓬松外套等厚重冬装，也不采用夏装")
         if product:
             pname = str(product.get("product_name") or "")
             pcat = str(product.get("category") or "")

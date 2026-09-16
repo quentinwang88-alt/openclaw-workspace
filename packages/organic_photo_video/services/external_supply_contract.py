@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional
 
 #: 执行策略版本：adoption 语义 / 页级供图 / 目的地与商品约束的解析规则。
 #: 任何影响执行行为的改动都必须升版本（影响合同指纹与缓存续跑判断）。
-SUPPLY_POLICY_VERSION = "external-reference-exec-v1"
+SUPPLY_POLICY_VERSION = "external-reference-exec-v2"
 
 #: 与 auto_photo_supply 的来源标记前缀保持一致（单一事实源见那边导出）。
 MARKER_PREFIX = "auto_supply"
@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS external_supply_contracts (
     selected_pages TEXT NOT NULL DEFAULT '[]',
     product TEXT NOT NULL DEFAULT '',
     destination TEXT NOT NULL DEFAULT '',
+    temperature_band TEXT NOT NULL DEFAULT '',
     content_requirement TEXT NOT NULL DEFAULT '',
     policy_version TEXT NOT NULL,
     contract_fingerprint TEXT NOT NULL,
@@ -61,9 +62,9 @@ def default_contract_store_path() -> Path:
 def contract_fingerprint(
     *, adoption: str, main_note_id: str, selected_pages: List[Dict[str, Any]],
     product: Dict[str, Any], destination: Dict[str, Any],
-    policy_version: str,
+    policy_version: str, temperature_band: str = "",
 ) -> str:
-    """合同指纹：adoption / 选中来源与页面 / 商品 / 目的地 / 策略版本。
+    """合同指纹：adoption / 选中来源与页面 / 商品 / 目的地 / 温度带 / 策略版本。
 
     视觉输入任一维度变化都必须得到新指纹（方案 §七），下游不得把
     指纹不同的新执行当作文案小改去复用旧 staging。
@@ -80,6 +81,7 @@ def contract_fingerprint(
                     for k in ("code", "name", "category", "variant")},
         "destination": {k: str((destination or {}).get(k) or "")
                         for k in ("country", "place")},
+        "temperature_band": str(temperature_band or ""),
         "policy_version": str(policy_version or ""),
     }, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -106,6 +108,13 @@ class ExternalSupplyContractStore:
         conn = self._connect()
         with conn:
             conn.executescript(CONTRACT_SCHEMA)
+            # 既有库迁移：temperature_band 列（2026-09-16 温度一致性修复）
+            columns = {row[1] for row in conn.execute(
+                "PRAGMA table_info(external_supply_contracts)")}
+            if "temperature_band" not in columns:
+                conn.execute(
+                    "ALTER TABLE external_supply_contracts"
+                    " ADD COLUMN temperature_band TEXT NOT NULL DEFAULT ''")
 
     def close(self) -> None:
         if self._conn is not None:
@@ -135,8 +144,9 @@ class ExternalSupplyContractStore:
                 " contract_id, account_id, supply_date, slot, status,"
                 " source_type, authorization, adoption, main_note_id,"
                 " main_note_title, selected_pages, product, destination,"
-                " content_requirement, policy_version, contract_fingerprint)"
-                " VALUES (?,?,?,?, 'intent',?,?,?,?,?,?,?,?,?,?,?)",
+                " temperature_band, content_requirement, policy_version,"
+                " contract_fingerprint)"
+                " VALUES (?,?,?,?, 'intent',?,?,?,?,?,?,?,?,?,?,?,?)",
                 (contract_id, account_id, supply_date, slot,
                  str(contract.get("source_type") or "xhs_reference"),
                  str(contract.get("authorization") or "reference_only"),
@@ -147,6 +157,7 @@ class ExternalSupplyContractStore:
                             ensure_ascii=False),
                  json.dumps(contract.get("product") or {}, ensure_ascii=False),
                  json.dumps(contract.get("destination") or {}, ensure_ascii=False),
+                 str(contract.get("temperature_band") or ""),
                  str(contract.get("content_requirement") or "")[:2000],
                  str(contract.get("policy_version") or SUPPLY_POLICY_VERSION),
                  str(contract.get("contract_fingerprint") or "")))

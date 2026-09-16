@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -92,6 +93,76 @@ def strategy_for(theme: str) -> Dict[str, Any]:
     return DEFAULT_STRATEGY
 
 
+# ---------------------------------------------------------------------------
+# 温度带与热学适配（2026-09-16 文案×品类失配修复）
+# 背景：主题「凉爽旅行」执行档在文案里声明 15–22°C，但商品轮换与参考
+# 选材都没有温度概念——蓬松棉服照样进凉爽主题。此处的工具供供给选品
+# 门禁、初筛降权与终选 prompt 共用；规则式、不调用模型。
+# ---------------------------------------------------------------------------
+
+#: 主题 → 本篇温度带（°C 含端点）。只映射可明确判定的主题（含显示别名）；
+#: 未映射主题不启用热学检查，行为与旧版一致。
+THEME_THERMAL_BANDS = {
+    "凉爽旅行": (15, 22),
+    "旅行穿搭": (15, 22),   # photo_theme 显示别名 → 凉爽旅行
+}
+
+#: 品类/单品关键词 → 适用温度窗口（°C）。自上而下首个命中生效；
+#: 判定输入=商品名+品类+variant 的拼串，命中不了=无窗口（不拦，交人工）。
+CATEGORY_THERMAL_WINDOWS: tuple = (
+    (("羽绒", "蓬松", "棉服", "厚外套", "派克", "puffer", "down jacket"), 5, 12),
+    (("大衣", "coat"), 8, 16),
+    (("外套", "夹克", "开衫", "西装", "风衣", "卫衣", "连帽衫", "jacket"), 12, 20),
+    (("长袖", "衬衫", "针织", "毛衣", "帽衫", "长袖T"), 15, 24),
+    (("短袖", "背心", "吊带", "短裤", "短裙", "连衣裙", "半裙", "夏裙"), 22, 32),
+)
+
+_BAND_RE = re.compile(r"(\d{1,2})\s*[-–~至]\s*(\d{1,2})\s*°?C?", re.I)
+
+
+def parse_thermal_band(text) -> Optional[tuple]:
+    """从文案/标签里解析温度区间，如「15-22°C」「15–22度」→ (15, 22)。"""
+    m = _BAND_RE.search(str(text or ""))
+    if not m:
+        return None
+    lo, hi = int(m.group(1)), int(m.group(2))
+    return (lo, hi) if lo < hi else None
+
+
+def thermal_window(*texts) -> Optional[tuple]:
+    """按关键词给单品/商品归类热学窗口；无命中返回 None（不拦）。"""
+    blob = " ".join(str(t or "") for t in texts if t)
+    for keywords, lo, hi in CATEGORY_THERMAL_WINDOWS:
+        if any(str(k) in blob for k in keywords):
+            return (lo, hi)
+    return None
+
+
+def thermal_overlap(a: tuple, b: tuple) -> bool:
+    return a[0] <= b[1] and b[0] <= a[1]
+
+
+def theme_thermal_band(theme_label) -> Optional[tuple]:
+    return THEME_THERMAL_BANDS.get(str(theme_label or "").strip())
+
+
+#: 标题季节标签（规则式）：cold=秋冬厚装主导，warm=夏装主导，cool=春秋。
+_COLD_WORDS = ("羽绒", "棉服", "保暖", "过冬", "冬季", "冬天", "雪地", "厚外套", "加绒", "羽绒服")
+_WARM_WORDS = ("夏天", "夏季", "海岛", "清凉", "短袖", "吊带", "泳", "度假防晒")
+_COOL_WORDS = ("秋冬", "秋天", "秋季", "秋日", "初秋", "初冬", "外套", "夹克", "开衫")
+
+
+def title_season_tag(title) -> str:
+    text = str(title or "")
+    if any(w in text for w in _COLD_WORDS):
+        return "cold"
+    if any(w in text for w in _WARM_WORDS):
+        return "warm"
+    if any(w in text for w in _COOL_WORDS):
+        return "cool"
+    return ""
+
+
 @dataclass
 class ProductBrief:
     """本篇商品摘要（Phase 2 供稿脚本从现有商品资料构建；§六）。"""
@@ -145,6 +216,7 @@ def narrow_candidates(
     product: Optional[ProductBrief] = None,
     recent_note_ids: Sequence[str] = (),
     limit: int = 8,
+    temperature_band: Optional[tuple] = None,
 ) -> List[Candidate]:
     """程序初筛：只消费分析缓存文字，不调用模型。
 
@@ -175,6 +247,15 @@ def narrow_candidates(
         if quality == "good":
             score += 0.5
             reasons.append("成片质量好（构图光线干净）")
+
+        if temperature_band:
+            season = title_season_tag(package.title)
+            if season == "cold" and not thermal_overlap((5, 12), temperature_band):
+                score -= 3.0
+                reasons.append("秋冬厚装主导笔记，与本篇温度带不符（强降权）")
+            elif season == "warm" and not thermal_overlap((22, 32), temperature_band):
+                score -= 3.0
+                reasons.append("夏季主导笔记，与本篇温度带不符（强降权）")
 
         structure = str(analysis.get("set_structure") or "")
         if prefer_structures and structure in prefer_structures:
@@ -237,7 +318,7 @@ _SELECT_PROMPT = """你是穿搭图文的参考选材器。根据候选素材摘
 - 审美门槛：绝对不要选择镜面自拍（mirror_selfie）、随手拍/游客照（casual_phone_selfie）
   或 photography_quality=poor 的素材；优先全身完整、光线干净、背景整洁、
   构图专业的博主级出片——生成画面会直接继承参考的拍摄质感。
-- 采用方式（adoption）语义必须严格执行，并据此做页级选材（pages）：
+{band_line}- 采用方式（adoption）语义必须严格执行，并据此做页级选材（pages）：
   · outfit_only：只借鉴单品组合/层次/比例/配色关系。pages 只选搭配与单品
     细节页（purpose=outfit_detail），环境主导的大场景页一律不选；若该笔记
     没有可用的细节页，pages 返回空数组（只用文字化搭配信息，不发原图）。
@@ -273,6 +354,7 @@ def select_reference(
     theme: str = "",
     product: Optional[ProductBrief] = None,
     max_tokens: int = 900,
+    temperature_band: Optional[tuple] = None,
 ) -> Optional[SelectionResult]:
     """Doubao 终选：读文字摘要定主参考/补充/采用方式。无合适候选返回 None。"""
     if not candidates:
@@ -297,12 +379,17 @@ def select_reference(
             f"｜主题:{str(analysis.get('note_topic') or '')[:40]}"
         )
     product_line = f"本篇商品：{product.summary_line()}" if product else "本篇不指定商品（自由搭配）"
+    band_line = (
+        f"- 温度带约束：本篇温度区间 {temperature_band[0]}–{temperature_band[1]}°C；"
+        "pages 不得选择羽绒/棉服/厚外套等冬装搭配为主的页，也不得选择夏装为主的页。\n"
+        if temperature_band else "")
     prompt = _SELECT_PROMPT.format(
         theme=theme or "（参考优先：由素材提炼选题）",
         strategy_prefer="；".join(strategy.get("prefer") or []) or "—",
         strategy_fallback="；".join(strategy.get("fallback") or []) or "—",
         strategy_forbidden="；".join(strategy.get("forbidden") or []) or "—",
         product_line=product_line,
+        band_line=band_line,
         candidates_text="\n".join(lines),
     )
     from services.photo_reference_vision import parse_vision_envelope

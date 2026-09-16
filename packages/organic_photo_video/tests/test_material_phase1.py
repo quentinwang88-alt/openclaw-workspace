@@ -356,6 +356,42 @@ class MaterialAdapterTest(unittest.TestCase):
         result2 = select_reference(narrative, candidates, theme="")
         self.assertEqual(result2.pages, [])
 
+    def test_thermal_utilities(self):
+        from services.material_adapter import (
+            parse_thermal_band, thermal_overlap, thermal_window,
+            title_season_tag, theme_thermal_band)
+        self.assertEqual(parse_thermal_band("气温为15-22°C"), (15, 22))
+        self.assertEqual(parse_thermal_band("15–22度"), (15, 22))
+        self.assertIsNone(parse_thermal_band("无温度"))
+        self.assertEqual(thermal_window("浅蓝色短款蓬松外套", "outerwear"), (5, 12))
+        self.assertEqual(thermal_window("奶白针织开衫"), (12, 20))
+        self.assertIsNone(thermal_window("饰品"))
+        self.assertTrue(thermal_overlap((12, 20), (15, 22)))
+        self.assertFalse(thermal_overlap((5, 12), (15, 22)))
+        self.assertEqual(title_season_tag("秋冬旅行穿搭 保暖又出片"), "cold")
+        self.assertEqual(title_season_tag("海岛夏日度假穿搭"), "warm")
+        self.assertEqual(title_season_tag("秋日城市穿搭"), "cool")
+        self.assertEqual(title_season_tag("随便看看"), "")
+        self.assertEqual(theme_thermal_band("凉爽旅行"), (15, 22))
+        self.assertIsNone(theme_thermal_band("自动"))
+
+    def test_season_penalty_under_temperature_band(self):
+        # 温度带 15-22°C 下，秋冬厚装主导的笔记被强降权（不硬排除——
+        # 冷笔记里可能仍有薄款搭配页，交给终选页级约束把关）
+        self.lab.add_note(note_id="c" * 24, images=2, title="秋冬旅行穿搭 保暖又出片")
+        self.lab.add_note(note_id="e" * 24, images=2, title="城市漫步日常")
+        packages = self.lab.source().list_packages()
+        analyses = {
+            "c" * 24: _analysis_payload(),
+            "e" * 24: _analysis_payload(),
+        }
+        result = narrow_candidates(
+            packages, analyses, theme="", temperature_band=(15, 22))
+        scores = {c.note_id: c.score for c in result}
+        self.assertGreater(scores["e" * 24], scores["c" * 24])
+        cold = next(c for c in result if c.note_id == "c" * 24)
+        self.assertTrue(any("温度带不符" in r for r in cold.reasons))
+
     def test_empty_candidates_returns_none(self):
         self.assertIsNone(select_reference(MockClient([]), [], theme="四选一"))
 
