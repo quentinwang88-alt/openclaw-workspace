@@ -331,6 +331,31 @@ class MaterialAdapterTest(unittest.TestCase):
         self.assertIsNone(
             select_reference(bad, candidates, theme="一衣多穿"))
 
+    def test_select_reference_page_validation(self):
+        # 页级选材校验：虚拟页码剔除、同页去重、narrative_only 强制清空
+        self.lab.add_note(note_id="1" * 24, title="候选", images=3)
+        packages = self.lab.source().list_packages()
+        analyses = {"1" * 24: _analysis_payload(pages=3)}
+        candidates = narrow_candidates(packages, analyses, theme="")
+        ok = MockClient([{
+            "main_note_id": "1" * 24, "adoption": "outfit_only",
+            "pages": [{"seq": 2, "purpose": "outfit_detail"},
+                      {"seq": 99, "purpose": "full_outfit"},   # 不存在的页
+                      {"seq": 2, "purpose": "visual_tone"}],   # 重复页
+            "rationale": "细节页", "rejected": [],
+        }])
+        result = select_reference(ok, candidates, theme="")
+        self.assertEqual([p["seq"] for p in result.pages], [2])
+        self.assertEqual(result.pages[0]["note_id"], "1" * 24)
+
+        narrative = MockClient([{
+            "main_note_id": "1" * 24, "adoption": "narrative_only",
+            "pages": [{"seq": 1, "purpose": "full_outfit"}],  # 模型违规带页
+            "rationale": "只借结构", "rejected": [],
+        }])
+        result2 = select_reference(narrative, candidates, theme="")
+        self.assertEqual(result2.pages, [])
+
     def test_empty_candidates_returns_none(self):
         self.assertIsNone(select_reference(MockClient([]), [], theme="四选一"))
 

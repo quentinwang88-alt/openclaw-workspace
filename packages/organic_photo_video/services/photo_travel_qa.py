@@ -412,3 +412,43 @@ def travel_qa_as_alignment(qa: Mapping[str, Any]) -> dict[str, Any]:
         "cover_recommendation": dict(qa.get("cover_recommendation") or {}),
         "travel_qa": qa,
     }
+
+
+# ---------------------------------------------------------------------------
+# 旅行目的地统一解析（自动供稿 Phase 3）
+# ---------------------------------------------------------------------------
+
+#: 常见旅行地点 → 国家 的最小映射（仅做一致性校验，不做通用 NER）。
+KNOWN_PLACE_COUNTRY = {
+    "东京": "日本", "大阪": "日本", "京都": "日本", "札幌": "日本", "福冈": "日本",
+    "名古屋": "日本", "奈良": "日本", "冲绳": "日本",
+    "曼谷": "泰国", "清迈": "泰国", "普吉": "泰国", "苏梅": "泰国", "芭提雅": "泰国",
+    "巴黎": "法国", "伦敦": "英国", "首尔": "韩国", "新加坡": "新加坡",
+    "吉隆坡": "马来西亚", "巴厘岛": "印度尼西亚", "胡志明": "越南", "河内": "越南",
+}
+
+
+class TravelDestinationError(ValueError):
+    """旅行国家与旅行地点冲突——规划前必须修正，不允许静默二选一。"""
+
+
+def resolve_travel_destination(*, country: str, place: str) -> dict:
+    """把「旅行国家 + 旅行地点」合并为一个有效目的地对象。
+
+    - 发布市场（如泰国）与旅行目的地（如日本）是两个概念，国家字段只指
+      旅行目的地；
+    - 地点命中已知映射且与国家冲突 → 抛错（调用方转为工作流错误）；
+    - 两者都空 → 空对象：生成不得凭空标注真实国家/景点。
+    """
+    country = str(country or "").strip()
+    place = str(place or "").strip()
+    if place:
+        for known_place, known_country in KNOWN_PLACE_COUNTRY.items():
+            if known_place in place:
+                if country and country != known_country:
+                    raise TravelDestinationError(
+                        f"旅行地点「{place}」属于{known_country}，与旅行国家"
+                        f"「{country}」冲突；请修正后再执行")
+                country = country or known_country
+                break
+    return {"country": country, "place": place}

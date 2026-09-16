@@ -37,6 +37,11 @@ from services.publish_account_profile import (
     SUPPLY_STRATEGY_POSITIONING_FIRST,
     PublishAccountBinding,
 )
+from services.external_supply_contract import (
+    SUPPLY_POLICY_VERSION,
+    contract_fingerprint,
+    default_contract_store_path,
+)
 
 # 与 services/feishu_workflow.py 的字段契约同值（模块解耦，改动需两侧同步）；
 # 「来源标记」列由 scripts/ensure_feishu_task_table.py 补建——备注会被工作流
@@ -51,6 +56,12 @@ FIELD_TARGET_ACCOUNT = "目标账号（可选）"
 FIELD_PHOTO_INPUT = "完整穿搭素材（可选）"
 FIELD_NOTES = "备注"
 FIELD_SOURCE_TAG = "来源标记"
+# 外部第三方参考的执行路径（Phase 1 来源分流）：参考图走「参考图（可选）」
+# + 显式「风格参考」类型，由现有 STYLE 规划/生成路径消费；
+# 「完整穿搭素材」只属于运营人工完整素材，外部 reference_only 永不进入。
+FIELD_REFERENCE = "参考图（可选）"
+FIELD_REFERENCE_TYPE = "参考图类型"
+FIELD_TRAVEL_COUNTRY = "旅行国家"
 
 MARKER_PREFIX = "auto_supply"
 MAX_REFERENCE_IMAGES = 6
@@ -80,6 +91,8 @@ class SlotPlan:
     main_note_id: str = ""
     adoption: str = ""
     detail: str = ""
+    contract_id: str = ""
+    pages: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -112,6 +125,8 @@ class AutoPhotoSupply:
         model: str = "",
         today: Optional[str] = None,
         max_reference_images: int = MAX_REFERENCE_IMAGES,
+        contract_store: Any = None,   # ExternalSupplyContractStore；None=同库默认
+        product_snapshot_resolver: Any = None,  # callable(code)->snapshot dict
     ):
         self.client = client
         self.source = source
@@ -121,6 +136,11 @@ class AutoPhotoSupply:
         self.model = model
         self.today = today or _date.today().isoformat()
         self.max_reference_images = max_reference_images
+        if contract_store is None:
+            from services.external_supply_contract import ExternalSupplyContractStore
+            contract_store = ExternalSupplyContractStore()
+        self.contract_store = contract_store
+        self.product_snapshot_resolver = product_snapshot_resolver
 
     # ---- 主入口 ----
     def run(
@@ -272,10 +292,40 @@ class AutoPhotoSupply:
             plan.status = "error"
             plan.detail = "apply 模式需要 vision_client（选材调用）"
             return plan
+
+        # 指定商品：先解析真实商品摘要（品类/名称/variant），解析失败明确
+        # 暂停本任务——不再以 ProductBrief(code, "") 假装商品匹配已完成。
+        product_snapshot: Dict[str, Any] = {}
+        product_brief: Optional[ProductBrief] = None
+        if product_code:
+            if self.product_snapshot_resolver is None:
+                self.ledger.record_gap(
+                    scope=f"supply:{binding.account_id}", reason="product_resolver_missing",
+                    detail="指定商品模式需要商品解析器（RDS 商品参考包）")
+                plan.status = "error"
+                plan.detail = "指定商品但无商品解析器，暂停本任务"
+                return plan
+            try:
+                product_snapshot = dict(
+                    self.product_snapshot_resolver(product_code) or {})
+            except Exception as exc:  # noqa: BLE001 - 商品资料缺失＝暂停，不降级为自由搭配
+                self.ledger.record_gap(
+                    scope=f"supply:{binding.account_id}", reason="product_snapshot_failed",
+                    detail=f"{product_code}: {str(exc)[:200]}")
+                plan.status = "error"
+                plan.detail = f"商品资料缺失（{product_code}），暂停本任务：{str(exc)[:80]}"
+                return plan
+            product_name = str(product_snapshot.get("product_name") or "")
+            product_brief = ProductBrief(
+                product_code,
+                str(product_snapshot.get("category") or ""),
+                form=str(product_snapshot.get("variant_key") or ""),
+                key_features=[product_name] if product_name else [])
+
         selection = select_reference(
             self.vision_client, narrowed,
             theme=default_theme if positioning_first else "",
-            product=ProductBrief(product_code, "") if product_code else None)
+            product=product_brief)
         if selection is None:
             self.ledger.record_gap(
                 scope=f"supply:{binding.account_id}", reason="no_material",
@@ -284,14 +334,79 @@ class AutoPhotoSupply:
             plan.detail = "模型未选出主参考"
             return plan
 
-        package = candidates.get(selection.main_note_id)
-        if package is None:
+        package_pair = candidates.get(selection.main_note_id)
+        if package_pair is None:
             plan.status = "error"
             plan.detail = "主参考不在候选集合（内部错误）"
             return plan
-        package_obj = package[0]
+        package_obj, main_analysis = package_pair[0], package_pair[1]
+        if not main_analysis:
+            plan.status = "error"
+            plan.detail = "主参考缺少分析缓存（内部错误）"
+            return plan
 
-        attachments = self._upload_references(package_obj)
+        # 选题、来源说明、参考图、摘要全部来自同一选材结果（修复串配：
+        # 此前主题取 narrowed[0] 而图片取模型终选，可能不是同一篇）。
+        topic = str(main_analysis.get("note_topic") or selection.rationale[:40])
+        attachments, selected_pages = self._stage_reference_pages(
+            package_obj, selection)
+
+        # 目的地：账号显式配置优先；未配置则留空（执行侧行字段为准）。
+        destination = {
+            "country": str(binding.profile.get("travel_country") or "").strip(),
+            "place": str(binding.profile.get("travel_place") or "").strip(),
+        }
+
+        requirement = self._content_requirement_text(
+            selection=selection, analysis=main_analysis, topic=topic,
+            destination=destination, product=product_snapshot)
+        theme_value = default_theme or ""
+        if not theme_value:
+            # STYLE 执行路径必须携带图文主题（feishu_workflow 硬校验）；
+            # 参考优先但未配置默认主题＝配置缺口，明确报错不静默。
+            self.ledger.record_gap(
+                scope=f"supply:{binding.account_id}", reason="no_theme",
+                detail="外部参考走风格参考路径需要账号默认图文主题")
+            plan.status = "error"
+            plan.detail = "账号未配置默认图文主题（STYLE 路径必需），暂停本任务"
+            return plan
+
+        contract = {
+            "account_id": binding.account_id,
+            "supply_date": self.today,
+            "slot": slot,
+            "source_type": "xhs_reference",
+            "authorization": "reference_only",
+            "adoption": selection.adoption,
+            "main_note_id": selection.main_note_id,
+            "main_note_title": package_obj.title or topic,
+            "selected_pages": selected_pages,
+            "product": {
+                "code": product_code,
+                "name": str(product_snapshot.get("product_name") or ""),
+                "category": str(product_snapshot.get("category") or ""),
+                "variant": str(product_snapshot.get("variant_key") or ""),
+            } if product_code else {},
+            "destination": {k: v for k, v in destination.items() if v},
+            "content_requirement": requirement,
+            "policy_version": SUPPLY_POLICY_VERSION,
+        }
+        contract["contract_fingerprint"] = contract_fingerprint(
+            adoption=contract["adoption"],
+            main_note_id=contract["main_note_id"],
+            selected_pages=selected_pages,
+            product=contract["product"],
+            destination=contract["destination"],
+            policy_version=SUPPLY_POLICY_VERSION)
+        # 建行前先持久化供稿意图（崩溃可恢复）；执行侧付费前凭此合同放行。
+        stored = self.contract_store.persist_intent(contract)
+        plan.contract_id = str(stored.get("contract_id") or "")
+        if stored.get("status") == "created" and stored.get("record_id"):
+            plan.status = "already_created"
+            plan.record_id = str(stored["record_id"])
+            plan.detail = "合同已绑定行（幂等恢复）"
+            return plan
+
         fields: Dict[str, Any] = {
             FIELD_PRESET: preset,
             FIELD_EXECUTE: True,
@@ -304,20 +419,20 @@ class AutoPhotoSupply:
                 f"自动供稿 slot{slot}"
                 f"｜主参考 {selection.main_note_id}|采用 {selection.adoption}"
                 f"|{selection.rationale[:60]}"),
+            # 来源分流：外部 reference_only 参考显式走「风格参考」，由现有
+            # STYLE 规划/生成路径消费；绝不写「完整穿搭素材」字段。
+            FIELD_REFERENCE_TYPE: "风格参考",
+            FIELD_CONTENT_THEME: theme_value,
+            FIELD_CONTENT_REQUIREMENT: requirement,
         }
         if product_code:
             fields[FIELD_PRODUCT] = product_code
-        if positioning_first and default_theme:
-            fields[FIELD_CONTENT_THEME] = default_theme
-        else:
-            topic = str((narrowed[0].analysis or {}).get("note_topic") or "")
-            fields[FIELD_CONTENT_REQUIREMENT] = (
-                f"参考优先选题：{topic or selection.rationale[:40]}")
         if attachments:
-            fields[FIELD_PHOTO_INPUT] = attachments
+            fields[FIELD_REFERENCE] = attachments
 
         record_ids = self.client.batch_create_records([{"fields": fields}])
         record_id = record_ids[0] if record_ids else ""
+        self.contract_store.attach_record(plan.contract_id, record_id)
         self.ledger.complete_slot(
             binding.account_id, self.today, slot,
             record_id=record_id, product_code=product_code,
@@ -332,6 +447,7 @@ class AutoPhotoSupply:
         plan.product_code = product_code
         plan.main_note_id = selection.main_note_id
         plan.adoption = selection.adoption
+        plan.pages = selected_pages
         return plan
 
     # ---- 候选收集（包 + 分析缓存配对）与初筛 ----
@@ -355,12 +471,80 @@ class AutoPhotoSupply:
             product=ProductBrief(product_code, "") if product_code else None,
             recent_note_ids=recent)
 
-    def _upload_references(self, package: MaterialPackage) -> List[Dict[str, Any]]:
+    # ---- 页级供图（Phase 1/3）：只上传选材结果指定的页面 ----
+    def _stage_reference_pages(
+        self, package: MaterialPackage, selection: Any,
+    ) -> tuple:
+        """按选材结果的页引用供图；narrative_only 或无页引用时不发任何原图。
+
+        返回 (attachments, selected_pages)；selected_pages 携带每页 sha256，
+        进入执行合同（合同指纹的一部分）。不再固定取前 N 张。
+        """
+        import hashlib
+
+        adoption = str(selection.adoption or "overall")
+        if adoption == "narrative_only":
+            return [], []
+        by_seq = {img.seq: img for img in package.images}
         attachments: List[Dict[str, Any]] = []
-        for image in package.images[: self.max_reference_images]:
-            if not image.exists:
+        selected: List[Dict[str, Any]] = []
+        for page in (selection.pages or [])[: self.max_reference_images]:
+            image = by_seq.get(int(page.get("seq") or 0))
+            if image is None or not image.exists:
                 continue
             attachments.append(self.client.upload_attachment(
                 image.path.read_bytes(), image.path.name, "image/jpeg",
                 image.path.stat().st_size))
-        return attachments
+            selected.append({
+                "note_id": selection.main_note_id,
+                "seq": image.seq,
+                "sha256": hashlib.sha256(image.path.read_bytes()).hexdigest(),
+                "purpose": str(page.get("purpose") or ""),
+            })
+        return attachments, selected
+
+    # ---- 内容要求（Phase 2）：adoption 语义 + 目的地 + 商品约束进执行提示 ----
+    @staticmethod
+    def _content_requirement_text(
+        *, selection: Any, analysis: Dict[str, Any], topic: str,
+        destination: Dict[str, Any], product: Dict[str, Any],
+    ) -> str:
+        adoption = str(selection.adoption or "overall")
+        lines: List[str] = [f"参考优先选题：{topic}"]
+        adoption_rules = {
+            "outfit_only": (
+                "采用方式 outfit_only：只借鉴参考的搭配关系（单品组合/层次/"
+                "比例/配色），人物、场景、构图必须重新创作，禁止复刻参考画面"),
+            "visual_only": (
+                "采用方式 visual_only：只借鉴参考的色调与摄影气质，人物造型与"
+                "场景按本篇主题重新创作"),
+            "narrative_only": (
+                "采用方式 narrative_only：只借鉴参考的选题与页面结构，全部画面"
+                "按本篇主题独立创作（参考结构：" +
+                str(analysis.get("set_structure") or "") + "）"),
+            "overall": (
+                "采用方式 overall：参考仅作综合灵感，重新形成本篇计划，"
+                "禁止逐页复现参考组图"),
+        }
+        lines.append(adoption_rules.get(adoption, adoption_rules["overall"]))
+        if adoption in {"outfit_only", "narrative_only", "overall"}:
+            relations = str(analysis.get("outfit_relations") or "")
+            core = "、".join(
+                str((item or {}).get("item") or "")
+                for item in (analysis.get("core_items") or [])[:6])
+            if core:
+                lines.append(f"参考搭配要点（文字化借鉴）：{core}"
+                             + (f"；{relations}" if relations else ""))
+        country = str(destination.get("country") or "")
+        place = str(destination.get("place") or "")
+        if country or place:
+            dest = "、".join(x for x in (country, place) if x)
+            lines.append(f"旅行目的地设定：{dest}；场景按目的地重新规划，"
+                         "不照搬参考图拍摄地")
+        if product:
+            pname = str(product.get("product_name") or "")
+            pcat = str(product.get("category") or "")
+            if pname or pcat:
+                lines.append(f"本篇商品以本店资料为准：{pcat} {pname}".strip())
+        return "｜".join(lines)[:1500]
+

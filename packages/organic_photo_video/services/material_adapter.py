@@ -131,6 +131,10 @@ class SelectionResult:
     adoption: str = "overall"          # overall | outfit_only | visual_only | narrative_only
     rationale: str = ""
     rejected: List[Dict[str, str]] = field(default_factory=list)
+    # 页级选材（Phase 1）：[{note_id, seq, purpose}]，只含主参考笔记。
+    # purpose ∈ outfit_detail（搭配/单品细节）| full_outfit（完整穿搭页）|
+    # visual_tone（色调/氛围参考）。narrative_only 时必须为空。
+    pages: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def narrow_candidates(
@@ -229,11 +233,22 @@ _SELECT_PROMPT = """你是穿搭图文的参考选材器。根据候选素材摘
 主题策略：优先 {strategy_prefer}；可借鉴 {strategy_fallback}；禁止 {strategy_forbidden}
 {product_line}
 要求：
-- 优先一篇主参考；仅在主参考存在明确缺口（如缺细节页）时补 1 篇补充参考。
-- 指定商品时：商品身份/颜色/版型以本店资料为准，参考只借鉴配套、比例与表达。
+- 只选一篇主参考；本轮不支持补充参考，supplement_note_ids 恒为空数组。
 - 审美门槛：绝对不要选择镜面自拍（mirror_selfie）、随手拍/游客照（casual_phone_selfie）
   或 photography_quality=poor 的素材；优先全身完整、光线干净、背景整洁、
   构图专业的博主级出片——生成画面会直接继承参考的拍摄质感。
+- 采用方式（adoption）语义必须严格执行，并据此做页级选材（pages）：
+  · outfit_only：只借鉴单品组合/层次/比例/配色关系。pages 只选搭配与单品
+    细节页（purpose=outfit_detail），环境主导的大场景页一律不选；若该笔记
+    没有可用的细节页，pages 返回空数组（只用文字化搭配信息，不发原图）。
+  · visual_only：只借鉴色调、光线、摄影气质。pages 选最能代表色调氛围的
+    1-2 页（purpose=visual_tone），不选人物特写为主的页。
+  · narrative_only：只借鉴选题、页面角色与解释顺序，不发送任何原图，
+    pages 必须为空数组。
+  · overall：综合灵感，重新形成本篇计划，不等于逐页沿用。pages 挑不超过
+    3 页（purpose 按实际用途标注），禁止整组逐页照搬。
+- pages 的 seq 必须来自候选摘要里标注的页码，不得虚构。
+- 指定商品时：商品身份/颜色/版型以本店资料为准，参考只借鉴配套、比例与表达。
 - 不确定或没有合适候选时，main_note_id 填空字符串，不要勉强选择。
 
 候选摘要：
@@ -242,8 +257,9 @@ _SELECT_PROMPT = """你是穿搭图文的参考选材器。根据候选素材摘
 输出严格 JSON（不要其他文字）：
 {{
  "main_note_id": "主参考笔记ID或空字符串",
- "supplement_note_ids": ["补充参考ID"],
+ "supplement_note_ids": [],
  "adoption": "overall | outfit_only | visual_only | narrative_only 之一",
+ "pages": [{{"seq": 页码, "purpose": "outfit_detail | full_outfit | visual_tone"}}],
  "rationale": "选择理由与采用方式（两三句）",
  "rejected": [{{"note_id": "ID", "reason": "不采用原因"}}]
 }}
@@ -269,10 +285,15 @@ def select_reference(
             str((item or {}).get("item") or "")
             for item in (analysis.get("core_items") or [])
         )[:80]
+        page_seq_roles = "、".join(
+            f"{pr.get('seq')}:{pr.get('role')}"
+            for pr in (analysis.get("page_roles") or [])[:10]
+        )
         lines.append(
             f"- {cand.note_id}｜标题:{cand.title[:40]}｜结构:{analysis.get('set_structure')}"
             f"｜单品:{core}｜配色:{','.join(analysis.get('palette') or [])}"
             f"｜拍摄:{analysis.get('shoot_style') or '未知'}/{analysis.get('photography_quality') or '未知'}"
+            f"｜页码(角色):{page_seq_roles or '未知'}"
             f"｜主题:{str(analysis.get('note_topic') or '')[:40]}"
         )
     product_line = f"本篇商品：{product.summary_line()}" if product else "本篇不指定商品（自由搭配）"
@@ -298,11 +319,41 @@ def select_reference(
     adoption = str(parsed.get("adoption") or "overall")
     if adoption not in {"overall", "outfit_only", "visual_only", "narrative_only"}:
         adoption = "overall"
+    # 页级选材：只接受主参考笔记里真实存在的页码，按 adoption 语义约束
+    main_analysis = {}
+    for cand in candidates:
+        if cand.note_id == main:
+            main_analysis = cand.analysis
+            break
+    known_seqs = {
+        int(pr.get("seq") or 0)
+        for pr in (main_analysis.get("page_roles") or [])
+        if int(pr.get("seq") or 0) > 0
+    }
+    pages: List[Dict[str, Any]] = []
+    for item in (parsed.get("pages") or []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            seq = int(item.get("seq") or 0)
+        except (TypeError, ValueError):
+            continue
+        purpose = str(item.get("purpose") or "")
+        if purpose not in {"outfit_detail", "full_outfit", "visual_tone"}:
+            purpose = "full_outfit"
+        if seq > 0 and seq in known_seqs:
+            pages.append({"note_id": main, "seq": seq, "purpose": purpose})
+    if adoption == "narrative_only":
+        pages = []
+    # 去重（同页多用途保留第一条）
+    seen = set()
+    pages = [p for p in pages if not (p["seq"] in seen or seen.add(p["seq"]))]
     return SelectionResult(
         main_note_id=main,
         supplement_note_ids=supplements,
         adoption=adoption,
         rationale=str(parsed.get("rationale") or ""),
+        pages=pages,
         rejected=[
             {"note_id": str(item.get("note_id") or ""), "reason": str(item.get("reason") or "")}
             for item in (parsed.get("rejected") or []) if isinstance(item, dict)

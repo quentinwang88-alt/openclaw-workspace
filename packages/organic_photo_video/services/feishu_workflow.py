@@ -66,6 +66,10 @@ FIELD_CONTENT_REQUIREMENT = "内容要求（可选）"
 FIELD_TARGET_ACCOUNT = "目标账号（可选）"
 FIELD_VISUAL_PRESET = "视觉预设（可选）"
 FIELD_TRAVEL_PLACE = "旅行地点（可选）"
+FIELD_TRAVEL_COUNTRY = "旅行国家"
+# 自动供稿来源标记（与 services/auto_photo_supply.py 同值）：外部 reference_only
+# 行必须有执行合同，付费前反查（Phase 1 来源分流）。
+FIELD_SOURCE_TAG = "来源标记"
 FIELD_TEMPERATURE_BAND = "温度档"
 FIELD_THERMAL_SENSITIVITY = "体感倾向"
 FIELD_TEMPERATURE_SCENE = "温度穿搭场景"
@@ -285,6 +289,63 @@ def resolve_travel_thermal_sensitivity(
             f"{FIELD_THERMAL_SENSITIVITY}只能填写：怕冷、正常体感、怕热"
         )
     return resolved
+
+
+#: 常见旅行地点 → 国家 的最小映射与统一解析（Phase 3）见 photo_travel_qa。
+from services.photo_travel_qa import resolve_travel_destination  # noqa: E402
+
+
+def _external_contract_store():
+    """外部供稿合同存储（进程级缓存；与消费侧台账同库）。"""
+    global _EXTERNAL_CONTRACT_STORE
+    if _EXTERNAL_CONTRACT_STORE is None:
+        from services.external_supply_contract import ExternalSupplyContractStore
+        _EXTERNAL_CONTRACT_STORE = ExternalSupplyContractStore()
+    return _EXTERNAL_CONTRACT_STORE
+
+
+_EXTERNAL_CONTRACT_STORE = None
+
+
+def assert_external_supply_wiring(
+    *, source_tag: str, record_id: str, reference_mode: str,
+    product_id: str, store: Any = None,
+) -> "Optional[dict]":
+    """外部自动供稿行的付费前门禁（Phase 1 来源分流）。
+
+    - 来源标记是 auto_supply 的行必须有执行合同（record_id 反查）；
+    - authorization 必须是 reference_only；
+    - 禁止 COMPLETE_LOOK（原图直用成片底图）；
+    - 行产品编码与合同一致。
+    返回合同 dict；非外部行返回 None。任何违规抛 FeishuWorkflowError。
+    """
+    if not str(source_tag or "").startswith("auto_supply|"):
+        return None
+    from services.photo_reference import REFERENCE_MODE_COMPLETE_LOOK
+    contract = None
+    try:
+        contract = (store or _external_contract_store()).find_by_record(record_id)
+    except Exception:  # noqa: BLE001 - 合同库不可读也必须中止，不能放行
+        contract = None
+    if contract is None:
+        raise FeishuWorkflowError(
+            "AUTO_SUPPLY_WIRING：自动外部供稿行缺少执行合同"
+            "（external_supply_contracts 无此 record_id），付费前中止；"
+            "请通过自动供稿流程重建该任务，勿手工复用旧行")
+    if str(contract.get("authorization") or "") != "reference_only":
+        raise FeishuWorkflowError(
+            "AUTO_SUPPLY_WIRING：外部供稿合同授权异常（"
+            f"{contract.get('authorization')!r}）")
+    if reference_mode == REFERENCE_MODE_COMPLETE_LOOK:
+        raise FeishuWorkflowError(
+            "AUTO_SUPPLY_WIRING：外部 reference_only 参考禁止进入"
+            "完整穿搭（COMPLETE_LOOK）原图直用路径")
+    contract_product = str(((contract.get("product") or {}).get("code")) or "")
+    if contract_product and product_id and contract_product != product_id:
+        raise FeishuWorkflowError(
+            "AUTO_SUPPLY_WIRING：行产品编码与执行合同不一致"
+            f"（{product_id} ≠ {contract_product}）")
+    return contract
 
 
 def build_travel_topic(
@@ -1624,6 +1685,15 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 reference_attachments = list(reference_context.reference_attachments)
                 style_product = reference_context.product_snapshot
                 product_context = reference_context.product_context
+            # ---- 外部自动供稿门禁（Phase 1 来源分流）：付费生成前反查合同 ----
+            source_tag = text_value(record.fields.get(FIELD_SOURCE_TAG))
+            external_auto_supply = str(source_tag or "").startswith("auto_supply|")
+            external_contract = assert_external_supply_wiring(
+                source_tag=source_tag,
+                record_id=record.record_id,
+                reference_mode=reference_mode,
+                product_id=text_value(record.fields.get(FIELD_PRODUCT)),
+            )
             requires_product_supply = bool(
                 recipe_for_input and (recipe_for_input.recipe_spec_json or {}).get("outfit_supply")
             )
@@ -1648,6 +1718,16 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
             style_profile: dict[str, Any] = {}
             content_requirement = text_value(record.fields.get(FIELD_CONTENT_REQUIREMENT))
             travel_place = text_value(record.fields.get(FIELD_TRAVEL_PLACE))
+            # 统一旅行目的地（Phase 3）：国家 + 地点合并解析，冲突规划前报错；
+            # 空值表示未指定——生成不得凭空标注真实国家/景点。
+            try:
+                travel_destination = resolve_travel_destination(
+                    country=text_value(record.fields.get(FIELD_TRAVEL_COUNTRY)),
+                    place=travel_place,
+                )
+            except ValueError as exc:
+                raise FeishuWorkflowError(str(exc)) from exc
+            travel_country = travel_destination.get("country") or ""
             travel_contract: dict[str, Any] = {}
             travel_variables: dict[str, Any] = {}
             travel_copy_templates = None
@@ -1724,6 +1804,9 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     # travel_topic 本身会进内容计划 input_contract（hash 覆盖）。
                     if expression_mode:
                         travel_topic["expression_mode"] = expression_mode
+                    if travel_country:
+                        # 旅行国家进入选题冻结（additive：未填国家的历史行不变）
+                        travel_topic["travel_country"] = travel_country
                     if account_brief and account_brief.get("positioning"):
                         travel_topic["account_positioning"] = str(
                             account_brief["positioning"])
@@ -1752,6 +1835,8 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                         },
                         "content_requirement": content_requirement,
                     }
+                    if travel_country:
+                        travel_topic["travel_country"] = travel_country
                     if expression_mode:
                         travel_topic["expression_mode"] = expression_mode
                     if account_brief and account_brief.get("positioning"):
@@ -1965,6 +2050,11 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
             prepared_source_groups: list[list[dict[str, Any]]] = []
             if (reference_mode == REFERENCE_MODE_COMPLETE_LOOK and recipe_for_input
                     and asset_supply_must_run(asset_status, record.fields)):
+                if external_auto_supply:
+                    # 兜底（正常在外层门禁已拦）：外部参考绝不做原图直用登记
+                    raise FeishuWorkflowError(
+                        "AUTO_SUPPLY_WIRING：外部 reference_only 参考禁止登记为"
+                        "完整穿搭资产（原图直用）")
                 recipe = recipe_for_input
                 from services.photo_asset_supply import PhotoAssetSupplyService
                 asset_supply = PhotoAssetSupplyService(self.client, root=staging_root)
@@ -2332,6 +2422,8 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                                 "place": str(travel_topic.get("place") or travel_place or ""),
                                 "topic_zh": str(variations[index].get("topic_zh") or ""),
                                 "temperature_context": dict(travel_topic.get("temperature_context") or {}),
+                                **({"travel_country": str(travel_topic.get("travel_country") or travel_country or "")}
+                                   if (travel_topic.get("travel_country") or travel_country) else {}),
                             } if theme and theme.get("travel_theme_type") else {}),
                         }
                         if account_brief is not None:
@@ -2471,10 +2563,31 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     ))
             else:
                 preset_segment = ""
+            # 旅行目的地采用值与来源（Phase 3）：表格自动填入的国家也让运营可见，
+            # 避免被误认为无效默认项。
+            dest_country = text_value(record.fields.get(FIELD_TRAVEL_COUNTRY))
+            dest_place = text_value(record.fields.get(FIELD_TRAVEL_PLACE))
+            destination_parts = [x for x in (dest_country, dest_place) if x]
+            destination_segment = (
+                "；旅行目的地 {}（来源：任务字段）".format("、".join(destination_parts))
+                if destination_parts else "")
+            # 外部自动供稿行的采用方式与参考来源（Phase 2 可追溯）
+            external_segment = ""
+            if str(text_value(record.fields.get(FIELD_SOURCE_TAG)) or "").startswith("auto_supply|"):
+                try:
+                    _contract = _external_contract_store().find_by_record(record.record_id)
+                except Exception:  # noqa: BLE001
+                    _contract = None
+                if _contract:
+                    external_segment = (
+                        "；外部参考 采用 {adoption}｜主参考 {note}｜策略 {version}".format(
+                            adoption=_contract.get("adoption") or "—",
+                            note=_contract.get("main_note_id") or "—",
+                            version=_contract.get("policy_version") or "—"))
             summary = (
                 "本篇配置：目标账号 {account}（店铺 {store}）；主题 {theme}"
                 "（来源：{source}）；表达 {expression}；视觉基准 {baseline}"
-                "{preset_segment}\n{summary}"
+                "{preset_segment}{destination_segment}{external_segment}\n{summary}"
             ).format(
                 account=frozen_account.get("target_publish_account_id"),
                 store=frozen_account.get("account_store_id") or "未记录",
@@ -2486,6 +2599,8 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     str(frozen_account.get("expression_mode") or ""), "默认"),
                 baseline=str(frozen_account.get("visual_baseline") or "无"),
                 preset_segment=preset_segment,
+                destination_segment=destination_segment,
+                external_segment=external_segment,
                 summary=summary,
             )
         frozen_content_plan = (batch.manifest_json or {}).get("content_plan")

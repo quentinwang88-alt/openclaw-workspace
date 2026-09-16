@@ -20,10 +20,12 @@ from tests.test_material_phase1 import LabFixture, _analysis_payload
 
 
 class FixedSelectionClient:
-    """不限次数的选材假客户端：总是选中给定主参考。"""
+    """不限次数的选材假客户端：总是选中给定主参考（可指定 adoption/页引用）。"""
 
-    def __init__(self, main_note_id):
+    def __init__(self, main_note_id, adoption="overall", pages=None):
         self.main_note_id = main_note_id
+        self.adoption = adoption
+        self.pages = pages
         self.calls = 0
 
     def chat_with_multiple_images(self, paths, prompt, max_tokens):
@@ -32,7 +34,8 @@ class FixedSelectionClient:
             "choices": [{"message": {"content": json.dumps({
                 "main_note_id": self.main_note_id,
                 "supplement_note_ids": [],
-                "adoption": "overall",
+                "adoption": self.adoption,
+                "pages": self.pages or [],
                 "rationale": "结构完整",
                 "rejected": [],
             }, ensure_ascii=False)}}],
@@ -85,14 +88,15 @@ def make_binding(account_id="tocrystal66", *, name="泰国女装1", profile_extr
 
 
 def make_ledger_with_analysis(root: Path, source: MaterialSource, note_ids,
-                              model="mock-model"):
-    ledger = MaterialLedger(str(root / "ledger.sqlite3"))
+                              model="mock-model", name="ledger.sqlite3",
+                              pages=3):
+    ledger = MaterialLedger(str(root / name))
     for note_id in note_ids:
         package = source.get(note_id)
         ledger.put_cached_analysis(
             fingerprint=package.version_fingerprint, model=model,
             analysis_version=ANALYSIS_VERSION,
-            note_id=note_id, result=_analysis_payload(), image_count=2,
+            note_id=note_id, result=_analysis_payload(pages=pages), image_count=2,
             calls=1, prompt_tokens=100, completion_tokens=20, duration_ms=10)
     return ledger
 
@@ -141,13 +145,30 @@ class AutoPhotoSupplyTest(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def _supply(self, client, ledger, vision=None, apply=True):
+    def _supply(self, client, ledger, vision=None, apply=True, product_resolver=None):
+        from services.external_supply_contract import ExternalSupplyContractStore
         return AutoPhotoSupply(
             client=client, source=self.lab.source(), ledger=ledger,
-            vision_client=vision, model="mock-model", today="2026-09-16")
+            vision_client=vision, model="mock-model", today="2026-09-16",
+            contract_store=ExternalSupplyContractStore(
+                str(self.root / "contracts.sqlite3")),
+            product_snapshot_resolver=product_resolver)
 
     def _vision_ok(self):
-        return FixedSelectionClient("m" * 24)
+        return FixedSelectionClient(
+            "m" * 24, pages=[{"seq": 1, "purpose": "full_outfit"},
+                             {"seq": 2, "purpose": "outfit_detail"},
+                             {"seq": 3, "purpose": "outfit_detail"}])
+
+    @staticmethod
+    def _fake_product_resolver(catalog=None):
+        snapshots = catalog or {}
+
+        def resolve(code):
+            if code not in snapshots:
+                raise RuntimeError(f"商品 {code} 无参考包")
+            return snapshots[code]
+        return resolve
 
     def test_creates_rows_with_contract_fields(self):
         ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
@@ -164,11 +185,107 @@ class AutoPhotoSupplyTest(unittest.TestCase):
         self.assertEqual(fields["图文主题"], "旅行穿搭")
         self.assertEqual(fields["来源标记"], "auto_supply|2026-09-16|tocrystal66")
         self.assertTrue(fields["备注"].startswith("自动供稿"))
-        self.assertEqual(len(fields["完整穿搭素材（可选）"]), 3)
+        # 来源分流（Phase 1）：外部参考走「参考图 + 风格参考」，
+        # 绝不写「完整穿搭素材」字段（原图直用通道已封死）
+        self.assertNotIn("完整穿搭素材（可选）", fields)
+        self.assertEqual(fields["参考图类型"], "风格参考")
+        self.assertEqual(len(fields["参考图（可选）"]), 3)
         self.assertGreater(len(client.uploads), 0)
+        self.assertIn("采用方式 overall", fields["内容要求（可选）"])
         slots = ledger.slots_for("tocrystal66", "2026-09-16")
         self.assertEqual(len(slots), 2)
         self.assertTrue(all(s["status"] == "created" for s in slots))
+
+    def test_external_contract_persisted_and_attached(self):
+        from services.external_supply_contract import ExternalSupplyContractStore
+        ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
+        client = FakeTaskTableClient()
+        self._supply(client, ledger, vision=self._vision_ok()).run(
+            [make_binding()], apply=True)
+        store = ExternalSupplyContractStore(str(self.root / "contracts.sqlite3"))
+        contract = store.find_by_record(client.rows[0]["record_id"])
+        self.assertIsNotNone(contract)
+        self.assertEqual(contract["status"], "created")
+        self.assertEqual(contract["adoption"], "overall")
+        self.assertEqual(contract["authorization"], "reference_only")
+        self.assertEqual(len(contract["selected_pages"]), 3)
+        self.assertTrue(all(p.get("sha256") for p in contract["selected_pages"]))
+        self.assertTrue(contract["contract_fingerprint"])
+
+    def test_page_level_selection_limits_uploads(self):
+        # 页级选材：只上传选材结果指定的页面，不再固定取前 N 张
+        ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
+        client = FakeTaskTableClient()
+        vision = FixedSelectionClient(
+            "m" * 24, pages=[{"seq": 2, "purpose": "outfit_detail"}])
+        self._supply(client, ledger, vision=vision).run(
+            [make_binding(profile_extra={"daily_limit": 1})], apply=True)
+        fields = client.created[0]["fields"]
+        self.assertEqual(len(fields["参考图（可选）"]), 1)
+        self.assertIn("m" * 24 + "_2", client.uploads[0])
+
+    def test_narrative_only_sends_no_original_images(self):
+        # narrative_only：只借鉴结构，不发任何第三方原图作为生图参考
+        ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
+        client = FakeTaskTableClient()
+        vision = FixedSelectionClient(
+            "m" * 24, adoption="narrative_only",
+            pages=[{"seq": 1, "purpose": "full_outfit"}])  # 模型违规带页 → 必须被清空
+        self._supply(client, ledger, vision=vision).run(
+            [make_binding(profile_extra={"daily_limit": 1})], apply=True)
+        fields = client.created[0]["fields"]
+        self.assertNotIn("参考图（可选）", fields)
+        self.assertEqual(client.uploads, [])
+        self.assertIn("narrative_only", fields["内容要求（可选）"])
+
+    def test_topic_comes_from_selection_main_note(self):
+        # 修复串配：选题/摘要来自模型终选主参考（n 篇），而不是初筛第一（m 篇）
+        ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
+        client = FakeTaskTableClient()
+        vision = FixedSelectionClient("n" * 24, pages=[{"seq": 1, "purpose": "full_outfit"}])
+        self._supply(client, ledger, vision=vision).run(
+            [make_binding(profile_extra={"daily_limit": 1})], apply=True)
+        requirement = client.created[0]["fields"]["内容要求（可选）"]
+        self.assertIn("冬季旅游穿搭", requirement)   # _analysis_payload 的 note_topic
+
+    def test_destination_writes_requirement_and_contract(self):
+        ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
+        client = FakeTaskTableClient()
+        binding = make_binding(profile_extra={"daily_limit": 1})
+        binding.profile["travel_country"] = "日本"
+        self._supply(client, ledger, vision=self._vision_ok()).run(
+            [binding], apply=True)
+        requirement = client.created[0]["fields"]["内容要求（可选）"]
+        self.assertIn("旅行目的地设定：日本", requirement)
+        self.assertIn("不照搬参考图拍摄地", requirement)
+
+    def test_specified_product_uses_real_summary(self):
+        # 指定商品：复用商品解析器读真实品类/名称；资料缺失明确暂停，不建行
+        ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
+        client = FakeTaskTableClient()
+        ok_resolver = self._fake_product_resolver({
+            "P1": {"category": "开衫", "product_name": "奶白针织开衫",
+                   "variant_key": "宽松款"}})
+        self._supply(client, ledger, vision=self._vision_ok(),
+                     product_resolver=ok_resolver).run(
+            [make_binding(profile_extra={
+                "product_mode": "使用指定商品", "product_codes": "P1",
+                "daily_limit": 1})], apply=True)
+        fields = client.created[0]["fields"]
+        self.assertEqual(fields["产品编码"], "P1")
+        self.assertIn("奶白针织开衫", fields["内容要求（可选）"])
+
+        miss_client = FakeTaskTableClient()
+        results = self._supply(miss_client, make_ledger_with_analysis(
+            self.root, self.lab.source(), self.note_ids, name="ledger_miss.sqlite3"),
+            vision=self._vision_ok(),
+            product_resolver=self._fake_product_resolver({})).run(
+            [make_binding(profile_extra={
+                "product_mode": "使用指定商品", "product_codes": "P9",
+                "daily_limit": 1})], apply=True)
+        self.assertEqual(results[0].slots[0].status, "error")
+        self.assertIn("商品资料缺失", results[0].slots[0].detail)
+        self.assertEqual(miss_client.created, [])
 
     def test_marker_survives_notes_being_cleared(self):
         # 工作流接手行后会清空/覆写备注（feishu_workflow 启动时 FIELD_NOTES=""
@@ -237,7 +354,9 @@ class AutoPhotoSupplyTest(unittest.TestCase):
         self._supply(client, ledger, vision=self._vision_ok()).run(
             [binding], apply=True)
         fields = client.created[0]["fields"]
-        self.assertNotIn("图文主题", fields)
+        # STYLE 执行路径必须携带主题：参考优先也写图文主题（账号默认），
+        # 选题摘要与参考图同源（模型终选主参考）
+        self.assertEqual(fields["图文主题"], "旅行穿搭")
         self.assertTrue(
             fields["内容要求（可选）"].startswith("参考优先选题："))
 
@@ -247,8 +366,11 @@ class AutoPhotoSupplyTest(unittest.TestCase):
         binding = make_binding(profile_extra={
             "product_mode": "使用指定商品", "product_codes": "P1,P2",
             "daily_limit": 2})
-        self._supply(client, ledger, vision=self._vision_ok()).run(
-            [binding], apply=True)
+        resolver = self._fake_product_resolver({
+            "P1": {"category": "开衫", "product_name": "A", "variant_key": "v1"},
+            "P2": {"category": "棉服", "product_name": "B", "variant_key": "v2"}})
+        self._supply(client, ledger, vision=self._vision_ok(),
+                     product_resolver=resolver).run([binding], apply=True)
         codes = [row["fields"].get("产品编码") for row in client.created]
         self.assertEqual(codes, ["P1", "P2"])   # 轮换不重复
 

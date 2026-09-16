@@ -55,6 +55,30 @@ def build_vision_client():
     return _DoubaoVisionClient(api_url=api_url, api_key=api_key, model=model), model
 
 
+def build_product_snapshot_resolver():
+    """指定商品模式：复用现有商品解析器（RDS 商品参考包）读真实品类/款色。
+
+    解析失败由供给层明确暂停该任务（不降级为自由搭配）；RDS 环境缺失时
+    返回 None（指定商品的账号本轮暂停并记缺口）。
+    """
+    try:
+        from repositories.rds_repository import RdsRepository
+        from services.product_reference_resolver import ProductReferenceResolver
+    except Exception:  # noqa: BLE001 - 环境缺失＝显式不可用，不假装成功
+        return None
+    try:
+        repository = RdsRepository.from_env()
+    except Exception:  # noqa: BLE001
+        return None
+    resolver = ProductReferenceResolver(repository)
+
+    def _resolve(code: str):
+        snapshot = resolver.resolve_snapshot(code)
+        return snapshot
+
+    return _resolve
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true", help="正式建行（默认 dry-run）")
@@ -86,6 +110,7 @@ def main() -> int:
         ledger=MaterialLedger(args.ledger or None),
         vision_client=vision_client,
         model=model,
+        product_snapshot_resolver=build_product_snapshot_resolver(),
     )
     mode = "APPLY" if args.apply else "DRY-RUN"
     print(f"== 自动供稿 {mode}｜开启账号 {len(accounts)} 个 ==")
