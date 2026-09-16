@@ -99,7 +99,10 @@ async def title_value(editor: Any) -> str:
 def description_counter_value(
     text: str, limit: int = DESCRIPTION_CHAR_LIMIT
 ) -> Optional[int]:
-    matches = re.findall(rf"(\d+)\s*/\s*{limit}\b", str(text or ""))
+    # Trailing \b never matches before a CJK character, and Miaoshou's 2026-09
+    # editor renders the counter as "531 /10000图片：…" with the next label
+    # glued to the limit, so only guard against more digits.
+    matches = re.findall(rf"(\d+)\s*/\s*{limit}(?!\d)", str(text or ""))
     return int(matches[-1]) if matches else None
 
 
@@ -143,7 +146,7 @@ async def description_region(editor: Any) -> Optional[Any]:
             if await _is_description_region(ancestor):
                 return ancestor
 
-    counters = editor.get_by_text(re.compile(r"\d+\s*/\s*10000\b"))
+    counters = editor.get_by_text(re.compile(r"\d+\s*/\s*10000(?!\d)"))
     for index in range(await counters.count()):
         counter = counters.nth(index)
         for levels in range(1, 13):
@@ -420,25 +423,52 @@ async def all_sku_snapshots(page: Any) -> list[Dict[str, str]]:
     if not positions or positions[-1] != int(metrics["max"]):
         positions.append(int(metrics["max"]))
     snapshots: Dict[str, Dict[str, str]] = {}
+    # Miaoshou's 2026-09 editor gives the purchase-price and display-price
+    # inputs identical wrappers (`.price-currency` around `.currency-input`),
+    # so columns must be resolved from the header text of the row's own table
+    # instead of input classes.
     script = """
     elements => elements.map(row => {
       const cells = [...row.querySelectorAll('.pro-virtual-table__row-cell')];
+      const table = row.closest('.pro-virtual-table');
+      const headers = table
+        ? [...table.querySelectorAll('.pro-virtual-table__header-cell')]
+        : [];
+      const columnIndex = keyword => headers.findIndex(header =>
+        String(header.innerText || '').replace(/\s+/g, ' ').includes(keyword));
+      const columns = {
+        source: columnIndex('货源价格'),
+        price: columnIndex('本地展示价'),
+        stock: columnIndex('库存'),
+        weight: columnIndex('重量')
+      };
+      const missing = Object.entries(columns)
+        .filter(([, index]) => index < 0)
+        .map(([name]) => name);
+      if (missing.length || !cells.length) {
+        return { error: `SKU table columns missing: ${missing.join(', ') || 'row cells'}` };
+      }
+      const cellValue = (index, selector) => {
+        const cell = cells[index];
+        if (!cell) return '';
+        const el = cell.querySelector(selector) || cell.querySelector('input');
+        return String(el?.value ?? '').trim();
+      };
       const specs = [];
-      for (const cell of cells) {
-        if (cell.querySelector('.currency-input input')) break;
-        if (cell.classList.contains('is-selection-column')) continue;
-        const text = String(cell.innerText || '').trim().replace(/\s+/g, ' ');
+      for (let index = 0; index < cells.length && index < columns.source; index++) {
+        if (cells[index].classList.contains('is-selection-column')) continue;
+        const text = String(cells[index].innerText || '').trim().replace(/\s+/g, ' ');
         if (text) specs.push(text);
       }
-      const value = selector => String(row.querySelector(selector)?.value || '').trim();
+      const priceCell = cells[columns.price];
       return {
         key: specs.join(' / '),
         label: specs.join(' / '),
-        price: value('.price-currency input'),
-        purchase_price: value('.currency-input input'),
-        stock: value('input.jx-input__inner[readonly]'),
-        weight: value('.package-weight-input input'),
-        platform_price: String(row.querySelector('.pro-readonly-component')?.innerText || '').trim()
+        price: cellValue(columns.price, '.price-currency input'),
+        purchase_price: cellValue(columns.source, '.currency-input input'),
+        stock: cellValue(columns.stock, 'input'),
+        weight: cellValue(columns.weight, '.package-weight-input input'),
+        platform_price: String(priceCell?.querySelector('.pro-readonly-component')?.innerText || '').trim()
       };
     })
     """
@@ -454,6 +484,8 @@ async def all_sku_snapshots(page: Any) -> list[Dict[str, str]]:
             if current is None:
                 raise ValueError("SKU rows disappeared while scrolling")
             for snapshot in await current.evaluate_all(script):
+                if snapshot.get("error"):
+                    raise ValueError(str(snapshot["error"]))
                 key = str(snapshot.get("key", "")).strip()
                 if key:
                     snapshots[key] = snapshot
@@ -469,3 +501,37 @@ async def all_sku_snapshots(page: Any) -> list[Dict[str, str]]:
             f"Virtual SKU scan collected {len(snapshots)} unique rows, expected {total}"
         )
     return list(snapshots.values())
+
+
+async def sku_column_indexes(page: Any) -> Dict[str, int]:
+    """Resolve SKU table column indexes from the editor table header text.
+
+    Purchase-price and display-price inputs share the same wrapper classes
+    since Miaoshou's 2026-09 editor update, so handlers that fill or read a
+    specific column must locate it via the header instead of input classes.
+    """
+    rows = await real_sku_rows(page)
+    if rows is None:
+        raise ValueError("Miaoshou SKU table is unavailable")
+    mapping = await rows.first.evaluate(
+        """
+    row => {
+      const table = row.closest('.pro-virtual-table');
+      const headers = table
+        ? [...table.querySelectorAll('.pro-virtual-table__header-cell')]
+        : [];
+      const find = keyword => headers.findIndex(header =>
+        String(header.innerText || '').replace(/\s+/g, ' ').includes(keyword));
+      return {
+        source: find('货源价格'),
+        price: find('本地展示价'),
+        stock: find('库存'),
+        weight: find('重量')
+      };
+    }
+    """
+    )
+    missing = sorted(name for name, index in mapping.items() if int(index) < 0)
+    if missing:
+        raise ValueError(f"SKU table header columns missing: {', '.join(missing)}")
+    return {name: int(index) for name, index in mapping.items()}

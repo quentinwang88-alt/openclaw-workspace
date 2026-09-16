@@ -13,6 +13,7 @@ from .editor_dom import (
     editor_root,
     real_sku_rows,
     row_label,
+    sku_column_indexes,
     sku_header,
 )
 
@@ -84,10 +85,12 @@ class PriceHandler(Handler):
             await self._fill_purchase_multiplier(context)
             return
         platform_prices = []
+        columns = await sku_column_indexes(context.page)
         for index in range(await rows.count()):
             row = rows.nth(index)
-            target = row.locator(".price-currency input").first
-            source = row.locator(".currency-input input").first
+            cells = row.locator(".pro-virtual-table__row-cell")
+            target = cells.nth(columns["price"]).locator("input").first
+            source = cells.nth(columns["source"]).locator("input").first
             purchase_cost = parse_decimal(await element_value(source))
             sale_price = context.pricing.calculate(
                 purchase_cost, context.task.pricing_rule_id
@@ -101,7 +104,7 @@ class PriceHandler(Handler):
                 raise ValueError(
                     f"{label}: final CNY price drifted from {expected} to {actual}"
                 )
-            converted = row.locator(".pro-readonly-component")
+            converted = cells.nth(columns["price"]).locator(".pro-readonly-component")
             platform_prices.append(
                 (await converted.first.inner_text()).strip()
                 if await converted.count()
