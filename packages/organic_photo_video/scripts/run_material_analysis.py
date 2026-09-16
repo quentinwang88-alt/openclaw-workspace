@@ -15,7 +15,15 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+WORKSPACE_ROOT = PACKAGE_ROOT.parents[1]
+for value in (str(WORKSPACE_ROOT), str(PACKAGE_ROOT)):
+    if value not in sys.path:
+        sys.path.insert(0, value)
+
+from workspace_support import load_repo_env  # noqa: E402
+
+load_repo_env()
 
 from services.material_analysis import MaterialAnalyzer, MaterialLedger  # noqa: E402
 from services.material_source import MaterialSource  # noqa: E402

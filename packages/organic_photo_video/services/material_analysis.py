@@ -70,6 +70,20 @@ CREATE TABLE IF NOT EXISTS material_gaps (
     reason TEXT NOT NULL,
     detail TEXT
 );
+CREATE TABLE IF NOT EXISTS supply_slots (
+    account_id TEXT NOT NULL,
+    supply_date TEXT NOT NULL,
+    slot INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'reserved',
+    record_id TEXT,
+    product_code TEXT,
+    main_note_id TEXT,
+    adoption TEXT,
+    note TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (account_id, supply_date, slot)
+);
 """
 
 
@@ -178,6 +192,56 @@ class MaterialLedger:
             (scope, reason, detail),
         )
         self._conn.commit()
+
+    # ---- 供稿名额（Phase 2） ----
+    def reserve_slot(self, account_id: str, supply_date: str, slot: int) -> str:
+        """预留名额。返回 newly_reserved / reserved（此前已预留未完成）/ created。"""
+        row = self._conn.execute(
+            "SELECT status FROM supply_slots WHERE account_id=? AND supply_date=? AND slot=?",
+            (account_id, supply_date, slot),
+        ).fetchone()
+        if row is None:
+            self._conn.execute(
+                "INSERT INTO supply_slots (account_id, supply_date, slot, status)"
+                " VALUES (?,?,?,'reserved')",
+                (account_id, supply_date, slot),
+            )
+            self._conn.commit()
+            return "newly_reserved"
+        return str(row["status"] or "reserved")
+
+    def complete_slot(self, account_id: str, supply_date: str, slot: int, *,
+                      record_id: str, product_code: str = "", main_note_id: str = "",
+                      adoption: str = "", note: str = "") -> None:
+        self._conn.execute(
+            "UPDATE supply_slots SET status='created', record_id=?, product_code=?,"
+            " main_note_id=?, adoption=?, note=?, updated_at=datetime('now')"
+            " WHERE account_id=? AND supply_date=? AND slot=?",
+            (record_id, product_code, main_note_id, adoption, note,
+             account_id, supply_date, slot),
+        )
+        self._conn.commit()
+
+    def slots_for(self, account_id: str, supply_date: Optional[str] = None):
+        if supply_date:
+            rows = self._conn.execute(
+                "SELECT * FROM supply_slots WHERE account_id=? AND supply_date=?"
+                " ORDER BY slot", (account_id, supply_date),
+            )
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM supply_slots WHERE account_id=?"
+                " ORDER BY updated_at DESC", (account_id,),
+            )
+        return rows.fetchall()
+
+    def product_usage_counts(self, account_id: str) -> Dict[str, int]:
+        rows = self._conn.execute(
+            "SELECT product_code, COUNT(*) n FROM supply_slots"
+            " WHERE account_id=? AND status='created' AND product_code!=''"
+            " GROUP BY product_code", (account_id,),
+        ).fetchall()
+        return {r["product_code"]: r["n"] for r in rows}
 
     def cost_summary(self) -> Dict[str, int]:
         row = self._conn.execute(

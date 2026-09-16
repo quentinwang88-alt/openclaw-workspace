@@ -19,7 +19,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 PROFILE_SCHEMA_VERSION = "opv-publish-account-profile-v1"
 
@@ -34,6 +34,95 @@ EXPRESSION_MODES = {
 CLAIM_SCOPE_STORE_POOL = "store_pool"
 CLAIM_SCOPE_OWN_TASKS_ONLY = "own_tasks_only"
 CLAIM_SCOPES = (CLAIM_SCOPE_STORE_POOL, CLAIM_SCOPE_OWN_TASKS_ONLY)
+
+# ---- 自动图文供稿策略（方案 §二/§三；运营开关，不参与内容冻结指纹） ----
+SUPPLY_STRATEGY_POSITIONING_FIRST = "positioning_first"
+SUPPLY_STRATEGY_REFERENCE_FIRST = "reference_first"
+SUPPLY_PRODUCT_MODE_NONE = "none"
+SUPPLY_PRODUCT_MODE_SPECIFIED = "specified"
+SUPPLY_AUTOMATION_OFF = "off"
+SUPPLY_AUTOMATION_PRODUCE = "produce"
+SUPPLY_AUTOMATION_PRODUCE_PUBLISH = "produce_publish"
+
+#: 中文枚举别名（账号表运营可读值 → 机器值）
+_SUPPLY_ENUM_ALIASES = {
+    "定位优先": SUPPLY_STRATEGY_POSITIONING_FIRST,
+    "参考优先": SUPPLY_STRATEGY_REFERENCE_FIRST,
+    "不指定商品": SUPPLY_PRODUCT_MODE_NONE,
+    "使用指定商品": SUPPLY_PRODUCT_MODE_SPECIFIED,
+    "关闭": SUPPLY_AUTOMATION_OFF,
+    "自动生产": SUPPLY_AUTOMATION_PRODUCE,
+    "自动生产并发布": SUPPLY_AUTOMATION_PRODUCE_PUBLISH,
+}
+
+
+def _supply_enum(value: Any, allowed: Tuple[str, ...], default: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return default
+    compact = text.replace(" ", "")
+    if compact in allowed:
+        return compact
+    return _SUPPLY_ENUM_ALIASES.get(compact, default)
+
+
+def _split_codes(value: Any) -> List[str]:
+    if isinstance(value, (list, tuple)):
+        items = [str(v) for v in value]
+    else:
+        items = str(value or "").replace("，", ",").replace("\n", ",").split(",")
+    return [item.strip() for item in items if item.strip()]
+
+
+def normalize_supply_policy(raw: Any) -> Optional[Dict[str, Any]]:
+    """收敛账号表里的供给策略；完全未配置返回 None（profile 不加键，字节不变）。
+
+    非法枚举值回落默认而不是报错：账号表由运营维护，坏值不应阻塞其他解析。
+    """
+    if not isinstance(raw, Mapping):
+        return None
+    mapping = dict(raw)
+    try:
+        daily_limit = max(int(mapping.get("daily_limit") or 0), 0)
+    except (TypeError, ValueError):
+        daily_limit = 0
+    policy: Dict[str, Any] = {
+        "content_strategy": _supply_enum(
+            mapping.get("content_strategy"),
+            (SUPPLY_STRATEGY_POSITIONING_FIRST, SUPPLY_STRATEGY_REFERENCE_FIRST),
+            SUPPLY_STRATEGY_POSITIONING_FIRST),
+        "product_mode": _supply_enum(
+            mapping.get("product_mode"),
+            (SUPPLY_PRODUCT_MODE_NONE, SUPPLY_PRODUCT_MODE_SPECIFIED),
+            SUPPLY_PRODUCT_MODE_NONE),
+        "product_codes": _split_codes(mapping.get("product_codes")),
+        "automation": _supply_enum(
+            mapping.get("automation"),
+            (SUPPLY_AUTOMATION_OFF, SUPPLY_AUTOMATION_PRODUCE,
+             SUPPLY_AUTOMATION_PRODUCE_PUBLISH),
+            SUPPLY_AUTOMATION_OFF),
+        "daily_limit": daily_limit,
+        "preset": str(mapping.get("preset") or "").strip(),
+        "material_scope": _split_codes(mapping.get("material_scope")),
+    }
+    if (policy["automation"] == SUPPLY_AUTOMATION_OFF
+            and not policy["preset"] and not policy["product_codes"]
+            and not policy["material_scope"] and not policy["daily_limit"]):
+        return None
+    return policy
+
+
+def default_supply_policy() -> Dict[str, Any]:
+    """未配置账号的供给策略视图：automation=off（不产生任何自动行为）。"""
+    return {
+        "content_strategy": SUPPLY_STRATEGY_POSITIONING_FIRST,
+        "product_mode": SUPPLY_PRODUCT_MODE_NONE,
+        "product_codes": [],
+        "automation": SUPPLY_AUTOMATION_OFF,
+        "daily_limit": 0,
+        "preset": "",
+        "material_scope": [],
+    }
 
 # 指纹只覆盖会影响生成/领取行为的字段；账号名称等展示字段变化不算配置变化。
 _FINGERPRINT_FIELDS = (
@@ -103,6 +192,11 @@ def normalize_profile_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
         "default_visual_preset": str(raw.get("default_visual_preset") or "").strip(),
         "style_image": style_image,
     }
+    # 供给策略是运营开关而非内容冻结配置：不进 _FINGERPRINT_FIELDS，
+    # 且未配置时完全不加键（旧账号 profile 序列化字节不变）。
+    supply_policy = normalize_supply_policy(raw.get("photo_supply_policy"))
+    if supply_policy is not None:
+        profile["photo_supply_policy"] = supply_policy
     return profile
 
 
@@ -132,6 +226,16 @@ class PublishAccountBinding:
     @property
     def claim_scope(self) -> str:
         return str(self.profile.get("photo_claim_scope") or CLAIM_SCOPE_STORE_POOL)
+
+    @property
+    def supply_policy(self) -> Dict[str, Any]:
+        """自动供稿策略（未配置 → automation=off 的默认视图）。"""
+        policy = self.profile.get("photo_supply_policy")
+        if isinstance(policy, Mapping):
+            merged = default_supply_policy()
+            merged.update({k: v for k, v in dict(policy).items() if k in merged})
+            return merged
+        return default_supply_policy()
 
     @property
     def target_publish_account_id(self) -> str:

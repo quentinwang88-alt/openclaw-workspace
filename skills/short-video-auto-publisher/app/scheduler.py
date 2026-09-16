@@ -99,6 +99,15 @@ ACCOUNT_FIELD_ALIASES: Dict[str, List[str]] = {
     "visual_style": ["视觉风格", "视频风格"],
     "style_image": ["风格图片"],
     "photo_claim_scope": ["图文领取范围"],
+    # 自动图文供稿策略（2026-09-16，OPV 自动供稿 Phase 2）：全部为空＝未配置，
+    # profile 不加 photo_supply_policy 键，账号行为与旧版完全一致。
+    "supply_strategy": ["图文内容策略"],
+    "supply_product_mode": ["商品使用方式"],
+    "supply_product_codes": ["默认产品编码"],
+    "supply_automation": ["图文自动化模式"],
+    "supply_daily_limit": ["每日自动生产上限"],
+    "supply_preset": ["自动供稿预设"],
+    "supply_material_scope": ["素材范围"],
 }
 
 
@@ -372,11 +381,18 @@ def normalize_photo_expression_mode(raw_value: Any) -> str:
 def build_photo_content_profile(
     *, positioning: str = "", default_theme: str = "", expression_mode: str = "",
     visual_style: str = "", style_image: Any = None,
+    supply_strategy: str = "", supply_product_mode: str = "",
+    supply_product_codes: Any = None, supply_automation: str = "",
+    supply_daily_limit: Any = None, supply_preset: str = "",
+    supply_material_scope: Any = None,
 ) -> str:
     """把账号表的定位相关列收敛成 OPV 消费的 photo_content_profile JSON。
 
     全部为空时返回空串（账号未配置定位，保持旧领取行为）。风格图片只保存
     附件身份（file_token/name）指纹；生成侧是否消费由 OPV 决定。
+
+    供给策略列同理：automation 等全空时不写 ``photo_supply_policy`` 键，
+    已有序列化输出与旧版逐字节一致。
     """
     profile: Dict[str, Any] = {
         "schema_version": "opv-publish-account-profile-v1",
@@ -396,10 +412,54 @@ def build_photo_content_profile(
             "file_token": str(attachment.get("file_token") or ""),
             "name": str(attachment.get("name") or ""),
         }
+    supply_policy = _build_supply_policy(
+        strategy=supply_strategy, product_mode=supply_product_mode,
+        product_codes=supply_product_codes, automation=supply_automation,
+        daily_limit=supply_daily_limit, preset=supply_preset,
+        material_scope=supply_material_scope)
+    if supply_policy:
+        profile["photo_supply_policy"] = supply_policy
     keys = [key for key in profile if key != "schema_version"]
     if not keys:
         return ""
     return json.dumps(profile, ensure_ascii=False, sort_keys=True)
+
+
+def _build_supply_policy(
+    *, strategy: str = "", product_mode: str = "", product_codes: Any = None,
+    automation: str = "", daily_limit: Any = None, preset: str = "",
+    material_scope: Any = None,
+) -> Dict[str, Any]:
+    """账号表供给列 → policy dict；automation 为空或“关闭”且无其他配置 → 空dict（不写键）。"""
+    automation_text = str(automation or "").strip()
+    codes = [
+        str(code).strip() for code in (
+            product_codes if isinstance(product_codes, (list, tuple))
+            else str(product_codes or "").replace("，", ",").replace("\n", ",").split(",")
+        ) if str(code).strip()
+    ]
+    scope = [
+        str(item).strip() for item in (
+            material_scope if isinstance(material_scope, (list, tuple))
+            else str(material_scope or "").replace("，", ",").replace("\n", ",").split(",")
+        ) if str(item).strip()
+    ]
+    try:
+        limit = max(int(str(daily_limit).strip() or 0), 0) if daily_limit is not None else 0
+    except (TypeError, ValueError):
+        limit = 0
+    if (not automation_text or automation_text == "关闭") and not preset \
+            and not codes and not scope and not limit:
+        return {}
+    return {
+        "content_strategy": str(strategy or "").strip() or "定位优先",
+        "product_mode": str(product_mode or "").strip() or "不指定商品",
+        "product_codes": codes,
+        "automation": automation_text or "关闭",
+        "daily_limit": limit,
+        "preset": str(preset or "").strip(),
+        "material_scope": scope,
+    }
 
 
 def account_photo_claim_scope(account: Any) -> str:
@@ -480,6 +540,13 @@ def sync_accounts(records: Iterable[Any], mapping: Dict[str, Optional[str]], db:
                     expression_mode=fields.get(mapping.get("expression_mode")),
                     visual_style=normalize_text(fields.get(mapping.get("visual_style"))),
                     style_image=fields.get(mapping.get("style_image")),
+                    supply_strategy=normalize_text(fields.get(mapping.get("supply_strategy"))),
+                    supply_product_mode=normalize_text(fields.get(mapping.get("supply_product_mode"))),
+                    supply_product_codes=fields.get(mapping.get("supply_product_codes")),
+                    supply_automation=normalize_text(fields.get(mapping.get("supply_automation"))),
+                    supply_daily_limit=fields.get(mapping.get("supply_daily_limit")),
+                    supply_preset=normalize_text(fields.get(mapping.get("supply_preset"))),
+                    supply_material_scope=fields.get(mapping.get("supply_material_scope")),
                 ),
                 "photo_claim_scope": normalize_photo_claim_scope(
                     fields.get(mapping.get("photo_claim_scope"))),

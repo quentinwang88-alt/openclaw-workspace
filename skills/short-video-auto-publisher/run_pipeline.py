@@ -661,6 +661,13 @@ def ensure_account_nurture_fields(client: FeishuBitableClient, field_names: list
             ui_type="SingleSelect",
             property={"options": [{"name": "沿用店铺池"}, {"name": "仅本账号任务"}]},
         )
+    # 自动图文供稿策略（2026-09-16，OPV Phase 2）：只加不删；文本列起步，
+    # 运营用法稳定后再升级单选（升级时保留历史值）。
+    for field_name in ("图文内容策略", "商品使用方式", "默认产品编码",
+                       "图文自动化模式", "每日自动生产上限",
+                       "自动供稿预设", "素材范围"):
+        if field_name not in existing:
+            create_optional_field(field_name, field_type=1, ui_type="Text")
     return client.list_field_names()
 
 
