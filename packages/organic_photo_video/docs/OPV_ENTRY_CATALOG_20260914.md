@@ -21,13 +21,14 @@
 | 分组 | 预设 | 状态 | 可用 | 类型 | 市场 | 配方 |
 |---|---|---|---|---|---|---|
 | production | 图文｜TH｜旅行穿搭 | active | ✅ | native_photo | TH | `PHOTO_TH_TRAVEL_OUTFIT_V2` |
-| production | 图文｜TH｜小个子显高 | active | ✅ | native_photo | TH | `PHOTO_TH_PETITE_STYLING_V1` |
 | production | 图文｜TH｜四选一穿搭 | active | ✅ | native_photo | TH | `PHOTO_TH_PICK_YOUR_LOOK_V3` |
-| production | 图文｜MX｜假发前后对比 | active | ✅ | native_photo | MX | `PHOTO_MX_BEFORE_AFTER_V1` |
 | production | 图文｜MX｜四选一发型 | active | ✅ | native_photo | MX | `PHOTO_MX_PICK_YOUR_HAIR_V2` |
-| production | 图文｜MX｜脸型匹配发型 | active | ✅ | native_photo | MX | `PHOTO_MX_FACE_SHAPE_MATCH_V1` |
-| production | 图文｜MX｜场景发型 | active | ✅ | native_photo | MX | `PHOTO_MX_OCCASION_HAIR_V1` |
+| trial | TH｜穿搭拆解首图｜均衡变体 | disabled | ⛔ | — | TH | `RECIPE_OUTFIT_BREAKDOWN_V1` |
+| trial | 图文｜TH｜小个子显高 | disabled | ⛔ | native_photo | TH | `PHOTO_TH_PETITE_STYLING_V1` |
 | trial | 图文｜TH｜冷热切换 | disabled | ⛔ | native_photo | TH | `PHOTO_TH_THERMAL_TRANSITION_V1` |
+| trial | 图文｜MX｜假发前后对比 | disabled | ⛔ | native_photo | MX | `PHOTO_MX_BEFORE_AFTER_V1` |
+| trial | 图文｜MX｜脸型匹配发型 | disabled | ⛔ | native_photo | MX | `PHOTO_MX_FACE_SHAPE_MATCH_V1` |
+| trial | 图文｜MX｜场景发型 | disabled | ⛔ | native_photo | MX | `PHOTO_MX_OCCASION_HAIR_V1` |
 | trial | 图文｜VN｜围巾旅行 | disabled | ⛔ | native_photo | VN | `PHOTO_TRAVEL_OUTFIT_V3` |
 | trial | 图文｜VN｜围巾搭配四选一 | disabled | ⛔ | native_photo | VN | `PHOTO_MATCHING_CHOICE_V3` |
 | legacy | TH｜五套穿搭｜拆解首图 | active | ✅ | — | TH | `RECIPE_MULTI_LOOK_V1` |
@@ -36,7 +37,6 @@
 | legacy | TH｜一衣多穿｜轻文字 | active | ✅ | — | TH | `RECIPE_VISUAL_TRANSFORM_V1` |
 | legacy | TH｜三配方套装｜轻文字 | active | ✅ | — | TH | `RECIPE_PAIN_POINT_SOLUTION_V1`、`RECIPE_SCENE_SOLUTION_V1`、`RECIPE_VISUAL_TRANSFORM_V1` |
 | legacy | TH｜自动匹配穿搭组合｜轻文字 | active | ✅ | — | TH | `RECIPE_PAIN_POINT_SOLUTION_V1`、`RECIPE_SCENE_SOLUTION_V1`、`RECIPE_VISUAL_TRANSFORM_V1` |
-| legacy | TH｜穿搭拆解首图｜均衡变体 | active | ✅ | — | TH | `RECIPE_OUTFIT_BREAKDOWN_V1` |
 | legacy | TH｜随机养号组合｜轻文字 | active | ✅ | — | — | `（候选项：TH｜五套穿搭｜拆解首图）` |
 
 ## 2. 预设 → 配方 → 流程 → 主题 → 语言 → 排版 → 输出
@@ -54,19 +54,6 @@
   - 排版：版式 `FULL_BLEED`、`CHOICE_DETAIL`；角色 `travel_cover`、`look_a`、`look_b`、`look_c`、`look_d_with_cta`
   - 输出形式：`native_photo` 5 页；发布店铺（TH）=`THFZ01`
 
-### 图文｜TH｜小个子显高
-
-分组 `production`（运营日常入口）；状态 `active`；可用：是；类目 `womenswear`；路由策略 `native_photo_v1`
-
-- **任务 1**：账号 `OPV_TH_TEST_001`；市场/语言 `TH`/`th-TH`；钩子 `petite_question`
-  - 配方：`PHOTO_TH_PETITE_STYLING_V1`（native_photo，5 页，锚点槽位 3）
-  - 规划流程：`—`
-  - 主题范围：—
-  - 主题缺省：必填
-  - 文案来源：v1 内联（随「图文主题」携带 th-TH 文案）
-  - 排版：版式 `SPLIT_TWO`、`DETAIL`；角色 `hook_comparison`、`baseline`、`improved`、`key_detail`、`cta`
-  - 输出形式：`native_photo` 5 页；发布店铺（TH）=`THFZ01`
-
 ### 图文｜TH｜四选一穿搭
 
 分组 `production`（运营日常入口）；状态 `active`；可用：是；类目 `womenswear`；路由策略 `native_photo_product_supply_v1`
@@ -79,19 +66,6 @@
   - 文案来源：v1 内联（随「图文主题」携带 th-TH 文案）
   - 排版：版式 `GRID_FOUR`、`CHOICE_DETAIL`；角色 `choice_grid`、`look_a`、`look_b`、`look_c`、`look_d_with_cta`
   - 输出形式：`native_photo` 5 页；发布店铺（TH）=`THFZ01`
-
-### 图文｜MX｜假发前后对比
-
-分组 `production`（运营日常入口）；状态 `active`；可用：是；类目 `wig`；路由策略 `native_photo_v1`
-
-- **任务 1**：账号 `OPV_MX_PHOTO_001`；市场/语言 `MX`/`es-MX`；钩子 `antes_despues`
-  - 配方：`PHOTO_MX_BEFORE_AFTER_V1`（native_photo，5 页，锚点槽位 3）
-  - 规划流程：`—`
-  - 主题范围：—
-  - 主题缺省：必填
-  - 文案来源：v1 内联（随「图文主题」携带 th-TH 文案）
-  - 排版：版式 `SPLIT_TWO`、`DETAIL`；角色 `before_after_hook`、`before`、`after`、`hair_detail`、`cta`
-  - 输出形式：`native_photo` 5 页；发布店铺（MX）=`MXJF01`
 
 ### 图文｜MX｜四选一发型
 
@@ -106,31 +80,32 @@
   - 排版：版式 `HAIR_OPTION`、`HAIR_OPTION_CTA`；角色 `hair_a`、`hair_b`、`hair_c`、`hair_d`
   - 输出形式：`native_photo` 4 页；发布店铺（MX）=`MXJF01`
 
-### 图文｜MX｜脸型匹配发型
+### TH｜穿搭拆解首图｜均衡变体
 
-分组 `production`（运营日常入口）；状态 `active`；可用：是；类目 `wig`；路由策略 `native_photo_v1`
+分组 `trial`（已配置待验收）；状态 `disabled`；可用：否；类目 `—`；路由策略 `—`
 
-- **任务 1**：账号 `OPV_MX_PHOTO_001`；市场/语言 `MX`/`es-MX`；钩子 `face_shape_match`
-  - 配方：`PHOTO_MX_FACE_SHAPE_MATCH_V1`（native_photo，5 页，锚点槽位 2）
+- **任务 1**：账号 `OPV_TH_TEST_001`；市场/语言 `TH`/`th-TH`；钩子 `—`
+  - 配方：`RECIPE_OUTFIT_BREAKDOWN_V1`（历史类型，5 页，锚点槽位 2）
+  - 预设自带主题：`THEME_TH_OUTFIT_BREAKDOWN_V1`
   - 规划流程：`—`
   - 主题范围：—
   - 主题缺省：必填
   - 文案来源：v1 内联（随「图文主题」携带 th-TH 文案）
-  - 排版：版式 `GRID_FOUR`、`CHOICE_DETAIL`；角色 `face_shape_hook`、`round_face`、`oval_face`、`square_face`、`long_face_with_cta`
-  - 输出形式：`native_photo` 5 页；发布店铺（MX）=`MXJF01`
+  - 排版：版式 —；角色 —
+  - 输出形式：`video` 5 页；发布店铺（TH）=`THFZ01`
 
-### 图文｜MX｜场景发型
+### 图文｜TH｜小个子显高
 
-分组 `production`（运营日常入口）；状态 `active`；可用：是；类目 `wig`；路由策略 `native_photo_v1`
+分组 `trial`（已配置待验收）；状态 `disabled`；可用：否；类目 `womenswear`；路由策略 `native_photo_v1`
 
-- **任务 1**：账号 `OPV_MX_PHOTO_001`；市场/语言 `MX`/`es-MX`；钩子 `hair_for_each_plan`
-  - 配方：`PHOTO_MX_OCCASION_HAIR_V1`（native_photo，5 页，锚点槽位 2）
+- **任务 1**：账号 `OPV_TH_TEST_001`；市场/语言 `TH`/`th-TH`；钩子 `petite_question`
+  - 配方：`PHOTO_TH_PETITE_STYLING_V1`（native_photo，5 页，锚点槽位 3）
   - 规划流程：`—`
   - 主题范围：—
   - 主题缺省：必填
   - 文案来源：v1 内联（随「图文主题」携带 th-TH 文案）
-  - 排版：版式 `GRID_FOUR`、`CHOICE_DETAIL`；角色 `occasion_hook`、`date_hair`、`party_hair`、`work_hair`、`weekend_hair_with_cta`
-  - 输出形式：`native_photo` 5 页；发布店铺（MX）=`MXJF01`
+  - 排版：版式 `SPLIT_TWO`、`DETAIL`；角色 `hook_comparison`、`baseline`、`improved`、`key_detail`、`cta`
+  - 输出形式：`native_photo` 5 页；发布店铺（TH）=`THFZ01`
 
 ### 图文｜TH｜冷热切换
 
@@ -144,6 +119,45 @@
   - 文案来源：v1 内联（随「图文主题」携带 th-TH 文案）
   - 排版：版式 `TRIPTYCH`、`FULL_BLEED`；角色 `hook`、`state_base`、`state_mid`、`state_outer`、`cta`
   - 输出形式：`native_photo` 5 页；发布店铺（TH）=`THFZ01`
+
+### 图文｜MX｜假发前后对比
+
+分组 `trial`（已配置待验收）；状态 `disabled`；可用：否；类目 `wig`；路由策略 `native_photo_v1`
+
+- **任务 1**：账号 `OPV_MX_PHOTO_001`；市场/语言 `MX`/`es-MX`；钩子 `antes_despues`
+  - 配方：`PHOTO_MX_BEFORE_AFTER_V1`（native_photo，5 页，锚点槽位 3）
+  - 规划流程：`—`
+  - 主题范围：—
+  - 主题缺省：必填
+  - 文案来源：v1 内联（随「图文主题」携带 th-TH 文案）
+  - 排版：版式 `SPLIT_TWO`、`DETAIL`；角色 `before_after_hook`、`before`、`after`、`hair_detail`、`cta`
+  - 输出形式：`native_photo` 5 页；发布店铺（MX）=`MXJF01`
+
+### 图文｜MX｜脸型匹配发型
+
+分组 `trial`（已配置待验收）；状态 `disabled`；可用：否；类目 `wig`；路由策略 `native_photo_v1`
+
+- **任务 1**：账号 `OPV_MX_PHOTO_001`；市场/语言 `MX`/`es-MX`；钩子 `face_shape_match`
+  - 配方：`PHOTO_MX_FACE_SHAPE_MATCH_V1`（native_photo，5 页，锚点槽位 2）
+  - 规划流程：`—`
+  - 主题范围：—
+  - 主题缺省：必填
+  - 文案来源：v1 内联（随「图文主题」携带 th-TH 文案）
+  - 排版：版式 `GRID_FOUR`、`CHOICE_DETAIL`；角色 `face_shape_hook`、`round_face`、`oval_face`、`square_face`、`long_face_with_cta`
+  - 输出形式：`native_photo` 5 页；发布店铺（MX）=`MXJF01`
+
+### 图文｜MX｜场景发型
+
+分组 `trial`（已配置待验收）；状态 `disabled`；可用：否；类目 `wig`；路由策略 `native_photo_v1`
+
+- **任务 1**：账号 `OPV_MX_PHOTO_001`；市场/语言 `MX`/`es-MX`；钩子 `hair_for_each_plan`
+  - 配方：`PHOTO_MX_OCCASION_HAIR_V1`（native_photo，5 页，锚点槽位 2）
+  - 规划流程：`—`
+  - 主题范围：—
+  - 主题缺省：必填
+  - 文案来源：v1 内联（随「图文主题」携带 th-TH 文案）
+  - 排版：版式 `GRID_FOUR`、`CHOICE_DETAIL`；角色 `occasion_hook`、`date_hair`、`party_hair`、`work_hair`、`weekend_hair_with_cta`
+  - 输出形式：`native_photo` 5 页；发布店铺（MX）=`MXJF01`
 
 ### 图文｜VN｜围巾旅行
 
@@ -248,20 +262,6 @@
 - **任务 3**：账号 `OPV_TH_TEST_001`；市场/语言 `TH`/`th-TH`；钩子 `before_after`
   - 配方：`RECIPE_VISUAL_TRANSFORM_V1`（历史类型，5 页，锚点槽位 5）
   - 预设自带主题：`THEME_TH_ONE_PIECE_MULTIWAY_V1`
-  - 规划流程：`—`
-  - 主题范围：—
-  - 主题缺省：必填
-  - 文案来源：v1 内联（随「图文主题」携带 th-TH 文案）
-  - 排版：版式 —；角色 —
-  - 输出形式：`video` 5 页；发布店铺（TH）=`THFZ01`
-
-### TH｜穿搭拆解首图｜均衡变体
-
-分组 `legacy`（保留的历史入口）；状态 `active`；可用：是；类目 `—`；路由策略 `—`
-
-- **任务 1**：账号 `OPV_TH_TEST_001`；市场/语言 `TH`/`th-TH`；钩子 `—`
-  - 配方：`RECIPE_OUTFIT_BREAKDOWN_V1`（历史类型，5 页，锚点槽位 2）
-  - 预设自带主题：`THEME_TH_OUTFIT_BREAKDOWN_V1`
   - 规划流程：`—`
   - 主题范围：—
   - 主题缺省：必填

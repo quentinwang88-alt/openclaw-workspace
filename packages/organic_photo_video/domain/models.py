@@ -535,6 +535,9 @@ class ContentTask:
     active_revision_id: Optional[str] = None
     released_revision_id: Optional[str] = None
     row_version: int = 1
+    # 真实投递账号（TikTok handle）。``account_id`` 仍是内部 OPV 生产资料
+    # 外键；该列只表示发布归属，空值＝沿用店铺公共池的旧行为。
+    target_publish_account_id: str = ""
     failure_code: Optional[str] = None
     failure_detail: Optional[str] = None
     feishu_record_id: Optional[str] = None
@@ -593,6 +596,7 @@ class ContentTask:
             "active_revision_id": self.active_revision_id,
             "released_revision_id": self.released_revision_id,
             "row_version": self.row_version,
+            "target_publish_account_id": self.target_publish_account_id,
             "failure_code": self.failure_code,
             "failure_detail": self.failure_detail,
             "feishu_record_id": self.feishu_record_id,
@@ -643,6 +647,7 @@ class ContentTask:
             active_revision_id=row.get("active_revision_id"),
             released_revision_id=row.get("released_revision_id"),
             row_version=int(row.get("row_version") or 1),
+            target_publish_account_id=str(row.get("target_publish_account_id") or ""),
             failure_code=row.get("failure_code"),
             failure_detail=row.get("failure_detail"),
             feishu_record_id=row.get("feishu_record_id"),

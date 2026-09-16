@@ -333,6 +333,19 @@ class PhotoStyleReferenceSupplyService:
         identity_paths: list[str] = []
         human_contract: dict[str, Any] = {}
         color_grading_plan = dict(style_profile.get("color_grading_plan") or {})
+        # 视觉预设有效配置（2026-09-15 七样审查：固定背景必须在**请求层**执行，
+        # 不能只停留在规划提示词）。旧快照缺 background 键时按旧行为。
+        _visual_preset = dict(style_profile.get("visual_preset") or {})
+        _background_cfg = dict(_visual_preset.get("background") or {})
+        fixed_kind = (
+            str(_background_cfg.get("kind") or "")
+            if str(_background_cfg.get("mode") or "") == "fixed" else ""
+        )
+        fixed_mode = fixed_kind in ("solid", "indoor")
+        fixed_scene_zh = str(_background_cfg.get("fixed_scene_zh") or "")
+        fixed_stability_zh = str(_background_cfg.get("stability_zh") or "")
+        photography_baseline_zh = str(
+            _visual_preset.get("photography_baseline_zh") or "")
         qa_reference_paths = list(dict.fromkeys(
             [str(value) for value in product.get("reference_images") or [] if Path(str(value)).is_file()]
             + list(paths)
@@ -390,6 +403,12 @@ class PhotoStyleReferenceSupplyService:
                                or (layered_planned and "LAYER_PROGRESSION" in uses)
                                or ("OUTFIT" in uses
                                    and (not selected_outfit or position in selected_outfit)))
+                    if fixed_mode and uses and not (
+                            "OUTFIT" in uses or "VISUAL_STYLE" in uses
+                            or "LAYER_PROGRESSION" in uses):
+                        # 固定背景（2026-09-15 断点 A1）：仅环境用途的参考图
+                        # 不进入生成参考；同图承担穿搭/风格用途时保留有效用途。
+                        include = False
                     if include:
                         selected_style_paths.append(path)
                 references = list(dict.fromkeys(
@@ -415,6 +434,8 @@ class PhotoStyleReferenceSupplyService:
                         if human_scene and not travel_moment and not layered_planned else None
                     )
                     camera_hint = (
+                        POSE_HINTS.get(role, "自然完整全身站姿")
+                        if fixed_mode else
                         TRAVEL_CAMERA_HINTS.get(travel_moment)
                         or (pose_contract or {}).get("camera_hint")
                         or POSE_HINTS.get(role, "自然完整全身站姿")
@@ -422,6 +443,10 @@ class PhotoStyleReferenceSupplyService:
                     composition = {
                         "framing": "full_body",
                         "instruction": (
+                            f"固定背景中的完整全身穿搭，背景要求：{fixed_scene_zh}；"
+                            f"{fixed_stability_zh}；人物动作自然，头顶和鞋底留安全边距，服装层次清晰；"
+                            "不得出现街道、地标、旅游场景或窗外街景"
+                            if fixed_mode else
                             f"生活场景中的完整全身穿搭，场景要求：{travel_scene_prompt}；"
                             "人物动作自然，头顶和鞋底留安全边距，服装层次清晰"
                             if travel_scene_prompt else
@@ -435,7 +460,7 @@ class PhotoStyleReferenceSupplyService:
                         "forbidden": ["手机遮脸", "试衣间界面", "商品编号", "截图黑边"],
                         "prop_policy": "no_new_props",
                     }
-                    if travel_moment and role == "look_a":
+                    if (travel_moment or fixed_mode) and role == "look_a":
                         composition["instruction"] += (
                             "；本页兼作图文首图，画面上方保留自然、干净的短标题区域，"
                             "人物和穿搭主体保持完整"
@@ -479,6 +504,9 @@ class PhotoStyleReferenceSupplyService:
                             if str(look.get("styling_intent") or "").strip() else ""
                         ),
                         (
+                            f"同一人物身份、固定背景（{fixed_scene_zh}）与统一色彩基调；"
+                            "各 Look 只变化姿势、机位与景别，背景保持同一空间气质"
+                            if fixed_mode else
                             "同一人物身份、同一目的地视觉体系、统一色彩基调；"
                             "各 Look 场景互相独立，按各自 travel_moment 呈现"
                             if travel_moment else ""
@@ -512,6 +540,8 @@ class PhotoStyleReferenceSupplyService:
                     look_snapshot={"recipe": dict(look)},
                     scene_snapshot={
                         "name": (
+                            f"固定背景·{fixed_kind}｜{variation.get('scene_zh') or theme['label_zh']}"
+                            if fixed_mode else
                             f"{travel_moment}｜{variation.get('scene_zh') or '旅行场景'}"
                             if travel_moment else
                             str(variation.get("scene_zh") or (
@@ -519,6 +549,9 @@ class PhotoStyleReferenceSupplyService:
                             ))
                         ),
                         "prompt_core": (
+                            "；".join(filter(None, [fixed_scene_zh, fixed_stability_zh,
+                                                    "不得出现街道、地标或旅游场景"]))
+                            if fixed_mode else
                             _with_background_anchor(
                                 travel_scene_prompt
                                 or str(variation.get("background_prompt") or (
@@ -546,11 +579,15 @@ class PhotoStyleReferenceSupplyService:
                             "presentation_type": presentation_type,
                             "background_mode": (
                                 "reference_surface" if flat_lay else
+                                "solid_color" if fixed_kind == "solid" else
+                                "fixed_indoor" if fixed_kind == "indoor" else
                                 "creator_environment" if scene_model else "solid_color"
                             ),
                             "background_color": str(variation.get("background_color") or "#E9DFD0"),
                             "full_body_occupancy": "78-88%",
                             "reference_style_profile": style_profile,
+                            **({"photography_baseline_zh": photography_baseline_zh}
+                               if photography_baseline_zh else {}),
                         },
                         # 发布语言随任务走（review 修复 P0-2）：此前写死 th-TH，
                         # 会让 VN 任务的生成请求带着泰语语言标记。默认值保持
@@ -567,11 +604,13 @@ class PhotoStyleReferenceSupplyService:
                     },
                     reference_roles={
                         "style_reference_images": list(selected_style_paths),
-                        "environment_reference_images": [
-                            paths[int(value) - 1]
-                            for value in (style_profile.get("environment_reference") or {}).get("indices") or []
-                            if str(value).isdigit() and 0 < int(value) <= len(paths)
-                        ],
+                        "environment_reference_images": (
+                            [] if fixed_mode else [
+                                paths[int(value) - 1]
+                                for value in (style_profile.get("environment_reference") or {}).get("indices") or []
+                                if str(value).isdigit() and 0 < int(value) <= len(paths)
+                            ]
+                        ),
                         "visual_style_reference_images": [
                             paths[int(value) - 1]
                             for value in (style_profile.get("visual_style_reference") or {}).get("indices") or []
@@ -603,11 +642,14 @@ class PhotoStyleReferenceSupplyService:
                     and set(generation_order) == set(by_generation_role))
                 else list(looks)
             )
-            # 并行预取：无生成图锚点的路径（人物场景/平铺）B/C/D 与 Look A
-            # 门禁并行生成，整组墙钟时间约减半。门禁彻底失败时预取结果
-            # 直接丢弃（不入 manifest，不进链路，仅损失生图费）。
-            parallelizable = ((flat_lay or human_scene) and len(looks) > 2
-                              and not layered_planned)
+            # 并行预取：B/C/D 与 Look A 门禁并行生成，整组墙钟时间约减半。
+            # 门禁彻底失败时预取结果直接丢弃（不入 manifest，不进链路，仅损
+            # 失生图费）。2026-09-15 提速：旅行线（无生成图锚点依赖）同样
+            # 预取——此前只对平铺/人物场景启用，旅行行 B/C/D 串行是单行
+            # 15-25 分钟的最大成因；各 Look 请求相互独立（风格/身份参考固
+            # 定），组级一致性仍在四张齐后统一检查。分层线保持串行（层间
+            # 有顺序语义）。
+            parallelizable = (len(looks) > 2 and not layered_planned)
             prefetch: dict[str, Any] = {}
             executor = None
             if parallelizable:
@@ -909,6 +951,9 @@ class PhotoStyleReferenceSupplyService:
                         image_paths=[str(item["path"]) for item in ordered],
                         travel_contract=style_profile.get("travel_contract") or {},
                         persona_based=bool(persona),
+                        fixed_background=(
+                            str((style_profile.get("visual_preset") or {})
+                                .get("background_mode") or "") == "fixed"),
                         **_product_qa_context(product),
                     )
                     from services.photo_travel_qa import (

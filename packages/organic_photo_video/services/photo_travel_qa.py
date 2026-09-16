@@ -120,6 +120,7 @@ def normalize_travel_qa(
     footwear_types: Sequence[str] = (),
     has_product: bool = False, travel_place: str = "", level: str = None,
     product_qa_fields: Sequence[str] = (),
+    fixed_background: bool = False,
 ) -> dict[str, Any]:
     """Convert a model verdict into per-role QA results with deterministic
     failure codes and repair instructions. Nothing defaults to passed.
@@ -184,7 +185,6 @@ def normalize_travel_qa(
         person_deformity = bool(flags.get("face_or_limb_deformity"))
         person_tilt = bool(flags.get("obvious_unnatural_tilt"))
 
-        scene_ok = observed == moment and bool(evidence)
         # 改造二：程序按计划与观察判定步行适配，不只相信模型布尔值。
         rule = rules.get(moment) or {}
         forbidden = set(rule.get("forbidden") or [])
@@ -198,9 +198,16 @@ def normalize_travel_qa(
         failure_code = ""
         if not observed or observed.lower() == "unknown":
             failure_code = FAILURE_UNKNOWN_SCENE
-        elif observed != moment:
+        elif observed != moment and not fixed_background:
+            # 固定背景（Phase 3）：moment 只是鞋履/步行规则的规划语境，画面
+            # 不呈现对应场所，observed 与 moment 不一致不算缺陷——但不能因此
+            # 结束检查链：商品、穿搭、天气、人物等核心检查必须继续执行
+            # （2026-09-15 七样审查：豁免分支曾短路后续全部 elif）。
             failure_code = FAILURE_SCENE_MISMATCH
-        elif scene_ok is False:
+        elif not evidence:
+            # 证据检查与 moment 解耦：固定背景只要求有画面证据，不要求
+            # 场所匹配（非固定路径在此处 observed==moment 已由上一分支保证，
+            # 行为逐字等价于旧 scene_ok 判定）。
             failure_code = FAILURE_INSUFFICIENT_EVIDENCE
         elif not product_ok:
             failure_code = FAILURE_OUTFIT_MISMATCH
@@ -285,9 +292,12 @@ def normalize_travel_qa(
 
     # Deterministic regression guard: one shared scene cannot honestly cover
     # four distinct travel moments, whatever the model claims per page.
+    # 固定背景（Phase 3）豁免：四页共享同一背景是任务设计，不是缺陷；地点/
+    # 温度只是内容语境，画面不呈现目的地也不算冲突。
     distinct_observed = {value for value in observed_moments.values() if value}
     distinct_expected = set(expected.values())
-    if len(distinct_expected) > 1 and len(distinct_observed) == 1:
+    if (not fixed_background
+            and len(distinct_expected) > 1 and len(distinct_observed) == 1):
         for item in results:
             item["passed"] = False
             if not item["failure_code"]:
@@ -297,7 +307,7 @@ def normalize_travel_qa(
                     "请按各自 scene_prompt 重做"
                 )
 
-    destination_conflict = bool(raw.get("destination_conflict"))
+    destination_conflict = bool(raw.get("destination_conflict")) and not fixed_background
     if destination_conflict:
         for item in results:
             if item["passed"]:

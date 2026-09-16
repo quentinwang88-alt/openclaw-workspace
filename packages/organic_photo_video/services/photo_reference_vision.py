@@ -817,18 +817,24 @@ class PhotoReferenceVisionService:
     def analyze_reference(
         self, *, record_id: str, paths: Sequence[str], theme: Mapping[str, Any],
         category_key: str, content_requirement: str = "",
+        account_visual_baseline: str = "",
     ) -> dict[str, Any]:
         """Step 1: describe references only — no scene planning, no copy."""
         images = [str(Path(value).expanduser().resolve()) for value in paths]
         if not images or any(not Path(value).is_file() for value in images):
             raise PhotoReferenceVisionError("参考图缺失或不可读取")
         source_hashes = [hashlib.sha256(Path(value).read_bytes()).hexdigest() for value in images]
+        baseline = str(account_visual_baseline or "").strip()
         input_contract = {
             "prompt_version": TRAVEL_PROMPT_VERSION, "model": self.model,
             "reference_hashes": source_hashes, "theme": dict(theme),
             "category_key": category_key, "content_requirement": content_requirement,
             "routing": self.provider_signature(),
         }
+        if baseline:
+            # 只有配置了账号视觉基准的任务才带该键：旧任务的 input_sha256
+            # 逐字不变，缓存与续跑语义不受影响。
+            input_contract["account_visual_baseline"] = baseline
         folder = self.root / "reference_contracts" / self._safe(record_id)
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / "reference_analysis.json"
@@ -842,7 +848,8 @@ class PhotoReferenceVisionService:
             return dict(cached["analysis"])
         prompt = self._reference_analysis_prompt(
             theme=theme, category_key=category_key,
-            content_requirement=content_requirement)
+            content_requirement=content_requirement,
+            account_visual_baseline=baseline)
         budget = self.reference_analysis_token_budget(len(images))
         response, _ = self._chat_with_truncation_retry(
             self._model_images(images), prompt, budget)
@@ -867,17 +874,27 @@ class PhotoReferenceVisionService:
         reference_paths: Sequence[str] = (),
         product_reference_paths: Sequence[str] = (),
         locale_pack: Mapping[str, Any] = None,
+        account_positioning: str = "",
+        expression_mode: str = "",
+        account_visual_baseline: str = "",
+        fixed_background: Mapping[str, Any] = None,
     ) -> Dict[str, Any]:
         """Step 2: recipe-bound travel plan; strongly validated with one auto-revise.
 
         ``travel_topic``（地点+六类主题）present = new-theme branch: the four
-        looks may share one travel_moment, and the planning response carries
-        the publish copy（title/caption/逐页 slide_texts）alongside the looks.
+        looks may share one travel_moment, and the planning response carries the
+        publish copy（title/caption/逐页 slide_texts）alongside the looks.
+
+        账号定位参数（positioning/expression/baseline）只有非空时才进入
+        input_contract 与提示词：未配置目标账号的旧任务契约与提示词逐字不变。
         """
         moments = list(travel_contract.get("moments") or [])
         if not moments:
             raise PhotoReferenceVisionError("旅行合同缺少场景枚举")
         topic = dict(travel_topic or {})
+        positioning = str(account_positioning or "").strip()
+        expression = str(expression_mode or "").strip()
+        baseline = str(account_visual_baseline or "").strip()
         topic_theme_type = str(topic.get("theme_type") or "")
         planning_paths, planning_images = self._travel_planning_images(
             analysis=analysis, reference_paths=reference_paths,
@@ -894,6 +911,21 @@ class PhotoReferenceVisionService:
             "planning_route": self.travel_planning_signature(),
             "planning_images": planning_images,
         }
+        if positioning:
+            input_contract["account_positioning"] = positioning
+        if expression:
+            input_contract["expression_mode"] = expression
+        if baseline:
+            input_contract["account_visual_baseline"] = baseline
+        fixed_backdrop = dict(fixed_background or {})
+        if fixed_backdrop.get("mode") == "fixed":
+            # 固定背景（2026-09-15 Phase 3）：只有固定背景任务才带该键，
+            # 旧任务契约逐字不变。
+            input_contract["fixed_background"] = {
+                key: fixed_backdrop.get(key)
+                for key in ("mode", "fixed_scene_zh", "stability_zh")
+                if fixed_backdrop.get(key)
+            }
         folder = self.root / "reference_contracts" / self._safe(record_id)
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / "travel_plan.json"
@@ -910,6 +942,10 @@ class PhotoReferenceVisionService:
             variables=variables, content_requirement=content_requirement, count=count,
             travel_topic=topic,
             product_context=product_context,
+            account_positioning=positioning,
+            expression_mode=expression,
+            account_visual_baseline=baseline,
+            fixed_background=fixed_backdrop,
         )
         if planning_images:
             base_prompt += self._travel_planning_image_prompt(planning_images)
@@ -1021,7 +1057,7 @@ class PhotoReferenceVisionService:
         product_context: Mapping[str, Any] = None, travel_place: str = "",
         look_plans: Sequence[Mapping[str, Any]],
         image_paths: Sequence[str], travel_contract: Mapping[str, Any] = None,
-        persona_based: bool = False,
+        persona_based: bool = False, fixed_background: bool = False,
     ) -> dict[str, Any]:
         """Per-page travel semantic QA against the frozen per-look moments.
 
@@ -1071,6 +1107,13 @@ class PhotoReferenceVisionService:
                     for key in base_outfit_keys + extra_slots
                 },
             })
+        fixed_note = (
+            "\n【固定背景说明】本组使用固定背景（非目的地场景）：observed_moment "
+            "按画面中人物的活动与搭配判断，不要求画面出现旅行地点或地标；"
+            "destination_conflict 只在画面出现与文案地点明显矛盾的**地标性元素**时才为 true，"
+            "纯色/室内背景一律 false。\n"
+            if fixed_background else ""
+        )
         prompt = self._travel_qa_prompt(
             page_plans=page_plans, reference_count=len(references),
             product_reference_count=len(product_references),
@@ -1080,8 +1123,8 @@ class PhotoReferenceVisionService:
             qa_fields=qa_fields, qa_rules=qa_rules,
         )
         response, _ = self._chat(
-            self._model_images(references + generated), prompt, max_tokens=2600,
-            prefer="fast",
+            self._model_images(references + generated), prompt + fixed_note,
+            max_tokens=2600, prefer="fast",
         )
         raw = parse_vision_envelope(response)
         try:
@@ -1090,7 +1133,7 @@ class PhotoReferenceVisionService:
                 moment_rules=moment_rules_from_contract(contract),
                 footwear_types=FOOTWEAR_TYPES,
                 has_product=bool(product_context), travel_place=travel_place,
-                product_qa_fields=qa_fields,
+                product_qa_fields=qa_fields, fixed_background=fixed_background,
             )
         except TravelSemanticQAError as first_error:
             retry_prompt = (
@@ -1101,8 +1144,8 @@ class PhotoReferenceVisionService:
                 "不得缺失或写为字符串。"
             )
             retry_response, _ = self._chat(
-                self._model_images(references + generated), retry_prompt, max_tokens=2600,
-                prefer="fast",
+                self._model_images(references + generated), retry_prompt + fixed_note,
+                max_tokens=2600, prefer="fast",
             )
             raw_retry = parse_vision_envelope(retry_response)
             try:
@@ -1551,7 +1594,7 @@ class PhotoReferenceVisionService:
                 "copy": dict(post.get("copy") or {}),
                 "topic_zh": str(post.get("topic_zh") or ""),
             })
-        return {
+        profile = {
             **{key: value for key, value in dict(analysis).items()
                if key not in {"schema_version"}},
             "analysis_method": "doubao_seed_2_1",
@@ -1560,6 +1603,13 @@ class PhotoReferenceVisionService:
             "travel_contract": dict(travel_plan.get("travel_contract") or {}),
             "recommended_sets": sets,
         }
+        # 账号色彩合同贯穿：旅行规划产出的 color_grading_plan 必须进入
+        # style_profile，供内容计划冻结、供给请求与 image_generator 的
+        # 【全局色彩合同】消费（通用 STYLE 链早有同款通道）。
+        if isinstance(travel_plan.get("color_grading_plan"), Mapping):
+            profile["color_grading_plan"] = dict(
+                travel_plan.get("color_grading_plan"))
+        return profile
 
     def review_travel_final_pages(
         self, *, image_paths: Sequence[str], expected_texts: Sequence[str],
@@ -1880,21 +1930,36 @@ class PhotoReferenceVisionService:
             posts.append(post)
         if errors:
             return {}, errors
-        return {
+        plan = {
             "schema_version": "opv-photo-travel-plan-v1",
             "prompt_version": TRAVEL_PROMPT_VERSION, "model": self.model,
             "travel_variables": dict(raw.get("travel_variables") or {}),
             "travel_contract": dict(travel_contract or {}),
             "posts": posts,
-        }, []
+        }
+        # 账号视觉基准任务：模型必须给出顶层 color_grading_plan；旧提示词从不
+        # 要求该字段，缺省时不新增键，保证未配置账号的计划结构逐字不变。
+        if isinstance(raw.get("color_grading_plan"), Mapping):
+            plan["color_grading_plan"] = _normalize_color_grading_plan(
+                raw.get("color_grading_plan"))
+        return plan, []
 
     @staticmethod
-    def _reference_analysis_prompt(*, theme, category_key, content_requirement):
+    def _reference_analysis_prompt(*, theme, category_key, content_requirement,
+                                   account_visual_baseline: str = ""):
+        baseline = str(account_visual_baseline or "").strip()
+        baseline_block = (
+            f"\n【账号长期视觉基准（分析色调/光线/构图时必须对照）】{baseline}\n"
+            "该基准是账号跨篇持续方向：允许室内外、昼夜与不同景点的自然变化，"
+            "只描述参考图可见事实，但在 lighting/visual_styles 等字段中如实指出"
+            "参考图与账号基准的关系（延续/接近/偏离）。\n"
+            if baseline else ""
+        )
         return f"""你是图文参考图分析员。逐张描述参考图中的服装、人物造型、色调、材质、风格与背景环境；只描述画面可见事实，不推断画面外信息。
 不要规划穿搭，不要决定旅行场景，不要生成任何文案。
 业务类目：{category_key}
 固定主题：{theme.get('label_zh') or theme.get('theme_key')}
-运营补充要求：{content_requirement or '无'}
+运营补充要求：{content_requirement or '无'}{baseline_block}
 必须区分：FLAT_LAY=无人物服装平铺；MODEL_FULL_BODY=真人纯色/简单背景；SCENE_MODEL=真人生活场景；EDITORIAL_COLLAGE=信息卡或拼贴。
 
 每张参考图的用途可以多选：OUTFIT=借鉴服装审美、版型比例、层次、配色关系和穿法；ENVIRONMENT=借鉴建筑、街道、景观和场所；VISUAL_STYLE=借鉴光线、色调、构图和摄影氛围。运营补充要求中明确指定“图1/第一张”等用途时必须优先执行并标记 use_source=operator，否则根据画面判断并标记 auto。服装风格（韩系/日系/法式等）属于 OUTFIT，不等同于摄影风格。
@@ -1917,7 +1982,11 @@ class PhotoReferenceVisionService:
 
     @staticmethod
     def _travel_plan_prompt(*, analysis, travel_contract, variables, content_requirement, count,
-                            travel_topic=None, product_context=None, locale_pack=None):
+                            travel_topic=None, product_context=None, locale_pack=None,
+                            account_positioning: str = "",
+                            expression_mode: str = "",
+                            account_visual_baseline: str = "",
+                            fixed_background: Mapping[str, Any] = None):
         ordered_moments = sorted(
             list(travel_contract.get("moments") or []),
             key=lambda item: str(item.get("key") or "") == "airport_departure",
@@ -1940,9 +2009,56 @@ class PhotoReferenceVisionService:
         topic = dict(travel_topic or {})
         product = dict(product_context or {})
         topic_theme_type = str(topic.get("theme_type") or "")
+        positioning = str(account_positioning or "").strip()
+        expression = str(expression_mode or "").strip()
+        baseline = str(account_visual_baseline or "").strip()
         outfit_indices = list(
             (dict(analysis).get("outfit_reference") or {}).get("indices") or []
         )
+        account_block = ""
+        if positioning or expression or baseline:
+            account_lines = ["\n【账号长期定位（跨篇内容基准，本篇必须遵守）】"]
+            if positioning:
+                account_lines.append(f"- 账号定位：{positioning}")
+            if expression == "PRACTICAL_GUIDE":
+                account_lines.append(
+                    "- 内容表达＝实用指南：整篇回答一个具体穿搭问题（步行/温差/穿脱/拍照搭配"
+                    "等），不扩展成交通、门票、营业时间等旅游攻略。")
+            elif expression == "STYLE_INSPIRATION":
+                account_lines.append(
+                    "- 内容表达＝搭配灵感：说清每套搭配的差异、适用场景与商品价值；"
+                    "标题强调这件商品的搭配价值，不只罗列四个地点。")
+            if baseline:
+                account_lines.append(f"- 视觉基准：{baseline}")
+            account_block = "\n".join(account_lines) + "\n"
+        grading_block = ""
+        if baseline:
+            grading_block = (
+                "\n【账号色彩合同（必须输出）】在返回 JSON 顶层额外输出 "
+                '"color_grading_plan":{"temperature":"neutral|warm|cool",'
+                '"saturation":"low|medium|high","contrast":"gentle|medium|strong",'
+                '"skin_tone_anchor":"肤色锚定描述","tone_note_zh":"一句中文说明"}。'
+                "以账号视觉基准为长期基准：允许室内外、昼夜与不同景点的自然变化；"
+                "商品真实颜色与自然肤色优先，不得为统一色调洗灰商品或漂白肤色。\n"
+            )
+        fixed_backdrop = dict(fixed_background or {})
+        fixed_backdrop_block = ""
+        if fixed_backdrop.get("mode") == "fixed":
+            # 固定背景合同（Phase 3）：四套 Look 共享同一固定背景；地点/温度只是
+            # 内容语境，画面不要求呈现目的地，也不得虚构地标。本块优先于
+            # 「背景延续」与旅行场景规则。
+            fixed_backdrop_block = (
+                "\n【固定背景合同（优先于场景规则）】本任务使用固定背景："
+                f"{fixed_backdrop.get('fixed_scene_zh') or '简洁固定背景'}。"
+                "四套 Look 全部在此背景内安排画面：scene_prompt 只描述人物姿势、"
+                "机位、景别与局部道具的变化，不得引入街道、地标或旅游场景；"
+                "travel_moment 仍从枚举选择（用于鞋履步行实用性规则），但画面"
+                "不需要呈现对应场所；标题与文案中的地点、温度是内容语境，"
+                "不是画面要求；没有真实地标参考时不得把生成建筑描述成具体地标。"
+                f"背景一致性要求：{fixed_backdrop.get('stability_zh') or '四页背景气质一致'}。\n"
+            )
+        expression_copy_block = ""
+        # 表达差异已并入主题联动文案合同（单一规则源）；此处不再输出后置覆盖块。
         topic_block = ""
         copy_rules = (
             "9. 主题联动分支必须同时输出 topic_zh 与 copy（结构见上）；"
@@ -1960,6 +2076,51 @@ class PhotoReferenceVisionService:
             if topic_theme_type else "每套绑定一个不同的 travel_moment；"
         )
         if topic_theme_type:
+            # 表达模式只有这一份逐页文案合同（2026-09-15 收敛）：每种表达输出
+            # 一致的规则，不再出现「基础规则+后置覆盖」两份可能冲突的合同。
+            if expression == "PRACTICAL_GUIDE":
+                per_page_rule = (
+                    "A-C 每页写「当地语言造型短名称 — 一句具体穿搭理由」，一行写完、"
+                    "理由简短可扫读，不编造英文杂志式名称；caption 承担 Look A 的详细理由"
+                    "（Look A 在最终版式中直接作为首图）")
+                final_page_rule = (
+                    "第 5 页固定两行，第一行是 D 的名称与理由，第二行 CTA 可以是收藏、"
+                    "提问或选择，不强制 A/B/C/D 投票")
+                caption_rule = (
+                    "caption 围绕本篇穿搭问题给读者一句可执行的结论；"
+                    "每条建议必须与画面和规划的服装相符，不生成保证效果、保证保暖"
+                    "或虚构旅行体验的文案")
+            elif expression == "STYLE_INSPIRATION":
+                per_page_rule = (
+                    "A-C 每页只写一个当地语言造型短名称，不编造英文杂志式名称")
+                final_page_rule = (
+                    "第 5 页固定两行，第一行是 D 的短名称，第二行只写简短的 A/B/C/D "
+                    "选择 CTA，不重复四套名称")
+                caption_rule = (
+                    "caption 说清四套搭配的实际变化（轮廓/配色/穿法/场景）与商品价值，"
+                    "不只罗列四个地点；只有四套实际使用同一指定商品时才能表达"
+                    "“同一件/一衣多穿”，不得凭四件相似外套声称同款")
+            else:
+                per_page_rule = (
+                    "A-C 每页只写一个当地语言造型短名称，不编造英文杂志式名称")
+                final_page_rule = (
+                    "第 5 页固定两行，第一行是 D 的短名称，第二行只写简短的 A/B/C/D "
+                    "选择 CTA，不重复四套名称")
+                caption_rule = (
+                    "caption 用一两句补充为什么这些搭配适合该地点/主题，"
+                    "不机械复述 A/B/C/D 名称")
+            if topic_theme_type != "NATIVE_MULTIWAY":
+                title_rule = (
+                    "标题规则（最重要）：title 与封面必须包含 place_localized（目标市场常用地点名，"
+                    "如富士山→ภูเขาไฟฟูจิ、河口湖→คาวากุจิโกะ、浅草寺→วัดอาซากุสะ、涩谷→ชิบุยะ），"
+                    "地点是旅行内容最大的吸引力点，绝不允许只写泛泛的\u201c旅行穿搭\u201d。\n"
+                )
+            else:
+                title_rule = (
+                    "标题规则（最重要）：title 围绕同一件指定商品的多次搭配价值提出一个具体问题"
+                    "（如「一件黑色短外套怎么搭出四种感觉？」）；填写了地点时自然带入标题，"
+                    "没有地点不强制；只有四套实际使用同一指定商品才可表达「同一件/一衣多穿」。\n"
+                )
             topic_block = (
                 "\n【旅行主题联动】主题类型：{tt}；地点：{place}；"
                 "规划重点：{focus}\n"
@@ -1973,16 +2134,16 @@ class PhotoReferenceVisionService:
                 '"copy":{{"place_localized":"目标市场常用地点名","title":"当地语言发布标题","caption":"当地语言发布正文",'
                 '"hashtags":["当地语言标签"],"slide_texts":["两行短封面","A · 当地语言短名称","B · 当地语言短名称","C · 当地语言短名称","D · 当地语言短名称\\n完整选择 CTA"]}}}}\n'
                 "文案要求：title、caption、封面必须由同一个具体选题驱动。title 用地点加一个明确的穿搭问题或利益点，"
-                "不能退化成‘某地 4 套穿搭’；caption 用一两句补充为什么这些搭配适合该地点/主题，不机械复述 A/B/C/D 名称。"
+                "不能退化成‘某地 4 套穿搭’；{caption_rule}。"
                 "只有当四张最终画面都明确支持某种审美风格时，title/caption 才能写法式、学院风等风格名。"
                 "slide_texts 只用于图片排版，必须短、完整、易扫读。slide_texts 必须 5 条且顺序为封面+A/B/C/D："
-                "封面固定两层信息，第一行是 place_localized，第二行是与 topic_zh 对应的短钩子；A-C 每页只写一个当地语言造型短名称，不编造英文杂志式名称；"
-                "第 5 页固定两行，第一行是 D 的短名称，第二行只写简短的 A/B/C/D 选择 CTA，不重复四套名称。禁止省略号和不完整选项。\n"
-                "标题规则（最重要）：title 与封面必须包含 place_localized（目标市场常用地点名，"
-                "如富士山→ภูเขาไฟฟูจิ、河口湖→คาวากุจิโกะ、浅草寺→วัดอาซากุสะ、涩谷→ชิบุยะ），"
-                "地点是旅行内容最大的吸引力点，绝不允许只写泛泛的\u201c旅行穿搭\u201d。\n"
+                "封面固定两层信息，第一行是 place_localized，第二行是与 topic_zh 对应的短钩子；{per_page_rule}；"
+                "{final_page_rule}。禁止省略号和不完整选项。\n"
+                "{title_rule}"
             ).format(tt=topic_theme_type, place=topic.get("place") or "未指定（使用参考图目的地氛围，不猜测具体地名）",
-                     focus=topic.get("planning_focus") or "")
+                     focus=topic.get("planning_focus") or "",
+                     per_page_rule=per_page_rule, final_page_rule=final_page_rule,
+                     caption_rule=caption_rule, title_rule=title_rule)
         # 旅行温度增强：只有 TEMPERATURE 主题渲染体感块，其余五个旅行主题的
         # 提示词与 v8 完全一致（体感指引来自 travel_theme_templates.json）。
         sensitivity_block = ""
@@ -2037,9 +2198,9 @@ class PhotoReferenceVisionService:
 【参考图分析】{json.dumps(dict(analysis), ensure_ascii=False)}
 【旅行变量】{json.dumps(dict(variables), ensure_ascii=False)}
 【指定商品】{json.dumps(product, ensure_ascii=False) if product else '无；可自由规划完整穿搭'}
-【运营补充要求】{content_requirement or '无'}
+【运营补充要求】{content_requirement or '无'}{account_block}
 【旅行场景枚举（travel_moment 只能取以下 key{moment_rule}）】
-{moments_text}{topic_block}{sensitivity_block}
+{moments_text}{fixed_backdrop_block}{topic_block}{sensitivity_block}{expression_copy_block}{grading_block}
 规则：
 1. 每篇 looks 必须是有序 look_a..look_d；{same_moment_rule}
 2. {difference_rule}
@@ -2355,6 +2516,23 @@ recommended_sets 数量必须等于 {count}；不同篇要有明显内容角度�
             "绝不作为失败理由，也不要写进 notes。"
             if persona_based else ""
         )
+        # 固定背景（2026-09-15 七样审查 P1-5）：视觉预设声明固定背景时，一致性
+        # 检查不得把「未复现参考图环境」判为退化——参考图的 ENVIRONMENT 用途
+        # 不采纳；scene_alignment 只针对固定背景合同本身。
+        _preset_cfg = dict(dict(contract or {}).get("visual_preset") or {})
+        _bg_cfg = dict(_preset_cfg.get("background") or {})
+        fixed_backdrop_clause = ""
+        if str(_bg_cfg.get("mode") or "") == "fixed" and _bg_cfg.get("kind") in ("solid", "indoor"):
+            fixed_backdrop_clause = (
+                "\n【固定背景合同】本任务使用固定背景（"
+                + str(_bg_cfg.get("fixed_scene_zh") or "固定简洁背景")
+                + "）。参考图中的街景、建筑、环境与场所**不作为任何一致性要求**——"
+                "生成图不出现参考图环境是预期行为，不是场景退化；"
+                "scene_alignment 只判断画面是否符合上述固定背景合同"
+                "（出现街道、地标或旅游场景才算不符）；摄影风格按固定背景合同"
+                "（而非参考图环境）判断；人物、服装主体、指定商品与整体协调性"
+                "仍按原规则检查。"
+            )
         role_clause = ""
         if generated_roles:
             role_clause = (
@@ -2402,13 +2580,22 @@ recommended_sets 数量必须等于 {count}；不同篇要有明显内容角度�
                 f"前 {reference_count} 张是原始风格参考，"
                 f"后 {generated_count} 张是生成结果。"
             )
+        disaster_items = "展示方式错配（真人变平铺/平铺出人物" + (
+            "" if fixed_backdrop_clause else "/场景退化为纯色棚拍"
+        ) + "）、明显肢体畸形、明显多人等灾难级问题"
+        first_look_gate_line = (
+            f"本次是首张（Look A）单张灾难门禁：只有出现{disaster_items}时 "
+            "passed 才为 false；风格、场景氛围、配色倾向、穿搭呈现与参考图的偏差一律写入 notes "
+            "供参考，不得作为本次单张的失败理由——这些属于后续整组检查。"
+            if str(scope).startswith("FIRST_LOOK") else ""
+        )
         return f"""你是独立图文内容质检员。{intro}直接对照原图判断，不能只相信给定合同。
-检查范围：{scope}{identity_clause}{product_clause}
-{"本次是首张（Look A）单张灾难门禁：只有出现展示方式错配（真人变平铺/平铺出人物/场景退化为纯色棚拍）、明显肢体畸形、明显多人等灾难级问题时 passed 才为 false；风格、场景氛围、配色倾向、穿搭呈现与参考图的偏差一律写入 notes 供参考，不得作为本次单张的失败理由——这些属于后续整组检查。" if str(scope).startswith("FIRST_LOOK") else ""}
+检查范围：{scope}{identity_clause}{product_clause}{fixed_backdrop_clause}
+{first_look_gate_line}
 目标合同：{json.dumps(dict(contract), ensure_ascii=False)}
-参考用途规则：逐图 reference_uses 是比较边界。ENVIRONMENT 只比较环境，OUTFIT 只比较搭配关系，VISUAL_STYLE 只比较摄影表达；不得用环境图中的衣服或穿搭图中的背景判定失败。穿搭参考不要求同款。
+参考用途规则：逐图 reference_uses 是比较边界。ENVIRONMENT 只比较环境，OUTFIT 只比较搭配关系，VISUAL_STYLE 只比较摄影表达；不得用环境图中的衣服或穿搭图中的背景判定失败。穿搭参考不要求同款。{fixed_backdrop_clause and '固定背景任务：ENVIRONMENT 用途本轮不采纳，环境不作为比较维度。' or ''}
 如目标合同包含 product_context，前置的商品参考图用于检查指定商品身份；指定商品被明显替换或核心颜色、版型、结构明显错误时才判失败，细微纹理与配饰差异记录即可。
-核心要求：真人参考不能变成平铺；平铺参考不能出现人物；场景参考不能退化成纯色棚拍；核心风格、场景、配色和服装语言必须肉眼可见；不得复制 Logo、水印、来源文字或人物身份。{"整组还要检查 A/B/C/D 差异和风格统一。" if generated_count > 1 else ""}
+核心要求：真人参考不能变成平铺；平铺参考不能出现人物；{'' if fixed_backdrop_clause else '场景参考不能退化成纯色棚拍；'}核心风格、场景、配色和服装语言必须肉眼可见；不得复制 Logo、水印、来源文字或人物身份。{"整组还要检查 A/B/C/D 差异和风格统一。" if generated_count > 1 else ""}
 宽容边界：只在整体维度（展示方式/风格/场景/配色/构图完整性）偏离时判失败；单品级呈现细节不作为失败理由，可写入 notes 供参考——生成模型不保证像素级服从单品描述。具体不受罚的例子：内搭少一层开衫或薄衫、配饰有无、鞋型款式差异、衣服颜色深浅微差——这些只写 notes。真正的失败仅限：完全缺失计划中的主体单品（有外套计划但整张无外套）、场景类型完全错配、展示方式退化。{"（上一条「配饰有无不受罚」不适用于上面【核心商品】里点名的指定商品。）" if product_clause else ""}
 只返回 JSON：{{"passed":true,"scores":{{"presentation_alignment":0,"style_alignment":0,"scene_alignment":0,"palette_alignment":0,"look_difference":0}},"reason_codes":[],"notes":"中文简述"}}。任一必要维度低于75时 passed 必须为 false。{role_clause}"""
 

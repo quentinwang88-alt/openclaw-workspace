@@ -497,6 +497,12 @@ def compose_shot_prompt(request: ShotGenerationRequest) -> str:
             color_plan, include_skin=not flat_lay,
             palette_hex=(request.look_snapshot.get("recipe") or {}).get("palette_hex"),
         ))
+    # 视觉预设摄影基准（2026-09-15）：账号/预设统一的光线、色调与构图方向，
+    # 随冻结快照进入每张请求；商品真色与人物肤色仍由上方合同优先约束。
+    photography_baseline = str(
+        presentation.get("photography_baseline_zh") or "").strip()
+    if photography_baseline:
+        lines.extend(["", "【摄影基准（整组统一）】", photography_baseline])
     human_contract = request.recipe_execution.get("human_presentation_contract") or {}
     if human_contract and not flat_lay:
         lines.extend(["", "【人物摄影合同】"])

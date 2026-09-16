@@ -94,16 +94,24 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(len(batch), 3)
         self.assertTrue(all(spec.look_ref == "" for spec in batch))
 
-    def test_shipped_catalog_exposes_outfit_breakdown_preset(self):
+    def test_shipped_catalog_retires_outfit_breakdown_preset(self):
+        """2026-09-15 选项精简：0 行使用的拆解首图预设已停用（隐藏）。
+
+        停用语义：不可再被新行解析（NEEDS_CONTENT），且不出现在目录
+        ``names``（ensure 不再播种该下拉选项）；历史行/冻结批次不受影响，
+        将来需要时把 ``status`` 改回 active 并重跑字段脚本即可恢复。
+        """
         catalog = ProductionPresetCatalog(
             PACKAGE_ROOT / "config" / "feishu_production_presets.json"
         )
-        batch = catalog.resolve_batch("TH｜穿搭拆解首图｜均衡变体", "rec1", 4)
-        self.assertEqual(len(batch), 4)
-        self.assertTrue(all(
-            spec.recipe_id == "RECIPE_OUTFIT_BREAKDOWN_V1" for spec in batch
-        ))
-        self.assertTrue(all(spec.look_ref == "" for spec in batch))
+        self.assertNotIn("TH｜穿搭拆解首图｜均衡变体", catalog.names)
+        with self.assertRaises(FeishuWorkflowError) as ctx:
+            catalog.resolve_batch("TH｜穿搭拆解首图｜均衡变体", "rec1", 4)
+        self.assertIn("已停用", str(ctx.exception))
+        self.assertEqual(
+            catalog.metadata("TH｜穿搭拆解首图｜均衡变体").get("status"),
+            "disabled",
+        )
 
     def test_shipped_catalog_exposes_native_photo_presets(self):
         path = PACKAGE_ROOT / "config" / "feishu_production_presets.json"
@@ -118,6 +126,9 @@ class CatalogTest(unittest.TestCase):
         # the eighth native-photo entry.
         # 2026-09-13 (VN scarf Phase 4): +2 disabled VN scarf presets (travel +
         # daily matching) = 10 entries, and the scarf category joins the set.
+        # 2026-09-15 (选项精简): 图文小个子 + MX 三个未用发型线转 disabled
+        # （0 行使用；恢复=改回 active 重跑字段脚本）。当前启用中的原生图文
+        # 预设 = TH 旅行 / TH 四选一 / MX 四选一发型。
         self.assertEqual(len(photo_presets), 10)
         self.assertEqual(
             {item["category_key"] for item in photo_presets},
@@ -155,7 +166,7 @@ class CatalogTest(unittest.TestCase):
             self.assertTrue(catalog.is_native_photo(item["name"]))
             self.assertEqual(catalog.metadata(item["name"])["routing_policy"], expected_route)
             recipe_ids.add(resolved[0].recipe_id)
-        self.assertEqual(len(recipe_ids), 7)
+        self.assertEqual(len(recipe_ids), 3)
         self.assertIn("PHOTO_TH_TRAVEL_OUTFIT_V2", recipe_ids)
 
     def test_photo_plan_note_never_reports_video_duration(self):

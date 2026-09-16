@@ -1,0 +1,16 @@
+{
+  "schema_version": "opv-publish-account-seed-v1",
+  "account_id": "wn0didnad6",
+  "account_name": "wn0didnad6（运营记录 泰国女装2；截图拼写 wn0dinad6 待以账号管理记录为准）",
+  "store_id": "THFZ01",
+  "target_country": "TH",
+  "identity_note": "2026-09-15 用户确认：wn0didnad6（泰国女装2，THFZ01）。",
+  "profile": {
+    "default_theme": "旅行·打卡穿搭",
+    "positioning": "日系旅游杂志风；围绕目的地与月份的穿搭问题提供简洁实用建议；标题、封面、正文与逐页建议同题同地点",
+    "expression_mode": "PRACTICAL_GUIDE",
+    "visual_baseline": "自然日光、柔和对比、干净构图与适度留白；日系是摄影与穿搭审美，市场仍为 TH、文案仍为泰语，不切换日本市场",
+    "photo_claim_scope": "own_tasks_only",
+    "default_visual_preset": "旅行场景穿搭"
+  }
+}

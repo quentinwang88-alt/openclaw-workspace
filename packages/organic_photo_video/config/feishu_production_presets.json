@@ -1,405 +1,410 @@
 {
- "schema_version": "opv-feishu-production-presets-v1",
- "default_overlay_profile_id": "OVERLAY_LIGHT_V1",
- "presets": [
-  {
-   "name": "TH｜五套穿搭｜拆解首图",
-   "entry_group": "legacy",
-   "tasks": [
+  "schema_version": "opv-feishu-production-presets-v1",
+  "default_overlay_profile_id": "OVERLAY_LIGHT_V1",
+  "presets": [
     {
-     "account_id": "OPV_TH_TEST_001",
-     "market": "TH",
-     "language": "th-TH",
-     "recipe_id": "RECIPE_MULTI_LOOK_V1",
-     "theme_id": "THEME_TH_OUTFIT_BREAKDOWN_V1",
-     "hook_strategy": "multi_look",
-     "persona_ref": "TH_APPAREL_SELECTED_01_001",
-     "look_ref": "",
-     "scene_ref": ""
-    }
-   ]
-  },
-  {
-   "name": "TH｜小个子显高｜轻文字",
-   "entry_group": "legacy",
-   "tasks": [
-    {
-     "account_id": "OPV_TH_TEST_001",
-     "market": "TH",
-     "language": "th-TH",
-     "recipe_id": "RECIPE_PAIN_POINT_SOLUTION_V1",
-     "theme_id": "THEME_TH_PETITE_PROPORTION_V1",
-     "hook_strategy": "pain_point",
-     "persona_ref": "TH_APPAREL_SELECTED_01_001",
-     "look_ref": "STYLE_OPV_PUFFER_PETITE_001",
-     "scene_ref": "SCENE_A_001"
-    }
-   ]
-  },
-  {
-   "name": "TH｜咖啡约会｜轻文字",
-   "entry_group": "legacy",
-   "tasks": [
-    {
-     "account_id": "OPV_TH_TEST_001",
-     "market": "TH",
-     "language": "th-TH",
-     "recipe_id": "RECIPE_SCENE_SOLUTION_V1",
-     "theme_id": "THEME_TH_CAFE_DATE_V1",
-     "hook_strategy": "scene_problem",
-     "persona_ref": "TH_APPAREL_SELECTED_02_001",
-     "look_ref": "STYLE_OPV_PUFFER_TRAVEL_001",
-     "scene_ref": "ENV_CAFE_001"
-    }
-   ]
-  },
-  {
-   "name": "TH｜一衣多穿｜轻文字",
-   "entry_group": "legacy",
-   "tasks": [
-    {
-     "account_id": "OPV_TH_TEST_001",
-     "market": "TH",
-     "language": "th-TH",
-     "recipe_id": "RECIPE_VISUAL_TRANSFORM_V1",
-     "theme_id": "THEME_TH_ONE_PIECE_MULTIWAY_V1",
-     "hook_strategy": "before_after",
-     "persona_ref": "TH_APPAREL_SELECTED_03_001",
-     "look_ref": "STYLE_OPV_PUFFER_MULTIWAY_001",
-     "scene_ref": "SCENE_A_001"
-    }
-   ]
-  },
-  {
-   "name": "TH｜三配方套装｜轻文字",
-   "entry_group": "legacy",
-   "tasks": [
-    {
-     "account_id": "OPV_TH_TEST_001",
-     "market": "TH",
-     "language": "th-TH",
-     "recipe_id": "RECIPE_PAIN_POINT_SOLUTION_V1",
-     "theme_id": "THEME_TH_PETITE_PROPORTION_V1",
-     "hook_strategy": "pain_point",
-     "persona_ref": "TH_APPAREL_SELECTED_01_001",
-     "look_ref": "STYLE_OPV_PUFFER_PETITE_001",
-     "scene_ref": "SCENE_A_001"
+      "name": "TH｜五套穿搭｜拆解首图",
+      "entry_group": "legacy",
+      "tasks": [
+        {
+          "account_id": "OPV_TH_TEST_001",
+          "market": "TH",
+          "language": "th-TH",
+          "recipe_id": "RECIPE_MULTI_LOOK_V1",
+          "theme_id": "THEME_TH_OUTFIT_BREAKDOWN_V1",
+          "hook_strategy": "multi_look",
+          "persona_ref": "TH_APPAREL_SELECTED_01_001",
+          "look_ref": "",
+          "scene_ref": ""
+        }
+      ]
     },
     {
-     "account_id": "OPV_TH_TEST_001",
-     "market": "TH",
-     "language": "th-TH",
-     "recipe_id": "RECIPE_SCENE_SOLUTION_V1",
-     "theme_id": "THEME_TH_CAFE_DATE_V1",
-     "hook_strategy": "scene_problem",
-     "persona_ref": "TH_APPAREL_SELECTED_02_001",
-     "look_ref": "STYLE_OPV_PUFFER_TRAVEL_001",
-     "scene_ref": "ENV_CAFE_001"
+      "name": "TH｜小个子显高｜轻文字",
+      "entry_group": "legacy",
+      "tasks": [
+        {
+          "account_id": "OPV_TH_TEST_001",
+          "market": "TH",
+          "language": "th-TH",
+          "recipe_id": "RECIPE_PAIN_POINT_SOLUTION_V1",
+          "theme_id": "THEME_TH_PETITE_PROPORTION_V1",
+          "hook_strategy": "pain_point",
+          "persona_ref": "TH_APPAREL_SELECTED_01_001",
+          "look_ref": "STYLE_OPV_PUFFER_PETITE_001",
+          "scene_ref": "SCENE_A_001"
+        }
+      ]
     },
     {
-     "account_id": "OPV_TH_TEST_001",
-     "market": "TH",
-     "language": "th-TH",
-     "recipe_id": "RECIPE_VISUAL_TRANSFORM_V1",
-     "theme_id": "THEME_TH_ONE_PIECE_MULTIWAY_V1",
-     "hook_strategy": "before_after",
-     "persona_ref": "TH_APPAREL_SELECTED_03_001",
-     "look_ref": "STYLE_OPV_PUFFER_MULTIWAY_001",
-     "scene_ref": "SCENE_A_001"
-    }
-   ]
-  },
-  {
-   "name": "TH｜自动匹配穿搭组合｜轻文字",
-   "entry_group": "legacy",
-   "tasks": [
-    {
-     "account_id": "OPV_TH_TEST_001",
-     "market": "TH",
-     "language": "th-TH",
-     "recipe_id": "RECIPE_PAIN_POINT_SOLUTION_V1",
-     "theme_id": "THEME_TH_PETITE_PROPORTION_V1",
-     "hook_strategy": "pain_point",
-     "persona_ref": "TH_APPAREL_SELECTED_01_001",
-     "look_ref": "",
-     "scene_ref": "SCENE_A_001"
+      "name": "TH｜咖啡约会｜轻文字",
+      "entry_group": "legacy",
+      "tasks": [
+        {
+          "account_id": "OPV_TH_TEST_001",
+          "market": "TH",
+          "language": "th-TH",
+          "recipe_id": "RECIPE_SCENE_SOLUTION_V1",
+          "theme_id": "THEME_TH_CAFE_DATE_V1",
+          "hook_strategy": "scene_problem",
+          "persona_ref": "TH_APPAREL_SELECTED_02_001",
+          "look_ref": "STYLE_OPV_PUFFER_TRAVEL_001",
+          "scene_ref": "ENV_CAFE_001"
+        }
+      ]
     },
     {
-     "account_id": "OPV_TH_TEST_001",
-     "market": "TH",
-     "language": "th-TH",
-     "recipe_id": "RECIPE_SCENE_SOLUTION_V1",
-     "theme_id": "THEME_TH_CAFE_DATE_V1",
-     "hook_strategy": "scene_problem",
-     "persona_ref": "TH_APPAREL_SELECTED_02_001",
-     "look_ref": "",
-     "scene_ref": "ENV_CAFE_001"
+      "name": "TH｜一衣多穿｜轻文字",
+      "entry_group": "legacy",
+      "tasks": [
+        {
+          "account_id": "OPV_TH_TEST_001",
+          "market": "TH",
+          "language": "th-TH",
+          "recipe_id": "RECIPE_VISUAL_TRANSFORM_V1",
+          "theme_id": "THEME_TH_ONE_PIECE_MULTIWAY_V1",
+          "hook_strategy": "before_after",
+          "persona_ref": "TH_APPAREL_SELECTED_03_001",
+          "look_ref": "STYLE_OPV_PUFFER_MULTIWAY_001",
+          "scene_ref": "SCENE_A_001"
+        }
+      ]
     },
     {
-     "account_id": "OPV_TH_TEST_001",
-     "market": "TH",
-     "language": "th-TH",
-     "recipe_id": "RECIPE_VISUAL_TRANSFORM_V1",
-     "theme_id": "THEME_TH_ONE_PIECE_MULTIWAY_V1",
-     "hook_strategy": "before_after",
-     "persona_ref": "TH_APPAREL_SELECTED_03_001",
-     "look_ref": "",
-     "scene_ref": "SCENE_A_001"
-    }
-   ]
-  },
-  {
-   "name": "TH｜穿搭拆解首图｜均衡变体",
-   "entry_group": "legacy",
-   "tasks": [
+      "name": "TH｜三配方套装｜轻文字",
+      "entry_group": "legacy",
+      "tasks": [
+        {
+          "account_id": "OPV_TH_TEST_001",
+          "market": "TH",
+          "language": "th-TH",
+          "recipe_id": "RECIPE_PAIN_POINT_SOLUTION_V1",
+          "theme_id": "THEME_TH_PETITE_PROPORTION_V1",
+          "hook_strategy": "pain_point",
+          "persona_ref": "TH_APPAREL_SELECTED_01_001",
+          "look_ref": "STYLE_OPV_PUFFER_PETITE_001",
+          "scene_ref": "SCENE_A_001"
+        },
+        {
+          "account_id": "OPV_TH_TEST_001",
+          "market": "TH",
+          "language": "th-TH",
+          "recipe_id": "RECIPE_SCENE_SOLUTION_V1",
+          "theme_id": "THEME_TH_CAFE_DATE_V1",
+          "hook_strategy": "scene_problem",
+          "persona_ref": "TH_APPAREL_SELECTED_02_001",
+          "look_ref": "STYLE_OPV_PUFFER_TRAVEL_001",
+          "scene_ref": "ENV_CAFE_001"
+        },
+        {
+          "account_id": "OPV_TH_TEST_001",
+          "market": "TH",
+          "language": "th-TH",
+          "recipe_id": "RECIPE_VISUAL_TRANSFORM_V1",
+          "theme_id": "THEME_TH_ONE_PIECE_MULTIWAY_V1",
+          "hook_strategy": "before_after",
+          "persona_ref": "TH_APPAREL_SELECTED_03_001",
+          "look_ref": "STYLE_OPV_PUFFER_MULTIWAY_001",
+          "scene_ref": "SCENE_A_001"
+        }
+      ]
+    },
     {
-     "account_id": "OPV_TH_TEST_001",
-     "market": "TH",
-     "language": "th-TH",
-     "recipe_id": "RECIPE_OUTFIT_BREAKDOWN_V1",
-     "theme_id": "THEME_TH_OUTFIT_BREAKDOWN_V1",
-     "hook_strategy": "",
-     "persona_ref": "TH_APPAREL_SELECTED_01_001",
-     "look_ref": "",
-     "scene_ref": ""
-    }
-   ]
-  },
-  {
-   "name": "TH｜随机养号组合｜轻文字",
-   "entry_group": "legacy",
-   "selection": "deterministic_one",
-   "routing_policy": "multi_look_6s_v2",
-   "tasks_from": [
-    "TH｜五套穿搭｜拆解首图"
-   ]
-  },
-  {
-   "name": "图文｜TH｜旅行穿搭",
-   "entry_group": "production",
-   "routing_policy": "native_photo_style_plan_v1",
-   "media_kind": "native_photo",
-   "category_key": "womenswear",
-   "default_product_mode": "NO_PRODUCT",
-   "default_asset_mode": "REUSE_THEN_GENERATE_MISSING",
-   "tasks": [
+      "name": "TH｜自动匹配穿搭组合｜轻文字",
+      "entry_group": "legacy",
+      "tasks": [
+        {
+          "account_id": "OPV_TH_TEST_001",
+          "market": "TH",
+          "language": "th-TH",
+          "recipe_id": "RECIPE_PAIN_POINT_SOLUTION_V1",
+          "theme_id": "THEME_TH_PETITE_PROPORTION_V1",
+          "hook_strategy": "pain_point",
+          "persona_ref": "TH_APPAREL_SELECTED_01_001",
+          "look_ref": "",
+          "scene_ref": "SCENE_A_001"
+        },
+        {
+          "account_id": "OPV_TH_TEST_001",
+          "market": "TH",
+          "language": "th-TH",
+          "recipe_id": "RECIPE_SCENE_SOLUTION_V1",
+          "theme_id": "THEME_TH_CAFE_DATE_V1",
+          "hook_strategy": "scene_problem",
+          "persona_ref": "TH_APPAREL_SELECTED_02_001",
+          "look_ref": "",
+          "scene_ref": "ENV_CAFE_001"
+        },
+        {
+          "account_id": "OPV_TH_TEST_001",
+          "market": "TH",
+          "language": "th-TH",
+          "recipe_id": "RECIPE_VISUAL_TRANSFORM_V1",
+          "theme_id": "THEME_TH_ONE_PIECE_MULTIWAY_V1",
+          "hook_strategy": "before_after",
+          "persona_ref": "TH_APPAREL_SELECTED_03_001",
+          "look_ref": "",
+          "scene_ref": "SCENE_A_001"
+        }
+      ]
+    },
     {
-     "account_id": "OPV_TH_TEST_001",
-     "market": "TH",
-     "language": "th-TH",
-     "recipe_id": "PHOTO_TH_TRAVEL_OUTFIT_V2",
-     "theme_id": "",
-     "hook_strategy": "destination_temperature",
-     "persona_ref": "",
-     "look_ref": "",
-     "scene_ref": ""
-    }
-   ]
-  },
-  {
-   "name": "图文｜TH｜小个子显高",
-   "entry_group": "production",
-   "routing_policy": "native_photo_v1",
-   "media_kind": "native_photo",
-   "category_key": "womenswear",
-   "default_product_mode": "NO_PRODUCT",
-   "default_asset_mode": "ASSET_REUSE",
-   "tasks": [
+      "name": "TH｜穿搭拆解首图｜均衡变体",
+      "status": "disabled",
+      "entry_group": "trial",
+      "tasks": [
+        {
+          "account_id": "OPV_TH_TEST_001",
+          "market": "TH",
+          "language": "th-TH",
+          "recipe_id": "RECIPE_OUTFIT_BREAKDOWN_V1",
+          "theme_id": "THEME_TH_OUTFIT_BREAKDOWN_V1",
+          "hook_strategy": "",
+          "persona_ref": "TH_APPAREL_SELECTED_01_001",
+          "look_ref": "",
+          "scene_ref": ""
+        }
+      ]
+    },
     {
-     "account_id": "OPV_TH_TEST_001",
-     "market": "TH",
-     "language": "th-TH",
-     "recipe_id": "PHOTO_TH_PETITE_STYLING_V1",
-     "theme_id": "",
-     "hook_strategy": "petite_question",
-     "persona_ref": "",
-     "look_ref": "",
-     "scene_ref": ""
-    }
-   ]
-  },
-  {
-   "name": "图文｜TH｜冷热切换",
-   "entry_group": "trial",
-   "routing_policy": "native_photo_v1",
-   "media_kind": "native_photo",
-   "category_key": "womenswear",
-   "default_product_mode": "NO_PRODUCT",
-   "default_asset_mode": "ASSET_REUSE",
-   "tasks": [
+      "name": "TH｜随机养号组合｜轻文字",
+      "entry_group": "legacy",
+      "selection": "deterministic_one",
+      "routing_policy": "multi_look_6s_v2",
+      "tasks_from": [
+        "TH｜五套穿搭｜拆解首图"
+      ]
+    },
     {
-     "account_id": "OPV_TH_TEST_001",
-     "market": "TH",
-     "language": "th-TH",
-     "recipe_id": "PHOTO_TH_THERMAL_TRANSITION_V1",
-     "theme_id": "",
-     "hook_strategy": "thermal_contrast",
-     "persona_ref": "",
-     "look_ref": "",
-     "scene_ref": ""
-    }
-   ],
-   "status": "disabled",
-   "disabled_reason": "日常冷热切换线 V1；仅开放 outdoor_bts_office/normal/office/minimal_city 的 COMPLETE_LOOK canary。待三张实拍素材、泰语母语审校和人工验收通过后开放"
-  },
-  {
-   "name": "图文｜TH｜四选一穿搭",
-   "entry_group": "production",
-   "routing_policy": "native_photo_product_supply_v1",
-   "media_kind": "native_photo",
-   "category_key": "womenswear",
-   "default_product_mode": "NO_PRODUCT",
-   "default_asset_mode": "REUSE_THEN_GENERATE_MISSING",
-   "tasks": [
+      "name": "图文｜TH｜旅行穿搭",
+      "entry_group": "production",
+      "routing_policy": "native_photo_style_plan_v1",
+      "media_kind": "native_photo",
+      "category_key": "womenswear",
+      "default_product_mode": "NO_PRODUCT",
+      "default_asset_mode": "REUSE_THEN_GENERATE_MISSING",
+      "tasks": [
+        {
+          "account_id": "OPV_TH_TEST_001",
+          "market": "TH",
+          "language": "th-TH",
+          "recipe_id": "PHOTO_TH_TRAVEL_OUTFIT_V2",
+          "theme_id": "",
+          "hook_strategy": "destination_temperature",
+          "persona_ref": "",
+          "look_ref": "",
+          "scene_ref": ""
+        }
+      ]
+    },
     {
-     "account_id": "OPV_TH_TEST_001",
-     "market": "TH",
-     "language": "th-TH",
-     "recipe_id": "PHOTO_TH_PICK_YOUR_LOOK_V3",
-     "theme_id": "",
-     "hook_strategy": "pick_one_of_four",
-     "persona_ref": "",
-     "look_ref": "",
-     "scene_ref": ""
-    }
-   ],
-   "status": "active"
-  },
-  {
-   "name": "图文｜MX｜假发前后对比",
-   "entry_group": "production",
-   "routing_policy": "native_photo_v1",
-   "media_kind": "native_photo",
-   "category_key": "wig",
-   "default_product_mode": "NO_PRODUCT",
-   "default_asset_mode": "ASSET_REUSE",
-   "tasks": [
+      "name": "图文｜TH｜小个子显高",
+      "status": "disabled",
+      "entry_group": "trial",
+      "routing_policy": "native_photo_v1",
+      "media_kind": "native_photo",
+      "category_key": "womenswear",
+      "default_product_mode": "NO_PRODUCT",
+      "default_asset_mode": "ASSET_REUSE",
+      "tasks": [
+        {
+          "account_id": "OPV_TH_TEST_001",
+          "market": "TH",
+          "language": "th-TH",
+          "recipe_id": "PHOTO_TH_PETITE_STYLING_V1",
+          "theme_id": "",
+          "hook_strategy": "petite_question",
+          "persona_ref": "",
+          "look_ref": "",
+          "scene_ref": ""
+        }
+      ]
+    },
     {
-     "account_id": "OPV_MX_PHOTO_001",
-     "market": "MX",
-     "language": "es-MX",
-     "recipe_id": "PHOTO_MX_BEFORE_AFTER_V1",
-     "theme_id": "",
-     "hook_strategy": "antes_despues",
-     "persona_ref": "",
-     "look_ref": "",
-     "scene_ref": ""
-    }
-   ]
-  },
-  {
-   "name": "图文｜MX｜四选一发型",
-   "entry_group": "production",
-   "routing_policy": "native_photo_v1",
-   "media_kind": "native_photo",
-   "category_key": "wig",
-   "default_product_mode": "NO_PRODUCT",
-   "default_asset_mode": "ASSET_REUSE",
-   "tasks": [
+      "name": "图文｜TH｜冷热切换",
+      "entry_group": "trial",
+      "routing_policy": "native_photo_v1",
+      "media_kind": "native_photo",
+      "category_key": "womenswear",
+      "default_product_mode": "NO_PRODUCT",
+      "default_asset_mode": "ASSET_REUSE",
+      "tasks": [
+        {
+          "account_id": "OPV_TH_TEST_001",
+          "market": "TH",
+          "language": "th-TH",
+          "recipe_id": "PHOTO_TH_THERMAL_TRANSITION_V1",
+          "theme_id": "",
+          "hook_strategy": "thermal_contrast",
+          "persona_ref": "",
+          "look_ref": "",
+          "scene_ref": ""
+        }
+      ],
+      "status": "disabled",
+      "disabled_reason": "日常冷热切换线 V1；仅开放 outdoor_bts_office/normal/office/minimal_city 的 COMPLETE_LOOK canary。待三张实拍素材、泰语母语审校和人工验收通过后开放"
+    },
     {
-     "account_id": "OPV_MX_PHOTO_001",
-     "market": "MX",
-     "language": "es-MX",
-     "recipe_id": "PHOTO_MX_PICK_YOUR_HAIR_V2",
-     "theme_id": "",
-     "hook_strategy": "cual_elegirias",
-     "persona_ref": "",
-     "look_ref": "",
-     "scene_ref": ""
-    }
-   ]
-  },
-  {
-   "name": "图文｜MX｜脸型匹配发型",
-   "entry_group": "production",
-   "routing_policy": "native_photo_v1",
-   "media_kind": "native_photo",
-   "category_key": "wig",
-   "default_product_mode": "NO_PRODUCT",
-   "default_asset_mode": "ASSET_REUSE",
-   "tasks": [
+      "name": "图文｜TH｜四选一穿搭",
+      "entry_group": "production",
+      "routing_policy": "native_photo_product_supply_v1",
+      "media_kind": "native_photo",
+      "category_key": "womenswear",
+      "default_product_mode": "NO_PRODUCT",
+      "default_asset_mode": "REUSE_THEN_GENERATE_MISSING",
+      "tasks": [
+        {
+          "account_id": "OPV_TH_TEST_001",
+          "market": "TH",
+          "language": "th-TH",
+          "recipe_id": "PHOTO_TH_PICK_YOUR_LOOK_V3",
+          "theme_id": "",
+          "hook_strategy": "pick_one_of_four",
+          "persona_ref": "",
+          "look_ref": "",
+          "scene_ref": ""
+        }
+      ],
+      "status": "active"
+    },
     {
-     "account_id": "OPV_MX_PHOTO_001",
-     "market": "MX",
-     "language": "es-MX",
-     "recipe_id": "PHOTO_MX_FACE_SHAPE_MATCH_V1",
-     "theme_id": "",
-     "hook_strategy": "face_shape_match",
-     "persona_ref": "",
-     "look_ref": "",
-     "scene_ref": ""
-    }
-   ]
-  },
-  {
-   "name": "图文｜MX｜场景发型",
-   "entry_group": "production",
-   "routing_policy": "native_photo_v1",
-   "media_kind": "native_photo",
-   "category_key": "wig",
-   "default_product_mode": "NO_PRODUCT",
-   "default_asset_mode": "ASSET_REUSE",
-   "tasks": [
+      "name": "图文｜MX｜假发前后对比",
+      "status": "disabled",
+      "entry_group": "trial",
+      "routing_policy": "native_photo_v1",
+      "media_kind": "native_photo",
+      "category_key": "wig",
+      "default_product_mode": "NO_PRODUCT",
+      "default_asset_mode": "ASSET_REUSE",
+      "tasks": [
+        {
+          "account_id": "OPV_MX_PHOTO_001",
+          "market": "MX",
+          "language": "es-MX",
+          "recipe_id": "PHOTO_MX_BEFORE_AFTER_V1",
+          "theme_id": "",
+          "hook_strategy": "antes_despues",
+          "persona_ref": "",
+          "look_ref": "",
+          "scene_ref": ""
+        }
+      ]
+    },
     {
-     "account_id": "OPV_MX_PHOTO_001",
-     "market": "MX",
-     "language": "es-MX",
-     "recipe_id": "PHOTO_MX_OCCASION_HAIR_V1",
-     "theme_id": "",
-     "hook_strategy": "hair_for_each_plan",
-     "persona_ref": "",
-     "look_ref": "",
-     "scene_ref": ""
-    }
-   ]
-  },
-  {
-   "name": "图文｜VN｜围巾旅行",
-   "entry_group": "trial",
-   "routing_policy": "native_photo_style_plan_v1",
-   "media_kind": "native_photo",
-   "category_key": "scarf",
-   "default_product_mode": "NO_PRODUCT",
-   "default_asset_mode": "REUSE_THEN_GENERATE_MISSING",
-   "tasks": [
+      "name": "图文｜MX｜四选一发型",
+      "entry_group": "production",
+      "routing_policy": "native_photo_v1",
+      "media_kind": "native_photo",
+      "category_key": "wig",
+      "default_product_mode": "NO_PRODUCT",
+      "default_asset_mode": "ASSET_REUSE",
+      "tasks": [
+        {
+          "account_id": "OPV_MX_PHOTO_001",
+          "market": "MX",
+          "language": "es-MX",
+          "recipe_id": "PHOTO_MX_PICK_YOUR_HAIR_V2",
+          "theme_id": "",
+          "hook_strategy": "cual_elegirias",
+          "persona_ref": "",
+          "look_ref": "",
+          "scene_ref": ""
+        }
+      ]
+    },
     {
-     "account_id": "OPV_VN_TEST_001",
-     "market": "VN",
-     "language": "vi-VN",
-     "recipe_id": "PHOTO_TRAVEL_OUTFIT_V3",
-     "theme_id": "",
-     "hook_strategy": "destination_temperature",
-     "persona_ref": "",
-     "look_ref": "",
-     "scene_ref": ""
-    }
-   ],
-   "status": "disabled",
-   "disabled_reason": "VN 围巾旅行线（PHOTO_TRAVEL_OUTFIT_V3 × SCARF_V1 × MP_VN_DEFAULT_V1 × LOCALE_VI_VN_V1）。越南语文案尚未母语审校（NATIVE_APPROVED）、VN 账号未确认 TikTok Content Posting 原生图文能力、离线 canary 未完成人工验收，故保持 disabled。验收通过后由运营改为 active。"
-  },
-  {
-   "name": "图文｜VN｜围巾搭配四选一",
-   "entry_group": "trial",
-   "routing_policy": "native_photo_product_supply_v1",
-   "media_kind": "native_photo",
-   "category_key": "scarf",
-   "default_product_mode": "NO_PRODUCT",
-   "default_asset_mode": "REUSE_THEN_GENERATE_MISSING",
-   "tasks": [
+      "name": "图文｜MX｜脸型匹配发型",
+      "status": "disabled",
+      "entry_group": "trial",
+      "routing_policy": "native_photo_v1",
+      "media_kind": "native_photo",
+      "category_key": "wig",
+      "default_product_mode": "NO_PRODUCT",
+      "default_asset_mode": "ASSET_REUSE",
+      "tasks": [
+        {
+          "account_id": "OPV_MX_PHOTO_001",
+          "market": "MX",
+          "language": "es-MX",
+          "recipe_id": "PHOTO_MX_FACE_SHAPE_MATCH_V1",
+          "theme_id": "",
+          "hook_strategy": "face_shape_match",
+          "persona_ref": "",
+          "look_ref": "",
+          "scene_ref": ""
+        }
+      ]
+    },
     {
-     "account_id": "OPV_VN_TEST_001",
-     "market": "VN",
-     "language": "vi-VN",
-     "recipe_id": "PHOTO_MATCHING_CHOICE_V3",
-     "theme_id": "",
-     "hook_strategy": "pick_one_of_four",
-     "persona_ref": "",
-     "look_ref": "",
-     "scene_ref": ""
+      "name": "图文｜MX｜场景发型",
+      "status": "disabled",
+      "entry_group": "trial",
+      "routing_policy": "native_photo_v1",
+      "media_kind": "native_photo",
+      "category_key": "wig",
+      "default_product_mode": "NO_PRODUCT",
+      "default_asset_mode": "ASSET_REUSE",
+      "tasks": [
+        {
+          "account_id": "OPV_MX_PHOTO_001",
+          "market": "MX",
+          "language": "es-MX",
+          "recipe_id": "PHOTO_MX_OCCASION_HAIR_V1",
+          "theme_id": "",
+          "hook_strategy": "hair_for_each_plan",
+          "persona_ref": "",
+          "look_ref": "",
+          "scene_ref": ""
+        }
+      ]
+    },
+    {
+      "name": "图文｜VN｜围巾旅行",
+      "entry_group": "trial",
+      "routing_policy": "native_photo_style_plan_v1",
+      "media_kind": "native_photo",
+      "category_key": "scarf",
+      "default_product_mode": "NO_PRODUCT",
+      "default_asset_mode": "REUSE_THEN_GENERATE_MISSING",
+      "tasks": [
+        {
+          "account_id": "OPV_VN_TEST_001",
+          "market": "VN",
+          "language": "vi-VN",
+          "recipe_id": "PHOTO_TRAVEL_OUTFIT_V3",
+          "theme_id": "",
+          "hook_strategy": "destination_temperature",
+          "persona_ref": "",
+          "look_ref": "",
+          "scene_ref": ""
+        }
+      ],
+      "status": "disabled",
+      "disabled_reason": "VN 围巾旅行线（PHOTO_TRAVEL_OUTFIT_V3 × SCARF_V1 × MP_VN_DEFAULT_V1 × LOCALE_VI_VN_V1）。越南语文案尚未母语审校（NATIVE_APPROVED）、VN 账号未确认 TikTok Content Posting 原生图文能力、离线 canary 未完成人工验收，故保持 disabled。验收通过后由运营改为 active。"
+    },
+    {
+      "name": "图文｜VN｜围巾搭配四选一",
+      "entry_group": "trial",
+      "routing_policy": "native_photo_product_supply_v1",
+      "media_kind": "native_photo",
+      "category_key": "scarf",
+      "default_product_mode": "NO_PRODUCT",
+      "default_asset_mode": "REUSE_THEN_GENERATE_MISSING",
+      "tasks": [
+        {
+          "account_id": "OPV_VN_TEST_001",
+          "market": "VN",
+          "language": "vi-VN",
+          "recipe_id": "PHOTO_MATCHING_CHOICE_V3",
+          "theme_id": "",
+          "hook_strategy": "pick_one_of_four",
+          "persona_ref": "",
+          "look_ref": "",
+          "scene_ref": ""
+        }
+      ],
+      "status": "disabled",
+      "disabled_reason": "VN 围巾日常搭配线（PHOTO_MATCHING_CHOICE_V3 × SCARF_V1 × MP_VN_DEFAULT_V1 × LOCALE_VI_VN_V1）。规格 §5.2 原写 MATCHING_CHOICE_V2，该配方全仓不存在（开工前对齐清单 §5 已列为待拍板），本阶段按建议落为国家无关的 PHOTO_MATCHING_CHOICE_V3。VN 文案未母语审校、VN_SCARF_CHOICE 素材集尚未交付，故保持 disabled。"
     }
-   ],
-   "status": "disabled",
-   "disabled_reason": "VN 围巾日常搭配线（PHOTO_MATCHING_CHOICE_V3 × SCARF_V1 × MP_VN_DEFAULT_V1 × LOCALE_VI_VN_V1）。规格 §5.2 原写 MATCHING_CHOICE_V2，该配方全仓不存在（开工前对齐清单 §5 已列为待拍板），本阶段按建议落为国家无关的 PHOTO_MATCHING_CHOICE_V3。VN 文案未母语审校、VN_SCARF_CHOICE 素材集尚未交付，故保持 disabled。"
-  }
- ]
+  ]
 }

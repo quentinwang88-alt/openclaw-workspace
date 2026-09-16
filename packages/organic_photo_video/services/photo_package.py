@@ -35,11 +35,15 @@ def normalize_photo_template(template: Mapping[str, Any]) -> Dict[str, Any]:
         if any(v and k not in allowed for k, v in template.items()):
             raise PhotoPackageError("unsupported non-empty layout field")
         options = dict(template.get("render_options") or {})
-        supported = {"width", "height", "background", "jpeg_quality", "font_candidates", "font_size", "cover_font_size", "detail_font_size", "cta_font_size", "min_font_size", "text_color", "text_background", "cta_text_color", "cta_background", "text_radius", "max_lines", "cover_index", "choice_badges", "padding_x", "padding_y", "top_offset", "bottom_offset", "line_spacing", "text_position", "split_last_line_to_bottom"}
+        supported = {"width", "height", "background", "jpeg_quality", "font_candidates", "font_size", "cover_font_size", "detail_font_size", "cta_font_size", "min_font_size", "text_color", "text_background", "cta_text_color", "cta_background", "text_radius", "max_lines", "cover_index", "choice_badges", "padding_x", "padding_y", "top_offset", "bottom_offset", "line_spacing", "text_position", "split_last_line_to_bottom", "overlay_style", "structured_style", "font_candidates_bold", "kicker_font_size", "headline_font_size", "body_font_size", "zone_height_ratio", "headline_text_color", "body_text_color", "kicker_text_color", "scrim_color", "scrim_alpha", "scrim_fade"}
         if any(v and k not in supported for k, v in options.items()):
             raise PhotoPackageError("unsupported non-empty render option")
         if options.get("text_position", "top") not in {"top", "bottom"}:
             raise PhotoPackageError("unsupported text_position")
+        if options.get("overlay_style") not in {None, "", "structured_v1"}:
+            # 显式选择尚未支持的排版必须报错，不得静默回落旧模板。
+            raise PhotoPackageError(
+                "unsupported overlay_style: " + str(options.get("overlay_style")))
         return {**options, "template_id": template["layout_id"], "template_version": template["layout_version"]}
     if template.get("schema_version") != "opv-photo-layout-v1":
         return dict(template)
@@ -77,6 +81,9 @@ def _font(template: Mapping[str, Any], *, required: bool,
     candidates = [template.get("font_path"), *(template.get("font_candidates") or [])]
     for candidate in candidates:
         path = Path(str(candidate or "")).expanduser()
+        if not path.is_absolute():
+            # 项目内置字体（assets/fonts）随仓库部署，不依赖机器路径。
+            path = Path(__file__).resolve().parents[1] / path
         if path.is_file():
             try:
                 return ImageFont.truetype(
@@ -369,6 +376,7 @@ class PhotoPackageExporter:
         target = self.output_root / task_id / revision.revision_id / "final"
         target.mkdir(parents=True, exist_ok=True)
         output_slides = []
+        renderer_pages = []
         current = revision
         for spec in specs:
             index = int(spec["index"])
@@ -388,10 +396,17 @@ class PhotoPackageExporter:
                     or ()
                 ),
             )
-            _draw_overlay(
-                image, str(spec.get("overlay_text") or ""), template,
-                index=index, cover_index=cover_index, total=expected_count,
-            )
+            if str(template.get("overlay_style") or "") == "structured_v1":
+                from services.photo_structured_layout import render_structured_page
+                renderer_pages.append(render_structured_page(
+                    image, str(spec.get("overlay_text") or ""), template,
+                    index=index, cover_index=cover_index, total=expected_count,
+                ))
+            else:
+                _draw_overlay(
+                    image, str(spec.get("overlay_text") or ""), template,
+                    index=index, cover_index=cover_index, total=expected_count,
+                )
             _draw_choice_badges(image, template, index=index, cover_index=cover_index, layout=spec["layout"])
             path = target / f"{index:02d}.jpg"
             temporary = path.with_suffix(".tmp.jpg")
@@ -426,6 +441,15 @@ class PhotoPackageExporter:
             "cover_index": cover_index,
             "copy": frozen_copy, "slides": output_slides,
         }
+        if renderer_pages:
+            manifest["renderer"] = {
+                "version": "structured_v1",
+                "style": str(template.get("structured_style") or ""),
+                "template_id": template_id,
+                "template_version": template_version,
+                "fonts": list(template.get("font_candidates") or [])[:1],
+                "pages": renderer_pages,
+            }
         if revision.plan_snapshot_json.get("plan", {}).get("theme_brief"):
             manifest["theme_brief"] = dict(
                 revision.plan_snapshot_json["plan"]["theme_brief"]

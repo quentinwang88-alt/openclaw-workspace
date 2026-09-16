@@ -1,0 +1,42 @@
+{
+  "schema_version": "opv-photo-layout-v2",
+  "layout_id": "PHOTO_STRUCTURED_SCENE_V1",
+  "layout_version": 1,
+  "layout_kind": "STRUCTURED",
+  "status": "active",
+  "render_options": {
+    "width": 1080,
+    "height": 1920,
+    "background": "#F7F5F0",
+    "jpeg_quality": 92,
+    "overlay_style": "structured_v1",
+    "structured_style": "scene",
+    "font_candidates": [
+      "assets/fonts/Sarabun-Regular.ttf",
+      "/System/Library/Fonts/Thonburi.ttc",
+      "/System/Library/Fonts/Supplemental/Arial Unicode.ttf"
+    ],
+    "font_candidates_bold": [
+      "assets/fonts/Sarabun-Bold.ttf",
+      "/System/Library/Fonts/ThonburiBold.ttf",
+      "assets/fonts/Sarabun-Regular.ttf"
+    ],
+    "kicker_font_size": 32,
+    "headline_font_size": 58,
+    "body_font_size": 38,
+    "cta_font_size": 32,
+    "min_font_size": 24,
+    "headline_text_color": "#FFFDF7",
+    "body_text_color": "#F4EFE4",
+    "kicker_text_color": "#E8E1D2",
+    "cta_text_color": "#EDE7DA",
+    "scrim_color": "#1E1A15",
+    "scrim_alpha": 118,
+    "scrim_fade": 150,
+    "padding_x": 84,
+    "top_offset": 96,
+    "bottom_offset": 96,
+    "line_spacing": 12,
+    "zone_height_ratio": 0.34
+  }
+}

@@ -55,6 +55,7 @@ FIELD_QUANTITY_LEGACY = "生成数量"
 FIELD_CONFIRM_PUBLISH = "确认发布"
 FIELD_PHOTO_REQUEST = "图文任务JSON"  # optional legacy override; never required
 FIELD_PHOTO_SUMMARY = "内容方案摘要"
+FIELD_FULL_COPY_ZH = "完整文案（中文）"  # 最终成片文案的中文全文（按套、按页）
 FIELD_PHOTO_INPUT = "完整穿搭素材（可选）"
 FIELD_PHOTO_INPUT_LEGACY = "图文参考图"
 FIELD_PRODUCT_REFERENCE = "商品参考图（可选）"
@@ -62,6 +63,8 @@ FIELD_REFERENCE = "参考图（可选）"
 FIELD_REFERENCE_TYPE = "参考图类型"
 FIELD_CONTENT_THEME = "图文主题"
 FIELD_CONTENT_REQUIREMENT = "内容要求（可选）"
+FIELD_TARGET_ACCOUNT = "目标账号（可选）"
+FIELD_VISUAL_PRESET = "视觉预设（可选）"
 FIELD_TRAVEL_PLACE = "旅行地点（可选）"
 FIELD_TEMPERATURE_BAND = "温度档"
 FIELD_THERMAL_SENSITIVITY = "体感倾向"
@@ -738,6 +741,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
         output_root=None,
         asset_readiness_gate=None,
         photo_reference_vision=None,
+        publish_account_resolver=None,
     ):
         self.repository = repository
         self.client = client
@@ -749,11 +753,31 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
         self.output_root = output_root
         self.asset_readiness_gate = asset_readiness_gate
         self.photo_reference_vision = photo_reference_vision
+        self.publish_account_resolver = publish_account_resolver
         self._run_lease = None
         self._photo_quality_summaries: Dict[str, str] = {}
         self.product_reference_resolver = (
             product_reference_resolver or ProductReferenceResolver(repository)
         )
+
+    def _resolve_target_account(self, record) -> "Optional[Any]":
+        """解析行级「目标账号（可选）」；显式填写但解析失败必须报错。
+
+        返回 ``PublishAccountBinding``；未填写时返回 ``None``（旧任务原路径，
+        不允许任何静默回退店铺公共池的逻辑出现在这里）。
+        """
+        handle = text_value(record.fields.get(FIELD_TARGET_ACCOUNT))
+        if not handle:
+            return None
+        from services.publish_account_profile import (
+            PublishAccountProfileError, build_default_resolver,
+        )
+        resolver = self.publish_account_resolver or build_default_resolver()
+        self.publish_account_resolver = resolver
+        try:
+            return resolver.resolve(handle)
+        except PublishAccountProfileError as exc:
+            raise FeishuWorkflowError(str(exc)) from exc
 
     @staticmethod
     def _complete_look_attachments(fields: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1166,6 +1190,12 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
         if ((batch and batch.manifest_json.get("media_kind") == "native_photo")
                 or (batch is None and self.catalog.is_native_photo(preset_name))):
             return self._generate_native_photo(record, preset_name, quantity, existing, batch=batch)
+        if text_value(record.fields.get(FIELD_TARGET_ACCOUNT)):
+            # 本轮目标账号只接入原生图文；视频线填写了目标账号必须显式报错，
+            # 不允许静默忽略导致运营误以为内容已绑定账号。
+            raise FeishuWorkflowError(
+                "目标账号（可选）当前只支持原生图文预设；视频任务请清空该字段"
+            )
         if existing and batch is None:
             if len(existing) != task_quantity(record.fields):
                 raise FeishuWorkflowError("历史批次缺少冻结清单且任务数量不足；请人工核对，不能按当前配置猜测补单")
@@ -1437,6 +1467,90 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 theme = resolve_photo_theme(text_value(record.fields.get(FIELD_CONTENT_THEME)))
             except ValueError as exc:
                 raise FeishuWorkflowError(str(exc)) from exc
+            # ---- 目标账号（可选）：账号默认主题/定位/表达/视觉基准的统一解析 ----
+            # 本篇配置优先级（按项）：任务显式选择 → 账号默认 → 原有行为。
+            # 只有填写了目标账号的行才会新增任何冻结键；旧行为逐字不变。
+            account_binding = self._resolve_target_account(record)
+            theme_source = "task" if theme is not None else ""
+            if theme is None and account_binding is not None:
+                default_theme = str(
+                    account_binding.profile.get("default_theme") or "").strip()
+                if default_theme:
+                    try:
+                        theme = resolve_photo_theme(default_theme)
+                    except ValueError as exc:
+                        raise FeishuWorkflowError(
+                            f"账号 {account_binding.account_id} 的默认主题无效：{exc}"
+                        ) from exc
+                    theme_source = "account_default"
+            if account_binding is not None:
+                market = str(specs[0].market or "").strip().upper()
+                binding_market = str(account_binding.target_country or "").strip().upper()
+                if binding_market and market and binding_market != market:
+                    raise FeishuWorkflowError(
+                        f"目标账号 {account_binding.account_id} 属于 "
+                        f"{binding_market} 市场，与预设 {preset_name}（{market}）不一致"
+                    )
+                row_store = text_value(record.fields.get(FIELD_STORE))
+                if row_store and row_store != account_binding.store_id:
+                    raise FeishuWorkflowError(
+                        f"目标账号 {account_binding.account_id} 属于店铺 "
+                        f"{account_binding.store_id}，与任务选择的店铺 {row_store} 不一致；"
+                        "请修正店铺或目标账号，不能自动借用其他店铺"
+                    )
+            if theme is not None and theme.get("native_multiway"):
+                # 指定商品身份优先用产品编码；商品参考包（PRODUCT 模式）同样成立。
+                if not product_id and not legacy_product:
+                    raise FeishuWorkflowError(
+                        "原生图文主题“一衣多穿”需要填写产品编码（同商品多搭配）；"
+                        "旧图片视频一衣多穿请继续使用「TH｜一衣多穿｜轻文字」预设"
+                    )
+            # 内容表达：任务补充要求里显式写「实用指南/搭配灵感」时覆盖账号默认。
+            expression_mode = ""
+            expression_source = ""
+            if account_binding is not None:
+                expression_mode = str(
+                    account_binding.profile.get("expression_mode") or "").strip()
+                if expression_mode:
+                    expression_source = "account_default"
+            requirement_text = text_value(record.fields.get(FIELD_CONTENT_REQUIREMENT))
+            if "实用指南" in requirement_text:
+                expression_mode, expression_source = "PRACTICAL_GUIDE", "task"
+            elif "搭配灵感" in requirement_text:
+                expression_mode, expression_source = "STYLE_INSPIRATION", "task"
+            account_brief: Optional[dict[str, Any]] = None
+            if account_binding is not None:
+                account_brief = {
+                    "target_publish_account_id": account_binding.account_id,
+                    "target_account_name": account_binding.account_name,
+                    "account_store_id": account_binding.store_id,
+                    "theme_source": theme_source,
+                    "expression_mode": expression_mode,
+                    "expression_source": expression_source,
+                    "positioning": str(
+                        account_binding.profile.get("positioning") or ""),
+                    "visual_baseline": str(
+                        account_binding.profile.get("visual_baseline") or ""),
+                    "profile_fingerprint": account_binding.fingerprint,
+                    "profile_source": account_binding.source,
+                }
+            # ---- 视觉预设（Phase 2）：本篇选择 → 账号默认 → 入口默认 ----
+            # 入口默认只对账号绑定行生效；无绑定旧行不新增键，冻结请求不变。
+            from services.visual_preset import (
+                VisualPresetError, entry_default_preset_id, resolve_preset_snapshot,
+            )
+            try:
+                visual_preset_snapshot = resolve_preset_snapshot(
+                    task_value=text_value(record.fields.get(FIELD_VISUAL_PRESET)),
+                    account_default=(
+                        account_binding.profile.get("default_visual_preset")
+                        if account_binding is not None else ""),
+                    entry_preset_id=entry_default_preset_id(
+                        str(preset.get("routing_policy") or "")),
+                    entry_default_allowed=account_binding is not None,
+                )
+            except VisualPresetError as exc:
+                raise FeishuWorkflowError(str(exc)) from exc
             if layering_flow:
                 expected_theme = "THERMAL_TRANSITION" if thermal_transition_flow else "TEMPERATURE_DRESSING"
                 if str((theme or {}).get("theme_key") or "") != expected_theme:
@@ -1606,6 +1720,43 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                         content_requirement=content_requirement,
                         fields=record.fields, recipe_spec=recipe_spec_input,
                     )
+                    # 账号定位进入选题冻结：只有配置了目标账号的行才带这些键，
+                    # travel_topic 本身会进内容计划 input_contract（hash 覆盖）。
+                    if expression_mode:
+                        travel_topic["expression_mode"] = expression_mode
+                    if account_brief and account_brief.get("positioning"):
+                        travel_topic["account_positioning"] = str(
+                            account_brief["positioning"])
+                elif theme and theme.get("native_multiway"):
+                    # 原生一衣多穿进入正式文案路径（2026-09-15 断点 A3）：
+                    # 与六类旅行主题共用主题联动分支（模型生成完整发布文案），
+                    # 地点可选（填了就进文案语境，不填不强制）；不再回落通用
+                    # 四选一投票模板。legacy 视频一衣多穿不受影响。
+                    travel_topic = {
+                        "theme_type": "NATIVE_MULTIWAY",
+                        "theme_version": 1,
+                        "theme_label_zh": str(theme.get("label_zh") or ""),
+                        "planning_focus": str(theme.get("visual_brief") or ""),
+                        "place": travel_place,
+                        "temperature_band": str(travel_variables.get("temperature_band") or ""),
+                        "temperature_context": {
+                            "value": str(travel_variables.get("temperature_band") or ""),
+                            "source": "execution_profile",
+                        },
+                        "thai_fallback": {
+                            "title": str(theme.get("title") or ""),
+                            "cover": str(theme.get("cover") or ""),
+                            "caption": str(theme.get("caption") or ""),
+                            "hashtags": list(theme.get("hashtags") or []),
+                            "cta": str(theme.get("cta") or ""),
+                        },
+                        "content_requirement": content_requirement,
+                    }
+                    if expression_mode:
+                        travel_topic["expression_mode"] = expression_mode
+                    if account_brief and account_brief.get("positioning"):
+                        travel_topic["account_positioning"] = str(
+                            account_brief["positioning"])
             if reference_mode == REFERENCE_MODE_STYLE and recipe_for_input:
                 if effective_theme is None:
                     raise FeishuWorkflowError("风格参考模式需要选择图文主题")
@@ -1622,6 +1773,19 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 )
                 self.photo_reference_vision = reference_vision
                 if planning_flow == "travel_two_step":
+                    # 固定背景（Phase 3）：预设 background.mode=fixed 时旅行规划
+                    # 改用固定背景合同；快照随 style_profile 供供给与 QA 识别。
+                    fixed_background_payload = None
+                    if visual_preset_snapshot is not None:
+                        # 直接读冻结快照的有效配置；旧快照缺 background 键时
+                        # 用显示名解析一次（窄兼容，不读最新文件覆盖新任务）。
+                        _bg = dict(visual_preset_snapshot.get("background") or {})
+                        if not _bg:
+                            from services.visual_preset import resolve_visual_preset
+                            _bg = dict(resolve_visual_preset(
+                                visual_preset_snapshot.get("name"))["background"])
+                        if str(_bg.get("mode") or "") == "fixed":
+                            fixed_background_payload = _bg
                     self._write_fields(record.record_id, {FIELD_PROGRESS: PROGRESS_PLANNING})
                     def _plan_travel_reference():
                         analysis = reference_vision.analyze_reference(
@@ -1629,6 +1793,8 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                             theme=theme or variation_theme,
                             category_key=str((recipe_for_input.recipe_spec_json or {}).get("category_key") or preset.get("category_key") or ""),
                             content_requirement=content_requirement,
+                            account_visual_baseline=str(
+                                (account_brief or {}).get("visual_baseline") or ""),
                         )
                         plan = reference_vision.plan_travel_content(
                             record_id=record.record_id, analysis=analysis,
@@ -1641,6 +1807,12 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                                 style_product.get("reference_images") or []
                             ),
                             locale_pack=locale_pack,
+                            account_positioning=str(
+                                (account_brief or {}).get("positioning") or ""),
+                            expression_mode=expression_mode,
+                            account_visual_baseline=str(
+                                (account_brief or {}).get("visual_baseline") or ""),
+                            fixed_background=fixed_background_payload,
                         )
                         return analysis, plan
 
@@ -1656,6 +1828,8 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     style_profile = reference_vision.build_travel_style_profile(
                         reference_analysis, travel_plan, count=quantity,
                     )
+                    if visual_preset_snapshot is not None:
+                        style_profile["visual_preset"] = dict(visual_preset_snapshot)
                     if travel_topic:
                         style_profile["travel_topic"] = dict(travel_topic)
                 else:
@@ -2146,6 +2320,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                                 locale=publish_locale or "th-TH",
                                 locale_pack=locale_pack,
                                 variation_index=index + 1,
+                                expression_mode=expression_mode,
                             )
                         request["theme_brief"] = {
                             **dict(variation_theme), "reference_mode": reference_mode,
@@ -2159,6 +2334,36 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                                 "temperature_context": dict(travel_topic.get("temperature_context") or {}),
                             } if theme and theme.get("travel_theme_type") else {}),
                         }
+                        if account_brief is not None:
+                            # 本篇实际使用的账号配置快照：主题来源、表达模式、
+                            # 视觉基准与目标账号一起冻结，续跑/重拍只读冻结值。
+                            request["theme_brief"]["account"] = dict(account_brief)
+                            request["target_publish_account_id"] = str(
+                                account_brief["target_publish_account_id"])
+                        if visual_preset_snapshot is not None:
+                            # 视觉预设快照（Phase 2）：身份/版本/背景方式/指纹
+                            # 进冻结请求；排版与背景执行在 Phase 3 消费。
+                            request["theme_brief"]["visual_preset"] = dict(
+                                visual_preset_snapshot)
+                        if visual_preset_snapshot is not None:
+                            # 排版接线（2026-09-15 排版轮 B2）：预设声明
+                            # structured_v1 时按背景类型替换布局模板；未知
+                            # family 显式报错，不静默沿用旧 PHOTO_TRAVEL_CARD。
+                            _layout_family = str(
+                                (visual_preset_snapshot.get("layout") or {})
+                                .get("layout_family") or "")
+                            if _layout_family == "structured_v1":
+                                from services.visual_preset import structured_layout_for
+                                _layout_id = structured_layout_for(
+                                    (visual_preset_snapshot.get("background") or {})
+                                    .get("kind"))
+                                request["layout_snapshot"] = json.loads(
+                                    (Path(__file__).resolve().parents[1]
+                                     / "config" / "layouts" / f"{_layout_id}.json")
+                                    .read_text(encoding="utf-8"))
+                            elif _layout_family:
+                                raise FeishuWorkflowError(
+                                    f"尚未支持的排版 family：{_layout_family}")
                         request["request_sha256"] = fingerprint({
                             key: value for key, value in request.items() if key != "request_sha256"
                         })
@@ -2238,6 +2443,51 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
             raise FeishuWorkflowError("该行存在冻结批次以外的任务，禁止混组")
         requests = [entry["request"] for entry in entries]
         summary = PhotoRequestFactory.summary(requests)
+        # 本篇实际使用的账号配置（运营核对入口，不新增确认步骤）：目标账号、
+        # 主题来源、表达模式与视觉基准都来自冻结快照。
+        frozen_account = dict(
+            ((requests[0].get("theme_brief") or {}).get("account") or {})
+            if requests else {},
+        )
+        if frozen_account.get("target_publish_account_id"):
+            expression_labels = {
+                "STYLE_INSPIRATION": "搭配灵感", "PRACTICAL_GUIDE": "实用指南",
+            }
+            preset_source_labels = {
+                "task": "任务选择", "account_default": "账号默认",
+                "entry_default": "入口默认",
+            }
+            theme_label = str(
+                (requests[0].get("theme_brief") or {}).get("label_zh") or "")
+            preset_snapshot = dict(
+                (requests[0].get("theme_brief") or {}).get("visual_preset") or {})
+            if preset_snapshot:
+                preset_segment = (
+                    "；视觉预设 {name}（{mode}，来源：{source}）".format(
+                        name=preset_snapshot.get("name"),
+                        mode=preset_snapshot.get("background_mode"),
+                        source=preset_source_labels.get(
+                            str(preset_snapshot.get("source") or ""), "入口默认"),
+                    ))
+            else:
+                preset_segment = ""
+            summary = (
+                "本篇配置：目标账号 {account}（店铺 {store}）；主题 {theme}"
+                "（来源：{source}）；表达 {expression}；视觉基准 {baseline}"
+                "{preset_segment}\n{summary}"
+            ).format(
+                account=frozen_account.get("target_publish_account_id"),
+                store=frozen_account.get("account_store_id") or "未记录",
+                theme=theme_label or "未选",
+                source={
+                    "task": "任务选择", "account_default": "账号默认",
+                }.get(str(frozen_account.get("theme_source") or ""), "原预设"),
+                expression=expression_labels.get(
+                    str(frozen_account.get("expression_mode") or ""), "默认"),
+                baseline=str(frozen_account.get("visual_baseline") or "无"),
+                preset_segment=preset_segment,
+                summary=summary,
+            )
         frozen_content_plan = (batch.manifest_json or {}).get("content_plan")
         if frozen_content_plan:
             from services.photo_content_planner import summarize_batch_plan
@@ -2267,6 +2517,27 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
             FIELD_PHOTO_ASSET_STATUS: "已匹配可用素材",
         })
         task_ids, paths, failures = [], [], []
+        final_copies: List[tuple] = []
+        # 提速（2026-09-15）：中文翻译随成片产出即时启动，与后续任务的生图/
+        # QA 及附件上传并行；仍按文案指纹缓存，失败只降级为占位提示。
+        from concurrent.futures import ThreadPoolExecutor
+        from services.copy_translation import (
+            CopyTranslationError, CopyTranslationService,
+        )
+        _zh_root = (Path(self.output_root).parent if self.output_root
+                    else Path.home() / ".openclaw/shared/data/organic_photo_video")
+
+        def _translate_one(copy_block, locale):
+            try:
+                return ("ok", CopyTranslationService(root=_zh_root).translate(
+                    copy_block, source_locale=locale))
+            except CopyTranslationError as exc:
+                return ("error", str(exc))
+            except Exception as exc:  # 翻译链路异常不得影响成片交付
+                return ("error", str(exc))
+
+        _zh_executor = ThreadPoolExecutor(max_workers=1)
+        _zh_futures: List = []
         for entry in entries:
             if self._run_lease:
                 self._run_lease.check()
@@ -2287,6 +2558,8 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     requested_shot_count=(
                         len((item.get("content_card") or {}).get("pages") or []) or 5
                     ), created_by="feishu_opv_photo", idempotency_key=source_record_id,
+                    target_publish_account_id=str(
+                        item.get("target_publish_account_id") or ""),
                 )).task
                 if task.target_country != item["market"] or task.target_locale != item["locale"]:
                     raise FeishuWorkflowError("生产账号市场/语言已变化，与冻结批次不一致")
@@ -2310,10 +2583,16 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     raise FeishuWorkflowError(f"图文任务 {task.task_id} 没有完整成品页")
                 task_ids.append(task.task_id)
                 paths.extend(str(slide["path"]) for slide in manifest["slides"])
+                final_copy = dict(manifest.get("copy") or {})
+                if final_copy:
+                    locale = str(item.get("locale") or "th-TH")
+                    final_copies.append((final_copy, locale))
+                    _zh_futures.append(_zh_executor.submit(
+                        _translate_one, final_copy, locale))
             except Exception as exc:
                 failures.append(f"{source_record_id}: {exc}")
         attachments = self._upload_files(paths, parent_type="bitable_image") if paths else []
-        self._write_fields(record.record_id, {
+        completion_fields = {
             FIELD_PROGRESS: PROGRESS_ACTION if failures else PROGRESS_DONE,
             FIELD_OUTPUT: attachments, FIELD_REVIEW: REVIEW_NOT_REQUIRED,
             FIELD_REVIEW_STAGE: "处理中" if failures else "技术完成", FIELD_PHOTO_SUMMARY: summary,
@@ -2323,9 +2602,55 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                              else "技术检查已通过；勾选确认发布后冻结当前成品并进入发布队列。")
                           + "｜" + self._photo_quality_summaries.get(record.record_id, "")
                           )[:1500],
-        })
+        }
+        # 完整中文文案（最终成片包口径）：翻译已在循环内并行完成/在途，
+        # 这里与上传汇合；失败只降级为占位提示，不影响成片与发布。
+        full_copy_zh = ""
+        try:
+            from services.copy_translation import compose_full_copy_zh
+            parts = []
+            for future in _zh_futures:
+                status, payload = future.result()
+                if status == "ok":
+                    parts.append(compose_full_copy_zh(
+                        payload, set_index=len(parts) + 1,
+                        total_sets=len(_zh_futures)))
+                else:
+                    parts.append(f"（第 {len(parts) + 1} 套中文翻译待补跑：{payload}；"
+                                 "重新执行该行或运行 scripts/backfill_copy_zh.py 可补齐）")
+            if parts:
+                full_copy_zh = "\n\n".join(parts)
+        finally:
+            _zh_executor.shutdown(wait=True)
+        if full_copy_zh:
+            completion_fields[FIELD_FULL_COPY_ZH] = full_copy_zh
+        self._write_fields(record.record_id, completion_fields)
         return {"record_id": record.record_id, "action": "generate_native_photo",
                 "task_ids": task_ids, "photo_count": len(paths), "failures": failures}
+
+    def _compose_full_copy_zh(self, final_copies: List[tuple]) -> str:
+        if not final_copies:
+            return ""
+        from services.copy_translation import (
+            CopyTranslationError, CopyTranslationService, compose_full_copy_zh,
+        )
+        root = (Path(self.output_root).parent if self.output_root
+                else Path.home() / ".openclaw/shared/data/organic_photo_video")
+        service = CopyTranslationService(root=root)
+        parts: List[str] = []
+        try:
+            for index, (copy_block, locale) in enumerate(final_copies, 1):
+                translation = service.translate(copy_block, source_locale=locale)
+                parts.append(compose_full_copy_zh(
+                    translation, set_index=index, total_sets=len(final_copies)))
+            return "\n\n".join(parts)
+        except CopyTranslationError as exc:
+            if parts:
+                return "\n\n".join(parts) + f"\n\n（其余套中文翻译待补跑：{exc}）"
+            return (f"（中文翻译待补跑：{exc}；不影响成片与发布；"
+                    "重新执行该行或运行 scripts/backfill_copy_zh.py 可补齐）")
+        except Exception as exc:  # 翻译链路任何异常都不得影响成片交付
+            return f"（中文翻译待补跑：{exc}；不影响成片与发布）"
 
     def _mx_wig_recipe_for_preset(self, preset_name: str):
         """Return the wig recipe only when the preset's tasks point at the
@@ -2384,6 +2709,10 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
         全程不进入 TH 主题解析/服装供给：主题在 MX 模块解析，参考图按发型
         灵感/环境/风格处理，产品编码在付费生成前显式拒绝并保留原值。
         """
+        if text_value(record.fields.get(FIELD_TARGET_ACCOUNT)):
+            raise FeishuWorkflowError(
+                "MX 假发线暂不支持目标账号定位；目标账号只用于 TH 原生图文任务"
+            )
         from config.loader import load_board_layouts
         from domain.models import ProductionBatch
         from dataclasses import asdict
@@ -3225,6 +3554,28 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
         selected_store_id = text_value(record.fields.get(FIELD_STORE))
         if photo_only and not selected_store_id:
             raise FeishuWorkflowError("原生图文确认发布前必须选择店铺")
+        # 目标账号贯穿投递：任务冻结了目标账号时，本行选择的店铺必须与该账号
+        # 所属店铺一致；不一致直接报错，不允许借店铺公共池绕过账号绑定。
+        target_accounts = {
+            str(getattr(task, "target_publish_account_id", "") or "")
+            for task in tasks
+            if str(getattr(task, "target_publish_account_id", "") or "")
+        }
+        if photo_only and target_accounts:
+            if len(target_accounts) > 1:
+                raise FeishuWorkflowError("同一行任务冻结了多个目标账号，禁止混组发布")
+            target_account_id = next(iter(target_accounts))
+            binding = self._resolve_target_account(record)
+            if binding is None or binding.account_id != target_account_id:
+                raise FeishuWorkflowError(
+                    f"任务冻结的目标账号 {target_account_id} 与当前行「目标账号」不一致；"
+                    "转账号需走修订/重排，不能在发布时改绑"
+                )
+            if selected_store_id != binding.store_id:
+                raise FeishuWorkflowError(
+                    f"目标账号 {target_account_id} 属于店铺 {binding.store_id}，"
+                    f"请把发布店铺改为 {binding.store_id}；内容只会投递到该账号"
+                )
         # Preflight every task before enqueuing any member of this row.
         for task in tasks:
             if workflow_v2_enabled(task) and not self._v2_released(task):

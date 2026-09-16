@@ -1,0 +1,24 @@
+{
+  "schema_version": "opv-visual-preset-v1",
+  "preset_id": "VP_SOLID_COLOR_V1",
+  "name": "纯色搭配解析",
+  "applicable": {
+    "media_kind": "native_photo"
+  },
+  "background": {
+    "mode": "fixed",
+    "fixed_scene_zh": "纯色或轻纹理背景：奶白、浅灰或低饱和米色为主，均匀柔和布光，无环境元素、无地标、无道具",
+    "stability_zh": "四页背景色与光效保持一致，仅机位与姿势变化",
+    "kind": "solid"
+  },
+  "photography_baseline_zh": "均匀柔光、商品与人物细节清晰、色彩还原准确，构图以完整展示搭配比例为主",
+  "layout": {
+    "layout_family": "structured_v1",
+    "page_kinds": [
+      "cover",
+      "detail"
+    ]
+  },
+  "fallback_zh": "无需任何参考图：纯色背景由摄影基准直接描述生成",
+  "version": 2
+}

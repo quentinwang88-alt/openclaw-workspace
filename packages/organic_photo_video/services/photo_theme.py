@@ -31,7 +31,10 @@ DEFAULT_PUBLISH_LOCALE = "th-TH"
 LEGACY_LOOK_LABEL_PREFIX = "ลุค "
 
 
-THEME_OPTIONS = ("自动", "秋季穿搭", "凉爽旅行", "日常通勤", "咖啡约会", "冷热切换",
+#: 运营下拉可选项（ensure 脚本按此播种线上「图文主题」）。2026-09-15 精简：
+#: 秋季穿搭/日常通勤/咖啡约会 三个历史主题移出下拉（线上 0 行使用）；
+#: ``_PROFILES`` 仍保留它们的解析能力，历史行与显式输入不受影响。
+THEME_OPTIONS = ("自动", "凉爽旅行", "一衣多穿", "冷热切换",
                  "温度穿搭", "旅行·打卡穿搭", "旅行·环境协调", "旅行·拍照穿搭",
                  "旅行·温度穿搭", "旅行·四选一", "旅行·配色参考")
 
@@ -59,6 +62,23 @@ _PROFILES = {
         "caption": "ถ้าไปเที่ยวเมืองอากาศเย็น คุณอยากใส่ลุค A B C หรือ D มากที่สุด?",
         "hashtags": ["#แต่งตัวไปเที่ยว", "#ไอเดียแต่งตัว", "#OOTD"],
         "cta": "ไปเที่ยวจะเลือกลุคไหน?",
+    },
+    # 原生图文「一衣多穿」＝旅行线的同商品多搭配：指定商品贯穿四套 Look，配套
+    # 单品/穿法/场景自然变化。legacy 图片视频「一衣多穿」走 config/themes 的
+    # THEME_TH_ONE_PIECE_MULTIWAY_V1 与 RECIPE_VISUAL_TRANSFORM_V1，两个入口
+    # 互不路由；本主题必须配合产品编码（由 feishu_workflow 校验）。
+    "一衣多穿": {
+        "theme_key": "COOL_WEATHER_TRAVEL",
+        "label_zh": "一衣多穿旅行搭配",
+        # 原生图文一衣多穿的身份证：要求任务必须提供产品编码（同商品多搭配），
+        # 与 legacy 图片视频一衣多穿（config/themes 的 MULTIWAY 主题）互不路由。
+        "native_multiway": True,
+        "visual_brief": "同一件指定商品贯穿四套旅行搭配：商品颜色、版型与结构以商品参考图为唯一权威，四套都保留该商品，只改变配套单品、穿法或场景，让读者理解商品好搭、可复用",
+        "title": "1 ตัว 4 ลุค ทริปอากาศเย็น",
+        "cover": "1 ตัว 4 ลุค\nA B C หรือ D?",
+        "caption": "ไอเทมชิ้นเดียวแต่งได้ 4 ลุคสำหรับทริปอากาศเย็น คุณชอบลุคไหนมากที่สุด?",
+        "hashtags": ["#แต่งตัว1ชิ้นหลายลุค", "#ไอเดียแต่งตัว", "#OOTD"],
+        "cta": "ลุคไหนคือสไตล์ของคุณ?",
     },
     "日常通勤": {
         "theme_key": "DAILY_COMMUTE",
@@ -107,6 +127,7 @@ _ALIASES = {
     "秋天的穿搭": "秋季穿搭", "秋天穿搭": "秋季穿搭", "秋季": "秋季穿搭",
     "autumn": "秋季穿搭", "autumn outfit": "秋季穿搭",
     "冷天气旅行": "凉爽旅行", "旅行穿搭": "凉爽旅行",
+    "一件多穿": "一衣多穿", "同款多穿": "一衣多穿", "one piece multiway": "一衣多穿",
     "通勤": "日常通勤", "咖啡": "咖啡约会",
     "温度": "温度穿搭", "分层穿搭": "温度穿搭", "temperature dressing": "温度穿搭",
     "冷热切换": "冷热切换", "冷热": "冷热切换", "空调穿搭": "冷热切换",
@@ -244,28 +265,46 @@ def _short_look_label(text: str) -> str:
     return text
 
 
-def _display_slide_texts(values: Sequence[Any], *, cta: str) -> list[str]:
-    """Convert model prose to complete, compact overlay copy without ellipses."""
+def _display_slide_texts(values: Sequence[Any], *, cta: str,
+                         expression_mode: str = "") -> list[str]:
+    """Convert model prose to complete, compact overlay copy without ellipses.
+
+    ``expression_mode="PRACTICAL_GUIDE"``（账号定位的实用指南表达）时，明细页
+    「造型名称 — 一句穿搭理由」的第二段是交付物的一部分，不得再被旧规则裁成
+    只有造型短名称；其余模式（含未配置）保持旧行为逐字不变。
+    """
     slides = [str(value or "").strip() for value in values]
     if len(slides) != 5 or not all(slides):
         return slides
+    guide_mode = str(expression_mode or "") == "PRACTICAL_GUIDE"
     slides[0] = _wrap_cover(slides[0])
-    for index in range(1, 4):
-        slides[index] = _short_look_label(slides[index])
+    if not guide_mode:
+        for index in range(1, 4):
+            slides[index] = _short_look_label(slides[index])
 
     final = slides[4]
     planned_cta = str(cta or "").strip()
+    # CTA 唯一来源（2026-09-15 修复）：模型在末页自己写的 CTA 优先——第二行
+    # 整行、或首个 CTA 标记之后的文本，原样保留；只有末页没写 CTA 时才用
+    # 冻结的 planned cta / 主题兜底。此前模型写「收藏/เซฟไว้」会被主题投票
+    # CTA 静默覆盖，正是本轮要消除的丢失路径。
     cta_markers = ("คุณเลือก", "คุณชอบ", "เลือกลุคไหน", "เลือก A", "A, B, C", "A B C")
-    marker_positions = [final.find(marker) for marker in cta_markers if final.find(marker) > 0]
-    if marker_positions:
-        position = min(marker_positions)
-        final_label = final[:position].strip(" ·,-—–")
-    else:
-        final_label = final.splitlines()[0].strip()
-    final_label = _short_look_label(final_label)
-    # The model may repeat all four look names in its final sentence.  Keep the
-    # frozen topic CTA instead: the last page should remain readable at phone size.
-    slides[4] = f"{final_label}\n{planned_cta}" if planned_cta else final_label
+    if guide_mode:
+        cta_markers += ("เซฟไว้", "คอมเมนต์", "บอกหน่อย")
+    final_lines = final.splitlines()
+    model_cta = final_lines[1].strip() if len(final_lines) > 1 else ""
+    first_line = final_lines[0].strip()
+    if not model_cta:
+        marker_positions = [first_line.find(marker) for marker in cta_markers
+                            if first_line.find(marker) > 0]
+        if marker_positions:
+            position = min(marker_positions)
+            model_cta = first_line[position:].strip(" ·,-—–")
+            first_line = first_line[:position].strip(" ·,-—–")
+    final_label = _short_look_label(first_line) if not guide_mode else first_line.strip()
+    effective_cta = model_cta or planned_cta
+    # 末页保持可读：标签一行 + CTA 一行；两者都没有时只留标签。
+    slides[4] = f"{final_label}\n{effective_cta}" if effective_cta else final_label
     return slides
 
 
@@ -383,6 +422,7 @@ def build_theme_copy(
     locale: str = DEFAULT_PUBLISH_LOCALE,
     locale_pack: Optional[Mapping[str, Any]] = None,
     variation_index: int = 1,
+    expression_mode: str = "",
 ) -> dict[str, Any]:
     by_role = {str(item.get("role") or ""): item for item in assets}
     try:
@@ -416,7 +456,10 @@ def build_theme_copy(
     # 2026-09-14：这条分支还必须把文案包里推迟到冻结点才替换的 {{label_x}}
     # 解析掉，否则主题覆盖会把字面占位符冻进发布文案。
     topic_slides = _fill_label_placeholders(
-        _display_slide_texts(planned_copy.get("slide_texts") or [], cta=cta),
+        _display_slide_texts(
+            planned_copy.get("slide_texts") or [], cta=cta,
+            expression_mode=expression_mode,
+        ),
         labels_by_letter,
     )
     # 发布契约兜底（2026-09-13）：theme copy 是最终被冻结进 request 的文案，而

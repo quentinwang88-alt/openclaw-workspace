@@ -15,7 +15,7 @@ from services.photo_reference_vision import (
     PhotoReferenceVisionError, PhotoReferenceVisionService,
 )
 from services.photo_travel_qa import (
-    FAILURE_SCENE_MISMATCH, FAILURE_WEATHER_MISMATCH,
+    FAILURE_SCENE_MISMATCH, FAILURE_WEATHER_MISMATCH, moment_rules_from_contract,
     failed_roles_from_travel_qa, normalize_travel_qa, travel_qa_as_alignment,
 )
 from services.photo_style_reference_supply import (
@@ -538,7 +538,9 @@ class TravelSupplySceneTest(unittest.TestCase):
         result = service.prepare(**self.base_kwargs())
         self.assertTrue(result["group_alignment"]["passed"])
         self.assertEqual(result["group_alignment"]["scope"], "TRAVEL_SEMANTIC_QA")
-        scene_prompts = [request.scene_snapshot["prompt_core"] for request in generator.requests]
+        # 2026-09-15 提速：B/C/D 预取后请求到达顺序不定，按槽位排序断言。
+        ordered = sorted(generator.requests, key=lambda r: r.slot_index)
+        scene_prompts = [request.scene_snapshot["prompt_core"] for request in ordered]
         self.assertEqual(scene_prompts, ["现代航站楼内，随身登机箱", "老城石板街道与建筑立面",
                                          "咖啡店窗边座位与咖啡杯", "傍晚街灯亮起的暖色光线"])
         for request in generator.requests:
@@ -571,7 +573,8 @@ class TravelSupplySceneTest(unittest.TestCase):
         service = PhotoStyleReferenceSupplyService(
             generator=generator, root=Path(self.tmp.name), vision_service=PassingQA())
         service.prepare(**kwargs)
-        direction = generator.requests[0].outfit_state["style_direction"]
+        look_a = next(r for r in generator.requests if r.slot_index == 1)
+        direction = look_a.outfit_state["style_direction"]
         self.assertIn("穿搭比例与下装鞋履衔接", direction)
         self.assertIn("裤脚与修长乐福鞋自然衔接", direction)
 
@@ -1275,3 +1278,97 @@ class TravelCopyTokenTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FixedBackgroundGuardTest(unittest.TestCase):
+    """固定背景（Phase 3）：同场景与目的地冲突护栏按背景方式豁免。"""
+
+    def setUp(self):
+        self.moment_rules = moment_rules_from_contract(travel_contract())
+
+    def raw_all_same_scene(self):
+        pages = []
+        footwear = {"a": "SNEAKER", "b": "LOAFER", "c": "LOW_HEEL", "d": "FLAT"}
+        for look in travel_looks():
+            pages.append({
+                "role": look["role"], "observed_moment": "old_town_walk",
+                "scene_evidence": ["纯色背景", "人物全身"],
+                "outfit_matches": True, "weather_matches": True,
+                "mobility_matches": True,
+                "observed_footwear_type": footwear[look["role"][-1]],
+                "repair_instruction": "",
+            })
+        return {"pages": pages, "style_uniform": True,
+                "destination_conflict": True,
+                "destination_evidence": ["无地标"], "notes": ""}
+
+    def test_fixed_background_same_scene_and_no_place_do_not_fail(self):
+        raw = self.raw_all_same_scene()
+        qa = normalize_travel_qa(
+            raw, look_plans=travel_looks(), moment_rules=self.moment_rules,
+            travel_place="东京", fixed_background=True,
+        )
+        self.assertTrue(qa["passed"])
+        self.assertTrue(all(item["passed"] for item in qa["roles"]))
+
+    def test_without_fixed_background_the_guard_still_fails(self):
+        raw = self.raw_all_same_scene()
+        raw["destination_conflict"] = False
+        qa = normalize_travel_qa(
+            raw, look_plans=travel_looks(), moment_rules=self.moment_rules,
+            travel_place="东京",
+        )
+        self.assertFalse(qa["passed"])
+        self.assertTrue(any(
+            item["failure_code"] == FAILURE_SCENE_MISMATCH for item in qa["roles"]))
+
+
+class FixedBackgroundNoShortCircuitTest(unittest.TestCase):
+    """固定背景豁免不得短路核心检查（2026-09-15 七样审查修复）。"""
+
+    def setUp(self):
+        self.moment_rules = moment_rules_from_contract(travel_contract())
+
+    def base_raw(self):
+        pages = []
+        footwear = {"a": "SNEAKER", "b": "LOAFER", "c": "LOW_HEEL", "d": "FLAT"}
+        for look in travel_looks():
+            pages.append({
+                "role": look["role"], "observed_moment": "old_town_walk",
+                "scene_evidence": ["纯色背景", "人物全身"],
+                "outfit_matches": True, "weather_matches": True,
+                "mobility_matches": True,
+                "observed_footwear_type": footwear[look["role"][-1]],
+                "repair_instruction": "",
+                "product_matches": True,
+            })
+        return {"pages": pages, "style_uniform": True,
+                "destination_conflict": False, "notes": ""}
+
+    def test_fixed_background_product_mismatch_still_fails(self):
+        raw = self.base_raw()
+        raw["pages"][1]["product_matches"] = False
+        qa = normalize_travel_qa(
+            raw, look_plans=travel_looks(), moment_rules=self.moment_rules,
+            has_product=True, fixed_background=True,
+        )
+        self.assertFalse(qa["passed"])
+        self.assertEqual(qa["roles"][1]["failure_code"], "OUTFIT_MISMATCH")
+
+    def test_fixed_background_person_disaster_still_fails(self):
+        raw = self.base_raw()
+        raw["pages"][2]["person_flags"] = {
+            "face_or_limb_deformity": True, "obvious_unnatural_tilt": False}
+        qa = normalize_travel_qa(
+            raw, look_plans=travel_looks(), moment_rules=self.moment_rules,
+            fixed_background=True,
+        )
+        self.assertFalse(qa["passed"])
+        self.assertEqual(qa["roles"][2]["failure_code"], "PERSON_DISASTER")
+
+    def test_fixed_background_clean_pages_still_pass(self):
+        qa = normalize_travel_qa(
+            self.base_raw(), look_plans=travel_looks(),
+            moment_rules=self.moment_rules, fixed_background=True,
+        )
+        self.assertTrue(qa["passed"])

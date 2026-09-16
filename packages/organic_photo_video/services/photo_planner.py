@@ -104,8 +104,19 @@ class PhotoReusePlannerService:
         self._validate_variables(spec.get("variables_schema") or {}, variables)
         template_id = str(layout.get("template_id") or layout.get("layout_id") or "")
         template_version = int(layout.get("template_version") or layout.get("layout_version") or 0)
+        # 视觉预设排版覆盖（2026-09-15 排版轮 C）：预设声明 structured_v1 且
+        # 布局本身带 overlay_style=structured_v1 时，允许使用预设选择的模板
+        # 替代配方默认模板；其余情况保持配方冻结校验逐字不变。
+        preset_family = str(
+            (((theme_brief or {}).get("visual_preset") or {}).get("layout") or {})
+            .get("layout_family") or "")
+        structured_override = (
+            preset_family == "structured_v1"
+            and str((layout.get("render_options") or {}).get("overlay_style") or "")
+            == "structured_v1")
         if (template_id != spec.get("template_id")
-                or template_version != int(spec.get("template_version") or 0)):
+                or template_version != int(spec.get("template_version") or 0)
+        ) and not structured_override:
             raise PhotoPlannerError("layout does not match the version frozen by recipe")
 
         if not recipe_snapshot and not spec.get("content_card"):

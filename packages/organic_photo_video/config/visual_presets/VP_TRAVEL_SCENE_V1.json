@@ -1,0 +1,23 @@
+{
+  "schema_version": "opv-visual-preset-v1",
+  "preset_id": "VP_TRAVEL_SCENE_V1",
+  "name": "旅行场景穿搭",
+  "applicable": {
+    "media_kind": "native_photo"
+  },
+  "background": {
+    "mode": "scene",
+    "selection": "task_reference_first",
+    "kind": "destination"
+  },
+  "photography_baseline_zh": "目的地自然光线、环境协调色调、人与场景比例自然，整组允许室内外与昼夜合理变化",
+  "layout": {
+    "layout_family": "structured_v1",
+    "page_kinds": [
+      "cover",
+      "detail"
+    ]
+  },
+  "fallback_zh": "无任务场景参考图时，可从素材库按目的地选择背景参考；仍无则使用普通街景氛围，不虚构地标",
+  "version": 2
+}

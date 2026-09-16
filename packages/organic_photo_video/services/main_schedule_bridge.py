@@ -211,6 +211,22 @@ class MainScheduleBridge:
         if requested_store_id and requested_store_id not in configured_stores:
             raise MainScheduleBridgeError(f"未知的图文发布店铺：{requested_store_id}")
         store_id = requested_store_id or self._store_id(country)
+        # 目标账号贯穿投递：任务冻结了 target_publish_account_id 时，入队前
+        # 校验该真实账号存在且店铺一致；任何不一致都保留待处理，不换号。
+        target_account_id = str(getattr(task, "target_publish_account_id", "") or "")
+        if target_account_id:
+            account_row = self.db.get_account_config(target_account_id)
+            if account_row is None:
+                raise MainScheduleBridgeError(
+                    f"目标账号 {target_account_id} 不在发布器账号配置中；"
+                    "内容保持待排期，请先补账号配置并同步，不自动换号"
+                )
+            account_store = str(account_row["store_id"] or "")
+            if account_store != store_id:
+                raise MainScheduleBridgeError(
+                    f"目标账号 {target_account_id} 属于店铺 {account_store}，"
+                    f"与入队店铺 {store_id} 不一致；请修正店铺后重试"
+                )
         title = self._publish_title(task, country)
         source_record_id = str(feishu_record_id or task.feishu_record_id or task.source_record_id or task_id)
         canonical_key, script_slot = f"opv:{task_id}", self._script_slot(task_id)
@@ -229,6 +245,8 @@ class MainScheduleBridge:
             "feishu_record_id": source_record_id,
             "publish_store_id": store_id,
         }
+        if target_account_id:
+            context["target_publish_account_id"] = target_account_id
         if media_kind == "native_photo":
             theme_brief = dict((release_manifest or {}).get("theme_brief") or {})
             context.update(
@@ -270,6 +288,7 @@ class MainScheduleBridge:
             short_video_title=title, title_source="opv_copy", script_source="图文养号",
             publish_purpose="养号", cart_enabled="否", content_branch="非商品展示型",
             audio_mode=context["audio_mode"],
+            target_publish_account_id=target_account_id,
         )
         self.db.upsert_script_metadata([metadata])
         if media_kind == "native_photo":
@@ -309,11 +328,18 @@ class MainScheduleBridge:
                 bgm_payload = json.loads(str(slot["bgm_json"] or "{}"))
             except (TypeError, ValueError, json.JSONDecodeError):
                 bgm_payload = {}
-            bgm_title = str(bgm_payload.get("music_title") or "")
+            bgm_title = str(bgm_payload.get("title") or bgm_payload.get("music_title") or "")
+        target_account = ""
+        script_meta = self.db.get_script_metadata(canonical_key)
+        if script_meta is not None and "target_publish_account_id" in script_meta.keys():
+            target_account = str(script_meta["target_publish_account_id"] or "")
+        assigned_account = str(slot["account_id"] or "") if slot else ""
         return {
             "task_id": task_id,
             "status": str(asset["publish_status"] or ""),
             "account_name": str(slot["account_name"] or "") if slot else str(asset["account_name"] or ""),
+            "account_id": assigned_account,
+            "target_publish_account_id": target_account,
             "planned_publish_at": str(slot["scheduled_for"] or "") if slot else str(asset["planned_publish_at"] or ""),
             "bgm_title": bgm_title,
             "error_message": str(asset["error_message"] or ""),

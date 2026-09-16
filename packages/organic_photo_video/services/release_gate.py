@@ -295,11 +295,38 @@ def freeze_photo_release(repository: Any, task: Any) -> dict:
         "theme_brief": dict(package_manifest.get("theme_brief") or {}),
         "slides": release_slides,
     }
+    # 目标发布账号（additive）：任务冻结了目标账号时进入 manifest 并被
+    # manifest_sha256 覆盖；旧任务缺省不新增键，历史清单 hash 逐字不变。
+    target_account = str(getattr(task, "target_publish_account_id", "") or "")
+    if target_account:
+        manifest["target_publish_account_id"] = target_account
     manifest["manifest_sha256"] = contract_hash(manifest)
     return manifest
 
 
-def validate_upload(context: dict, *, video_path: str, script_id: str, title: str) -> None:
+def _assert_target_account_consistency(manifest: dict, context: dict,
+                                       account_id: str = "") -> None:
+    """队列目标与冻结清单必须一致；任一侧缺失目标时按旧语义放行。
+
+    防线语义：manifest 冻结了 ``target_publish_account_id`` 时，
+    (a) 队列 context 若也带目标，两者必须相同（防入队后被改绑）；
+    (b) 调用方传入实际领取账号（发布器提交前核对）时必须相同（防串号）。
+    """
+    manifest_target = str(manifest.get("target_publish_account_id") or "")
+    if not manifest_target:
+        return
+    context_target = str(context.get("target_publish_account_id") or "")
+    if context_target and context_target != manifest_target:
+        raise ReleaseGateError("发布队列目标账号与冻结清单不一致，已阻止提交")
+    submitting = str(account_id or "").strip()
+    if submitting and submitting != manifest_target:
+        raise ReleaseGateError(
+            f"当前领取账号 {submitting} 不是冻结目标账号 {manifest_target}，已阻止提交"
+        )
+
+
+def validate_upload(context: dict, *, video_path: str, script_id: str, title: str,
+                    account_id: str = "") -> None:
     """Revalidate the exact release bytes immediately before remote upload.
 
     Legacy V1 OPV rows remain compatible. V2 metadata must carry a manifest;
@@ -333,10 +360,12 @@ def validate_upload(context: dict, *, video_path: str, script_id: str, title: st
     if (str(Path(video_path).resolve()) != manifest["video_path"]
             or file_hash(video_path) != manifest["video_sha256"]):
         raise ReleaseGateError("上传前成片 SHA256/路径与验收版本不一致，已阻止发布")
+    _assert_target_account_consistency(manifest, context, account_id)
 
 
 def validate_photo_upload(
-    context: dict, *, media_paths: list[str], script_id: str, title: str
+    context: dict, *, media_paths: list[str], script_id: str, title: str,
+    account_id: str = "",
 ) -> None:
     """Validate ordered photo bytes immediately before any remote upload."""
     manifest = context.get("release_manifest")
@@ -380,3 +409,4 @@ def validate_photo_upload(
                 or str(Path(provided).resolve()) != expected_path
                 or file_hash(provided) != slide.get("sha256")):
             raise ReleaseGateError(f"上传前第 {index} 张图片或顺序与验收版本不一致")
+    _assert_target_account_consistency(manifest, context, account_id)

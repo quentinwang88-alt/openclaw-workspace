@@ -55,6 +55,8 @@ class TaskRequest:
     priority: str = "normal"
     created_by: str = "manual"
     idempotency_key: Optional[str] = None
+    # 真实投递账号（TikTok handle）；空＝沿用店铺公共池的旧行为。
+    target_publish_account_id: str = ""
     # UTC datetime overriding "today" for the derived key (tests/seeding).
     business_moment: Optional[datetime] = None
 
@@ -170,6 +172,8 @@ class TaskIntakeService:
                 "render_preset_id": preset.render_preset_id if preset else None,
                 "target_country": pack.target_country,
                 "target_locale": pack.target_locale,
+                **({"target_publish_account_id": request.target_publish_account_id}
+                   if str(request.target_publish_account_id or "").strip() else {}),
             },
         }
 
@@ -195,6 +199,7 @@ class TaskIntakeService:
             requested_shot_count=request.requested_shot_count,
             created_by=request.created_by,
             feishu_record_id=request.feishu_record_id,
+            target_publish_account_id=str(request.target_publish_account_id or ""),
         )
         task, created = self._repository.create_task_idempotent(task)
         if (

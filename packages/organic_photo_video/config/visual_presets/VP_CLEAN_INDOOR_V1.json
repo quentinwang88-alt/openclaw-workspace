@@ -1,0 +1,24 @@
+{
+  "schema_version": "opv-visual-preset-v1",
+  "preset_id": "VP_CLEAN_INDOOR_V1",
+  "name": "清爽室内穿搭",
+  "applicable": {
+    "media_kind": "native_photo"
+  },
+  "background": {
+    "mode": "fixed",
+    "fixed_scene_zh": "简洁明亮的室内空间：浅色墙面与木色或米色地板，窗边自然柔光，少量生活化道具（穿衣镜、木质衣架、绿植）；无地标、无街道、无旅游元素",
+    "stability_zh": "四页共享同一室内空间的整体气质；允许机位、景别、姿势与局部道具自然变化",
+    "kind": "indoor"
+  },
+  "photography_baseline_zh": "自然柔光、中性偏暖白平衡、中等对比、全身或七分身构图为主，人物与背景留有排版空间",
+  "layout": {
+    "layout_family": "structured_v1",
+    "page_kinds": [
+      "cover",
+      "detail"
+    ]
+  },
+  "fallback_zh": "缺少室内参考图时按固定场景与摄影基准直接生成，不要求运营补图",
+  "version": 2
+}

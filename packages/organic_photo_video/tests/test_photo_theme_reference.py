@@ -5,6 +5,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -180,6 +181,148 @@ class PhotoThemeReferenceTest(unittest.TestCase):
                              first["sources"][2]["outerwear_signature"])
             self.assertEqual(len(generator.requests), 4)
             self.assertEqual(second["generated_this_run"], 0)
+
+    def test_fixed_background_executes_at_request_level(self):
+        """固定背景必须在请求层执行（2026-09-15 七样审查）：背景模式、场景核心、
+        摄影基准与环境参考分流，而不是只停留在规划提示词。"""
+        with tempfile.TemporaryDirectory() as folder:
+            reference = Path(folder) / "reference.png"
+            Image.new("RGB", (120, 180), (100, 90, 80)).save(reference)
+            generator = FakeGenerator()
+            service = PhotoStyleReferenceSupplyService(generator=generator, root=Path(folder))
+            variation = {
+                "index": 1, "variation_id": "v1", "family_id": "f", "angle_zh": "同商品多搭配",
+                "looks": [
+                    {"role": f"look_{letter}", "travel_moment": "old_town_walk",
+                     "scene_prompt": "老城街道漫步", "display_label": f"ลุค {letter.upper()}",
+                     "outerwear": f"外套{letter}",
+                     "top_inner": "内搭", "bottom": "下装", "shoes": "鞋",
+                     "footwear_type": "SNEAKER"}
+                    for letter in "abcd"
+                ],
+                "style_profile": {
+                    "presentation_type": "MODEL_FULL_BODY",
+                    "environment_reference": {"indices": [1]},
+                    "visual_preset": {
+                        "preset_id": "VP_SOLID_COLOR_V1", "name": "纯色搭配解析",
+                        "version": 2, "background_mode": "fixed", "source": "task",
+                        "background": {"mode": "fixed", "kind": "solid",
+                                       "fixed_scene_zh": "奶白纯色背景",
+                                       "stability_zh": "四页背景一致"},
+                        "photography_baseline_zh": "均匀柔光、色彩还原准确",
+                    },
+                },
+            }
+            with mock.patch(
+                    "services.photo_style_reference_analyzer.validate_style_alignment",
+                    return_value=None):
+                service.prepare(
+                    record_id="rec-fixed", reference_paths=[str(reference)],
+                theme=resolve_photo_theme("凉爽旅行"),
+                account=SimpleNamespace(persona_ref_id=""),
+                persona={}, variation=variation,
+            )
+            self.assertEqual(len(generator.requests), 4)
+            for request in generator.requests:
+                presentation = request.recipe_execution["presentation_profile"]
+                self.assertEqual(presentation["background_mode"], "solid_color")
+                self.assertEqual(presentation["photography_baseline_zh"], "均匀柔光、色彩还原准确")
+                self.assertIn("奶白纯色背景", request.scene_snapshot["prompt_core"])
+                self.assertIn("不得出现街道", request.scene_snapshot["prompt_core"])
+                # ENVIRONMENT 单用途参考在固定背景不发送
+                self.assertEqual(request.reference_roles["environment_reference_images"], [])
+                # 旅行机位提示不进入固定背景
+                self.assertNotIn("老城街道漫步", request.scene_snapshot["prompt_core"])
+
+    def test_fixed_background_drops_environment_only_reference(self):
+        """断点 A1：固定背景只过滤「仅环境用途」参考；同图承担穿搭/风格用途保留。"""
+        with tempfile.TemporaryDirectory() as folder:
+            ref_a = Path(folder) / "ref_outfit.png"
+            ref_b = Path(folder) / "ref_env_only.png"
+            Image.new("RGB", (120, 180), (110, 90, 80)).save(ref_a)
+            Image.new("RGB", (120, 180), (90, 110, 120)).save(ref_b)
+            generator = FakeGenerator()
+            service = PhotoStyleReferenceSupplyService(generator=generator, root=Path(folder))
+            variation = {
+                "index": 1, "variation_id": "v1", "family_id": "f", "angle_zh": "同商品多搭配",
+                "looks": [
+                    {"role": f"look_{letter}", "travel_moment": "old_town_walk",
+                     "scene_prompt": "固定", "display_label": f"ลุค {letter.upper()}",
+                     "outerwear": "外套", "top_inner": "内搭", "bottom": "下装", "shoes": "鞋",
+                     "footwear_type": "SNEAKER", "outfit_reference_indices": [1]}
+                    for letter in "abcd"
+                ],
+                "style_profile": {
+                    "presentation_type": "MODEL_FULL_BODY",
+                    "per_reference": [
+                        {"index": 1, "reference_uses": ["OUTFIT", "VISUAL_STYLE"]},
+                        {"index": 2, "reference_uses": ["ENVIRONMENT"]},
+                    ],
+                    "outfit_reference": {"indices": [1]},
+                    "visual_preset": {
+                        "preset_id": "VP_SOLID_COLOR_V1", "name": "纯色搭配解析",
+                        "version": 2, "background_mode": "fixed", "source": "task",
+                        "background": {"mode": "fixed", "kind": "solid",
+                                       "fixed_scene_zh": "奶白纯色背景",
+                                       "stability_zh": "一致"},
+                    },
+                },
+            }
+            with mock.patch(
+                    "services.photo_style_reference_analyzer.validate_style_alignment",
+                    return_value=None):
+                service.prepare(
+                    record_id="rec-a1", reference_paths=[str(ref_a), str(ref_b)],
+                    theme=resolve_photo_theme("凉爽旅行"),
+                    account=SimpleNamespace(persona_ref_id=""),
+                    persona={}, variation=variation,
+                )
+            request = generator.requests[0]
+            used = [str(p) for p in request.continuity_reference_images]
+            self.assertIn(str(Path(ref_a).resolve()), used)
+            self.assertNotIn(str(Path(ref_b).resolve()), used)
+
+    def test_destination_preset_keeps_travel_execution(self):
+        with tempfile.TemporaryDirectory() as folder:
+            reference = Path(folder) / "reference.png"
+            Image.new("RGB", (120, 180), (100, 90, 80)).save(reference)
+            generator = FakeGenerator()
+            service = PhotoStyleReferenceSupplyService(generator=generator, root=Path(folder))
+            variation = {
+                "index": 1, "variation_id": "v1", "family_id": "f", "angle_zh": "旅行",
+                "looks": [
+                    {"role": f"look_{letter}", "travel_moment": "old_town_walk",
+                     "scene_prompt": f"老城街道{letter}", "display_label": f"ลุค {letter.upper()}",
+                     "outerwear": "外套",
+                     "top_inner": "内搭", "bottom": "下装", "shoes": "鞋",
+                     "footwear_type": "SNEAKER"}
+                    for letter in "abcd"
+                ],
+                "style_profile": {
+                    "presentation_type": "SCENE_MODEL",
+                    "environment_reference": {"indices": [1]},
+                    "visual_preset": {
+                        "preset_id": "VP_TRAVEL_SCENE_V1", "name": "旅行场景穿搭",
+                        "version": 2, "background_mode": "scene", "source": "task",
+                        "background": {"mode": "scene", "kind": "destination"},
+                    },
+                },
+            }
+            with mock.patch(
+                    "services.photo_style_reference_analyzer.validate_style_alignment",
+                    return_value=None):
+                service.prepare(
+                    record_id="rec-dest", reference_paths=[str(reference)],
+                theme=resolve_photo_theme("凉爽旅行"),
+                account=SimpleNamespace(persona_ref_id=""),
+                persona={}, variation=variation,
+            )
+            request = next(r for r in generator.requests if r.slot_index == 1)
+            presentation = request.recipe_execution["presentation_profile"]
+            self.assertEqual(presentation["background_mode"], "creator_environment")
+            self.assertIn("老城街道a", request.scene_snapshot["prompt_core"])
+            self.assertEqual(request.reference_roles["environment_reference_images"],
+                             [str(Path(reference).resolve())])
 
     def test_flat_lay_style_supply_does_not_require_or_anchor_a_persona(self):
         with tempfile.TemporaryDirectory() as folder:

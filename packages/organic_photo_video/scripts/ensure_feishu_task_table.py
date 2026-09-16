@@ -22,7 +22,8 @@ from services.feishu_workflow import (  # noqa: E402
     FIELD_PHOTO_SUMMARY, FIELD_PHOTO_INPUT, FIELD_PHOTO_INPUT_LEGACY,
     FIELD_PRODUCT_REFERENCE, FIELD_PHOTO_ASSET_STATUS, FIELD_REFERENCE,
     FIELD_REFERENCE_TYPE, FIELD_CONTENT_THEME, FIELD_MUSIC_MODE,
-    FIELD_CONTENT_REQUIREMENT,
+    FIELD_CONTENT_REQUIREMENT, FIELD_TARGET_ACCOUNT, FIELD_FULL_COPY_ZH,
+    FIELD_VISUAL_PRESET,
     FIELD_TEMPERATURE_BAND, FIELD_THERMAL_SENSITIVITY, FIELD_TEMPERATURE_SCENE,
     FIELD_TRANSITION_SCENE, FIELD_TRANSITION_SENSITIVITY, FIELD_DRESS_CODE,
     FIELD_LAYER_BASE_REFERENCE, FIELD_LAYER_MID_REFERENCE, FIELD_LAYER_OUTER_REFERENCE,
@@ -33,10 +34,35 @@ from services.feishu_workflow import (  # noqa: E402
 )
 from services.photo_reference import REFERENCE_TYPE_OPTIONS  # noqa: E402
 from services.photo_theme import THEME_OPTIONS  # noqa: E402
+from services.visual_preset import visual_preset_options  # noqa: E402
+
+#: 暂不下发到线上「图文主题」下拉的选项（2026-09-15 精简）：冷热切换/温度穿搭
+#: 只服务分层线，而分层预设当前全部停用；解析能力不受影响（THEME_OPTIONS
+#: 仍是全集），将来分层线恢复时把名字从这里移除并重跑本脚本即可。
+HIDDEN_THEME_OPTIONS = ("冷热切换", "温度穿搭")
+
+
+def visible_theme_options():
+    return [name for name in THEME_OPTIONS if name not in HIDDEN_THEME_OPTIONS]
 
 
 def options(values):
     return {"options": [{"name": value} for value in values]}
+
+
+def target_account_options():
+    """目标账号下拉选项：仓库种子配置（确定性，供本地 schema 回归）。
+
+    运营可在飞书手动补充选项；生成侧按严格解析兜底（不存在即报错，
+    不静默回退公共池）。此处不读发布器库，保持离线可测。
+    """
+    handles = set()
+    try:
+        from services.publish_account_profile import PublishAccountProfileResolver
+        handles.update(PublishAccountProfileResolver().options())
+    except Exception:
+        pass
+    return sorted(handles)
 
 
 def publish_store_options():
@@ -158,8 +184,16 @@ def task_field_specs(catalog) -> list:
         (FIELD_PRESET, 3, "SingleSelect", options(catalog.names)),
         (FIELD_EXECUTE, 7, "Checkbox", None),
         (FIELD_QUANTITY, 2, "Number", {"formatter": "0"}),
-        (FIELD_CONTENT_THEME, 3, "SingleSelect", options(THEME_OPTIONS)),
+        (FIELD_CONTENT_THEME, 3, "SingleSelect", options(visible_theme_options())),
         (FIELD_CONTENT_REQUIREMENT, 1, "Text", None),
+        # 目标发布账号（真实 TikTok handle）：留空＝沿用店铺公共池；选择后
+        # 内容冻结该账号定位并只能被该账号领取。选项来自种子配置/账号表，
+        # 运营可在飞书手动补充。
+        (FIELD_TARGET_ACCOUNT, 3, "SingleSelect", options(target_account_options())),
+        # 视觉预设（高级/可选）：留空＝继承账号默认（无绑定时入口默认只在
+        # Phase 3 接线后影响画面）。背景方式/摄影/排版的统一入口，不再拆成
+        # 多个下拉。
+        (FIELD_VISUAL_PRESET, 3, "SingleSelect", options(visual_preset_options())),
         (FIELD_TEMPERATURE_BAND, 3, "SingleSelect", options(TEMPERATURE_BAND_OPTIONS)),
         (FIELD_THERMAL_SENSITIVITY, 3, "SingleSelect", options(THERMAL_SENSITIVITY_OPTIONS)),
         (FIELD_TEMPERATURE_SCENE, 3, "SingleSelect", options(TEMPERATURE_SCENE_OPTIONS)),
@@ -176,6 +210,9 @@ def task_field_specs(catalog) -> list:
         (FIELD_REFERENCE_TYPE, 3, "SingleSelect", options(REFERENCE_TYPE_OPTIONS)),
         (FIELD_REFERENCE, 17, "Attachment", None),
         (FIELD_PHOTO_SUMMARY, 1, "Text", None),
+        # 完整文案（中文）：最终成片包口径的标题/正文/标签/逐页文字中文回写，
+        # 按文案指纹缓存翻译；翻译失败显示占位，可独立补跑。
+        (FIELD_FULL_COPY_ZH, 1, "Text", None),
         (FIELD_PHOTO_INPUT, 17, "Attachment", None),
         (FIELD_PHOTO_ASSET_STATUS, 1, "Text", None),
         (FIELD_PROGRESS, 3, "SingleSelect", options([

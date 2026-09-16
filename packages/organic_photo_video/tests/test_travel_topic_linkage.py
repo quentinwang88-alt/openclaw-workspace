@@ -266,6 +266,18 @@ class PlannerTopicBranchTest(unittest.TestCase):
             reference_mode="STYLE", count=1, style_profile=style_profile,
         )
 
+    def test_native_multiway_topic_freezes_model_copy(self):
+        """断点 A3（2026-09-15）：原生一衣多穿经主题联动分支产出模型文案，
+        不再回落通用四选一投票模板。"""
+        profile = self.topic_style_profile()
+        profile["travel_topic"] = {**TRAVEL_TOPIC, "theme_type": "NATIVE_MULTIWAY"}
+        plan = self.plan_with(profile)
+        item = plan["items"][0]
+        self.assertEqual(item["copy_source"], "travel_topic_model")
+        self.assertTrue(item["copy"]["title"])
+        self.assertEqual(len(item["copy"]["slide_texts"]), 5)
+        self.assertTrue(plan.get("allow_repeated_travel_moments"))
+
     def test_topic_branch_freezes_model_copy_and_allows_same_moment(self):
         plan = self.plan_with(self.topic_style_profile())
         item = plan["items"][0]
@@ -313,8 +325,10 @@ class CopySurvivalTest(unittest.TestCase):
         }
         result = build_theme_copy(theme, assets, variation)
         self.assertEqual(result["slide_texts"][:4], variation["copy"]["slide_texts"][:4])
+        # 2026-09-15 CTA 唯一来源：模型末页自带的 CTA 原样保留，不再被主题
+        # 投票 CTA 覆盖（此前即「模型写收藏被改成 A/B/C/D」的丢失路径）。
         self.assertEqual(
-            result["slide_texts"][4], "D สี่\nไปที่นี่คุณจะเลือกลุคไหน?"
+            result["slide_texts"][4], "D สี่\nเลือกลุคไหน"
         )
         self.assertEqual(result["title"], "ไตเติลจากโมเดล")
         self.assertEqual(result["place_localized"], "อาซากุสะ")
@@ -360,7 +374,7 @@ class CopySurvivalTest(unittest.TestCase):
         result = build_theme_copy(theme, [], variation)
         self.assertEqual(len(result["slide_texts"]), 5)
 
-    def test_short_final_page_still_uses_compact_theme_cta(self):
+    def test_final_page_keeps_model_cta_verbatim(self):
         theme = resolve_photo_theme("旅行·四选一")
         assets = [{"role": f"look_{letter}", "display_label": {"th-TH": letter}}
                   for letter in "abcd"]
@@ -376,7 +390,7 @@ class CopySurvivalTest(unittest.TestCase):
         result = build_theme_copy(theme, assets, variation)
         self.assertEqual(
             result["slide_texts"][4],
-            "D · เบลเซอร์\nคอมเมนต์บอกหน่อยว่าเลือกลุคไหน",
+            "D · เบลเซอร์\nคุณเลือก A, B, C หรือ D?",
         )
         self.assertEqual(result["copy_policy_version"], 2)
 

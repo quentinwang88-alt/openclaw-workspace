@@ -1,0 +1,39 @@
+{
+  "schema_version": "opv-photo-layout-v2",
+  "layout_id": "PHOTO_STRUCTURED_CLEAN_V1",
+  "layout_version": 1,
+  "layout_kind": "STRUCTURED",
+  "status": "active",
+  "render_options": {
+    "width": 1080,
+    "height": 1920,
+    "background": "#FAF8F4",
+    "jpeg_quality": 92,
+    "overlay_style": "structured_v1",
+    "structured_style": "clean",
+    "font_candidates": [
+      "assets/fonts/Sarabun-Regular.ttf",
+      "/System/Library/Fonts/Thonburi.ttc",
+      "/System/Library/Fonts/Supplemental/Arial Unicode.ttf"
+    ],
+    "font_candidates_bold": [
+      "assets/fonts/Sarabun-Bold.ttf",
+      "/System/Library/Fonts/ThonburiBold.ttf",
+      "assets/fonts/Sarabun-Regular.ttf"
+    ],
+    "kicker_font_size": 32,
+    "headline_font_size": 58,
+    "body_font_size": 38,
+    "cta_font_size": 32,
+    "min_font_size": 24,
+    "headline_text_color": "#20201E",
+    "body_text_color": "#4A4640",
+    "kicker_text_color": "#8A8378",
+    "cta_text_color": "#6E675C",
+    "padding_x": 84,
+    "top_offset": 96,
+    "bottom_offset": 96,
+    "line_spacing": 12,
+    "zone_height_ratio": 0.34
+  }
+}

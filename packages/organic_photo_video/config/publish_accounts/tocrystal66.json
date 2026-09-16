@@ -1,0 +1,16 @@
+{
+  "schema_version": "opv-publish-account-seed-v1",
+  "account_id": "tocrystal66",
+  "account_name": "tocrystal66（运营显示名 likeU shop）",
+  "store_id": "THFZ01",
+  "target_country": "TH",
+  "identity_note": "2026-09-15 用户确认：likeU shop 对应 tocrystal66（泰国女装1，THFZ01）。",
+  "profile": {
+    "default_theme": "凉爽旅行",
+    "positioning": "旅行高级感；冷色与奶白暖色兼容；融入景点；同一件真实商品在旅行场景下展示多种搭配，让用户理解商品好搭、可复用",
+    "expression_mode": "STYLE_INSPIRATION",
+    "visual_baseline": "中性奶白底、自然肤色、柔和对比与低至中饱和；冷感只作为轻微摄影倾向，奶白暖感用于兼容场景，不逐篇二选一；商品真实颜色与自然肤色优先",
+    "photo_claim_scope": "own_tasks_only",
+    "default_visual_preset": "旅行场景穿搭"
+  }
+}

@@ -41,7 +41,8 @@ class ShippedConfigTest(unittest.TestCase):
         self.assertEqual(len(self.bundle.content_recipes), 20)
         self.assertEqual(len(self.bundle.render_profiles), 2)
         self.assertEqual(len(self.bundle.quality_profiles), 3)
-        self.assertEqual(len(self.bundle.board_layouts), 11)
+        # 2026-09-15 (排版轮 B)：+2 structured_v1 布局 = 13。
+        self.assertEqual(len(self.bundle.board_layouts), 13)
         self.assertEqual(len(self.bundle.variant_policies), 1)
         # The country-agnostic layer ships with the TH locale pack plus the VN
         # one added in Phase 4, and the V1 East-Asia destination catalog.
@@ -178,6 +179,10 @@ class ShippedConfigTest(unittest.TestCase):
                 "PHOTO_TRAVEL_CARD_V3",
                 "PHOTO_MX_HAIR_CARD_V1",
                 "PHOTO_THERMAL_ROUTE_V1",
+                # 2026-09-15 (排版轮 B)：structured_v1 结构化排版两个模板
+                # （CLEAN=纯色/室内直排；SCENE=旅行留白+柔和底）。
+                "PHOTO_STRUCTURED_CLEAN_V1",
+                "PHOTO_STRUCTURED_SCENE_V1",
             },
         )
         for recipe in photos:
