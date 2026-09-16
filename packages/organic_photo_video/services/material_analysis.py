@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from services.material_source import MaterialSource
 from services.photo_reference_vision import parse_vision_envelope
 
-ANALYSIS_VERSION = "material-analysis-v2"
+ANALYSIS_VERSION = "material-analysis-v3"
 DEFAULT_MODEL_ENV = "OPV_PHOTO_VISION_MODEL"
 DEFAULT_MAX_IMAGE_EDGE = 768
 DEFAULT_JPEG_QUALITY = 82
@@ -364,7 +364,9 @@ class AnalysisOutcome:
 
 
 _BATCH_PROMPT_HEADER = """你是小红书穿搭图文素材分析器。阅读这组按原始顺序排列的笔记图片（第 {start}-{end} 页，共 {total} 页），输出严格 JSON（不要输出其他文字）。
+笔记标题：{title}
 规则：
+- 标题只表达作者主张，不作为商品事实/保暖效果；判定以图片可见内容为准。
 - 只描述画面可见内容；不确定的字段填空字符串/空数组，不要猜。
 - 不推断适穿温度、保暖性能、面料材质。
 - 全部用中文。"""
@@ -373,23 +375,24 @@ _BATCH_PROMPT_BODY = """
 输出 JSON 结构：
 {
  "note_topic": "这篇笔记的核心主题（一句话）",
+ "set_structure": "independent_collection | same_item_multiway | layered | comparison | mixed 之一；注意：同一套造型的多角度/特写照片不算多搭，应归 comparison 或 independent_collection 并在 pages 里用 outfit_set_id 标明同组",
  "core_items": [{"item": "单品名", "role": "核心/配角"}],
  "outfit_relations": "单品之间的搭配关系（比例/配色/层次，一句话）",
- "set_structure": "same_item_multiway | independent_collection | layered | comparison | other 之一",
  "page_roles": [{"seq": 页码, "role": "cover | full_outfit | detail | explanation | other 之一"}],
+ "pages": [{"seq": 页码, "outfit_summary": "该页可见搭配的一句话摘要（含上下装与鞋履关系）", "outfit_set_id": "同套造型分组号（同一套的不同角度同号；独立搭配各自编号，整数）", "variation": "与同组其他页的实际差异（换个角度/局部特写/无差异）"}],
  "palette": ["主色", "辅色"],
  "photography": "摄影特征（街拍/棚拍/室内，景别）",
  "background": "背景/场景特征",
  "shoot_style": "拍摄方式：mirror_selfie（镜面自拍）| casual_phone_selfie（随手手机自拍/游客照）| street_snap（街拍）| studio（棚拍/精修）| indoor（室内他拍）| outdoor_other（户外其他）之一",
- "photography_quality": "成片审美质量：poor（画质差/场景脏乱/镜面自拍/随手拍）| normal（及格的生活实拍）| good（构图光线干净的博主级出片）之一",
- "consumable": true/false,
- "consumable_reason": "为什么可/不可作为穿搭生成参考（一句话）"
+ "photography_quality": "poor（画质差/场景脏乱/自拍/随手拍）| normal（及格的生活实拍）| good（构图光线干净的博主级出片）之一",
+ "purpose_usability": {
+   "outfit": {"usable": true/false, "reason": "搭配关系是否清楚可文字化借鉴（看不清衣服则 false）"},
+   "visual": {"usable": true/false, "reason": "色调/光线/构图是否值得视觉借鉴（摄影差/自拍感重则 false）"},
+   "narrative": {"usable": true/false, "reason": "选题与页面递进是否值得叙事借鉴（纯广告/文字长图则 false）"}
+ }
 }
-consumable 判定标准（两条都要满足）：
-1. 图片清晰、穿搭可辨认、以服装表达为主（非纯测评/广告/文字长图）；
-2. 拍摄审美达标：photography_quality 为 poor 的（卫生间/宿舍镜面自拍、
-   游客随手拍、背景脏乱、构图裁切残缺）一律 consumable=false——
-   生成链会继承参考的画面风格，低审美参考必然产出低审美成片。"""
+purpose_usability 按用途独立判定：摄影差只影响 visual，衣服搭配清楚则 outfit 仍可用；
+非穿搭内容（纯测评/广告/文字长图）三种都不可用。"""
 
 
 def _usage(response: Any) -> tuple:
@@ -430,6 +433,23 @@ def _rebase_page_roles(roles: Any, global_start: int, batch_len: int) -> List[Di
     return [{"seq": seq, "role": name} for seq, name in sorted(rebased.items())]
 
 
+def _rebase_page_details(pages: Any, global_start: int, batch_len: int) -> List[Dict[str, Any]]:
+    """v3 逐页搭配摘要同规则重定位批内页码（字段保留原样，仅修 seq）。"""
+    rebased: Dict[int, Dict[str, Any]] = {}
+    for position, page in enumerate(pages or []):
+        if not isinstance(page, dict):
+            continue
+        local = page.get("seq")
+        if isinstance(local, int) and 1 <= local <= batch_len:
+            seq = global_start + local - 1
+        else:
+            seq = global_start + position
+        item = dict(page)
+        item["seq"] = seq
+        rebased[seq] = item
+    return [rebased[seq] for seq in sorted(rebased)]
+
+
 def _merge_batch_results(batches: List[Dict[str, Any]]) -> Dict[str, Any]:
     """确定性合并分批结果：保序拼接页角色，全局字段取首批并标注页区间来源。"""
     if len(batches) == 1:
@@ -457,6 +477,39 @@ def _merge_batch_results(batches: List[Dict[str, Any]]) -> Dict[str, Any]:
                 palette.append(str(color))
     consumable = all(bool(c.get("consumable")) for c in batches)
     reasons = [str(c.get("consumable_reason") or "") for c in batches if c.get("consumable_reason")]
+    # v3 按用途可用性合并：任一批该用途可用即整篇可用（一篇可被不同任务以
+    # 不同用途借鉴，取代 v2 整篇 consumable 审美排除——附B-2）
+    usability: Dict[str, Dict[str, Any]] = {}
+    for purpose in ("outfit", "visual", "narrative"):
+        entries = []
+        for chunk in batches:
+            mapping = chunk.get("purpose_usability")
+            entry = (mapping or {}).get(purpose) if isinstance(mapping, dict) else None
+            if isinstance(entry, dict):
+                entries.append(entry)
+        if entries:
+            usability[purpose] = {
+                "usable": any(bool(e.get("usable")) for e in entries),
+                "reason": next(
+                    (str(e.get("reason") or "") for e in entries
+                     if str(e.get("reason") or "")), ""),
+            }
+    # 兼容键：v3 缓存下 consumable = 任一用途可用（摄影差不再是整篇否决）
+    if usability:
+        consumable = any(bool(v.get("usable")) for v in usability.values())
+    pages: List[Dict[str, Any]] = []
+    seen_seqs = set()
+    for chunk in batches:
+        for page in chunk.get("pages") or []:
+            if isinstance(page, dict) and int(page.get("seq") or 0) not in seen_seqs:
+                seen_seqs.add(int(page.get("seq") or 0))
+                pages.append({
+                    "seq": int(page.get("seq") or 0),
+                    "outfit_summary": str(page.get("outfit_summary") or "")[:120],
+                    "outfit_set_id": page.get("outfit_set_id"),
+                    "variation": str(page.get("variation") or "")[:60],
+                })
+    pages.sort(key=lambda p: p["seq"])
     # 审美维度合并：质量取最差批（一页拉胯即整体拉胯）；拍摄方式不一致记 mixed
     qualities = [str(c.get("photography_quality") or "") for c in batches]
     photography_quality = ""
@@ -482,6 +535,8 @@ def _merge_batch_results(batches: List[Dict[str, Any]]) -> Dict[str, Any]:
         "background": str(first.get("background") or ""),
         "shoot_style": shoot_style,
         "photography_quality": photography_quality,
+        "purpose_usability": usability,
+        "pages": pages,
         "consumable": consumable,
         "consumable_reason": "；".join(reasons[:2]) or ("分批全部可用" if consumable else "部分批次不可用"),
     }
@@ -548,6 +603,7 @@ class MaterialAnalyzer:
                         start=start_seq,
                         end=start_seq + len(batch) - 1,
                         total=len(paths),
+                        title=str(package.title or "（无标题）")[:80],
                     )
                     + _BATCH_PROMPT_BODY
                 )
@@ -572,6 +628,8 @@ class MaterialAnalyzer:
                 # 模型按批内相对页码输出；用已知的全局批次区间重定位，保证合并后保序
                 parsed["page_roles"] = _rebase_page_roles(
                     parsed.get("page_roles"), start_seq, len(batch))
+                parsed["pages"] = _rebase_page_details(
+                    parsed.get("pages"), start_seq, len(batch))
                 results.append(parsed)
             duration_ms = int((time.time() - started) * 1000)
             if last_error or not results:

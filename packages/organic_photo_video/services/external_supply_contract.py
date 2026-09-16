@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS external_supply_contracts (
     product TEXT NOT NULL DEFAULT '',
     destination TEXT NOT NULL DEFAULT '',
     temperature_band TEXT NOT NULL DEFAULT '',
+    topic_statement TEXT NOT NULL DEFAULT '',
+    effective_brief TEXT NOT NULL DEFAULT '',
     content_requirement TEXT NOT NULL DEFAULT '',
     policy_version TEXT NOT NULL,
     contract_fingerprint TEXT NOT NULL,
@@ -63,8 +65,10 @@ def contract_fingerprint(
     *, adoption: str, main_note_id: str, selected_pages: List[Dict[str, Any]],
     product: Dict[str, Any], destination: Dict[str, Any],
     policy_version: str, temperature_band: str = "",
+    topic_statement: str = "",
 ) -> str:
-    """合同指纹：adoption / 选中来源与页面 / 商品 / 目的地 / 温度带 / 策略版本。
+    """合同指纹：adoption / 选中来源与页面 / 商品 / 目的地 / 温度带 /
+    本篇主张 / 策略版本。
 
     视觉输入任一维度变化都必须得到新指纹（方案 §七），下游不得把
     指纹不同的新执行当作文案小改去复用旧 staging。
@@ -82,6 +86,7 @@ def contract_fingerprint(
         "destination": {k: str((destination or {}).get(k) or "")
                         for k in ("country", "place")},
         "temperature_band": str(temperature_band or ""),
+        "topic_statement": str(topic_statement or "")[:200],
         "policy_version": str(policy_version or ""),
     }, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -108,13 +113,14 @@ class ExternalSupplyContractStore:
         conn = self._connect()
         with conn:
             conn.executescript(CONTRACT_SCHEMA)
-            # 既有库迁移：temperature_band 列（2026-09-16 温度一致性修复）
+            # 既有库迁移：temperature_band / topic_statement / effective_brief 列
             columns = {row[1] for row in conn.execute(
                 "PRAGMA table_info(external_supply_contracts)")}
-            if "temperature_band" not in columns:
-                conn.execute(
-                    "ALTER TABLE external_supply_contracts"
-                    " ADD COLUMN temperature_band TEXT NOT NULL DEFAULT ''")
+            for column in ("temperature_band", "topic_statement", "effective_brief"):
+                if column not in columns:
+                    conn.execute(
+                        "ALTER TABLE external_supply_contracts"
+                        f" ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
 
     def close(self) -> None:
         if self._conn is not None:
@@ -144,9 +150,9 @@ class ExternalSupplyContractStore:
                 " contract_id, account_id, supply_date, slot, status,"
                 " source_type, authorization, adoption, main_note_id,"
                 " main_note_title, selected_pages, product, destination,"
-                " temperature_band, content_requirement, policy_version,"
-                " contract_fingerprint)"
-                " VALUES (?,?,?,?, 'intent',?,?,?,?,?,?,?,?,?,?,?,?)",
+                " temperature_band, topic_statement, effective_brief,"
+                " content_requirement, policy_version, contract_fingerprint)"
+                " VALUES (?,?,?,?, 'intent',?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (contract_id, account_id, supply_date, slot,
                  str(contract.get("source_type") or "xhs_reference"),
                  str(contract.get("authorization") or "reference_only"),
@@ -158,6 +164,9 @@ class ExternalSupplyContractStore:
                  json.dumps(contract.get("product") or {}, ensure_ascii=False),
                  json.dumps(contract.get("destination") or {}, ensure_ascii=False),
                  str(contract.get("temperature_band") or ""),
+                 str(contract.get("topic_statement") or "")[:300],
+                 json.dumps(contract.get("effective_brief") or {},
+                            ensure_ascii=False),
                  str(contract.get("content_requirement") or "")[:2000],
                  str(contract.get("policy_version") or SUPPLY_POLICY_VERSION),
                  str(contract.get("contract_fingerprint") or "")))
@@ -172,7 +181,8 @@ class ExternalSupplyContractStore:
             conn.execute(
                 "UPDATE external_supply_contracts SET"
                 " adoption=?, main_note_id=?, main_note_title=?, selected_pages=?,"
-                " product=?, destination=?, temperature_band=?, content_requirement=?,"
+                " product=?, destination=?, temperature_band=?, topic_statement=?,"
+                " effective_brief=?, content_requirement=?,"
                 " policy_version=?, contract_fingerprint=?, updated_at=datetime('now')"
                 " WHERE contract_id=? AND status='intent'",
                 (str(contract.get("adoption") or ""),
@@ -182,6 +192,8 @@ class ExternalSupplyContractStore:
                  json.dumps(contract.get("product") or {}, ensure_ascii=False),
                  json.dumps(contract.get("destination") or {}, ensure_ascii=False),
                  str(contract.get("temperature_band") or ""),
+                 str(contract.get("topic_statement") or "")[:300],
+                 json.dumps(contract.get("effective_brief") or {}, ensure_ascii=False),
                  str(contract.get("content_requirement") or "")[:2000],
                  str(contract.get("policy_version") or SUPPLY_POLICY_VERSION),
                  str(contract.get("contract_fingerprint") or ""),
@@ -211,7 +223,7 @@ class ExternalSupplyContractStore:
     @staticmethod
     def _to_dict(row: sqlite3.Row) -> Dict[str, Any]:
         data = {key: row[key] for key in row.keys()}
-        for key in ("selected_pages", "product", "destination"):
+        for key in ("selected_pages", "product", "destination", "effective_brief"):
             try:
                 data[key] = json.loads(data.get(key) or ("{}" if key != "selected_pages" else "[]"))
             except (TypeError, ValueError):

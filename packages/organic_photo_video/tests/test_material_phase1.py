@@ -115,7 +115,8 @@ class MockClient:
 
 def _analysis_payload(note_topic="冬季旅游穿搭", structure="same_item_multiway",
                       consumable=True, pages=2,
-                      shoot_style="street_snap", photography_quality="good"):
+                      shoot_style="street_snap", photography_quality="good",
+                      outfit_usable=True, visual_usable=True, narrative_usable=True):
     return {
         "note_topic": note_topic,
         "core_items": [{"item": "短款棉服", "role": "核心"}],
@@ -125,11 +126,21 @@ def _analysis_payload(note_topic="冬季旅游穿搭", structure="same_item_mult
             {"seq": i, "role": "cover" if i == 1 else "full_outfit"}
             for i in range(1, pages + 1)
         ],
+        "pages": [
+            {"seq": i, "outfit_summary": f"第{i}页搭配：短款棉服+直筒裤+短靴",
+             "outfit_set_id": i, "variation": ""}
+            for i in range(1, pages + 1)
+        ],
         "palette": ["奶白", "浅蓝"],
         "photography": "街拍",
         "background": "城市街道",
         "shoot_style": shoot_style,
         "photography_quality": photography_quality,
+        "purpose_usability": {
+            "outfit": {"usable": outfit_usable, "reason": "搭配清楚"},
+            "visual": {"usable": visual_usable, "reason": "色调可借鉴"},
+            "narrative": {"usable": narrative_usable, "reason": "递进清晰"},
+        },
         "consumable": consumable,
         "consumable_reason": "穿搭清晰",
     }
@@ -291,23 +302,33 @@ class MaterialAdapterTest(unittest.TestCase):
         result = narrow_candidates(packages, analyses, theme="")
         self.assertEqual(result, [])
 
-    def test_aesthetic_gate_excludes_selfie_and_poor(self):
-        # 审美硬门槛：即使 consumable=true，镜面自拍 / 随手拍 / 画质差也不进候选
+    def test_purpose_usability_gate(self):
+        # v3 按用途可用性（附B-2 取代审美硬排除）：
+        # - 摄影差但搭配清楚（outfit 可用）→ 仍在候选（降权，可文字化借鉴）
+        # - 三用途全不可用 → 排除
+        self.lab.add_note(note_id="1" * 24, images=2)
         self.lab.add_note(note_id="2" * 24, images=2)
         self.lab.add_note(note_id="3" * 24, images=2)
-        self.lab.add_note(note_id="4" * 24, images=2)
         packages = self.lab.source().list_packages()
         analyses = {
-            "1" * 24: _analysis_payload(shoot_style="mirror_selfie"),
-            "2" * 24: _analysis_payload(shoot_style="casual_phone_selfie",
-                                        photography_quality="normal"),
-            "3" * 24: _analysis_payload(photography_quality="poor"),
-            "4" * 24: _analysis_payload(shoot_style="studio",
+            "1" * 24: _analysis_payload(shoot_style="mirror_selfie",
+                                        photography_quality="poor",
+                                        visual_usable=False),
+            "2" * 24: _analysis_payload(outfit_usable=False,
+                                        visual_usable=False,
+                                        narrative_usable=False),
+            "3" * 24: _analysis_payload(shoot_style="studio",
                                         photography_quality="good"),
         }
         result = narrow_candidates(packages, analyses, theme="")
-        self.assertEqual([c.note_id for c in result], ["4" * 24])
-        self.assertTrue(any("成片质量好" in r for r in result[0].reasons))
+        ids = [c.note_id for c in result]
+        self.assertIn("1" * 24, ids)      # 摄影差但 outfit 可用 → 保留
+        self.assertNotIn("2" * 24, ids)   # 全用途不可用 → 排除
+        self.assertIn("3" * 24, ids)
+        poor = next(c for c in result if c.note_id == "1" * 24)
+        self.assertTrue(any("摄影质量差" in r for r in poor.reasons))
+        self.assertLess(poor.score, next(
+            c.score for c in result if c.note_id == "3" * 24))
 
     def test_select_reference_validates_main(self):
         self.lab.add_note(note_id="1" * 24, title="候选", images=2)

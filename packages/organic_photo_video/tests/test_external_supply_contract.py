@@ -57,7 +57,8 @@ class ExternalContractStoreTest(unittest.TestCase):
             adoption=base["adoption"], main_note_id=base["main_note_id"],
             selected_pages=base["selected_pages"], product=base["product"],
             destination=base["destination"], policy_version=base["policy_version"],
-            temperature_band=base.get("temperature_band", ""))
+            temperature_band=base.get("temperature_band", ""),
+            topic_statement=base.get("topic_statement", ""))
         return base
 
     def test_persist_intent_then_attach_record(self):
@@ -115,6 +116,12 @@ class ExternalContractStoreTest(unittest.TestCase):
         self.assertNotEqual(
             base["contract_fingerprint"],
             self._contract(temperature_band="15-22°C")["contract_fingerprint"])
+
+    def test_fingerprint_includes_topic_statement(self):
+        base = self._contract()
+        self.assertNotEqual(
+            base["contract_fingerprint"],
+            self._contract(topic_statement="完全不同的本篇主张")["contract_fingerprint"])
 
 
 class TravelDestinationTest(unittest.TestCase):

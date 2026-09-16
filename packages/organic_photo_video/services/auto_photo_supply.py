@@ -556,6 +556,29 @@ class AutoPhotoSupply:
             destination=destination, product=product_snapshot,
             temperature_band=band)
 
+        # effective_brief（方案 §4）：汇总本篇需求与来源（运营不填 JSON，
+        # 程序维护）；topic_statement=本篇主张（参考优先=素材提炼的选题）。
+        effective_brief = {
+            "account_id": binding.account_id,
+            "market": str(binding.target_country or ""),
+            "positioning": str(binding.profile.get("positioning") or "")[:120],
+            "content_strategy": (
+                "positioning_first" if positioning_first else "reference_first"),
+            "theme": {"value": theme_value, "source": (
+                "账号默认" if default_theme else "参考推导")},
+            "product": {
+                "mode": "specified" if specified else "unspecified",
+                "code": product_code,
+                "category": str(product_snapshot.get("category") or ""),
+                "name": str(product_snapshot.get("product_name") or ""),
+            },
+            "visual_preset": str(binding.profile.get("default_visual_preset") or ""),
+            "destination": destination,
+            "temperature_band": (f"{band[0]}-{band[1]}°C" if band else ""),
+            "output": {"preset": preset, "quantity": 1},
+        }
+        topic_statement = topic
+
         contract = {
             "account_id": binding.account_id,
             "supply_date": self.today,
@@ -574,6 +597,8 @@ class AutoPhotoSupply:
             } if product_code else {},
             "destination": {k: v for k, v in destination.items() if v},
             "temperature_band": (f"{band[0]}-{band[1]}°C" if band else ""),
+            "topic_statement": topic_statement,
+            "effective_brief": effective_brief,
             "content_requirement": requirement,
             "policy_version": SUPPLY_POLICY_VERSION,
         }
@@ -584,7 +609,8 @@ class AutoPhotoSupply:
             product=contract["product"],
             destination=contract["destination"],
             policy_version=SUPPLY_POLICY_VERSION,
-            temperature_band=contract["temperature_band"])
+            temperature_band=contract["temperature_band"],
+            topic_statement=topic_statement)
         # 建行前先持久化供稿意图（崩溃可恢复）；执行侧付费前凭此合同放行。
         # 冻结合同不可恢复（主参考已不可用等）时用新输入覆盖 intent，
         # 消除「冻结 A、执行 B」。

@@ -511,3 +511,18 @@ if __name__ == "__main__":
         contract = store.find_by_record(slot.record_id)
         self.assertEqual(contract["main_note_id"], "m" * 24)
         self.assertEqual(contract["status"], "created")
+
+    def test_contract_persists_brief_and_topic(self):
+        # 方案 §4/§6.4：effective_brief 快照与 topic_statement 冻结进合同
+        from services.external_supply_contract import ExternalSupplyContractStore
+        ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
+        client = FakeTaskTableClient()
+        self._supply(client, ledger, vision=self._vision_ok()).run(
+            [make_binding(profile_extra={"daily_limit": 1})], apply=True)
+        store = ExternalSupplyContractStore(str(self.root / "contracts.sqlite3"))
+        contract = store.find_by_record(client.rows[0]["record_id"])
+        brief = contract.get("effective_brief") or {}
+        self.assertEqual(brief.get("account_id"), "tocrystal66")
+        self.assertEqual(brief.get("content_strategy"), "positioning_first")
+        self.assertEqual(brief.get("theme", {}).get("value"), "旅行穿搭")
+        self.assertTrue(contract.get("topic_statement"))

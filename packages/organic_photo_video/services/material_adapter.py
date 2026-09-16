@@ -233,20 +233,28 @@ def narrow_candidates(
         analysis = analyses.get(package.note_id)
         if not analysis:
             continue
-        if not analysis.get("consumable", False):
-            continue
-        # 审美硬门槛：镜面自拍/随手拍/画质差不进候选。生成链会继承参考的
-        # 画面风格，这类素材必然带偏成片（宁可无候选也不将就）。
-        quality = str(analysis.get("photography_quality") or "")
-        style = str(analysis.get("shoot_style") or "")
-        if quality == "poor" or style in {"mirror_selfie", "casual_phone_selfie"}:
+        # 按用途可用性筛选（v3，方案 §5/附B-2）：一篇可被不同用途借鉴，
+        # 摄影差只取消 visual 资格、不再整篇排除；三用途全不可用才跳过。
+        # v2 旧缓存（无 purpose_usability）退回 consumable 语义。
+        usability = analysis.get("purpose_usability")
+        if isinstance(usability, dict) and usability:
+            flags = [bool((usability.get(name) or {}).get("usable"))
+                     for name in ("outfit", "visual", "narrative")
+                     if isinstance(usability.get(name), dict)]
+            if flags and not any(flags):
+                continue
+        elif not analysis.get("consumable", False):
             continue
         score = 0.0
         reasons: List[str] = []
 
+        quality = str(analysis.get("photography_quality") or "")
         if quality == "good":
             score += 0.5
             reasons.append("成片质量好（构图光线干净）")
+        elif quality == "poor":
+            score -= 0.5
+            reasons.append("摄影质量差（仅限文字化借鉴搭配）")
 
         if temperature_band:
             season = title_season_tag(package.title)
@@ -329,6 +337,8 @@ _SELECT_PROMPT = """你是穿搭图文的参考选材器。根据候选素材摘
   · overall：综合灵感，重新形成本篇计划，不等于逐页沿用。pages 挑不超过
     3 页（purpose 按实际用途标注），禁止整组逐页照搬。
 - pages 的 seq 必须来自候选摘要里标注的页码，不得虚构。
+- 页级选材基于逐页摘要：优先 outfit_summary 搭配关系清楚的页；同一 outfit_set_id
+  的多角度/特写页只选一张代表页；候选标注的可用用途之外的采用方式不可选。
 - 指定商品时：商品身份/颜色/版型以本店资料为准，参考只借鉴配套、比例与表达。
 - 不确定或没有合适候选时，main_note_id 填空字符串，不要勉强选择。
 
@@ -371,11 +381,24 @@ def select_reference(
             f"{pr.get('seq')}:{pr.get('role')}"
             for pr in (analysis.get("page_roles") or [])[:10]
         )
+        # v3 逐页搭配摘要（方案 §6.1：候选必须包含逐页摘要与搭配分组，
+        # 不能只有页码角色）
+        page_details = "；".join(
+            f"{p.get('seq')}#{p.get('outfit_set_id')}:{str(p.get('outfit_summary') or '')[:24]}"
+            for p in (analysis.get("pages") or [])[:8]
+        )
+        usability = analysis.get("purpose_usability") or {}
+        usable_line = "/".join(
+            name for name in ("outfit", "visual", "narrative")
+            if isinstance(usability.get(name), dict)
+            and bool(usability[name].get("usable"))) or "未知"
         lines.append(
             f"- {cand.note_id}｜标题:{cand.title[:40]}｜结构:{analysis.get('set_structure')}"
             f"｜单品:{core}｜配色:{','.join(analysis.get('palette') or [])}"
             f"｜拍摄:{analysis.get('shoot_style') or '未知'}/{analysis.get('photography_quality') or '未知'}"
+            f"｜可用用途:{usable_line}"
             f"｜页码(角色):{page_seq_roles or '未知'}"
+            f"｜逐页摘要:{page_details or '未知'}"
             f"｜主题:{str(analysis.get('note_topic') or '')[:40]}"
         )
     product_line = f"本篇商品：{product.summary_line()}" if product else "本篇不指定商品（自由搭配）"
