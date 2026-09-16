@@ -112,6 +112,14 @@ class MaterialLedger:
         self._conn = sqlite3.connect(str(self.db_path))
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(LEDGER_SCHEMA)
+        # 既有库迁移（2026-09-16 租约修复）：supply_slots 加 owner/lease_until
+        columns = {row[1] for row in self._conn.execute(
+            "PRAGMA table_info(supply_slots)")}
+        for column in ("owner", "lease_until"):
+            if column not in columns:
+                self._conn.execute(
+                    f"ALTER TABLE supply_slots ADD COLUMN {column}"
+                    " TEXT NOT NULL DEFAULT ''")
         self._conn.commit()
 
     def close(self) -> None:
@@ -219,12 +227,70 @@ class MaterialLedger:
             return "newly_reserved"
         return str(row["status"] or "reserved")
 
+    # ---- 名额执行租约（2026-09-16 评审 §D：名额唯一键≠锁）----
+    # 状态机：reserved（无主）→ running（持租执行）→ created（终态）。
+    # 失败释放回 reserved，可重试；租约过期的名额可被其他 worker 原子接管。
+    def acquire_slot_lease(
+        self, account_id: str, supply_date: str, slot: int, *,
+        owner: str, lease_seconds: int = 600,
+    ) -> str:
+        """原子获取单名额执行权。acquired / held_by_other / already_created。"""
+        self._conn.execute(
+            "INSERT OR IGNORE INTO supply_slots (account_id, supply_date, slot, status)"
+            " VALUES (?,?,?,'reserved')", (account_id, supply_date, slot))
+        cursor = self._conn.execute(
+            "UPDATE supply_slots"
+            " SET owner=?, lease_until=datetime('now','+{} seconds'),"
+            "     status='running', updated_at=datetime('now')".format(
+                int(max(30, lease_seconds)))
+            + " WHERE account_id=? AND supply_date=? AND slot=? AND status!='created'"
+              " AND (owner='' OR owner=? OR lease_until=''"
+              "      OR lease_until < datetime('now'))",
+            (owner, account_id, supply_date, slot, owner))
+        self._conn.commit()
+        if cursor.rowcount:
+            return "acquired"
+        row = self._conn.execute(
+            "SELECT status FROM supply_slots"
+            " WHERE account_id=? AND supply_date=? AND slot=?",
+            (account_id, supply_date, slot)).fetchone()
+        return ("already_created" if str(row["status"]) == "created"
+                else "held_by_other") if row else "held_by_other"
+
+    def renew_slot_lease(
+        self, account_id: str, supply_date: str, slot: int, *,
+        owner: str, lease_seconds: int = 600,
+    ) -> bool:
+        """长调用前续租；仅当仍由本 worker 持有时生效。"""
+        cursor = self._conn.execute(
+            "UPDATE supply_slots"
+            " SET lease_until=datetime('now','+{} seconds'), updated_at=datetime('now')"
+            .format(int(max(30, lease_seconds)))
+            + " WHERE account_id=? AND supply_date=? AND slot=? AND owner=?"
+              " AND status='running'",
+            (account_id, supply_date, slot, owner))
+        self._conn.commit()
+        return bool(cursor.rowcount)
+
+    def release_slot_lease(
+        self, account_id: str, supply_date: str, slot: int, *, owner: str,
+    ) -> None:
+        """失败释放：回到 reserved 等待下轮；只有本 worker 持有时可释放。"""
+        self._conn.execute(
+            "UPDATE supply_slots SET status='reserved', owner='', lease_until='',"
+            " updated_at=datetime('now')"
+            " WHERE account_id=? AND supply_date=? AND slot=? AND owner=?"
+            " AND status='running'",
+            (account_id, supply_date, slot, owner))
+        self._conn.commit()
+
     def complete_slot(self, account_id: str, supply_date: str, slot: int, *,
                       record_id: str, product_code: str = "", main_note_id: str = "",
                       adoption: str = "", note: str = "") -> None:
         self._conn.execute(
             "UPDATE supply_slots SET status='created', record_id=?, product_code=?,"
-            " main_note_id=?, adoption=?, note=?, updated_at=datetime('now')"
+            " main_note_id=?, adoption=?, note=?, owner='', lease_until='',"
+            " updated_at=datetime('now')"
             " WHERE account_id=? AND supply_date=? AND slot=?",
             (record_id, product_code, main_note_id, adoption, note,
              account_id, supply_date, slot),

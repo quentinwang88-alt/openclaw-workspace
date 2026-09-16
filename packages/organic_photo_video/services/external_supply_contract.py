@@ -163,6 +163,30 @@ class ExternalSupplyContractStore:
                  str(contract.get("contract_fingerprint") or "")))
         return self.get(contract_id) or dict(contract, contract_id=contract_id)
 
+    def supersede_intent(self, contract: Dict[str, Any]) -> None:
+        """冻结输入已不可执行（如主参考被拒）时，用新合同覆盖未绑定行的 intent。"""
+        contract_id = str(contract.get("contract_id")
+                          or f"{contract.get('account_id')}|{contract.get('supply_date')}|{contract.get('slot')}")
+        conn = self._connect()
+        with conn:
+            conn.execute(
+                "UPDATE external_supply_contracts SET"
+                " adoption=?, main_note_id=?, main_note_title=?, selected_pages=?,"
+                " product=?, destination=?, temperature_band=?, content_requirement=?,"
+                " policy_version=?, contract_fingerprint=?, updated_at=datetime('now')"
+                " WHERE contract_id=? AND status='intent'",
+                (str(contract.get("adoption") or ""),
+                 str(contract.get("main_note_id") or ""),
+                 str(contract.get("main_note_title") or "")[:120],
+                 json.dumps(contract.get("selected_pages") or [], ensure_ascii=False),
+                 json.dumps(contract.get("product") or {}, ensure_ascii=False),
+                 json.dumps(contract.get("destination") or {}, ensure_ascii=False),
+                 str(contract.get("temperature_band") or ""),
+                 str(contract.get("content_requirement") or "")[:2000],
+                 str(contract.get("policy_version") or SUPPLY_POLICY_VERSION),
+                 str(contract.get("contract_fingerprint") or ""),
+                 contract_id))
+
     def attach_record(self, contract_id: str, record_id: str) -> None:
         conn = self._connect()
         with conn:

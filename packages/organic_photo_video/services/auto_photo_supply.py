@@ -19,6 +19,7 @@ workflow、不触碰生成与发布状态机；对既有代码的唯一依赖是
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from datetime import date as _date
 from typing import Any, Dict, List, Optional, Sequence
@@ -26,6 +27,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from services.material_adapter import (
     Candidate,
     ProductBrief,
+    SelectionResult,
     narrow_candidates,
     parse_thermal_band,
     select_reference,
@@ -78,6 +80,13 @@ DEFAULT_DAILY_LIMIT = 1
 
 def supply_marker(today: str, account_id: str) -> str:
     return f"{MARKER_PREFIX}|{today}|{account_id}"
+
+
+def worker_identity() -> str:
+    """名额租约的 worker 标识：host#pid#随机短码（日志可对账）。"""
+    import socket
+    import uuid
+    return f"{socket.gethostname()}#{os.getpid()}#{uuid.uuid4().hex[:8]}"
 
 
 def _notes_text(value: Any) -> str:
@@ -145,6 +154,7 @@ class AutoPhotoSupply:
         self.model = model
         self.today = today or _date.today().isoformat()
         self.max_reference_images = max_reference_images
+        self.lease_owner = worker_identity()
         if contract_store is None:
             from services.external_supply_contract import ExternalSupplyContractStore
             contract_store = ExternalSupplyContractStore()
@@ -231,6 +241,10 @@ class AutoPhotoSupply:
                 default_theme=default_theme, positioning_first=positioning_first,
                 apply=apply)
             result.slots.append(plan)
+            if plan.status == "leased_elsewhere":
+                result.status = "leased_elsewhere"
+                result.detail = plan.detail
+                break
             if plan.status == "no_material":
                 result.status = "no_material"
                 break
@@ -255,15 +269,78 @@ class AutoPhotoSupply:
         plan = SlotPlan(account_id=binding.account_id, slot=slot, status="dry_run")
 
         if apply:
-            reservation = self.ledger.reserve_slot(
-                binding.account_id, self.today, slot)
-            if reservation == "created":
-                plan.status = "already_created"   # 台账已完成（对账兜底）
+            # 执行租约（评审 §D：名额唯一键≠锁，双 worker 会重复执行 reserved）。
+            # acquired 后所有提前返回路径都会释放租约（finally），created 由
+            # complete_slot 清理。
+            lease_owner = self.lease_owner
+            lease = self.ledger.acquire_slot_lease(
+                binding.account_id, self.today, slot, owner=lease_owner)
+            if lease == "already_created":
+                plan.status = "already_created"
                 plan.detail = "台账已完成（对账跳过）"
                 return plan
+            if lease == "held_by_other":
+                plan.status = "leased_elsewhere"
+                plan.detail = "名额由其他 worker 持有（租约未过期）"
+                return plan
+            try:
+                return self._run_slot_locked(
+                    binding=binding, slot=slot, preset=preset, codes=codes,
+                    specified=specified, scope_themes=scope_themes,
+                    default_theme=default_theme, positioning_first=positioning_first,
+                    lease_owner=lease_owner)
+            except Exception:
+                self.ledger.release_slot_lease(
+                    binding.account_id, self.today, slot, owner=lease_owner)
+                raise
+        return self._produce_slot_plan(
+            binding=binding, slot=slot, preset=preset, codes=codes,
+            specified=specified, scope_themes=scope_themes,
+            default_theme=default_theme, positioning_first=positioning_first,
+            apply=False)
+
+    def _run_slot_locked(
+        self, *, binding: PublishAccountBinding, slot: int, preset: str,
+        codes: List[str], specified: bool, scope_themes: Optional[List[str]],
+        default_theme: str, positioning_first: bool, lease_owner: str,
+    ) -> SlotPlan:
+        plan = self._produce_slot_plan(
+            binding=binding, slot=slot, preset=preset, codes=codes,
+            specified=specified, scope_themes=scope_themes,
+            default_theme=default_theme, positioning_first=positioning_first,
+            apply=True, lease_owner=lease_owner)
+        if plan.status != "created":
+            # 失败/无素材/错误：释放租约回 reserved，等待下轮重试
+            self.ledger.release_slot_lease(
+                binding.account_id, self.today, slot, owner=lease_owner)
+        return plan
+
+    def _produce_slot_plan(
+        self, *, binding: PublishAccountBinding, slot: int, preset: str,
+        codes: List[str], specified: bool, scope_themes: Optional[List[str]],
+        default_theme: str, positioning_first: bool, apply: bool,
+        lease_owner: str = "",
+    ) -> SlotPlan:
+        plan = SlotPlan(account_id=binding.account_id, slot=slot, status="dry_run")
+
+        # 合同恢复（评审 §D「冻结 A、执行 B」）：未绑定行的 intent 合同优先，
+        # 冻结输入（商品/温度带/目的地/主参考/采用/页）全部复用，不重新随机选材。
+        frozen: Optional[Dict[str, Any]] = None
+        if apply:
+            try:
+                frozen = self.contract_store.get(
+                    f"{binding.account_id}|{self.today}|{slot}")
+            except Exception:  # noqa: BLE001 - 合同库异常按无冻结处理，走新建
+                frozen = None
+            if frozen is not None and frozen.get("status") != "intent":
+                frozen = None
 
         # 本篇温度带：显式参数 > 主题默认（未映射主题=None → 不启用检查）
         band = self.thermal_band or theme_thermal_band(default_theme)
+        if frozen is not None:
+            frozen_band = parse_thermal_band(frozen.get("temperature_band"))
+            if frozen_band:
+                band = frozen_band
 
         # 指定商品（先解析，真实摘要同时供初筛与终选）：
         # - 热学门禁：商品适用窗口与本篇温度带不重叠 → 换下一个轮换编码；
@@ -272,7 +349,21 @@ class AutoPhotoSupply:
         product_code = ""
         product_snapshot: Dict[str, Any] = {}
         product_brief: Optional[ProductBrief] = None
-        if specified:
+        if frozen is not None:
+            frozen_product = dict(frozen.get("product") or {})
+            if frozen_product.get("code"):
+                product_code = str(frozen_product["code"])
+                product_snapshot = {
+                    "product_name": frozen_product.get("name") or "",
+                    "category": frozen_product.get("category") or "",
+                    "variant_key": frozen_product.get("variant") or "",
+                }
+                pname = str(product_snapshot["product_name"])
+                product_brief = ProductBrief(
+                    product_code, str(product_snapshot["category"] or ""),
+                    form=str(product_snapshot["variant_key"] or ""),
+                    key_features=[pname] if pname else [])
+        if specified and not product_code:
             usage_counts = self.ledger.product_usage_counts(binding.account_id)
             ordered_codes = sorted(
                 codes, key=lambda c: (usage_counts.get(c, 0), codes.index(c)))
@@ -371,11 +462,33 @@ class AutoPhotoSupply:
             plan.detail = "apply 模式需要 vision_client（选材调用）"
             return plan
 
-        selection = select_reference(
-            self.vision_client, narrowed,
-            theme=default_theme if positioning_first else "",
-            product=product_brief,
-            temperature_band=band)
+        # 长调用（模型终选）前续租，避免选材期间租约过期被接管
+        if lease_owner and not self.ledger.renew_slot_lease(
+                binding.account_id, self.today, slot, owner=lease_owner):
+            plan.status = "leased_elsewhere"
+            plan.detail = "租约已丢失（选材前续租失败）"
+            return plan
+
+        selection: Optional[Any] = None
+        frozen_main = str((frozen or {}).get("main_note_id") or "")
+        if frozen is not None and frozen_main and frozen_main in candidates:
+            # 恢复路径：主参考/采用/页来自冻结合同，跳过模型终选
+            selection = SelectionResult(
+                main_note_id=frozen_main,
+                supplement_note_ids=[],
+                adoption=str(frozen.get("adoption") or "overall"),
+                rationale="[合同恢复] 复用冻结输入，不重新选材",
+                pages=[{
+                    "note_id": frozen_main,
+                    "seq": int(page.get("seq") or 0),
+                    "purpose": str(page.get("purpose") or ""),
+                } for page in (frozen.get("selected_pages") or [])])
+        else:
+            selection = select_reference(
+                self.vision_client, narrowed,
+                theme=default_theme if positioning_first else "",
+                product=product_brief,
+                temperature_band=band)
         if selection is None:
             self.ledger.record_gap(
                 scope=f"supply:{binding.account_id}", reason="no_material",
@@ -402,10 +515,18 @@ class AutoPhotoSupply:
             package_obj, selection)
 
         # 目的地：账号显式配置优先；未配置则留空（执行侧行字段为准）。
+        # 恢复路径：冻结合同的目的地优先（保证与已冻结输入一致）。
         destination = {
             "country": str(binding.profile.get("travel_country") or "").strip(),
             "place": str(binding.profile.get("travel_place") or "").strip(),
         }
+        if frozen is not None:
+            frozen_destination = dict(frozen.get("destination") or {})
+            if frozen_destination:
+                destination = {
+                    "country": str(frozen_destination.get("country") or ""),
+                    "place": str(frozen_destination.get("place") or ""),
+                }
 
         # 图文主题：账号默认 → 参考优先时从选材结果推导（2026-09-16：
         # travel_two_step 等流程强制图文主题，无预设主题账号靠推导出正路，
@@ -465,8 +586,17 @@ class AutoPhotoSupply:
             policy_version=SUPPLY_POLICY_VERSION,
             temperature_band=contract["temperature_band"])
         # 建行前先持久化供稿意图（崩溃可恢复）；执行侧付费前凭此合同放行。
-        stored = self.contract_store.persist_intent(contract)
-        plan.contract_id = str(stored.get("contract_id") or "")
+        # 冻结合同不可恢复（主参考已不可用等）时用新输入覆盖 intent，
+        # 消除「冻结 A、执行 B」。
+        if frozen is not None:
+            self.contract_store.supersede_intent(
+                dict(contract, contract_id=f"{binding.account_id}|{self.today}|{slot}"))
+            stored = self.contract_store.get(
+                f"{binding.account_id}|{self.today}|{slot}") or contract
+        else:
+            stored = self.contract_store.persist_intent(contract)
+        plan.contract_id = str(stored.get("contract_id")
+                               or f"{binding.account_id}|{self.today}|{slot}")
         if stored.get("status") == "created" and stored.get("record_id"):
             plan.status = "already_created"
             plan.record_id = str(stored["record_id"])

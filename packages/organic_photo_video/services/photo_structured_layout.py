@@ -275,28 +275,33 @@ def _paint(
 
 def _draw_scrim(image: Image.Image, *, top_zone: bool, top: int, bottom: int,
                 left: int, right: int, template: Mapping[str, Any]) -> None:
-    """局部柔和渐变底：只在 scene 呈现使用，边缘淡出，不整块压画面。"""
+    """局部柔和渐变底：只在 scene 呈现使用，边缘淡出，不整块压画面。
+
+    2026-09-16 修复：此前在同一 RGBA 层重叠绘制半透明矩形——重叠区 alpha
+    累积、条带方向计算错误，文字位置得不到稳定衬底（白墙/天空上米白字
+    不可读，评审 §C 探针全 255）。改为逐行单次绘制的梯形剖面：文字带
+    （top–bottom）内全强度，向带外按可用边距淡出到 0，每行只画一次。
+    """
     base = str(template.get("scrim_color") or "#000000")
     alpha = int(template.get("scrim_alpha") or 90)
-    fade = max(24, int(template.get("scrim_fade") or round((bottom - top) * 0.9)))
     overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
     scrim = ImageDraw.Draw(overlay)
     hex_color = base.lstrip("#")
     rgb = tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
     band_top = max(0, top - 26)
     band_bottom = min(image.height, bottom + 26)
-    steps = max(2, fade // 6)
-    for step in range(steps):
-        ratio = step / max(1, steps - 1)
-        step_alpha = int(alpha * (1 - ratio) if top_zone else int(alpha * ratio))
-        if top_zone:
-            y0 = band_top + int((band_bottom - band_top) * ratio / steps)
-            y1 = band_bottom
+    upper_fade = max(1, top - band_top)
+    lower_fade = max(1, band_bottom - bottom)
+    for y in range(band_top, band_bottom):
+        if y < top:
+            factor = (y - band_top) / upper_fade
+        elif y >= bottom:
+            factor = (band_bottom - y) / lower_fade
         else:
-            y0 = band_top
-            y1 = band_top + int((band_bottom - band_top) * (1 - ratio) / steps) + 1
-        if y1 > y0:
-            scrim.rectangle((left, y0, right, y1), fill=rgb + (step_alpha,))
+            factor = 1.0
+        a = int(alpha * factor)
+        if a > 0:
+            scrim.rectangle((left, y, right, y + 1), fill=rgb + (a,))
     image.alpha = None  # 保持 RGB 画布；合成走 RGBA 蒙版
     composed = Image.alpha_composite(image.convert("RGBA"), overlay)
     image.paste(composed.convert("RGB"), (0, 0))

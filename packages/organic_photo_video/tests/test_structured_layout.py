@@ -116,6 +116,26 @@ class RenderTest(unittest.TestCase):
                 image, f"B · ลุค — {long_reason}", template,
                 index=2, cover_index=1, total=4)
 
+    def test_scrim_gradient_single_pass_trapezoid(self):
+        # 2026-09-16 修复回归（评审 §C 探针）：文字带内必须有稳定衬底，
+        # 边缘淡出，且不得因同层叠画导致 alpha 累积成整块实色。
+        from services.photo_structured_layout import _draw_scrim
+        image = Image.new("RGB", (200, 400), "#FFFFFF")
+        template = {"scrim_color": "#000000", "scrim_alpha": 128}
+        _draw_scrim(image, top_zone=True, top=100, bottom=220,
+                    left=10, right=190, template=template)
+        def lum(y):
+            px = image.getpixel((100, y))
+            return sum(px[:3]) / 3
+        self.assertLess(lum(160), 200)      # 文字带中心：明显衬底
+        self.assertGreater(lum(160), 40)    # 但不是实黑（单次绘制）
+        self.assertGreater(lum(60), 240)    # 带外上方：接近原底
+        self.assertGreater(lum(360), 240)   # 带外下方：接近原底
+        # 带内稳定、向两侧淡出单调
+        self.assertEqual(lum(105), lum(215))          # 带内左右对称处同亮度
+        self.assertLess(lum(100), lum(90))            # 带边比淡出区更暗
+        self.assertLess(lum(220), lum(240))
+
 
 if __name__ == "__main__":
     unittest.main()

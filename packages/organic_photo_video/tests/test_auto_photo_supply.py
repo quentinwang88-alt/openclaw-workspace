@@ -456,3 +456,58 @@ class AutoPhotoSupplyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_frozen_intent_recovery_reuses_selection(self):
+        # 评审 §D「冻结 A、执行 B」：崩溃后重跑必须复用冻结合同的选材输入，
+        # 不重新调用模型（即使本轮模型会选另一篇）
+        from services.external_supply_contract import ExternalSupplyContractStore
+        ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
+        store = ExternalSupplyContractStore(str(self.root / "contracts.sqlite3"))
+        # 手工冻结 intent：主参考=n（第二篇），页=seq1，adoption=outfit_only
+        store.persist_intent({
+            "account_id": "tocrystal66", "supply_date": "2026-09-16", "slot": 1,
+            "adoption": "outfit_only", "main_note_id": "n" * 24,
+            "main_note_title": "另一篇",
+            "selected_pages": [{"note_id": "n" * 24, "seq": 1, "sha256": "x",
+                                "purpose": "outfit_detail"}],
+            "product": {}, "destination": {}, "temperature_band": "",
+            "content_requirement": "冻结要求", "policy_version": "p",
+            "contract_fingerprint": "frozen"})
+        client = FakeTaskTableClient()
+        vision = FixedSelectionClient(   # 本轮模型会选 m —— 不得生效
+            "m" * 24, pages=[{"seq": 1, "purpose": "full_outfit"}])
+        results = self._supply(client, ledger, vision=vision).run(
+            [make_binding(profile_extra={"daily_limit": 1})], apply=True)
+        slot = results[0].slots[0]
+        self.assertEqual(slot.status, "created")
+        self.assertEqual(slot.main_note_id, "n" * 24)   # 冻结的主参考
+        self.assertEqual(slot.adoption, "outfit_only")
+        self.assertEqual(vision.calls, 0)               # 未重新选材
+        fields = client.created[0]["fields"]
+        self.assertIn("n" * 24, client.uploads[0])      # 上传冻结页
+        contract = store.find_by_record(slot.record_id)
+        self.assertEqual(contract["adoption"], "outfit_only")
+
+    def test_unrecoverable_frozen_intent_superseded(self):
+        # 冻结主参考已不在候选（如被拒）：覆盖 intent 用新选材，不留「冻结A执行B」
+        from services.external_supply_contract import ExternalSupplyContractStore
+        ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
+        store = ExternalSupplyContractStore(str(self.root / "contracts.sqlite3"))
+        store.persist_intent({
+            "account_id": "tocrystal66", "supply_date": "2026-09-16", "slot": 1,
+            "adoption": "overall", "main_note_id": "gone" * 8,
+            "main_note_title": "已拒绝",
+            "selected_pages": [], "product": {}, "destination": {},
+            "temperature_band": "", "content_requirement": "旧要求",
+            "policy_version": "p", "contract_fingerprint": "old"})
+        client = FakeTaskTableClient()
+        vision = FixedSelectionClient(
+            "m" * 24, pages=[{"seq": 1, "purpose": "full_outfit"}])
+        results = self._supply(client, ledger, vision=vision).run(
+            [make_binding(profile_extra={"daily_limit": 1})], apply=True)
+        slot = results[0].slots[0]
+        self.assertEqual(slot.status, "created")
+        self.assertEqual(slot.main_note_id, "m" * 24)   # 新选材生效
+        contract = store.find_by_record(slot.record_id)
+        self.assertEqual(contract["main_note_id"], "m" * 24)
+        self.assertEqual(contract["status"], "created")

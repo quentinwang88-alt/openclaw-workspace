@@ -216,3 +216,77 @@ class StyleRoutingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SlotLeaseTest(unittest.TestCase):
+    """supply_slots 执行租约（评审 §D：名额唯一键≠锁）。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        from services.material_analysis import MaterialLedger
+        self.path = str(Path(self._tmp.name) / "lease.sqlite3")
+        self.worker1 = MaterialLedger(self.path)
+        self.worker2 = MaterialLedger(self.path)   # 双连接模拟双 worker
+
+    def tearDown(self):
+        self.worker1.close()
+        self.worker2.close()
+        self._tmp.cleanup()
+
+    def test_atomic_acquire_holds_and_takeover(self):
+        self.assertEqual(
+            self.worker1.acquire_slot_lease("a", "2026-09-17", 1, owner="w1"),
+            "acquired")
+        # 第二个 worker 同名额：租约未过期 → 拒绝
+        self.assertEqual(
+            self.worker2.acquire_slot_lease("a", "2026-09-17", 1, owner="w2"),
+            "held_by_other")
+        # 同一 worker 重入：幂等续持
+        self.assertEqual(
+            self.worker1.acquire_slot_lease("a", "2026-09-17", 1, owner="w1"),
+            "acquired")
+        # 模拟租约过期：手动回拨 lease_until
+        self.worker1._conn.execute(
+            "UPDATE supply_slots SET lease_until=datetime('now','-1 hour')")
+        self.worker1._conn.commit()
+        self.assertEqual(
+            self.worker2.acquire_slot_lease("a", "2026-09-17", 1, owner="w2"),
+            "acquired")   # 过期可被接管
+        # 旧 owner 续租失败（已易主）
+        self.assertFalse(self.worker1.renew_slot_lease(
+            "a", "2026-09-17", 1, owner="w1"))
+        self.assertTrue(self.worker2.renew_slot_lease(
+            "a", "2026-09-17", 1, owner="w2"))
+
+    def test_release_returns_to_reserved_and_complete_is_terminal(self):
+        self.worker1.acquire_slot_lease("a", "2026-09-17", 2, owner="w1")
+        self.worker1.release_slot_lease("a", "2026-09-17", 2, owner="w1")
+        self.assertEqual(
+            self.worker2.acquire_slot_lease("a", "2026-09-17", 2, owner="w2"),
+            "acquired")   # 释放后可被他人获取
+        self.worker2.complete_slot(
+            "a", "2026-09-17", 2, record_id="recX")
+        self.assertEqual(
+            self.worker1.acquire_slot_lease("a", "2026-09-17", 2, owner="w1"),
+            "already_created")   # 终态不可再取
+
+    def test_legacy_db_migrates_owner_columns(self):
+        import sqlite3
+        from services.material_analysis import LEDGER_SCHEMA, MaterialLedger
+        # 先建一个无 owner 列的旧库（手工去掉新列模拟旧版）
+        legacy = str(Path(self._tmp.name) / "legacy.sqlite3")
+        conn = sqlite3.connect(legacy)
+        conn.executescript(LEDGER_SCHEMA)
+        conn.execute(
+            "CREATE TABLE supply_slots_old AS SELECT account_id, supply_date,"
+            " slot, status, record_id, product_code, main_note_id, adoption,"
+            " note, created_at, updated_at FROM supply_slots")
+        conn.execute("DROP TABLE supply_slots")
+        conn.execute("ALTER TABLE supply_slots_old RENAME TO supply_slots")
+        conn.commit()
+        conn.close()
+        ledger = MaterialLedger(legacy)   # 初始化即迁移
+        self.assertEqual(
+            ledger.acquire_slot_lease("a", "2026-09-17", 1, owner="w"),
+            "acquired")
+        ledger.close()
