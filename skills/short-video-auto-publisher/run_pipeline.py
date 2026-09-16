@@ -642,6 +642,25 @@ def ensure_account_nurture_fields(client: FeishuBitableClient, field_names: list
             ui_type="SingleSelect",
             property={"options": [{"name": "带货"}, {"name": "不带货"}]},
         )
+    # OPV 定位账号内容配置（2026-09-15）。“视频风格”列已存在时优先复用
+    # （aliases 里两个名字都映射 visual_style），不重复建列。
+    for field_name in ("账号定位", "默认主题", "视频风格", "风格图片"):
+        if field_name not in existing:
+            create_optional_field(field_name, field_type=1, ui_type="Text")
+    if "内容表达" not in existing:
+        create_optional_field(
+            "内容表达",
+            field_type=3,
+            ui_type="SingleSelect",
+            property={"options": [{"name": "搭配灵感"}, {"name": "实用指南"}]},
+        )
+    if "图文领取范围" not in existing:
+        create_optional_field(
+            "图文领取范围",
+            field_type=3,
+            ui_type="SingleSelect",
+            property={"options": [{"name": "沿用店铺池"}, {"name": "仅本账号任务"}]},
+        )
     return client.list_field_names()
 
 

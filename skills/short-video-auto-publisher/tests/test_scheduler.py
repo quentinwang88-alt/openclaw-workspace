@@ -2384,7 +2384,7 @@ class PreflightFailureClassificationTest(unittest.TestCase):
 
         from app.scheduler import OpvReleaseVerificationError, _validate_opv_upload
 
-        def _boom(candidate: object) -> None:
+        def _boom(candidate: object, *, account_id: str = "") -> None:
             raise OpvReleaseVerificationError("核验运行环境或配置异常")
 
         with patch("app.scheduler._validate_opv_upload", side_effect=_boom):
@@ -2402,7 +2402,8 @@ class PreflightFailureClassificationTest(unittest.TestCase):
         self.assertIn("提交前检查未通过，换用其他候选重排", row["error_message"])
 
     @patch("app.scheduler.bgm.requires_platform_bgm", return_value=False)
-    @patch("app.scheduler._validate_opv_upload", lambda candidate: None)
+    @patch("app.scheduler._validate_opv_upload",
+           lambda candidate, *, account_id="": None)
     def test_presubmit_runtime_error_parks_for_retry(self, *_mocks) -> None:
         self._seed_candidate()
 

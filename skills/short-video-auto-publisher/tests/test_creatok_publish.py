@@ -24,6 +24,7 @@ from app.creatok_publish import (  # noqa: E402
     CREATOK_SUPPORTED_TIMEZONES,
     CreatOKAuthError,
     CreatOKCLI,
+    CreatOKCliUsageError,
     CreatOKEnvelopeBuilder,
     CreatOKError,
     CreatOKPublishAdapter,
@@ -306,6 +307,50 @@ class CLIRunnerTest(unittest.TestCase):
             with patch("app.creatok_publish.subprocess.run", side_effect=subprocess.TimeoutExpired(["creatok"], 10)):
                 with self.assertRaises(CreatOKResultUnknownError):
                     runner.run(["publish", "job", "submit"])
+
+    def test_local_usage_error_is_not_sent(self) -> None:
+        """kind=invalid：CLI 在本地就拒了命令，请求未出网，必须可释放重排而非冻结。"""
+        fake = subprocess.CompletedProcess(
+            ["creatok"], 2,
+            '{"ok": false, "cli_version": "v0.14.0", "command": "publish job",'
+            ' "error": {"kind": "invalid", "message": "unknown publish subcommand: job",'
+            ' "retriable": false, "retryable": false, "result_unknown": false}}',
+            "",
+        )
+        runner = CreatOKCLI(api_key_env_name="CREATOK_API_KEY_TEST_ALIAS")
+        with patch.dict(os.environ, {"CREATOK_API_KEY_TEST_ALIAS": "ok_secret_key_value"}):
+            with patch("app.creatok_publish.subprocess.run", return_value=fake):
+                with self.assertRaises(CreatOKCliUsageError) as ctx:
+                    runner.run(["publish", "job", "submit"])
+        self.assertTrue(getattr(ctx.exception, "submission_not_sent", False))
+        self.assertFalse(getattr(ctx.exception, "submission_ambiguous", False))
+
+    def test_usage_error_without_kind_still_not_sent(self) -> None:
+        """旧版 CLI 可能不带 error.kind，靠措辞兜底（2026-09-12 的实际报文）。"""
+        fake = subprocess.CompletedProcess(
+            ["creatok"], 2,
+            '{"ok": false, "error": {"message": "unknown publish subcommand: job"}}',
+            "",
+        )
+        runner = CreatOKCLI(api_key_env_name="CREATOK_API_KEY_TEST_ALIAS")
+        with patch.dict(os.environ, {"CREATOK_API_KEY_TEST_ALIAS": "ok_secret_key_value"}):
+            with patch("app.creatok_publish.subprocess.run", return_value=fake):
+                with self.assertRaises(CreatOKCliUsageError):
+                    runner.run(["publish", "job", "submit"])
+
+    def test_server_error_is_not_mistaken_for_usage_error(self) -> None:
+        """服务端的 unknown 措辞不得被当成「未发出」，否则会重复发布。"""
+        fake = subprocess.CompletedProcess(
+            ["creatok"], 1,
+            '{"ok": false, "error": {"kind": "server", "message": "unknown command from upstream"}}',
+            "",
+        )
+        runner = CreatOKCLI(api_key_env_name="CREATOK_API_KEY_TEST_ALIAS")
+        with patch.dict(os.environ, {"CREATOK_API_KEY_TEST_ALIAS": "ok_secret_key_value"}):
+            with patch("app.creatok_publish.subprocess.run", return_value=fake):
+                with self.assertRaises(CreatOKError) as ctx:
+                    runner.run(["publish", "job", "submit"])
+        self.assertNotIsInstance(ctx.exception, CreatOKCliUsageError)
 
     def test_sanitize_error_text_strips_keys(self) -> None:
         long_token = "abcDEF0123456789XYZ" + "ABC0123456789"

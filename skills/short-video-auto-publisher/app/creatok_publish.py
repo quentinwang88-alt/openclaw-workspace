@@ -155,12 +155,41 @@ class CreatOKPreSubmitError(CreatOKSubmissionNotReadyError):
     """媒体上传/解析等提交前阶段失败；发布请求未曾发出，可安全重试。"""
 
 
+class CreatOKCliUsageError(CreatOKPreSubmitError):
+    """creatok CLI 本地子命令/参数解析失败（error.kind == invalid）。
+
+    命令在本地就被拒绝，请求从未出网（实测退出码 2、result_unknown=false），
+    因此必须按「未发出」释放本地占位待重排；若误判为「结果不明」，
+    该槽位会被永久冻结且不自动重发。
+    """
+
+
 CLI_CALL_TIMEOUT = 180
 
 
 def _sanitize_error_text(text: str) -> str:
     """去掉错误文本中可能的凭据片段，避免 Key 经日志/飞书泄露。"""
     return _API_KEY_PATTERN.sub("***", str(text or ""))[:4000]
+
+
+# CLI 本地解析失败的措辞。命中即证明命令没被接受、请求未出网。
+# 保留文本兜底是因为 error.kind 由 CLI 版本决定，旧版可能不带该字段。
+# 只收「解析器专属」措辞，不含宽泛的 unknown command —— 服务端也可能这么说，
+# 误判会释放已真实发出的占位，造成重复发布。
+_LOCAL_USAGE_ERROR_MARKERS = (
+    "unknown publish subcommand",
+    "unknown publish job subcommand",
+    "unknown option",
+    "unknown flag",
+    "unexpected argument",
+    "missing required argument",
+    "is required as the first argument",
+)
+
+
+def _looks_like_local_usage_error(message: str) -> bool:
+    lowered = str(message or "").lower()
+    return any(marker in lowered for marker in _LOCAL_USAGE_ERROR_MARKERS)
 
 
 def _deep_get(payload: Any, dotted_path: str) -> Any:
@@ -625,6 +654,11 @@ class CreatOKCLI:
             raise CreatOKAuthError(f"CreatOK 鉴权失败：{message}")
         if error.get("result_unknown") or payload.get("data.job.result_unknown"):
             raise CreatOKResultUnknownError(f"CreatOK 结果未知：{message}")
+        if kind == "invalid" or _looks_like_local_usage_error(message):
+            # 本地就把命令拒了，请求没出去：释放占位重排，不要冻结。
+            raise CreatOKCliUsageError(
+                f"creatok CLI 本地命令解析失败（{self._command_label(args)}）：{message}"
+            )
         raise CreatOKError(f"creatok CLI 执行失败（{self._command_label(args)}）"
                            + (f"，request_id={request_id}" if request_id else "")
                            + f"：{message}")

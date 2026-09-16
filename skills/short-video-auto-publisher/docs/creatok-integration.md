@@ -1,16 +1,38 @@
 # CreatOK 渠道接入记录
 
-> 更新时间：2026-09-05
-> 现状：**代码基础已就绪（迁移/模型/适配器/路由/测试），真实发布被 envelope 门禁拦住，等待 API Key 与官方样例接入后开通。**
+> 更新时间：2026-09-13
+> 现状：**CLI 与代码基础均已就绪（CLI v0.14.0，`doctor` 通过）。Content Posting 图文能力已具备**——
+> workspace 现有 **10 个 `tiktok_content_posting` 连接全部带 `publish_content_photo`**，其中 5 个 `health=ready`。
+> 剩下的是**人的决定**：指定哪个账号作为越南（VN）发布账号（API 不暴露国家，无法自动判定）。
+
+## 更新记录
+
+| 日期 | 变更 |
+|---|---|
+| 2026-09-05 | 初版：代码基础 + Shop Video envelope 契约；当时 workspace 仅 1 个连接，无 Content Posting 能力 |
+| 2026-09-13 | CLI 升至 v0.14.0（`publish` 改为 `<group> <command>` 分组）；连接数 1 → 15，Content Posting 图文能力已具备；修正本文两处 2026-09-05 残留的错误结论 |
+
+> ⚠️ **阅读提示**：本文按时间分层累积。标 2026-09-05 的「账号发现现状」与「三种契约仍未采集」两处结论
+> **已被后续小节与 2026-09-13 复核推翻**，不要再用作当前判据。当前判据以本节、「账号发现现状」与文末「待办」为准。
 
 ## CLI 版本与安装
 
-- 包：`@creatok/cli`（npm 全局），安装命令 `npm install -g @creatok/cli@0.13.0`
-- 当前锁定版本：**v0.13.0**（stable，commit `1c7cc30`，skills_hash `26e5d84a4964`）
-- 升级前先 `creatok doctor` 看 `update` 块；升级用 `creatok update --apply`，失败回退按官方指引手动装
-- CLI 要求 Node 18+；本机 Node v24.14.0
-- 官方内嵌 skill：`creatok-publish-tiktok`（v1.0.6），已随 CLI 安装到 `~/.claude/skills/`
-- 内嵌 skill 会漂移：`creatok doctor` 的 `skills_drift` 为 true 时跑 `creatok skills install`
+- 包：`@creatok/cli`（npm 全局）。**2026-09-13 复核本机实际版本 v0.14.0**：
+  `doctor` 返回 `ok:true`、`api_key_configured:true`、`reachable:true`、channel=stable、
+  `skills_hash=8e5b588457af`、`update.available=false`
+- ⚠️ **多前缀安装陷阱（升级前必查）**：机器上可同时存在多份 `@creatok/cli`。
+  交互式会话 PATH 先命中 WorkBuddy 托管 node 目录
+  （`~/.workbuddy/binaries/node/versions/*/bin/creatok`），而 launchd 生产任务按
+  `scripts/run_launchd_task.py::runtime_environment()` 拼出的 PATH 命中 **`/usr/local/bin/creatok`**。
+  **升级必须落到生产命中的前缀，否则只是升了你自己的 shell**（曾因此出现「本地自测通过、生产照样报
+  `unknown publish subcommand`」）。完整排查方法论见
+  `~/.workbuddy/skills/creatok-cli-endpoint-diagnosis/SKILL.md`
+- 升级到生产前缀：`npm install -g --prefix /usr/local @creatok/cli@<latest>`。
+  `creatok update --apply` 装到当前 npm 全局前缀，在托管运行时下往往**不是** `/usr/local`
+- 升级前先 `creatok doctor` 看 `update` 块；CLI 要求 Node 18+
+- 内嵌 skill 共 **15 个**（含 `creatok-publish-tiktok`），2026-09-13 复核全部 `status: ok`，
+  安装在 `~/.claude/skills/`
+- 内嵌 skill 会漂移：`doctor` 的 `skills_drift` 为 true 时跑 `creatok skills install`
 
 ## API Key 配置
 
@@ -21,18 +43,51 @@
 - 校验：`creatok doctor` 的 `data.api_key_configured` 必须为 true
 - 本机配置（2026-09-05）：已写入 `~/.zshrc`（机器级，不进 git）；非交互 shell 需要显式 export
 
-## 账号发现现状（2026-09-05，真实连接）
+## 账号发现现状
 
-当前 workspace 仅 1 个连接：
+> **2026-09-13 复核（当前判据）**：`creatok publish connection list` 实测 **15 个连接**。
+
+| 平台 | 数量 | capabilities | health=ready |
+|---|---|---|---|
+| `tiktok_shop` | 5 | 仅 `publish_shoppable_video` + `add/remove_showcase_products` | 5（全部 ready） |
+| `tiktok_content_posting` | 10 | **全部含 `publish_content_video` + `publish_content_photo`** | 5（另 5 个 `token_invalid`） |
+
+`tiktok_content_posting` 中 **`health=ready` 的 5 个**（可用于真实图文发布）：
+
+| 显示名 | connection_uid |
+|---|---|
+| tamarawoo | `conn_tc_3cWjrL84udzEWMsixHyspt` |
+| louisatian | `conn_tc_3UW3fJHM5YhDqw0b4wTkjL` |
+| doristang | `conn_tc_5Jd17IxT0gGIgU3xUB5y6a` |
+| LikeU shop | `conn_tc_3QnZcdS70fNLC9imLbQmRg` |
+| AMbalalala | `conn_tc_6vhCs68WVavOdyn4cJRz2O` |
+
+`token_invalid`（需重新授权）：`VICTORIO DEL HOYO`、`vickieyi`、`kaycen`、`ronaldrou`、`th2LikeUshop`。
+
+**结论**：
+- Content Posting 图文能力**已具备** —— 2026-09-05 的「首期非带货无可用连接」结论**已反转**。
+- `tiktok_shop` 侧仍未见 `publish_shoppable_photo` → **Shop 图文能力未开通**（未复查，如需请到 creatok.ai 确认）。
+
+⚠️ **API 不暴露连接的国家/市场**：`connection list` 与 `connection creator-info` 均无 country 字段，
+无法据此判定哪个账号属于越南受众。**VN 发布账号必须由运营人工指定。**
+
+`creator-info` 抽样（`conn_tc_3cWjrL84udzEWMsixHyspt`）：`creator_username=tamarawoo8363`、
+`privacy_level_options=[PUBLIC_TO_EVERYONE, MUTUAL_FOLLOW_FRIENDS, SELF_ONLY]`、
+`comment_disabled=false`、`max_video_post_duration_sec=3600`。
+
+<details>
+<summary>历史记录（2026-09-05，已失效，仅备查）</summary>
+
+当时 workspace **仅 1 个连接**：
 
 - `yoursbeauty.my`（platform=**tiktok_shop**，platform_account_id=7525721272178066433）
 - connection_uid：`conn_ts_4zDg4wT0Wd9L82ysizOb66`，health=ready
 - capabilities：`publish_shoppable_video`、`add_showcase_products`、`remove_showcase_products`
-- **不含 `publish_content_video`/`publish_content_photo`（普通 Content Posting 能力）→ 首期非带货无可用连接**
-- **不含 `publish_shoppable_photo`（Shop 图文）→ 第二期 Shop 图文能力未开通**
+- 不含 `publish_content_video`/`publish_content_photo` → 当时判定「首期非带货无可用连接」
+- 不含 `publish_shoppable_photo` → Shop 图文能力未开通
 - `creator-info` 对该连接返回 404（`publish_connection_not_found`）——该命令仅服务 Content Posting
-- 结论：当前可用的唯一真实能力是 **Shop 带货视频**；首期目标（非带货视频/图文）需先在
-  CreatOK workspace（creatok.ai）新增普通 TikTok 账号连接
+
+</details>
 
 能力名与本地字段映射（已按真实连接校准）：
 
@@ -44,22 +99,51 @@
 | publish_shoppable_photo / shoppable_photo / publish_shop_photo | shop_photo_capable |
 | direct_post（Content Posting 才判定） | direct_post_capable / delivery_mode |
 
-## 已确认的 CLI 命令（v0.13.0）
+## 已确认的 CLI 命令（v0.14.0）
+
+`publish` 已改组为 **`creatok publish <group> <command>`**。2026-09-13 `publish --help` 实测子命令：
 
 ```text
-creatok doctor                                  健康检查（api_key_configured / skills_drift）
-creatok publish connections [--capability] [--platform] [--operation-id]
-creatok publish capabilities --connection <uid> [--operation-id]
-creatok publish creator-info --connection <uid> [--operation-id]
-creatok publish products --connection <uid> [--keyword] [--operation-id]
-creatok publish music --connection <uid> (--keyword|--url) [--operation-id]
-creatok publish prepare-video --connection <uid> --file <asset.json> [--json] [--operation-id]
-creatok publish submit --file <envelope.json> | --json <envelope>  [--operation-id]
-creatok publish status --job-id <job_id> | --idempotency-key <key>  [--operation-id]
-creatok assets create --type video|image --file <path>
-creatok capabilities（远程能力：模型/默认值/限制）
-creatok version | update | jobs | logs
+connection list                    列出可见 TikTok 连接
+connection capabilities <uid>      连接能力与 grant/scopes（<uid> 为【位置参数】）
+connection creator-info <uid>      Content Posting 约束（privacy 档位、时长上限等）
+product list                       [Shop] 查连接商品（默认仅可发布商品）
+product performance list|get       [Shop] 商品表现
+music search                       [Shop] 文本检索 TikTok Shop 曲库
+music resolve                      [Shop] 解析官方 TikTok 音乐 URL
+photo-destination list             [Shop] 图文分类/合集锚点（**要求 Shop 连接 UID**）
+video prepare                      [Shop] 视频 Asset → file_id
+video cover prepare                上传图片 Asset 作为封面，返回 cover_uri
+video performance list|get         视频表现
+showcase add|remove                [Shop] Creator Showcase 商品增删
+job submit                        提交最终 snake_case envelope
+job get                           按 job id 或幂等键取任务 / 恢复
+job retry                         **显式重试** Content Posting 提交（v0.14.0 新增）
+shop performance                  [Shop] 聚合表现
 ```
+
+顶层命令：`image` / `video` / `assets` / `publish` / `estimate` / `jobs` / `skills` / `doctor` /
+`capabilities` / `version` / `update` / `logs`。`creatok skills` 可 list/read/install 内嵌 skill。
+
+**v0.13.0 → v0.14.0 命令对照**（调用方写死子命令时必须同步改）：
+
+| v0.13.0（旧，服务端端点已 404） | v0.14.0（现行） |
+|---|---|
+| `publish connections` | `publish connection list` |
+| `publish capabilities --connection <uid>` | `publish connection capabilities <uid>` |
+| `publish creator-info --connection <uid>` | `publish connection creator-info <uid>` |
+| `publish products --connection <uid>` | `publish product list --connection <uid>` |
+| `publish music --connection <uid>` | `publish music search\|resolve ...` |
+| `publish prepare-video --connection <uid>` | `publish video prepare --connection <uid>` |
+| `publish submit --file <f>` | `publish job submit --file <f>` |
+| `publish status --job-id <id>` | `publish job get <id>` |
+| `publish status --idempotency-key <k>` | `publish job get --idempotency-key <k>` |
+| `assets create` / `assets list` | 未变 |
+
+⚠️ **部分参数由 flag 改为位置参数**：`connection capabilities` / `creator-info` 报
+`connection UID is required as the first argument` 时即为此故；而不带参数运行可反查用法。
+`product` / `music` / `video` 等组仍用 `--connection <uid>`。
+判别方法：命令在本地被拒（`error.kind=="invalid"`、`result_unknown==false`、退出码 2）＝请求从未出网。
 
 要点（来自官方 skill 文档）：
 
@@ -92,7 +176,12 @@ creatok version | update | jobs | logs
   崩溃后重建一致；`reconcile_scheduled_task` 只用冻结的 key 只读查询
 - 超时/`result_unknown` → 抛 `CreatOKResultUnknownError`（submission_ambiguous，禁止重发）
 - API Key 只经子进程环境变量；CLI 错误消息经 `_sanitize_error_text` 脱敏
-- `terminate_task` 实现为抛错：CLI v0.13.0 无公开取消命令，不得宣称远端已取消
+- `terminate_task` 实现为抛错：CLI（v0.13.0 及 v0.14.0）均**无公开取消命令**，不得宣称远端已取消
+- ⚠️ **v0.14.0 新增 `publish job retry`（显式重试 Content Posting 提交）**——这条命令的存在
+  意味着「结果不明」的恢复路径可能不再只有对账。**其语义尚未验证**：在确认「retry 是否重发、
+  是否复用原幂等键、是否可能造成重复发布」之前，**不得**把它接进自动流程，也不得据此解除
+  `submission_ambiguous` 冻结。冻结任务的处置仍需按 `creatok-cli-endpoint-diagnosis` 的
+  「先确证远端不存在 → 再释放重排」流程走。
 
 ## Envelope 契约（2026-09-05 正式账号采集，CLI v0.13.0）
 
@@ -126,8 +215,14 @@ creatok version | update | jobs | logs
 - 失败的 definite 语义：`result_unknown=false` + `retryable=false` + `recovery_action`；
   Provider precheck 拒绝样例（precheck_failed / "Video id is invalid" / code 170001040）已归档 fixture
 
-**Organic Video / Organic Photo / Shop Photo 三种契约仍未采集**——当前 workspace 无
-Content Posting 连接（需求方：在 creatok.ai 添加普通 TikTok 账号），Shop Photo 能力未开通。
+> **勘误（2026-09-13 复核）**：本节原结论（`Organic Video / Organic Photo` 契约仍未采集、
+> 无 Content Posting 连接）**已被下一节推翻** —— 紧接着的「有机契约」小节就记录了 2026-09-05 当日
+> 从 `tamarawoo` 采集到的 Organic Video / Organic Photo 契约，两处自相矛盾。当前状态：
+>
+> - **Organic Video / Organic Photo 契约：已采集**（见下节，含端到端实证 job 355065）。
+> - **Shop Photo 契约：仍未采集**——`tiktok_shop` 连接无 `publish_shoppable_photo` 能力；
+>   `photo-destination list` 要求 Shop 连接 UID，仅服务 Shop 图文锚点。
+> - 连接清单已从 1 个增至 15 个，其中 10 个 Content Posting 连接**全部**带 `publish_content_photo`（见「账号发现现状」）。
 
 ## 有机契约（2026-09-05 tamarawoo 采集，CLI v0.13.0）
 
@@ -217,6 +312,12 @@ Shop `prepare-video` 继续使用它自己的正式 file 引用流程。
 `provider_ai_label_status=unsupported_by_creatok_v0.13.0`，但在 CreatOK 提供正式字段前
 不能声称该标识已透传到 TikTok。
 
+> ⚠️ **版本未复核（2026-09-13 标注）**：上述结论是在 **v0.13.0** 上实测的。
+> 2026-09-13 只复核了 CLI 版本、连接清单与命令结构（`doctor` + `publish --help` + `connection list`），
+> **未在 v0.14.0 上重测 `is_aigc` 的拒绝行为**。接入真实发布前需重新采一次 schema 反馈，
+> 并同步 `provider_ai_label_status` 的取值（`unsupported_by_creatok_v0.13.0` 已带版本号，
+> 复核后应更新为新版本标识）。
+
 **Shop Video**（上一节）补充：`prepare-video` 的 asset-json 也用签名 media_url；
 无排期字段（发布时点服务端决定，未经官方确认前不真实提交）。
 
@@ -253,7 +354,10 @@ Shop `prepare-video` 继续使用它自己的正式 file 引用流程。
 1. ✅ `CREATOK_API_KEY` 已配置（~/.zshrc，doctor/reachable 通过）
 2. ✅ 账号连接发现 + 能力回写（只读，代码经真实连接端到端验证；本地库无 CreatOK 账号配置，等飞书账号表 + 同步）
 3. ✅ Shop Video 官方 envelope 契约已采集并固化 fixture；**排期语义未确认，真实提交保持关闭**
-4. ⏳ 老板在 creatok.ai 添加普通 TikTok Content Posting 连接 → 采集 Organic Video/Photo 契约 → 首期非带货
+4. ✅ **普通 TikTok Content Posting 连接已接入**（2026-09-13 复核：10 个连接，全部带
+   `publish_content_photo`，其中 5 个 `health=ready`）→ Organic Video/Photo 契约已采集；
+   **首个非带货发布账号待运营指定**（API 不暴露国家，无法自动判定越南受众）
 5. ⏳ 向 CreatOK 确认 Shop 发布排期语义（提交后立即发布 or 服务端排队）
-6. 全契约接通后：单账号 real test → 7 天并跑 + 50 条无重复对账后批量迁移
-- 时区用账号 IANA 时区（Asia/Bangkok 等），不用本机时区
+6. ⏳ **在 v0.14.0 上重测 `is_aigc` 拒绝行为**并更新 `provider_ai_label_status` 取值（见「AI 标识边界」）
+7. ⏳ **验证 `publish job retry` 语义**（是否重发/复用幂等键/可能重复发布），确认前不得接入自动流程
+8. 全契约接通后：单账号 real test → 7 天并跑 + 50 条无重复对账后批量迁移

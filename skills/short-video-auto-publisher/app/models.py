@@ -31,6 +31,8 @@ class ScriptMetadata:
     cart_enabled: str = ""
     content_branch: str = ""
     audio_mode: str = ""
+    # OPV 定位任务冻结的真实投递账号；空＝店铺公共池（旧行为）。
+    target_publish_account_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,12 @@ class AccountConfig:
     delivery_mode: str = ""
     provider_health: str = ""
     provider_checked_at: str = ""
+    # 账号内容定位（OPV photo_content_profile 的 JSON 缓存）。空＝未配置，
+    # 该账号保持店铺公共池的旧领取行为。
+    photo_content_profile_json: str = ""
+    # 图文领取范围：store_pool（默认，沿用店铺池）/ own_tasks_only（仅本账号
+    # 任务的图文）。空值按 store_pool 处理。只影响原生图文候选，不影响视频。
+    photo_claim_scope: str = ""
 
 
 @dataclass(frozen=True)
@@ -86,6 +94,8 @@ class PublishCandidate:
     place: str = ""
     content_type: str = "video"
     media_paths: list[str] = field(default_factory=list)
+    # 定向投递：OPV 任务冻结的目标账号；空＝可被店铺池内任意合规账号领取。
+    target_publish_account_id: str = ""
 
 
 @dataclass(frozen=True)

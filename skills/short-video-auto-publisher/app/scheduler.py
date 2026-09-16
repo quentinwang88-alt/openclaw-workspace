@@ -91,6 +91,14 @@ ACCOUNT_FIELD_ALIASES: Dict[str, List[str]] = {
     "provider_health": ["CreatOK能力状态", "CreatOK 能力状态"],
     "content_scope": ["内容类型限定", "内容类型", "带货限定"],
     "provider_checked_at": ["能力检查时间"],
+    # OPV 定位账号内容配置（2026-09-15）：账号表已有列优先复用（如“视频风格”
+    # 列同时服务图文摄影基准），缺列时由 ensure_account_nurture_fields 补建。
+    "positioning": ["账号定位", "定位"],
+    "default_theme": ["默认主题", "账号默认主题"],
+    "expression_mode": ["内容表达"],
+    "visual_style": ["视觉风格", "视频风格"],
+    "style_image": ["风格图片"],
+    "photo_claim_scope": ["图文领取范围"],
 }
 
 
@@ -333,6 +341,104 @@ def select_publish_attachment(
     return None, "waiting_voiceover"
 
 
+def normalize_photo_claim_scope(raw_value: Any) -> str:
+    """账号表“图文领取范围”（沿用店铺池/仅本账号任务）→ store_pool/own_tasks_only。
+
+    空值返回空串：``upsert_account_configs`` 用 COALESCE 保留库内既有值，
+    未配置账号读取时按 store_pool（旧店铺池行为）处理。
+    """
+    text = _choice_text(raw_value).strip()
+    if not text:
+        return ""
+    if "仅本账号" in text or "own" in text.lower():
+        return "own_tasks_only"
+    if "店铺池" in text or "store" in text.lower() or "沿用" in text:
+        return "store_pool"
+    return ""
+
+
+def normalize_photo_expression_mode(raw_value: Any) -> str:
+    """账号表“内容表达”（搭配灵感/实用指南）→ STYLE_INSPIRATION/PRACTICAL_GUIDE。"""
+    text = _choice_text(raw_value).strip()
+    if not text:
+        return ""
+    if "实用" in text or "指南" in text or "guide" in text.lower():
+        return "PRACTICAL_GUIDE"
+    if "灵感" in text or "inspiration" in text.lower():
+        return "STYLE_INSPIRATION"
+    return ""
+
+
+def build_photo_content_profile(
+    *, positioning: str = "", default_theme: str = "", expression_mode: str = "",
+    visual_style: str = "", style_image: Any = None,
+) -> str:
+    """把账号表的定位相关列收敛成 OPV 消费的 photo_content_profile JSON。
+
+    全部为空时返回空串（账号未配置定位，保持旧领取行为）。风格图片只保存
+    附件身份（file_token/name）指纹；生成侧是否消费由 OPV 决定。
+    """
+    profile: Dict[str, Any] = {
+        "schema_version": "opv-publish-account-profile-v1",
+    }
+    if str(positioning or "").strip():
+        profile["positioning"] = str(positioning).strip()
+    if str(default_theme or "").strip():
+        profile["default_theme"] = str(default_theme).strip()
+    mode = normalize_photo_expression_mode(expression_mode)
+    if mode:
+        profile["expression_mode"] = mode
+    if str(visual_style or "").strip():
+        profile["visual_baseline"] = str(visual_style).strip()
+    attachment = extract_attachment(style_image)
+    if attachment:
+        profile["style_image"] = {
+            "file_token": str(attachment.get("file_token") or ""),
+            "name": str(attachment.get("name") or ""),
+        }
+    keys = [key for key in profile if key != "schema_version"]
+    if not keys:
+        return ""
+    return json.dumps(profile, ensure_ascii=False, sort_keys=True)
+
+
+def account_photo_claim_scope(account: Any) -> str:
+    """读取账号图文领取范围；未配置/读取失败一律回落店铺池（旧行为）。"""
+    if account is None:
+        return "store_pool"
+    try:
+        if "photo_claim_scope" not in account.keys():
+            return "store_pool"
+        return str(account["photo_claim_scope"] or "").strip() or "store_pool"
+    except (AttributeError, TypeError):
+        return "store_pool"
+
+
+def filter_candidates_for_account(
+    candidates: List[Any], account_id: str, account: Any,
+) -> Tuple[List[Any], Dict[str, int]]:
+    """目标账号领取隔离（只影响候选过滤，不改任何渠道/配额规则）。
+
+    - 候选带 ``target_publish_account_id`` 时只能被该账号领取（等待，不转号）；
+    - 账号 ``photo_claim_scope=own_tasks_only`` 时不领取未绑定的原生图文公共池
+      候选（视频与未配置账号不受影响）。
+    """
+    scope = account_photo_claim_scope(account)
+    kept: List[Any] = []
+    stats = {"targeted_for_other": 0, "unbound_photo_skipped": 0}
+    for candidate in candidates:
+        target = str(getattr(candidate, "target_publish_account_id", "") or "").strip()
+        if target and target != str(account_id or "").strip():
+            stats["targeted_for_other"] += 1
+            continue
+        is_photo = str(getattr(candidate, "content_type", "video") or "video") == "photo"
+        if (not target and is_photo and scope == "own_tasks_only"):
+            stats["unbound_photo_skipped"] += 1
+            continue
+        kept.append(candidate)
+    return kept, stats
+
+
 def sync_accounts(records: Iterable[Any], mapping: Dict[str, Optional[str]], db: AutoPublishDB) -> int:
     account_rows: Dict[str, List[Dict[str, Any]]] = {}
     binding_rows: Dict[str, List[Dict[str, Any]]] = {}
@@ -366,6 +472,17 @@ def sync_accounts(records: Iterable[Any], mapping: Dict[str, Optional[str]], db:
                 "delivery_mode": normalize_creatok_delivery_mode(fields.get(mapping.get("delivery_mode"))),
                 "provider_health": normalize_creatok_health(fields.get(mapping.get("provider_health"))),
                 "provider_checked_at": normalize_text(fields.get(mapping.get("provider_checked_at"))),
+                # 内容定位（同一账号多通道行共享）：行值非空即候选，聚合时取第一个
+                # 非空值；全部为空＝未配置定位，保持店铺池旧行为。
+                "photo_content_profile": build_photo_content_profile(
+                    positioning=normalize_text(fields.get(mapping.get("positioning"))),
+                    default_theme=normalize_text(fields.get(mapping.get("default_theme"))),
+                    expression_mode=fields.get(mapping.get("expression_mode")),
+                    visual_style=normalize_text(fields.get(mapping.get("visual_style"))),
+                    style_image=fields.get(mapping.get("style_image")),
+                ),
+                "photo_claim_scope": normalize_photo_claim_scope(
+                    fields.get(mapping.get("photo_claim_scope"))),
         }
         binding_rows.setdefault(account_id, []).append(row)
         account_rows.setdefault(account_id, []).append(row)
@@ -388,6 +505,17 @@ def sync_accounts(records: Iterable[Any], mapping: Dict[str, Optional[str]], db:
         provider_row = next(
             (row for row in rows if row["publish_channel"] == "CreatOK"),
             preferred,
+        )
+        # 内容定位跨通道共享：取第一个非空 profile / scope。冲突（两个非空且
+        # 不同）时保留第一个非空值——发布仍可用，OPV 侧解析时会给出唯一来源。
+        photo_profile = next(
+            (row["photo_content_profile"] for row in rows
+             if row.get("photo_content_profile")),
+            "",
+        )
+        photo_scope = next(
+            (row["photo_claim_scope"] for row in rows if row.get("photo_claim_scope")),
+            "",
         )
         # Common fields are selected deterministically; CreatOK connection and
         # nurture settings belong to the organic binding on dual-channel accounts.
@@ -412,6 +540,8 @@ def sync_accounts(records: Iterable[Any], mapping: Dict[str, Optional[str]], db:
             delivery_mode=provider_row["delivery_mode"],
             provider_health=provider_row["provider_health"],
             provider_checked_at=provider_row["provider_checked_at"],
+            photo_content_profile_json=photo_profile,
+            photo_claim_scope=photo_scope,
         ))
     written = db.upsert_account_configs(configs)
     _sync_channel_bindings(db, binding_rows)
@@ -814,7 +944,7 @@ def _is_retryable_create_error(error_message: str) -> bool:
     )
 
 
-def _validate_opv_upload(candidate: Any) -> None:
+def _validate_opv_upload(candidate: Any, *, account_id: str = "") -> None:
     if not str(candidate.canonical_script_key or "").startswith("opv:"):
         return
     context = json.loads(candidate.script_text or "{}")
@@ -830,10 +960,19 @@ def _validate_opv_upload(candidate: Any) -> None:
         if not callable(validator):
             raise OpvReleaseVerificationError("照片 release 核验尚未接入")
         validator(context, media_paths=list(candidate.media_paths),
-                  script_id=candidate.script_id, title=candidate.short_video_title)
+                  script_id=candidate.script_id, title=candidate.short_video_title,
+                  account_id=account_id)
     else:
         module.validate_upload(context, video_path=candidate.publish_video_value,
-                               script_id=candidate.script_id, title=candidate.short_video_title)
+                               script_id=candidate.script_id, title=candidate.short_video_title,
+                               account_id=account_id)
+    # 队列侧目标账号与候选冻结目标必须一致（列与 context JSON 双通道互证）。
+    queue_target = str(getattr(candidate, "target_publish_account_id", "") or "")
+    context_target = str(context.get("target_publish_account_id") or "")
+    if context_target and queue_target and context_target != queue_target:
+        raise OpvReleaseVerificationError(
+            f"队列目标账号（{queue_target}）与冻结任务目标（{context_target}）不一致"
+        )
     if context.get("release_manifest"):
         if is_photo:
             _verify_live_opv_release(candidate.script_id, context["release_manifest"]["manifest_sha256"],
@@ -1028,6 +1167,11 @@ def schedule_slots(
             candidate for candidate in candidates
             if account_can_publish_candidate(account, candidate, slot_channel)
         ]
+        # 目标账号领取隔离（2026-09-15）：定向候选只归目标账号；配置了
+        # 「仅本账号任务」的重点图文账号不再领取未绑定的公共图文池。被过滤
+        # 的候选保持待排期等待自己的账号，不转号、不计失败。
+        candidates, claim_filter_stats = filter_candidates_for_account(
+            candidates, account_id, account)
         slot_scope = binding_scopes.get(account_id, {}).get(slot_channel, "all")
         if slot_scope in ("shoppable", "organic"):
             def _matches_scope(candidate: Any) -> bool:
@@ -1136,6 +1280,10 @@ def schedule_slots(
         for candidate in candidates:
             if prefer_nurture and has_nurture_candidate and not is_nurture_candidate(candidate):
                 break
+            # 提交前双保险：定向候选与本槽账号不一致时绝不占用（防其他入口绕过）。
+            candidate_target = str(getattr(candidate, "target_publish_account_id", "") or "").strip()
+            if candidate_target and candidate_target != account_id:
+                continue
             if db.has_active_script_assignment(candidate.canonical_script_key, exclude_slot_id=int(slot["slot_id"])):
                 continue
             if not db.candidate_retry_ready(candidate.canonical_script_key, current_time):
@@ -1156,6 +1304,15 @@ def schedule_slots(
             blocked_by_rules += 1
             if initialization_incomplete:
                 pending_reason = "初始化内容池不足，等待补充图文养号成片"
+            elif claim_filter_stats["targeted_for_other"] and not candidates:
+                pending_reason = (
+                    "候选均为其他目标账号的绑定内容，本账号不领取；内容等待目标账号自己的槽位"
+                )
+            elif claim_filter_stats["unbound_photo_skipped"] and not candidates:
+                pending_reason = (
+                    "本账号图文领取范围为「仅本账号任务」，暂无绑定本账号的图文；"
+                    "未绑定公共池内容不领取"
+                )
             elif nurture_quota_reached:
                 pending_reason = f"今日养号条数已达上限（{nurture_quota}条），等待明日排班"
             else:
@@ -1263,6 +1420,8 @@ def schedule_slots(
             "content_type": publish_request.content_type,
             "publish_channel": publish_channel,
             "media_paths": publish_request.media_paths,
+            "target_publish_account_id": str(
+                getattr(selected, "target_publish_account_id", "") or ""),
         }
         if selected.content_type == "photo":
             submission_context["release_manifest"] = photo_context["release_manifest"]
@@ -1296,7 +1455,7 @@ def schedule_slots(
             continue
         validated_for_upload = False
         try:
-            _validate_opv_upload(selected)
+            _validate_opv_upload(selected, account_id=account_id)
             validated_for_upload = True
             if selected.content_type == "photo" or publish_channel == "CreatOK":
                 task_id = adapter.create_publish_task(publish_request)

@@ -231,6 +231,11 @@ class AutoPublishDB:
             self._ensure_column(conn, "account_configs", "provider_health", "TEXT")
             self._ensure_column(conn, "account_configs", "provider_checked_at", "TEXT")
             self._ensure_column(conn, "account_configs", "provider_error", "TEXT")
+            # OPV 定位账号：内容定位缓存 + 图文领取范围（2026-09-15）。
+            self._ensure_column(conn, "account_configs", "photo_content_profile_json", "TEXT")
+            self._ensure_column(conn, "account_configs", "photo_claim_scope",
+                                "TEXT NOT NULL DEFAULT 'store_pool'")
+            self._ensure_column(conn, "script_metadata", "target_publish_account_id", "TEXT")
             self._ensure_publisher_profiles_table(conn)
             self._ensure_column(conn, "publish_slots", "bgm_json", "TEXT")
             self._ensure_column(conn, "publish_slots", "submission_context_json", "TEXT")
@@ -283,6 +288,7 @@ class AutoPublishDB:
                 cart_enabled TEXT,
                 content_branch TEXT,
                 audio_mode TEXT,
+                target_publish_account_id TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE(source_record_id, script_slot)
@@ -344,6 +350,8 @@ class AutoPublishDB:
                 provider_health TEXT,
                 provider_checked_at TEXT,
                 provider_error TEXT,
+                photo_content_profile_json TEXT,
+                photo_claim_scope TEXT NOT NULL DEFAULT 'store_pool',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -696,8 +704,9 @@ class AutoPublishDB:
                     canonical_script_key, script_id, source_record_id, script_slot, task_no, store_id, product_id,
                     parent_slot, direction_label, variant_strength, target_country, product_type,
                     content_family_key, script_text, short_video_title, title_source,
-                    script_source, publish_purpose, cart_enabled, content_branch, audio_mode, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    script_source, publish_purpose, cart_enabled, content_branch, audio_mode,
+                    target_publish_account_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(canonical_script_key) DO UPDATE SET
                     script_id = excluded.script_id,
                     source_record_id = excluded.source_record_id,
@@ -719,6 +728,7 @@ class AutoPublishDB:
                     cart_enabled = excluded.cart_enabled,
                     content_branch = excluded.content_branch,
                     audio_mode = excluded.audio_mode,
+                    target_publish_account_id = excluded.target_publish_account_id,
                     updated_at = excluded.updated_at
                 """,
                 [
@@ -744,6 +754,7 @@ class AutoPublishDB:
                         item.cart_enabled,
                         item.content_branch,
                         item.audio_mode,
+                        str(getattr(item, "target_publish_account_id", "") or ""),
                         now,
                         now,
                     )
@@ -1575,8 +1586,9 @@ class AutoPublishDB:
                     nurture_enabled, nurture_daily_count, nurture_only, initialization_enabled,
                     publish_profile_id, provider_connection_uid, account_timezone,
                     delivery_mode, provider_health, provider_checked_at,
+                    photo_content_profile_json, photo_claim_scope,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(account_id) DO UPDATE SET
                     account_name = excluded.account_name,
                     store_id = excluded.store_id,
@@ -1595,6 +1607,8 @@ class AutoPublishDB:
                     delivery_mode = COALESCE(NULLIF(excluded.delivery_mode, ''), account_configs.delivery_mode),
                     provider_health = COALESCE(NULLIF(excluded.provider_health, ''), account_configs.provider_health),
                     provider_checked_at = COALESCE(NULLIF(excluded.provider_checked_at, ''), account_configs.provider_checked_at),
+                    photo_content_profile_json = COALESCE(NULLIF(excluded.photo_content_profile_json, ''), account_configs.photo_content_profile_json),
+                    photo_claim_scope = COALESCE(NULLIF(excluded.photo_claim_scope, ''), account_configs.photo_claim_scope),
                     updated_at = excluded.updated_at
                 """,
                 [
@@ -1617,6 +1631,8 @@ class AutoPublishDB:
                         str(item.delivery_mode or "").strip(),
                         str(item.provider_health or "").strip(),
                         str(item.provider_checked_at or "").strip(),
+                        str(getattr(item, "photo_content_profile_json", "") or "").strip(),
+                        str(getattr(item, "photo_claim_scope", "") or "").strip(),
                         now,
                         now,
                     )
@@ -1883,7 +1899,7 @@ class AutoPublishDB:
                        va.media_kind, va.photo_manifest_json,
                        sm.source_record_id, sm.script_slot,
                        sm.script_source, sm.publish_purpose, sm.cart_enabled, sm.content_branch, sm.audio_mode,
-                       sm.target_country, sm.script_text,
+                       sm.target_country, sm.script_text, sm.target_publish_account_id,
                        pool.platform_product_id, pool.canonical_script_key AS pool_key,
                        COALESCE(psp.schedule_strategy, '普通') AS schedule_strategy,
                        COALESCE(psp.priority_updated_at, '') AS priority_updated_at
@@ -2004,6 +2020,10 @@ class AutoPublishDB:
                     script_pool_registered=bool(row["pool_key"]),
                     target_country=str(row["target_country"] or ""),
                     script_text=str(row["script_text"] or ""),
+                    target_publish_account_id=(
+                        str(row["target_publish_account_id"] or "")
+                        or str(context.get("target_publish_account_id") or "")
+                    ),
                     recipe_id=context.get("recipe_id", ""),
                     theme_id=context.get("theme_id", ""),
                     place=str(context.get("place") or ""),
