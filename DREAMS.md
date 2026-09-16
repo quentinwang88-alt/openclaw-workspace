@@ -478,6 +478,6 @@ one table waits still
 
 ## Deep Sleep
 <!-- openclaw:dreaming:deep:start -->
-- Ranked 5 candidate(s) for durable promotion.
-- Promoted 5 candidate(s) into MEMORY.md.
+- Ranked 0 candidate(s) for durable promotion.
+- Promoted 0 candidate(s) into MEMORY.md.
 <!-- openclaw:dreaming:deep:end -->
