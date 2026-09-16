@@ -296,7 +296,9 @@ class AutoPhotoSupply:
             FIELD_PRESET: preset,
             FIELD_EXECUTE: True,
             FIELD_QUANTITY: 1,
-            FIELD_TARGET_ACCOUNT: binding.account_name or binding.account_id,
+            # 目标账号下拉选项是账号 handle（= account_id，如 tocrystal66），
+            # 不是 account_name（如 泰国女装1）——写名字会命中不存在的选项
+            FIELD_TARGET_ACCOUNT: binding.account_id or binding.account_name,
             FIELD_SOURCE_TAG: supply_marker(self.today, binding.account_id),
             FIELD_NOTES: (
                 f"自动供稿 slot{slot}"

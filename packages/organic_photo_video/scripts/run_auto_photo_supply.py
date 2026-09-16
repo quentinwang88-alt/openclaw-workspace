@@ -33,7 +33,7 @@ from services.auto_photo_supply import AutoPhotoSupply  # noqa: E402
 from services.material_analysis import MaterialLedger  # noqa: E402
 from services.material_source import MaterialSource  # noqa: E402
 from services.publish_account_profile import (  # noqa: E402
-    SUPPLY_AUTOMATION_OFF, PublishAccountProfileResolver)
+    SUPPLY_AUTOMATION_OFF, build_default_resolver)
 
 DEFAULT_WIKI_TOKEN = "TR10wxEXHiCYIhk8clActVdenpc"
 DEFAULT_TABLE_ID = "tblj3x846gU3rshB"
@@ -63,7 +63,7 @@ def main() -> int:
     parser.add_argument("--ledger", default="")
     args = parser.parse_args()
 
-    resolver = PublishAccountProfileResolver()
+    resolver = build_default_resolver()
     accounts = []
     for handle in resolver.options():
         binding = resolver.resolve(handle)

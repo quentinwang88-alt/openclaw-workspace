@@ -67,7 +67,7 @@ class FakeTaskTableClient:
                 "size": size or len(content), "type": content_type}
 
 
-def make_binding(account_id="tocrystal66", *, name="tocrystal66", profile_extra=None):
+def make_binding(account_id="tocrystal66", *, name="泰国女装1", profile_extra=None):
     profile = normalize_profile_payload({
         "default_theme": "旅行穿搭",
         "photo_supply_policy": {
