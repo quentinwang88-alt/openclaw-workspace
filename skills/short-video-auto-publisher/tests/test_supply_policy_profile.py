@@ -50,6 +50,14 @@ class SupplyPolicyProfileTest(unittest.TestCase):
         self.assertEqual(policy["preset"], "图文｜TH｜四选一穿搭")
         self.assertEqual(policy["material_scope"], ["旅游冬装", "显高搭配"])
 
+    def test_daily_limit_accepts_float_forms(self):
+        value = build_photo_content_profile(
+            supply_automation="自动生产", supply_daily_limit=3.0)
+        self.assertEqual(json.loads(value)["photo_supply_policy"]["daily_limit"], 3)
+        value = build_photo_content_profile(
+            supply_automation="自动生产", supply_daily_limit="2.0")
+        self.assertEqual(json.loads(value)["photo_supply_policy"]["daily_limit"], 2)
+
     def test_supply_off_without_other_config_writes_no_key(self):
         value = build_photo_content_profile(
             default_theme="旅行穿搭", supply_automation="关闭")

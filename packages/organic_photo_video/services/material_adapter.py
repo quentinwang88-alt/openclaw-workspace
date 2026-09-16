@@ -13,7 +13,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
-from services.material_analysis import MaterialLedger
 from services.material_source import MaterialPackage
 
 # ---------------------------------------------------------------------------

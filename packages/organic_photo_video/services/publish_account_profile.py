@@ -83,7 +83,8 @@ def normalize_supply_policy(raw: Any) -> Optional[Dict[str, Any]]:
         return None
     mapping = dict(raw)
     try:
-        daily_limit = max(int(mapping.get("daily_limit") or 0), 0)
+        # 飞书数字字段可能给 3.0，文本列可能给 "3.0"；统一走 float 再取整
+        daily_limit = max(int(float(str(mapping.get("daily_limit")).strip() or 0)), 0)
     except (TypeError, ValueError):
         daily_limit = 0
     policy: Dict[str, Any] = {

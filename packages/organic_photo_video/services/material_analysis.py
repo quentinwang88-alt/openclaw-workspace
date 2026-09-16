@@ -13,11 +13,11 @@ import json
 import os
 import sqlite3
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-from services.material_source import MaterialPackage, MaterialSource
+from services.material_source import MaterialSource
 from services.photo_reference_vision import parse_vision_envelope
 
 ANALYSIS_VERSION = "material-analysis-v1"
@@ -83,6 +83,15 @@ CREATE TABLE IF NOT EXISTS supply_slots (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (account_id, supply_date, slot)
+);
+CREATE TABLE IF NOT EXISTS analysis_failures (
+    material_fingerprint TEXT NOT NULL,
+    model TEXT NOT NULL,
+    analysis_version TEXT NOT NULL,
+    note_id TEXT NOT NULL,
+    error TEXT,
+    failed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (material_fingerprint, model, analysis_version)
 );
 """
 
@@ -243,6 +252,29 @@ class MaterialLedger:
         ).fetchall()
         return {r["product_code"]: r["n"] for r in rows}
 
+    # ---- 分析失败冷却（避免反复付费重试同一失败素材） ----
+    def record_analysis_failure(self, *, fingerprint: str, model: str,
+                                analysis_version: str, note_id: str,
+                                error: str) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO analysis_failures"
+            " (material_fingerprint, model, analysis_version, note_id, error, failed_at)"
+            " VALUES (?,?,?,?,?,datetime('now'))",
+            (fingerprint, model, analysis_version, note_id, error[:300]),
+        )
+        self._conn.commit()
+
+    def recent_analysis_failure(self, fingerprint: str, model: str,
+                                analysis_version: str,
+                                within_hours: int = 24) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM analysis_failures"
+            " WHERE material_fingerprint=? AND model=? AND analysis_version=?"
+            " AND failed_at >= datetime('now', ?)",
+            (fingerprint, model, analysis_version, f"-{int(within_hours)} hours"),
+        ).fetchone()
+        return row is not None
+
     def cost_summary(self) -> Dict[str, int]:
         row = self._conn.execute(
             "SELECT COUNT(*) calls, COALESCE(SUM(images),0) images,"
@@ -326,7 +358,7 @@ def _rebase_page_roles(roles: Any, global_start: int, batch_len: int) -> List[Di
     return [{"seq": seq, "role": name} for seq, name in sorted(rebased.items())]
 
 
-def _merge_batch_results(batches: List[Dict[str, Any]], total_pages: int) -> Dict[str, Any]:
+def _merge_batch_results(batches: List[Dict[str, Any]]) -> Dict[str, Any]:
     """确定性合并分批结果：保序拼接页角色，全局字段取首批并标注页区间来源。"""
     if len(batches) == 1:
         return batches[0]
@@ -460,8 +492,13 @@ class MaterialAnalyzer:
                 self.ledger.record_gap(
                     scope=f"analysis:{note_id}", reason="analyze_failed",
                     detail=last_error or "无有效批次结果")
+                # 失败入冷却：24h 内 analyze_pending 不再付费重试（force 可越过）
+                self.ledger.record_analysis_failure(
+                    fingerprint=fingerprint, model=self.model,
+                    analysis_version=self.analysis_version, note_id=note_id,
+                    error=last_error or "无有效批次结果")
                 return AnalysisOutcome(note_id, fingerprint, cached=False, error=last_error)
-            merged = _merge_batch_results(results, len(paths))
+            merged = _merge_batch_results(results)
             self.ledger.put_cached_analysis(
                 fingerprint=fingerprint, model=self.model,
                 analysis_version=self.analysis_version, note_id=note_id,
@@ -494,7 +531,12 @@ class MaterialAnalyzer:
                         consecutive_fail_stop: int = 2) -> List[AnalysisOutcome]:
         packages = self.source.list_packages(require_complete=True)
         analyzed = self.ledger.analyzed_note_ids(self.model, self.analysis_version)
-        todo = [p for p in packages if force or p.note_id not in analyzed][:max(0, limit)]
+        todo = [
+            p for p in packages
+            if (force or p.note_id not in analyzed)
+            and (force or not self.ledger.recent_analysis_failure(
+                p.version_fingerprint, self.model, self.analysis_version))
+        ][:max(0, limit)]
         outcomes: List[AnalysisOutcome] = []
         fails = 0
         for package in todo:

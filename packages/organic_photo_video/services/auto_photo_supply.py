@@ -6,8 +6,9 @@ workflow、不触碰生成与发布状态机；对既有代码的唯一依赖是
 
 幂等两层：
 1. 台账 ``supply_slots``（account_id × supply_date × slot 唯一，事务预留）；
-2. 每轮先按「备注 marker」对账飞书表已建行（覆盖台账与飞书之间崩溃的窗口），
-   slot 编号 ≤ 已建行数的名额直接跳过。
+2. 每轮先按「来源标记」列对账飞书表已建行（覆盖台账与飞书之间崩溃的窗口），
+   slot 编号 ≤ 已建行数的名额直接跳过。标记放专用列而非备注：备注会被
+   工作流在生成启动时清空/覆写，来源标记列工作流只读不写。
 
 异常语义（§十四）：素材不足记缺口跳过（不建行）；商品资料/预设缺失记缺口
 暂停该账号；单账号异常不阻塞其他账号。
@@ -37,7 +38,9 @@ from services.publish_account_profile import (
     PublishAccountBinding,
 )
 
-# 与 services/feishu_workflow.py 的字段契约常量同值（模块解耦，改动需两侧同步）
+# 与 services/feishu_workflow.py 的字段契约同值（模块解耦，改动需两侧同步）；
+# 「来源标记」列由 scripts/ensure_feishu_task_table.py 补建——备注会被工作流
+# 在生成过程中覆写（feishu_workflow 启动时清空备注），不能承载幂等标记。
 FIELD_PRODUCT = "产品编码"
 FIELD_PRESET = "生产预设"
 FIELD_EXECUTE = "执行"
@@ -47,6 +50,7 @@ FIELD_CONTENT_REQUIREMENT = "内容要求（可选）"
 FIELD_TARGET_ACCOUNT = "目标账号（可选）"
 FIELD_PHOTO_INPUT = "完整穿搭素材（可选）"
 FIELD_NOTES = "备注"
+FIELD_SOURCE_TAG = "来源标记"
 
 MARKER_PREFIX = "auto_supply"
 MAX_REFERENCE_IMAGES = 6
@@ -70,7 +74,7 @@ def _notes_text(value: Any) -> str:
 class SlotPlan:
     account_id: str
     slot: int
-    status: str                 # created / skipped_limit / dry_run / no_material / error
+    status: str                 # created / already_created / dry_run / no_material / error
     record_id: Optional[str] = None
     product_code: str = ""
     main_note_id: str = ""
@@ -143,13 +147,17 @@ class AutoPhotoSupply:
         return results
 
     # ---- 对账：统计飞书表里当日已建的自动行 ----
+    # 优先读「来源标记」（工作流不覆写）；兼容旧数据的备注前缀作为兜底。
     def _count_existing_auto_rows(self) -> Dict[str, int]:
         counts: Dict[str, int] = {}
         for record in self.client.list_records(page_size=500):
-            notes = _notes_text(record.fields.get(FIELD_NOTES))
-            if not notes.startswith(MARKER_PREFIX):
+            marker = _notes_text(record.fields.get(FIELD_SOURCE_TAG))
+            if not marker:
+                notes = _notes_text(record.fields.get(FIELD_NOTES))
+                marker = notes if notes.startswith(MARKER_PREFIX) else ""
+            if not marker.startswith(MARKER_PREFIX):
                 continue
-            parts = notes.split("|")
+            parts = marker.split("|")
             if len(parts) >= 3 and parts[0] == MARKER_PREFIX and parts[1] == self.today:
                 counts[parts[2]] = counts.get(parts[2], 0) + 1
         return counts
@@ -220,7 +228,7 @@ class AutoPhotoSupply:
             reservation = self.ledger.reserve_slot(
                 binding.account_id, self.today, slot)
             if reservation == "created":
-                plan.status = "skipped_limit"   # 台账显示已完成（对账兜底）
+                plan.status = "already_created"   # 台账已完成（对账兜底）
                 plan.detail = "台账已完成（对账跳过）"
                 return plan
 
@@ -289,9 +297,10 @@ class AutoPhotoSupply:
             FIELD_EXECUTE: True,
             FIELD_QUANTITY: 1,
             FIELD_TARGET_ACCOUNT: binding.account_name or binding.account_id,
+            FIELD_SOURCE_TAG: supply_marker(self.today, binding.account_id),
             FIELD_NOTES: (
-                f"{supply_marker(self.today, binding.account_id)}|slot{slot}"
-                f"|主参考 {selection.main_note_id}|采用 {selection.adoption}"
+                f"自动供稿 slot{slot}"
+                f"｜主参考 {selection.main_note_id}|采用 {selection.adoption}"
                 f"|{selection.rationale[:60]}"),
         }
         if product_code:

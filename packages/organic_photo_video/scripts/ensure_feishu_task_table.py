@@ -215,6 +215,10 @@ def task_field_specs(catalog) -> list:
         (FIELD_FULL_COPY_ZH, 1, "Text", None),
         (FIELD_PHOTO_INPUT, 17, "Attachment", None),
         (FIELD_PHOTO_ASSET_STATUS, 1, "Text", None),
+        # 来源标记（2026-09-16 自动供稿）：机器可读的行来源指纹（如
+        # auto_supply|日期|账号），供供稿幂等对账。专用列的原因：备注会被
+        # 工作流在生成过程中覆写，不能承载持久标记；本列工作流只读不写。
+        ("来源标记", 1, "Text", None),
         (FIELD_PROGRESS, 3, "SingleSelect", options([
             "待执行", "生成中", "待审核", "已完成", "需处理",
             "待排班", "已排期", "提交中", "发布中", "已发布", "发布失败",

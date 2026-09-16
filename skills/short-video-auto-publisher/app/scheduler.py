@@ -445,7 +445,8 @@ def _build_supply_policy(
         ) if str(item).strip()
     ]
     try:
-        limit = max(int(str(daily_limit).strip() or 0), 0) if daily_limit is not None else 0
+        # 数字列会给 3.0、文本列可能给 "3.0"；统一 float 再取整
+        limit = max(int(float(str(daily_limit).strip() or 0)), 0) if daily_limit is not None else 0
     except (TypeError, ValueError):
         limit = 0
     if (not automation_text or automation_text == "关闭") and not preset \

@@ -221,6 +221,27 @@ class MaterialAnalyzerTest(unittest.TestCase):
             "SELECT reason FROM material_gaps").fetchall()
         self.assertTrue(any(r["reason"] == "analyze_failed" for r in rows))
 
+    def test_failure_cooldown_prevents_paid_retry(self):
+        # 分析失败后 24h 冷却：analyze_pending 不再重试（force 可越过）
+        self.lab.add_note(note_id="6" * 24, images=1)
+        failing = MockClient([RuntimeError("boom"), RuntimeError("boom")])
+        analyzer = self._analyzer(failing)
+        outcome = analyzer.analyze_note("6" * 24)
+        self.assertIsNotNone(outcome.error)
+        fresh = MockClient([])  # 第二轮：客户端不应再被调用
+        analyzer2 = MaterialAnalyzer(
+            self.lab.source(), self.ledger, fresh, model="mock-model",
+            batch_size=6, max_image_edge=64)
+        outcomes = analyzer2.analyze_pending(limit=5)
+        self.assertEqual(fresh.calls, [])
+        self.assertEqual(outcomes, [])   # 冷却命中：待办为空
+        forced = MockClient([_analysis_payload(pages=1)])
+        analyzer3 = MaterialAnalyzer(
+            self.lab.source(), self.ledger, forced, model="mock-model",
+            batch_size=6, max_image_edge=64)
+        outcome = analyzer3.analyze_note("6" * 24, force=True)
+        self.assertIsNone(outcome.error)   # force 越过冷却
+
     def test_incomplete_note_rejected_without_call(self):
         self.lab.add_note(note_id="8" * 24, fetch_status="partial")
         client = MockClient([])

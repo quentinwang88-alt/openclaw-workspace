@@ -115,6 +115,13 @@ class SupplyPolicyTest(unittest.TestCase):
         self.assertEqual(policy["product_codes"], ["P1", "P2", "P3"])
         self.assertEqual(policy["automation"], "produce_publish")
         self.assertEqual(policy["daily_limit"], 3)
+        # 浮点/带小数字符串安全取整（2026-09-16 review P1.2）
+        float_policy = normalize_profile_payload({"photo_supply_policy": {
+            "automation": "自动生产", "daily_limit": 2.0}})
+        self.assertEqual(float_policy["photo_supply_policy"]["daily_limit"], 2)
+        str_policy = normalize_profile_payload({"photo_supply_policy": {
+            "automation": "自动生产", "daily_limit": "4.0"}})
+        self.assertEqual(str_policy["photo_supply_policy"]["daily_limit"], 4)
 
     def test_binding_supply_policy_default_off(self):
         binding = PublishAccountBinding(
@@ -155,12 +162,30 @@ class AutoPhotoSupplyTest(unittest.TestCase):
         self.assertEqual(fields["生成篇数"], 1)
         self.assertEqual(fields["目标账号（可选）"], "tocrystal66")
         self.assertEqual(fields["图文主题"], "旅行穿搭")
-        self.assertTrue(fields["备注"].startswith("auto_supply|2026-09-16|tocrystal66"))
+        self.assertEqual(fields["来源标记"], "auto_supply|2026-09-16|tocrystal66")
+        self.assertTrue(fields["备注"].startswith("自动供稿"))
         self.assertEqual(len(fields["完整穿搭素材（可选）"]), 3)
         self.assertGreater(len(client.uploads), 0)
         slots = ledger.slots_for("tocrystal66", "2026-09-16")
         self.assertEqual(len(slots), 2)
         self.assertTrue(all(s["status"] == "created" for s in slots))
+
+    def test_marker_survives_notes_being_cleared(self):
+        # 工作流接手行后会清空/覆写备注（feishu_workflow 启动时 FIELD_NOTES=""
+        # 2026-09-16 review P1）；幂等标记在「来源标记」列，必须存续。
+        ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
+        client = FakeTaskTableClient()
+        self._supply(client, ledger, vision=self._vision_ok()).run(
+            [make_binding()], apply=True)
+        self.assertEqual(len(client.created), 2)
+        for row in client.rows:  # 模拟扫描器清空备注
+            row["fields"]["备注"] = ""
+        vision = self._vision_ok()
+        results = self._supply(client, ledger, vision=vision).run(
+            [make_binding()], apply=True)
+        self.assertEqual(len(client.created), 2)   # 不重复建行
+        self.assertEqual(vision.calls, 0)
+        self.assertEqual(results[0].status, "limit_reached")
 
     def test_rerun_idempotent(self):
         ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
