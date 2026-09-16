@@ -1,0 +1,12 @@
+# 本目录为小红书素材入口技术预研实验室，全部产物本地隔离
+third_party/
+.venv/
+out/
+*.sqlite
+*.sqlite3
+*.db
+config.local.*
+__pycache__/
+.DS_Store
+pilot_links.txt
+pilot_links*.txt
