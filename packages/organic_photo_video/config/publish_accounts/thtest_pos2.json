@@ -1,0 +1,23 @@
+{
+  "schema_version": "opv-publish-account-seed-v1",
+  "store_id": "THFZ01",
+  "target_country": "TH",
+  "profile": {
+    "default_theme": "凉爽旅行",
+    "positioning": "泰国市场旅行女装；轻层搭、好走好拍；同一商品多场景复用",
+    "expression_mode": "STYLE_INSPIRATION",
+    "visual_baseline": "中性奶白底、自然肤色、柔和对比与低至中饱和",
+    "photo_claim_scope": "own_tasks_only",
+    "default_visual_preset": "旅行场景穿搭",
+    "photo_supply_policy": {
+      "content_strategy": "positioning_first",
+      "product_mode": "none",
+      "automation": "off",
+      "daily_limit": 1,
+      "preset": "图文｜TH｜旅行穿搭"
+    }
+  },
+  "account_id": "thtest_pos2",
+  "account_name": "测试·定位优先02（勿发布）",
+  "identity_note": "2026-09-16 自动供稿供给链路测试账号（有/无预设主题对比），仅用于测试，测试完成后 automation 置关闭。"
+}

@@ -214,6 +214,35 @@ class AutoPhotoSupplyTest(unittest.TestCase):
         self.assertTrue(all(p.get("sha256") for p in contract["selected_pages"]))
         self.assertTrue(contract["contract_fingerprint"])
 
+    def test_reference_first_without_theme_derives_theme(self):
+        # 参考优先 + 无默认主题：主题从选材结果推导（travel_two_step 等
+        # 流程强制图文主题），并标注推导来源；温度带随推导主题生效
+        ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
+        client = FakeTaskTableClient()
+        binding = make_binding(profile_extra={
+            "content_strategy": "参考优先", "daily_limit": 1})
+        binding.profile["default_theme"] = ""
+        self._supply(client, ledger, vision=self._vision_ok()).run(
+            [binding], apply=True)
+        fields = client.created[0]["fields"]
+        self.assertEqual(fields["图文主题"], "凉爽旅行")   # 推导主题
+        self.assertIn("图文主题由参考推导：凉爽旅行",
+                      fields["内容要求（可选）"])
+        self.assertIn("温度带 15–22°C", fields["内容要求（可选）"])
+        self.assertEqual(fields["温度档"], "15°C 左右")
+
+    def test_positioning_first_without_theme_is_config_gap(self):
+        # 定位优先缺主题＝配置缺口：明确报错不建行（不替账号猜定位）
+        ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
+        client = FakeTaskTableClient()
+        binding = make_binding(profile_extra={"daily_limit": 1})
+        binding.profile["default_theme"] = ""
+        results = self._supply(client, ledger, vision=self._vision_ok()).run(
+            [binding], apply=True)
+        self.assertEqual(results[0].slots[0].status, "error")
+        self.assertIn("定位优先", results[0].slots[0].detail)
+        self.assertEqual(client.created, [])
+
     def test_page_level_selection_limits_uploads(self):
         # 页级选材：只上传选材结果指定的页面，不再固定取前 N 张
         ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)

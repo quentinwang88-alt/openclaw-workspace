@@ -1,0 +1,18 @@
+{
+  "schema_version": "opv-publish-account-seed-v1",
+  "store_id": "THFZ01",
+  "target_country": "TH",
+  "profile": {
+    "photo_claim_scope": "own_tasks_only",
+    "photo_supply_policy": {
+      "content_strategy": "reference_first",
+      "product_mode": "none",
+      "automation": "off",
+      "daily_limit": 1,
+      "preset": "图文｜TH｜旅行穿搭"
+    }
+  },
+  "account_id": "thtest_ref2",
+  "account_name": "测试·参考优先02（勿发布）",
+  "identity_note": "2026-09-16 自动供稿供给链路测试账号（有/无预设主题对比），仅用于测试，测试完成后 automation 置关闭。"
+}

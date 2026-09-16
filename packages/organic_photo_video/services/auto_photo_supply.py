@@ -407,20 +407,33 @@ class AutoPhotoSupply:
             "place": str(binding.profile.get("travel_place") or "").strip(),
         }
 
-        requirement = self._content_requirement_text(
+        # 图文主题：账号默认 → 参考优先时从选材结果推导（2026-09-16：
+        # travel_two_step 等流程强制图文主题，无预设主题账号靠推导出正路，
+        # 不再一票暂停）。定位优先缺主题仍是配置缺口，明确报错。
+        # 主题先行确定：推导主题也参与温度带与内容要求。
+        theme_value = default_theme or ""
+        theme_derived_note = ""
+        if theme_value:
+            pass
+        elif positioning_first:
+            self.ledger.record_gap(
+                scope=f"supply:{binding.account_id}", reason="no_theme",
+                detail="定位优先但账号未配置默认图文主题")
+            plan.status = "error"
+            plan.detail = "定位优先但未配置默认图文主题，暂停本任务"
+            return plan
+        else:
+            structure = str(main_analysis.get("set_structure") or "")
+            theme_value = ("一衣多穿"
+                           if structure == "same_item_multiway" and product_code
+                           else "凉爽旅行")
+            theme_derived_note = f"内容方向以参考素材为基准（图文主题由参考推导：{theme_value}）｜"
+            band = band or theme_thermal_band(theme_value)
+
+        requirement = theme_derived_note + self._content_requirement_text(
             selection=selection, analysis=main_analysis, topic=topic,
             destination=destination, product=product_snapshot,
             temperature_band=band)
-        theme_value = default_theme or ""
-        if not theme_value:
-            # STYLE 执行路径必须携带图文主题（feishu_workflow 硬校验）；
-            # 参考优先但未配置默认主题＝配置缺口，明确报错不静默。
-            self.ledger.record_gap(
-                scope=f"supply:{binding.account_id}", reason="no_theme",
-                detail="外部参考走风格参考路径需要账号默认图文主题")
-            plan.status = "error"
-            plan.detail = "账号未配置默认图文主题（STYLE 路径必需），暂停本任务"
-            return plan
 
         contract = {
             "account_id": binding.account_id,
