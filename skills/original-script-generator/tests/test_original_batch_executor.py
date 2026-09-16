@@ -15,6 +15,7 @@ from core.original_batch_executor import (
     _checkpoint_identity,
     _execute_single_item,
     _load_stage_checkpoint,
+    _repair_frozen_seed_mixed_extension,
     run_script_only,
     validate_batch_script_integrity,
     _generate_simplified_visual_script_with_fallback,
@@ -334,6 +335,68 @@ class BatchStageCheckpointTest(unittest.TestCase):
         loaded, matched = _load_stage_checkpoint(item, self.provenance)
         self.assertFalse(matched)
         self.assertEqual(loaded["stages"], {})
+
+class FrozenSeedMixedExtensionRepairTest(unittest.TestCase):
+    """Batches frozen before the allocator ordering fix must still work."""
+
+    def _contract(self):
+        return {"template_id": "AMX_A_WORN_FIRST", "execution_profile": "x"}
+
+    def _frozen(self, with_contract=True):
+        extension = {"schema_version": "accessory-execution-profile-v5"}
+        if with_contract:
+            extension["mixed_template_contract"] = self._contract()
+        return {
+            "category_execution_extension": extension,
+            "simplified_creative_seed": {
+                "category_execution_extension": {"schema_version": "accessory-execution-profile-v5"}
+            },
+        }
+
+    def test_contract_is_re_attached_when_the_seed_lost_it(self):
+        frozen = self._frozen(with_contract=True)
+        repaired = _repair_frozen_seed_mixed_extension(
+            frozen["simplified_creative_seed"], frozen
+        )
+        self.assertEqual(
+            repaired["category_execution_extension"]["mixed_template_contract"],
+            self._contract(),
+        )
+        self.assertEqual(
+            repaired["category_execution_extension"]["schema_version"],
+            "accessory-execution-profile-v5",
+        )
+
+    def test_seed_is_not_mutated_in_place(self):
+        frozen = self._frozen(with_contract=True)
+        seed = frozen["simplified_creative_seed"]
+        original = deepcopy(seed)
+        _repair_frozen_seed_mixed_extension(seed, frozen)
+        self.assertEqual(seed, original)
+
+    def test_existing_seed_contract_wins_and_is_left_alone(self):
+        frozen = self._frozen(with_contract=True)
+        seed = {
+            "category_execution_extension": {
+                "mixed_template_contract": {"template_id": "AMX_C_DETAIL_FIRST"}
+            }
+        }
+        repaired = _repair_frozen_seed_mixed_extension(seed, frozen)
+        self.assertEqual(
+            repaired["category_execution_extension"]["mixed_template_contract"],
+            {"template_id": "AMX_C_DETAIL_FIRST"},
+        )
+
+    def test_gate_off_frozen_package_is_untouched(self):
+        frozen = self._frozen(with_contract=False)
+        seed = frozen["simplified_creative_seed"]
+        self.assertEqual(_repair_frozen_seed_mixed_extension(seed, frozen), seed)
+
+    def test_missing_frozen_package_is_tolerated(self):
+        seed = {"category_execution_extension": {"schema_version": "s"}}
+        self.assertEqual(_repair_frozen_seed_mixed_extension(seed, {}), seed)
+        self.assertEqual(_repair_frozen_seed_mixed_extension(seed, None), seed)
+
 
 if __name__ == "__main__":
     unittest.main()

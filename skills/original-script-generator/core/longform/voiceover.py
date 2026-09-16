@@ -11,6 +11,7 @@ from .contracts import VOICEOVER_SCHEMA_VERSION, text
 from .audio import (
     synthesize_segment_preflight, voiceover_text_hash, measure_speech_window,
     audio_asset_hash, LAYOUT_VERSION, EDGE_TRIM_VERSION,
+    DEFAULT_VOICEOVER_ROOT, _synthesize_edge, audio_duration_seconds, choose_narration_rate,
 )
 from .voiceover_resources import resolve_longform_voiceover_resources
 
@@ -425,3 +426,149 @@ def calibrate_longform_voiceover_with_edge(
     selected["duration_fit"] = duration_fit
     selected["schema_version"] = VOICEOVER_SCHEMA_VERSION
     return selected
+
+
+SOURCE_VOICEOVER_OVERFLOW = "SOURCE_VOICEOVER_OVERFLOW"
+
+
+def measure_frozen_source_voiceover_with_edge(
+    plan: Mapping[str, Any],
+    voiceover: Mapping[str, Any],
+    output_dir: str | Path,
+    *,
+    voice_id: str = "th-TH-PremwadeeNeural",
+    voiceover_root: str | Path = DEFAULT_VOICEOVER_ROOT,
+) -> Dict[str, Any]:
+    """Measure a frozen remake voiceover with real Edge TTS, never rewriting it.
+
+    A remake script is approved copy: the central voiceover model is never
+    called, so ``target_text_sha256`` stays byte-identical.  Real Edge audio is
+    still used to prove the read fits before any paid H3 submission.  Speech may
+    be sped up inside a safe band, but it is never slowed down to fill time, and
+    a genuine overflow blocks instead of rewriting the copy.
+    """
+
+    result = dict(voiceover)
+    target_text = text(result.get("target_text"))
+    recorded_hash = text(result.get("target_text_sha256"))
+    if recorded_hash and voiceover_text_hash(target_text) != recorded_hash:
+        raise ValueError("SOURCE_VOICEOVER_TEXT_MUTATED: 冻结原口播文本哈希已变化")
+    result["target_text_sha256"] = voiceover_text_hash(target_text) if target_text else recorded_hash
+
+    segments = [
+        {"segment_id": str(item.get("segment_id")), "duration_seconds": float(item.get("duration_seconds") or 0)}
+        for item in plan.get("segments") or []
+    ]
+    sections = [dict(item) for item in result.get("semantic_sections") or [] if isinstance(item, Mapping)]
+    root = Path(output_dir).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+
+    if sections and len(sections) == len(segments) and all(text(item.get("target_text")) for item in sections):
+        preflight = synthesize_segment_preflight(
+            sections, segments, root, voice_id=voice_id, voiceover_root=voiceover_root,
+        )
+        overflow = [
+            item for item in preflight.get("sections") or []
+            if float(item.get("effective_tts_seconds") or 0)
+            > float(item.get("planned_segment_seconds") or 0) + 0.65
+        ]
+        if overflow:
+            ids = "、".join(str(item.get("segment_id")) for item in overflow)
+            raise ValueError(
+                f"{SOURCE_VOICEOVER_OVERFLOW}: 冻结原口播在片段{ids}无法容纳；"
+                "禁止改写原口播，请人工调整源稿后重新规划"
+            )
+        result["tts_preflight"] = {
+            **preflight,
+            "revision_attempted": False,
+            "revision_selected": False,
+            "revision_limit": 0,
+            "readiness": (
+                "READY" if preflight.get("all_acceptable") else "READY_WITH_SOFT_DURATION_WARNING"
+            ),
+        }
+        result["duration_fit"] = {
+            **dict(result.get("duration_fit") or {}),
+            "method": "EDGE_TTS_FROZEN_SOURCE_COPY",
+            "authority": "ACTUAL_AUDIO",
+            "revision_used": False,
+            "revision_limit": 0,
+            "actual_tts_seconds": preflight.get("actual_tts_seconds_total"),
+            "audio_readiness": result["tts_preflight"]["readiness"],
+        }
+        return result
+
+    # Whole-paragraph copy: one continuous read, no model sentence splitting.
+    total_seconds = sum(item["duration_seconds"] for item in segments) or float(
+        plan.get("target_duration_seconds") or 0
+    )
+    if not target_text:
+        raise ValueError("冻结原口播缺少 target_text")
+    audio = root / f"voiceover_whole_{voiceover_text_hash(target_text)[:12]}_rate_0.mp3"
+    if not audio.is_file():
+        _synthesize_edge(
+            target_text, audio, voice_id=voice_id, rate_percent=0,
+            voiceover_root=Path(voiceover_root).expanduser().resolve(),
+        )
+    measured = audio_duration_seconds(audio)
+    window = measure_speech_window(audio, measured)
+    effective = float(window["effective_tts_seconds"])
+    usable = max(1.0, total_seconds - 0.15)
+    selected_rate = 0
+    if effective > usable:
+        # Only accelerate genuine overflow; never slow short copy to fill time.
+        selected_rate = choose_narration_rate(effective, total_seconds)
+        if not selected_rate:
+            raise ValueError(
+                f"{SOURCE_VOICEOVER_OVERFLOW}: 冻结原口播实测 {effective:.2f}s 超出视频 {total_seconds:.2f}s；"
+                "禁止改写原口播，请人工调整源稿后重新规划"
+            )
+        accelerated = root / f"voiceover_whole_{voiceover_text_hash(target_text)[:12]}_rate_{selected_rate:+d}.mp3"
+        if not accelerated.is_file():
+            _synthesize_edge(
+                target_text, accelerated, voice_id=voice_id, rate_percent=selected_rate,
+                voiceover_root=Path(voiceover_root).expanduser().resolve(),
+            )
+        accelerated_seconds = audio_duration_seconds(accelerated)
+        accelerated_window = measure_speech_window(accelerated, accelerated_seconds)
+        if float(accelerated_window["effective_tts_seconds"]) > usable:
+            raise ValueError(
+                f"{SOURCE_VOICEOVER_OVERFLOW}: 冻结原口播即使加速 {selected_rate:+d}% 仍超出视频 "
+                f"{total_seconds:.2f}s；禁止改写原口播"
+            )
+        audio, window = accelerated, accelerated_window
+        effective = float(window["effective_tts_seconds"])
+    result["tts_preflight"] = {
+        "schema_version": "longform-edge-tts-preflight-v2-effective-speech",
+        "provider": "edge",
+        "voice_id": voice_id,
+        "layout": "WHOLE_PARAGRAPH_CONTINUOUS",
+        "sections": [{
+            **window,
+            "segment_id": "",
+            "text_sha256": voiceover_text_hash(target_text),
+            "target_text": target_text,
+            "planned_segment_seconds": round(total_seconds, 3),
+            "actual_tts_seconds": round(effective, 3),
+            "coverage_ratio": round(effective / total_seconds, 4) if total_seconds else 0,
+            "rate_percent": selected_rate,
+            "audio_path": str(audio),
+            "audio_sha256": audio_asset_hash(audio),
+        }],
+        "actual_tts_seconds_total": round(effective, 3),
+        "all_acceptable": effective <= usable,
+        "revision_attempted": False,
+        "revision_selected": False,
+        "revision_limit": 0,
+        "readiness": "READY" if effective <= usable else "OVERFLOW_BLOCKED",
+    }
+    result["duration_fit"] = {
+        **dict(result.get("duration_fit") or {}),
+        "method": "EDGE_TTS_FROZEN_SOURCE_COPY",
+        "authority": "ACTUAL_AUDIO",
+        "revision_used": False,
+        "revision_limit": 0,
+        "actual_tts_seconds": round(effective, 3),
+        "audio_readiness": result["tts_preflight"]["readiness"],
+    }
+    return result

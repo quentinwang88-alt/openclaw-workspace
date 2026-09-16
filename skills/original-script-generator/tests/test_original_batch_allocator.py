@@ -1,8 +1,10 @@
 """V1 批次编排器单元测试 — 分配算法 + 存储 + 幂等"""
+import contextlib
 import json
 import os
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -27,14 +29,80 @@ from core.original_batch_allocator import (
     _build_proof_execution_intent,
     _build_argument_context_alignment,
     _eligible_hooks_for_bundle,
+    _mixed_history_references,
     _relationship_device_for_hook,
     _relationship_schedule,
 )
+from core.accessory_mixed_templates import (
+    MIXED_HISTORY_METADATA_KEY,
+    compile_mixed_template_contract,
+    judge_mixed_candidate,
+    mixed_reference_signature,
+    mixed_signature_bundle,
+    mixed_template_ids,
+    mixed_visual_signature,
+    select_environment_recipe_id,
+    select_template_id,
+)
+from core.storage import PipelineStorage
 from core.complete_script_v3 import (
     _perceptual_action_family,
     _perceptual_signature,
     _usage_perceptual_signature,
 )
+
+_MIXED_GATE_ENV = "ORIGINAL_SCRIPT_ACCESSORY_MIXED_TEMPLATE_V1_ENABLED"
+
+_ISO_ROOT = tempfile.mkdtemp(prefix="alloc_iso_")
+_ENV_GUARD = None
+
+
+def setUpModule():
+    """Run this whole file against scratch stores, never the production ledger."""
+
+    global _ENV_GUARD
+    _ENV_GUARD = _isolated_databases(_ISO_ROOT)
+    _ENV_GUARD.__enter__()
+
+
+def tearDownModule():
+    import shutil
+
+    if _ENV_GUARD is not None:
+        _ENV_GUARD.__exit__(None, None, None)
+    shutil.rmtree(_ISO_ROOT, ignore_errors=True)
+
+
+@contextlib.contextmanager
+def _isolated_databases(root: str):
+    """Point every known local store at a scratch directory.
+
+    ``run_plan_only`` builds its own ``BatchStorage`` / ``PipelineStorage`` from
+    the environment, so without this the planning tests would write the
+    production ledger.  The RDS URLs are removed for the same reason: a URL in
+    the ambient environment outranks the sqlite path.
+    """
+
+    removed = {
+        key: os.environ.pop(key)
+        for key in ("ORIGINAL_SCRIPT_GENERATOR_DATABASE_URL", "LIKEU_AI_DATABASE_URL")
+        if key in os.environ
+    }
+    overrides = {
+        "OPENCLAW_SHARED_DATA_DIR": root,
+        "ORIGINAL_SCRIPT_GENERATOR_DB_PATH": str(Path(root) / "gen.sqlite3"),
+        "ORIGINAL_SCRIPT_GENERATOR_CONFIG_PATH": str(Path(root) / "cfg.json"),
+        "ORIGINAL_SCRIPT_OUTFIT_TEMPLATE_DB_PATH": str(Path(root) / "outfit.sqlite3"),
+        "SHORT_VIDEO_AUTO_PUBLISH_DB_PATH": str(Path(root) / "publish.sqlite3"),
+        "ORGANIC_SEEDING_DB_PATH": str(Path(root) / "seeding.sqlite3"),
+        "ORIGINAL_SCRIPT_LONGFORM_DB_PATH": str(Path(root) / "longform.sqlite3"),
+    }
+    try:
+        with patch.dict(os.environ, overrides, clear=False):
+            yield
+    finally:
+        os.environ.update(removed)
+
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -1110,6 +1178,503 @@ class BatchIdempotencyTest(unittest.TestCase):
 
             self.assertEqual(batch1.batch_id, batch2.batch_id, "Idempotent plan should return same batch")
             self.assertEqual(len(items1), len(items2))
+
+
+class FrozenSeedMixedContractTest(unittest.TestCase):
+    """The frozen creative seed must own the authored per-shot contract.
+
+    The script stage consumes ``frozen["simplified_creative_seed"]`` verbatim --
+    it never rebuilds the seed when the batch already carries one.  A contract
+    injected into the frozen package *after* the seed was built therefore never
+    reached the generator: the plan looked correct, and the generated script
+    silently fell back to the legacy single-carrier framing advice.
+    """
+
+    def _accessory_anchor_card(self) -> dict:
+        return {
+            "hard_anchors": [{"anchor": "蝴蝶造型", "why_must_show": "商品主体造型"}],
+            "display_anchors": [
+                {"anchor": "细链条", "why_must_show": "耳线结构"},
+                {"anchor": "满钻面", "why_must_show": "表面细节"},
+            ],
+            "category_execution_contract": {"display_family": "accessory"},
+        }
+
+    def _allocate(self, gate: str):
+        with patch.dict(
+            os.environ, {"ORIGINAL_SCRIPT_ACCESSORY_MIXED_TEMPLATE_V1_ENABLED": gate},
+            clear=False,
+        ):
+            return allocate_batch_items(
+                product_code="P_ACC",
+                requested_count=1,
+                directions=[_fake_direction("DA_ACC", "S1", carrier="WEARER_ACTIVE")],
+                anchor_card=self._accessory_anchor_card(),
+                active_hook_ids=["DETAIL_SURPRISE"],
+                creative_policy_version="test-v1",
+                random_seed=42,
+                selling_point_catalog=_fake_selling_catalog(),
+                product_type="耳饰",
+                top_category="配饰",
+            )
+
+    def test_gate_on_freezes_the_contract_inside_the_seed(self):
+        items, _ = self._allocate("1")
+        frozen = json.loads(items[0].frozen_direction_package_json)
+
+        seed_extension = frozen["simplified_creative_seed"]["category_execution_extension"]
+        seed_contract = seed_extension.get("mixed_template_contract")
+        package_contract = frozen["category_execution_extension"][
+            "mixed_template_contract"
+        ]
+
+        self.assertTrue(seed_contract, "冻结晶种必须自带逐镜合同")
+        self.assertEqual(
+            seed_contract,
+            package_contract,
+            "种子内合同必须与冻结包内合同逐字一致",
+        )
+        self.assertEqual(frozen["mixed_template_contract_status"], "FROZEN")
+
+    def test_gate_off_leaves_the_seed_extension_untouched(self):
+        items, _ = self._allocate("0")
+        frozen = json.loads(items[0].frozen_direction_package_json)
+
+        seed_extension = (
+            frozen["simplified_creative_seed"].get("category_execution_extension") or {}
+        )
+        self.assertNotIn("mixed_template_contract", seed_extension)
+        self.assertNotIn(
+            "mixed_template_contract", frozen.get("category_execution_extension") or {}
+        )
+        self.assertNotIn("mixed_template_contract_status", frozen)
+
+
+# ── Stage E: final-shot difference judgement (Review #3) ───────────────
+#
+# T16/T17 fixtures.  Kept self-contained: the accessory anchor/catalogue pair
+# below is what the mixed compiler actually validates, so a change in the
+# women's-wear fixtures above cannot silently move these assertions.
+
+_ACC_ANCHOR_CARD = {
+    "hard_anchors": [{"anchor": "蝴蝶造型", "why_must_show": "商品主体造型"}],
+    "display_anchors": [
+        {"anchor": "镂空轮廓", "why_must_show": "耳饰外轮廓"},
+        {"anchor": "耳线长度比例", "why_must_show": "佩戴比例"},
+    ],
+    "category_execution_contract": {"display_family": "accessory"},
+}
+
+_ACC_CATALOG = [
+    {
+        "value_id": "ARG_HOLLOW",
+        "primary_selling_point": "镂空轮廓让耳饰边缘更清楚",
+        "proof_thesis": "镂空轮廓在近景里可以看清边缘",
+        "truth_status": "VERIFIED",
+        "visual_dependency": "WEARER_REQUIRED",
+        "argument_kind": "SELLING_ARGUMENT",
+    },
+    {
+        "value_id": "ARG_LENGTH",
+        "primary_selling_point": "耳线长度比例修饰脸型",
+        "proof_thesis": "耳线长度比例在侧脸关系里可见",
+        "truth_status": "VERIFIED",
+        "visual_dependency": "WEARER_REQUIRED",
+        "argument_kind": "SELLING_ARGUMENT",
+    },
+]
+
+
+def _acc_direction(da_id: str, output_slot: str) -> dict:
+    return {
+        "direction_assignment_id": da_id,
+        "output_slot": output_slot,
+        "selection_run_id": "SR_ACC",
+        "cluster_id": 1,
+        "cluster_version": "v1",
+        "evidence_tier": "BOOTSTRAP",
+        "structure_contract": {
+            "direction_identity": {"macro_family_key": "HOOK>PROOF>RESULT"},
+            "hard_constraints": {
+                "content_carrier": "WEARER_ACTIVE",
+                "continuity_mode": "MULTI_CUT",
+            },
+            "evidence": {"evidence_tier": "BOOTSTRAP"},
+        },
+        "execution_reference": {
+            "execution_card_id": f"EC_{da_id}",
+            "source_video_id": "V_ACC",
+            "content_carrier": "WEARER_ACTIVE",
+        },
+        "country": "泰国",
+        "category": "配饰",
+    }
+
+
+def _acc_allocate(requested_count: int, *, recent_usage=None):
+    with patch.dict(os.environ, {_MIXED_GATE_ENV: "1"}, clear=False):
+        return allocate_batch_items(
+            product_code="P_ACC",
+            requested_count=requested_count,
+            directions=[_acc_direction("DA_ACC", "S1"), _acc_direction("DA_ACC2", "S2")],
+            anchor_card=dict(_ACC_ANCHOR_CARD),
+            active_hook_ids=["DETAIL_SURPRISE", "AUDIENCE_NEED_CALLOUT"],
+            creative_policy_version="test-v1",
+            random_seed=42,
+            recent_creative_usage=recent_usage,
+            selling_point_catalog=list(_ACC_CATALOG),
+            product_type="耳饰",
+            top_category="配饰",
+            execution_scope=None,
+        )
+
+
+def _acc_contract(template_id: str, recipe_id: str = "") -> dict:
+    return compile_mixed_template_contract(
+        product_type="耳饰",
+        top_category="饰品",
+        template_id=template_id,
+        environment_recipe_id=recipe_id,
+        content_theme={
+            "theme_id": "TH_1",
+            "thesis": "怕买了不会戴",
+            "approved_claim_refs": ["C1"],
+            "evidence_refs": ["C1"],
+        },
+    )
+
+
+def _acc_history_row(contract: dict) -> dict:
+    return {
+        "usage_id": f"CPU_{contract.get('template_id')}",
+        "visual_signature": "OLD_SCENE_SIG|WHICH|MUST|NOT|BE|REUSED",
+        "scene_motif": "OLD_SCENE",
+        "persona_role": "OLD_PERSONA",
+        "metadata": {
+            "batch_item_id": f"HIST_{contract.get('template_id')}",
+            MIXED_HISTORY_METADATA_KEY: mixed_signature_bundle(contract),
+        },
+    }
+
+
+def _acc_contract_of(item) -> dict:
+    frozen = json.loads(item.frozen_direction_package_json or "{}")
+    extension = frozen.get("category_execution_extension") or {}
+    return extension.get("mixed_template_contract") or {}
+
+
+def _mixed_rejections(summary) -> list:
+    return [
+        row
+        for row in summary.get("deferred_content") or []
+        if str(row.get("downgrade_reason") or "").startswith("MIXED_")
+    ]
+
+
+class MixedDifferenceAccountingTest(unittest.TestCase):
+    """T16: 请求 20 条、只有少量足够差异候选时，按实报告不足。
+
+    The mechanism must never paper over a shortage with randomly re-worded
+    scripts, and it must not keep retrying until the quota is full either.
+    """
+
+    def test_a_shortage_is_reported_instead_of_synthesised(self):
+        items, summary = _acc_allocate(20)
+
+        self.assertEqual(summary["requested_count"], 20)
+        self.assertLess(summary["planned_count"], 20, "差异不足时必须少交付")
+        self.assertEqual(summary["planned_count"], len(items))
+        self.assertEqual(summary["shortage_count"], 20 - len(items))
+        self.assertEqual(summary["mixed_shortage_reason"], "DIFFERENCE_INSUFFICIENT")
+        self.assertEqual(summary["allocation_status"], "PARTIAL_CONTENT_CAPACITY")
+        self.assertEqual(
+            (summary["mixed_history_coverage"] or {}).get("scope_status"), "IN_SCOPE",
+        )
+
+        # 每条交付的脚本都要有可核查的比较依据，并且最终镜头互不相同。
+        digests = set()
+        for item in items:
+            contract = _acc_contract_of(item)
+            report = contract.get("difference_report") or {}
+            self.assertIn(report.get("review_status"), {"DISTINCT_THEME", "EXECUTION_VARIANT"})
+            self.assertTrue(report.get("counts_as_independent"))
+            digests.add(mixed_visual_signature(contract)["digest"])
+        self.assertEqual(len(digests), len(items), "交付的最终镜头不得互相重复")
+
+        self.assertEqual(
+            summary["mixed_usable_count"], len(items),
+            "可用数必须等于实际交付条目数（不补随机同义脚本）",
+        )
+        self.assertEqual(
+            summary["mixed_distinct_theme_count"]
+            + summary["mixed_execution_variant_count"],
+            len(items),
+            "同一候选不得同时落进两个桶",
+        )
+
+    def test_rejected_candidates_are_counted_once_each(self):
+        _items, summary = _acc_allocate(20)
+        rejected = _mixed_rejections(summary)
+        self.assertTrue(rejected, "差异不足必须留下可核查的剔除记录")
+
+        keys = {
+            (
+                row.get("direction_assignment_id"),
+                row.get("output_slot"),
+                row.get("content_bundle_id"),
+                row.get("downgrade_reason"),
+                (row.get("difference_report") or {}).get("review_status"),
+            )
+            for row in rejected
+        }
+        self.assertEqual(
+            len(keys), len(rejected), "同一候选不得重复累计",
+        )
+        self.assertEqual(
+            summary["mixed_duplicate_rejected_count"]
+            + summary["mixed_insufficient_evidence_count"],
+            len(rejected),
+        )
+        self.assertLessEqual(
+            len(rejected), 5,
+            "差异不足时不得反复重试去填满名额",
+        )
+        for row in rejected:
+            self.assertEqual(row.get("recommended_flow"), "REPLAN_MIXED_THEME")
+            report = row.get("difference_report") or {}
+            self.assertTrue(report.get("difference_summary"), "剔除必须给出理由")
+            self.assertTrue(report.get("difference_dimensions"), "剔除必须给出比较依据")
+            self.assertFalse(report.get("counts_as_independent"))
+
+
+class MixedReservationAndResumeTest(unittest.TestCase):
+    """T17: 历史重复被排除；重复/并发预留不产生新内容；resume 幂等复用。"""
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.addCleanup(
+            lambda: __import__("shutil").rmtree(self._tmpdir, ignore_errors=True)
+        )
+        self.db_path = Path(self._tmpdir) / "mixed.sqlite3"
+
+    def test_a_history_row_alone_blocks_the_same_montage(self):
+        history = [
+            _acc_history_row(_acc_contract(template_id, select_environment_recipe_id(0)))
+            for template_id in mixed_template_ids()
+        ]
+        items, summary = _acc_allocate(1, recent_usage=history)
+
+        self.assertEqual(items, [], "整条历史已占用时不得再产出同款蒙太奇")
+        self.assertEqual(summary["planned_count"], 0)
+        self.assertEqual(summary["mixed_usable_count"], 0)
+        self.assertEqual(
+            summary["mixed_duplicate_rejected_count"], len(_mixed_rejections(summary)),
+        )
+        self.assertEqual(summary["mixed_shortage_reason"], "DIFFERENCE_INSUFFICIENT")
+
+        report = _mixed_rejections(summary)[0]["difference_report"]
+        self.assertEqual(report["review_status"], "EXACT_DUPLICATE")
+        self.assertEqual(report["comparison_scope"], "BATCH_AND_HISTORY")
+        self.assertEqual(
+            report["nearest_script_id"], f"HIST_{select_template_id(0)}",
+            "必须指出重复的是历史里的哪一条",
+        )
+        self.assertFalse(report["counts_as_independent"])
+        self.assertEqual(
+            (summary["mixed_history_coverage"] or {}).get("history_compared"), 3,
+        )
+
+    def test_incomplete_history_is_counted_but_never_used_as_a_reference(self):
+        legacy = [
+            {
+                "usage_id": "CPU_LEGACY",
+                "visual_signature": "A|B|C|D|E|F",
+                "scene_motif": "OLD_SCENE",
+                "persona_role": "OLD_PERSONA",
+            }
+        ]
+        items, summary = _acc_allocate(2, recent_usage=legacy)
+        coverage = summary["mixed_history_coverage"]
+
+        self.assertEqual(coverage["history_compared"], 0)
+        self.assertEqual(coverage["history_incomplete"], 1, "缺最终镜头必须标注")
+        self.assertEqual(coverage["history_rows_seen"], 1)
+        self.assertEqual(
+            len(items), 2, "不完整的历史记录不得被当作\"已比对\"而阻断新内容",
+        )
+        self.assertEqual(summary["mixed_duplicate_rejected_count"], 0)
+        for item in items:
+            self.assertTrue(_acc_contract_of(item).get("difference_report"))
+
+    def test_the_same_candidate_reserved_twice_is_still_one_duplicate(self):
+        # 重复/并发预留同一个候选，不得让它变成"多一条独立内容"。
+
+        # 每个模板都写了两条等价的历史（模拟并发或失败重试各写了一次）。
+        rows = [
+            _acc_history_row(_acc_contract(template_id, select_environment_recipe_id(0)))
+            for template_id in mixed_template_ids()
+            for _ in range(2)
+        ]
+
+        references, incomplete = _mixed_history_references(rows)
+        self.assertEqual((len(references), incomplete), (6, 0))
+
+        contract = _acc_contract("AMX_A_WORN_FIRST", select_environment_recipe_id(0))
+        report = judge_mixed_candidate(contract, references)
+        self.assertEqual(report["review_status"], "EXACT_DUPLICATE")
+        self.assertFalse(report["counts_as_independent"])
+
+        items, summary = _acc_allocate(1, recent_usage=rows)
+        self.assertEqual(items, [], "两条等价历史不得让候选看起来还是新的")
+        self.assertEqual(summary["mixed_usable_count"], 0)
+
+        # 历史条目翻倍不得把剔除数也翻倍。
+        single, single_summary = _acc_allocate(1, recent_usage=rows[::2])
+        self.assertEqual(single, [])
+        self.assertEqual(
+            summary["mixed_duplicate_rejected_count"],
+            single_summary["mixed_duplicate_rejected_count"],
+            "同一候选被预留两次也只能算一条重复",
+        )
+
+    def test_concurrent_reservations_keep_every_signature_intact(self):
+        storage = PipelineStorage(db_path=self.db_path)
+        contract = _acc_contract("AMX_B_FORM_FIRST")
+        signature = mixed_signature_bundle(contract)
+        rows = [
+            {
+                "usage_id": f"CPU_CONC_{index}",
+                "product_code": "P_ACC",
+                "country": "泰国",
+                "category": "配饰",
+                "status": "RESERVED",
+                "visual_signature": "LEGACY_SIG",
+                "metadata": {
+                    "batch_item_id": f"ITEM_CONC_{index}",
+                    MIXED_HISTORY_METADATA_KEY: signature,
+                },
+            }
+            for index in range(4)
+        ]
+        errors: list = []
+
+        def _reserve(row):
+            try:
+                storage.reserve_creative_pattern(row)
+            except Exception as exc:  # noqa: BLE001 - recorded and asserted below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_reserve, args=(row,)) for row in rows]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(errors, [], "并发预留不得丢行或损坏写入")
+        stored = storage.list_recent_creative_patterns(country="泰国", category="配饰")
+        self.assertEqual(len(stored), len(rows))
+        for row in stored:
+            reference = mixed_reference_signature(row)
+            self.assertTrue(
+                reference["complete"], "台账读取路径必须能取回最终镜头签名",
+            )
+            self.assertEqual(reference["signature"], signature)
+
+    def test_resume_reuses_the_settled_batch_and_its_reservation(self):
+        from core.original_batch_executor import run_plan_only
+
+        storage = PipelineStorage(db_path=self.db_path)
+        request = BatchRequest(
+            request_id="OP_MIXED_RESUME",
+            product_code="P_ACC",
+            requested_count=2,
+            test_phase="INITIAL",
+            duration_seconds=15.0,
+            script_mode="simplified_v1",
+            random_seed=42,
+        )
+        directions = [_acc_direction("DA_ACC", "S1"), _acc_direction("DA_ACC2", "S2")]
+        context = {
+            "source_run_id": 1,
+            "source_record_id": "rec_acc",
+            "input_hash": "hash_acc",
+            "product_code": "P_ACC",
+            "target_country": "泰国",
+            "target_language": "泰语",
+            "product_type": "耳饰",
+            "top_category": "配饰",
+            "anchor_card": dict(_ACC_ANCHOR_CARD),
+            "selling_point_catalog": list(_ACC_CATALOG),
+            "product_selling_note": "",
+            "structure_route": {
+                "selection_run_id": "SR_ACC",
+                "assignments": [
+                    {
+                        "direction_assignment_id": direction["direction_assignment_id"],
+                        "output_slot": direction["output_slot"],
+                        "cluster_id": 1,
+                        "cluster_version": "v1",
+                        "evidence_tier": "BOOTSTRAP",
+                        "structure_contract": direction["structure_contract"],
+                    }
+                    for direction in directions
+                ],
+            },
+        }
+        env = {
+            _MIXED_GATE_ENV: "1",
+            "ORIGINAL_SCRIPT_GENERATOR_DB_PATH": str(self.db_path),
+            "OPENCLAW_SHARED_DATA_DIR": self._tmpdir,
+        }
+
+        with patch.dict(os.environ, env, clear=False), patch(
+            "core.structure_router_adapter.select_original_structure_directions",
+            return_value=context["structure_route"],
+        ), patch(
+            "core.reality_reference.build_reality_direction_packages",
+            return_value={"directions": directions},
+        ), patch(
+            "core.original_batch_executor.allocate_batch_items",
+            wraps=allocate_batch_items,
+        ) as planner:
+            first_batch, first_items, _ = run_plan_only(
+                request, product_context_override=context,
+            )
+            reserved_once = storage.list_recent_creative_patterns(
+                country="泰国", category="配饰",
+            )
+            second_batch, second_items, _ = run_plan_only(
+                request, product_context_override=context,
+            )
+            reserved_twice = storage.list_recent_creative_patterns(
+                country="泰国", category="配饰",
+            )
+
+        self.assertTrue(first_items, "混合模式下必须产出脚本")
+        for item in first_items:
+            self.assertTrue(
+                _acc_contract_of(item), "交付条目必须带冻结的混合合同",
+            )
+
+        self.assertEqual(first_batch.batch_id, second_batch.batch_id)
+        self.assertEqual(
+            [item.batch_item_id for item in first_items],
+            [item.batch_item_id for item in second_items],
+        )
+        self.assertEqual(reserved_once and len(reserved_once), len(first_items))
+        self.assertEqual(
+            len(reserved_twice), len(reserved_once),
+            "resume 必须复用自身预留，不得重复占用名额",
+        )
+        self.assertEqual(planner.call_count, 1, "resume 不得重新规划")
+
+        for row in reserved_once:
+            reference = mixed_reference_signature(row)
+            self.assertTrue(
+                reference["complete"],
+                "预留台账必须带上最终镜头签名，下一批才能按镜头比对",
+            )
+            self.assertTrue(reference["identity"])
 
 
 if __name__ == "__main__":

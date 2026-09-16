@@ -1,10 +1,23 @@
 #!/usr/bin/env python3
-"""Run checked long-form production rows to final video and write back Feishu."""
+"""Run checked long-form production rows to final video and write back Feishu.
+
+One operator entry point ("进入生产" on the shared production-script pool) owns
+both long-form sources:
+
+* ``ORIGINAL_LONGFORM`` keeps its existing Plan C job created by the generator;
+* ``REMAKE_SEGMENTED`` compiles the frozen remake script into a Plan C job here,
+  then shares the identical keyframes/H3/resume/TTS/merge/validation/write-back.
+
+Only the source compiler differs: a remake script is never re-planned, rewritten
+or padded with new selling points.
+"""
 from __future__ import annotations
 
 import argparse
 import atexit
 import fcntl
+import importlib.util
+import json
 import mimetypes
 import subprocess
 import sys
@@ -17,16 +30,170 @@ SKILL_ROOT = Path(__file__).resolve().parents[1]
 if str(SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILL_ROOT))
 
+WORKSPACE_ROOT = SKILL_ROOT.parents[1]
+REMAKE_PACKAGE_ROOT = WORKSPACE_ROOT / "packages" / "remake_video_execution"
+SHARED_ROUTE_MODULE = (
+    SKILL_ROOT.parents[0] / "script-run-manager-sync" / "core" / "production_route.py"
+)
+if str(REMAKE_PACKAGE_ROOT) not in sys.path:
+    sys.path.insert(0, str(REMAKE_PACKAGE_ROOT))
+
 from core.longform.production_runner import run_longform_job_to_final  # noqa: E402
 from core.longform.main_schedule_bridge import enqueue_longform_final  # noqa: E402
 from core.longform.audio import validate_finalized_media  # noqa: E402
-from core.longform.storage import DEFAULT_ASSET_ROOT, LongformStorage  # noqa: E402
+from core.longform.assets import freeze_reference_assets  # noqa: E402
+from core.longform.storage import (  # noqa: E402
+    DEFAULT_ASSET_ROOT, SOURCE_KIND_REMAKE, LongformStorage, remake_job_id,
+)
 from core.production_script_feishu import (  # noqa: E402
     PRODUCTION_SCRIPT_FIELD_NAMES,
     PRODUCTION_SCRIPT_FIELDS,
     ensure_fields,
 )
 from scripts.run_feishu_operation_tasks import DEFAULT_SCRIPT_URL, _client  # noqa: E402
+
+
+def _load_shared_route_module() -> Any:
+    """Load the shared classifier by file path.
+
+    Both skills own a ``core`` package, so a plain ``import core.production_route``
+    would resolve to the wrong package.  Loading the single module under a unique
+    name keeps one classifier without creating an import cycle.
+    """
+
+    module_name = "shared_production_route"
+    spec = importlib.util.spec_from_file_location(module_name, SHARED_ROUTE_MODULE)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"找不到统一生产路由分类器: {SHARED_ROUTE_MODULE}")
+    module = importlib.util.module_from_spec(spec)
+    # dataclasses resolve string annotations through sys.modules[cls.__module__],
+    # so the module must be registered before it is executed.
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_production_route = _load_shared_route_module()
+ProductionRoute = _production_route.ProductionRoute
+classify_production_route = _production_route.classify_production_route
+
+from remake_video_execution.plan_c_handoff import build_plan_c_handoff  # noqa: E402
+from remake_video_execution.source import freeze_record  # noqa: E402
+
+
+# Attachment field -> frozen reference role.  A unified first frame is only a
+# composition reference; raw product images keep product authority.
+REMAKE_ATTACHMENT_ROLES: tuple[tuple[str, str], ...] = (
+    ("统一首帧（系统）", "COMPOSITE_FIRST_FRAME"),
+    ("人物参考图（系统）", "PERSONA_REFERENCE"),
+    ("产品图片", "PRODUCT_REFERENCE"),
+    ("参考图", "PRODUCT_REFERENCE"),
+)
+
+
+def _route_mapping(field_names: dict[str, str]) -> dict[str, str]:
+    return {
+        "script_source": "脚本来源",
+        "video_duration": field_names["duration_seconds"],
+        "video_format": field_names["video_format"],
+    }
+
+
+def _attachments(values: Any) -> list[dict]:
+    result: list[dict] = []
+    if not isinstance(values, list):
+        return result
+    for item in values:
+        if isinstance(item, dict) and (item.get("file_token") or item.get("url")):
+            result.append(dict(item))
+    return result
+
+
+def _download_remake_references(
+    client: Any, record: Any, *, job_id: str, asset_root: str,
+) -> list[dict]:
+    """Download this row's attachments once and stage them for freezing."""
+
+    staging = Path(asset_root).expanduser().resolve() / job_id / "source_attachments"
+    staging.mkdir(parents=True, exist_ok=True)
+    materials: list[dict] = []
+    for field_name, role in REMAKE_ATTACHMENT_ROLES:
+        for index, attachment in enumerate(_attachments(record.fields.get(field_name)), 1):
+            target = client.download_attachment(attachment, staging / role.lower())
+            materials.append({
+                "role": role,
+                "local_path": str(Path(target).resolve()),
+                "source_asset_id": str(attachment.get("file_token") or ""),
+                "file_index": index,
+                "source_field": field_name,
+            })
+    return materials
+
+
+def _has_paid_submission(job: dict[str, Any] | None) -> bool:
+    for segment in (job or {}).get("segments") or []:
+        if str(segment.get("platform_task_id") or "").strip():
+            return True
+        if str(segment.get("status") or "") in {"SUBMITTED", "READY"}:
+            return True
+    return False
+
+
+def _ensure_remake_job(
+    client: Any, storage: LongformStorage, record: Any, *, asset_root: str,
+) -> tuple[str, str]:
+    """Return (job_id, error).  Never re-downloads or re-submits a frozen job."""
+
+    fields = record.fields
+    f = PRODUCTION_SCRIPT_FIELD_NAMES
+    candidate = freeze_record(record.record_id, fields, {})
+    expected_job_id = remake_job_id(record.record_id, candidate.source_revision_hash)
+
+    existing = storage.find_job_by_source(
+        record.record_id, candidate.source_revision_hash,
+    )
+    if existing:
+        job_id = str(existing["job_id"])
+        if str(fields.get(f["longform_job_id"]) or "").strip() != job_id:
+            client.update_record_fields(record.record_id, {f["longform_job_id"]: job_id})
+        return job_id, ""
+
+    recorded = str(fields.get(f["longform_job_id"]) or "").strip()
+    if recorded and recorded != expected_job_id:
+        previous = storage.get_job(recorded)
+        if _has_paid_submission(previous):
+            return "", (
+                "SOURCE_CHANGED_AFTER_SUBMIT: 该复刻行已存在远端H3任务ID或READY片段，"
+                "禁止覆盖旧job后重复付费提交；请人工确认新revision"
+            )
+        # No paid work happened yet, so a new revision may safely replace it.
+
+    materials = _download_remake_references(
+        client, record, job_id=expected_job_id, asset_root=asset_root,
+    )
+    frozen_assets = freeze_reference_assets(
+        job_id=expected_job_id, asset_root=asset_root,
+        materials=[[item] for item in materials],
+    )
+    handoff = build_plan_c_handoff(
+        record_id=record.record_id, fields=fields, frozen_assets=frozen_assets,
+    )
+    if handoff["blocked"]:
+        codes = "、".join(handoff["blocking_codes"]) or "UNKNOWN"
+        return "", f"复刻稿校验未通过，付费调用前阻断: {codes}"
+    job_id = str(handoff["job_id"])
+    storage.save_plan(
+        job_id, handoff["master_contract"], handoff["plan"], handoff["keyframe_package"],
+        source_kind=SOURCE_KIND_REMAKE,
+        source_record_id=record.record_id,
+        source_script_id=str(handoff.get("source_script_id") or ""),
+        source_revision_hash=str(handoff.get("source_revision_hash") or ""),
+    )
+    storage.update_job(
+        job_id, "PLANNED", voiceover_json=json.dumps(handoff["voiceover"], ensure_ascii=False),
+    )
+    client.update_record_fields(record.record_id, {f["longform_job_id"]: job_id})
+    return job_id, ""
 
 
 DEFAULT_LOCK = (
@@ -209,40 +376,51 @@ def main() -> int:
     records = _list_records_with_transient_retry(client, page_size=500)
     if args.record_id:
         records = [record for record in records if record.record_id == args.record_id]
+    mapping = _route_mapping(f)
     candidates = []
     for record in records:
         fields = record.fields
-        if str(fields.get(f["video_format"]) or "").strip() != "长视频":
-            continue
         code = str(fields.get(f["product_code"]) or "").strip()
         if args.product_code and code != args.product_code:
             continue
-        job_id = str(fields.get(f["longform_job_id"]) or "").strip()
-        if not job_id:
-            continue
-        if _checked(fields.get(f["production_enabled"])):
-            action = "produce"
-        elif (
-            str(fields.get(f["longform_status"]) or "").strip() == "已完成"
-            and _checked(fields.get(f["publish_confirmed"]))
-        ):
-            action = "publish_only"
+        route = classify_production_route(fields, mapping)
+        if route.route == ProductionRoute.ORIGINAL_LONGFORM:
+            job_id = str(fields.get(f["longform_job_id"]) or "").strip()
+            if not job_id:
+                continue
+            if _checked(fields.get(f["production_enabled"])):
+                action = "produce"
+            elif (
+                str(fields.get(f["longform_status"]) or "").strip() == "已完成"
+                and _checked(fields.get(f["publish_confirmed"]))
+            ):
+                action = "publish_only"
+            else:
+                continue
+        elif route.route == ProductionRoute.REMAKE_SEGMENTED:
+            # The same operator checkbox owns remake long-form production.
+            if not _checked(fields.get(f["production_enabled"])):
+                continue
+            job_id = str(fields.get(f["longform_job_id"]) or "").strip()
+            action = "produce_remake"
+            if route.conflict:
+                print(f"⚠️ {record.record_id}: {route.conflict}")
         else:
             continue
-        candidates.append((record, code, job_id, action))
+        candidates.append((record, code, job_id, action, route))
         if len(candidates) >= args.limit:
             break
 
     print(f"待执行长视频生产/发布脚本: {len(candidates)}")
-    for record, code, job_id, action in candidates:
-        print(f"- {record.record_id} | {code} | {job_id} | {action}")
+    for record, code, job_id, action, route in candidates:
+        print(f"- {record.record_id} | {code} | {job_id or '(待创建)'} | {route.route.value} | {action}")
     if args.dry_run:
         return 0
 
     storage = LongformStorage()
     storage.ensure_schema()
     failed = 0
-    for record, code, job_id, action in candidates:
+    for record, code, job_id, action, route in candidates:
         if action == "publish_only":
             try:
                 job = storage.get_job(job_id) or {}
@@ -271,11 +449,34 @@ def main() -> int:
                 })
                 print(f"排班接入失败: {record.record_id}: {exc}", file=sys.stderr)
             continue
+        if action == "produce_remake":
+            # Compile the frozen remake script into a stable Plan C job, then
+            # continue in the same round.  A blocked script stops before any
+            # paid call and keeps "进入生产" for the operator.
+            try:
+                job_id, job_error = _ensure_remake_job(
+                    client, storage, record, asset_root=args.asset_root,
+                )
+            except Exception as exc:
+                job_id, job_error = "", str(exc)
+            if job_error or not job_id:
+                failed += 1
+                message = job_error or "复刻稿未能创建Plan C任务"
+                client.update_record_fields(record.record_id, {
+                    f["longform_status"]: "生成失败",
+                    f["longform_error"]: message[:1800],
+                    f["processing_status"]: "同步失败",
+                    f["sync_result"]: f"复刻长视频准备失败：{message[:800]}",
+                    f["sync_time"]: int(time.time() * 1000),
+                })
+                print(f"失败: {record.record_id}: {message}", file=sys.stderr)
+                continue
+        source_label = "复刻长视频" if action == "produce_remake" else "长视频"
         try:
             client.update_record_fields(record.record_id, {
                 f["longform_status"]: "生成中",
                 f["longform_error"]: "",
-                f["sync_result"]: "长视频生产执行中",
+                f["sync_result"]: f"{source_label}生产执行中",
             })
             result = run_longform_job_to_final(
                 job_id,
@@ -291,7 +492,7 @@ def main() -> int:
                 client, storage, job_id, record.fields,
             )
             if str(result.get("status") or "") == "WAITING_REMOTE":
-                sync_result = "H3远端生成中，下一轮自动续跑"
+                sync_result = f"{source_label}H3远端生成中，下一轮自动续跑"
                 if first_frame_error:
                     sync_result += f"；长视频首帧展示回写失败：{first_frame_error}"
                 client.update_record_fields(record.record_id, {
@@ -326,7 +527,7 @@ def main() -> int:
                     # A publish-queue problem must not relabel a successfully
                     # rendered master as a generation failure.
                     publish_error = str(exc)[:800]
-            sync_result = "长视频完整生产已完成"
+            sync_result = f"{source_label}完整生产已完成"
             if first_frame_error:
                 sync_result += f"；长视频首帧展示回写失败：{first_frame_error}"
             if publish_result:
@@ -361,7 +562,7 @@ def main() -> int:
                 **first_frame_fields,
                 f["longform_error"]: failure_text[:1800],
                 f["processing_status"]: "同步失败",
-                f["sync_result"]: f"长视频生成失败：{str(exc)[:800]}",
+                f["sync_result"]: f"{source_label}生成失败：{str(exc)[:800]}",
                 f["sync_time"]: int(time.time() * 1000),
             })
             print(f"失败: {record.record_id}: {exc}", file=sys.stderr)

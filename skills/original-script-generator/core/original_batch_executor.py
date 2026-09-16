@@ -44,6 +44,38 @@ BLUEPRINT_LLM_TIMEOUT_SECONDS = int(
     os.environ.get("ORIGINAL_SCRIPT_BLUEPRINT_LLM_TIMEOUT_SECONDS", "600") or "600"
 )
 
+# Independent structure directions are capped separately from the number of
+# candidate scripts -- several candidates may share one direction.  This was a
+# hard-coded 4.  It stays 4 unless explicitly raised, so every existing batch
+# keeps its exact current behaviour; the override exists because request counts
+# of 10-20 need more independent content directions than four.
+DIRECTION_LIMIT_ENV = "ORIGINAL_SCRIPT_DIRECTION_LIMIT"
+DEFAULT_DIRECTION_LIMIT = 4
+
+
+def _resolve_direction_limit(requested_count: Any) -> int:
+    """Clamp the number of independent content directions for one batch.
+
+    Default behaviour is identical to the previous ``min(requested_count, 4)``.
+    Raising ``ORIGINAL_SCRIPT_DIRECTION_LIMIT`` lets a larger request reach more
+    independent themes without touching any other caller.
+    """
+
+    limit = DEFAULT_DIRECTION_LIMIT
+    raw = str(os.environ.get(DIRECTION_LIMIT_ENV, "") or "").strip()
+    if raw:
+        try:
+            parsed = int(raw)
+        except ValueError:
+            parsed = DEFAULT_DIRECTION_LIMIT
+        if parsed > 0:
+            limit = parsed
+    try:
+        requested = int(requested_count)
+    except (TypeError, ValueError):
+        requested = 1
+    return max(1, min(requested, limit))
+
 
 class ItemExecutionTimeout(RuntimeError):
     """Raised when one frozen batch item exceeds the wall-clock timeout."""
@@ -544,6 +576,23 @@ def _reserve_batch_creative_usage(
             "batch_id": batch.batch_id,
             "batch_item_id": item.batch_item_id,
         }
+        # 复用现有历史用量持久化，并补充最终镜头签名。  The legacy scene
+        # signature above stays exactly as it is -- it still governs the
+        # persona/scene axis for every category.  The final-shot signature is
+        # stored beside it so the *next* batch can compare against the shots
+        # this one actually owns instead of a scene label.
+        try:
+            from core.accessory_mixed_templates import (
+                MIXED_HISTORY_METADATA_KEY,
+                mixed_signature_bundle,
+            )
+
+            mixed_contract = _frozen_mixed_contract(frozen)
+            signature = mixed_signature_bundle(mixed_contract)
+            if signature:
+                row["metadata"][MIXED_HISTORY_METADATA_KEY] = signature
+        except Exception:  # noqa: BLE001 - bookkeeping must not break a plan
+            pass
         usage_id = creative_storage.reserve_creative_pattern(row)
         frozen["creative_usage_id"] = usage_id
         item.frozen_direction_package_json = json.dumps(
@@ -573,6 +622,111 @@ def _update_batch_creative_usage(item: PlanItem, status: str) -> None:
 # ── Plan-only execution ────────────────────────────────────────────────
 
 
+def resolve_planning_execution_scope(
+    request: "BatchRequest",
+    ctx: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Resolve the *real* parent task for one planning request.
+
+    The long-form direct-product source builder reuses this planner with
+    ``duration_seconds=15.0`` and marks its product context with ``longform_*``
+    flags, so the duration alone cannot tell a 15-second short original from a
+    long-form source build.  Those flags are the parent task's own declaration,
+    so they decide the branch; the duration and script mode are guard rails on
+    top.
+    """
+
+    from core.accessory_mixed_templates import (
+        SCOPE_BRANCH_LONGFORM,
+        SCOPE_BRANCH_SHORT_VIDEO_ORIGINAL,
+    )
+
+    longform = any(
+        ctx.get(key)
+        for key in ("longform_prefer_persona_pack", "longform_outfit_color_matching")
+    )
+    branch = SCOPE_BRANCH_LONGFORM if longform else SCOPE_BRANCH_SHORT_VIDEO_ORIGINAL
+    return {
+        "task_branch": branch,
+        "target_duration_seconds": float(
+            getattr(request, "duration_seconds", 0) or 0
+        ),
+        # ``run_plan_only`` is always a fresh plan.  A resume reuses the frozen
+        # contract instead of recompiling it, and an explicit replan re-enters
+        # this same entry point.
+        "is_new_plan": True,
+        "execution_mode": _text(getattr(request, "execution_mode", "")),
+        "script_mode": _text(getattr(request, "script_mode", "")),
+    }
+
+
+def _declared_mixed_contract_state(frozen: Dict[str, Any]) -> Tuple[bool, str]:
+    """``(declared, status)`` for one frozen package's mixed-template claim.
+
+    ``declared`` is True only when planning actually wrote a mixed-template
+    status -- i.e. this item was planned by the mixed mode.  A historical item
+    with no such key keeps its legacy path.
+    """
+
+    status = _text(frozen.get("mixed_template_contract_status"))
+    extension = (
+        frozen.get("category_execution_extension")
+        if isinstance(frozen.get("category_execution_extension"), dict)
+        else {}
+    )
+    contract = extension.get("mixed_template_contract")
+    declared = bool(status) or isinstance(contract, dict) and bool(contract)
+    return declared, status
+
+
+def _frozen_package_of(item: Any) -> Dict[str, Any]:
+    """The item's frozen direction package, or ``{}`` when unreadable."""
+
+    raw = getattr(item, "frozen_direction_package_json", "") or ""
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _mixed_preflight_error(frozen: Dict[str, Any]) -> str:
+    """Hard error code when a mixed item may not reach the first model call.
+
+    A planning failure must not be papered over by falling back to the legacy
+    mode: the item was planned *as* a mixed montage, so generating an ordinary
+    single-carrier script for it would ship content nobody planned.
+    """
+
+    try:
+        from core.accessory_mixed_templates import (
+            MIXED_TEMPLATE_CONTRACT_KEY,
+            validate_mixed_template_contract,
+        )
+    except Exception:  # noqa: BLE001 - never break execution
+        return ""
+
+    declared, status = _declared_mixed_contract_state(frozen)
+    if not declared:
+        return ""
+    if status and status.upper() != "FROZEN":
+        return "MIXED_CONTRACT_REJECTED"
+    extension = (
+        frozen.get("category_execution_extension")
+        if isinstance(frozen.get("category_execution_extension"), dict)
+        else {}
+    )
+    contract = extension.get(MIXED_TEMPLATE_CONTRACT_KEY)
+    if not isinstance(contract, dict) or not contract:
+        return "MIXED_CONTRACT_MISSING"
+    errors = validate_mixed_template_contract(contract)
+    if errors:
+        return f"MIXED_CONTRACT_INVALID:{errors[0]}"
+    return ""
+
+
 def run_plan_only(
     request: BatchRequest,
     *,
@@ -596,10 +750,18 @@ def run_plan_only(
     existing = storage.get_batch_by_request_id(request_id)
     if existing:
         items = storage.get_items(existing.batch_id)
+        # A batch is reusable when this policy already produced it and every
+        # item carries its frozen package.  A planning run that legitimately
+        # produced *no* items (content-capacity shortage) is also a settled
+        # result: re-planning it on every call would mint a fresh batch each
+        # time and break the documented resume/idempotency semantics.
+        settled_items = bool(items) and all(
+            item.frozen_direction_package_json for item in items
+        )
+        settled_empty = not items and bool(_text(existing.allocation_summary_json))
         if (
             existing.policy_version == POLICY_VERSION
-            and items
-            and all(item.frozen_direction_package_json for item in items)
+            and (settled_items or settled_empty)
         ):
             summary = json.loads(existing.allocation_summary_json) if existing.allocation_summary_json else {}
             return existing, items, summary
@@ -692,7 +854,7 @@ def run_plan_only(
             anchor_card=ctx["anchor_card"],
             record_id=f"{ctx['source_record_id']}:batch:{request_id}",
             input_hash=f"{ctx.get('input_hash', '')}:{POLICY_VERSION}",
-            direction_count=min(request.requested_count, 4),
+            direction_count=_resolve_direction_limit(request.requested_count),
             random_seed=request.random_seed,
             allowed_carriers=_allowed_structure_carriers(
                 ctx["selling_point_catalog"]
@@ -708,7 +870,7 @@ def run_plan_only(
         anchor_card=ctx["anchor_card"],
         product_type=ctx["product_type"],
         top_category=ctx["top_category"],
-        direction_limit=min(request.requested_count, 4),
+        direction_limit=_resolve_direction_limit(request.requested_count),
         recent_execution_card_ids=[],
         recent_source_video_ids=[],
         selling_point_catalog=ctx["selling_point_catalog"],
@@ -771,6 +933,7 @@ def run_plan_only(
         target_language=ctx["target_language"],
         multidim_reference_contexts=multidim_reference_contexts,
         category_execution_extension=category_execution_extension,
+        execution_scope=resolve_planning_execution_scope(request, ctx),
     )
 
     # Persist batch
@@ -952,6 +1115,23 @@ def run_script_only(
             f"{item.item_role} | {item.requested_hook_id} | "
             f"timeout={int(item_timeout_seconds or 0)}s"
         )
+        # ── Mixed-template preflight, before any model call ────────────
+        # An item planned *as* a mixed-accessory montage must carry a valid
+        # frozen contract before the first paid call.  Planning-time failures
+        # are never downgraded to the legacy mode here: the item was planned as
+        # a montage, so an ordinary single-carrier script would ship content
+        # nobody planned.  Items with no mixed declaration keep their old path.
+        mixed_preflight = _mixed_preflight_error(_frozen_package_of(item))
+        if mixed_preflight:
+            failed += 1
+            storage.update_item_status(
+                item.batch_item_id,
+                "SCRIPT_FAILED",
+                error_code=mixed_preflight,
+                error_message="混合展示合同缺失或无效，需重新规划；未调用任何模型",
+            )
+            print(f"     ⛔ 混合合同前置检查失败：{mixed_preflight}（模型调用 0 次）")
+            continue
         storage.update_item_status(
             item.batch_item_id,
             "SCRIPT_RUNNING",
@@ -1084,6 +1264,130 @@ def run_script_only(
     return latest_batch, latest_items
 
 
+def _frozen_mixed_extension(frozen: Any) -> Optional[Dict[str, Any]]:
+    """Return the frozen category extension when it carries a mixed template.
+
+    Only the authored mixed-display template needs the frozen extension handed
+    through.  Returning ``None`` everywhere else keeps every existing path
+    recompiling its category extension exactly as it did before.
+    """
+
+    if not isinstance(frozen, dict):
+        return None
+    extension = frozen.get("category_execution_extension")
+    if not isinstance(extension, dict):
+        return None
+    contract = extension.get("mixed_template_contract")
+    return extension if isinstance(contract, dict) and contract else None
+
+
+def _frozen_mixed_contract(frozen: Any) -> Dict[str, Any]:
+    """The frozen mixed contract carried by a frozen direction package."""
+
+    extension = _frozen_mixed_extension(frozen)
+    if not extension:
+        return {}
+    contract = extension.get("mixed_template_contract")
+    return dict(contract) if isinstance(contract, dict) and contract else {}
+
+
+def _mixed_sibling_references(
+    storage: Any,
+    batch: BatchRecord,
+    item: PlanItem,
+) -> List[Dict[str, Any]]:
+    """Final-shot references from this batch's *other* mixed items.
+
+    A sibling that already generated is referenced by the shots it actually
+    produced; one that has not is referenced by its frozen shots.  Mixing the
+    two is intentional -- refusing a candidate because it repeats something
+    merely *planned* is as wrong as accepting one that repeats something
+    already rendered.
+    """
+
+    try:
+        from core.accessory_mixed_templates import (
+            mixed_signature_bundle,
+            mixed_signature_from_script,
+        )
+    except Exception:  # noqa: BLE001 - never break execution
+        return []
+
+    try:
+        siblings = storage.get_items(batch.batch_id)
+    except Exception:  # noqa: BLE001
+        return []
+
+    references: List[Dict[str, Any]] = []
+    for sibling in siblings:
+        if _text(getattr(sibling, "batch_item_id", "")) == _text(item.batch_item_id):
+            continue
+        frozen = _frozen_package_of(sibling)
+        contract = _frozen_mixed_contract(frozen)
+        if not contract:
+            continue
+        rendered: Dict[str, Any] = {}
+        raw_result = getattr(sibling, "result_json", "") or ""
+        if raw_result:
+            try:
+                payload = json.loads(raw_result)
+            except (TypeError, ValueError):
+                payload = {}
+            candidate_script = (
+                payload.get("script") if isinstance(payload, dict) else None
+            )
+            if isinstance(candidate_script, dict):
+                rendered = mixed_signature_from_script(candidate_script, contract)
+        references.append(
+            {
+                "identity": _text(sibling.batch_item_id),
+                "signature": rendered or mixed_signature_bundle(contract),
+                "source": "RENDERED" if rendered else "FROZEN",
+            }
+        )
+    return references
+
+
+def _repair_frozen_seed_mixed_extension(
+    seed: Dict[str, Any], frozen: Any
+) -> Dict[str, Any]:
+    """Re-attach the frozen mixed-display contract to an already-frozen seed.
+
+    Batches planned before the ordering fix in ``_make_item`` froze a creative
+    seed whose ``category_execution_extension`` was compiled *without* the
+    authored template, while the frozen package itself did carry it.  The script
+    stage reads the seed verbatim, so such a batch would silently lose the
+    template even though the plan had approved it.
+
+    Only the one key is merged in, and only when the frozen package really owns
+    it and the seed really lacks it.  Everything else -- including the case
+    where the feature gate was never enabled -- is returned untouched, so no
+    other product's frozen input changes shape.
+    """
+
+    if not isinstance(seed, dict):
+        return seed
+    frozen_extension = _frozen_mixed_extension(frozen)
+    if not frozen_extension:
+        return seed
+    contract = frozen_extension.get("mixed_template_contract")
+    if not isinstance(contract, dict) or not contract:
+        return seed
+
+    seed_extension = seed.get("category_execution_extension")
+    seed_extension = dict(seed_extension) if isinstance(seed_extension, dict) else {}
+    existing = seed_extension.get("mixed_template_contract")
+    if isinstance(existing, dict) and existing:
+        return seed
+
+    seed_extension["mixed_template_contract"] = contract
+    if not _text(seed_extension.get("schema_version")):
+        seed_extension["schema_version"] = _text(frozen_extension.get("schema_version"))
+    repaired = dict(seed)
+    repaired["category_execution_extension"] = seed_extension
+    return repaired
+
+
 def _execute_simplified_single_item(
     *,
     item: PlanItem,
@@ -1130,6 +1434,8 @@ def _execute_simplified_single_item(
         raise RuntimeError("简化脚本路径缺少冻结的结构或内容事实")
 
     seed = frozen.get("simplified_creative_seed") if isinstance(frozen.get("simplified_creative_seed"), dict) else {}
+    if seed:
+        seed = _repair_frozen_seed_mixed_extension(seed, frozen)
     # A normal batch freezes the full creative seed during PLAN_ONLY.  Do not
     # re-read RDS during SCRIPT_ONLY merely to reconstruct data we already
     # pinned: it adds a network dependency without changing the script input.
@@ -1159,6 +1465,13 @@ def _execute_simplified_single_item(
                 if isinstance(frozen.get("retrieval_reference_contract"), dict)
                 else {}
             ),
+            # The authored mixed-display template lives inside the frozen
+            # category extension.  Recompiling the extension here would drop it
+            # and silently fall back to the legacy single-carrier framing
+            # advice.  Hand the frozen extension over only when it actually
+            # carries the template, so every other path keeps compiling its
+            # extension exactly as before.
+            category_execution_extension=_frozen_mixed_extension(frozen),
         )
 
     provenance = {
@@ -1364,6 +1677,29 @@ def _execute_simplified_single_item(
         if isinstance(retrieval_reference.get("primary_case"), dict)
         else {}
     )
+    # ── 用实际正文/最终镜头再核对一次 ────────────────────────────────
+    # Planning compared four *intended* shots.  The model can still write the
+    # same visible event four times, or land on a montage a sibling already
+    # used.  The verdict is recorded next to the planned one rather than
+    # replacing it: a disagreement between "planned as a variant" and
+    # "generated as a repeat" is the signal a reviewer needs, and silently
+    # overwriting the plan would destroy it.
+    mixed_contract = _frozen_mixed_contract(frozen)
+    mixed_recheck: Dict[str, Any] = {}
+    if mixed_contract:
+        try:
+            from core.accessory_mixed_templates import judge_rendered_script
+
+            mixed_recheck = judge_rendered_script(
+                script,
+                mixed_contract,
+                _mixed_sibling_references(storage, batch, item),
+            )
+        except Exception:  # noqa: BLE001 - a re-check must never fail the item
+            mixed_recheck = {}
+        if mixed_recheck:
+            script["mixed_final_shot_recheck"] = mixed_recheck
+
     binding_id = ""
     try:
         binding_id = bind_structure_application(
@@ -1386,6 +1722,13 @@ def _execute_simplified_single_item(
                     "hook_knowledge_provenance", {}
                 ),
                 "preferred_presentation": seed.get("creative_direction", {}).get("preferred_presentation"),
+                # The binding ledger is where a reviewer looks for "why was this
+                # delivered": keep both the planned and the rendered verdict.
+                "mixed_difference_report": mixed_contract.get("difference_report") or {},
+                "mixed_final_shot_signature_version": _text(
+                    mixed_recheck.get("signature_version")
+                ),
+                "mixed_final_shot_recheck": mixed_recheck,
                 "retrieval_reference": {
                     "contract_hash": retrieval_reference.get("contract_hash", ""),
                     "primary_video_id": primary_reference.get("video_id", ""),
@@ -1428,6 +1771,8 @@ def _execute_simplified_single_item(
         "structure_binding_id": binding_id,
         "frozen_direction_package_schema_version": frozen.get("schema_version"),
         "creative_seed_id": seed.get("creative_seed_id"),
+        "mixed_difference_report": mixed_contract.get("difference_report") or {},
+        "mixed_final_shot_recheck": mixed_recheck,
         "retrieval_reference_provenance": {
             "status": retrieval_reference.get("status", "UNAVAILABLE"),
             "contract_hash": retrieval_reference.get("contract_hash", ""),

@@ -7,7 +7,6 @@ import json
 import mimetypes
 import time
 from dataclasses import dataclass
-from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -461,7 +460,10 @@ class FeishuBitableClient:
             or mimetypes.guess_type(file_name)[0]
             or "application/octet-stream"
         )
-        return content, file_name, content_type, int(attachment.get("size") or len(content))
+        # Feishu attachment metadata can retain a stale declared size.  The
+        # upload_all API validates the multipart body against the submitted
+        # size, so always use the bytes we actually downloaded.
+        return content, file_name, content_type, len(content)
 
     def upload_attachment(
         self,
@@ -478,7 +480,10 @@ class FeishuBitableClient:
             "parent_node": self.app_token,
             "size": str(size or len(content)),
         }
-        files = {"file": (file_name, BytesIO(content), content_type)}
+        # Pass immutable bytes so requests can rebuild the multipart body when
+        # _request refreshes an expired Feishu token and retries. A reused
+        # BytesIO remains at EOF and makes upload_all reject the declared size.
+        files = {"file": (file_name, content, content_type)}
         response = self._request(
             "POST",
             "https://open.feishu.cn/open-apis/drive/v1/medias/upload_all",

@@ -1,6 +1,9 @@
+import os
 import unittest
+from unittest import mock
 
 from scripts.run_original_batch import _render_complete_scripts_markdown
+from core.original_batch_executor import DIRECTION_LIMIT_ENV, _resolve_direction_limit
 
 
 class CompleteScriptReportTest(unittest.TestCase):
@@ -87,6 +90,103 @@ class CompleteScriptReportTest(unittest.TestCase):
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, markdown)
+
+
+class CapacityReportTest(unittest.TestCase):
+    """A content-capacity shortage must never look like a model failure."""
+
+    def _report(self, **overrides):
+        report = {
+            "batch_id": "B2",
+            "product_code": "P2",
+            "status": "PARTIAL_PLANNED",
+            "requested_count": 10,
+            "planned_count": 4,
+            "ready_count": 0,
+            "failed_count": 0,
+            "allocation_summary": {
+                "allocation_status": "PARTIAL_CONTENT_CAPACITY",
+                "requested_count": 10,
+                "planned_count": 4,
+                "shortage_count": 6,
+                "structure_count": 2,
+                "used_selling_argument_count": 2,
+                "deferred_content": [
+                    {"downgrade_reason": "SELLING_ARGUMENT_UNAVAILABLE"},
+                    {"downgrade_reason": "SELLING_ARGUMENT_UNAVAILABLE"},
+                    {"downgrade_reason": "WEARER_VISUAL_REQUIRED"},
+                ],
+            },
+            "items": [],
+        }
+        report.update(overrides)
+        return report
+
+    def test_shortage_and_reasons_are_visible(self):
+        markdown = _render_complete_scripts_markdown(self._report())
+        self.assertIn("内容容量与规划状态", markdown)
+        self.assertIn("PARTIAL_CONTENT_CAPACITY", markdown)
+        self.assertIn("未补足：6 条", markdown)
+        self.assertIn("不是模型失败", markdown)
+        self.assertIn("SELLING_ARGUMENT_UNAVAILABLE × 2", markdown)
+        self.assertIn("WEARER_VISUAL_REQUIRED × 1", markdown)
+
+    def test_complete_batch_omits_the_shortage_sentence(self):
+        report = self._report(
+            status="PLANNED",
+            planned_count=10,
+            allocation_summary={
+                "allocation_status": "COMPLETE",
+                "requested_count": 10,
+                "planned_count": 10,
+                "shortage_count": 0,
+                "structure_count": 4,
+                "used_selling_argument_count": 6,
+                "deferred_content": [],
+            },
+        )
+        markdown = _render_complete_scripts_markdown(report)
+        self.assertIn("COMPLETE", markdown)
+        self.assertNotIn("未补足", markdown)
+
+    def test_missing_allocation_summary_does_not_break_render(self):
+        markdown = _render_complete_scripts_markdown(
+            self._report(allocation_summary=None)
+        )
+        self.assertIn("内容容量与规划状态", markdown)
+        self.assertIn("请求 / 已规划 / 已就绪 / 失败：10 / 4 / 0 / 0", markdown)
+
+
+class DirectionLimitTest(unittest.TestCase):
+    """The independent-direction cap keeps its legacy default of four."""
+
+    def test_default_matches_the_previous_hard_coded_cap(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(DIRECTION_LIMIT_ENV, None)
+            self.assertEqual(_resolve_direction_limit(1), 1)
+            self.assertEqual(_resolve_direction_limit(4), 4)
+            for requested in (5, 6, 10, 20):
+                with self.subTest(requested=requested):
+                    self.assertEqual(_resolve_direction_limit(requested), 4)
+
+    def test_env_can_raise_the_cap(self):
+        with mock.patch.dict(os.environ, {DIRECTION_LIMIT_ENV: "12"}, clear=False):
+            self.assertEqual(_resolve_direction_limit(20), 12)
+            self.assertEqual(_resolve_direction_limit(5), 5)
+            self.assertEqual(_resolve_direction_limit(1), 1)
+
+    def test_invalid_env_falls_back_to_default(self):
+        for value in ("abc", "0", "-3", ""):
+            with self.subTest(value=value):
+                with mock.patch.dict(
+                    os.environ, {DIRECTION_LIMIT_ENV: value}, clear=False
+                ):
+                    self.assertEqual(_resolve_direction_limit(20), 4)
+
+    def test_bad_requested_count_is_safe(self):
+        self.assertEqual(_resolve_direction_limit(None), 1)
+        self.assertEqual(_resolve_direction_limit("x"), 1)
+        self.assertEqual(_resolve_direction_limit(0), 1)
 
 
 if __name__ == "__main__":

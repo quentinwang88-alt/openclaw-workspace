@@ -81,7 +81,11 @@ def build_longform_command(
     product_code: str | None = None,
     limit: int | None = None,
 ) -> list[str]:
-    """Build the isolated paid-media branch for checked long-form rows."""
+    """Build the unified long-form branch for original and remake rows.
+
+    Both sources share one operator checkbox and one paid-media path; only the
+    source compiler differs inside the producer.
+    """
 
     if action not in {"check", "sync"}:
         raise ValueError(f"未知 action: {action}")
@@ -140,7 +144,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         return 2
 
     print(f"OpenClaw 原创生产脚本分流动作: {args.action}")
-    print("1/2 长视频旁路")
+    print("1/2 统一长视频生产（原创 + 复刻）")
     longform = subprocess.run(longform_command, cwd=str(LONGFORM_RUNNER.parent.parent), check=False)
     print("2/2 15秒短视频同步")
     shortform = subprocess.run(command, cwd=str(SKILL_ROOT), check=False)

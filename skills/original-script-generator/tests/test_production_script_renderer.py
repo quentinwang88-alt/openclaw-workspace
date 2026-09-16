@@ -1164,3 +1164,86 @@ class ProductionScriptRendererTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FaceFreeConstraintTest(unittest.TestCase):
+    """The mixed template's NO_FACE guarantee must be stated in the prompt.
+
+    The per-shot framing prose implies it, but without an explicit constraint a
+    video model is free to fall back to the accessory genre's habitual wearer
+    close-up -- the exact failure this profile exists to prevent.
+    """
+
+    NO_FACE_CONTRACT = {
+        "execution_profile": "ACCESSORY_MIXED_TEMPLATE_V1",
+        "face_policy": "NO_FACE",
+        "capture_units": [
+            {
+                "unit_id": "CU_01",
+                "module": "WORN_DETAIL",
+                "carrier_mode": "WEARER_ACTIVE",
+                "face_policy": "NO_FACE",
+                "forbidden_framing": [
+                    "眼睛入画",
+                    "鼻子入画",
+                    "嘴部入画",
+                    "正面全脸",
+                    "镜面反射露脸",
+                ],
+                "allowed_framing": ["耳廓与耳垂近景", "耳侧与颈侧关系", "少量下颌边缘"],
+            }
+        ],
+    }
+
+    def _item(self, contract):
+        script = {
+            "production_design": {
+                "presentation_mode": "PERSON_ON_CAMERA",
+                "capture_mode": "CREATOR_SELF_SHOT",
+            },
+            "video_generation_brief": {
+                "render_profile": "ugc_native_v1",
+                "category_execution_extension": {"mixed_template_contract": contract},
+                "storyboard": [
+                    {
+                        "shot_no": 1,
+                        "time_range": "0-3s",
+                        "visual_content": "耳饰已经佩戴，耳廓与耳垂局部近景",
+                        "character_action": "保持自然小幅呼吸",
+                        "camera": "耳廓与耳垂局部近景，固定机位",
+                    }
+                ],
+                "capture_units": [
+                    {
+                        "capture_unit_id": "CU_01",
+                        "shot_numbers": [1],
+                        "time_range": "0-3s",
+                    }
+                ],
+            },
+        }
+        return SimpleNamespace(
+            result_json=json.dumps({"script": script}, ensure_ascii=False),
+            content_bundle_json="",
+        )
+
+    def test_no_face_contract_is_stated_in_the_prompt(self):
+        rendered = render_video_generation_prompt(
+            item=self._item(self.NO_FACE_CONTRACT), duration_seconds=15
+        )
+        self.assertIn("【全片不露脸｜硬约束】", rendered)
+        self.assertIn("正面全脸", rendered)
+        self.assertIn("耳廓与耳垂近景", rendered)
+
+    def test_absent_contract_adds_no_constraint(self):
+        rendered = render_video_generation_prompt(
+            item=self._item({}), duration_seconds=15
+        )
+        self.assertNotIn("【全片不露脸｜硬约束】", rendered)
+
+    def test_non_no_face_policy_adds_no_constraint(self):
+        contract = dict(self.NO_FACE_CONTRACT, face_policy="FACE_ALLOWED")
+        rendered = render_video_generation_prompt(
+            item=self._item(contract), duration_seconds=15
+        )
+        self.assertNotIn("【全片不露脸｜硬约束】", rendered)

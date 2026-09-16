@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -9,6 +10,35 @@ from typing import Any, Dict, Optional
 
 DEFAULT_DB_PATH = Path("/Users/likeu3/.openclaw/shared/data/longform_original_video.sqlite3")
 DEFAULT_ASSET_ROOT = Path("/Users/likeu3/.openclaw/shared/data/longform_original_video")
+
+# Historical original jobs predate the source-identity columns.  They are the
+# safe default so an old row keeps meaning exactly what it meant before.
+SOURCE_KIND_ORIGINAL = "ORIGINAL_GENERATED"
+SOURCE_KIND_REMAKE = "REMAKE_SEGMENTED"
+
+# Added by backward-compatible migration.  ALTER TABLE ADD COLUMN only: the
+# historical table is never dropped or rebuilt.
+_SOURCE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("source_kind", f"TEXT NOT NULL DEFAULT '{SOURCE_KIND_ORIGINAL}'"),
+    ("source_record_id", "TEXT NOT NULL DEFAULT ''"),
+    ("source_script_id", "TEXT NOT NULL DEFAULT ''"),
+    ("source_revision_hash", "TEXT NOT NULL DEFAULT ''"),
+)
+
+
+def remake_job_id(record_id: str, source_revision_hash: str, *, prefix: str = "LFR_") -> str:
+    """Stable job id material is at least record_id + source_revision_hash.
+
+    The same frozen remake row therefore always maps to the same job, while a
+    revised source produces a new job instead of silently overwriting the old
+    one.
+    """
+
+    material = json.dumps(
+        {"record_id": str(record_id or ""), "source_revision_hash": str(source_revision_hash or "")},
+        ensure_ascii=False, sort_keys=True,
+    )
+    return prefix + hashlib.sha256(material.encode("utf-8")).hexdigest()[:20].upper()
 
 
 class LongformStorage:
@@ -65,21 +95,43 @@ class LongformStorage:
                 conn.execute(
                     "ALTER TABLE longform_job ADD COLUMN execution_report_json TEXT NOT NULL DEFAULT '{}'"
                 )
+            # Source identity is additive.  Old original jobs read back as
+            # ORIGINAL_GENERATED with empty source ids and keep resuming.
+            for column, definition in _SOURCE_COLUMNS:
+                if column not in columns:
+                    conn.execute(
+                        f"ALTER TABLE longform_job ADD COLUMN {column} {definition}"
+                    )
+            # Only rows that actually carry source identity participate, so the
+            # index never collides across the many legacy original jobs.
+            conn.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_longform_job_source_identity
+                   ON longform_job(source_kind, source_record_id, source_revision_hash)
+                   WHERE source_record_id <> '' AND source_revision_hash <> ''"""
+            )
 
     def save_plan(self, job_id: str, master: Dict[str, Any], plan: Dict[str, Any],
-                  keyframes: Dict[str, Any]) -> None:
+                  keyframes: Dict[str, Any], *, source_kind: str = SOURCE_KIND_ORIGINAL,
+                  source_record_id: str = "", source_script_id: str = "",
+                  source_revision_hash: str = "") -> None:
         now = int(time.time())
         with self.connect() as conn:
             conn.execute(
                 """INSERT INTO longform_job
                 (job_id, product_code, status, master_contract_json, plan_json,
-                 keyframe_package_json, created_at, updated_at)
-                VALUES (?, ?, 'PLANNED', ?, ?, ?, ?, ?)
+                 keyframe_package_json, created_at, updated_at,
+                 source_kind, source_record_id, source_script_id, source_revision_hash)
+                VALUES (?, ?, 'PLANNED', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(job_id) DO UPDATE SET master_contract_json=excluded.master_contract_json,
                   plan_json=excluded.plan_json, keyframe_package_json=excluded.keyframe_package_json,
+                  source_kind=excluded.source_kind, source_record_id=excluded.source_record_id,
+                  source_script_id=excluded.source_script_id,
+                  source_revision_hash=excluded.source_revision_hash,
                   updated_at=excluded.updated_at""",
                 (job_id, master["product_code"], json.dumps(master, ensure_ascii=False),
-                 json.dumps(plan, ensure_ascii=False), json.dumps(keyframes, ensure_ascii=False), now, now),
+                 json.dumps(plan, ensure_ascii=False), json.dumps(keyframes, ensure_ascii=False), now, now,
+                 str(source_kind or SOURCE_KIND_ORIGINAL), str(source_record_id or ""),
+                 str(source_script_id or ""), str(source_revision_hash or "")),
             )
             for segment in plan["segments"]:
                 conn.execute(
@@ -115,6 +167,21 @@ class LongformStorage:
                      '$.workbench_request.item_index') AS INTEGER)""", (batch_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def find_job_by_source(self, source_record_id: str, source_revision_hash: str, *,
+                           source_kind: str = SOURCE_KIND_REMAKE) -> Optional[Dict[str, Any]]:
+        """Resume a frozen remake job by its authoritative source identity."""
+
+        if not source_record_id or not source_revision_hash:
+            return None
+        with self.connect() as conn:
+            row = conn.execute(
+                """SELECT job_id FROM longform_job
+                   WHERE source_kind=? AND source_record_id=? AND source_revision_hash=?
+                   ORDER BY updated_at DESC LIMIT 1""",
+                (str(source_kind), str(source_record_id), str(source_revision_hash)),
+            ).fetchone()
+        return self.get_job(str(row["job_id"])) if row else None
 
     def update_segment(self, job_id: str, segment_id: str, **fields: Any) -> None:
         allowed = {

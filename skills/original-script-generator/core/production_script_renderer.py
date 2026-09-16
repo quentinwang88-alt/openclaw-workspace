@@ -16,6 +16,11 @@ import os
 import re
 from typing import Any, Dict, Iterable
 
+from core.accessory_mixed_templates import (
+    ACCESSORY_MIXED_TEMPLATE_PROFILE,
+    MIXED_TEMPLATE_CONTRACT_KEY,
+    worn_body_framing,
+)
 from core.category_execution import (
     compile_category_execution_extension,
     resolve_category_carrier_execution,
@@ -29,6 +34,10 @@ from core.simplified_complete_script import (
     build_product_identity_lock,
     compile_capture_units,
     normalize_creator_capture_preset,
+)
+from core.video_prompt_compaction import (
+    CompactionReport,
+    compact_video_prompt_report,
 )
 
 
@@ -1334,6 +1343,86 @@ def _render_legacy_video_generation_prompt(*, item: Any, duration_seconds: float
     return "\n".join(lines).strip()
 
 
+def _is_face_free_contract(category_extension: Dict[str, Any]) -> bool:
+    """True when the frozen mixed accessory template forbids showing the face."""
+
+    contract = _dict(category_extension.get(MIXED_TEMPLATE_CONTRACT_KEY))
+    return bool(
+        _text(contract.get("execution_profile"), "")
+        == ACCESSORY_MIXED_TEMPLATE_PROFILE
+        and _text(contract.get("face_policy"), "").upper() == "NO_FACE"
+    )
+
+
+def _face_free_constraint_lines(category_extension: Dict[str, Any]) -> list:
+    """Hard no-face block for the authored mixed accessory template.
+
+    The template's central guarantee is that no shot ever shows the face.  The
+    per-shot framing prose already implies it, but nothing in the prompt ever
+    *states* it, so a video model is free to fall back to the accessory genre's
+    habitual wearer close-up.  Emitting the constraint explicitly closes that
+    gap.
+
+    Only the worn modules carry a body-in-frame vocabulary.  A handheld shot is
+    hand-and-product and a static shot is product-and-surface, and both ban
+    things that are *not* faces (a static shot may not show a hand at all), so
+    those bans are stated on their own instead of being folded into "人物只能以
+    这些局部入画" -- which is how a bracelet ended up described in ear words.
+
+    Returns ``[]`` for every other profile, so nothing else changes.
+    """
+
+    contract = _dict(category_extension.get(MIXED_TEMPLATE_CONTRACT_KEY))
+    if not _is_face_free_contract(category_extension):
+        return []
+    forbidden: list = []
+    for unit in contract.get("capture_units") or []:
+        if not isinstance(unit, dict):
+            continue
+        if _text(unit.get("module"), "") not in {"WORN_DETAIL", "WORN_RELATION"}:
+            continue
+        for value in unit.get("forbidden_framing") or []:
+            text = _text(value, "")
+            if text and text not in forbidden:
+                forbidden.append(text)
+
+    module_bans: list = []
+    for unit in contract.get("capture_units") or []:
+        if not isinstance(unit, dict):
+            continue
+        if _text(unit.get("module"), "") not in {
+            "HANDHELD_PRODUCT",
+            "STATIC_PRODUCT",
+        }:
+            continue
+        for value in unit.get("forbidden_framing") or []:
+            text = _text(value, "")
+            if text and text not in forbidden and text not in module_bans:
+                module_bans.append(text)
+
+    lines = [
+        "",
+        "【全片不露脸｜硬约束】",
+        "任何一镜都不得出现"
+        + "、".join(
+            forbidden or ["眼睛", "鼻子", "嘴部", "正面全脸", "镜面反射露脸"]
+        )
+        + "（镜面里的反射同样算露脸）。",
+    ]
+    allowed = worn_body_framing(contract)
+    if allowed:
+        lines.append("佩戴类镜头只能以这些局部入画：" + "、".join(allowed) + "。")
+    if module_bans:
+        lines.append(
+            "手持与静物镜头另有模块禁令，不得违反：" + "、".join(module_bans) + "。"
+        )
+    lines.append(
+        "不得把任何一镜改成以人脸为主体的正面构图；"
+        "人物入画时只保留上述局部身体关系，商品始终是画面主体。"
+    )
+    return lines
+
+
 def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: float) -> str:
     result = load_item_result(item)
     script = _dict(result.get("script"))
@@ -1363,6 +1452,7 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
         }
     identity_lock = _dict(brief.get("product_identity_lock"))
     category_extension = _dict(brief.get("category_execution_extension"))
+    face_free = _is_face_free_contract(category_extension)
     accessory_brief = _upgrade_small_accessory_brief_for_render(
         category_extension=category_extension,
         accessory_brief=_dict(brief.get("accessory_execution_brief")),
@@ -1502,6 +1592,9 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
         lines.append(f"关键可见细节：{_join(critical_details[:4])}")
     if must_not_change:
         lines.extend(["", "【商品负向约束】", _join(must_not_change)])
+    face_free_lines = _face_free_constraint_lines(category_extension)
+    if face_free_lines:
+        lines.extend(face_free_lines)
     if visual_saliency:
         exposure = _dict(visual_saliency.get("exposure"))
         separation = _dict(visual_saliency.get("separation"))
@@ -1755,13 +1848,31 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
         )
     elif not direct_creator_share:
         capture_lines.append(f"风格负向：{UGC_NATIVE_NEGATIVE}")
+    # The face-free framing vocabulary is read from the frozen contract rather
+    # than written out as ear wording: this sentence used to tell a bracelet to
+    # put "耳侧、耳廓、颈侧" in frame.
+    face_free_framing = "、".join(
+        worn_body_framing(_dict(category_extension.get(MIXED_TEMPLATE_CONTRACT_KEY)))
+    )
     lines.extend(
         [
             *capture_lines,
             "",
             "【人物、穿搭与生活场景】",
-            f"出镜方式：{_text(production.get('presentation_mode'))}",
-            f"拍摄关系：{capture_mode or '普通手机商品记录'}",
+            (
+                f"出镜方式：{_text(production.get('presentation_mode'))}"
+                "（本片全片不露脸，人物只以"
+                + (face_free_framing or "本镜自己的局部身体关系")
+                + "等局部入画）"
+                if face_free
+                else f"出镜方式：{_text(production.get('presentation_mode'))}"
+            ),
+            (
+                f"拍摄关系：{capture_mode or '普通手机商品记录'}"
+                "（同一个人用同一部手机分多段录制后直接剪切成片；任何一镜都不以人脸为主体）"
+                if face_free
+                else f"拍摄关系：{capture_mode or '普通手机商品记录'}"
+            ),
             f"人物：{_text(character.get('identity'))}；{_text(character.get('appearance'))}",
             f"妆发：{_text(character.get('hair_makeup'))}",
             f"基础穿搭：{_text(outfit.get('base_outfit'))}",
@@ -1842,6 +1953,13 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
             _text(capture_rhythm.get("capture_setup_mode"), "").upper()
             == "ONE_PUBLIC_PHONE_POSITION_PLUS_HANDHELD_CUTAWAY"
         )
+        # "手持自拍" describes the legacy wearer-on-camera cutaway.  A face-free
+        # contract must ask for a plain handheld pick-up shot instead.
+        cutaway_shot = (
+            "手持补录或商品切片"
+            if _is_face_free_contract(category_extension)
+            else "手持自拍或商品切片"
+        )
         lines.extend(
             [
                 (
@@ -1849,8 +1967,9 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
                     "不是一个长镜头里的数字裁切、连续变焦或人物反复走近走远。"
                 ),
                 (
-                    "公共场景拍摄关系：只使用一个自然可解释的固定手机位置，再补一段手持自拍或商品切片；"
-                    "这两种布置可录制多个不同内容时刻，不得因此合并成两个长镜头；"
+                    "公共场景拍摄关系：只使用一个自然可解释的固定手机位置，再补一段"
+                    + cutaway_shot
+                    + "；这两种布置可录制多个不同内容时刻，不得因此合并成两个长镜头；"
                     "不要在公共空间反复架设、搬动无人值守手机。"
                     if public_setup else
                     "连续性：只锁同一人物、商品、穿搭、地点、时刻、手机和生活状态；不锁死手机位置与景别。"
@@ -1982,17 +2101,52 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
 
 
 def render_video_generation_prompt(*, item: Any, duration_seconds: float) -> str:
+    """Rendered video prompt.  Byte-identical to before the compaction report."""
+    return render_video_generation_prompt_report(
+        item=item, duration_seconds=duration_seconds
+    ).text
+
+
+def render_video_generation_prompt_report(
+    *, item: Any, duration_seconds: float
+) -> CompactionReport:
+    """Same prompt, plus whether compaction met the budget.
+
+    Compaction never truncates, so an over-limit contract can only be
+    *reported*.  ``report.ok`` is ``False`` if any protected constraint was
+    dropped or migrated between shots (Review #9); ``report.over_limit`` is
+    ``True`` when explanatory filler could not cover the gap.
+    """
     result = load_item_result(item)
     script = _dict(result.get("script"))
     brief = _dict(script.get("video_generation_brief")) or script
     if _video_prompt_profile(brief) == LEGACY_PROFILE:
-        return _render_legacy_video_generation_prompt(
+        return _unchanged_report(
+            _render_legacy_video_generation_prompt(
+                item=item,
+                duration_seconds=duration_seconds,
+            )
+        )
+    # The UGC-native prompt concatenates several projections of the same frozen
+    # contract and can run past the video stage's character budget.  The
+    # compaction pass only touches prompts that exceed the budget, and only
+    # removes text that is duplicated elsewhere in the prompt.
+    return compact_video_prompt_report(
+        _render_ugc_native_video_generation_prompt(
             item=item,
             duration_seconds=duration_seconds,
         )
-    return _render_ugc_native_video_generation_prompt(
-        item=item,
-        duration_seconds=duration_seconds,
+    )
+
+
+def _unchanged_report(text: str) -> CompactionReport:
+    """A report for a path that has its own budget handling (legacy)."""
+    return CompactionReport(
+        text=text,
+        original_chars=len(text),
+        limit=0,
+        applied=False,
+        over_limit=False,
     )
 
 

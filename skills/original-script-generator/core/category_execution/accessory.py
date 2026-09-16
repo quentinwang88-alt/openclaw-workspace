@@ -12,11 +12,19 @@ import os
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Mapping
 
 from core.product_type_resolution import normalize_product_type
 
 from .base import CategoryExecutionAdapter
+
+# The pairing vocabulary is single-sourced with the mixed-display template so the
+# script validator and the blueprint guidance can never disagree about which
+# words an unauthorised script may not contain.
+from core.accessory_mixed_templates import (  # noqa: E402
+    PAIRING_OUTPUT_TERMS as _PAIR_OUTPUT_TERMS,
+    SINGLE_OUTPUT_TERMS as _SINGLE_OUTPUT_TERMS,
+)
 
 
 _RISK_REGISTRY_PATH = (
@@ -55,12 +63,162 @@ SMALL_ACCESSORY_MULTICLIP_PROFILE = "SMALL_ACCESSORY_MULTICLIP_V1"
 
 _PAIR_TERMS = ("一对", "成对", "一副", "双耳", "两只")
 _SINGLE_TERMS = ("单只", "单个", "单耳", "单边")
-_PAIR_OUTPUT_TERMS = ("一对", "成对", "一副", "双耳", "两只", "这对")
-_SINGLE_OUTPUT_TERMS = ("单只", "单个", "单耳", "单边", "这一只")
+
+# ---------------------------------------------------------------------------
+# NO_FACE framing vocabulary
+# ---------------------------------------------------------------------------
+# The accessory profiles were authored for a wearer-on-camera video, so their
+# small-product framing language names the face ("半脸耳侧近景").  That wording
+# is correct for PERSON_ON_CAMERA and for every other wearer profile, and must
+# stay byte-identical for them.
+#
+# When a *frozen mixed-display contract* declares ``face_policy = NO_FACE`` the
+# same framing has to be expressed without any face reference.  Otherwise the
+# final video prompt still asks the model for a half-face shot while the
+# storyboard, the per-shot ``face_policy`` and the contract all forbid it --
+# the template says NO_FACE but the prompt says 半脸.
+#
+# Selection is driven exclusively by the frozen contract travelling inside the
+# category extension, so an extension without one keeps the historical strings
+# verbatim, and already-frozen plan packages can be repaired by re-running only
+# the script stage.
+NO_FACE_POLICY = "NO_FACE"
+
+_NO_FACE_EAR_CLOSE = "耳侧与耳垂近景"
+_NO_FACE_EAR_RELATION = "耳侧与颈侧近景"
+
+# Terms that must never survive into a prompt that forbids faces.
+#
+# "头肩" (head-and-shoulders) belongs here even though it does not literally
+# say "face": the mixed template's EAR zone lists
+# ``forbidden_framing = [眼睛入画, 鼻子入画, 嘴部入画, 正面全脸, 镜面反射露脸]``
+# and its ``allowed_framing`` has no head-and-shoulders option at all.  A
+# head-and-shoulders shot puts eyes, nose and mouth in frame, so offering one as
+# the fallback "context" framing contradicts the contract that is supposed to
+# guarantee the face-free result.
+_FACE_TERMS = ("半脸", "侧脸", "正脸", "全脸", "镜面头肩", "头肩", "自拍")
+
+# Ordered longest-first: each entry has to be applied before any of its own
+# prefixes, otherwise "半脸耳侧近景" would be eaten by the bare "半脸" rule.
+_NO_FACE_TEXT_REPLACEMENTS = (
+    ("镜面头肩结果与半脸耳侧近景", "同机位重拍结果与" + _NO_FACE_EAR_RELATION),
+    ("镜面头肩结果", "同机位重拍结果"),
+    ("镜面头肩", "同机位重拍"),
+    # Non-mirror head-and-shoulders wording.  These run after the mirror rules
+    # above have already consumed "镜面头肩".
+    #
+    # "头肩" has to go because a head-and-shoulders shot puts eyes, nose and
+    # mouth in frame, which the EAR zone forbids.  But it must not be removed
+    # blindly: the HAIR zone's authorised framing is "后脑与侧后方", so
+    # "头肩侧后方近景" is a *back* view that never shows the face and has to keep
+    # its direction.  Most specific patterns therefore come first, and the bare
+    # "头肩" rule stays last as the catch-all.
+    ("回到头肩或上半身交代人物与穿搭", "回到颈部与肩线关系景交代人物与穿搭"),
+    ("头肩侧后方", "侧后方"),
+    ("头肩或上半身", "上半身"),
+    ("头肩关系内", "颈肩关系内"),
+    ("头肩构图内", "颈肩构图内"),
+    ("头肩关系", "颈肩关系"),
+    ("头肩", "颈肩"),
+    # "自拍" is in ``_FACE_TERMS`` but used to have no rule here, which made the
+    # scrubber a silent no-op for it: ``_has_face_term`` reported True while
+    # ``_no_face_safe_text`` handed the text back untouched.
+    #
+    # Where it comes from: the frozen capture mode is
+    # ``CREATOR_SELF_SHOT`` -- *one person, one phone, several takes cut
+    # together*.  That names who owns the camera, not where the camera points.
+    # A model reading the token name paraphrases it back into "自拍" and writes
+    # it into the storyboard ("人物在同一自拍范围内轻微调整位置"), which quietly
+    # re-imports the face the NO_FACE contract exists to exclude.
+    #
+    # Most specific first, then the bare term as the catch-all -- same ordering
+    # discipline as the head-and-shoulders block above.  The replacements keep
+    # the *recording-organisation* meaning and drop only the framing claim.
+    ("自然自拍范围", "自然同机位取景范围"),
+    ("同一自拍范围", "同一取景范围"),
+    ("自拍范围内", "同机位取景范围内"),
+    ("普通自拍或固定近距离记录", "固定近距离记录"),
+    ("自拍", "自持手机固定录制"),
+    ("半脸与耳侧近景", _NO_FACE_EAR_CLOSE),
+    ("半脸耳侧近景", _NO_FACE_EAR_RELATION),
+    ("半脸耳侧", "耳侧"),
+    ("耳侧和半脸", "耳侧"),
+    ("耳侧与半脸", "耳侧"),
+    ("半脸", ""),
+    ("侧脸", "耳侧"),
+)
 
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def mixed_contract_face_policy(extension: Any) -> str:
+    """Face policy declared by the frozen mixed-display contract, if present."""
+
+    source = extension if isinstance(extension, Mapping) else {}
+    contract = source.get("mixed_template_contract")
+    if not isinstance(contract, Mapping) or not contract:
+        return ""
+    return _text(contract.get("face_policy")).upper()
+
+
+def _is_no_face(face_policy: Any) -> bool:
+    return _text(face_policy).upper() == NO_FACE_POLICY
+
+
+def _face_pick(no_face: bool, face_text: str, neutral_text: str) -> str:
+    """Return the neutral wording only when NO_FACE is genuinely in force."""
+
+    return neutral_text if no_face else face_text
+
+
+def _has_face_term(value: Any) -> bool:
+    text = _text(value)
+    return any(term in text for term in _FACE_TERMS)
+
+
+def _no_face_safe_text(value: Any) -> str:
+    """Rewrite authored framing prose so it never names the face."""
+
+    text = _text(value)
+    for source, target in _NO_FACE_TEXT_REPLACEMENTS:
+        if source in text:
+            text = text.replace(source, target)
+    return text
+
+
+def _no_face_deep_clean(value: Any) -> Any:
+    """Remove every face reference from a finished adapter projection.
+
+    One guarantee at the adapter boundary instead of a per-field rewrite: once
+    the frozen contract declares ``NO_FACE``, nothing this adapter emits may
+    describe a face.  Scattering individual rewrites is how ``头肩关系`` stayed
+    in ``EAR_RELATION_TO_CLOSE_RETURN`` long after the guidance prose had been
+    fixed -- the guidance fields were patched one by one and the interaction
+    keywords were simply missed.
+
+    Strings are rewritten; string entries of a list are additionally dropped
+    when they still name the face, which mirrors the rule already applied to
+    ``optional_simple_interactions``.  Non-string values are preserved, so this
+    can never remove a capability or a contract object.
+    """
+
+    if isinstance(value, str):
+        return _no_face_safe_text(value)
+    if isinstance(value, Mapping):
+        return {key: _no_face_deep_clean(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        cleaned: List[Any] = []
+        for item in value:
+            if isinstance(item, str):
+                text = _no_face_safe_text(item)
+                if text and not _has_face_term(text):
+                    cleaned.append(text)
+                continue
+            cleaned.append(_no_face_deep_clean(item))
+        return cleaned
+    return value
 
 
 def _dedupe(values: Iterable[Any], limit: int = 8) -> List[str]:
@@ -72,6 +230,45 @@ def _dedupe(values: Iterable[Any], limit: int = 8) -> List[str]:
         if len(result) >= limit:
             break
     return result
+
+
+def _mixed_template_blueprint_guidance(extension: Mapping[str, Any]) -> str:
+    """Per-shot guidance for the authored mixed-display template, if present.
+
+    Returns an empty string when the extension carries no template, which keeps
+    every legacy accessory path on its existing guidance.
+    """
+
+    if not isinstance(extension, Mapping):
+        return ""
+    contract = extension.get("mixed_template_contract")
+    if not isinstance(contract, Mapping) or not contract:
+        return ""
+    try:
+        from core.accessory_mixed_templates import (
+            PART_EVIDENCE_KEY,
+            render_mixed_blueprint_guidance,
+        )
+    except Exception:  # noqa: BLE001 - never break an existing path
+        return ""
+    profile = (
+        extension.get("profile") if isinstance(extension.get("profile"), Mapping) else {}
+    )
+    identity_authority = (
+        profile.get("identity_authority")
+        if isinstance(profile.get("identity_authority"), Mapping)
+        else {}
+    )
+    # Part-gated action candidates are only issued when the frozen evidence
+    # confirms the part.  Without evidence nothing is issued, which is the
+    # conservative default: an unconfirmed part must not be displayed.
+    evidence = extension.get(PART_EVIDENCE_KEY)
+    lines = render_mixed_blueprint_guidance(
+        contract,
+        identity_authority=identity_authority,
+        evidence=evidence if isinstance(evidence, Mapping) else None,
+    )
+    return "\n".join(line for line in lines if _text(line))
 
 
 def _small_accessory_motion_enabled() -> bool:
@@ -229,7 +426,10 @@ def _small_accessory_motion_capture(
     return roles, framing
 
 
-def _small_accessory_performance_arc(kind: str) -> List[Dict[str, str]]:
+def _small_accessory_performance_arc(
+    kind: str, *, face_policy: str = ""
+) -> List[Dict[str, str]]:
+    no_face = _is_no_face(face_policy)
     if kind == "HAIR_ACCESSORY":
         return [
             {
@@ -259,11 +459,26 @@ def _small_accessory_performance_arc(kind: str) -> List[Dict[str, str]]:
     return [
         {
             "unit_role": "PRODUCT_RESULT_CLOSE",
-            "gaze_target": "先观察镜中耳侧或当前耳饰位置",
-            "micro_reaction": "保持轻专注，让半脸与耳侧关系自然成立",
-            "movement_guidance": (
-                "耳饰从第一帧已经清楚可见，人物的肩部和侧脸正处在一个很小的自然角度变化中，"
-                "不先静止等待再开始"
+            "gaze_target": _face_pick(
+                no_face,
+                "先观察镜中耳侧或当前耳饰位置",
+                "先观察耳侧或当前耳饰位置",
+            ),
+            "micro_reaction": _face_pick(
+                no_face,
+                "保持轻专注，让半脸与耳侧关系自然成立",
+                "保持轻专注，让耳饰与耳侧关系自然成立",
+            ),
+            "movement_guidance": _face_pick(
+                no_face,
+                (
+                    "耳饰从第一帧已经清楚可见，人物的肩部和侧脸正处在一个很小的自然角度变化中，"
+                    "不先静止等待再开始"
+                ),
+                (
+                    "耳饰从第一帧已经清楚可见，人物的肩部和耳侧正处在一个很小的自然角度变化中，"
+                    "不先静止等待再开始"
+                ),
             ),
         },
         {
@@ -273,22 +488,38 @@ def _small_accessory_performance_arc(kind: str) -> List[Dict[str, str]]:
         },
         {
             "unit_role": "PRODUCT_REACQUISITION",
-            "gaze_target": "回到耳侧或镜中整体确认点",
+            "gaze_target": _face_pick(
+                no_face,
+                "回到耳侧或镜中整体确认点",
+                "回到耳侧整体确认点",
+            ),
             "micro_reaction": "轻确认后自然收住，不触碰耳饰",
-            "movement_guidance": (
-                "通过一次轻微上半身角度变化，或同一部手机的简单重新构图，"
-                "把耳饰带回半脸耳侧近景；动作延续到片段末尾，只在最后一瞬自然收住，不触碰耳饰"
+            "movement_guidance": _face_pick(
+                no_face,
+                (
+                    "通过一次轻微上半身角度变化，或同一部手机的简单重新构图，"
+                    "把耳饰带回半脸耳侧近景；动作延续到片段末尾，只在最后一瞬自然收住，不触碰耳饰"
+                ),
+                (
+                    "通过一次轻微上半身角度变化，或同一部手机的简单重新构图，"
+                    f"把耳饰带回{_NO_FACE_EAR_RELATION}；动作延续到片段末尾，"
+                    "只在最后一瞬自然收住，不触碰耳饰"
+                ),
             ),
         },
     ]
 
 
-def _small_accessory_motion_fields(kind: str) -> Dict[str, Any]:
+def _small_accessory_motion_fields(
+    kind: str, *, face_policy: str = ""
+) -> Dict[str, Any]:
     return {
         "schema_version": "action-design-v2-continuous-motion",
         "motion_scope": "ONE_CONTINUOUS_CHANGE",
         "motion_duration_preference": "3_TO_6_SECONDS",
-        "performance_arc": _small_accessory_performance_arc(kind),
+        "performance_arc": _small_accessory_performance_arc(
+            kind, face_policy=face_policy
+        ),
     }
 
 
@@ -335,13 +566,14 @@ def _earring_pairing_authority(anchor_card: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _resolve_product_prominence(
-    profile: Dict[str, Any], *, presentation_mode: str
+    profile: Dict[str, Any], *, presentation_mode: str, face_policy: str = ""
 ) -> Dict[str, Any]:
     """Project one small-product viewing scale without creating a QC gate."""
 
     contract = dict(profile.get("product_prominence") or {})
     if not contract:
         return {}
+    no_face = _is_no_face(face_policy)
     mode = _text(presentation_mode).upper()
     motion_kind = _text(contract.get("motion_projection_kind")).upper()
     # Historical frozen extensions predate ``motion_projection_kind``.  Infer
@@ -353,6 +585,13 @@ def _resolve_product_prominence(
             motion_kind = "HAIR_ACCESSORY"
         elif product_subtype == "earring":
             motion_kind = "EAR_ACCESSORY"
+    if no_face and motion_kind == "EAR_ACCESSORY":
+        # The authored earring scale names the face.  Keep the same viewing
+        # intent -- the ear and the product remain the observation target --
+        # but strip every face reference from the descriptive prose.
+        for key in ("opening_guidance", "context_guidance"):
+            if _text(contract.get(key)):
+                contract[key] = _no_face_safe_text(contract[key])
     wearer = mode in {
         "PERSON_ON_CAMERA", "MIXED", "WEARER_ACTIVE", "WEARER_PASSIVE",
     }
@@ -361,18 +600,24 @@ def _resolve_product_prominence(
         and motion_kind in {"HAIR_ACCESSORY", "EAR_ACCESSORY"}
         and _small_accessory_motion_enabled()
     ):
-        ending_framing = (
-            "后脑发饰区域或头肩侧后方近景"
-            if motion_kind == "HAIR_ACCESSORY"
-            else "半脸耳侧近景"
-        )
-        ending_guidance = (
-            "最后一段在同一地点补录后脑发饰区域或头肩侧后方近景，"
-            "让发饰、佩戴位置、相对大小和发束关系重新清楚可辨"
-            if motion_kind == "HAIR_ACCESSORY"
-            else "最后一段在同一地点补录半脸耳侧近景，"
-            "让耳饰本体、佩戴落点和相对长度重新清楚可辨"
-        )
+        if motion_kind == "HAIR_ACCESSORY":
+            ending_framing = "后脑发饰区域或头肩侧后方近景"
+            ending_guidance = (
+                "最后一段在同一地点补录后脑发饰区域或头肩侧后方近景，"
+                "让发饰、佩戴位置、相对大小和发束关系重新清楚可辨"
+            )
+        elif no_face:
+            ending_framing = _NO_FACE_EAR_RELATION
+            ending_guidance = (
+                f"最后一段在同一地点补录{_NO_FACE_EAR_RELATION}，"
+                "让耳饰本体、佩戴落点和相对长度重新清楚可辨"
+            )
+        else:
+            ending_framing = "半脸耳侧近景"
+            ending_guidance = (
+                "最后一段在同一地点补录半脸耳侧近景，"
+                "让耳饰本体、佩戴落点和相对长度重新清楚可辨"
+            )
         contract.update({
             "schema_version": "small-accessory-prominence-v2-motion-return",
             "sequence_policy": "PRODUCT_OPENING_TO_MOTION_TO_PRODUCT_RETURN",
@@ -389,7 +634,9 @@ def _resolve_product_prominence(
                 "hard_qc": False,
                 "may_trigger_retry": False,
             },
-            "performance_arc": _small_accessory_performance_arc(motion_kind),
+            "performance_arc": _small_accessory_performance_arc(
+                motion_kind, face_policy=face_policy
+            ),
         })
     if mode in {"HAND_ONLY", "HANDS_ONLY"}:
         contract.update({
@@ -916,7 +1163,9 @@ def _interaction_capabilities(
     demonstration_mode: str,
     presentation_mode: str,
     preferred_action_mode: str = "",
+    face_policy: str = "",
 ) -> list[dict[str, Any]]:
+    no_face = _is_no_face(face_policy)
     mode = _text(presentation_mode).upper()
     preferred_mode = _text(preferred_action_mode).upper()
     wrist_process = {
@@ -1065,32 +1314,77 @@ def _interaction_capabilities(
             {
                 "interaction_id": "EAR_FACE_ARC_REVEAL",
                 "primary_action_mode": "RESULT_SHOW",
-                "start_state": "耳饰已经佩戴完成并从第一帧可见，耳侧和半脸正在发生很小的自然角度变化",
-                "core_action": "肩部、上半身和侧脸一起完成一次连续角度变化，耳饰始终留在清楚亮部",
-                "end_state": "通过轻微角度变化回到耳饰、耳侧和半脸关系清楚的结果，只在最后一瞬收住",
+                "start_state": _face_pick(
+                    no_face,
+                    "耳饰已经佩戴完成并从第一帧可见，耳侧和半脸正在发生很小的自然角度变化",
+                    "耳饰已经佩戴完成并从第一帧可见，耳侧正在发生很小的自然角度变化",
+                ),
+                "core_action": _face_pick(
+                    no_face,
+                    "肩部、上半身和侧脸一起完成一次连续角度变化，耳饰始终留在清楚亮部",
+                    "肩部、上半身和耳侧一起完成一次连续角度变化，耳饰始终留在清楚亮部",
+                ),
+                "end_state": _face_pick(
+                    no_face,
+                    "通过轻微角度变化回到耳饰、耳侧和半脸关系清楚的结果，只在最后一瞬收住",
+                    "通过轻微角度变化回到耳饰与耳侧关系清楚的结果，只在最后一瞬收住",
+                ),
                 "risk_tier": "LOW",
-                "action_keywords": ["侧脸连续变化", "半脸耳侧", "佩戴结果"],
-                **_small_accessory_motion_fields("EAR_ACCESSORY"),
+                "action_keywords": _face_pick(
+                    no_face,
+                    ["侧脸连续变化", "半脸耳侧", "佩戴结果"],
+                    ["耳侧连续变化", "耳侧近景", "佩戴结果"],
+                ),
+                **_small_accessory_motion_fields(
+                    "EAR_ACCESSORY", face_policy=face_policy
+                ),
             },
             {
                 "interaction_id": "EAR_MIRROR_TO_PHONE",
                 "primary_action_mode": "RESULT_SHOW",
-                "start_state": "耳饰已经佩戴完成并从第一帧可见，人物在镜中观察时保持轻微自然状态变化",
-                "core_action": "镜面头肩结果与半脸耳侧近景分成两段手机素材，人物只短暂看向自己的手机",
-                "end_state": "重新构图回到耳饰无遮挡的半脸耳侧结果，只在最后一瞬收住",
+                "start_state": _face_pick(
+                    no_face,
+                    "耳饰已经佩戴完成并从第一帧可见，人物在镜中观察时保持轻微自然状态变化",
+                    "耳饰已经佩戴完成并从第一帧可见，人物保持轻微自然状态变化",
+                ),
+                "core_action": _face_pick(
+                    no_face,
+                    "镜面头肩结果与半脸耳侧近景分成两段手机素材，人物只短暂看向自己的手机",
+                    "同机位重拍结果与"
+                    + _NO_FACE_EAR_RELATION
+                    + "分成两段手机素材，人物只短暂看向自己的手机",
+                ),
+                "end_state": _face_pick(
+                    no_face,
+                    "重新构图回到耳饰无遮挡的半脸耳侧结果，只在最后一瞬收住",
+                    "重新构图回到耳饰无遮挡的耳侧结果，只在最后一瞬收住",
+                ),
                 "risk_tier": "LOW",
-                "action_keywords": ["镜面", "手机视线", "耳侧近景"],
-                **_small_accessory_motion_fields("EAR_ACCESSORY"),
+                "action_keywords": _face_pick(
+                    no_face,
+                    ["镜面", "手机视线", "耳侧近景"],
+                    ["同机位重拍", "手机视线", "耳侧近景"],
+                ),
+                **_small_accessory_motion_fields(
+                    "EAR_ACCESSORY", face_policy=face_policy
+                ),
             },
             {
                 "interaction_id": "EAR_RELATION_TO_CLOSE_RETURN",
                 "primary_action_mode": "RESULT_SHOW",
                 "start_state": "耳饰已经佩戴完成并从第一帧可见，人物在头肩关系内保持轻微自然状态变化",
-                "core_action": "人物完成一次自然上半身角度变化，下一段重新放置手机回到半脸耳侧近景",
+                "core_action": _face_pick(
+                    no_face,
+                    "人物完成一次自然上半身角度变化，下一段重新放置手机回到半脸耳侧近景",
+                    "人物完成一次自然上半身角度变化，"
+                    f"下一段重新放置手机回到{_NO_FACE_EAR_RELATION}",
+                ),
                 "end_state": "通过重新构图让耳饰本体、佩戴落点和相对长度重新清楚可辨，只在最后一瞬收住",
                 "risk_tier": "LOW",
                 "action_keywords": ["头肩关系", "上半身变化", "耳侧回收"],
-                **_small_accessory_motion_fields("EAR_ACCESSORY"),
+                **_small_accessory_motion_fields(
+                    "EAR_ACCESSORY", face_policy=face_policy
+                ),
             },
         ]
     if product_subtype in _WRIST_TYPES:
@@ -1311,6 +1605,12 @@ class AccessoryExecutionAdapter(CategoryExecutionAdapter):
         presentation_mode: str,
     ) -> Dict[str, Any]:
         profile = extension.get("profile") if isinstance(extension.get("profile"), dict) else {}
+        # The frozen mixed-display contract, when present, owns the face policy
+        # for the whole script.  Reading it here keeps every downstream framing
+        # string consistent with the per-shot ``face_policy`` stamped onto the
+        # capture units, including for plan packages frozen before this change.
+        face_policy = mixed_contract_face_policy(extension)
+        no_face = _is_no_face(face_policy)
         mode = _text(presentation_mode).upper()
         wearer = mode in {
             "PERSON_ON_CAMERA", "MIXED", "WEARER_ACTIVE", "WEARER_PASSIVE",
@@ -1337,7 +1637,7 @@ class AccessoryExecutionAdapter(CategoryExecutionAdapter):
                 demonstration_mode = "NECK_WORN"
         demonstration_profile = _DEMONSTRATION_PROFILES.get(demonstration_mode, {})
         product_prominence = _resolve_product_prominence(
-            profile, presentation_mode=mode
+            profile, presentation_mode=mode, face_policy=face_policy
         )
         optional_interactions = (
             list(
@@ -1353,7 +1653,15 @@ class AccessoryExecutionAdapter(CategoryExecutionAdapter):
             if mode in {"HAND_ONLY", "HANDS_ONLY"}
             else []
         )
-        return {
+        if no_face:
+            # These suggestions are authored prose.  Rewrite them first and then
+            # drop anything that still names the face, so an unauthored entry
+            # can never smuggle a half-face shot past the frozen contract.
+            neutral = [_no_face_safe_text(value) for value in optional_interactions]
+            optional_interactions = [
+                value for value in neutral if value and not _has_face_term(value)
+            ]
+        carrier_execution = {
             "presentation_mode": mode,
             "wearing_zone": _text(profile.get("wearing_zone")),
             "required_view": required_view,
@@ -1393,8 +1701,15 @@ class AccessoryExecutionAdapter(CategoryExecutionAdapter):
                 demonstration_mode=demonstration_mode,
                 presentation_mode=mode,
                 preferred_action_mode=_text(profile.get("preferred_action_mode")),
+                face_policy=face_policy,
             ),
         }
+        if no_face:
+            # Boundary guarantee: every code-owned field of this projection is
+            # face-free, including ones a future author forgets to route
+            # through ``_face_pick``.
+            carrier_execution = _no_face_deep_clean(carrier_execution)
+        return carrier_execution
 
     def resolve_argument_execution(
         self,
@@ -1458,6 +1773,14 @@ class AccessoryExecutionAdapter(CategoryExecutionAdapter):
         *,
         carrier_execution: Dict[str, Any],
     ) -> str:
+        # Authored mixed-display template: it owns the physical choreography for
+        # the whole clip (handheld + static + face-free worn modules), so the
+        # legacy single-carrier advice below -- which assumes one framing for the
+        # entire video, e.g. a half-face ear close-up -- must not be emitted.
+        mixed_guidance = _mixed_template_blueprint_guidance(extension)
+        if mixed_guidance:
+            return mixed_guidance
+
         profile = extension.get("profile") if isinstance(extension.get("profile"), dict) else {}
         lines = [
             carrier_execution.get("product_relation_zh"),

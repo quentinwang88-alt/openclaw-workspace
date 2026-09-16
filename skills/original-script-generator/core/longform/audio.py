@@ -609,3 +609,92 @@ def _video_duration_seconds(path: Path) -> float:
     if completed.returncode != 0:
         raise RuntimeError("读取视频时长失败: " + completed.stderr[-800:])
     return float(completed.stdout.strip())
+
+
+def finalize_silent(
+    video_path: str | Path,
+    output_path: str | Path,
+    *,
+    bgm_path: str | Path | None = None,
+) -> Dict[str, Any]:
+    """Attach a silent AAC track to a no-voiceover master.
+
+    H3 segments have their source audio stripped, so the merged video has no
+    audio stream at all.  Publishing and ``validate_finalized_media`` both need
+    one, so a real silent AAC stream is written (or the approved local BGM when
+    ``LONGFORM_BGM_PATH`` / ``bgm_path`` is configured).  No TTS is called.
+    """
+
+    video = Path(video_path).resolve()
+    if not video.is_file():
+        raise ValueError("待处理长视频不存在")
+    output = Path(output_path).resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path = output.parent / "finalization.json"
+    video_seconds = _video_duration_seconds(video)
+    resolved_bgm = _resolve_bgm_path(bgm_path)
+    text_hash = hashlib.sha256(
+        json.dumps({
+            "layout_version": "silent-aac-v1",
+            "video_seconds": round(video_seconds, 3),
+            "bgm_path": str(resolved_bgm) if resolved_bgm else "PLATFORM_BGM",
+        }, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    if manifest_path.is_file() and output.is_file():
+        existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if existing.get("text_sha256") == text_hash and existing.get("final_video_path") == str(output):
+            try:
+                validation = validate_finalized_media(
+                    output, expected_duration_seconds=video_seconds,
+                )
+            except RuntimeError:
+                pass
+            else:
+                return {**existing, "action": "IDEMPOTENT_REUSE", "media_validation": validation}
+
+    temp = output.with_suffix(".tmp.mp4")
+    command = [_binary("ffmpeg"), "-y", "-i", str(video)]
+    if resolved_bgm:
+        command.extend(["-stream_loop", "-1", "-i", str(resolved_bgm)])
+        filters = (
+            f"[1:a]volume=0.09,afade=t=in:st=0:d=0.5,"
+            f"afade=t=out:st={max(0.0, video_seconds - 0.8):.3f}:d=0.8,"
+            f"atrim=duration={video_seconds:.3f},alimiter=limit=0.95[a]"
+        )
+        bgm_policy = "APPROVED_LOCAL_BGM_APPLIED"
+    else:
+        command.extend([
+            "-f", "lavfi", "-i",
+            "anullsrc=channel_layout=stereo:sample_rate=44100",
+        ])
+        filters = f"[1:a]atrim=duration={video_seconds:.3f}[a]"
+        bgm_policy = "SILENT_TRACK_PLATFORM_BGM_EXPECTED"
+    command.extend([
+        "-filter_complex", filters,
+        "-map", "0:v:0", "-map", "[a]", "-c:v", "copy", "-c:a", "aac",
+        "-b:a", "192k", "-ar", "44100", "-ac", "2", "-movflags", "+faststart",
+        "-t", f"{video_seconds:.3f}", "-shortest", str(temp),
+    ])
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    if completed.returncode != 0:
+        raise RuntimeError("静音音轨写入失败: " + completed.stderr[-1200:])
+    try:
+        validation = validate_finalized_media(temp, expected_duration_seconds=video_seconds)
+    except Exception:
+        temp.unlink(missing_ok=True)
+        raise
+    temp.replace(output)
+    result = {
+        "schema_version": "longform-finalization-silent-v1",
+        "action": "FINALIZED_SILENT",
+        "text_sha256": text_hash,
+        "provider": "none",
+        "voice_id": "",
+        "video_seconds": round(video_seconds, 3),
+        "bgm_policy": bgm_policy,
+        "bgm_path": str(resolved_bgm) if resolved_bgm else "",
+        "final_video_path": str(output),
+        "media_validation": validation,
+    }
+    manifest_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return result

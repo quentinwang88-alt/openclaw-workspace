@@ -372,6 +372,116 @@ def finalize_visual_execution_contract(
     return result
 
 
+ACCESSORY_MIXED_VISUAL_CONTRACT_VERSION = "accessory-mixed-visual-contract-v1"
+
+
+def build_accessory_mixed_visual_contract(
+    *,
+    canonical_product_type: str,
+    presentation_mode: str,
+    capture_mode: str,
+    environment_recipe_id: str = "",
+    frozen_contract: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Accessory-specific visual contract for the authored mixed template mode.
+
+    This is deliberately a separate branch rather than an extension of
+    ``_SUPPORTED_TYPES``: widening the support set alone would let accessories
+    inherit the scarf grey/default rules.  Returns ``{}`` whenever the mode owns
+    nothing here and the product is outside the four supported accessory
+    families, so the existing scarf / apparel contract stays byte-for-byte
+    unchanged.
+
+    Review #7: the environment recipe must come from the *frozen* mixed contract.
+    The blueprint already quotes the frozen recipe, so a visual contract that
+    quietly picked the default instead handed one model input two different
+    surfaces and light directions.  ``frozen_contract`` also keeps a task frozen:
+    once a contract exists, the ``..._MIXED_TEMPLATE_V1_ENABLED`` switch must not
+    be able to flip a re-run back to the legacy contract.
+    """
+
+    frozen = frozen_contract if isinstance(frozen_contract, Mapping) else {}
+    try:
+        from core.accessory_mixed_templates import (
+            accessory_mixed_template_enabled,
+            get_environment_recipe,
+            load_mixed_template_definition,
+            resolve_mixed_zone,
+        )
+    except Exception:  # noqa: BLE001 - never break the legacy contract path
+        return {}
+    if not frozen and not accessory_mixed_template_enabled():
+        return {}
+    # The frozen contract names its own zone, so a frozen task does not depend on
+    # type resolution being able to re-derive it.
+    zone = _text(frozen.get("category_zone"))
+    if not zone:
+        resolved, _canonical = resolve_mixed_zone(canonical_product_type, "")
+        zone = resolved or ""
+    if not zone:
+        return {}
+
+    definition = load_mixed_template_definition()
+    rules = (definition.get("category_rules") or {}).get(zone)
+    rules = rules if isinstance(rules, Mapping) else {}
+    recipe_id = (
+        _text(environment_recipe_id)
+        or _text(frozen.get("environment_recipe_id"))
+        or _text(definition.get("default_environment_recipe"))
+    )
+    try:
+        recipe = get_environment_recipe(recipe_id)
+    except ValueError:
+        recipe = {}
+    consistency = definition.get("consistency_rules") or {}
+    authenticity = definition.get("authenticity_and_evidence_rules") or {}
+    return {
+        "schema_version": ACCESSORY_MIXED_VISUAL_CONTRACT_VERSION,
+        "feature_scope": "ACCESSORY_MIXED_TEMPLATE",
+        "visual_finish_profile": VISUAL_FINISH_PROFILE,
+        "presentation_mode": _text(presentation_mode),
+        "capture_mode": _text(capture_mode),
+        "authorities": {
+            "product_integrity": "HARD_EXISTING_IDENTITY_LOCK",
+            "lighting_recipe": "FROZEN_PER_VIDEO",
+            "framing_zone": "CATEGORY_EXTENSION",
+            "capture_texture": "SOFT",
+            "evidence": "REFERENCE_LIMITED",
+        },
+        "lighting_recipe": {
+            "recipe_id": _text(recipe_id),
+            "recipe_version": recipe.get("recipe_version"),
+            "label": _text(recipe.get("label")),
+            "environment": _text(recipe.get("environment")),
+            "goal": _text(recipe.get("goal")),
+            "keep_constant": list(consistency.get("keep_constant") or []),
+            "allowed_variation": list(consistency.get("allowed_variation") or []),
+            "forbidden": list(consistency.get("forbidden") or []),
+        },
+        "framing_zone": {
+            "zone": zone,
+            "zone_label": _text(rules.get("zone_label")),
+            "allowed_framing": list(rules.get("allowed_framing") or []),
+            "forbidden_framing": list(rules.get("forbidden_framing") or []),
+            "instruction": (
+                "同一条视频使用同一套环境配方：光向、白平衡、肤色与主要背景材质保持一致；"
+                "允许正常角度变化引起的合理高光变化。"
+            ),
+        },
+        "authenticity": {
+            "reference_limited": _text(authenticity.get("reference_limited")),
+            "no_fabricated_material": _text(authenticity.get("no_fabricated_material")),
+            "relative_only": _text(authenticity.get("relative_only")),
+            "pairing_authority": _text(authenticity.get("pairing_authority")),
+        },
+        "diagnostics_policy": {
+            "mode": "SOFT_ONLY",
+            "may_block_generation": False,
+            "may_trigger_retry": False,
+        },
+    }
+
+
 def build_visual_execution_contract(
     *,
     canonical_product_type: str,
@@ -384,10 +494,21 @@ def build_visual_execution_contract(
     action_design: Mapping[str, Any] | None = None,
     suggested_opening_action: str = "",
     suggested_event_flow: str = "",
+    accessory_environment_recipe_id: str = "",
+    accessory_frozen_contract: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Return one thin wearable visual contract, or empty for unsupported flows."""
 
     canonical_type = _text(canonical_product_type).lower()
+    accessory_contract = build_accessory_mixed_visual_contract(
+        canonical_product_type=canonical_product_type,
+        presentation_mode=presentation_mode,
+        capture_mode=capture_mode,
+        environment_recipe_id=accessory_environment_recipe_id,
+        frozen_contract=accessory_frozen_contract,
+    )
+    if accessory_contract:
+        return accessory_contract
     if not visual_execution_v2_enabled() or canonical_type not in _SUPPORTED_TYPES:
         return {}
 

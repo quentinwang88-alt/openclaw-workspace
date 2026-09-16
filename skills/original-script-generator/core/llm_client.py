@@ -15,7 +15,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
 from openai import OpenAI
@@ -57,6 +57,11 @@ def normalize_route_order(route_order: Optional[Any]) -> Optional[List[str]]:
 
 PRIMARY_LLM_DEFAULT_API_URL = "https://chatgpt.com/backend-api/codex"
 PRIMARY_LLM_DEFAULT_MODEL = "gpt-5.6-sol"
+# The OpenClaw config renamed this provider from ``openai-codex`` to ``openai``.
+# Both generations must resolve, otherwise the explicit proxy configured for the
+# route is silently dropped and the request falls back to whatever environment
+# proxy happens to be set (which cannot reach the model host).
+PRIMARY_PROVIDER_ALIASES: Tuple[str, ...] = ("openai-codex", "openai")
 PRIMARY_LLM_REASONING_EFFORT = os.environ.get("ORIGINAL_SCRIPT_PRIMARY_REASONING_EFFORT", "high")
 PRIMARY_LLM_STREAM_RETURN_ON_TEXT_DONE = (
     os.environ.get("ORIGINAL_SCRIPT_STREAM_RETURN_ON_TEXT_DONE", "1") != "0"
@@ -127,6 +132,26 @@ def _safe_read_json(path: Path) -> Dict[str, Any]:
         return {}
 
 
+def _lookup_primary_provider(mapping: Any) -> Dict[str, Any]:
+    """Return the primary provider block, tolerating both config generations."""
+    if not isinstance(mapping, dict):
+        return {}
+    for name in PRIMARY_PROVIDER_ALIASES:
+        value = mapping.get(name)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _strip_primary_provider_prefix(value: str) -> str:
+    """``openai/gpt-x`` / ``openai-codex/gpt-x`` -> ``gpt-x``."""
+    text = str(value or "").strip()
+    for name in PRIMARY_PROVIDER_ALIASES:
+        if text.startswith(name + "/"):
+            return text.split("/", 1)[1].strip()
+    return ""
+
+
 def _extract_openclaw_primary_model() -> str:
     payload = _safe_read_json(OPENCLAW_CONFIG_PATH)
     agents = payload.get("agents") if isinstance(payload, dict) else {}
@@ -140,8 +165,8 @@ def _extract_openclaw_primary_model() -> str:
                     break
         if not selected:
             selected = str((agents.get("defaults") or {}).get("model", {}).get("primary") or "").strip()
-    if selected.startswith("openai-codex/"):
-        model = selected.split("/", 1)[1].strip()
+    if selected:
+        model = _strip_primary_provider_prefix(selected)
         if model:
             return model
     return ""
@@ -592,8 +617,8 @@ class OriginalScriptLLMClient:
         if override:
             return override
         payload = _safe_read_json(OPENCLAW_CONFIG_PATH)
-        provider = (
-            ((payload.get("models") or {}).get("providers") or {}).get("openai-codex")
+        provider = _lookup_primary_provider(
+            ((payload.get("models") or {}).get("providers") or {})
             if isinstance(payload, dict)
             else {}
         )

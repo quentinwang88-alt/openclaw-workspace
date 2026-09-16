@@ -21,6 +21,12 @@ from core.category_execution.accessory import (
     SMALL_ACCESSORY_MOTION_ENV,
     SMALL_ACCESSORY_MULTICLIP_ENV,
     SMALL_ACCESSORY_MULTICLIP_PROFILE,
+    _no_face_deep_clean,
+    _no_face_safe_text,
+)
+from core.accessory_mixed_templates import (
+    ACCESSORY_MIXED_TEMPLATE_ENV,
+    ACCESSORY_MIXED_TEMPLATE_PROFILE,
 )
 from core.original_batch_allocator import _make_item
 from core.production_script_renderer import render_video_generation_prompt
@@ -891,7 +897,15 @@ class CategoryExecutionAdapterTest(unittest.TestCase):
         )
 
     def test_accessory_extension_flows_from_plan_to_video_brief(self):
-        with patch.dict(os.environ, {ACCESSORY_PROFILE_ENV: "1"}, clear=False):
+        # Pin the mixed-display gate off.  This test walks the legacy
+        # single-carrier hand-off, and its expected framing vocabulary is the
+        # the legacy one; leaving the gate ambient would make it depend on
+        # whatever the caller exported.
+        with patch.dict(
+            os.environ,
+            {ACCESSORY_PROFILE_ENV: "1", ACCESSORY_MIXED_TEMPLATE_ENV: "0"},
+            clear=False,
+        ):
             item = _make_item(
                 product_code="P_EAR",
                 batch_id="B1",
@@ -1051,6 +1065,225 @@ class CategoryExecutionAdapterTest(unittest.TestCase):
         self.assertIn("视线关系：", rendered)
         self.assertIn("自然反应：", rendered)
         self.assertIn("补录半脸耳侧近景", rendered)
+
+
+class NoFaceFramingAlignmentTest(unittest.TestCase):
+    """A frozen NO_FACE contract must not leave face wording in the hand-off.
+
+    The accessory profile authored its small-product framing vocabulary for a
+    wearer-on-camera video, so it names the face ("半脸耳侧近景").  When the
+    mixed-display template freezes a NO_FACE policy for the same product, every
+    code-owned field that reaches the video prompt has to switch to a face-free
+    equivalent.  Otherwise the storyboard says NO_FACE while the rendered prompt
+    still asks the model for a half-face shot.
+    """
+
+    FACE_TERMS = ("半脸", "侧脸", "正脸", "全脸", "镜面头肩", "头肩", "自拍")
+
+    def _face_hits(self, node, path=""):
+        hits = []
+        if isinstance(node, dict):
+            for key, value in node.items():
+                hits.extend(self._face_hits(value, f"{path}.{key}"))
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                hits.extend(self._face_hits(value, f"{path}[{index}]"))
+        elif isinstance(node, str):
+            if any(term in node for term in self.FACE_TERMS):
+                hits.append((path, node))
+        return hits
+
+    def _earring_extension(self, *, face_policy=None):
+        extension = compile_category_execution_extension(
+            product_type="耳环",
+            top_category="配饰",
+            anchor_card=_anchor(),
+            enabled=True,
+        )
+        self.assertTrue(extension.get("profile"))
+        if face_policy is None:
+            return extension
+        extension = dict(extension)
+        extension["mixed_template_contract"] = {
+            "execution_profile": ACCESSORY_MIXED_TEMPLATE_PROFILE,
+            "face_policy": face_policy,
+        }
+        return extension
+
+    def _projections(self, extension):
+        carrier = resolve_category_carrier_execution(
+            extension, presentation_mode="MIXED"
+        )
+        brief = build_category_video_brief(extension, carrier_execution=carrier)
+        rhythm = project_category_capture_rhythm_contract(
+            extension,
+            carrier_execution=carrier,
+            capture_contract={
+                "profile": "NATIVE_MULTI_CLIP_V1",
+                "capture_unit_count": 4,
+            },
+        )
+        return carrier, brief, rhythm
+
+    def test_no_face_contract_removes_face_wording(self):
+        with patch.dict(
+            os.environ,
+            {
+                ACCESSORY_PROFILE_ENV: "1",
+                SMALL_ACCESSORY_MOTION_ENV: "1",
+                SMALL_ACCESSORY_MULTICLIP_ENV: "1",
+            },
+            clear=False,
+        ):
+            extension = self._earring_extension(face_policy="NO_FACE")
+            carrier, brief, rhythm = self._projections(extension)
+
+        for label, node in (("carrier", carrier), ("brief", brief), ("rhythm", rhythm)):
+            hits = self._face_hits(node)
+            self.assertEqual([], hits, f"{label} 仍含脸部措辞: {hits[:3]}")
+
+        prominence = carrier["product_prominence_contract"]
+        self.assertIn("耳侧与耳垂近景", prominence["opening_guidance"])
+        terminal = prominence["terminal_visibility"]
+        self.assertEqual("耳侧与颈侧近景", terminal["ending_framing"])
+        self.assertIn("耳侧与颈侧近景", terminal["ending_guidance"])
+        self.assertTrue(
+            all(
+                "耳侧" in item for item in carrier["optional_simple_interactions"]
+            ),
+            carrier["optional_simple_interactions"],
+        )
+        framing = rhythm.get("framing_guidance_by_unit") or []
+        neutral_units = [unit for unit in framing if "耳侧与颈侧近景" in unit]
+        self.assertEqual(1, len(neutral_units), framing)
+        self.assertIs(framing[-1], neutral_units[0], framing)
+        self.assertIn("补录耳侧与颈侧近景", neutral_units[0])
+
+    def test_no_face_contract_drops_head_and_shoulders_framing(self):
+        """Head-and-shoulders is a face shot by another name.
+
+        The EAR zone forbids ``眼睛入画 / 鼻子入画 / 嘴部入画`` and its
+        ``allowed_framing`` has no head-and-shoulders option, yet the authored
+        earring profile offers "后续可回到头肩或上半身交代人物与穿搭" as the
+        context framing.  A NO_FACE film must not repeat that offer, otherwise
+        the rendered prompt asks for a framing its own forbidden list bans.
+        """
+
+        with patch.dict(
+            os.environ,
+            {
+                ACCESSORY_PROFILE_ENV: "1",
+                SMALL_ACCESSORY_MOTION_ENV: "1",
+                SMALL_ACCESSORY_MULTICLIP_ENV: "1",
+            },
+            clear=False,
+        ):
+            authored = self._earring_extension()
+            self.assertIn(
+                "头肩", authored["profile"]["product_prominence"]["context_guidance"]
+            )
+            extension = self._earring_extension(face_policy="NO_FACE")
+            carrier, brief, rhythm = self._projections(extension)
+
+        prominence = carrier["product_prominence_contract"]
+        self.assertNotIn("头肩", prominence["context_guidance"])
+        self.assertIn("颈部与肩线", prominence["context_guidance"])
+        for label, node in (("carrier", carrier), ("brief", brief), ("rhythm", rhythm)):
+            hits = self._face_hits(node)
+            self.assertEqual([], hits, f"{label} 仍含脸部措辞: {hits[:3]}")
+
+    def test_head_and_shoulders_rewrite_keeps_the_back_of_head_intent(self):
+        """The rewrite must be intent-preserving inside the HAIR zone.
+
+        "头肩侧后方近景" is a view from behind the head: the face is not in
+        frame, so it is an authorised HAIR framing and must keep its direction.
+        A blanket 头肩 -> 颈肩 substitution would silently turn the hair result
+        shot into a neck shot, so the specific patterns have to win.
+        """
+
+        cleaned = _no_face_deep_clean(
+            {
+                "end_state": "通过重新构图回到发饰无遮挡的头肩侧后方近景，只在最后一瞬收住",
+                "start_state": "发饰已经固定完成并从第一帧可见，人物在头肩或上半身构图内轻微调整自然重心",
+                "core_action": "先录一段镜面头肩结果，再重新放置同一部手机补录侧后方发饰近景，两段直接剪切",
+                "keyword_list": ["镜面头肩", "头肩关系内", "侧后方近景"],
+            }
+        )
+
+        self.assertEqual(
+            "通过重新构图回到发饰无遮挡的侧后方近景，只在最后一瞬收住",
+            cleaned["end_state"],
+        )
+        self.assertIn("上半身构图内", cleaned["start_state"])
+        self.assertIn("同机位重拍结果", cleaned["core_action"])
+        self.assertEqual(["同机位重拍", "颈肩关系内", "侧后方近景"], cleaned["keyword_list"])
+
+    def test_creator_self_shot_does_not_become_selfie_wording(self):
+        """``CREATOR_SELF_SHOT`` names who owns the camera, not where it points.
+
+        "自拍" was already listed in ``_FACE_TERMS`` but had no entry in the
+        rewrite table, so ``_has_face_term`` reported a hit while
+        ``_no_face_safe_text`` handed the text straight back -- a silent no-op.
+        A model that reads the capture-mode token paraphrases it into
+        "人物在同一自拍范围内轻微调整位置" and the face returns through the
+        capture mode.  The rewrite must keep the recording-organisation meaning
+        and drop only the framing claim.
+        """
+
+        cases = (
+            (
+                "手部与商品在台面柔光范围内完成前两段；人物随后站在鞋柜旁的"
+                "自然自拍范围内补录耳侧佩戴画面",
+                "自然同机位取景范围内",
+            ),
+            ("人物在同一自拍范围内轻微调整位置", "同一取景范围内"),
+            (
+                "手机保持普通自拍或固定近距离记录关系，腕部自然进入画面；",
+                "固定近距离记录关系",
+            ),
+        )
+        for source, expected in cases:
+            cleaned = _no_face_safe_text(source)
+            self.assertIn(expected, cleaned, cleaned)
+            self.assertNotIn("自拍", cleaned, cleaned)
+
+    def test_absent_contract_keeps_the_authored_wording(self):
+        """No contract means no change: the legacy vocabulary is untouched."""
+
+        with patch.dict(
+            os.environ,
+            {
+                ACCESSORY_PROFILE_ENV: "1",
+                SMALL_ACCESSORY_MOTION_ENV: "1",
+                SMALL_ACCESSORY_MULTICLIP_ENV: "1",
+            },
+            clear=False,
+        ):
+            extension = self._earring_extension()
+            carrier, brief, rhythm = self._projections(extension)
+
+        rendered = json.dumps([carrier, brief, rhythm], ensure_ascii=False)
+        self.assertIn("半脸与耳侧近景", rendered)
+        self.assertIn("补录半脸耳侧近景", rendered)
+        self.assertIn("半脸耳侧近景", rendered)
+
+    def test_non_no_face_policy_is_a_no_op(self):
+        """A contract that does not forbid faces must not rewrite the prose."""
+
+        with patch.dict(
+            os.environ,
+            {
+                ACCESSORY_PROFILE_ENV: "1",
+                SMALL_ACCESSORY_MOTION_ENV: "1",
+                SMALL_ACCESSORY_MULTICLIP_ENV: "1",
+            },
+            clear=False,
+        ):
+            extension = self._earring_extension(face_policy="FACE_ALLOWED")
+            carrier, _, _ = self._projections(extension)
+
+        rendered = json.dumps(carrier, ensure_ascii=False)
+        self.assertIn("半脸与耳侧近景", rendered)
 
 
 if __name__ == "__main__":

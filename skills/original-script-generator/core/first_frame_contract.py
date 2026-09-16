@@ -223,6 +223,16 @@ def build_first_frame_contract(
     else:
         availability = "AVAILABLE"
 
+    from core.accessory_mixed_templates import (
+        frozen_mixed_contract,
+        mixed_first_frame_facts,
+    )
+
+    mixed_contract = frozen_mixed_contract(
+        brief if brief.get("category_execution_extension") else script
+    )
+    mixed_facts = mixed_first_frame_facts(mixed_contract) if mixed_contract else {}
+
     contract: Dict[str, Any] = {
         "schema_version": CONTRACT_VERSION,
         "prompt_version": PROMPT_VERSION,
@@ -258,6 +268,11 @@ def build_first_frame_contract(
         "opening_contract": _opening_snapshot(script, brief),
         "presentation_mode": presentation,
         "capture_mode": _text(brief.get("capture_mode") or production.get("capture_mode")),
+        # The frozen mixed contract travels with the script, so the first frame
+        # reads its framing instead of re-deciding from the current environment.
+        # Absent for every legacy accessory task -> "" -> legacy branches below.
+        "mixed_template_contract": mixed_contract,
+        "mixed_first_frame_facts": mixed_facts,
         "authority_order": [
             "PRODUCT_REFERENCES_CONTROL_PRODUCT_IDENTITY",
             "PERSONA_REFERENCES_CONTROL_FACE_SKIN_HAIR_IDENTITY",
@@ -295,6 +310,11 @@ def build_first_frame_contract(
         "visual_saliency": visual_saliency,
         "opening_contract": contract["opening_contract"],
     }
+    # Only the opening shot can affect a still frame, so only that slice enters
+    # the fingerprint: a later shot's prose change must not invalidate a cached
+    # first frame.
+    if mixed_facts:
+        fingerprint_payload["mixed_first_frame_facts"] = mixed_facts
     contract["asset_fingerprint"] = _stable_hash(fingerprint_payload, 40)
     contract["contract_id"] = "FFC_" + _stable_hash(fingerprint_payload, 20).upper()
     return contract
@@ -323,6 +343,71 @@ def _project_first_frame_opening_action(action: Any, presentation: Any) -> str:
     for source, target in replacements:
         text = text.replace(source, target)
     return text
+
+
+_MIXED_SCOPE_OPENING = {
+    # view_scope -> the opening-state sentence.  Keyed by the *frozen* shot's
+    # scope rather than by the carrier, because a still frame of shot 1 must be
+    # described the way shot 1 is actually executed.
+    "PRODUCT_AND_SURFACE": (
+        "商品安放在冻结环境中独立成主体，画面不得出现人物、脸、身体、穿搭、手或手臂"
+    ),
+    "HAND_AND_PRODUCT": (
+        "只出现商品与必要的承托手部，不得出现人物脸部或完整身体；"
+        "手指稳定承托，不对刚性结构做多余展开"
+    ),
+    "BODY_ZONE_CLOSE": "只取已完成的佩戴局部，商品是清楚主体",
+    "BODY_ZONE_RELATION": "只取已完成的佩戴部位与相邻衣物或发型的搭配关系",
+}
+_MIXED_SCOPE_FALLBACK = (
+    "只取已完成的商品或佩戴局部；保持不露脸，不出现正面全脸、眼鼻嘴或对镜讲话"
+)
+
+
+def _mixed_accessory_frame_line(contract: Mapping[str, Any] | None) -> str:
+    """Category line for the authored mixed accessory mode.
+
+    Returns ``""`` whenever the task carries no frozen mixed contract.  That is
+    the whole gate: the ``ORIGINAL_SCRIPT_ACCESSORY_MIXED_TEMPLATE_V1_ENABLED``
+    switch decides whether *new planning* compiles a contract, and once a task is
+    frozen it must not matter whether the switch is still on.  Gating on the
+    switch here (as this function used to) meant a first-frame retry or an async
+    worker with a different environment could silently restore the historical
+    "半脸耳侧近景" framing onto a task that was frozen face-free -- and, in the
+    other direction, could change a legacy accessory task the moment the switch
+    was turned on.
+
+    The framing itself is read off the *opening shot* of the frozen contract, so
+    a template whose first shot is a static product shot is never described with
+    a worn close-up, and vice versa.
+    """
+
+    if not isinstance(contract, Mapping) or not contract:
+        return ""
+    try:
+        from core.accessory_mixed_templates import mixed_first_frame_facts
+    except Exception:  # noqa: BLE001 - never break the legacy prompt path
+        return ""
+    facts = mixed_first_frame_facts(contract)
+    opening = _dict(facts.get("opening_unit"))
+    scope = _text(opening.get("view_scope")).upper()
+    label = _text(opening.get("view_label")) or "商品首帧"
+    allowed = "、".join(_list(opening.get("allowed_framing")))
+    forbidden = "、".join(_list(opening.get("forbidden_framing")))
+    no_face = _text(facts.get("face_policy")).upper() == "NO_FACE"
+
+    parts = [
+        f"{label}首帧："
+        + (_MIXED_SCOPE_OPENING.get(scope) or _MIXED_SCOPE_FALLBACK)
+    ]
+    if allowed and scope in _MIXED_SCOPE_OPENING:
+        parts.append(f"取景只允许：{allowed}")
+    if forbidden:
+        parts.append(f"禁止取景：{forbidden}")
+    elif no_face:
+        parts.append("禁止取景：正面全脸、眼鼻嘴入画、对镜讲话")
+    parts.append("只展示参考图已知的材质与结构")
+    return "；".join(parts) + "。"
 
 
 def render_first_frame_prompt(
@@ -408,7 +493,14 @@ def render_first_frame_prompt(
         or persona.get("product_type")
         or outfit.get("product_type")
     ).lower()
-    if canonical_type in {"outerwear", "top", "dress"}:
+    mixed_accessory_line = _mixed_accessory_frame_line(
+        contract.get("mixed_template_contract")
+    )
+    if mixed_accessory_line:
+        # Authored mixed accessory mode owns its own face-free framing; the
+        # legacy branches below must not add a half-face / head-shoulder line.
+        category_extension = mixed_accessory_line
+    elif canonical_type in {"outerwear", "top", "dress"}:
         category_extension = (
             "服装：按本段景别保留实际入画的商品结构，局部细节可以单独入画；"
             "入画的领型、门襟、袖口等结构与商品参考图一致。"

@@ -717,6 +717,35 @@ def _eligible_hooks_for_bundle(
 # ── Three-round allocation ─────────────────────────────────────────────
 
 
+def _mixed_scope_status(
+    product_type: str,
+    top_category: str,
+    execution_scope: Optional[Dict[str, Any]],
+) -> str:
+    """Whether the accessory mixed mode governs this batch at all.
+
+    ``IN_SCOPE`` / ``OUT_OF_SCOPE`` (feature off or another category) /
+    ``SCOPE_UNSUPPORTED`` (this is a long-form build, a remake or a resume).
+    The distinction matters: three zeroed coverage counters on an out-of-scope
+    batch must never read as "compared history, found no duplicate".
+    """
+
+    try:
+        from core.accessory_mixed_templates import (
+            accessory_mixed_template_enabled,
+            mixed_scope_decision,
+            resolve_mixed_zone,
+        )
+    except Exception:  # noqa: BLE001 - a report label must never break planning
+        return "OUT_OF_SCOPE"
+    if not accessory_mixed_template_enabled():
+        return "OUT_OF_SCOPE"
+    if not mixed_scope_decision(execution_scope).get("eligible"):
+        return "SCOPE_UNSUPPORTED"
+    zone, _canonical = resolve_mixed_zone(product_type, top_category)
+    return "IN_SCOPE" if zone else "OUT_OF_SCOPE"
+
+
 def allocate_batch_items(
     *,
     product_code: str,
@@ -736,13 +765,50 @@ def allocate_batch_items(
     scene_reference_contexts: Optional[Dict[str, Dict[str, Any]]] = None,
     multidim_reference_contexts: Optional[Dict[str, Dict[str, Any]]] = None,
     category_execution_extension: Optional[Dict[str, Any]] = None,
+    execution_scope: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[PlanItem], Dict[str, Any]]:
-    """Three-round deterministic allocation returning items and allocation summary."""
+    """Three-round deterministic allocation returning items and allocation summary.
+
+    ``execution_scope`` is the caller's declaration of the *real* task this
+    planning request belongs to (short-original vs long-form vs remake, its real
+    target duration, whether this is a fresh plan).  The authored mixed template
+    is a 15-second short-original mode, and the long-form direct-product builder
+    borrows this same entry point with a 15-second duration while owning a
+    different parent task, so the category and the environment flag alone cannot
+    decide it.  ``None`` keeps the historical behaviour for direct callers.
+    """
     recent = list(recent_creative_usage or [])
     rng = random.Random(random_seed)
     items: List[PlanItem] = []
     reserved_visual_signatures: List[str] = []
     reserved_creative_contracts: List[Dict[str, Any]] = []
+    # Final-shot references for the mixed montage.  Kept separate from the
+    # legacy scene signatures above: they measure a different axis and mixing
+    # them would let a rotating scene label hide a repeated montage.
+    reserved_mixed_references: List[Dict[str, Any]] = []
+    mixed_history_references, mixed_history_incomplete = _mixed_history_references(
+        recent
+    )
+    # 历史比较覆盖范围: a reader must be able to see how much history was
+    # actually available before believing a "no duplicate found" statement.
+    # ``scope_status`` says whether this mechanism applied to the batch at all,
+    # so an all-zero coverage on a women's-wear batch is never read as a dedup
+    # verdict.
+    mixed_scope_status = _mixed_scope_status(
+        product_type, top_category, execution_scope
+    )
+    mixed_history_coverage: Dict[str, Any] = {
+        "scope_status": mixed_scope_status,
+        "history_compared": len(mixed_history_references),
+        "history_incomplete": mixed_history_incomplete,
+        "history_rows_seen": len(mixed_history_references) + mixed_history_incomplete,
+    }
+    mixed_difference_tally: Dict[str, int] = {
+        "distinct_theme": 0,
+        "execution_variant": 0,
+        "duplicate_rejected": 0,
+        "insufficient_evidence": 0,
+    }
     reference_video_usage: Counter = Counter()
     deferred_content: List[Dict[str, Any]] = []
     catalog_rows = list(selling_point_catalog or [])
@@ -873,6 +939,31 @@ def allocate_batch_items(
                     "recommended_flow": bundle.get("recommended_flow", "LIGHT_VIDEO_OR_MIXCUT"),
                 }
             )
+        rejection = _mixed_structure_rejection(
+            direction=d,
+            product_type=product_type,
+            top_category=top_category,
+            execution_scope=execution_scope,
+        )
+        if rejection:
+            # This structure cannot host the frozen four-shot template: it needs
+            # more beats than the template has shots and there is no defined
+            # mapping for the surplus beat.  Exclude the candidate while
+            # structures are still being chosen, and say why -- truncating the
+            # extra beat later in the compile step would delete narrative
+            # authority, and merging two beats would invent one.
+            deferred_content.append(
+                {
+                    "direction_assignment_id": d.get("direction_assignment_id", ""),
+                    "output_slot": d.get("output_slot", ""),
+                    "content_bundle_id": "",
+                    "content_mode": "FACTUAL_OBSERVATION",
+                    "argument_readiness": "NOT_APPLICABLE",
+                    "downgrade_reason": rejection,
+                    "recommended_flow": "REPLAN_WITH_MIXED_COMPATIBLE_STRUCTURE",
+                }
+            )
+            continue
         content_pools[idx] = candidates
         structure_pool.append(d)
 
@@ -947,6 +1038,15 @@ def allocate_batch_items(
             ),
             reference_video_usage=reference_video_usage,
             category_execution_extension=category_execution_extension,
+            execution_scope=execution_scope,
+            # The very list the summary already reports as deferred content: a
+            # rejected mixed contract *is* a candidate that could not be
+            # delivered, so its reason code belongs with the others.
+            planning_rejections=deferred_content,
+            reserved_mixed_references=reserved_mixed_references,
+            mixed_history_references=mixed_history_references,
+            mixed_history_incomplete=mixed_history_incomplete,
+            mixed_difference_tally=mixed_difference_tally,
         )
         if item:
             items.append(item)
@@ -967,6 +1067,8 @@ def allocate_batch_items(
             items, structure_pool, "ROUND1_COMPLETE",
             requested_count=requested_count,
             deferred_content=deferred_content,
+            mixed_difference_tally=mixed_difference_tally,
+            mixed_history_coverage=mixed_history_coverage,
         )
 
     # ── Round 2: CONTENT_VARIANT ───────────────────────────────────────
@@ -1050,6 +1152,15 @@ def allocate_batch_items(
             ),
             reference_video_usage=reference_video_usage,
             category_execution_extension=category_execution_extension,
+            execution_scope=execution_scope,
+            # The very list the summary already reports as deferred content: a
+            # rejected mixed contract *is* a candidate that could not be
+            # delivered, so its reason code belongs with the others.
+            planning_rejections=deferred_content,
+            reserved_mixed_references=reserved_mixed_references,
+            mixed_history_references=mixed_history_references,
+            mixed_history_incomplete=mixed_history_incomplete,
+            mixed_difference_tally=mixed_difference_tally,
         )
         if item:
             items.append(item)
@@ -1069,12 +1180,16 @@ def allocate_batch_items(
             items, structure_pool, "ROUND2_COMPLETE",
             requested_count=requested_count,
             deferred_content=deferred_content,
+            mixed_difference_tally=mixed_difference_tally,
+            mixed_history_coverage=mixed_history_coverage,
         )
 
     return items[:requested_count], _build_summary(
         items, structure_pool, "PARTIAL_CONTENT_CAPACITY",
         requested_count=requested_count,
         deferred_content=deferred_content,
+        mixed_difference_tally=mixed_difference_tally,
+        mixed_history_coverage=mixed_history_coverage,
     )
 
 
@@ -1212,6 +1327,12 @@ def _make_item(
     multidim_reference_context: Optional[Dict[str, Any]] = None,
     reference_video_usage: Optional[Counter] = None,
     category_execution_extension: Optional[Dict[str, Any]] = None,
+    execution_scope: Optional[Dict[str, Any]] = None,
+    planning_rejections: Optional[List[Dict[str, Any]]] = None,
+    reserved_mixed_references: Optional[List[Dict[str, Any]]] = None,
+    mixed_history_references: Optional[List[Dict[str, Any]]] = None,
+    mixed_history_incomplete: int = 0,
+    mixed_difference_tally: Optional[Dict[str, int]] = None,
 ) -> Optional[PlanItem]:
     da_id = direction.get("direction_assignment_id", "")
     atoms = bundle.get("claim_atoms", [])
@@ -1384,6 +1505,112 @@ def _make_item(
         product_type=product_type,
         content_carrier=_text(hard.get("content_carrier")),
     )
+    # ── Authored mixed accessory template (feature-gated) ─────────────
+    # Adds one frozen per-shot display contract inside the existing
+    # category_execution_extension.  When the gate is off this writes nothing,
+    # so frozen packages for every other product stay byte-for-byte identical.
+    #
+    # Ordering is load-bearing: this must run *before* the creative seed is
+    # built.  The seed deep-copies the extension it is handed, and the script
+    # stage consumes the frozen seed verbatim (it never rebuilds it when the
+    # batch already carries one).  Injecting after the seed therefore wrote the
+    # contract into the frozen package but not into the copy the generator
+    # actually reads, so the template silently vanished between planning and
+    # generation -- the blueprint fell back to the legacy single-carrier
+    # framing advice.
+    mixed_injection = _build_mixed_template_injection(
+        product_type=product_type,
+        top_category=top_category,
+        item_index=item_index,
+        item_role=item_role,
+        content_angle_key=angle_key,
+        audience_tension_text=bundle.get("audience_tension_text", ""),
+        claim_keys=claim_keys,
+        product_code=product_code,
+        execution_scope=execution_scope,
+        reserved_references=reserved_mixed_references,
+        history_references=mixed_history_references,
+        history_incomplete=mixed_history_incomplete,
+        identity=f"{da_id}#{int(item_index):02d}",
+    )
+    if mixed_injection.get("contract"):
+        mixed_extension = dict(category_execution_extension or {})
+        mixed_extension["mixed_template_contract"] = mixed_injection["contract"]
+        category_execution_extension = mixed_extension
+        frozen_package["category_execution_extension"] = mixed_extension
+        frozen_package["mixed_template_contract_status"] = "FROZEN"
+        _record_mixed_difference(
+            mixed_difference_tally,
+            mixed_injection["contract"].get("difference_report"),
+        )
+        if reserved_mixed_references is not None:
+            # Reserve the *final shots* this candidate owns, so the next item in
+            # this same batch is compared against what was actually accepted
+            # rather than against a plan that never shipped.
+            reserved_mixed_references.append(
+                {
+                    "identity": f"{da_id}#{int(item_index):02d}",
+                    "signature": mixed_injection["contract"].get(
+                        "final_shot_signature"
+                    )
+                    or {},
+                }
+            )
+    elif mixed_injection.get("rejected"):
+        # A valid contract whose four final shots repeat one this batch already
+        # owns.  Delivering it anyway is exactly what Review #3 found: the batch
+        # claimed N distinct scripts while showing the same montage N times.
+        rejection = mixed_injection["rejected"]
+        verdict = _text(rejection.get("review_status")).upper()
+        tally = mixed_difference_tally
+        if tally is not None:
+            key = (
+                "insufficient_evidence"
+                if verdict == "NEEDS_REVIEW"
+                else "duplicate_rejected"
+            )
+            tally[key] = tally.get(key, 0) + 1
+        if planning_rejections is not None:
+            planning_rejections.append(
+                {
+                    "direction_assignment_id": da_id,
+                    "output_slot": direction.get("output_slot", f"S{int(item_index)}"),
+                    "content_bundle_id": bundle.get("content_bundle_id", ""),
+                    "content_mode": bundle.get("content_mode", "FACTUAL_OBSERVATION"),
+                    "argument_readiness": bundle.get(
+                        "argument_readiness", "NOT_APPLICABLE"
+                    ),
+                    "downgrade_reason": _text(rejection.get("reason"))
+                    or "MIXED_DUPLICATE_CANDIDATE",
+                    "difference_report": rejection.get("difference_report") or {},
+                    "recommended_flow": "REPLAN_MIXED_THEME",
+                }
+            )
+        return None
+    elif mixed_injection.get("errors"):
+        # A contract that failed hard validation must never look like a
+        # successful plan, and must never reach paid generation.  Return no
+        # executable item at all: a "PLANNED" item carrying a REJECTED contract
+        # is exactly the hole this closes.  The reason codes travel back to the
+        # caller so the batch report can say *why* the candidate was dropped.
+        errors = [str(item) for item in mixed_injection["errors"] if str(item)]
+        if planning_rejections is not None:
+            planning_rejections.append(
+                {
+                    "direction_assignment_id": da_id,
+                    "output_slot": direction.get("output_slot", f"S{int(item_index)}"),
+                    "content_bundle_id": bundle.get("content_bundle_id", ""),
+                    "content_mode": bundle.get("content_mode", "FACTUAL_OBSERVATION"),
+                    "argument_readiness": bundle.get(
+                        "argument_readiness", "NOT_APPLICABLE"
+                    ),
+                    "downgrade_reason": "MIXED_CONTRACT_REJECTED",
+                    "contract_errors": errors,
+                    "recommended_flow": "REPLAN_MIXED_CONTRACT",
+                }
+            )
+        return None
+
     frozen_package["simplified_creative_seed"] = build_simplified_creative_seed(
         anchor_card=dict(anchor_card or {}),
         structure_contract=contract,
@@ -1449,6 +1676,324 @@ def _make_item(
     )
 
 
+def _routed_beats(contract: Dict[str, Any]) -> List[str]:
+    """Routed beat order for one direction, via the single existing authority."""
+
+    try:
+        from core.simplified_complete_script import _macro_structure
+
+        return list(_macro_structure(contract or {}))
+    except Exception:  # noqa: BLE001 - a structure we cannot read is not a filter
+        return []
+
+
+def _mixed_structure_rejection(
+    *,
+    direction: Dict[str, Any],
+    product_type: str,
+    top_category: str,
+    execution_scope: Optional[Dict[str, Any]],
+) -> str:
+    """Reason code when this structure cannot host the mixed template.
+
+    Empty string means "keep the candidate".  Only consulted when the mixed mode
+    is genuinely on for this execution scope and this product, so every other
+    request returns immediately and no existing path changes.
+    """
+
+    try:
+        from core.accessory_mixed_templates import (
+            accessory_mixed_template_enabled,
+            map_structure_beats_to_units,
+            mixed_scope_decision,
+            mixed_template_shot_limit,
+            resolve_mixed_zone,
+        )
+    except Exception:  # noqa: BLE001 - never break planning
+        return ""
+    if not accessory_mixed_template_enabled():
+        return ""
+    if not mixed_scope_decision(execution_scope).get("eligible"):
+        return ""
+    zone, _canonical = resolve_mixed_zone(product_type, top_category)
+    if zone is None:
+        return ""
+
+    contract = (
+        direction.get("structure_contract")
+        if isinstance(direction.get("structure_contract"), dict)
+        else {}
+    )
+    mapping = map_structure_beats_to_units(
+        _routed_beats(contract), mixed_template_shot_limit()
+    )
+    if mapping.get("compatible"):
+        return ""
+    return _text(mapping.get("reason")) or "MIXED_STRUCTURE_INCOMPATIBLE"
+
+
+def _mixed_history_references(
+    recent_usage: Optional[List[Dict[str, Any]]],
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Comparable mixed references from the historical usage ledger.
+
+    Returns ``(references, incomplete_count)``.  A row that predates the
+    final-shot signatures is *counted* but never used as a reference: treating a
+    missing record as "nothing similar found" would report a dedup pass that
+    never happened, and rebuilding a signature from the legacy scene id would
+    fabricate a reference outright.
+    """
+
+    try:
+        from core.accessory_mixed_templates import mixed_reference_signature
+    except Exception:  # noqa: BLE001 - never break planning
+        return [], 0
+
+    references: List[Dict[str, Any]] = []
+    incomplete = 0
+    for row in recent_usage or []:
+        if not isinstance(row, dict):
+            continue
+        reference = mixed_reference_signature(row)
+        if reference.get("complete"):
+            references.append(reference)
+        else:
+            incomplete += 1
+    return references, incomplete
+
+
+def _record_mixed_difference(
+    tally: Optional[Dict[str, int]],
+    report: Optional[Dict[str, Any]],
+) -> None:
+    """Count one accepted candidate into the report's independent-content tally."""
+
+    if not isinstance(tally, dict) or not isinstance(report, dict):
+        return
+    verdict = _text(report.get("review_status")).upper()
+    if verdict == "DISTINCT_THEME":
+        tally["distinct_theme"] = tally.get("distinct_theme", 0) + 1
+    elif verdict == "EXECUTION_VARIANT":
+        tally["execution_variant"] = tally.get("execution_variant", 0) + 1
+
+
+def _build_mixed_template_injection(
+    *,
+    product_type: str,
+    top_category: str,
+    item_index: int,
+    item_role: str,
+    content_angle_key: str,
+    audience_tension_text: str,
+    claim_keys: List[str],
+    product_code: str,
+    execution_scope: Optional[Dict[str, Any]] = None,
+    reserved_references: Optional[List[Dict[str, Any]]] = None,
+    history_references: Optional[List[Dict[str, Any]]] = None,
+    history_incomplete: int = 0,
+    identity: str = "",
+) -> Dict[str, Any]:
+    """Compile the authored mixed-accessory contract for one plan item.
+
+    Returns one of five shapes:
+
+    * ``{}``                       -- the feature is off, or the product is not
+      one of the four supported accessory families.  Nothing is injected, so
+      every existing path stays byte-for-byte unchanged.
+    * ``{"scope_rejected": ...}``  -- the mode is on and the product qualifies,
+      but the *real* parent task is not a 15-second short original (a long-form
+      source build borrowing this entry point, a remake, a resumed plan).  No
+      contract is injected and no failure is recorded: this request simply is
+      not the mixed mode's business.
+    * ``{"contract": {...}}``      -- a validated contract that won its
+      final-shot comparison, with ``difference_report`` filled in.
+    * ``{"errors": [...]}``        -- the contract was built but failed hard
+      validation.  It is *not* injected, and the failure is recorded so it can
+      never be mistaken for a successful plan.
+    * ``{"rejected": {...}}``      -- the contract is valid but its four final
+      shots repeat a candidate this batch (or history) already owns.  The
+      reason and the comparison report travel back so the batch report can show
+      *why* fewer scripts were delivered instead of quietly minting a synonym.
+
+    The theme reuses the existing content semantics (``content_angle_key`` /
+    ``audience_tension_text`` / ``claim_keys``) and the existing item role, so no
+    parallel theme registry or creative-history database is introduced.
+    """
+
+    try:
+        from core.accessory_mixed_templates import (
+            MIXED_SIGNATURE_KEY,
+            accessory_mixed_template_enabled,
+            compile_mixed_template_contract,
+            judge_mixed_candidate,
+            mixed_scope_decision,
+            mixed_template_ids,
+            resolve_mixed_zone,
+            select_environment_recipe_id,
+            select_template_id,
+            validate_mixed_template_contract,
+        )
+    except Exception:  # noqa: BLE001 - never break planning
+        return {}
+    if not accessory_mixed_template_enabled():
+        return {}
+    scope_decision = mixed_scope_decision(execution_scope)
+    if not scope_decision.get("eligible"):
+        return {"scope_rejected": str(scope_decision.get("reason") or "")}
+    zone, canonical = resolve_mixed_zone(product_type, top_category)
+    if zone is None:
+        return {}
+
+    role = _text(item_role).upper()
+    candidate_role = "PRIMARY" if role == "STRUCTURE_MOTHER" else "EXECUTION_VARIANT"
+    angle = _text(content_angle_key)
+    theme_id = angle or f"TH_ITEM_{int(item_index)}"
+
+    # 先选本条要让观众看懂什么，再选择能展示这个主题的模板。
+    # The observation vocabulary is owned by the physical subtype; the template
+    # decides which of those observations open the film and in what order.  So
+    # the template is the axis that has to vary when the index-driven choice
+    # would repeat a montage this batch already owns.
+    recipe_id = select_environment_recipe_id(int(item_index) - 1)
+    identifier = _text(identity) or f"{_text(product_code)}#{int(item_index):02d}"
+
+    try:
+        template_ids = list(mixed_template_ids())
+    except Exception:  # noqa: BLE001
+        template_ids = []
+    if not template_ids:
+        return {"errors": ["MIXED_CONTRACT_NO_TEMPLATE"]}
+
+    preferred = select_template_id(int(item_index) - 1)
+    ordered = [preferred] + [tid for tid in template_ids if tid != preferred]
+
+    attempted: List[Dict[str, Any]] = []
+    first_contract: Dict[str, Any] = {}
+    for template_id in ordered:
+        try:
+            contract = compile_mixed_template_contract(
+                product_type=product_type,
+                top_category=top_category,
+                template_id=template_id,
+                environment_recipe_id=recipe_id,
+                product_identity_ref=_text(product_code),
+                content_theme={
+                    "theme_id": theme_id,
+                    "parent_theme_id": angle or theme_id,
+                    "candidate_role": candidate_role,
+                    "thesis": _text(audience_tension_text) or angle or theme_id,
+                    "approved_claim_refs": [
+                        _text(item) for item in (claim_keys or []) if _text(item)
+                    ],
+                    "evidence_refs": [
+                        _text(item) for item in (claim_keys or []) if _text(item)
+                    ],
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"errors": [f"MIXED_CONTRACT_COMPILE_FAILED:{type(exc).__name__}"]}
+
+        errors = validate_mixed_template_contract(contract)
+        if errors:
+            return {"errors": errors}
+
+        if not first_contract:
+            first_contract = contract
+        report = judge_mixed_candidate(
+            contract,
+            [
+                *(reserved_references or []),
+                *(history_references or []),
+            ],
+            history_compared=len(history_references or []),
+            history_incomplete=int(history_incomplete),
+        )
+        contract["difference_report"] = report
+        if report.get("counts_as_independent", True):
+            return {"contract": contract}
+        attempted.append(report)
+
+    # Every authored montage repeats something already accepted.  Report the
+    # first (the index-driven choice, i.e. the one the batch actually asked for)
+    # so the reason matches what a reader would expect.
+    blocking = attempted[0] if attempted else {}
+    if not blocking:
+        return {"contract": first_contract}
+    verdict = _text(blocking.get("review_status")).upper()
+    reason = (
+        "MIXED_EVIDENCE_UNVERIFIED"
+        if verdict == "NEEDS_REVIEW"
+        else "MIXED_DUPLICATE_CANDIDATE"
+    )
+    return {
+        "rejected": {
+            "reason": reason,
+            "review_status": verdict,
+            "difference_report": blocking,
+            "identity": identifier,
+            "template_id": _text(first_contract.get("template_id")),
+            "signature": first_contract.get(MIXED_SIGNATURE_KEY) or {},
+        }
+    }
+
+
+def _mixed_rejection_key(row: Dict[str, Any]) -> Tuple[str, ...]:
+    """One rejected mixed candidate's identity inside the deferred report."""
+
+    report = row.get("difference_report")
+    report = report if isinstance(report, dict) else {}
+    return (
+        _text(row.get("direction_assignment_id")),
+        _text(row.get("output_slot")),
+        _text(row.get("content_bundle_id")),
+        _text(row.get("downgrade_reason")),
+        _text(report.get("review_status")).upper(),
+        "|".join(_text(item) for item in (report.get("difference_dimensions") or [])),
+    )
+
+
+def _dedup_mixed_rejections(
+    deferred: Optional[List[Dict[str, Any]]],
+    tally: Optional[Dict[str, int]],
+) -> None:
+    """同一候选被多轮重复尝试时只计一次。
+
+    A round-1 candidate that lost its final-shot comparison leaves no accepted
+    item behind, so the next round can put the very same candidate back on the
+    table and lose it again for the very same reason.  Recording that twice
+    would inflate "重复剔除数" with a single candidate -- exactly the
+    double-counting the report is required to avoid.  The list is rewritten in
+    place (it is the same object the summary publishes) and the two rejection
+    counters are recomputed from the deduplicated rows.
+    """
+
+    if not isinstance(deferred, list) or not deferred:
+        return
+    seen: set = set()
+    deduped: List[Dict[str, Any]] = []
+    for row in deferred:
+        if not isinstance(row, dict) or not _text(
+            row.get("downgrade_reason")
+        ).startswith("MIXED_"):
+            # Non-mixed deferrals keep their own semantics untouched.
+            deduped.append(row)
+            continue
+        key = _mixed_rejection_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    if len(deduped) != len(deferred):
+        deferred[:] = deduped
+    if isinstance(tally, dict) and seen:
+        tally["duplicate_rejected"] = sum(
+            1 for key in seen if key[4] != "NEEDS_REVIEW"
+        )
+        tally["insufficient_evidence"] = sum(
+            1 for key in seen if key[4] == "NEEDS_REVIEW"
+        )
+
+
 def _build_summary(
     items: List[PlanItem],
     structures: List[Dict[str, Any]],
@@ -1456,6 +2001,8 @@ def _build_summary(
     *,
     requested_count: Optional[int] = None,
     deferred_content: Optional[List[Dict[str, Any]]] = None,
+    mixed_difference_tally: Optional[Dict[str, int]] = None,
+    mixed_history_coverage: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     families = list(set(it.macro_family_key for it in items if it.macro_family_key))
     carriers = list(set(it.carrier_mode for it in items if it.carrier_mode))
@@ -1595,6 +2142,15 @@ def _build_summary(
     allocation_status = (
         "COMPLETE" if planned >= requested else "PARTIAL_CONTENT_CAPACITY"
     )
+    # 数量报告必须区分请求数、独立主题数、执行变体数、重复剔除数、证据不足数和实际可用数；
+    # 计数不要重复累计同一候选（每条候选只落进一个桶，且只在通过比较后计入）。
+    _dedup_mixed_rejections(deferred_content, mixed_difference_tally)
+    tally = mixed_difference_tally or {}
+    distinct_theme = int(tally.get("distinct_theme", 0))
+    execution_variant = int(tally.get("execution_variant", 0))
+    duplicate_rejected = int(tally.get("duplicate_rejected", 0))
+    insufficient_evidence = int(tally.get("insufficient_evidence", 0))
+    mixed_usable = distinct_theme + execution_variant
     outfit_provider_snapshot = get_outfit_template_provider_snapshot()
     persona_provider_snapshot = load_persona_templates()
     return {
@@ -1604,6 +2160,17 @@ def _build_summary(
         "requested_count": requested,
         "planned_count": planned,
         "shortage_count": max(0, requested - planned),
+        "mixed_distinct_theme_count": distinct_theme,
+        "mixed_execution_variant_count": execution_variant,
+        "mixed_duplicate_rejected_count": duplicate_rejected,
+        "mixed_insufficient_evidence_count": insufficient_evidence,
+        "mixed_usable_count": mixed_usable,
+        "mixed_history_coverage": dict(mixed_history_coverage or {}),
+        "mixed_shortage_reason": (
+            "DIFFERENCE_INSUFFICIENT"
+            if planned < requested and (duplicate_rejected or insufficient_evidence)
+            else "CONTENT_CAPACITY"
+        ),
         "deferred_content": list(deferred_content or []),
         "structure_count": len(structures),
         "unique_families": len(families),

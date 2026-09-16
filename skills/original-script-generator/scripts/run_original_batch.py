@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 if str(SKILL_ROOT) not in sys.path:
@@ -328,6 +328,53 @@ def _md(value) -> str:
     return text.replace("|", "\\|").replace("\n", "<br>") or "UNAVAILABLE"
 
 
+def _capacity_section(report) -> List[str]:
+    """Surface *why* a batch produced fewer candidates than requested.
+
+    All values already exist in ``allocation_summary``.  Operators previously
+    saw only ``完成 0/20`` with no reason, which made a content-capacity
+    shortage look identical to a model failure.  Nothing new is computed or
+    invented here -- existing fields are only promoted into the readable report.
+    """
+
+    summary = report.get("allocation_summary")
+    summary = summary if isinstance(summary, dict) else {}
+    requested = int(report.get("requested_count") or 0)
+    planned = int(report.get("planned_count") or 0)
+    ready = int(report.get("ready_count") or 0)
+    failed = int(report.get("failed_count") or 0)
+    shortage = int(summary.get("shortage_count") or max(0, requested - planned))
+    status = _md(summary.get("allocation_status") or report.get("status"))
+    lines = [
+        "## 内容容量与规划状态",
+        "",
+        f"- 请求 / 已规划 / 已就绪 / 失败：{requested} / {planned} / {ready} / {failed}",
+        f"- 规划状态：`{status}`",
+        (
+            f"- 独立方向数：{int(summary.get('structure_count') or 0)}"
+            "（受 `ORIGINAL_SCRIPT_DIRECTION_LIMIT` 控制，默认 4）"
+        ),
+        f"- 已用唯一卖点数：{int(summary.get('used_selling_argument_count') or 0)}",
+    ]
+    if shortage > 0:
+        lines.append(
+            f"- 未补足：{shortage} 条（属于内容容量不足，不是模型失败）"
+        )
+    reasons: Dict[str, int] = {}
+    for entry in summary.get("deferred_content") or []:
+        if not isinstance(entry, dict):
+            continue
+        reason = str(entry.get("downgrade_reason") or "").strip() or "UNSPECIFIED"
+        reasons[reason] = reasons.get(reason, 0) + 1
+    if reasons:
+        detail = "；".join(
+            f"{key} × {value}" for key, value in sorted(reasons.items())
+        )
+        lines.append(f"- 未补足原因：{detail}")
+    lines.append("")
+    return lines
+
+
 def _render_complete_scripts_markdown(report) -> str:
     """Render the complete script without dropping production design fields."""
 
@@ -340,6 +387,7 @@ def _render_complete_scripts_markdown(report) -> str:
         f"- 完成：{int(report.get('ready_count') or 0)}/{int(report.get('planned_count') or 0)}",
         "",
     ]
+    lines.extend(_capacity_section(report))
     for item in report.get("items") or []:
         if not isinstance(item, dict):
             continue

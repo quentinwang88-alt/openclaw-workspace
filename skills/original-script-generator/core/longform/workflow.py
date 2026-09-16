@@ -5,16 +5,35 @@ import time
 from pathlib import Path
 from typing import Any, Dict
 
-from .audio import finalize_with_voiceover, validate_finalized_media
+from .audio import finalize_silent, finalize_with_voiceover, validate_finalized_media
 from .h3_gateway import H3Gateway, write_segment_request
 from .media import extract_bridge_candidates, merge_segments, select_bridge_candidate
 from .review import export_review_bundle
 from .storage import LongformStorage
-from .voiceover import DEFAULT_MODEL_COMMAND, calibrate_longform_voiceover_with_edge
+from .subtitles import burn_subtitles, subtitle_cues
+from .voiceover import (
+    DEFAULT_MODEL_COMMAND, calibrate_longform_voiceover_with_edge,
+    measure_frozen_source_voiceover_with_edge,
+)
 
 
 class RemoteGenerationPending(RuntimeError):
     """The remote H3 task is healthy but did not finish in this patrol window."""
+
+
+# Shared audio-mode contract.  An original generated job carries no explicit
+# mode, so it keeps its historical "must have a rewritten voiceover" behaviour.
+AUDIO_MODE_PRESERVE_SOURCE = "PRESERVE_SOURCE_COPY"
+AUDIO_MODE_NO_VOICEOVER = "NO_VOICEOVER"
+AUDIO_MODE_UNRESOLVED = {"UNSPECIFIED", "DIALOGUE_REQUIRES_PROVIDER"}
+
+
+def _audio_mode(plan: Dict[str, Any], voiceover: Dict[str, Any]) -> str:
+    mode = str(voiceover.get("mode") or "").strip().upper()
+    if mode:
+        return mode
+    contract = dict(plan.get("audio_contract") or {})
+    return str(contract.get("mode") or "").strip().upper()
 
 
 def _json(value: str) -> Dict[str, Any]:
@@ -227,13 +246,28 @@ def run_to_final(
         for index, item in enumerate(current_segments)
     )
     voiceover = _json(str(row.get("voiceover_json") or "{}"))
-    if not voiceover.get("target_text"):
+    audio_mode = _audio_mode(plan, voiceover)
+    if audio_mode in AUDIO_MODE_UNRESOLVED:
+        # Never guess a remake is silent, and never turn multi-speaker dialogue
+        # into a single post-dub read.  Block before any paid H3 submission.
+        # The reason is recorded before the report is persisted so the audit
+        # trail explains why nothing was submitted.
+        events.append({"stage": "BLOCKED_AUDIO_MODE", "mode": audio_mode, "at": int(time.time())})
+        report = _persist_report(storage, job_id, root, events)
+        return {
+            "job_id": job_id, "status": "BLOCKED_AUDIO_MODE",
+            "message": f"声音模式未确定({audio_mode})，付费H3提交前阻断",
+            "report": report,
+        }
+    # NO_VOICEOVER still needs a real (silent) audio stream, but no TTS at all.
+    needs_tts = audio_mode != AUDIO_MODE_NO_VOICEOVER
+    if needs_tts and not str(voiceover.get("target_text") or "").strip():
         report = _persist_report(storage, job_id, root, events)
         return {"job_id": job_id, "status": "WAITING_VOICEOVER", "report": report}
     if requires_new_submit and not allow_real_submit:
         report = _persist_report(storage, job_id, root, events)
         return {"job_id": job_id, "status": "WAITING_H3_AUTHORIZATION", "report": report}
-    if requires_new_submit and not allow_external_tts:
+    if needs_tts and requires_new_submit and not allow_external_tts:
         report = _persist_report(storage, job_id, root, events)
         return {"job_id": job_id, "status": "WAITING_TTS_PREFLIGHT_AUTHORIZATION", "report": report}
     # Validate H3 credentials and runner before any external image/TTS work.
@@ -242,12 +276,19 @@ def run_to_final(
     preflight = gateway.preflight(require_api_key=needs_h3)
     if needs_h3 and not preflight["ready"]:
         raise RuntimeError("；".join(preflight["problems"]))
-    if allow_external_tts:
+    if needs_tts and allow_external_tts:
         try:
-            calibrated = calibrate_longform_voiceover_with_edge(
-                master, plan, voiceover, root / job_id / "voiceover_preflight",
-                model_command=voiceover_model_command,
-            )
+            if bool(voiceover.get("revision_allowed", True)):
+                calibrated = calibrate_longform_voiceover_with_edge(
+                    master, plan, voiceover, root / job_id / "voiceover_preflight",
+                    model_command=voiceover_model_command,
+                )
+            else:
+                # Frozen source copy (remake): measure with real Edge audio but
+                # never call the central voiceover model to rewrite the text.
+                calibrated = measure_frozen_source_voiceover_with_edge(
+                    plan, voiceover, root / job_id / "voiceover_preflight",
+                )
             if calibrated != voiceover:
                 voiceover = calibrated
                 storage.update_job(
@@ -349,14 +390,47 @@ def run_to_final(
             storage.update_job(job_id, "MERGED", merged_video_path=str(merged))
             events.append({"stage": "MERGED", "path": str(merged), "at": int(time.time())})
 
+        # Frozen remake copy may name on-screen text.  It is reproduced here on
+        # the frozen source timeline; an original plan declares no subtitle
+        # contract, so this pass is skipped and its master is unchanged.
+        captioned = merged
+        cues = subtitle_cues(plan)
+        if cues:
+            captioned = root / job_id / "merged_captioned.mp4"
+            burn = burn_subtitles(
+                merged, cues, captioned,
+                target_language=str(plan.get("target_language") or ""),
+            )
+            events.append({"stage": "SUBTITLES_BURNED", "burn": burn,
+                           "at": int(time.time())})
+
         row = storage.get_job(job_id) or {}
         voiceover = _json(str(row.get("voiceover_json") or "{}"))
+        audio_mode = _audio_mode(plan, voiceover)
+        final_path = root / job_id / "final_video.mp4"
+        if audio_mode == AUDIO_MODE_NO_VOICEOVER:
+            # No TTS is called; the master still receives a real silent AAC
+            # stream so validation and publishing remain compatible.
+            finalization = finalize_silent(captioned, final_path)
+            storage.update_job(job_id, "FINAL_READY", final_video_path=str(final_path))
+            events.append({"stage": "FINAL_READY_SILENT", "finalization": finalization,
+                           "at": int(time.time())})
+            final_row = storage.get_job(job_id) or {}
+            review = export_review_bundle(final_row, root / job_id / "text_review")
+            events.append({"stage": "TEXT_REVIEW_REFRESHED", "review": review,
+                           "at": int(time.time())})
+            report = _persist_report(storage, job_id, root, events)
+            return {
+                "job_id": job_id, "status": "FINAL_READY", "final_video_path": str(final_path),
+                "finalization": finalization,
+                "report_path": str(root / job_id / "execution_report.json"),
+                "report": report, "review": review,
+            }
         if not allow_external_tts:
             report = _persist_report(storage, job_id, root, events)
             return {"job_id": job_id, "status": "WAITING_TTS_AUTHORIZATION", "report": report}
-        final_path = root / job_id / "final_video.mp4"
         finalization = finalize_with_voiceover(
-            merged, voiceover, final_path, allow_external_tts=allow_external_tts,
+            captioned, voiceover, final_path, allow_external_tts=allow_external_tts,
             segment_plan=segments,
         )
         storage.update_job(job_id, "FINAL_READY", final_video_path=str(final_path))

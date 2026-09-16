@@ -1,0 +1,846 @@
+{
+  "schema_version": "accessory-mixed-template-v1",
+  "execution_profile": "ACCESSORY_MIXED_TEMPLATE_V1",
+  "source_mode": "AUTHORED_TEMPLATE",
+  "template_version": 1,
+  "feature_gate_env": "ORIGINAL_SCRIPT_ACCESSORY_MIXED_TEMPLATE_V1_ENABLED",
+  "duration_seconds": 15,
+  "unit_count": 4,
+  "_note": "人工设计的固定拍摄模板。不来自真实视频观察，不得伪称来自 RDS 真实样本。模板只拥有物理展示编排权威；叙事结构、商品事实与卖点仍来自各自原有权威来源。",
+
+  "structural": {
+    "required_modules": [
+      "WORN_DETAIL",
+      "HANDHELD_PRODUCT",
+      "STATIC_PRODUCT",
+      "WORN_RELATION"
+    ],
+    "module_labels": {
+      "WORN_DETAIL": "佩戴近景",
+      "WORN_RELATION": "佩戴关系",
+      "HANDHELD_PRODUCT": "手持商品",
+      "STATIC_PRODUCT": "商品静物"
+    },
+    "carrier_by_module": {
+      "WORN_DETAIL": "WEARER_ACTIVE",
+      "WORN_RELATION": "WEARER_ACTIVE",
+      "HANDHELD_PRODUCT": "HAND_ONLY",
+      "STATIC_PRODUCT": "STATIC_PRODUCT"
+    },
+    "product_state_by_module": {
+      "WORN_DETAIL": "ALREADY_WORN",
+      "WORN_RELATION": "ALREADY_WORN",
+      "HANDHELD_PRODUCT": "HELD",
+      "STATIC_PRODUCT": "RESTING_ON_SURFACE"
+    },
+    "global_carrier": "MIXED",
+    "face_policy": "NO_FACE",
+    "audio_route": "VOICEOVER_POST",
+    "edit_before_first_unit": "START",
+    "edit_before_default": "DIRECT_CUT",
+    "cut_policy": {
+      "allow_direct_cut_between_states": true,
+      "allow_in_shot_state_change": false,
+      "note": "允许 DIRECT_CUT 做佩戴-手持-静物-佩戴的展示蒙太奇；同一连续镜头内不允许物理状态瞬间转移，也不生成摘戴过程。"
+    }
+  },
+
+  "_module_framing_note": "镜头裁切规则分两层：本节的模块层（这一镜用哪类画面范围）+ category_rules 里的类目层（佩戴部位具体在哪）。手持与静物是模块自己的范围，不得继承佩戴部位入画要求；佩戴两镜才读对应类目的身体区域。",
+  "module_framing_rules": {
+    "HANDHELD_PRODUCT": {
+      "view_scope": "HAND_AND_PRODUCT",
+      "view_label": "手与商品",
+      "framing_source": "MODULE",
+      "allowed_framing": [
+        "手指与商品本体的承托关系",
+        "手部少量入画，商品是清楚主体",
+        "商品正面与侧面轮廓"
+      ],
+      "forbidden_framing": [
+        "脸与头部入画",
+        "正面全脸",
+        "镜面反射露脸",
+        "佩戴部位入画",
+        "全身穿搭展示"
+      ],
+      "state_boundary": "商品已经拿稳，本镜只做小幅转动与角度调整；不要求现场摘戴、扣合、穿刺或夹取",
+      "visible_quantity_rule": "本镜只说明画面里当前实际可见的商品部分；不因手持裁切推断件数、左右方式或任何未入画的部件"
+    },
+    "STATIC_PRODUCT": {
+      "view_scope": "PRODUCT_AND_SURFACE",
+      "view_label": "商品与台面",
+      "framing_source": "MODULE",
+      "allowed_framing": [
+        "商品与冻结台面的接触关系",
+        "商品独立成主体",
+        "克制的同侧机位变化"
+      ],
+      "forbidden_framing": [
+        "人物、脸与身体入画",
+        "手或手臂入画",
+        "佩戴部位入画",
+        "镜面反射露脸"
+      ],
+      "state_boundary": "商品自然静置于冻结台面，本镜只做克制的机位与角度变化；不继承任何佩戴部位入画要求",
+      "visible_quantity_rule": "本镜只说明台面上实际可见的商品部分；不因静物裁切推断件数或任何未入画的部件"
+    },
+    "WORN_DETAIL": {
+      "view_scope": "BODY_ZONE_CLOSE",
+      "view_label": "佩戴近景",
+      "framing_source": "CATEGORY_ZONE",
+      "framing_key": "WORN_DETAIL",
+      "state_boundary": "已完成佩戴，本镜只做局部微转；不生成复杂扣合、穿刺、夹取或摘戴过程",
+      "visible_quantity_rule": "本镜的裁切范围只决定画面里实际可见的部分；不要求近景内出现全部件数，也不得据此推断未入画部分的状态或左右佩戴方式"
+    },
+    "WORN_RELATION": {
+      "view_scope": "BODY_ZONE_RELATION",
+      "view_label": "佩戴关系",
+      "framing_source": "CATEGORY_ZONE",
+      "framing_key": "WORN_RELATION",
+      "state_boundary": "已完成佩戴，本镜用同一佩戴部位与局部衣物或发型交代搭配关系；不重复佩戴近景的观察任务",
+      "visible_quantity_rule": "本镜的裁切范围只决定画面里实际可见的部分；不要求扩大取景后出现全部件数，也不得据此推断未入画部分的状态"
+    }
+  },
+
+  "templates": [
+    {
+      "template_id": "AMX_A_WORN_FIRST",
+      "template_version": 1,
+      "display_name": "佩戴优先",
+      "use_case": "强调佩戴比例、局部搭配与最终整体效果",
+      "sequence": [
+        {
+          "unit_index": 1,
+          "module": "WORN_DETAIL",
+          "duration_seconds": 3,
+          "observation_job": "先给出已验证的佩戴落点，让观众确认商品真实上身位置"
+        },
+        {
+          "unit_index": 2,
+          "module": "HANDHELD_PRODUCT",
+          "duration_seconds": 3,
+          "observation_job": "脱离身体关系单独看清商品本体造型"
+        },
+        {
+          "unit_index": 3,
+          "module": "STATIC_PRODUCT",
+          "duration_seconds": 4,
+          "observation_job": "在冻结环境中稳定停住，看清材质、结构与核心细节"
+        },
+        {
+          "unit_index": 4,
+          "module": "WORN_RELATION",
+          "duration_seconds": 5,
+          "observation_job": "换一个佩戴观察关系，给出与首镜不同的搭配或比例证据"
+        }
+      ]
+    },
+    {
+      "template_id": "AMX_B_FORM_FIRST",
+      "template_version": 1,
+      "display_name": "造型优先",
+      "use_case": "先看完整商品造型，再理解佩戴关系",
+      "sequence": [
+        {
+          "unit_index": 1,
+          "module": "HANDHELD_PRODUCT",
+          "duration_seconds": 3,
+          "observation_job": "开口先展示商品完整形状与主要造型"
+        },
+        {
+          "unit_index": 2,
+          "module": "STATIC_PRODUCT",
+          "duration_seconds": 4,
+          "observation_job": "在冻结环境中稳住商品，呈现材质与核心结构"
+        },
+        {
+          "unit_index": 3,
+          "module": "WORN_DETAIL",
+          "duration_seconds": 3,
+          "observation_job": "进入局部佩戴近景，确认商品真实可佩戴"
+        },
+        {
+          "unit_index": 4,
+          "module": "WORN_RELATION",
+          "duration_seconds": 5,
+          "observation_job": "扩大到佩戴关系，给出搭配或比例证据"
+        }
+      ]
+    },
+    {
+      "template_id": "AMX_C_DETAIL_FIRST",
+      "template_version": 1,
+      "display_name": "细节优先",
+      "use_case": "用于具有清楚、可验证且有辨识度细节的商品",
+      "sequence": [
+        {
+          "unit_index": 1,
+          "module": "STATIC_PRODUCT",
+          "duration_seconds": 4,
+          "observation_job": "开口先钉住一个可核实的核心细节"
+        },
+        {
+          "unit_index": 2,
+          "module": "HANDHELD_PRODUCT",
+          "duration_seconds": 3,
+          "observation_job": "把细节放回商品整体，确认整体造型一致"
+        },
+        {
+          "unit_index": 3,
+          "module": "WORN_DETAIL",
+          "duration_seconds": 4,
+          "observation_job": "给出该细节在真实佩戴中的落点"
+        },
+        {
+          "unit_index": 4,
+          "module": "WORN_RELATION",
+          "duration_seconds": 4,
+          "observation_job": "给出佩戴关系与搭配证据，与首镜观察任务不同"
+        }
+      ]
+    }
+  ],
+
+  "canonical_type_to_zone": {
+    "earring": "EAR",
+    "bracelet": "WRIST",
+    "bangle": "WRIST",
+    "slim_bangle": "WRIST",
+    "ring": "FINGER",
+    "hair_accessory_generic": "HAIR",
+    "claw_clip": "HAIR",
+    "hair_clip": "HAIR",
+    "headband": "HAIR",
+    "scrunchie": "HAIR",
+    "hair_tie": "HAIR",
+    "ribbon": "HAIR",
+    "hair_pin": "HAIR"
+  },
+
+  "category_rules": {
+    "EAR": {
+      "zone_label": "耳部",
+      "body_zone": "EAR",
+      "allowed_framing": [
+        "耳廓与耳垂近景",
+        "耳侧与颈侧关系",
+        "少量下颌边缘"
+      ],
+      "forbidden_framing": [
+        "眼睛入画",
+        "鼻子入画",
+        "嘴部入画",
+        "正面全脸",
+        "镜面反射露脸"
+      ],
+      "base_action": "保持已完成佩戴，仅用局部微转与自然呼吸展示耳饰落点",
+      "action_by_module": {
+        "WORN_DETAIL": "耳侧小幅自然转头，展示耳饰落点与耳垂关系",
+        "WORN_RELATION": "小幅颈肩变化，展示耳饰与颈侧、领口的搭配关系",
+        "HANDHELD_PRODUCT": "手指稳定承托耳饰本体，小幅转动展示正面与侧面轮廓",
+        "STATIC_PRODUCT": "耳饰安放在冻结台面上，克制的同侧机位变化展示结构与光泽"
+      },
+      "forbidden_actions": [
+        "展示穿耳过程",
+        "扣耳堵",
+        "拨发",
+        "快速甩动",
+        "对刚性装饰做展开动作"
+      ],
+      "quantity_rule": "耳侧近景的裁切范围不改变授权数量与佩戴位置；画面里可见的部分不代表商品本身的件数与左右方式，分镜与文案都不得推断。",
+      "module_framing": {
+        "WORN_DETAIL": ["耳廓与耳垂近景", "耳侧与耳垂落点的关系"],
+        "WORN_RELATION": ["耳侧与颈侧关系", "少量下颌边缘"]
+      },
+      "visible_quantity_rule": "耳侧近景的裁切范围只决定画面里实际可见的部分；不要求一个近景内出现全部件数，也不得据此推断未入画部分的状态或左右佩戴方式；授权数量与佩戴位置不因裁切改变。",
+      "distinct_jobs": {
+        "WORN_DETAIL": "商品本体与耳垂落点的关系",
+        "WORN_RELATION": "耳饰与颈侧、领口的搭配关系"
+      }
+    },
+    "WRIST": {
+      "zone_label": "腕部",
+      "body_zone": "WRIST",
+      "allowed_framing": [
+        "同一手腕近景",
+        "少量前臂",
+        "少量袖口"
+      ],
+      "forbidden_framing": [
+        "脸与头部",
+        "正面全脸",
+        "全身穿搭展示"
+      ],
+      "base_action": "保持已完成佩戴，用手腕自然角度变化展示腕饰本体与手腕的贴合关系",
+      "action_by_module": {
+        "WORN_DETAIL": "手腕小幅自然转动，展示腕饰本体与手腕的贴合关系",
+        "WORN_RELATION": "前臂与袖口入画，展示腕饰与袖口的比例关系",
+        "HANDHELD_PRODUCT": "手指稳定承托腕饰，小幅转动展示本体造型与表面轮廓",
+        "STATIC_PRODUCT": "腕饰自然放在冻结台面上，呈现本体轮廓与金属反射层次"
+      },
+      "forbidden_actions": [
+        "扣细搭扣",
+        "拉伸链体",
+        "快速翻腕"
+      ],
+      "quantity_rule": "同一类目下不同物理形态的商品不得互相冒充；动作候选与承载按各自物理形态分别生成。",
+      "module_framing": {
+        "WORN_DETAIL": ["同一手腕近景", "少量前臂"],
+        "WORN_RELATION": ["少量前臂", "少量袖口"]
+      },
+      "visible_quantity_rule": "腕部近景的裁切范围只决定画面里实际可见的部分；不要求一镜内出现全部件数，也不得据此推断未入画部分的状态；授权数量与佩戴位置不因裁切改变。",
+      "distinct_jobs": {
+        "WORN_DETAIL": "腕饰本体与手腕的关系",
+        "WORN_RELATION": "腕饰与袖口的比例关系"
+      }
+    },
+    "FINGER": {
+      "zone_label": "手指",
+      "body_zone": "FINGER",
+      "allowed_framing": [
+        "同一只手与同一根手指近景",
+        "戒面与戒圈关系"
+      ],
+      "forbidden_framing": [
+        "脸与头部",
+        "正面全脸",
+        "整手全身关系"
+      ],
+      "base_action": "保持已完成佩戴，用同一根手指的自然伸展展示戒面与戒圈关系",
+      "action_by_module": {
+        "WORN_DETAIL": "手指自然伸展，展示戒面正面与戒圈贴合关系",
+        "WORN_RELATION": "手部与相邻手指入画，展示戒指与整只手的比例关系",
+        "HANDHELD_PRODUCT": "手指稳定承托戒指，小幅转动展示戒面与戒圈侧面轮廓",
+        "STATIC_PRODUCT": "戒指安放在冻结台面上，呈现戒面与戒圈的结构与光泽"
+      },
+      "forbidden_actions": [
+        "掰开戒圈",
+        "换到另一根手指",
+        "无授权叠戴",
+        "快速翻掌"
+      ],
+      "quantity_rule": "戒面与戒圈关系必须清楚；不因近景裁切而改变授权数量。",
+      "module_framing": {
+        "WORN_DETAIL": ["同一只手与同一根手指近景", "戒面与戒圈关系"],
+        "WORN_RELATION": ["同一只手与相邻手指关系", "戒指与手部的相对尺寸关系"]
+      },
+      "visible_quantity_rule": "手指近景的裁切范围只决定画面里实际可见的部分；不要求一镜内出现全部件数，也不得据此推断未入画部分的状态；授权数量与佩戴位置不因裁切改变。",
+      "distinct_jobs": {
+        "WORN_DETAIL": "戒面本体与戒圈贴合关系",
+        "WORN_RELATION": "戒指与整只手的比例关系"
+      }
+    },
+    "HAIR": {
+      "zone_label": "头发",
+      "body_zone": "HAIR",
+      "allowed_framing": [
+        "后脑与侧后方",
+        "已完成发型",
+        "固定发束与发饰关系"
+      ],
+      "forbidden_framing": [
+        "正面全脸",
+        "镜面反射露脸",
+        "眼鼻嘴入画"
+      ],
+      "base_action": "保持已完成发型，用小幅侧后方转头展示发饰与发束固定关系",
+      "action_by_module": {
+        "WORN_DETAIL": "小幅侧后方转头，展示发饰与发束的固定关系",
+        "WORN_RELATION": "侧后方扩大取景，展示发饰与整体发型轮廓的关系",
+        "HANDHELD_PRODUCT": "手指稳定承托发饰，小幅转动展示正面造型与背面结构",
+        "STATIC_PRODUCT": "发饰安放在冻结台面上，呈现结构与夹持部位外观"
+      },
+      "forbidden_actions": [
+        "完整盘发教程",
+        "重新夹发",
+        "转到正脸",
+        "引入露脸镜面"
+      ],
+      "quantity_rule": "发饰不因局部裁切而改变授权数量；授权锚点未确认的结构一律不生成，只呈现画面里实际可见的部分。",
+      "module_framing": {
+        "WORN_DETAIL": ["后脑与侧后方", "固定发束与发饰关系"],
+        "WORN_RELATION": ["侧后方扩大取景", "已完成发型轮廓关系"]
+      },
+      "visible_quantity_rule": "发饰局部的裁切范围只决定画面里实际可见的部分；不要求一镜内出现全部件数，也不得据此推断未入画部分的状态；授权数量与固定位置不因裁切改变。",
+      "distinct_jobs": {
+        "WORN_DETAIL": "发饰与固定发束的关系",
+        "WORN_RELATION": "发饰与整体发型轮廓的关系"
+      }
+    }
+  },
+
+  "_physical_subtype_note": "按商品物理子类型（注册表 canonical type）定义观察重点与动作。structure_facts 记录注册表已确认的形态事实，取值 VERIFIED / ABSENT / UNKNOWN；动作不得要求展示 ABSENT 或 UNKNOWN 的部件。optional_actions 只在对应部件被证据确认 VERIFIED 后才启用，UNKNOWN 一律不启用，也不当作 ABSENT。",
+  "part_evidence_terms": {
+    "has_chain": {
+      "part_label": "链节结构",
+      "positive_terms": ["链节", "链条", "链身", "环链", "细链", "链式"],
+      "negative_terms": ["无链", "实心", "一体成型", "素圈", "整体金属圈"]
+    },
+    "has_pendant": {
+      "part_label": "吊坠或垂坠饰物",
+      "positive_terms": ["吊坠", "坠饰", "吊饰", "流苏"],
+      "negative_terms": ["无吊坠", "无坠", "素链", "无流苏"]
+    },
+    "has_clasp": {
+      "part_label": "搭扣结构",
+      "positive_terms": ["搭扣", "扣环", "龙虾扣", "弹簧扣", "磁扣", "开口扣"],
+      "negative_terms": ["无扣", "无搭扣", "一体成型", "不可调节", "闭圈"]
+    },
+    "has_rigid_ring": {
+      "part_label": "刚性圈体",
+      "positive_terms": ["手镯", "圈口", "刚性", "硬质圆环", "闭圈"],
+      "negative_terms": ["链式", "柔软", "可弯折", "柔性"]
+    },
+    "has_teeth_or_jaw": {
+      "part_label": "夹体或齿口",
+      "positive_terms": ["夹体", "齿口", "抓夹", "夹齿", "弹簧夹"],
+      "negative_terms": ["无夹体", "非夹式", "无齿"]
+    },
+    "has_hinge_or_spring": {
+      "part_label": "铰链或弹簧结构",
+      "positive_terms": ["铰链", "弹簧", "弹片", "活扣"],
+      "negative_terms": ["无铰链", "无弹簧", "一体成型"]
+    },
+    "has_pin_shaft": {
+      "part_label": "簪杆结构",
+      "positive_terms": ["簪杆", "插杆", "杆身", "细杆"],
+      "negative_terms": ["无杆", "非插式"]
+    },
+    "has_elastic_band": {
+      "part_label": "松紧带结构",
+      "positive_terms": ["松紧带", "弹力", "橡皮筋", "弹性圈", "松紧"],
+      "negative_terms": ["无松紧", "非弹力"]
+    },
+    "has_ribbon_bow": {
+      "part_label": "缎带或系结结构",
+      "positive_terms": ["缎带", "丝带", "系结", "蝴蝶结"],
+      "negative_terms": ["无缎带", "无丝带", "非系结"]
+    },
+    "has_band_arch": {
+      "part_label": "发箍弧架",
+      "positive_terms": ["发箍", "弧架", "箍身", "头箍"],
+      "negative_terms": ["无箍"]
+    },
+    "has_piercing_post": {
+      "part_label": "耳针结构",
+      "positive_terms": ["耳针", "针式", "耳钉针"],
+      "negative_terms": ["无耳针", "耳夹"]
+    },
+    "has_ear_clip": {
+      "part_label": "耳夹结构",
+      "positive_terms": ["耳夹", "夹式", "无耳洞", "免穿耳"],
+      "negative_terms": ["无耳夹", "耳针"]
+    },
+    "has_open_band": {
+      "part_label": "开口戒圈",
+      "positive_terms": ["开口", "活口", "开口圈"],
+      "negative_terms": ["闭口", "闭圈", "不可调节"]
+    }
+  },
+
+  "physical_subtype_rules": {
+    "earring": {
+      "family": "EAR_PIERCED_OR_CLIP",
+      "family_label": "耳部佩戴饰品",
+      "structure_facts": {
+        "has_chain": "UNKNOWN",
+        "has_pendant": "UNKNOWN",
+        "has_rigid_ring": "ABSENT",
+        "has_piercing_post": "UNKNOWN",
+        "has_ear_clip": "UNKNOWN"
+      },
+      "observation_focus": ["耳饰本体的正面轮廓", "已确认的材质观感与颜色", "佩戴落点与耳垂的关系"],
+      "fallback_observation": "只展示参考图已知的正面轮廓、颜色与表面纹理；不展示未确认的耳针、耳夹背面或连接结构",
+      "distinct_jobs": {
+        "WORN_DETAIL": "商品本体与耳垂落点的关系",
+        "WORN_RELATION": "耳饰与颈侧、领口的搭配关系"
+      },
+      "action_by_module": {
+        "WORN_DETAIL": "耳侧小幅自然转头，展示耳饰落点与耳垂关系",
+        "WORN_RELATION": "小幅颈肩变化，展示耳饰与颈侧、领口的搭配关系",
+        "HANDHELD_PRODUCT": "手指稳定承托耳饰本体，小幅转动展示正面与侧面轮廓",
+        "STATIC_PRODUCT": "耳饰安放在冻结台面上，克制的同侧机位变化展示结构与光泽"
+      },
+      "optional_actions": [
+        {
+          "module": "HANDHELD_PRODUCT",
+          "requires": {"has_pendant": "VERIFIED"},
+          "action": "手指稳定承托耳饰本体，小幅转动，同时交代已确认的吊坠垂落形态"
+        }
+      ]
+    },
+
+    "bracelet": {
+      "family": "FLEXIBLE_CHAIN_WRIST",
+      "family_label": "柔性链式腕饰",
+      "structure_facts": {
+        "has_chain": "VERIFIED",
+        "has_rigid_ring": "ABSENT",
+        "has_clasp": "UNKNOWN",
+        "has_pendant": "UNKNOWN"
+      },
+      "observation_focus": ["链节走向与垂落形态", "与手腕的相对宽度", "已确认的材质观感与颜色"],
+      "fallback_observation": "只展示参考图已知的链节走向、颜色与表面纹理；不展示未确认的搭扣或吊坠结构",
+      "distinct_jobs": {
+        "WORN_DETAIL": "链节走向与垂落形态的关系",
+        "WORN_RELATION": "腕饰与袖口的比例关系"
+      },
+      "action_by_module": {
+        "WORN_DETAIL": "手腕小幅自然转动，展示链节走向与垂落形态",
+        "WORN_RELATION": "前臂与袖口入画，展示腕饰与袖口的比例关系",
+        "HANDHELD_PRODUCT": "手指稳定承托腕饰，小幅转动展示链节走向与整体造型",
+        "STATIC_PRODUCT": "腕饰自然静置于冻结台面，呈现链节垂落与金属反射层次"
+      },
+      "optional_actions": [
+        {
+          "module": "WORN_DETAIL",
+          "requires": {"has_pendant": "VERIFIED"},
+          "action": "手腕小幅自然转动，展示链节走向，同时交代已确认的吊坠垂落形态"
+        },
+        {
+          "module": "HANDHELD_PRODUCT",
+          "requires": {"has_clasp": "VERIFIED"},
+          "action": "手指稳定承托腕饰，小幅转动展示链节走向，以及已确认的搭扣外观与连接位置"
+        }
+      ]
+    },
+
+    "bangle": {
+      "family": "RIGID_WRIST_RING",
+      "family_label": "刚性手镯",
+      "structure_facts": {
+        "has_chain": "ABSENT",
+        "has_rigid_ring": "VERIFIED",
+        "has_clasp": "UNKNOWN",
+        "has_pendant": "UNKNOWN"
+      },
+      "observation_focus": ["圈口轮廓与内径观感", "与手腕的贴合关系", "已确认的材质观感与颜色"],
+      "fallback_observation": "只展示参考图已知的圈口轮廓、颜色与表面纹理；不展示未确认的链节、吊坠或搭扣结构",
+      "distinct_jobs": {
+        "WORN_DETAIL": "圈口轮廓与手腕的贴合关系",
+        "WORN_RELATION": "手镯与袖口的比例关系"
+      },
+      "action_by_module": {
+        "WORN_DETAIL": "手腕小幅自然转动，展示圈口轮廓与手腕的贴合关系",
+        "WORN_RELATION": "前臂与袖口入画，展示手镯与袖口的比例关系",
+        "HANDHELD_PRODUCT": "手指稳定承托手镯，小幅转动展示圈口轮廓与内外侧过渡",
+        "STATIC_PRODUCT": "手镯自然静置于冻结台面，呈现圈口轮廓与金属反射层次"
+      },
+      "optional_actions": [
+        {
+          "module": "HANDHELD_PRODUCT",
+          "requires": {"has_clasp": "VERIFIED"},
+          "action": "手指稳定承托手镯，小幅转动展示圈口轮廓，以及已确认的搭扣外观与连接位置"
+        }
+      ]
+    },
+
+    "slim_bangle": {
+      "family": "RIGID_WRIST_RING",
+      "family_label": "细刚性手镯",
+      "structure_facts": {
+        "has_chain": "ABSENT",
+        "has_rigid_ring": "VERIFIED",
+        "has_clasp": "UNKNOWN",
+        "has_pendant": "UNKNOWN"
+      },
+      "observation_focus": ["细圈口轮廓", "与手腕的相对宽度", "已确认的材质观感与颜色"],
+      "fallback_observation": "只展示参考图已知的细圈口轮廓、颜色与表面纹理；不展示未确认的链节、吊坠或搭扣结构",
+      "distinct_jobs": {
+        "WORN_DETAIL": "细圈口轮廓与手腕的贴合关系",
+        "WORN_RELATION": "细手镯与袖口的比例关系"
+      },
+      "action_by_module": {
+        "WORN_DETAIL": "手腕小幅自然转动，展示细圈口轮廓与手腕的贴合关系",
+        "WORN_RELATION": "前臂与袖口入画，展示细手镯与袖口的比例关系",
+        "HANDHELD_PRODUCT": "手指稳定承托细手镯，小幅转动展示圈口轮廓与侧面过渡",
+        "STATIC_PRODUCT": "细手镯自然静置于冻结台面，呈现圈口轮廓与金属反射层次"
+      },
+      "optional_actions": [
+        {
+          "module": "HANDHELD_PRODUCT",
+          "requires": {"has_clasp": "VERIFIED"},
+          "action": "手指稳定承托细手镯，小幅转动展示圈口轮廓，以及已确认的搭扣外观与连接位置"
+        }
+      ]
+    },
+
+    "ring": {
+      "family": "RING_BAND",
+      "family_label": "戒指",
+      "structure_facts": {
+        "has_chain": "ABSENT",
+        "has_rigid_ring": "VERIFIED",
+        "has_clasp": "ABSENT",
+        "has_pendant": "UNKNOWN",
+        "has_open_band": "UNKNOWN"
+      },
+      "observation_focus": ["指环本体轮廓", "与手指的贴合关系", "已确认的材质观感与颜色"],
+      "fallback_observation": "只展示参考图已知的指环轮廓、颜色与表面纹理；不展示未确认的开口或镶嵌结构",
+      "distinct_jobs": {
+        "WORN_DETAIL": "指环本体与手指的佩戴贴合关系",
+        "WORN_RELATION": "戒指与整只手的比例关系"
+      },
+      "action_by_module": {
+        "WORN_DETAIL": "手指自然伸展，展示指环本体与手指的佩戴贴合关系",
+        "WORN_RELATION": "相邻手指入画，展示戒指与整只手的比例关系",
+        "HANDHELD_PRODUCT": "手指稳定承托戒指，小幅转动展示指环正面轮廓与侧面过渡",
+        "STATIC_PRODUCT": "戒指安放在冻结台面上，呈现指环轮廓与金属反射层次"
+      },
+      "optional_actions": [
+        {
+          "module": "HANDHELD_PRODUCT",
+          "requires": {"has_open_band": "VERIFIED"},
+          "action": "手指稳定承托戒指，小幅转动展示指环正面轮廓，以及已确认的开口结构"
+        }
+      ]
+    },
+
+    "hair_accessory_generic": {
+      "family": "HAIR_GENERIC",
+      "family_label": "通用发饰",
+      "structure_facts": {},
+      "observation_focus": ["发饰整体造型", "与固定发束的关系", "已确认的材质观感与颜色"],
+      "fallback_observation": "只展示参考图已知的整体造型、颜色与表面纹理；不展示未确认的夹体、齿口或任何背面结构",
+      "distinct_jobs": {
+        "WORN_DETAIL": "发饰与固定发束的关系",
+        "WORN_RELATION": "发饰与整体发型轮廓的关系"
+      },
+      "action_by_module": {
+        "WORN_DETAIL": "小幅侧后方转头，展示发饰与固定发束的关系",
+        "WORN_RELATION": "侧后方扩大取景，展示发饰与整体发型轮廓的关系",
+        "HANDHELD_PRODUCT": "手指稳定承托发饰，小幅转动展示正面造型与侧面轮廓",
+        "STATIC_PRODUCT": "发饰安放在冻结台面上，呈现整体造型与表面纹理"
+      },
+      "optional_actions": []
+    },
+
+    "claw_clip": {
+      "family": "HAIR_CLAW_CLIP",
+      "family_label": "抓夹",
+      "structure_facts": {
+        "has_teeth_or_jaw": "VERIFIED",
+        "has_hinge_or_spring": "VERIFIED",
+        "has_chain": "ABSENT",
+        "has_pin_shaft": "ABSENT",
+        "has_elastic_band": "ABSENT",
+        "has_ribbon_bow": "ABSENT"
+      },
+      "observation_focus": ["夹体轮廓", "与固定发束的夹持关系", "已确认的材质观感与颜色"],
+      "fallback_observation": "只展示参考图已知的夹体轮廓、颜色与表面纹理；不展示未确认的装饰部件或背面细节",
+      "distinct_jobs": {
+        "WORN_DETAIL": "抓夹夹体与固定发束的关系",
+        "WORN_RELATION": "抓夹与整体发型轮廓的关系"
+      },
+      "action_by_module": {
+        "WORN_DETAIL": "小幅侧后方转头，展示抓夹夹体与固定发束的关系",
+        "WORN_RELATION": "侧后方扩大取景，展示抓夹与整体发型轮廓的关系",
+        "HANDHELD_PRODUCT": "手指稳定承托抓夹，小幅转动展示夹体正面与侧面轮廓",
+        "STATIC_PRODUCT": "抓夹安放在冻结台面上，呈现夹体轮廓与表面纹理"
+      },
+      "optional_actions": []
+    },
+
+    "hair_clip": {
+      "family": "HAIR_CLIP",
+      "family_label": "发夹",
+      "structure_facts": {
+        "has_teeth_or_jaw": "UNKNOWN",
+        "has_hinge_or_spring": "UNKNOWN",
+        "has_chain": "ABSENT",
+        "has_pin_shaft": "ABSENT",
+        "has_elastic_band": "ABSENT",
+        "has_ribbon_bow": "ABSENT"
+      },
+      "observation_focus": ["发夹整体轮廓", "与固定发束的关系", "已确认的材质观感与颜色"],
+      "fallback_observation": "只展示参考图已知的整体轮廓、颜色与表面纹理；不展示未确认的夹体结构或背面细节",
+      "distinct_jobs": {
+        "WORN_DETAIL": "发夹与固定发束的关系",
+        "WORN_RELATION": "发夹与整体发型轮廓的关系"
+      },
+      "action_by_module": {
+        "WORN_DETAIL": "小幅侧后方转头，展示发夹与固定发束的关系",
+        "WORN_RELATION": "侧后方扩大取景，展示发夹与整体发型轮廓的关系",
+        "HANDHELD_PRODUCT": "手指稳定承托发夹，小幅转动展示正面造型与侧面轮廓",
+        "STATIC_PRODUCT": "发夹安放在冻结台面上，呈现整体轮廓与表面纹理"
+      },
+      "optional_actions": []
+    },
+
+    "hair_pin": {
+      "family": "HAIR_PIN",
+      "family_label": "发簪",
+      "structure_facts": {
+        "has_pin_shaft": "VERIFIED",
+        "has_teeth_or_jaw": "ABSENT",
+        "has_hinge_or_spring": "ABSENT",
+        "has_chain": "ABSENT",
+        "has_elastic_band": "ABSENT",
+        "has_ribbon_bow": "ABSENT"
+      },
+      "observation_focus": ["簪身轮廓", "与固定发束的关系", "已确认的材质观感与颜色"],
+      "fallback_observation": "只展示参考图已知的簪身轮廓、颜色与表面纹理；不展示未确认的装饰部件或背面细节",
+      "distinct_jobs": {
+        "WORN_DETAIL": "发簪与固定发束的关系",
+        "WORN_RELATION": "发簪与整体发型轮廓的关系"
+      },
+      "action_by_module": {
+        "WORN_DETAIL": "小幅侧后方转头，展示发簪与固定发束的关系",
+        "WORN_RELATION": "侧后方扩大取景，展示发簪与整体发型轮廓的关系",
+        "HANDHELD_PRODUCT": "手指稳定承托发簪，小幅转动展示簪身正面造型与侧面轮廓",
+        "STATIC_PRODUCT": "发簪安放在冻结台面上，呈现簪身轮廓与表面纹理"
+      },
+      "optional_actions": []
+    },
+
+    "headband": {
+      "family": "HAIR_BAND",
+      "family_label": "发箍",
+      "structure_facts": {
+        "has_band_arch": "VERIFIED",
+        "has_teeth_or_jaw": "ABSENT",
+        "has_hinge_or_spring": "ABSENT",
+        "has_chain": "ABSENT",
+        "has_pin_shaft": "ABSENT"
+      },
+      "observation_focus": ["弧架轮廓", "与头顶的贴合关系", "已确认的材质观感与颜色"],
+      "fallback_observation": "只展示参考图已知的弧架轮廓、颜色与表面纹理；不展示未确认的装饰部件或背面细节",
+      "distinct_jobs": {
+        "WORN_DETAIL": "发箍与头顶轮廓的贴合关系",
+        "WORN_RELATION": "发箍与整体发型轮廓的关系"
+      },
+      "action_by_module": {
+        "WORN_DETAIL": "小幅侧后方转头，展示发箍与头顶轮廓的贴合关系",
+        "WORN_RELATION": "侧后方扩大取景，展示发箍与整体发型轮廓的关系",
+        "HANDHELD_PRODUCT": "手指稳定承托发箍，小幅转动展示弧架造型与侧面轮廓",
+        "STATIC_PRODUCT": "发箍安放在冻结台面上，呈现弧架轮廓与表面纹理"
+      },
+      "optional_actions": []
+    },
+
+    "scrunchie": {
+      "family": "HAIR_SCRUNCHIE",
+      "family_label": "发圈",
+      "structure_facts": {
+        "has_elastic_band": "VERIFIED",
+        "has_teeth_or_jaw": "ABSENT",
+        "has_hinge_or_spring": "ABSENT",
+        "has_chain": "ABSENT",
+        "has_pin_shaft": "ABSENT"
+      },
+      "observation_focus": ["整体造型与包裹关系", "织物纹理与颜色", "与固定发束的关系"],
+      "fallback_observation": "只展示参考图已知的整体造型、织物纹理与颜色；不展示未确认的夹体或金属结构",
+      "distinct_jobs": {
+        "WORN_DETAIL": "发圈与固定发束的包裹关系",
+        "WORN_RELATION": "发圈与整体发型轮廓的关系"
+      },
+      "action_by_module": {
+        "WORN_DETAIL": "小幅侧后方转头，展示发圈与固定发束的包裹关系",
+        "WORN_RELATION": "侧后方扩大取景，展示发圈与整体发型轮廓的关系",
+        "HANDHELD_PRODUCT": "手指稳定承托发圈，小幅转动展示整体造型与织物纹理",
+        "STATIC_PRODUCT": "发圈安放在冻结台面上，呈现整体轮廓与织物纹理"
+      },
+      "optional_actions": []
+    },
+
+    "hair_tie": {
+      "family": "HAIR_TIE",
+      "family_label": "头绳",
+      "structure_facts": {
+        "has_elastic_band": "VERIFIED",
+        "has_teeth_or_jaw": "ABSENT",
+        "has_hinge_or_spring": "ABSENT",
+        "has_chain": "ABSENT",
+        "has_pin_shaft": "ABSENT"
+      },
+      "observation_focus": ["整体造型与缠绕关系", "材质纹理与颜色", "与固定发束的关系"],
+      "fallback_observation": "只展示参考图已知的整体造型、材质纹理与颜色；不展示未确认的夹体或金属结构",
+      "distinct_jobs": {
+        "WORN_DETAIL": "头绳与固定发束的关系",
+        "WORN_RELATION": "头绳与整体发型轮廓的关系"
+      },
+      "action_by_module": {
+        "WORN_DETAIL": "小幅侧后方转头，展示头绳与固定发束的关系",
+        "WORN_RELATION": "侧后方扩大取景，展示头绳与整体发型轮廓的关系",
+        "HANDHELD_PRODUCT": "手指稳定承托头绳，小幅转动展示整体造型与材质纹理",
+        "STATIC_PRODUCT": "头绳安放在冻结台面上，呈现整体轮廓与材质纹理"
+      },
+      "optional_actions": []
+    },
+
+    "ribbon": {
+      "family": "HAIR_RIBBON",
+      "family_label": "发带或缎带",
+      "structure_facts": {
+        "has_ribbon_bow": "VERIFIED",
+        "has_teeth_or_jaw": "ABSENT",
+        "has_hinge_or_spring": "ABSENT",
+        "has_chain": "ABSENT",
+        "has_pin_shaft": "ABSENT"
+      },
+      "observation_focus": ["缎带造型轮廓", "织物纹理与颜色", "与发型的关系"],
+      "fallback_observation": "只展示参考图已知的造型轮廓、织物纹理与颜色；不展示未确认的夹体或金属结构",
+      "distinct_jobs": {
+        "WORN_DETAIL": "缎带造型与发束的关系",
+        "WORN_RELATION": "缎带与整体发型轮廓的关系"
+      },
+      "action_by_module": {
+        "WORN_DETAIL": "小幅侧后方转头，展示缎带造型与发束的关系",
+        "WORN_RELATION": "侧后方扩大取景，展示缎带与整体发型轮廓的关系",
+        "HANDHELD_PRODUCT": "手指稳定承托缎带，小幅转动展示造型轮廓与织物纹理",
+        "STATIC_PRODUCT": "缎带安放在冻结台面上，呈现造型轮廓与织物纹理"
+      },
+      "optional_actions": []
+    }
+  },
+
+  "environment_recipes": {
+    "WINDOW_LIGHT_WOOD": {
+      "recipe_version": 1,
+      "label": "窗光木台",
+      "environment": "浅木台面、米白背景、大面积侧窗柔光、轻微反射补亮",
+      "goal": "清爽自然，保留材质纹理与接触阴影"
+    },
+    "WARM_WOOD_NEUTRAL_SUBJECT": {
+      "recipe_version": 1,
+      "label": "暖木中性商品光",
+      "environment": "稍深木色台面、低饱和背景，商品中性柔光，背景略暖",
+      "goal": "温润精致，商品本身不被整体染黄"
+    },
+    "MATTE_GREY_DETAIL": {
+      "recipe_version": 1,
+      "label": "哑光灰细节",
+      "environment": "哑光灰背景、柔和侧光、可见金属明暗边缘",
+      "goal": "干净结构与正常反射层次"
+    }
+  },
+
+  "default_environment_recipe": "WINDOW_LIGHT_WOOD",
+
+  "consistency_rules": {
+    "one_environment_per_video": true,
+    "keep_constant": [
+      "光向",
+      "白平衡",
+      "肤色",
+      "主要背景材质"
+    ],
+    "allowed_variation": [
+      "正常角度变化引起的合理高光变化"
+    ],
+    "forbidden": [
+      "磨成塑料皮肤",
+      "星芒或虚构钻石火彩",
+      "过曝白块",
+      "用镜头抖动或曝光跳变制造真实感",
+      "用低画质制造真实感"
+    ]
+  },
+
+  "authenticity_and_evidence_rules": {
+    "reference_limited": "参考图不足时只展示已知面和已知细节；不从小图生成虚构镶嵌、链节、背扣或毫米级尺寸。",
+    "no_fabricated_material": "不能只靠一张图的材质观感认定真实金属、宝石或功能。",
+    "relative_only": "没有可核实尺寸时只写相对观察，不宣称精确比例。",
+    "pairing_authority": "穿搭只投影实际入画的袖口、领口、肩部或发型；不强制生成不可见的全身人物剧情。"
+  }
+}

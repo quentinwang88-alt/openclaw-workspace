@@ -1,5 +1,7 @@
+import copy
 import unittest
 
+from core.accessory_mixed_templates import compile_mixed_template_contract
 from core.category_execution import compile_category_execution_extension
 from core.simplified_complete_script import (
     CAPTURE_RHYTHM_MULTICLIP,
@@ -1989,6 +1991,256 @@ class SimplifiedCompleteScriptTest(unittest.TestCase):
         self.assertFalse(realization["hard_required"])
         validation = validate_simplified_visual_script(normalized, seed)
         self.assertTrue(validation["valid"], validation)
+
+
+class MixedTemplateFrozenContractTest(unittest.TestCase):
+    """T11-T12: the frozen mixed contract survives the *real* seed entry point.
+
+    Both checks deliberately go through ``build_simplified_creative_seed`` /
+    ``normalize_simplified_visual_script`` instead of calling the contract
+    builders directly.  The seed is what the generator actually consumes; a
+    property that only holds when the builder is called in isolation still
+    produces two contradictory model inputs in production.
+    """
+
+    RECIPES = ("WINDOW_LIGHT_WOOD", "WARM_WOOD_NEUTRAL_SUBJECT", "MATTE_GREY_DETAIL")
+
+    def _anchor(self):
+        return {
+            "product_positioning_one_liner": "银色小圆环耳饰",
+            "hard_anchors": [{"anchor": "银色小圆环轮廓"}],
+            "display_anchors": [{"anchor": "耳垂上的小圆环"}],
+        }
+
+    def _mixed_extension(self, recipe="", template_id="AMX_C_DETAIL_FIRST"):
+        anchor = self._anchor()
+        extension = compile_category_execution_extension(
+            product_type="耳饰",
+            top_category="饰品",
+            anchor_card=anchor,
+            enabled=True,
+        )
+        extension["mixed_template_contract"] = compile_mixed_template_contract(
+            product_type="耳饰",
+            top_category="饰品",
+            template_id=template_id,
+            content_theme={
+                "theme_id": "TH_1",
+                "candidate_role": "PRIMARY",
+                "thesis": "主题",
+            },
+            environment_recipe_id=recipe,
+        )
+        return anchor, extension
+
+    def _seed(self, anchor, extension):
+        return build_simplified_creative_seed(
+            anchor_card=anchor,
+            structure_contract={
+                "hard_constraints": {
+                    "content_carrier": "MIXED",
+                    "beat_sequence": ["HOOK", "PROOF"],
+                }
+            },
+            content_bundle={
+                "content_mainline": "银色小圆环耳饰清楚可见",
+                "audience_tension_text": "怕买了不会戴",
+                "eligible_hook_ids": ["AUDIENCE_NEED_CALLOUT"],
+                "claim_atoms": [
+                    {"claim_key": "C1", "fact_text": "银色小圆环清楚可见", "role": "core_result"}
+                ],
+            },
+            creative_contract={
+                "opening_action": "商品已经放置完成",
+                "action_grammar": "结果建立→细节观察→佩戴结果→结束",
+            },
+            execution_reference={"content_carrier": "MIXED"},
+            requested_hook_id="AUDIENCE_NEED_CALLOUT",
+            content_angle_key="FACT_DISCOVERY",
+            product_type="耳饰",
+            top_category="饰品",
+            category_execution_extension=extension,
+        )
+
+    def _mixed_script(self):
+        return {
+            "script_concept": {
+                "one_sentence_idea": "展示银色小圆环耳饰的佩戴效果",
+                "viewer_need": "怕买了不会戴",
+                "hook_intent": "用小圆环细节制造关注",
+            },
+            "production_design": {
+                # The film-level carrier for a MIXED accessory film resolves to
+                # the existing person fallback; per-shot carriers are frozen
+                # separately and are what this test is about.
+                "presentation_mode": "PERSON_ON_CAMERA",
+                "character": {
+                    "identity": "只出现手与佩戴局部的创作者",
+                    "appearance": "干净手部",
+                    "hair_makeup": "不露脸",
+                    "speaking_personality": "自然",
+                },
+                "outfit": {
+                    "base_outfit": "白色针织上衣",
+                    "product_role": "耳饰是主体",
+                    "accessories": "无",
+                },
+                "scene": {
+                    "location": "木质台面旁",
+                    "moment": "自然光下的展示",
+                    "lighting": "窗边自然光",
+                    "background": "浅木台面",
+                },
+                "emotion": {
+                    "starting_state": "平静",
+                    "natural_change": "细节被看清",
+                    "ending_state": "完成展示",
+                },
+                "life_event": {
+                    "motivation": "展示耳饰细节",
+                    "continuous_event": "结果建立→细节观察→佩戴结果→结束",
+                },
+            },
+            "product_usage": {
+                "identity_anchors_preserved": ["银色小圆环轮廓"],
+                "selling_points_used": ["C1"],
+            },
+            "storyboard": [
+                {
+                    "shot_no": index,
+                    "time_range": f"{(index - 1) * 3.75}-{index * 3.75}s",
+                    "visual_content": visual,
+                    "character_action": action,
+                    "natural_emotion": "自然",
+                    "camera": "手持手机近景",
+                    "product_anchors_visible": ["银色小圆环轮廓"],
+                    "supported_claim_keys": [],
+                    "narrative_role": role,
+                }
+                for index, (visual, action, role) in enumerate(
+                    [
+                        ("耳饰放在木质台面上", "商品静置", "HOOK"),
+                        ("手指托起耳饰观察", "手指托起", "PROOF"),
+                        ("耳垂上完成佩戴", "已佩戴完成", "PROOF"),
+                        ("侧后方看佩戴结果", "自然转头", "ENDING"),
+                    ],
+                    1,
+                )
+            ],
+            "voiceover_context": {
+                "viewer_relationship": "像和姐妹分享",
+                "speaking_intent": "分享耳饰细节",
+                "desired_tone": "自然口语",
+            },
+        }
+
+    def _voiceover_frozen(self):
+        return {
+            "structure_contract": {"hard_constraints": {"content_carrier": "MIXED"}},
+            "content_bundle_brief": {},
+            "execution_reference": {"content_carrier": "MIXED"},
+        }
+
+    def test_T11_every_environment_recipe_survives_the_real_seed_entry(self):
+        for recipe in self.RECIPES:
+            with self.subTest(recipe=recipe):
+                anchor, extension = self._mixed_extension(recipe=recipe)
+                seed = self._seed(anchor, extension)
+                frozen = extension["mixed_template_contract"]
+                # The frozen contract reached the seed verbatim.
+                self.assertEqual(
+                    seed["category_execution_extension"]["mixed_template_contract"],
+                    frozen,
+                )
+                visual = seed["visual_execution_contract"]
+                self.assertEqual(visual["feature_scope"], "ACCESSORY_MIXED_TEMPLATE")
+                # Review #7: the blueprint quotes the frozen recipe, so the
+                # visual contract must quote the same one.  Before the fix this
+                # fell back to the default recipe on every call.
+                self.assertEqual(visual["lighting_recipe"]["recipe_id"], recipe)
+                self.assertEqual(
+                    visual["lighting_recipe"]["recipe_id"],
+                    frozen["environment_recipe_id"],
+                )
+        # The two non-default recipes must not have collapsed to the default.
+        _anchor, default_extension = self._mixed_extension(recipe="")
+        default_seed = self._seed(_anchor, default_extension)
+        default_id = default_seed["visual_execution_contract"]["lighting_recipe"]["recipe_id"]
+        self.assertNotEqual(default_id, "MATTE_GREY_DETAIL")
+
+    def test_T12_the_voiceover_inherits_the_frozen_per_shot_carrier(self):
+        anchor, extension = self._mixed_extension()
+        seed = self._seed(anchor, extension)
+        frozen = extension["mixed_template_contract"]
+        units = frozen["capture_units"]
+        expected_carriers = [unit["carrier_mode"] for unit in units]
+        expected_groups = [unit["continuity_group"] for unit in units]
+        # Template C opens on a static product shot and ends worn: no single
+        # film-level carrier can express it.
+        self.assertEqual(
+            expected_carriers,
+            ["STATIC_PRODUCT", "HAND_ONLY", "WEARER_ACTIVE", "WEARER_ACTIVE"],
+        )
+        self.assertEqual(expected_groups, ["CU_01", "CU_02", "CU_03", "CU_04"])
+
+        normalized = normalize_simplified_visual_script(
+            self._mixed_script(), seed, generation_provenance={"model": "test"}
+        )
+        validation = validate_simplified_visual_script(normalized, seed)
+        self.assertTrue(validation["valid"], validation)
+        self.assertEqual(
+            (normalized.get("mixed_template_shot_projection") or {}).get("status"),
+            "APPLIED",
+        )
+
+        storyboard = normalized["storyboard"]
+        self.assertEqual(
+            [shot["carrier_mode"] for shot in storyboard], expected_carriers
+        )
+        self.assertEqual(
+            [shot["continuity_group"] for shot in storyboard], expected_groups
+        )
+
+        direction, visual = build_simplified_voiceover_inputs(
+            normalized, seed, self._voiceover_frozen()
+        )
+        shot_plan = direction["structure_execution_plan"]["shot_plan"]
+        self.assertEqual(
+            [shot["carrier_mode"] for shot in shot_plan], expected_carriers
+        )
+        self.assertEqual(
+            [shot["continuity_group"] for shot in shot_plan], expected_groups
+        )
+        self.assertEqual(
+            [shot["carrier_mode"] for shot in visual["shots"]], expected_carriers
+        )
+
+    def test_T12_legacy_script_without_per_shot_fields_keeps_the_film_fallback(self):
+        """Only a script that *lacks* the frozen fields may use the film fallback."""
+
+        anchor, extension = self._mixed_extension()
+        seed = self._seed(anchor, extension)
+        normalized = normalize_simplified_visual_script(
+            self._mixed_script(), seed, generation_provenance={"model": "test"}
+        )
+        stripped = copy.deepcopy(normalized)
+        for shot in stripped["storyboard"]:
+            shot.pop("carrier_mode", None)
+            shot.pop("continuity_group", None)
+        direction, _visual = build_simplified_voiceover_inputs(
+            stripped, seed, self._voiceover_frozen()
+        )
+        shot_plan = direction["structure_execution_plan"]["shot_plan"]
+        # The film-level carrier is the person fallback, and there is no frozen
+        # continuity group to inherit.
+        self.assertEqual(
+            [shot["carrier_mode"] for shot in shot_plan],
+            ["WEARER_ACTIVE"] * 4,
+        )
+        self.assertEqual(
+            [shot["continuity_group"] for shot in shot_plan],
+            ["EVENT_1"] * 4,
+        )
 
 
 if __name__ == "__main__":

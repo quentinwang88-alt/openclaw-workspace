@@ -1342,6 +1342,74 @@ def _capture_mode_for_presentation(presentation: str) -> str:
     }.get(_text(presentation).upper(), CAPTURE_MODE_CREATOR_SELF_SHOT)
 
 
+def _project_mixed_template_shot_contract(
+    seed: Dict[str, Any],
+    storyboard: Any,
+    capture_units: Any,
+    target: Dict[str, Any],
+) -> None:
+    """Stamp the frozen per-shot carrier back onto the compiled script.
+
+    ``compile_capture_units`` rebuilds the clip list from the structure contract,
+    which knows nothing about the authored mixed-display template.  Without this
+    projection the per-shot carrier would survive planning and then silently
+    disappear here.  Only runs when a template contract is actually present.
+
+    A compiled clip list that does not line up with the frozen template is
+    recorded as a hard error rather than skipped: the shots then have no
+    authorised carrier, framing or timeline, and letting the script continue
+    would ship an unauthored montage.  ``validate_simplified_visual_script``
+    consumes those codes.
+    """
+
+    extension = (
+        seed.get("category_execution_extension")
+        if isinstance(seed.get("category_execution_extension"), dict)
+        else {}
+    )
+    contract = extension.get("mixed_template_contract") if extension else None
+    if not isinstance(contract, dict) or not contract:
+        return
+    try:
+        from core.accessory_mixed_templates import (
+            NO_FACE_POLICY,
+            PROJECTION_ERRORS_KEY,
+            PROJECTION_STATUS_MISMATCH,
+            PROJECTION_STATUS_SKIPPED,
+            project_mixed_template_onto_units,
+            scrub_no_face_prose_in_place,
+        )
+    except Exception:  # noqa: BLE001 - keep legacy paths untouched
+        return
+    projection = project_mixed_template_onto_units(capture_units, storyboard, contract)
+    status = _text(projection.get("status"))
+    if status == PROJECTION_STATUS_SKIPPED:
+        return
+    if status == PROJECTION_STATUS_MISMATCH:
+        # Hard stop: record the codes for the script validator and claim nothing.
+        # ``mixed_template_shot_projection`` is deliberately *not* written, so no
+        # downstream reader can mistake this for an applied contract.
+        target[PROJECTION_ERRORS_KEY] = list(projection.get("errors") or [])
+        target["mixed_template_contract"] = dict(contract)
+        return
+    target["mixed_template_contract"] = dict(contract)
+    target["mixed_template_shot_projection"] = projection
+    if _text(contract.get("face_policy")).upper() == NO_FACE_POLICY:
+        # Second boundary for the NO_FACE contract.  The projection above cleaned
+        # the fields the adapter owns, but a script is also *model-authored
+        # prose*: ``production_design.scene.subject_position`` and
+        # ``storyboard[].camera`` are written by the generator, never seen by any
+        # adapter, and copied verbatim into the video prompt.  Left alone, a
+        # model renders ``CREATOR_SELF_SHOT`` as "人物在同一自拍范围内轻微调整位置"
+        # and the face comes back in through the capture mode.
+        #
+        # Must run *here* and not later: ``video_generation_brief`` picks up
+        # ``production_design`` / ``storyboard`` by reference (see its
+        # construction below), so cleaning a copy afterwards would not reach it.
+        scrub_no_face_prose_in_place(target.get("production_design"))
+        scrub_no_face_prose_in_place(target.get("storyboard"))
+
+
 def _visual_selling_argument_view(raw_argument: Dict[str, Any]) -> Dict[str, Any]:
     """Build the only selling-argument view exposed to the visual model.
 
@@ -1853,6 +1921,20 @@ def build_simplified_creative_seed(
             category_execution_extension,
             presentation_mode=presentation,
         )
+        # Freeze the part evidence next to the frozen contract.  This is the one
+        # place that holds both the contract and the approved anchors, and the
+        # answer has to be shared by the blueprint guidance and the final prompt
+        # renderer -- deriving it twice is how the two can drift apart.  A
+        # no-op without a mixed contract, so no other path changes.
+        from core.accessory_mixed_templates import (
+            anchor_evidence_texts,
+            attach_mixed_part_evidence,
+        )
+
+        attach_mixed_part_evidence(
+            category_execution_extension,
+            anchor_texts=anchor_evidence_texts(anchor_card),
+        )
     claim_atoms = [
         {
             "claim_key": _text(item.get("claim_key")),
@@ -2303,6 +2385,14 @@ def build_simplified_creative_seed(
     if canonical_product_type:
         seed["product_truth"]["canonical_product_type"] = canonical_product_type
     from core.visual_execution_contract import build_visual_execution_contract
+    from core.accessory_mixed_templates import frozen_mixed_contract
+
+    # Review #7: the blueprint quotes the frozen environment recipe, so the
+    # visual contract has to be built from the same frozen value.  Passing
+    # nothing here made the function fall back to the default recipe, leaving one
+    # model input with two different surfaces and light directions -- and the
+    # first frame and the production prompt both inherit whichever one wins.
+    seed_mixed_contract = frozen_mixed_contract(category_execution_extension)
 
     apparel_anchor_action = _text(action_design.get("interaction_id")) == (
         "APPAREL_PRODUCT_ANCHOR_ACTION"
@@ -2328,6 +2418,10 @@ def build_simplified_creative_seed(
             "" if apparel_anchor_action
             else _text(creative_contract.get("action_grammar"))
         ),
+        accessory_environment_recipe_id=_text(
+            seed_mixed_contract.get("environment_recipe_id")
+        ),
+        accessory_frozen_contract=seed_mixed_contract,
     )
     if visual_execution_contract:
         seed["visual_execution_contract"] = visual_execution_contract
@@ -2819,6 +2913,7 @@ def normalize_simplified_visual_script(
     script["storyboard"] = compiled_storyboard
     script["capture_rhythm_contract"] = capture_rhythm_contract
     script["capture_units"] = capture_units
+    _project_mixed_template_shot_contract(seed, compiled_storyboard, capture_units, script)
     retrieval_reference = (
         seed.get("retrieval_reference")
         if isinstance(seed.get("retrieval_reference"), dict)
@@ -2912,6 +3007,33 @@ def validate_simplified_visual_script(
     usage = script.get("product_usage") if isinstance(script.get("product_usage"), dict) else {}
     shots = [item for item in script.get("storyboard") or [] if isinstance(item, dict)]
     voice = script.get("voiceover_context") if isinstance(script.get("voiceover_context"), dict) else {}
+
+    # 0. Frozen mixed-display contract consistency.
+    # A mixed script whose compiled clips do not line up with its frozen template
+    # has no authorised per-shot carrier and two disagreeing timelines.  Re-check
+    # here (not only at the projection site) so the verdict is derived from the
+    # *actual* compiled script that would be handed downstream.
+    try:
+        from core.accessory_mixed_templates import (
+            PROJECTION_ERRORS_KEY,
+            validate_mixed_shot_projection,
+        )
+
+        recorded = [
+            _text(value)
+            for value in (script.get(PROJECTION_ERRORS_KEY) or [])
+            if _text(value)
+        ]
+        if recorded:
+            issues.append("混合模板合同不一致：" + ",".join(recorded))
+        mixed_contract = script.get("mixed_template_contract")
+        if isinstance(mixed_contract, dict) and mixed_contract:
+            for code in validate_mixed_shot_projection(
+                script.get("capture_units"), mixed_contract
+            ):
+                issues.append("混合模板镜头不一致：" + _text(code))
+    except Exception:  # noqa: BLE001 - legacy scripts have no mixed contract
+        pass
 
     # 1. Output usability.
     if not _required_texts(concept, ("one_sentence_idea", "viewer_need", "hook_intent")):
@@ -3208,6 +3330,8 @@ def build_simplified_voiceover_inputs(
     shots: List[Dict[str, Any]] = []
     shot_plan: List[Dict[str, Any]] = []
     presentation = _text(production.get("presentation_mode")).upper()
+    # Film-level fallback.  ``MIXED`` has no single carrier, so this mapping
+    # deliberately does not resolve it: a MIXED film must answer per shot.
     carrier = {
         "PERSON_ON_CAMERA": "WEARER_ACTIVE",
         "STATIC_PRODUCT": "STATIC_PRODUCT",
@@ -3220,6 +3344,14 @@ def build_simplified_voiceover_inputs(
             _text(key) for key in item.get("supported_claim_keys") or []
             if _text(key) in evidence_keys
         ]
+        # Review #8: the frozen per-shot carrier and continuity group win.  The
+        # montage deliberately cuts between worn / hand-only / static shots, so
+        # collapsing all four onto the film's ``MIXED`` label (or onto a single
+        # "EVENT_1") told the central voiceover to write for four identical worn
+        # shots -- weakening exactly the tie between wording and what is on
+        # screen.  Legacy scripts carry neither field and keep the old fallback.
+        shot_carrier = _text(item.get("carrier_mode")).upper() or carrier
+        continuity = _text(item.get("continuity_group")) or "EVENT_1"
         shots.append({
             "shot_no": int(item.get("shot_no") or index),
             "duration": _text(item.get("time_range")),
@@ -3229,7 +3361,7 @@ def build_simplified_voiceover_inputs(
             "framing": _text(item.get("camera")),
             "product_visibility": list(item.get("product_anchors_visible") or []),
             "supported_claim_keys": supported,
-            "carrier_mode": carrier,
+            "carrier_mode": shot_carrier,
             "structure_beat": _text(item.get("narrative_role")),
             "audio_hard_constraint": "NONE",
             "audio_preference": "VOICEOVER_ALLOWED",
@@ -3237,8 +3369,8 @@ def build_simplified_voiceover_inputs(
         shot_plan.append({
             "shot_no": int(item.get("shot_no") or index),
             "structure_beat": _text(item.get("narrative_role")),
-            "carrier_mode": carrier,
-            "continuity_group": "EVENT_1",
+            "carrier_mode": shot_carrier,
+            "continuity_group": continuity,
         })
     creative_blueprint = {
         "creative_thesis": _text(script.get("script_concept", {}).get("one_sentence_idea")),
@@ -3375,6 +3507,7 @@ def assemble_simplified_complete_script(
     result["storyboard"] = compiled_storyboard
     result["capture_rhythm_contract"] = capture_rhythm_contract
     result["capture_units"] = capture_units
+    _project_mixed_template_shot_contract(seed, compiled_storyboard, capture_units, result)
     product_truth = seed.get("product_truth") if isinstance(seed.get("product_truth"), dict) else {}
     lines = [item for item in voiceover_plan.get("lines") or [] if isinstance(item, dict)]
     target = " ".join(_text(item.get("voiceover_text_target_language")) for item in lines).strip()
