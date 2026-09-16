@@ -34,6 +34,59 @@ python3 -m remake_video_execution.cli plan \
 
 当前不自动提交真实视频。实际素材缺失或能力检查未通过时保持阻断；后续执行器必须消费冻结计划，不能重新理解或改写源稿。
 
+## 正式生产入口（唯一）
+
+复刻长视频**不再**使用本包的 `scripts/run_real_flow.py` 作为生产入口。正式运营流程与原创长视频完全统一：
+
+```text
+复刻任务生成脚本 → 写入“原创视频生产脚本”总库 → 运营审核 → 勾选“进入生产”
+→ openclaw_original_batch_sync.py
+→ 统一长视频生产器识别 REMAKE_SEGMENTED
+→ plan_c_handoff.py 把冻结复刻稿编译成 Plan C job（A/B/C）
+→ 与原创共用的 K0/进入帧、H3、远端续跑、TTS/静音轨、合并、成片校验、飞书回写
+```
+
+正式命令仍只有：
+
+```bash
+python3 /Users/likeu3/.openclaw/workspace/skills/script-run-manager-sync/scripts/openclaw_original_batch_sync.py check --limit 20
+python3 /Users/likeu3/.openclaw/workspace/skills/script-run-manager-sync/scripts/openclaw_original_batch_sync.py sync --limit 20
+```
+
+### 只保留调试职责的脚本
+
+以下两个脚本保留为本地调试工具，不承担生产职责：
+
+- `scripts/run_real_flow.py`：已删除特定商品硬编码纠偏与 41 秒硬编码；BGM、字幕文本与字幕时间窗都必须显式传入；
+- `skills/script-run-manager-sync/scripts/run_remake_segmented_preview.py`：只做本地只读预览，不写飞书、不生成成片。
+
+旧独立库 `/Users/likeu3/.openclaw/shared/data/remake_video_execution.sqlite3` **不会**自动迁移。若其中已有远端 task ID，必须先人工审计，禁止当作新 job 重复提交。
+
+## 复刻稿 → Plan C 适配层
+
+`remake_video_execution/plan_c_handoff.py` 是复刻编译器与共享 Plan C 媒体执行器之间唯一的接缝：
+
+- 冻结人工复刻稿，确定性解析时间轴，按 15 秒上限切成 2-3 段（≤30 秒为 A/B，31-45 秒为 A/B/C）；
+- `SEG_01/02/03` 统一映射为 Plan C 的 `A/B/C`；
+- `incoming_boundary=CONTINUOUS` → `boundary_mode=CONTINUOUS`（上一段计划尾帧 + 实际尾帧续接）；
+- `incoming_boundary=CUT` → `boundary_mode=DISCONTINUOUS_CUT`（生成独立进入帧）；
+- 生成与原创兼容的关键帧包（K0、`K{n}_PLANNED`、`S{X}_ENTRY`）；
+- 声音模式继承 `PRESERVE_SOURCE_COPY / NO_VOICEOVER / UNSPECIFIED`，`rewrite_allowed=false`；
+- 观众可见文字从视频提示词中剔除，改由后期字幕合同渲染。
+
+它**不**调用原创的 `validate_master_contract()` / `compile_longform_plan()`：复刻稿不需要卖点、capture unit 或唯一 Hook 创作规则。
+
+### 字幕后处理（由共享执行器消费）
+
+适配层输出 `plan.postprocess_contract.subtitles`（`mode=PRESERVE_SOURCE_TIMELINE` + 逐条 cue）。
+共享执行器 `core/longform/subtitles.py` 在合并后、混音/静音轨前把冻结原稿的可见文字按
+**源时间轴**烧录进成片（ASS + libass，避免 drawtext 转义破坏泰文/中文）：
+
+- cue 文本逐字保留，不翻译、不改写、不重排；
+- 泰语目标解析泰文字体（Thonburi / Arial Unicode），缺字体直接报错而不是画出方框；
+- 原创计划没有该合同，因此不烧字幕，成片与改造前一致；
+- 产物 `merged_captioned.mp4` + `subtitles.json` 清单，可幂等复用。
+
 离线贯通测试可用 Mock H3 验证请求编译、状态登记和幂等重跑，不产生费用：
 
 ```bash

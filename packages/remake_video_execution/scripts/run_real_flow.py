@@ -1,10 +1,22 @@
 #!/usr/bin/env python3
+"""Local debug tool: generate, download and concatenate one remake video.
+
+This is NOT the production entry point.  Formal remake production goes through
+the shared operator entry point only:
+
+    python3 /Users/likeu3/.openclaw/workspace/skills/script-run-manager-sync/scripts/openclaw_original_batch_sync.py sync --limit 20
+
+which compiles the frozen remake script into a Plan C job and reuses the same
+keyframes/H3/resume/TTS/merge/validation/Feishu write-back as original
+long-form.  This script deliberately carries no product-specific prompt
+corrections, no fixed BGM length and no fixed subtitle window; every such value
+must be passed explicitly.  It never migrates tasks from the legacy
+``remake_video_execution.sqlite3`` database.
+"""
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import re
 import shutil
 import subprocess
 import time
@@ -25,28 +37,18 @@ def _status(response: dict[str, Any]) -> str:
     return str((((response.get("response") or {}).get("task") or {}).get("status") or "")).lower()
 
 
-def _correct_product_conflicts(prompt: str) -> str:
-    replacements = {
-        "深棕色": "真实商品图中的暖棕色",
-        "小翻领/小领口结构": "宽尖角翻领结构",
-        "简洁小翻领/小领口结构": "宽尖角翻领结构",
-        "小翻领": "宽尖角翻领",
-        "三颗纽扣": "四枚金色圆形按扣",
-        "前三颗前中纽扣": "四枚前中金色圆形按扣",
-        "前三颗纽扣": "四枚金色圆形按扣",
-        "第一、第二、第三颗前中纽扣": "第一至第四枚前中金色圆形按扣",
-        "第三、第二、第一颗纽扣": "第四至第一枚金色圆形按扣",
-    }
-    for old, new in replacements.items():
-        prompt = prompt.replace(old, new)
-    prompt = re.sub(r"(?m)^\s*(?:屏幕文字|字幕|评论气泡)\s*[：:].*$", "", prompt)
-    product_lock = (
-        "\n\n【真实商品图权威纠偏】\n"
-        "真实商品参考图优先于原提示词中的冲突描述。外套固定为暖棕色哑光仿麂皮PU短款箱型外套，"
-        "宽尖角翻领，单排四枚金色圆形按扣，袖口各有同款金色圆扣；禁止改成三扣、黑扣、窄小领、"
-        "拉链、亮面皮革或长款。观众可见文字统一由后期字幕生成，视频模型不得自行画字。"
+def _video_seconds(path: Path) -> float:
+    """Read the real duration instead of assuming any fixed length."""
+
+    ffprobe = shutil.which("ffprobe") or "/Users/likeu3/.local/bin/ffprobe"
+    completed = subprocess.run(
+        [ffprobe, "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+        capture_output=True, text=True, check=False,
     )
-    return prompt + product_lock
+    if completed.returncode != 0:
+        raise RuntimeError("读取视频时长失败: " + completed.stderr[-800:])
+    return float(completed.stdout.strip())
 
 
 def _merge(segment_paths: list[Path], output: Path) -> None:
@@ -76,15 +78,17 @@ def _merge(segment_paths: list[Path], output: Path) -> None:
 
 def _add_continuous_bgm(silent_video: Path, bgm: Path, output: Path) -> None:
     """Replace all provider segment audio with one continuous licensed track."""
+
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise RuntimeError("缺少 ffmpeg")
+    seconds = _video_seconds(silent_video)
     completed = subprocess.run([
         ffmpeg, "-y", "-i", str(silent_video), "-stream_loop", "-1", "-i", str(bgm),
         "-filter_complex",
-        "[1:a]atrim=0:41,asetpts=PTS-STARTPTS,loudnorm=I=-16:TP=-1.5:LRA=11,"
-        "volume=0.55,afade=t=in:st=0:d=0.18,afade=t=out:st=40.3:d=0.7[a]",
-        "-map", "0:v:0", "-map", "[a]", "-t", "41", "-c:v", "copy", "-c:a", "aac",
+        f"[1:a]atrim=0:{seconds:.3f},asetpts=PTS-STARTPTS,loudnorm=I=-16:TP=-1.5:LRA=11,"
+        f"volume=0.55,afade=t=in:st=0:d=0.18,afade=t=out:st={max(0.0, seconds - 0.7):.3f}:d=0.7[a]",
+        "-map", "0:v:0", "-map", "[a]", "-t", f"{seconds:.3f}", "-c:v", "copy", "-c:a", "aac",
         "-ar", "44100", "-ac", "2", "-b:a", "160k", "-movflags", "+faststart", str(output),
     ], capture_output=True, text=True, check=False)
     if completed.returncode != 0:
@@ -117,7 +121,9 @@ def _burn_subtitle(source: Path, output: Path, text: str, start_seconds: float, 
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="真实生成、下载并拼接一条复刻长视频")
+    parser = argparse.ArgumentParser(
+        description="复刻长视频本地调试：真实生成、下载并拼接（非正式生产入口）"
+    )
     parser.add_argument("--plan", required=True)
     parser.add_argument("--start-frame", required=True)
     parser.add_argument("--product-id", default="")
@@ -126,10 +132,10 @@ def main() -> int:
     parser.add_argument("--reference-image-pack-id", default="")
     parser.add_argument("--reference-group-id", default="")
     parser.add_argument("--reference-source", choices=("auto", "operation", "amc"), default="auto")
-    parser.add_argument("--bgm", required=True)
-    parser.add_argument("--subtitle-text", default="")
-    parser.add_argument("--subtitle-start", type=float, default=39.0)
-    parser.add_argument("--subtitle-end", type=float, default=41.0)
+    parser.add_argument("--bgm", default="", help="可选本地BGM；默认不加，交给发布端选音乐")
+    parser.add_argument("--subtitle-text", default="", help="后期字幕文本；需同时给出时间窗")
+    parser.add_argument("--subtitle-start", type=float, default=None)
+    parser.add_argument("--subtitle-end", type=float, default=None)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--allow-real-submit", action="store_true")
     parser.add_argument("--poll-interval", type=int, default=20)
@@ -137,14 +143,18 @@ def main() -> int:
     args = parser.parse_args()
     if not args.allow_real_submit:
         raise SystemExit("真实 H3 提交必须显式使用 --allow-real-submit")
+    if args.subtitle_text and (args.subtitle_start is None or args.subtitle_end is None):
+        raise SystemExit("字幕必须显式提供 --subtitle-start 与 --subtitle-end，禁止硬编码时间窗")
 
     plan_path = Path(args.plan).resolve()
     start_frame = Path(args.start_frame).resolve()
-    bgm = Path(args.bgm).resolve()
+    bgm = Path(args.bgm).resolve() if args.bgm else None
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    if not plan_path.is_file() or not start_frame.is_file() or not bgm.is_file():
-        raise SystemExit("计划、首帧或 BGM 不存在")
+    if not plan_path.is_file() or not start_frame.is_file():
+        raise SystemExit("计划或首帧不存在")
+    if bgm is not None and not bgm.is_file():
+        raise SystemExit("指定的 BGM 不存在")
 
     frozen = json.loads(plan_path.read_text(encoding="utf-8"))
     source = SourceSnapshot(**frozen["source"])
@@ -163,14 +173,8 @@ def main() -> int:
     product_images = frozen_product_paths(source)
     snapshot_path.write_text(json.dumps({"input_source_revision_hash": input_revision,
                                        "source": source.to_dict()}, ensure_ascii=False, indent=2), encoding="utf-8")
-    corrected_prompt = _correct_product_conflicts(source.raw_prompt)
-    source = SourceSnapshot(**{
-        **source.to_dict(),
-        "raw_prompt": corrected_prompt,
-        "source_revision_hash": hashlib.sha256(
-            (source.source_revision_hash + corrected_prompt).encode()
-        ).hexdigest(),
-    })
+    # The frozen prompt is executed verbatim.  No product-specific correction is
+    # applied here: the product reference image is the only appearance authority.
     execution = parse_source(source)
     segment_plan = plan_segments(execution)
     segments = [item.to_dict() for item in segment_plan.segments]
@@ -236,10 +240,14 @@ def main() -> int:
 
     segment_paths = [output_dir / "segments" / f"{item['segment_id']}.mp4" for item in segments]
     silent = output_dir / "merged_silent.mp4"
-    mixed = output_dir / "final_video_continuous_bgm.mp4"
     final = output_dir / "final_video.mp4"
     _merge(segment_paths, silent)
-    _add_continuous_bgm(silent, bgm, mixed)
+    audio_mode = "continuous_local_bgm_no_voiceover" if bgm else "no_voiceover_no_bgm"
+    if bgm is not None:
+        mixed = output_dir / "final_video_continuous_bgm.mp4"
+        _add_continuous_bgm(silent, bgm, mixed)
+    else:
+        mixed = silent
     if args.subtitle_text:
         _burn_subtitle(mixed, final, args.subtitle_text, args.subtitle_start, args.subtitle_end)
     else:
@@ -259,7 +267,8 @@ def main() -> int:
         "reference_selection": source.reference_selection,
         "probe": json.loads(probe.stdout),
         "source_blockers_bypassed_for_test": [issue.code for issue in execution.issues if issue.severity == "BLOCK"],
-        "audio": {"mode": "continuous_local_bgm_no_voiceover", "path": str(bgm)},
+        "production_entry_point": "openclaw_original_batch_sync.py sync (this run is a local debug tool)",
+        "audio": {"mode": audio_mode, "path": str(bgm) if bgm else "", "tts_called": False},
         "subtitle": {
             "text": args.subtitle_text, "start_seconds": args.subtitle_start,
             "end_seconds": args.subtitle_end, "render_mode": "POST_PROCESS" if args.subtitle_text else "NONE",
