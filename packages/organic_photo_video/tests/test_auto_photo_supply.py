@@ -8,7 +8,7 @@ from dataclasses import field
 from pathlib import Path
 
 from services.auto_photo_supply import AutoPhotoSupply
-from services.material_analysis import MaterialLedger
+from services.material_analysis import ANALYSIS_VERSION, MaterialLedger
 from services.material_source import MaterialSource
 from services.publish_account_profile import (
     SUPPLY_AUTOMATION_PRODUCE,
@@ -91,7 +91,7 @@ def make_ledger_with_analysis(root: Path, source: MaterialSource, note_ids,
         package = source.get(note_id)
         ledger.put_cached_analysis(
             fingerprint=package.version_fingerprint, model=model,
-            analysis_version="material-analysis-v1",
+            analysis_version=ANALYSIS_VERSION,
             note_id=note_id, result=_analysis_payload(), image_count=2,
             calls=1, prompt_tokens=100, completion_tokens=20, duration_ms=10)
     return ledger

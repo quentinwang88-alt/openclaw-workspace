@@ -159,8 +159,18 @@ def narrow_candidates(
             continue
         if not analysis.get("consumable", False):
             continue
+        # 审美硬门槛：镜面自拍/随手拍/画质差不进候选。生成链会继承参考的
+        # 画面风格，这类素材必然带偏成片（宁可无候选也不将就）。
+        quality = str(analysis.get("photography_quality") or "")
+        style = str(analysis.get("shoot_style") or "")
+        if quality == "poor" or style in {"mirror_selfie", "casual_phone_selfie"}:
+            continue
         score = 0.0
         reasons: List[str] = []
+
+        if quality == "good":
+            score += 0.5
+            reasons.append("成片质量好（构图光线干净）")
 
         structure = str(analysis.get("set_structure") or "")
         if prefer_structures and structure in prefer_structures:
@@ -221,6 +231,9 @@ _SELECT_PROMPT = """你是穿搭图文的参考选材器。根据候选素材摘
 要求：
 - 优先一篇主参考；仅在主参考存在明确缺口（如缺细节页）时补 1 篇补充参考。
 - 指定商品时：商品身份/颜色/版型以本店资料为准，参考只借鉴配套、比例与表达。
+- 审美门槛：绝对不要选择镜面自拍（mirror_selfie）、随手拍/游客照（casual_phone_selfie）
+  或 photography_quality=poor 的素材；优先全身完整、光线干净、背景整洁、
+  构图专业的博主级出片——生成画面会直接继承参考的拍摄质感。
 - 不确定或没有合适候选时，main_note_id 填空字符串，不要勉强选择。
 
 候选摘要：
@@ -259,6 +272,7 @@ def select_reference(
         lines.append(
             f"- {cand.note_id}｜标题:{cand.title[:40]}｜结构:{analysis.get('set_structure')}"
             f"｜单品:{core}｜配色:{','.join(analysis.get('palette') or [])}"
+            f"｜拍摄:{analysis.get('shoot_style') or '未知'}/{analysis.get('photography_quality') or '未知'}"
             f"｜主题:{str(analysis.get('note_topic') or '')[:40]}"
         )
     product_line = f"本篇商品：{product.summary_line()}" if product else "本篇不指定商品（自由搭配）"

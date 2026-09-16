@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from services.material_source import MaterialSource
 from services.photo_reference_vision import parse_vision_envelope
 
-ANALYSIS_VERSION = "material-analysis-v1"
+ANALYSIS_VERSION = "material-analysis-v2"
 DEFAULT_MODEL_ENV = "OPV_PHOTO_VISION_MODEL"
 DEFAULT_MAX_IMAGE_EDGE = 768
 DEFAULT_JPEG_QUALITY = 82
@@ -314,10 +314,16 @@ _BATCH_PROMPT_BODY = """
  "palette": ["主色", "辅色"],
  "photography": "摄影特征（街拍/棚拍/室内，景别）",
  "background": "背景/场景特征",
+ "shoot_style": "拍摄方式：mirror_selfie（镜面自拍）| casual_phone_selfie（随手手机自拍/游客照）| street_snap（街拍）| studio（棚拍/精修）| indoor（室内他拍）| outdoor_other（户外其他）之一",
+ "photography_quality": "成片审美质量：poor（画质差/场景脏乱/镜面自拍/随手拍）| normal（及格的生活实拍）| good（构图光线干净的博主级出片）之一",
  "consumable": true/false,
  "consumable_reason": "为什么可/不可作为穿搭生成参考（一句话）"
 }
-consumable 判定标准：图片清晰、穿搭可辨认、以服装表达为主（非纯测评/广告/文字长图）。"""
+consumable 判定标准（两条都要满足）：
+1. 图片清晰、穿搭可辨认、以服装表达为主（非纯测评/广告/文字长图）；
+2. 拍摄审美达标：photography_quality 为 poor 的（卫生间/宿舍镜面自拍、
+   游客随手拍、背景脏乱、构图裁切残缺）一律 consumable=false——
+   生成链会继承参考的画面风格，低审美参考必然产出低审美成片。"""
 
 
 def _usage(response: Any) -> tuple:
@@ -385,6 +391,18 @@ def _merge_batch_results(batches: List[Dict[str, Any]]) -> Dict[str, Any]:
                 palette.append(str(color))
     consumable = all(bool(c.get("consumable")) for c in batches)
     reasons = [str(c.get("consumable_reason") or "") for c in batches if c.get("consumable_reason")]
+    # 审美维度合并：质量取最差批（一页拉胯即整体拉胯）；拍摄方式不一致记 mixed
+    qualities = [str(c.get("photography_quality") or "") for c in batches]
+    photography_quality = ""
+    if "poor" in qualities:
+        photography_quality = "poor"
+    else:
+        for q in qualities:
+            if q:
+                photography_quality = q
+                break
+    styles = {str(c.get("shoot_style") or "") for c in batches} - {""}
+    shoot_style = styles.pop() if len(styles) == 1 else ("mixed" if styles else "")
     return {
         "note_topic": str(first.get("note_topic") or ""),
         "core_items": core_items,
@@ -396,6 +414,8 @@ def _merge_batch_results(batches: List[Dict[str, Any]]) -> Dict[str, Any]:
         "palette": palette[:6],
         "photography": str(first.get("photography") or ""),
         "background": str(first.get("background") or ""),
+        "shoot_style": shoot_style,
+        "photography_quality": photography_quality,
         "consumable": consumable,
         "consumable_reason": "；".join(reasons[:2]) or ("分批全部可用" if consumable else "部分批次不可用"),
     }
