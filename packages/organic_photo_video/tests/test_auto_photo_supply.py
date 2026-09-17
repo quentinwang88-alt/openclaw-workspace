@@ -185,7 +185,8 @@ class AutoPhotoSupplyTest(unittest.TestCase):
         self.assertEqual(fields["生成篇数"], 1)
         self.assertEqual(fields["目标账号（可选）"], "tocrystal66")
         self.assertEqual(fields["图文主题"], "旅行穿搭")
-        self.assertEqual(fields["来源标记"], "auto_supply|2026-09-16|tocrystal66")
+        self.assertEqual(fields["来源标记"],
+                         "auto_supply|2026-09-16|tocrystal66|slot1")
         self.assertTrue(fields["备注"].startswith("自动供稿"))
         # 来源分流（Phase 1）：外部参考走「参考图 + 风格参考」，
         # 绝不写「完整穿搭素材」字段（原图直用通道已封死）
@@ -584,3 +585,102 @@ class AutoPhotoSupplyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_a2_attach_failure_reconciled_next_run(self):
+        # 方案 A2：行已建但 attach_record 失败（合同留 intent）→ 下轮 run()
+        # 按标记 slot 段唯一匹配补绑，不重选不重建
+        from services.external_supply_contract import ExternalSupplyContractStore
+        store = ExternalSupplyContractStore(str(self.root / "contracts.sqlite3"))
+        ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
+        # 第一次跑：劫持 attach_record 模拟绑定失败
+        client = FakeTaskTableClient()
+        broken = ExternalSupplyContractStore(str(self.root / "contracts.sqlite3"))
+        orig_attach = broken.attach_record
+        broken.attach_record = lambda cid, rid: (_ for _ in ()).throw(
+            RuntimeError("attach 模拟失败"))
+        supply1 = AutoPhotoSupply(
+            client=client, source=self.lab.source(), ledger=ledger,
+            vision_client=self._vision_ok(), model="mock-model",
+            today="2026-09-16", contract_store=broken)
+        supply1.run([make_binding(profile_extra={"daily_limit": 1})], apply=True)
+        row = client.rows[-1]
+        marker = row["fields"]["来源标记"]
+        self.assertIn("slot1", marker)          # 标记带 slot 段
+        self.assertEqual(broken.get(
+            "tocrystal66|2026-09-16|1")["status"], "intent")  # 合同未绑
+        # 第二次跑（新 store，attach 正常）：对账回绑该行，不再新建
+        client2 = FakeTaskTableClient(existing=[row])
+        ledger2 = make_ledger_with_analysis(
+            self.root, self.lab.source(), self.note_ids, name="ledger_r2.sqlite3")
+        supply2 = AutoPhotoSupply(
+            client=client2, source=self.lab.source(), ledger=ledger2,
+            vision_client=FixedSelectionClient("m" * 24), model="mock-model",
+            today="2026-09-16", contract_store=store)
+        results = supply2.run([make_binding(profile_extra={"daily_limit": 1})], apply=True)
+        self.assertEqual(len(client2.created), 0)         # 未重建
+        contract = store.get("tocrystal66|2026-09-16|1")
+        self.assertEqual(contract["status"], "created")   # 已补绑
+        self.assertEqual(contract["record_id"], row["record_id"])
+        self.assertEqual(results[0].status, "limit_reached")
+
+    def test_a2_response_unknown_keeps_intent_for_recovery(self):
+        # 建行返回空 ID（响应未知）：合同留 intent、状态 pending_reconcile；
+        # 下轮恢复路径复用冻结输入（不 supersede、不重选）
+        from services.external_supply_contract import ExternalSupplyContractStore
+        store = ExternalSupplyContractStore(str(self.root / "contracts.sqlite3"))
+        ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
+
+        class EmptyCreateClient(FakeTaskTableClient):
+            def batch_create_records(self, records):
+                return []                      # 模拟响应未知/为空
+
+        supply1 = AutoPhotoSupply(
+            client=EmptyCreateClient(), source=self.lab.source(), ledger=ledger,
+            vision_client=self._vision_ok(), model="mock-model",
+            today="2026-09-16", contract_store=store)
+        results = supply1.run([make_binding(profile_extra={"daily_limit": 1})], apply=True)
+        slot = results[0].slots[0]
+        self.assertEqual(slot.status, "pending_reconcile")
+        contract = store.get("tocrystal66|2026-09-16|1")
+        self.assertEqual(contract["status"], "intent")
+        self.assertEqual(contract["main_note_id"], "m" * 24)   # 冻结输入在
+        # 下轮正常客户端：恢复路径复用 m（vision 若被调会选 n——stub 给 n）
+        client2 = FakeTaskTableClient()
+        ledger2 = make_ledger_with_analysis(
+            self.root, self.lab.source(), self.note_ids, name="ledger_r3.sqlite3")
+        vision = FixedSelectionClient("n" * 24)
+        supply2 = AutoPhotoSupply(
+            client=client2, source=self.lab.source(), ledger=ledger2,
+            vision_client=vision, model="mock-model",
+            today="2026-09-16", contract_store=store)
+        results2 = supply2.run([make_binding(profile_extra={"daily_limit": 1})], apply=True)
+        self.assertEqual(results2[0].slots[0].main_note_id, "m" * 24)
+        self.assertEqual(vision.calls, 0)      # 未重选
+
+    def test_a2_marker_ambiguous_records_gap(self):
+        # 同 slot 匹配多行：记异常不猜不删（gap reason=marker_ambiguous）
+        from services.external_supply_contract import ExternalSupplyContractStore
+        store = ExternalSupplyContractStore(str(self.root / "contracts.sqlite3"))
+        store.persist_intent({
+            "account_id": "tocrystal66", "supply_date": "2026-09-16", "slot": 1,
+            "adoption": "overall", "main_note_id": "m" * 24, "main_note_title": "t",
+            "selected_pages": [], "product": {}, "destination": {},
+            "temperature_band": "", "content_requirement": "x",
+            "policy_version": "p", "contract_fingerprint": "f"})
+        dup_rows = [
+            {"record_id": f"dup{i}", "fields": {
+                "来源标记": "auto_supply|2026-09-16|tocrystal66|slot1",
+                "目标账号（可选）": "tocrystal66", "进度": "已完成"}}
+            for i in range(2)]
+        client = FakeTaskTableClient(existing=dup_rows)
+        ledger = make_ledger_with_analysis(
+            self.root, self.lab.source(), self.note_ids, name="ledger_r4.sqlite3")
+        AutoPhotoSupply(
+            client=client, source=self.lab.source(), ledger=ledger,
+            vision_client=self._vision_ok(), model="mock-model",
+            today="2026-09-16", contract_store=store).run(
+            [make_binding(profile_extra={"daily_limit": 1})], apply=True)
+        gaps = ledger._conn.execute(
+            "SELECT reason FROM material_gaps").fetchall()
+        self.assertTrue(any(r["reason"] == "marker_ambiguous" for r in gaps))
+        self.assertEqual(store.get("tocrystal66|2026-09-16|1")["status"], "intent")

@@ -79,8 +79,22 @@ DEFAULT_DAILY_LIMIT = 1
 DEFAULT_TARGET_INVENTORY = 4
 
 
-def supply_marker(today: str, account_id: str) -> str:
-    return f"{MARKER_PREFIX}|{today}|{account_id}"
+def supply_marker(today: str, account_id: str, slot: int = 0) -> str:
+    """来源标记：`auto_supply|日期|账号[|slotN]`。
+
+    旧三段格式仍被对账解析兼容（按前缀计数）；追加的 slot 段用于
+    建行后回绑合同的对账定位（方案 A2：绑定失败可恢复）。
+    """
+    base = f"{MARKER_PREFIX}|{today}|{account_id}"
+    return f"{base}|slot{int(slot)}" if slot else base
+
+
+def parse_marker_slot(marker: str) -> int:
+    """从来源标记解析 slot 段；旧格式/无段返回 0。"""
+    for part in str(marker or "").split("|"):
+        if part.startswith("slot") and part[4:].isdigit():
+            return int(part[4:])
+    return 0
 
 
 def worker_identity() -> str:
@@ -173,9 +187,35 @@ class AutoPhotoSupply:
         rows_by_marker: Dict[str, int] = {}
         inventory_by_handle: Dict[str, int] = {}
         budget: Dict[str, int] = {}
+        rows_by_slot: Dict[tuple, List[str]] = {}
         if apply:
-            rows_by_marker, inventory_by_handle = self._scan_task_rows()
+            rows_by_marker, inventory_by_handle, rows_by_slot = self._scan_task_rows()
             budget = self.ledger.daily_call_usage(self.today)
+            # 方案 A2：先对账未完成绑定——行已建但合同未绑（attach 失败/
+            # 响应未知）的，唯一匹配补绑；多匹配记异常，不猜不删不重建。
+            for (account_id, slot_no), record_ids in sorted(rows_by_slot.items()):
+                if len(record_ids) != 1:
+                    self.ledger.record_gap(
+                        scope=f"supply:{account_id}", reason="marker_ambiguous",
+                        detail=f"slot{slot_no} 匹配到 {len(record_ids)} 行："
+                               + ",".join(record_ids[:5]))
+                    continue
+                contract_id = f"{account_id}|{self.today}|{slot_no}"
+                try:
+                    contract = self.contract_store.get(contract_id)
+                except Exception:  # noqa: BLE001 - 读取异常按错误处理不重建
+                    self.ledger.record_gap(
+                        scope=f"supply:{account_id}", reason="contract_read_error",
+                        detail=contract_id)
+                    continue
+                if (contract is not None and contract.get("status") != "created"
+                        and not contract.get("record_id")):
+                    self.contract_store.attach_record(contract_id, record_ids[0])
+                    try:
+                        self.ledger.complete_slot(
+                            account_id, self.today, slot_no, record_id=record_ids[0])
+                    except Exception:  # noqa: BLE001 - 行存在即占名额，台账缺失可后补
+                        pass
         results: List[AccountRunResult] = []
         for binding in accounts:
             try:
@@ -207,6 +247,7 @@ class AutoPhotoSupply:
         """
         marker_counts: Dict[str, int] = {}
         inventory: Dict[str, int] = {}
+        rows_by_slot: Dict[tuple, List[str]] = {}
         for record in self.client.list_records(page_size=500):
             marker = _notes_text(record.fields.get(FIELD_SOURCE_TAG))
             if not marker:
@@ -216,11 +257,15 @@ class AutoPhotoSupply:
                 parts = marker.split("|")
                 if len(parts) >= 3 and parts[0] == MARKER_PREFIX and parts[1] == self.today:
                     marker_counts[parts[2]] = marker_counts.get(parts[2], 0) + 1
+                    slot_no = parse_marker_slot(marker)
+                    if slot_no:
+                        rows_by_slot.setdefault((parts[2], slot_no), []).append(
+                            record.record_id)
             handle = _notes_text(record.fields.get(FIELD_TARGET_ACCOUNT)).strip()
             progress = _notes_text(record.fields.get("进度")).strip()
             if handle and progress in self.INVENTORY_ACTIVE_STATES:
                 inventory[handle] = inventory.get(handle, 0) + 1
-        return marker_counts, inventory
+        return marker_counts, inventory, rows_by_slot
 
     def _count_existing_auto_rows(self) -> Dict[str, int]:
         return self._scan_task_rows()[0]
@@ -686,7 +731,7 @@ class AutoPhotoSupply:
             # 目标账号下拉选项是账号 handle（= account_id，如 tocrystal66），
             # 不是 account_name（如 泰国女装1）——写名字会命中不存在的选项
             FIELD_TARGET_ACCOUNT: binding.account_id or binding.account_name,
-            FIELD_SOURCE_TAG: supply_marker(self.today, binding.account_id),
+            FIELD_SOURCE_TAG: supply_marker(self.today, binding.account_id, slot),
             FIELD_NOTES: (
                 f"自动供稿 slot{slot}"
                 f"｜主参考 {selection.main_note_id}|采用 {selection.adoption}"
@@ -714,15 +759,28 @@ class AutoPhotoSupply:
         if attachments:
             fields[FIELD_REFERENCE] = attachments
 
+        # 方案 A2：外部写入前复核租约——丢失所有权的 worker 不能再建行
+        if lease_owner and not self.ledger.renew_slot_lease(
+                binding.account_id, self.today, slot, owner=lease_owner):
+            plan.status = "leased_elsewhere"
+            plan.detail = "建行前租约复核失败（所有权已丢失）"
+            return plan
+
         record_ids = self.client.batch_create_records([{"fields": fields}])
         record_id = record_ids[0] if record_ids else ""
+        if not record_id:
+            # 响应未知/为空：合同保持 intent（冻结输入不丢），slot 释放回
+            # 待对账——下轮 run() 的标记回绑会补上真实行（方案 A2.6）
+            plan.status = "pending_reconcile"
+            plan.detail = "建行响应未知，合同保留待对账"
+            return plan
         self.contract_store.attach_record(plan.contract_id, record_id)
         self.ledger.complete_slot(
             binding.account_id, self.today, slot,
             record_id=record_id, product_code=product_code,
             main_note_id=selection.main_note_id,
             adoption=selection.adoption,
-            note=fields[FIELD_NOTES])
+            note=fields[FIELD_NOTES], owner=lease_owner)
         self.ledger.record_usage(
             note_id=selection.main_note_id, account_id=binding.account_id,
             task_ref=record_id, adoption=selection.adoption)

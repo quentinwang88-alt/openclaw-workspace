@@ -15,12 +15,12 @@ import argparse
 import json
 import sqlite3
 import sys
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from search_to_library import import_feeds, parse_cn_count
 import time
 import urllib.request
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from search_to_library import import_feeds, parse_cn_count
 
 LAB_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(LAB_ROOT))

@@ -308,15 +308,20 @@ class MaterialLedger:
 
     def complete_slot(self, account_id: str, supply_date: str, slot: int, *,
                       record_id: str, product_code: str = "", main_note_id: str = "",
-                      adoption: str = "", note: str = "") -> None:
-        self._conn.execute(
+                      adoption: str = "", note: str = "", owner: str = "") -> bool:
+        """完成名额。带 owner 时校验持有权：丢失租约的 worker 不能落终态。"""
+        cursor = self._conn.execute(
             "UPDATE supply_slots SET status='created', record_id=?, product_code=?,"
             " main_note_id=?, adoption=?, note=?, owner='', lease_until='',"
             " updated_at=datetime('now')"
-            " WHERE account_id=? AND supply_date=? AND slot=?",
+            " WHERE account_id=? AND supply_date=? AND slot=?"
+            + (" AND (owner='' OR owner=?)" if owner else ""),
             (record_id, product_code, main_note_id, adoption, note,
-             account_id, supply_date, slot),
+             account_id, supply_date, slot)
+            + ((owner,) if owner else ()),
         )
+        self._conn.commit()
+        return bool(cursor.rowcount)
         self._conn.commit()
 
     def slots_for(self, account_id: str, supply_date: Optional[str] = None):
