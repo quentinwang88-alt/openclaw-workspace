@@ -1037,7 +1037,11 @@ def run_central_complete_voiceover(
     # 正是刚被口径拒掉的材质断言。清洗只覆盖一份副本，等于没清洗。
     mainline = _voiceover_mainline(direction)
     payload, boundary_application = apply_expression_boundary_layer(payload, mainline)
-    if boundary_application.get("applied"):
+    # 门要设在 ``layer_present`` 上，不是 ``applied``。``applied`` 只说明"清洗发生了"：
+    # 把下发条件绑在它上面，会让**只走 allowed_wording / wording_ceilings 的封顶约束
+    # 永远收不到**（多场景、多造型恰好就是这一类，它刻意不用 forbidden_wording）。
+    # 实测手镯／戒指两条真实稿因此把三个场景并列说出，而全链路都报 PASS。
+    if boundary_application.get("layer_present"):
         # 禁止层放进 spoken_brief（写作指令区），而不是在顶层新增键：模型读得到
         # "不许说什么"，同时不改动中央命令已知的 payload 结构。
         layer = payload.pop(BOUNDARY_LAYER_KEY, {})
@@ -1046,6 +1050,10 @@ def run_central_complete_voiceover(
             brief["forbidden_wording"] = list(layer.get("forbidden_wording") or [])
             brief["forbidden_wording_rule"] = _text(layer.get("forbidden_wording_rule"))
             brief["allowed_wording"] = _text(layer.get("allowed_wording"))
+            brief["allowed_strength"] = _text(layer.get("allowed_strength"))
+            # 封顶：先前这两项从不投递，"不并列多个"就只剩一句口号。
+            brief["max_main_value_count"] = int(layer.get("max_main_value_count") or 1)
+            brief["wording_ceilings"] = list(layer.get("wording_ceilings") or [])
     generated = _invoke_model(model_command, payload)
     model_provenance = (
         generated.get("_model_provenance")
@@ -1132,15 +1140,21 @@ def run_central_complete_voiceover(
         "target_language": target_language,
         "target_language_key": _target_language_key(target_language),
         "language_validation": "PASSED",
-        # 口径落地的证据分两段：载荷侧（清洗了哪些字段、禁止层有没有发出去）
+        # 口径落地的证据分两段：载荷侧（清洗了哪些字段、约束层有没有发出去）
         # 与成品侧（模型到底说没说出来）。两者都要在成稿里可查。
+        # ``applied`` 与 ``layer_present`` 必须分开记：前者是"清洗发生了"，
+        # 后者才是"约束下发了"。只记 former 会让"约束从没发出"看起来像"无事可做"。
         "expression_boundary": {
             "forbidden_terms": list(boundary_application.get("terms") or []),
             "applied": bool(boundary_application.get("applied")),
+            "layer_present": bool(boundary_application.get("layer_present")),
+            "declared_constraints": list(
+                boundary_application.get("declared_constraints") or []
+            ),
             "cleaned_field_count": int(boundary_application.get("cleaned_field_count") or 0),
             "cleaned_paths": list(boundary_application.get("cleaned_paths") or []),
             "layer_dispatched_to": (
-                "spoken_brief" if boundary_application.get("applied") else ""
+                "spoken_brief" if boundary_application.get("layer_present") else ""
             ),
             "check": boundary_check,
         },

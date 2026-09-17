@@ -866,7 +866,7 @@ class VoiceoverExpressionBoundaryTest(unittest.TestCase):
             "category_execution_extension": {"mixed_mainline_contract": mainline},
         }
 
-    def _run(self, *, generated_zh, captured):
+    def _run(self, *, generated_zh, captured, direction=None):
         def fake_invoke(_command, payload):
             captured.update(payload)
             return {
@@ -894,7 +894,7 @@ class VoiceoverExpressionBoundaryTest(unittest.TestCase):
                 target_language="越南语",
                 top_category="配饰",
                 product_type="抓夹",
-                direction=self._direction(),
+                direction=direction if direction is not None else self._direction(),
                 visual_plan={"shots": [{"supported_claim_keys": ["C1"]}]},
                 model_command="mock-command",
                 candidate_hook_id="AUDIENCE_NEED_CALLOUT",
@@ -920,6 +920,73 @@ class VoiceoverExpressionBoundaryTest(unittest.TestCase):
         self.assertNotIn("voiceover_expression_boundary", captured)
         self.assertEqual(captured["spoken_brief"]["forbidden_wording"], ["纱"])
         self.assertIn("任何语言", captured["spoken_brief"]["forbidden_wording_rule"])
+
+    def test_a_ceiling_only_boundary_is_still_dispatched(self):
+        """没有禁词、只有封顶时，约束仍必须到达写作指令区。
+
+        真实批次：手镯与戒指的边界里 ``forbidden_wording`` 为空，封顶只写在
+        ``allowed_wording`` 里。先前把下发条件绑在"有没有禁词"上，整层没下发，
+        两条真实稿都因此把三个场景并列说了出来。
+        """
+
+        captured = {}
+        direction = self._direction()
+        mainline = direction["category_execution_extension"]["mixed_mainline_contract"]
+        mainline["expression_boundary"]["forbidden_wording"] = []
+        mainline["expression_boundary"][
+            "allowed_wording"
+        ] = "只说一个与实际冻结场景兼容的搭配，不并列多个"
+        mainline["expression_boundary"]["conflicts"] = [
+            {
+                "kind": "MULTI_SCENARIO_UNAUTHORIZED",
+                "stacked_scenes": ["日常", "约会", "上班"],
+                "allowed_scenarios": 1,
+                "resolution": "KEEP_ONE",
+            }
+        ]
+        result = self._run(
+            generated_zh="适合上班、约会或日常戴，不挑场合。",
+            captured=captured,
+            direction=direction,
+        )
+        brief = captured["spoken_brief"]
+        self.assertEqual(brief["forbidden_wording"], [])
+        self.assertEqual(
+            brief["allowed_wording"], "只说一个与实际冻结场景兼容的搭配，不并列多个"
+        )
+        self.assertEqual(
+            [item["kind"] for item in brief["wording_ceilings"]],
+            ["MULTI_SCENARIO_UNAUTHORIZED"],
+        )
+        self.assertEqual(brief["max_main_value_count"], 1)
+        boundary = result["expression_boundary"]
+        # 清洗没发生，但约束下发了 —— 两者必须分开记，
+        # 否则"约束从没发出"在报告里看起来像"无事可做"。
+        self.assertFalse(boundary["applied"])
+        self.assertTrue(boundary["layer_present"])
+        self.assertEqual(boundary["layer_dispatched_to"], "spoken_brief")
+        self.assertIn("wording_ceilings", boundary["declared_constraints"])
+        # 成品侧也要查得出来，不再因为"没有禁词"而 NOT_APPLICABLE。
+        self.assertEqual(boundary["check"]["status"], "FAIL")
+        self.assertEqual(boundary["check"]["reason"], "CEILING_EXCEEDED")
+
+    def test_a_single_scenario_ceiling_is_not_a_violation(self):
+        captured = {}
+        direction = self._direction()
+        mainline = direction["category_execution_extension"]["mixed_mainline_contract"]
+        mainline["expression_boundary"]["forbidden_wording"] = []
+        mainline["expression_boundary"]["conflicts"] = [
+            {
+                "kind": "MULTI_SCENARIO_UNAUTHORIZED",
+                "stacked_scenes": ["日常", "约会", "上班"],
+                "allowed_scenarios": 1,
+                "resolution": "KEEP_ONE",
+            }
+        ]
+        result = self._run(
+            generated_zh="上班戴这枚就够了。", captured=captured, direction=direction
+        )
+        self.assertEqual(result["expression_boundary"]["check"]["status"], "PASS")
 
     def test_no_mainline_leaves_the_payload_structure_untouched(self):
         captured = {}

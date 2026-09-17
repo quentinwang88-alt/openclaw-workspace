@@ -29,7 +29,15 @@ from core.mixed_voiceover_mainline import (  # noqa: E402
 )
 
 
-def _mainline(*, tier="APPEARANCE_FACT", verdict="ADAPTED_WITH_CEILING", image="UNKNOWN", conflicts=None, shot_ref="CU_01"):
+def _mainline(
+    *,
+    tier="APPEARANCE_FACT",
+    verdict="ADAPTED_WITH_CEILING",
+    image="UNKNOWN",
+    conflicts=None,
+    forbidden=None,
+    shot_ref="CU_01",
+):
     return {
         "schema_version": "mixed-mainline-contract-v1",
         "status": "FROZEN",
@@ -44,7 +52,9 @@ def _mainline(*, tier="APPEARANCE_FACT", verdict="ADAPTED_WITH_CEILING", image="
         "visible_answer": {"shot_ref": shot_ref, "module": "WORN_DETAIL", "text": "能看到什么"},
         "expression_boundary": {
             "allowed_wording": "只描述可见的造型、层次与排列",
-            "forbidden_wording": ["纱"],
+            # ``forbidden`` 显式传空列表 = 只有封顶、没有禁词的边界（真实批次里
+            # 多场景封顶就是这个形状）。默认仍是 ["纱"]，其余用例不受影响。
+            "forbidden_wording": ["纱"] if forbidden is None else list(forbidden),
             "experience_authority": "NONE",
             "max_main_value_count": 1,
             "conflicts": list(conflicts or []),
@@ -430,15 +440,120 @@ class ExpressionBoundaryTest(_BoundaryPayloadMixin, unittest.TestCase):
     变成过约束。下面的用例逐条钉住这几件事。
     """
 
-    def test_no_banned_wording_leaves_the_payload_untouched(self):
+    def test_an_empty_boundary_leaves_the_payload_untouched(self):
         from core.mixed_voiceover_mainline import apply_expression_boundary_layer
 
         payload = self._payload()
         before = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        mainline = {"expression_boundary": {"forbidden_wording": [], "allowed_wording": "只描述造型"}}
+        # 边界存在但**什么都没声明**：没有禁词、没有允许口径、没有封顶。
+        # 这种包必须逐字不变 —— 旧契约的错在于把"逐字不变"扩大到了所有无禁词的包。
+        mainline = {"expression_boundary": {"forbidden_wording": []}}
         applied, report = apply_expression_boundary_layer(payload, mainline)
         self.assertFalse(report["applied"])
+        self.assertFalse(report["layer_present"])
+        self.assertEqual(report["declared_constraints"], [])
         self.assertEqual(json.dumps(applied, ensure_ascii=False, sort_keys=True), before)
+
+    def test_a_ceiling_only_boundary_still_ships_its_constraint(self):
+        """没有禁词、但有封顶的包，约束必须**下发**。
+
+        真实批次暴露过：多场景封顶刻意不走 ``forbidden_wording``（单个场景词是对的，
+        错的只是并列堆叠），它只存在于 ``allowed_wording`` / ``conflicts`` 里。先前把
+        下发条件绑在"有没有禁词"上，于是手镯／戒指两条真实稿把三个场景并列说出来，
+        而 ``applied=False``、全链路都报 PASS。
+        """
+
+        from core.mixed_voiceover_mainline import BOUNDARY_LAYER_KEY, apply_expression_boundary_layer
+
+        payload = self._payload()
+        mainline = {
+            "expression_boundary": {
+                "forbidden_wording": [],
+                "allowed_wording": "只说一个与实际冻结场景兼容的搭配，不并列多个",
+                "allowed_strength": "factual",
+                "max_main_value_count": 1,
+                "conflicts": [
+                    {
+                        "kind": "MULTI_SCENARIO_UNAUTHORIZED",
+                        "stacked_scenes": ["日常", "约会", "上班"],
+                        "allowed_scenarios": 1,
+                        "resolution": "KEEP_ONE",
+                    }
+                ],
+            }
+        }
+        applied, report = apply_expression_boundary_layer(payload, mainline)
+        # 清洗没发生（本来就没有禁词），但约束下发了 —— 两件事必须分开报。
+        self.assertFalse(report["applied"])
+        self.assertTrue(report["layer_present"])
+        self.assertEqual(
+            report["declared_constraints"],
+            ["allowed_wording", "wording_ceilings", "allowed_strength"],
+        )
+        layer = applied[BOUNDARY_LAYER_KEY]
+        self.assertEqual(layer["allowed_wording"], "只说一个与实际冻结场景兼容的搭配，不并列多个")
+        self.assertEqual(
+            [item["kind"] for item in layer["wording_ceilings"]],
+            ["MULTI_SCENARIO_UNAUTHORIZED"],
+        )
+
+    def test_a_scenario_ceiling_ships_its_numeric_limit(self):
+        """封顶的**数值**必须跟着类型一起下发。
+
+        编译 ceilings 时曾写死只搬 ``allowed_looks``，而多场景那条用的是
+        ``allowed_scenarios`` —— 实测产出 ``{"kind": ..., "allowed_looks": null}``：
+        模型只收到一个类型名，不知道"最多几个"。约束说"不许并列"，却没说上限是 1。
+        """
+
+        from core.mixed_voiceover_mainline import BOUNDARY_LAYER_KEY, apply_expression_boundary_layer
+
+        payload = self._payload()
+        mainline = {
+            "expression_boundary": {
+                "forbidden_wording": [],
+                "allowed_wording": "只说一个与实际冻结场景兼容的搭配，不并列多个",
+                "conflicts": [
+                    {
+                        "kind": "MULTI_SCENARIO_UNAUTHORIZED",
+                        "stacked_scenes": ["日常", "约会", "上班"],
+                        "allowed_scenarios": 1,
+                        "resolution": "KEEP_ONE",
+                    }
+                ],
+            }
+        }
+        applied, _ = apply_expression_boundary_layer(payload, mainline)
+        ceiling = applied[BOUNDARY_LAYER_KEY]["wording_ceilings"][0]
+        self.assertEqual(ceiling["limit_field"], "allowed_scenarios")
+        self.assertEqual(ceiling["max_allowed"], 1)
+        self.assertEqual(ceiling["allowed_scenarios"], 1)
+        self.assertEqual(ceiling["resolution"], "KEEP_ONE")
+
+    def test_a_look_ceiling_reads_its_own_limit_field(self):
+        """多造型那条走 ``allowed_looks``：限值字段按 kind 取，不能写死单字段名。"""
+
+        from core.mixed_voiceover_mainline import BOUNDARY_LAYER_KEY, apply_expression_boundary_layer
+
+        payload = self._payload()
+        mainline = {
+            "expression_boundary": {
+                "forbidden_wording": [],
+                "allowed_wording": "只说一个造型",
+                "conflicts": [
+                    {
+                        "kind": "MULTI_LOOK_UNAUTHORIZED",
+                        "stacked_looks": ["造型甲", "造型乙"],
+                        "allowed_looks": 1,
+                        "resolution": "KEEP_ONE",
+                    }
+                ],
+            }
+        }
+        applied, _ = apply_expression_boundary_layer(payload, mainline)
+        ceiling = applied[BOUNDARY_LAYER_KEY]["wording_ceilings"][0]
+        self.assertEqual(ceiling["limit_field"], "allowed_looks")
+        self.assertEqual(ceiling["max_allowed"], 1)
+        self.assertIsNone(ceiling["allowed_scenarios"])
 
     def test_no_mainline_contract_leaves_the_payload_untouched(self):
         from core.mixed_voiceover_mainline import apply_expression_boundary_layer
@@ -447,6 +562,7 @@ class ExpressionBoundaryTest(_BoundaryPayloadMixin, unittest.TestCase):
         before = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         applied, report = apply_expression_boundary_layer(payload, {})
         self.assertFalse(report["applied"])
+        self.assertFalse(report["layer_present"])
         self.assertEqual(json.dumps(applied, ensure_ascii=False, sort_keys=True), before)
 
     def test_banned_wording_is_removed_from_every_speakable_field(self):
@@ -656,6 +772,82 @@ class BoundaryCheckTest(unittest.TestCase):
         )
         self.assertEqual(check["status"], CHECK_NOT_APPLICABLE)
         self.assertEqual(check["reason"], "NO_FORBIDDEN_WORDING")
+
+    def test_a_ceiling_only_boundary_is_judged_rather_than_skipped(self):
+        """没有禁词不等于没有边界可查。
+
+        封顶约束不走 ``forbidden_wording``，所以成品侧必须另有一条判定；否则
+        "不并列多个"永远没有检测，模型说三个场景也没人发现。
+        """
+
+        from core.mixed_voiceover_mainline import check_voiceover_target_against_boundary
+
+        mainline = _mainline(
+            conflicts=[
+                {
+                    "kind": "MULTI_SCENARIO_UNAUTHORIZED",
+                    "stacked_scenes": ["日常", "约会", "上班"],
+                    "allowed_scenarios": 1,
+                    "resolution": "KEEP_ONE",
+                }
+            ],
+            forbidden=[],
+        )
+        stacked = check_voiceover_target_against_boundary(
+            voice={"chinese_translation": "适合上班、约会或日常戴，不挑场合"}, mainline=mainline
+        )
+        self.assertEqual(stacked["status"], CHECK_FAIL)
+        self.assertEqual(stacked["reason"], "CEILING_EXCEEDED")
+        self.assertEqual(len(stacked["ceiling_violations"]), 1)
+        self.assertEqual(stacked["ceiling_violations"][0]["spoken_count"], 3)
+        self.assertEqual(stacked["ceiling_violations"][0]["allowed"], 1)
+
+        one_only = check_voiceover_target_against_boundary(
+            voice={"chinese_translation": "上班戴这枚就够了，不用换来换去"}, mainline=mainline
+        )
+        self.assertEqual(one_only["status"], CHECK_PASS)
+        self.assertEqual(one_only["ceiling_violations"], [])
+
+    def test_a_ceiling_without_a_chinese_translation_is_not_applicable(self):
+        # 中译缺失时不能假装查过：判据在中译侧，没有中译就是"没有依据"。
+        from core.mixed_voiceover_mainline import check_voiceover_target_against_boundary
+
+        check = check_voiceover_target_against_boundary(
+            voice={"target_text": "Kalau korang cari cincin..."},
+            mainline=_mainline(
+                conflicts=[
+                    {
+                        "kind": "MULTI_SCENARIO_UNAUTHORIZED",
+                        "stacked_scenes": ["日常"],
+                        "allowed_scenarios": 1,
+                        "resolution": "KEEP_ONE",
+                    }
+                ],
+                forbidden=[],
+            ),
+        )
+        self.assertEqual(check["status"], CHECK_NOT_APPLICABLE)
+        self.assertEqual(check["reason"], "NO_CHINESE_TRANSLATION")
+
+    def test_a_ceiling_that_allows_the_stacked_scenes_is_not_a_violation(self):
+        # ``allowed_scenarios`` 说了算：授权了多场景就不是违规。
+        from core.mixed_voiceover_mainline import check_voiceover_target_against_boundary
+
+        check = check_voiceover_target_against_boundary(
+            voice={"chinese_translation": "上班、约会、日常都能戴"},
+            mainline=_mainline(
+                conflicts=[
+                    {
+                        "kind": "MULTI_SCENARIO_UNAUTHORIZED",
+                        "stacked_scenes": ["日常", "约会", "上班"],
+                        "allowed_scenarios": 3,
+                        "resolution": "KEEP_ONE",
+                    }
+                ],
+                forbidden=[],
+            ),
+        )
+        self.assertEqual(check["status"], CHECK_PASS)
 
     def test_each_line_is_reported_with_its_index(self):
         from core.mixed_voiceover_mainline import check_voiceover_target_against_boundary

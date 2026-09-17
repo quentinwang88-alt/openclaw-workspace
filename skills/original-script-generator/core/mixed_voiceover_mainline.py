@@ -298,6 +298,14 @@ def reduce_voiceover_payload(payload: Optional[Mapping[str, Any]]) -> Dict[str, 
 BOUNDARY_LAYER_KEY = "voiceover_expression_boundary"
 BOUNDARY_LAYER_SCHEMA = "voiceover-expression-boundary-v1"
 
+#: 封顶类约束的字段口径：kind -> (原文里的并列项字段, 允许条数字段)。
+#: 这类约束**不**走 ``forbidden_wording``（单个场景词是对的，错的只是并列），
+#: 所以成品侧必须**另有一条**检测，不能靠禁词扫描顺带覆盖。
+_CEILING_RULES: Dict[str, Tuple[str, str]] = {
+    "MULTI_SCENARIO_UNAUTHORIZED": ("stacked_scenes", "allowed_scenarios"),
+    "MULTI_LOOK_UNAUTHORIZED": ("stacked_looks", "allowed_looks"),
+}
+
 #: 清洗豁免的命名空间：这些键下面放的就是"不许说什么"本身。
 #: 把它们清掉会让约束失去内容 —— 那等于没有约束。
 _BOUNDARY_NAMESPACES: Tuple[str, ...] = (
@@ -341,15 +349,28 @@ def compile_expression_boundary_layer(
     forbidden = [
         _text(item) for item in (boundary.get("forbidden_wording") or []) if _text(item)
     ]
-    ceilings = [
-        {
-            "kind": _text(item.get("kind")),
-            "policy": _text(item.get("policy")),
-            "allowed_looks": item.get("allowed_looks"),
-        }
-        for item in (boundary.get("conflicts") or [])
-        if isinstance(item, Mapping)
-    ]
+    ceilings = []
+    for item in boundary.get("conflicts") or []:
+        if not isinstance(item, Mapping):
+            continue
+        kind = _text(item.get("kind"))
+        # 上限字段由 kind 决定：多场景看 ``allowed_scenarios``，多造型看 ``allowed_looks``。
+        # 先前这里写死读 ``allowed_looks``，于是 MULTI_SCENARIO_UNAUTHORIZED 那条的
+        # 上限永远编译成 None —— 模型只拿到一个类型名，不知道"最多几个"。
+        _, limit_field = _CEILING_RULES.get(kind.upper(), ("", "allowed_looks"))
+        ceilings.append(
+            {
+                "kind": kind,
+                "policy": _text(item.get("policy")),
+                "resolution": _text(item.get("resolution")),
+                # 限值字段名一并下发，模型无需猜字段含义。
+                "limit_field": limit_field,
+                "max_allowed": item.get(limit_field),
+                # 两个原始字段都带上：kind 之外的消费者仍可读到旧键。
+                "allowed_scenarios": item.get("allowed_scenarios"),
+                "allowed_looks": item.get("allowed_looks"),
+            }
+        )
     return {
         "schema_version": BOUNDARY_LAYER_SCHEMA,
         "forbidden_wording": forbidden,
@@ -429,6 +450,28 @@ def sanitize_payload_forbidden_wording(
     return cleaned, report
 
 
+def declared_constraints(layer: Optional[Mapping[str, Any]]) -> List[str]:
+    """这一层里**真的约束了模型**的键。
+
+    空边界不产生任何约束，于是"没有边界的包逐字不变"这条保证仍然成立 ——
+    变的只有那些**确实声明了东西**的包，而那正是先前被漏掉的部分。
+    """
+
+    data = layer if isinstance(layer, Mapping) else {}
+    declared: List[str] = []
+    if [item for item in (data.get("forbidden_wording") or []) if _text(item)]:
+        declared.append("forbidden_wording")
+    if _text(data.get("allowed_wording")):
+        declared.append("allowed_wording")
+    if [
+        item for item in (data.get("wording_ceilings") or []) if isinstance(item, Mapping)
+    ]:
+        declared.append("wording_ceilings")
+    if _text(data.get("allowed_strength")):
+        declared.append("allowed_strength")
+    return declared
+
+
 def apply_expression_boundary_layer(
     payload: Optional[Mapping[str, Any]],
     mainline: Optional[Mapping[str, Any]],
@@ -448,25 +491,37 @@ def apply_expression_boundary_layer(
     forbidden = [
         _text(item) for item in (boundary.get("forbidden_wording") or []) if _text(item)
     ]
+    layer = compile_expression_boundary_layer(contract)
+    declared = declared_constraints(layer)
     data = dict(payload) if isinstance(payload, Mapping) else {}
     report: Dict[str, Any] = {
-        "schema_version": "voiceover-boundary-application-v1",
+        "schema_version": "voiceover-boundary-application-v2",
+        # ``applied`` 只回答"清洗发生了没有"。它**不等于**"约束发出去了没有"，
+        # 先前把两者当同一件事，恰恰让只走 allowed_wording 的封顶约束全部收不到。
         "applied": bool(forbidden),
         "terms": forbidden,
         "cleaned_paths": [],
         "cleaned_field_count": 0,
         "cleaned_originals": {},
-        "boundary_layer_present": False,
+        # ``layer_present`` 才回答"这家商品的约束有没有下发给模型"。
+        "boundary_layer_present": bool(declared),
+        "layer_present": bool(declared),
+        "declared_constraints": declared,
     }
-    if not forbidden:
-        return data, report
-    data, clean_report = sanitize_payload_forbidden_wording(data, forbidden)
-    report["cleaned_paths"] = clean_report["cleaned_paths"]
-    report["cleaned_field_count"] = clean_report["cleaned_field_count"]
-    report["scanned_strings"] = clean_report["scanned_strings"]
-    report["cleaned_originals"] = clean_report["cleaned_originals"]
-    data[BOUNDARY_LAYER_KEY] = compile_expression_boundary_layer(contract)
-    report["boundary_layer_present"] = True
+    if forbidden:
+        data, clean_report = sanitize_payload_forbidden_wording(data, forbidden)
+        report["cleaned_paths"] = clean_report["cleaned_paths"]
+        report["cleaned_field_count"] = clean_report["cleaned_field_count"]
+        report["scanned_strings"] = clean_report["scanned_strings"]
+        report["cleaned_originals"] = clean_report["cleaned_originals"]
+    # 声明与清洗**解耦**。封顶类约束（多场景、多造型）刻意不写进
+    # ``forbidden_wording`` —— 见 ``selling_fact_evidence`` 的说明：单个场景词本身
+    # 是对的，错的只是并列堆叠，词级禁用会把合法搭配一起误杀。于是这类约束**只**
+    # 存在于 ``allowed_wording`` / ``wording_ceilings`` 里。若把下发条件绑死在
+    # "有没有禁词"上，它们就永远收不到：实测手镯／戒指两条真实稿因此把三个场景
+    # 并列说了出来，而 ``forbidden_wording`` 为空、下游一切检查都报 PASS。
+    if declared:
+        data[BOUNDARY_LAYER_KEY] = layer
     return data, report
 
 
@@ -531,10 +586,16 @@ def check_voiceover_target_against_boundary(
     forbidden = [
         _text(item) for item in (boundary.get("forbidden_wording") or []) if _text(item)
     ]
+    ceilings = [
+        item for item in (boundary.get("conflicts") or []) if isinstance(item, Mapping)
+    ]
+    data = voice if isinstance(voice, Mapping) else {}
     base: Dict[str, Any] = {
-        "schema_version": "mixed-voiceover-boundary-check-v1",
+        "schema_version": "mixed-voiceover-boundary-check-v2",
         "forbidden_wording": forbidden,
         "violations": [],
+        "ceiling_checks": [],
+        "ceiling_violations": [],
         "detection_scope": ["chinese_translation", "target_text_shared_script"],
         "blocking_basis": "chinese_translation",
         "target_language_detection": "SHARED_SCRIPT_TERMS_ONLY",
@@ -543,8 +604,10 @@ def check_voiceover_target_against_boundary(
             "若目标语言正文未如实反映在中译里，本条仍可能漏检。"
         ),
     }
-    if not forbidden:
+    if not forbidden and not ceilings:
         return {**base, "status": CHECK_NOT_APPLICABLE, "reason": "NO_FORBIDDEN_WORDING"}
+    if not forbidden and not _text(data.get("chinese_translation")):
+        return {**base, "status": CHECK_NOT_APPLICABLE, "reason": "NO_CHINESE_TRANSLATION"}
 
     violations: List[Dict[str, Any]] = []
 
@@ -563,7 +626,6 @@ def check_voiceover_target_against_boundary(
                     }
                 )
 
-    data = voice if isinstance(voice, Mapping) else {}
     scan(data.get("chinese_translation"), "chinese_translation", 0)
     scan(data.get("target_text"), "target_text_shared_script", 0)
     for index, line in enumerate(lines or [], 1):
@@ -572,12 +634,58 @@ def check_voiceover_target_against_boundary(
         scan(line.get("voiceover_text_zh"), "chinese_translation", index)
         scan(line.get("voiceover_text_target_language"), "target_text_shared_script", index)
 
+    # 封顶类约束的单列判定。判据仍取**中译侧**：``stacked_scenes`` /
+    # ``stacked_looks`` 是中文场景／造型词（如 日常／约会／上班），只有中文侧能
+    # 同形命中；目标语言侧无词表，如实不报，不制造"已覆盖"的假象。
+    ceiling_checks: List[Dict[str, Any]] = []
+    ceiling_violations: List[Dict[str, Any]] = []
+    zh_lines: List[Tuple[str, int, str]] = [("chinese_translation", 0, _text(data.get("chinese_translation")))]
+    for index, line in enumerate(lines or [], 1):
+        if isinstance(line, Mapping):
+            zh_lines.append(("chinese_translation", index, _text(line.get("voiceover_text_zh"))))
+    for item in ceilings:
+        rule = _CEILING_RULES.get(_text(item.get("kind")).upper())
+        if not rule:
+            continue
+        if _text(item.get("resolution")).upper() != "KEEP_ONE":
+            continue
+        stacked_field, allowed_field = rule
+        stacked = [_text(term) for term in (item.get(stacked_field) or []) if _text(term)]
+        if not stacked:
+            continue
+        allowed = int(item.get(allowed_field) or 1)
+        for scope, index, haystack in zh_lines:
+            if not haystack:
+                continue
+            spoken = [term for term in stacked if term in haystack]
+            record: Dict[str, Any] = {
+                "kind": _text(item.get("kind")),
+                "scope": scope,
+                "index": index,
+                "stacked_terms": stacked,
+                "spoken_terms": spoken,
+                "allowed": allowed,
+                "spoken_count": len(spoken),
+                "status": CHECK_FAIL if len(spoken) > allowed else CHECK_PASS,
+            }
+            ceiling_checks.append(record)
+            if len(spoken) > allowed:
+                ceiling_violations.append({**record, "excerpt": haystack[:120]})
+
     return {
         **base,
-        "status": CHECK_FAIL if violations else CHECK_PASS,
-        "reason": "FORBIDDEN_WORDING_SPOKEN" if violations else "",
+        "status": CHECK_FAIL if (violations or ceiling_violations) else CHECK_PASS,
+        "reason": (
+            "FORBIDDEN_WORDING_SPOKEN"
+            if violations
+            else "CEILING_EXCEEDED"
+            if ceiling_violations
+            else ""
+        ),
         "violations": violations,
         "violation_count": len(violations),
+        "ceiling_checks": ceiling_checks,
+        "ceiling_violations": ceiling_violations,
     }
 
 

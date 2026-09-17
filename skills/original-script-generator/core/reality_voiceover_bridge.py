@@ -1527,6 +1527,7 @@ def run_central_voiceover(
     from core.mixed_voiceover_mainline import (
         BOUNDARY_LAYER_KEY,
         check_voiceover_target_against_boundary,
+        declared_constraints,
         speakable_forbidden_hits,
     )
 
@@ -1538,6 +1539,11 @@ def run_central_voiceover(
     expression_boundary = {
         "forbidden_terms": list(boundary_terms),
         "layer_present_in_payload": isinstance(boundary_layer, dict) and bool(boundary_layer),
+        # "层在不在"与"层里到底约束了什么"要分开报：禁词为空但封顶存在时，
+        # 前者为 True 而后者非空 —— 先前把下发条件绑在禁词上，这一类就整层丢失。
+        "declared_constraints": list(
+            declared_constraints(boundary_layer if isinstance(boundary_layer, dict) else {})
+        ),
         # What actually reached the model, checked rather than assumed: the
         # banned wording must survive only inside the boundary namespaces.
         "speakable_leaks_in_payload": speakable_forbidden_hits(
