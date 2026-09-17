@@ -233,11 +233,15 @@ class AutoPhotoSupply:
 
     # ---- 对账：统计飞书表里当日已建的自动行 ----
     # 优先读「来源标记」（工作流不覆写）；兼容旧数据的备注前缀作为兜底。
-    #: 库存口径（方案 §9）：生成中＋合格待发＋排队中；已发布/废弃/失败不计
+    #: 库存口径（方案 §9/A4）：生成中＋合格待发＋排队中；已发布/废弃/失败
+    #: 不计。动态进度文本（素材生成 3/4 等）由 _inventory_pieces 规范化识别。
     INVENTORY_ACTIVE_STATES = frozenset({
         "待执行", "规划中", "准备素材", "素材生成", "质检中", "生成中",
         "人物表现质检中", "待审核", "待排班", "已排期", "提交中", "发布中",
         "已完成"})
+    #: 终态（0 库存）：已发布（含部分发布后的剩余按篇数折算前的整行）、
+    #: 废弃/需处理/发布失败
+    INVENTORY_ZERO_STATES = frozenset({"已发布", "需处理", "发布失败", "已取消"})
 
     def _scan_task_rows(self) -> tuple:
         """一次全表扫描同时产出：当日自动行对账 + 各账号待发库存。
@@ -263,9 +267,38 @@ class AutoPhotoSupply:
                             record.record_id)
             handle = _notes_text(record.fields.get(FIELD_TARGET_ACCOUNT)).strip()
             progress = _notes_text(record.fields.get("进度")).strip()
-            if handle and progress in self.INVENTORY_ACTIVE_STATES:
-                inventory[handle] = inventory.get(handle, 0) + 1
+            executing = bool(record.fields.get(FIELD_EXECUTE))
+            pieces, known = self._inventory_pieces(record.fields, progress, executing)
+            if handle and known and pieces > 0:
+                inventory[handle] = inventory.get(handle, 0) + pieces
         return marker_counts, inventory, rows_by_slot
+
+    @classmethod
+    def _inventory_pieces(cls, fields: Dict[str, Any], progress: str,
+                          executing: bool) -> tuple:
+        """一行折算库存篇数（方案 A4：4 张图=1 篇，按篇数不按行）。
+
+        返回 (pieces, known)：known=False 表示进度无法可靠分类——
+        该账号按“库存未知”处理，不按零计（不新增自动任务）。
+        - 已发布/需处理/发布失败 → 0；
+        - 进度空但 执行=True → 视为待执行（排队中），计满篇数；
+        - 动态文本（素材生成 3/4 / 质检修复等）视为在制，计满篇数；
+        - 篇数取「生成篇数」字段（缺省 1）。
+        """
+        try:
+            qty = max(1, int(float(str(fields.get("生成篇数") or 1))))
+        except (TypeError, ValueError):
+            qty = 1
+        if progress in cls.INVENTORY_ZERO_STATES:
+            return 0, True
+        if progress in cls.INVENTORY_ACTIVE_STATES:
+            return qty, True
+        import re
+        if re.match(r"^(素材生成|文案生成|风格质检修复|人物质检修复)\s*\d+\s*/\s*\d+", progress):
+            return qty, True     # 在制动态文本：计满篇数（生成中）
+        if not progress:
+            return (qty, True) if executing else (0, True)
+        return 0, False          # 未识别进度：库存未知，交由上层保守处理
 
     def _count_existing_auto_rows(self) -> Dict[str, int]:
         return self._scan_task_rows()[0]

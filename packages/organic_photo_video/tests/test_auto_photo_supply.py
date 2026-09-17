@@ -684,3 +684,30 @@ if __name__ == "__main__":
             "SELECT reason FROM material_gaps").fetchall()
         self.assertTrue(any(r["reason"] == "marker_ambiguous" for r in gaps))
         self.assertEqual(store.get("tocrystal66|2026-09-16|1")["status"], "intent")
+
+    def test_a4_inventory_by_pieces(self):
+        # 方案 A4 验收：素材生成1/4 篇数1 + 生成中 篇数3 = 库存4；
+        # 已发布篇数3=0；空进度+执行=排队计篇数；未识别进度→库存未知
+        P = AutoPhotoSupply._inventory_pieces
+        f = lambda qty=None, **kw: {**({"生成篇数": qty} if qty else {}), **kw}
+        self.assertEqual(P(f(), "素材生成 1/4", True), (1, True))
+        self.assertEqual(P(f(3), "生成中", True), (3, True))
+        self.assertEqual(P(f(3), "已发布", True), (0, True))
+        self.assertEqual(P(f(2), "需处理", True), (0, True))
+        self.assertEqual(P(f(2), "", True), (2, True))      # 待执行排队
+        self.assertEqual(P(f(2), "", False), (0, True))     # 空置行不计
+        self.assertEqual(P(f(), "奇怪的中间态", True), (0, False))  # 未知
+        # 整表折算：跨日不清零（扫描无日期过滤）+ 篇数求和
+        ledger = MaterialLedger(str(self.root / "ledger_a4.sqlite3"))
+        client = FakeTaskTableClient(existing=[
+            {"record_id": "a1", "fields": {"目标账号（可选）": "tocrystal66",
+             "进度": "素材生成 1/4", "生成篇数": 1}},
+            {"record_id": "a2", "fields": {"目标账号（可选）": "tocrystal66",
+             "进度": "生成中", "生成篇数": 3}},
+            {"record_id": "a3", "fields": {"目标账号（可选）": "tocrystal66",
+             "进度": "已发布", "生成篇数": 2}},
+        ])
+        supply = AutoPhotoSupply(client=client, source=self.lab.source(),
+                                 ledger=ledger, model="m", today="2026-09-16")
+        _, inventory, _ = supply._scan_task_rows()
+        self.assertEqual(inventory.get("tocrystal66"), 4)
