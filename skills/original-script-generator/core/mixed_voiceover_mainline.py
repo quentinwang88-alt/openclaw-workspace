@@ -470,6 +470,43 @@ def apply_expression_boundary_layer(
     return data, report
 
 
+def speakable_forbidden_hits(
+    payload: Optional[Mapping[str, Any]],
+    terms: Sequence[str],
+) -> List[str]:
+    """Dotted paths of *speakable* fields that still carry banned wording.
+
+    Boundary namespaces are skipped on purpose -- that is where a banned term
+    is supposed to appear (``forbidden_wording`` exists to name what must not
+    be said).  A hit anywhere else means the model would receive the banned
+    claim as material it may speak.  Returning paths lets a report *list* the
+    remaining leaks instead of asserting "we cleaned it".
+    """
+
+    banned = [_text(item) for item in terms if _text(item)]
+    if not banned or not isinstance(payload, Mapping):
+        return []
+
+    hits: List[str] = []
+
+    def walk(node: Any, path: List[str]) -> None:
+        if isinstance(node, Mapping):
+            for key, value in node.items():
+                if _is_boundary_namespace(key):
+                    continue
+                walk(value, path + [str(key)])
+            return
+        if isinstance(node, (list, tuple)):
+            for index, value in enumerate(node):
+                walk(value, path + [str(index)])
+            return
+        if isinstance(node, str) and any(term in node for term in banned):
+            hits.append(".".join(path))
+
+    walk(payload, [])
+    return sorted(set(hits))
+
+
 def check_voiceover_target_against_boundary(
     voice: Optional[Mapping[str, Any]] = None,
     *,

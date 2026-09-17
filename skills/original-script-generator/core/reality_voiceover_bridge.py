@@ -1527,6 +1527,7 @@ def run_central_voiceover(
     from core.mixed_voiceover_mainline import (
         BOUNDARY_LAYER_KEY,
         check_voiceover_target_against_boundary,
+        speakable_forbidden_hits,
     )
 
     boundary_layer = expression_contract.get(BOUNDARY_LAYER_KEY)
@@ -1537,6 +1538,12 @@ def run_central_voiceover(
     expression_boundary = {
         "forbidden_terms": list(boundary_terms),
         "layer_present_in_payload": isinstance(boundary_layer, dict) and bool(boundary_layer),
+        # What actually reached the model, checked rather than assumed: the
+        # banned wording must survive only inside the boundary namespaces.
+        "speakable_leaks_in_payload": speakable_forbidden_hits(
+            expression_contract, boundary_terms
+        ),
+        "selling_points_cleaned": bool(boundary_terms),
         "check": expression_boundary_check,
     }
     shot_count = len([item for item in visual_plan.get("shots", []) if isinstance(item, dict)])
