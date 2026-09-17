@@ -15,6 +15,9 @@ import argparse
 import json
 import sqlite3
 import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from search_to_library import import_feeds, parse_cn_count
 import time
 import urllib.request
 from pathlib import Path
@@ -52,51 +55,6 @@ def mcp_search(query: str, filters: dict, timeout: int = 60):
         raw = json.loads(resp.read().decode("utf-8"))
     text = raw["result"]["content"][0]["text"]
     return json.loads(text).get("feeds") or []
-
-
-def import_feeds(conn: sqlite3.Connection, feeds, theme: str, limit: int):
-    """与 search_to_library.py 同构的入库（note_id 去重、跳过视频）。"""
-    added = dup = skipped = 0
-    for feed in feeds[:limit]:
-        note_id = feed.get("id")
-        token = feed.get("xsecToken")
-        card = feed.get("noteCard") or {}
-        if card.get("type") == "video":
-            skipped += 1
-            continue
-        if not note_id or not token:
-            continue
-        user = card.get("user") or {}
-        interact = card.get("interactInfo") or {}
-        like = _parse_count(interact.get("likedCount"))
-        collected = _parse_count(interact.get("collectedCount"))
-        url = f"https://www.xiaohongshu.com/explore/{note_id}?xsec_token={token}"
-        cur = conn.execute(
-            "INSERT INTO notes (note_id, xsec_token, source_url, theme, origin,"
-            " title, author_id, author_nickname, like_count, collected_count,"
-            " status, fetch_status) VALUES (?,?,?,?, 'search', ?,?,?,?,?,"
-            " 'pending_review', 'pending') ON CONFLICT(note_id) DO NOTHING",
-            (note_id, token, url, theme, card.get("displayTitle"),
-             user.get("userId"), user.get("nickname"), like, collected))
-        if cur.rowcount:
-            added += 1
-        else:
-            dup += 1
-    return added, dup, skipped
-
-
-def _parse_count(value):
-    import re
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        return int(value)
-    s = str(value).strip()
-    m = re.match(r"^([\d.]+)万$", s)
-    if m:
-        return int(float(m.group(1)) * 10000)
-    m = re.match(r"^(\d+)", s)
-    return int(m.group(1)) if m else None
 
 
 def main() -> None:

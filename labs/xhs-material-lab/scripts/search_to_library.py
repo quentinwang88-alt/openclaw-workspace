@@ -57,7 +57,7 @@ def main() -> None:
 def import_feeds(conn, feeds, theme, limit):
     """入库（note_id 去重、跳过视频）；collect_by_demand 复用同构逻辑。"""
     added = dup = skipped_video = 0
-    for feed in feeds[: args.limit]:
+    for feed in feeds[:limit]:
         note_id = feed.get("id")
         token = feed.get("xsecToken")
         card = feed.get("noteCard") or {}
@@ -74,7 +74,7 @@ def import_feeds(conn, feeds, theme, limit):
             " title, author_id, author_nickname, like_count, collected_count,"
             " status, fetch_status) VALUES (?,?,?,?, 'search', ?,?,?,?,?,"
             " 'pending_review', 'pending') ON CONFLICT(note_id) DO NOTHING",
-            (note_id, token, url, args.theme,
+            (note_id, token, url, theme,
              card.get("displayTitle"), user.get("userId"), user.get("nickname"),
              parse_cn_count(interact.get("likedCount")),
              parse_cn_count(interact.get("collectedCount"))),
