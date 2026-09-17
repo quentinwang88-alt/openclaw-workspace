@@ -394,3 +394,358 @@ class RendererLabelTest(unittest.TestCase):
         self.assertIn("目标语言：越南语", text)
         self.assertIn("目标语言正文：Xin chào các bạn", text)
         self.assertNotIn("目标语言：Xin chào", text)
+
+
+class _BoundaryPayloadMixin:
+    """真实批次里含「纱」的每一类来源路径，用来验证清洗覆盖面。"""
+
+    def _payload(self):
+        return {
+            "content_mainline": "双层蝴蝶造型，超唯美",
+            "mixed_mainline_contract": _mainline(),
+            "argument_contract": {
+                "content": {
+                    "value_proposition": {"text": "双层纱质蝴蝶造型，超唯美"},
+                    "audience_tension": {"text": "纱质发饰总显廉价"},
+                    "selling_argument": {
+                        "operator_expression": "双层纱质蝴蝶造型",
+                        "core_value": "双层纱质蝴蝶造型，超唯美",
+                    },
+                    "proof_atoms": [{"claim_key": "C1", "fact_text": "纱质双层结构"}],
+                    "argument_context_alignment": {"allowed_spoken_context": "双层纱质蝴蝶造型"},
+                },
+                "forbidden_claims": ["未经授权的舒适、保暖或材质性能"],
+            },
+            "claim_atoms": [{"claim_key": "C1", "fact_text": "双层纱质蝴蝶造型"}],
+            "context_bridge_contract": {"allowed_spoken_context": "双层纱质蝴蝶造型"},
+        }
+
+
+class ExpressionBoundaryTest(_BoundaryPayloadMixin, unittest.TestCase):
+    """表达边界的三个口子：清洗、禁止层、成品兜底。
+
+    真实批次暴露过：主线把核心价值清洗成「双层蝴蝶造型」，同一条片子的口播却说出
+    「双层纱质蝴蝶造型」（目标语言 ``dáng bướm bằng voan hai lớp``）。清洗只落在
+    ``content_mainline`` 一个字段，其余正面授权字段仍是原文 —— 禁止的措辞从来没有
+    变成过约束。下面的用例逐条钉住这几件事。
+    """
+
+    def test_no_banned_wording_leaves_the_payload_untouched(self):
+        from core.mixed_voiceover_mainline import apply_expression_boundary_layer
+
+        payload = self._payload()
+        before = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        mainline = {"expression_boundary": {"forbidden_wording": [], "allowed_wording": "只描述造型"}}
+        applied, report = apply_expression_boundary_layer(payload, mainline)
+        self.assertFalse(report["applied"])
+        self.assertEqual(json.dumps(applied, ensure_ascii=False, sort_keys=True), before)
+
+    def test_no_mainline_contract_leaves_the_payload_untouched(self):
+        from core.mixed_voiceover_mainline import apply_expression_boundary_layer
+
+        payload = self._payload()
+        before = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        applied, report = apply_expression_boundary_layer(payload, {})
+        self.assertFalse(report["applied"])
+        self.assertEqual(json.dumps(applied, ensure_ascii=False, sort_keys=True), before)
+
+    def test_banned_wording_is_removed_from_every_speakable_field(self):
+        from core.mixed_voiceover_mainline import (
+            apply_expression_boundary_layer,
+            speakable_forbidden_hits,
+        )
+
+        applied, report = apply_expression_boundary_layer(self._payload(), _mainline())
+        # fail-closed：默认清洗全部可讲字段，而不是维护一张"值得清洗的字段"白名单。
+        self.assertGreaterEqual(report["cleaned_field_count"], 6, report["cleaned_paths"])
+        self.assertEqual(speakable_forbidden_hits(applied, ["纱"]), [])
+        self.assertNotIn("纱", json.dumps(applied["claim_atoms"], ensure_ascii=False))
+        self.assertNotIn(
+            "纱", applied["context_bridge_contract"]["allowed_spoken_context"]
+        )
+
+    def test_the_boundary_namespace_keeps_the_banned_terms(self):
+        from core.mixed_voiceover_mainline import apply_expression_boundary_layer
+
+        applied, _ = apply_expression_boundary_layer(self._payload(), _mainline())
+        # 把"不许说什么"本身清掉，约束就没有内容了。
+        self.assertEqual(
+            applied["mixed_mainline_contract"]["expression_boundary"]["forbidden_wording"],
+            ["纱"],
+        )
+        self.assertEqual(
+            applied["argument_contract"]["forbidden_claims"],
+            ["未经授权的舒适、保暖或材质性能"],
+        )
+
+    def test_the_payload_carries_an_explicit_forbidden_layer(self):
+        from core.mixed_voiceover_mainline import BOUNDARY_LAYER_KEY, apply_expression_boundary_layer
+
+        applied, report = apply_expression_boundary_layer(self._payload(), _mainline())
+        layer = applied[BOUNDARY_LAYER_KEY]
+        self.assertTrue(report["boundary_layer_present"])
+        self.assertEqual(layer["forbidden_wording"], ["纱"])
+        self.assertEqual(layer["rule_scope"], "ANY_LANGUAGE_INCLUDING_TARGET_TEXT")
+        self.assertTrue(layer["is_constraint_not_material"])
+
+    def test_the_forbidden_layer_rule_carries_no_category_terms(self):
+        # 喂给模型的指引文案不得包含会被下游硬门禁枪毙的类目术语。
+        from core.mixed_voiceover_mainline import compile_expression_boundary_layer
+
+        rule = compile_expression_boundary_layer(_mainline())["forbidden_wording_rule"]
+        self.assertIn("任何语言", rule)
+        for term in ("单只", "一对"):
+            self.assertNotIn(term, rule)
+
+    def test_the_cleaning_report_keeps_the_original_wording(self):
+        from core.mixed_voiceover_mainline import apply_expression_boundary_layer
+
+        _, report = apply_expression_boundary_layer(self._payload(), _mainline())
+        originals = report["cleaned_originals"]
+        # 清洗把「双层纱质蝴蝶造型，超唯美」从模型输入里删掉是对的；审计不能因此丢掉原句。
+        self.assertEqual(
+            originals["mixed_mainline_contract.core_value"], "双层纱质蝴蝶造型，超唯美"
+        )
+        self.assertTrue(all("纱" in value for value in originals.values()))
+
+    def test_the_production_entry_applies_it_not_a_parallel_function(self):
+        # 「声明了合同 ≠ 合同生效」：禁止层必须长在中央引擎真正收到的那份 contract 上。
+        from core.reality_voiceover_bridge import build_voiceover_expression_contract
+
+        direction = {
+            "content_bundle_brief": {
+                "content_mainline": "双层蝴蝶造型，超唯美",
+                "claim_atoms": [{"claim_key": "C1", "fact_text": "双层纱质蝴蝶造型"}],
+                "mixed_mainline_contract": _mainline(),
+            }
+        }
+        contract = build_voiceover_expression_contract(direction, {"shots": []})
+        self.assertIn("voiceover_expression_boundary", contract)
+        self.assertEqual(
+            contract["voiceover_expression_boundary"]["forbidden_wording"], ["纱"]
+        )
+        self.assertNotIn("纱", contract["claim_atoms"][0]["fact_text"])
+
+    def test_the_boundary_terms_are_read_from_the_frozen_mainline(self):
+        from core.reality_voiceover_bridge import (
+            _boundary_forbidden_terms,
+            _strip_banned_terms,
+        )
+
+        direction = {"mixed_mainline_contract": _mainline()}
+        self.assertEqual(_boundary_forbidden_terms(direction), ["纱"])
+        self.assertEqual(_strip_banned_terms("双层纱质蝴蝶造型", ["纱"]), "双层蝴蝶造型")
+        # 没有禁词时逐字不改，包括空值。
+        self.assertEqual(_strip_banned_terms("双层纱质蝴蝶造型", []), "双层纱质蝴蝶造型")
+
+    def test_the_engine_request_never_carries_the_banned_claim(self):
+        # 契约不是唯一一条投喂通路：core_selling_points / visual_fact_inputs /
+        # primary_selling_point 是引擎请求上的独立字段，带着同一批原句。
+        from unittest import mock
+
+        from core import reality_voiceover_bridge as bridge
+
+        mainline = _mainline()
+        direction = {
+            "content_bundle_brief": {
+                "content_mainline": "双层蝴蝶造型，超唯美",
+                "selling_argument": {
+                    "core_proof_claim_keys": ["C1"],
+                    "operator_expression": "双层纱质蝴蝶造型",
+                    "core_value": "双层纱质蝴蝶造型，超唯美",
+                },
+                "proof_atoms": [{"claim_key": "C1", "fact_text": "双层纱质蝴蝶造型"}],
+                "mixed_mainline_contract": mainline,
+            },
+            "mixed_mainline_contract": mainline,
+        }
+        visual_plan = {"shots": [{"shot_no": 1, "supported_claim_keys": ["C1"]}]}
+        captured = {}
+
+        def _fake_engine_variant(**kwargs):
+            captured.update(kwargs)
+            return {
+                "hook_id": "H1",
+                "selected_claim_count": 1,
+                "selected_claim_ids": ["C1"],
+                "beats": [
+                    {
+                        "suggested_start_ms": 0,
+                        "suggested_end_ms": 1500,
+                        "speech_text": "dang buom bang voan hai lop",
+                        "chinese_translation": "双层纱质蝴蝶造型",
+                        "role": "VALUE",
+                    }
+                ],
+            }
+
+        with mock.patch.object(
+            bridge,
+            "load_active_voiceover_hooks",
+            return_value=[{"hook_id": "H1", "status": "ACTIVE"}],
+        ), mock.patch.object(
+            bridge, "run_voiceover_engine_variant", side_effect=_fake_engine_variant
+        ):
+            result = bridge.run_central_voiceover(
+                product_code="P1",
+                target_country="VN",
+                target_language="越南语",
+                direction=direction,
+                visual_plan=visual_plan,
+            )
+
+        product = captured["product"]
+        strategy = captured["strategy"]
+        self.assertTrue(product["core_selling_points"])
+        self.assertTrue(all("纱" not in item for item in product["core_selling_points"]))
+        self.assertNotIn("纱", strategy["primary_selling_point"])
+        self.assertTrue(all("纱" not in item["fact_text"] for item in product["visual_fact_inputs"]))
+        self.assertEqual(
+            strategy["expression_contract"]["voiceover_expression_boundary"]["forbidden_wording"],
+            ["纱"],
+        )
+        self.assertTrue(result["expression_boundary"]["layer_present_in_payload"])
+        self.assertEqual(result["expression_boundary"]["speakable_leaks_in_payload"], [])
+        # 兜底改成"查出来"：引擎这次确实把被禁断言说出来了，必须被判定为未通过。
+        self.assertEqual(result["expression_boundary"]["check"]["status"], CHECK_FAIL)
+
+
+class BoundaryCheckTest(unittest.TestCase):
+    """成品兜底：真说出来了要能被检出，而不是指望它没写。"""
+
+    def test_the_chinese_translation_is_the_blocking_basis(self):
+        from core.mixed_voiceover_mainline import check_voiceover_target_against_boundary
+
+        check = check_voiceover_target_against_boundary(
+            voice={
+                "target_text": "dang buom bang voan hai lop",
+                "chinese_translation": "双层纱质蝴蝶造型",
+            },
+            mainline=_mainline(),
+        )
+        self.assertEqual(check["status"], CHECK_FAIL)
+        self.assertEqual(check["violations"][0]["term"], "纱")
+        self.assertEqual(check["violations"][0]["scope"], "chinese_translation")
+
+    def test_the_detection_scope_is_reported_not_overclaimed(self):
+        from core.mixed_voiceover_mainline import check_voiceover_target_against_boundary
+
+        check = check_voiceover_target_against_boundary(
+            voice={"chinese_translation": "双层纱质蝴蝶造型"}, mainline=_mainline()
+        )
+        self.assertEqual(check["blocking_basis"], "chinese_translation")
+        self.assertEqual(check["target_language_detection"], "SHARED_SCRIPT_TERMS_ONLY")
+        self.assertTrue(check["residual_risk"])
+
+    def test_a_clean_utterance_passes(self):
+        from core.mixed_voiceover_mainline import check_voiceover_target_against_boundary
+
+        check = check_voiceover_target_against_boundary(
+            voice={"chinese_translation": "双层蝴蝶造型，夹得很稳"},
+            mainline=_mainline(),
+        )
+        self.assertEqual(check["status"], CHECK_PASS)
+        self.assertEqual(check["violations"], [])
+
+    def test_without_banned_wording_it_is_not_applicable(self):
+        from core.mixed_voiceover_mainline import check_voiceover_target_against_boundary
+
+        check = check_voiceover_target_against_boundary(
+            voice={"chinese_translation": "双层纱质蝴蝶造型"},
+            mainline={"expression_boundary": {"forbidden_wording": []}},
+        )
+        self.assertEqual(check["status"], CHECK_NOT_APPLICABLE)
+        self.assertEqual(check["reason"], "NO_FORBIDDEN_WORDING")
+
+    def test_each_line_is_reported_with_its_index(self):
+        from core.mixed_voiceover_mainline import check_voiceover_target_against_boundary
+
+        check = check_voiceover_target_against_boundary(
+            mainline=_mainline(),
+            lines=[
+                {"voiceover_text_zh": "第一句很干净"},
+                {"voiceover_text_zh": "第二句提到纱"},
+            ],
+        )
+        self.assertEqual(check["status"], CHECK_FAIL)
+        self.assertEqual([item["index"] for item in check["violations"]], [2])
+
+
+class DeliveredVoiceoverReviewTest(unittest.TestCase):
+    """两份核对要真的产出结论，而不是只在测试里被调用。"""
+
+    class _Item:
+        macro_family_key = ""
+        carrier_mode = "MIXED"
+        actual_hook_id = ""
+        requested_hook_id = ""
+        batch_item_id = "I1"
+        item_index = 1
+
+        def __init__(self, payload):
+            self.result_json = json.dumps(payload, ensure_ascii=False)
+
+    def _script(self, chinese):
+        return {
+            "continuous_voiceover": {
+                "target_language": "越南语",
+                "target_text": "dang buom",
+                "chinese_translation": chinese,
+            },
+            "storyboard": [{"capture_unit_id": "CU_01", "visual_content": "画面"}],
+            "capture_units": [{"capture_unit_id": "CU_01", "structure_role": "MOMENT"}],
+        }
+
+    def test_without_a_mainline_the_delivery_text_is_unchanged(self):
+        from core.production_script_renderer import render_complete_production_script
+
+        text = render_complete_production_script(
+            item=self._Item({"script": self._script("双层蝴蝶造型")}), duration_seconds=15
+        )
+        self.assertNotIn("口播口径核对", text)
+        self.assertNotIn("主线三类核对", text)
+
+    def test_a_delivered_script_with_a_mainline_reports_both_checks(self):
+        from core.production_script_renderer import render_complete_production_script
+
+        script = self._script("双层蝴蝶造型")
+        script["mixed_mainline_contract"] = _mainline()
+        text = render_complete_production_script(
+            item=self._Item({"script": script}), duration_seconds=15
+        )
+        self.assertIn("口播口径核对：通过", text)
+        self.assertIn("主线三类核对", text)
+
+    def test_a_violation_in_the_finished_copy_surfaces_in_the_delivery_text(self):
+        from core.production_script_renderer import render_complete_production_script
+
+        script = self._script("双层纱质蝴蝶造型")
+        script["mixed_mainline_contract"] = _mainline()
+        text = render_complete_production_script(
+            item=self._Item({"script": script}), duration_seconds=15
+        )
+        self.assertIn("口播口径核对：未通过", text)
+        self.assertIn("纱", text)
+
+    def test_the_projection_carries_the_review_as_structured_data(self):
+        from core.production_script_renderer import build_production_projection
+
+        script = self._script("双层纱质蝴蝶造型")
+        script["mixed_mainline_contract"] = _mainline()
+
+        class _Batch:
+            duration_seconds = 15
+            batch_id = "B1"
+            product_code = "P1"
+            target_country = "VN"
+            target_language = "越南语"
+            top_category = ""
+            product_type = ""
+
+        projection = build_production_projection(
+            batch=_Batch(), item=self._Item({"script": script})
+        )
+        self.assertEqual(projection["voiceover_review_status"], CHECK_FAIL)
+        self.assertEqual(
+            projection["voiceover_review"]["boundary_check"]["violations"][0]["term"], "纱"
+        )
