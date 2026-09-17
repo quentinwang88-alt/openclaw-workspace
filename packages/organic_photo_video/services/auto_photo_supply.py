@@ -577,11 +577,25 @@ class AutoPhotoSupply:
                     "purpose": str(page.get("purpose") or ""),
                 } for page in (frozen.get("selected_pages") or [])])
         else:
-            selection = select_reference(
-                self.vision_client, narrowed,
-                theme=default_theme if positioning_first else "",
-                product=product_brief,
-                temperature_band=band)
+            # 方案 A3：模型发起前原子预留额度；成功/失败/未知都占用
+            cap_calls = int(os.environ.get("OPV_SUPPLY_DAILY_CALL_CAP") or 300)
+            if not self.ledger.reserve_budget(
+                    purpose="selection", cap=cap_calls,
+                    note=f"{binding.account_id} slot{slot}"):
+                plan.status = "budget_exhausted"
+                plan.detail = f"终选额度已满（当日 {cap_calls} 次）"
+                return plan
+            try:
+                selection = select_reference(
+                    self.vision_client, narrowed,
+                    theme=default_theme if positioning_first else "",
+                    product=product_brief,
+                    temperature_band=band)
+                self.ledger.settle_budget(purpose="selection", state="consumed")
+            except Exception:
+                self.ledger.settle_budget(purpose="selection", state="consumed",
+                                          note="调用失败仍计额度")
+                raise
             # 终选调用入账（方案 §9 预算口径；恢复路径不调模型不入账）
             self.ledger.log_supply_call(purpose="selection", model=self.model)
         if selection is None:

@@ -70,6 +70,16 @@ CREATE TABLE IF NOT EXISTS material_gaps (
     reason TEXT NOT NULL,
     detail TEXT
 );
+CREATE TABLE IF NOT EXISTS budget_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    budget_day TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'reserved',
+    note TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_budget_day_purpose ON budget_attempts (budget_day, purpose);
 CREATE TABLE IF NOT EXISTS supply_slots (
     account_id TEXT NOT NULL,
     supply_date TEXT NOT NULL,
@@ -103,6 +113,10 @@ def default_ledger_path() -> Path:
     return Path(__file__).resolve().parents[1] / "var" / "material_consumer.sqlite3"
 
 
+class MaterialAnalysisBudgetError(RuntimeError):
+    """当日调用额度用尽（方案 A3）。"""
+
+
 class MaterialLedger:
     """消费侧台账：分析缓存、调用成本、使用历史、素材缺口。"""
 
@@ -124,6 +138,79 @@ class MaterialLedger:
 
     def close(self) -> None:
         self._conn.close()
+
+    # ---- 逐调用额度预留（方案 A3：短事务检查+预留，多 worker 原子）----
+    @staticmethod
+    def budget_today() -> str:
+        """预算日窗口：按配置时区计算（OPV_BUDGET_TIMEZONE，默认亚洲/曼谷）。"""
+        import os
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz_name = os.environ.get("OPV_BUDGET_TIMEZONE") or "Asia/Bangkok"
+        try:
+            return datetime.now(ZoneInfo(tz_name)).date().isoformat()
+        except Exception:  # noqa: BLE001 - 非法时区名回落本地日
+            return datetime.now().date().isoformat()
+
+    def reserve_budget(self, *, purpose: str, cap: int, note: str = "") -> bool:
+        """检查并预留一次调用额度。成功/已发起失败/结果未知都占额度；
+        只有确认未发起的取消可 release。BEGIN IMMEDIATE 保证跨 worker 原子。"""
+        day = self.budget_today()
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM budget_attempts"
+                " WHERE budget_day=? AND purpose=?"
+                " AND state IN ('reserved','consumed','unknown')",
+                (day, purpose)).fetchone()
+            if int(row["n"]) >= int(cap):
+                self._conn.execute("ROLLBACK")
+                return False
+            self._conn.execute(
+                "INSERT INTO budget_attempts (budget_day, purpose, state, note)"
+                " VALUES (?,?,'reserved',?)", (day, purpose, str(note)[:120]))
+            self._conn.execute("COMMIT")
+            return True
+        except Exception:
+            try:
+                self._conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+
+    def settle_budget(self, *, purpose: str, state: str, note: str = "") -> None:
+        """结算本人最近一次 reserved：consumed（成功/失败但已发起）或
+        unknown（结果未知）；只有未发起才允许 release（删除预留）。"""
+        day = self.budget_today()
+        if state == "release":
+            self._conn.execute(
+                "DELETE FROM budget_attempts WHERE id=("
+                " SELECT id FROM budget_attempts WHERE budget_day=? AND purpose=?"
+                " AND state='reserved' ORDER BY id DESC LIMIT 1)",
+                (day, purpose))
+        else:
+            self._conn.execute(
+                "UPDATE budget_attempts SET state=?, note=?,"
+                " updated_at=datetime('now') WHERE id=("
+                " SELECT id FROM budget_attempts WHERE budget_day=? AND purpose=?"
+                " AND state='reserved' ORDER BY id DESC LIMIT 1)",
+                (state, str(note)[:120], day, purpose))
+        self._conn.commit()
+
+    def budget_usage(self, purpose: str = "") -> Dict[str, int]:
+        day = self.budget_today()
+        if purpose:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM budget_attempts"
+                " WHERE budget_day=? AND purpose=?"
+                " AND state IN ('reserved','consumed','unknown')",
+                (day, purpose)).fetchone()
+            return {"attempts": int(row["n"])}
+        rows = self._conn.execute(
+            "SELECT purpose, COUNT(*) AS n FROM budget_attempts"
+            " WHERE budget_day=? AND state IN ('reserved','consumed','unknown')"
+            " GROUP BY purpose", (day,)).fetchall()
+        return {str(r["purpose"]): int(r["n"]) for r in rows}
 
     # ---- 调用预算（方案 §9：失败重试也计入额度）----
     def daily_call_usage(self, today: str) -> Dict[str, int]:
@@ -646,6 +733,10 @@ class MaterialAnalyzer:
                 )
                 ok, response = self._call_once(note_id, batch, prompt)
                 calls += 1
+                self.ledger.settle_budget(
+                    purpose="analysis",
+                    state="consumed" if ok else "unknown",
+                    note=note_id)
                 if not ok:
                     # 每批最多重试一次，仍失败则本篇放弃（不形成重试循环）
                     ok, response = self._call_once(note_id, batch, prompt)
@@ -689,6 +780,20 @@ class MaterialAnalyzer:
             return AnalysisOutcome(note_id, fingerprint, cached=False, result=merged)
 
     def _call_once(self, note_id: str, batch: List[Path], prompt: str):
+        # 方案 A3：分析调用逐次原子预留（缓存命中不会走到这里）
+        cap = int(os.environ.get("OPV_SUPPLY_DAILY_CALL_CAP") or 300)
+        if not self.ledger.reserve_budget(purpose="analysis", cap=cap,
+                                          note=note_id):
+            raise MaterialAnalysisBudgetError(
+                f"当日分析调用额度已满（{cap} 次），本轮中止")
+        try:
+            return self._call_once_inner(note_id, batch, prompt)
+        except Exception:
+            self.ledger.settle_budget(purpose="analysis", state="consumed",
+                                      note="失败仍计额度")
+            raise
+
+    def _call_once_inner(self, note_id: str, batch: List[Path], prompt: str):
         started = time.time()
         try:
             response = self.client.chat_with_multiple_images(

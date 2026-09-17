@@ -297,3 +297,47 @@ class SlotLeaseTest(unittest.TestCase):
             ledger.acquire_slot_lease("a", "2026-09-17", 1, owner="w"),
             "acquired")
         ledger.close()
+
+
+class BudgetReservationTest(unittest.TestCase):
+    """方案 A3：逐调用额度原子预留。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        from services.material_analysis import MaterialLedger
+        self.w1 = MaterialLedger(str(Path(self._tmp.name) / "b.sqlite3"))
+        self.w2 = MaterialLedger(str(Path(self._tmp.name) / "b.sqlite3"))
+
+    def tearDown(self):
+        self.w1.close(); self.w2.close(); self._tmp.cleanup()
+
+    def test_cap1_single_launch_two_workers(self):
+        # cap=1：两个 worker 争最后一个额度，只成一个
+        self.assertTrue(self.w1.reserve_budget(purpose="selection", cap=1))
+        self.assertFalse(self.w2.reserve_budget(purpose="selection", cap=1))
+        self.w1.settle_budget(purpose="selection", state="consumed")
+        # 已消费仍占额度：重试不能再预留（失败不返还）
+        self.assertFalse(self.w1.reserve_budget(purpose="selection", cap=1))
+        # 用途独立：分析额度不受终选影响
+        self.assertTrue(self.w2.reserve_budget(purpose="analysis", cap=1))
+
+    def test_release_only_when_not_launched(self):
+        self.assertTrue(self.w1.reserve_budget(purpose="selection", cap=1))
+        self.w1.settle_budget(purpose="selection", state="release")  # 未发起取消
+        self.assertTrue(self.w2.reserve_budget(purpose="selection", cap=1))
+        self.w2.settle_budget(purpose="selection", state="unknown")  # 结果未知占额度
+        self.assertFalse(self.w1.reserve_budget(purpose="selection", cap=1))
+
+    def test_budget_day_by_timezone(self):
+        import os
+        day = self.w1.budget_today()
+        self.assertRegex(day, r"^\d{4}-\d{2}-\d{2}$")
+        os.environ["OPV_BUDGET_TIMEZONE"] = "UTC"
+        try:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            self.assertEqual(
+                self.w1.budget_today(),
+                datetime.now(ZoneInfo("UTC")).date().isoformat())
+        finally:
+            del os.environ["OPV_BUDGET_TIMEZONE"]
