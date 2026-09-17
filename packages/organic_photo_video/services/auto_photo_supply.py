@@ -633,10 +633,18 @@ class AutoPhotoSupply:
         narrowed = self._narrow(
             candidates, default_theme if positioning_first else "",
             narrow_brief, recent, band)
+        if not narrowed and apply and self.analyzer is not None:
+            # 方案 C4：0 候选先做一次有限补分析（正式入口，限 5 篇），
+            # 再判缺口——不能提前 return 把"未分析"当"无素材"。
+            self.analyzer.analyze_pending(limit=5)
+            candidates = self._collect_candidates(scope_themes)
+            narrowed = self._narrow(
+                candidates, default_theme if positioning_first else "",
+                narrow_brief, recent, band)
         if not narrowed:
             self.ledger.record_gap(
                 scope=f"supply:{binding.account_id}", reason="no_material",
-                detail="无可用候选（分析缓存不足或全部被拒）")
+                detail="无可用候选（补分析后仍不足或全部被拒）")
             plan.status = "no_material"
             plan.detail = "无可用候选素材"
             return plan

@@ -779,5 +779,39 @@ class AutoPhotoSupplyTest(unittest.TestCase):
         self.assertEqual(fields["温度档"], "15°C 左右")
 
 
+    def test_c4_zero_candidates_triggers_limited_refill(self):
+        # 方案 C4：0 候选先补分析再判缺口（不再提前 return）
+        calls = {"n": 0}
+        root, lab, note_ids = self.root, self.lab, self.note_ids
+
+        class RefillAnalyzer:
+            def analyze_pending(self, limit=5):
+                calls["n"] += 1
+                calls["limit"] = limit
+                # 模拟补分析后池子可用（写独立 ledger，不影响本供给台账）
+                make_ledger_with_analysis(
+                    root, lab.source(), note_ids,
+                    name="ledger_c4refill.sqlite3")
+                return []
+
+        ledger = MaterialLedger(str(self.root / "ledger_c4.sqlite3"))  # 无缓存
+        client = FakeTaskTableClient()
+        supply = AutoPhotoSupply(
+            client=client, source=self.lab.source(), ledger=ledger,
+            vision_client=self._vision_ok(), analyzer=RefillAnalyzer(),
+            model="mock-model", today="2026-09-16",
+            contract_store=__import__(
+                "services.external_supply_contract", fromlist=["x"]
+            ).ExternalSupplyContractStore(str(self.root / "contracts.sqlite3")))
+        results = supply.run([make_binding()], apply=True)
+        # 注意：RefillAnalyzer 写的是另一个 ledger，本 ledger 仍无候选 →
+        # 断言补分析被触发且缺口照记
+        self.assertEqual(calls["n"], 1)
+        self.assertEqual(calls["limit"], 5)
+        self.assertEqual(results[0].status, "no_material",
+                         msg=f"slots={results[0].slots} detail={results[0].detail}")
+        self.assertEqual(results[0].slots[0].status, "no_material")
+
+
 if __name__ == "__main__":
     unittest.main()
