@@ -34,25 +34,76 @@ def load_families(path: Path = LAB_CONFIG):
     return payload.get("families") or []
 
 
-def count_usable_by_theme(ledger, source, model: str, analysis_version: str):
-    """按 lab 主题统计 v3 缓存且「至少一个用途可用」的候选数。"""
-    counts: dict = {}
+def _covers_purposes(analysis, purposes, mode: str) -> bool:
+    """需求用途校验（方案 C2）：mode=any 可替代 / all 需同时具备；
+    v2 旧缓存未知用途退回 consumable。"""
+    usability = analysis.get("purpose_usability")
+    if not (isinstance(usability, dict) and usability):
+        return bool(analysis.get("consumable", False))
+    flags = [bool((usability.get(n) or {}).get("usable"))
+             for n in (purposes or [])
+             if isinstance(usability.get(n), dict)]
+    if not flags:
+        return False
+    return all(flags) if mode == "all" else any(flags)
+
+
+def count_usable_by_family(families, ledger, source, model: str,
+                           analysis_version: str, lab_db: str = ""):
+    """按查询族统计可用候选（方案 C2）。
+
+    归属以 query_hits.family 为主、notes.theme 兼容别名兜底（label 仅
+    展示）；用途按族配置（purposes+purposes_mode）校验；同件多搭族区分
+    真同件多搭（set_structure=same_item_multiway）与可适配候选。
+    计数按 note_id 去重（v3 缓存键本身按版本指纹）。
+    """
+    import sqlite3
+    family_ids = {str(f.get("family_id")) for f in families}
+    hits_by_fid: dict = {fid: set() for fid in family_ids}
+    if lab_db:
+        try:
+            conn = sqlite3.connect(f"file:{lab_db}?mode=ro", uri=True)
+            for fid, note_id in conn.execute(
+                    "SELECT DISTINCT family, note_id FROM query_hits"):
+                if fid in hits_by_fid:
+                    hits_by_fid[fid].add(str(note_id))
+            conn.close()
+        except Exception:  # noqa: BLE001 - lab 库缺失时退回主题别名
+            pass
+    theme_alias: dict = {}
+    for f in families:
+        for theme in f.get("themes") or []:
+            theme_alias[str(theme)] = str(f.get("family_id"))
+
+    analyses_by_note = {}
     for package in source.list_packages():
         analysis = ledger.get_cached_analysis(
             package.version_fingerprint, model, analysis_version)
-        if not analysis:
-            continue
-        usability = analysis.get("purpose_usability")
-        if isinstance(usability, dict) and usability:
-            flags = [bool((usability.get(n) or {}).get("usable"))
-                     for n in ("outfit", "visual", "narrative")
-                     if isinstance(usability.get(n), dict)]
-            if flags and not any(flags):
+        if analysis:
+            analyses_by_note[package.note_id] = analysis
+            fid = theme_alias.get(str(package.theme or "").strip())
+            if fid:
+                hits_by_fid[fid].add(package.note_id)
+
+    counts: dict = {}
+    for f in families:
+        fid = str(f.get("family_id"))
+        purposes = [str(x) for x in f.get("purposes") or []]
+        mode = str(f.get("purposes_mode") or "any")
+        usable = true_mw = 0
+        for note_id in hits_by_fid.get(fid, ()):
+            analysis = analyses_by_note.get(note_id)
+            if not analysis or not _covers_purposes(analysis, purposes, mode):
                 continue
-        elif not analysis.get("consumable", False):
-            continue
-        theme = str(package.theme or "").strip()
-        counts[theme] = counts.get(theme, 0) + 1
+            usable += 1
+            if (str(analysis.get("set_structure") or "")
+                    == "same_item_multiway"):
+                true_mw += 1
+        counts[fid] = {
+            "usable": usable,
+            "true_multiway": true_mw,
+            "adaptable": max(0, usable - true_mw),
+        }
     return counts
 
 
@@ -90,8 +141,11 @@ def build_demand(families, usable_by_theme, gap_rows):
     demands = []
     for family in families:
         fid = str(family.get("family_id") or "")
-        themes = [str(t) for t in family.get("themes") or []]
-        usable_now = sum(usable_by_theme.get(t, 0) for t in themes)
+        raw = usable_by_theme.get(fid, 0)
+        if isinstance(raw, dict):
+            usable_now = int(raw.get("usable") or 0)
+        else:
+            usable_now = int(raw)
         threshold = int(family.get("min_usable_pool") or 0)
         gap_hits = sum(
             1 for reason, detail in gap_rows
@@ -160,7 +214,10 @@ def main() -> int:
 
     families = load_families()
     ledger = MaterialLedger()
-    usable = count_usable_by_theme(ledger, MaterialSource(), args.model, ANALYSIS_VERSION)
+    from services.material_source import DEFAULT_LIBRARY_DB
+    usable = count_usable_by_family(
+        families, ledger, MaterialSource(), args.model, ANALYSIS_VERSION,
+        lab_db=str(DEFAULT_LIBRARY_DB))
     gaps = recent_gap_hints(ledger, hours=args.gap_hours)
     demands = build_demand(families, usable, gaps)
     ledger_demands = []

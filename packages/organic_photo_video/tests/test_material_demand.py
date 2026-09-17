@@ -27,12 +27,14 @@ CREATE TABLE notes (
 FAMILIES = [
     {"family_id": "same_item_multiway", "label": "同件多搭",
      "themes": ["一衣多穿"], "base_queries": ["一衣多穿"],
-     "min_usable_pool": 6},
+     "purposes": ["outfit"], "min_usable_pool": 6},
     {"family_id": "travel_layering", "label": "旅行穿脱/层次",
      "themes": ["旅行穿搭"], "base_queries": ["旅行穿搭"],
+     "purposes": ["outfit", "narrative"], "purposes_mode": "any",
      "min_usable_pool": 8},
     {"family_id": "scarf_pairing", "label": "围巾搭配", "themes": [],
-     "base_queries": ["围巾搭配"], "min_usable_pool": 4},
+     "base_queries": ["围巾搭配"], "purposes": ["outfit"],
+     "min_usable_pool": 4},
 ]
 
 
@@ -41,7 +43,7 @@ class DemandListTest(unittest.TestCase):
         # 库存足够的族不扩量（§7：库存足够即停止扩量）；
         # 存量 0 的族（一衣多穿/围巾）入选，存量足的旅行族被排除
         demands = build_demand(
-            FAMILIES, {"旅行穿搭": 10}, [])
+            FAMILIES, {"travel_layering": 10}, [])
         self.assertEqual(
             [d["family"] for d in demands],
             ["same_item_multiway", "scarf_pairing"])
@@ -121,3 +123,46 @@ class DemandLedgerTest(unittest.TestCase):
                                      "destination_country": "日本"})
         self.assertEqual(len(q2), 3)               # 2 定向+1 通用
         self.assertTrue(q2[0].startswith("日本"))
+
+
+class FamilyInventoryTest(unittest.TestCase):
+    """方案 C2：按族+需求用途计数，真同件多搭与可适配分开。"""
+
+    def test_covers_purposes_mode(self):
+        from export_material_gaps import _covers_purposes
+        a_any = {"purpose_usability": {"outfit": {"usable": True},
+                                       "narrative": {"usable": False}}}
+        a_none = {"purpose_usability": {"outfit": {"usable": False},
+                                        "narrative": {"usable": False}}}
+        # any：一个可用即满足；all：必须同时
+        self.assertTrue(_covers_purposes(a_any, ["outfit", "narrative"], "any"))
+        self.assertFalse(_covers_purposes(a_any, ["outfit", "narrative"], "all"))
+        self.assertFalse(_covers_purposes(a_none, ["outfit"], "any"))
+        # v2 旧缓存退回 consumable
+        self.assertTrue(_covers_purposes({"consumable": True}, ["outfit"], "all"))
+
+    def test_count_usable_by_family_split_multiway(self):
+        from export_material_gaps import count_usable_by_family
+        with TemporaryDirectory() as tmp:
+            from services.material_analysis import ANALYSIS_VERSION, MaterialLedger
+            from tests.test_material_phase1 import LabFixture, _analysis_payload
+            lab = LabFixture(Path(tmp))
+            lab.add_note(note_id="m" * 24, images=2, theme="一衣多穿",
+                         title="真一衣多穿")
+            ledger = MaterialLedger(str(Path(tmp) / "l.sqlite3"))
+            pkg = lab.source().get("m" * 24)
+            ledger.put_cached_analysis(
+                fingerprint=pkg.version_fingerprint, model="m",
+                analysis_version=ANALYSIS_VERSION, note_id="m" * 24,
+                result=_analysis_payload(structure="same_item_multiway"),
+                image_count=2, calls=1, prompt_tokens=1, completion_tokens=1,
+                duration_ms=1)
+            ledger2 = MaterialLedger(str(Path(tmp) / "l.sqlite3"))
+            counts = count_usable_by_family(
+                FAMILIES, ledger2, lab.source(), "m", ANALYSIS_VERSION)
+            mw = counts["same_item_multiway"]
+            self.assertEqual(mw["usable"], 1)
+            self.assertEqual(mw["true_multiway"], 1)   # 真结构
+            self.assertEqual(mw["adaptable"], 0)
+            # 主题别名归属：notes.theme 不在 themes 里则不归属
+            self.assertEqual(counts["travel_layering"]["usable"], 0)
