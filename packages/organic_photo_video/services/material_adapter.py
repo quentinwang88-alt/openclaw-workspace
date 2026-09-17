@@ -323,9 +323,9 @@ _SELECT_PROMPT = """你是穿搭图文的参考选材器。根据候选素材摘
 {product_line}
 要求：
 - 只选一篇主参考；本轮不支持补充参考，supplement_note_ids 恒为空数组。
-- 审美门槛：绝对不要选择镜面自拍（mirror_selfie）、随手拍/游客照（casual_phone_selfie）
-  或 photography_quality=poor 的素材；优先全身完整、光线干净、背景整洁、
-  构图专业的博主级出片——生成画面会直接继承参考的拍摄质感。
+- 摄影质量影响视觉采用（B3）：photography_quality=poor 或镜面自拍类素材
+  不得作为 visual 采用方式或选 visual_tone 页；但搭配关系清楚时仍可作为
+  outfit/narrative 的文字化借鉴来源。优先全身完整、光线干净的出片。
 {band_line}- 采用方式（adoption）语义必须严格执行，并据此做页级选材（pages）：
   · outfit_only：只借鉴单品组合/层次/比例/配色关系。pages 只选搭配与单品
     细节页（purpose=outfit_detail），环境主导的大场景页一律不选；若该笔记
