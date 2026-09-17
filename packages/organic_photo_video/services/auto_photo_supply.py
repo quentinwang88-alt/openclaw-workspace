@@ -881,12 +881,15 @@ class AutoPhotoSupply:
                 theme_derived_note = "内容方向以参考素材为基准（旅行选题：主题=凉爽旅行）｜"
                 band = band or theme_thermal_band(theme_value)
             else:
-                # 通用结构：非旅行主题（结构性映射，无旅行/温度注入）
+                # 通用结构：非旅行主题（结构性映射，无旅行/温度注入）。
+                # §4.2：本篇明确温度（显式参数/冻结合同）不得被通用结构
+                # 清除——只有随主题推导出的温度才随之消失。
                 effective_preset = GENERIC_CHOICE_PRESET
                 theme_value = _nontravel_theme(source_topic)
                 theme_derived_note = (
                     f"内容方向以参考素材为基准（通用结构：主题={theme_value}）｜")
-                band = None
+                if band_source not in ("显式参数", "冻结合同"):
+                    band = None
 
         requirement = theme_derived_note + self._content_requirement_text(
             selection=selection, analysis=main_analysis, topic=topic,

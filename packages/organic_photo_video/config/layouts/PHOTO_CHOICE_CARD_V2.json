@@ -29,7 +29,7 @@
     "padding_x": 24,
     "padding_y": 20,
     "line_spacing": 10,
-    "text_position": "top",
+    "text_position": "bottom",
     "split_last_line_to_bottom": true
   }
 }

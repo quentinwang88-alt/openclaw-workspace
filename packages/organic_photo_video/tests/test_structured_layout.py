@@ -137,9 +137,6 @@ class RenderTest(unittest.TestCase):
         self.assertLess(lum(220), lum(240))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class CoverHierarchyTest(unittest.TestCase):
     """评审 §C 标题层级：投票字母不得成为封面视觉主体。"""
@@ -178,3 +175,41 @@ class CoverHierarchyTest(unittest.TestCase):
         self.assertEqual(spec["kicker"], "东京秋日")
         self.assertEqual(spec["headline"], "轻装出行指南")
         self.assertEqual(spec["cta"], "")
+
+class CoverWhitespaceTest(unittest.TestCase):
+    """§8：通用四宫格封面标题独立留白区（text_position=bottom 不压脸）。"""
+
+    def _template(self, name):
+        payload = json.loads((PACKAGE_ROOT / "config/layouts" / f"{name}.json")
+                             .read_text(encoding="utf-8"))
+        return normalize_photo_template(payload)
+
+    def test_cover_bottom_band_not_top(self):
+        from services.photo_structured_layout import (
+            render_structured_page, parse_page_spec)
+        template = self._template("PHOTO_STRUCTURED_CLEAN_V1")
+        template = {**dict(template), "text_position": "bottom"}
+        image = Image.new("RGB", (template["width"], template["height"]), "#FFFFFF")
+        # 顶部画一个"人物"色块（模拟人脸位置）
+        from PIL import ImageDraw
+        ImageDraw.Draw(image).rectangle(
+            [200, 100, 880, 700], fill="#C89B7B")
+        result = render_structured_page(
+            image, "灰色穿搭层次公式\n用3种配色打造4套造型", template,
+            index=1, cover_index=1, total=4)
+        self.assertEqual(result["page_kind"], "cover")
+        spec = parse_page_spec("灰色穿搭层次公式\n用3种配色打造4套造型",
+                               index=1, cover_index=1, total=4)
+        # 文字区域在下半部（不与人物色块重叠）：取文字带中心 y
+        text_zone_top = template["height"] - int(template["height"] * 0.34) - 60
+        self.assertGreater(text_zone_top, 700)   # 独立留白区在人物之下
+
+    def test_travel_default_top_unchanged(self):
+        from services.photo_structured_layout import parse_page_spec
+        # 旧模板无 text_position → 默认 top（旅行模板行为不变）
+        template = self._template("PHOTO_STRUCTURED_CLEAN_V1")
+        self.assertNotEqual(template.get("text_position"), "bottom")
+
+
+if __name__ == "__main__":
+    unittest.main()

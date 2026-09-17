@@ -261,7 +261,10 @@ def _paint(
     spec: Mapping[str, Any], style: str, template: Mapping[str, Any], *,
     margin_x: int, spacing: int,
 ) -> Dict[str, Any]:
-    top_zone = spec["page_kind"] == "cover"
+    # §8：通用四宫格封面标题独立留白区——text_position=bottom 时封面
+    # 文字画在底部条带（不压人物脸部），旅行模板默认 top 行为不变
+    top_zone = (spec["page_kind"] == "cover"
+                and str(template.get("text_position") or "top") != "bottom")
     line_heights = [
         (font.size + spacing) * len(lines) for lines, font, _ in laid]
     block_height = sum(line_heights)
