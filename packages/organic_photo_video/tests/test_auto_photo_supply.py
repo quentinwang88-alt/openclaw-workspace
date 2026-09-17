@@ -587,9 +587,6 @@ class AutoPhotoSupplyTest(unittest.TestCase):
         self.assertEqual(profile["photo_supply_policy"]["target_inventory"], 6)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
     def test_a2_attach_failure_reconciled_next_run(self):
         # 方案 A2：行已建但 attach_record 失败（合同留 intent）→ 下轮 run()
         # 按标记 slot 段唯一匹配补绑，不重选不重建
@@ -715,3 +712,27 @@ if __name__ == "__main__":
                                  ledger=ledger, model="m", today="2026-09-16")
         _, inventory, _ = supply._scan_task_rows()
         self.assertEqual(inventory.get("tocrystal66"), 4)
+
+    def test_b2_topic_statement_generalized(self):
+        # 参考原题「42套」不得照搬：source_topic 保留原题，主张泛化
+        from services.auto_photo_supply import _generalize_reference_topic
+        self.assertEqual(_generalize_reference_topic("4⃣2️⃣套|韩剧女主穿搭"),
+                         "4⃣2️⃣套|韩剧女主穿搭")  # emoji 数字不动
+        self.assertIn("多套", _generalize_reference_topic("秋冬18套穿搭合集"))
+        self.assertIn("组图", _generalize_reference_topic("入秋15图日常"))
+        ledger = make_ledger_with_analysis(
+            self.root, self.lab.source(), self.note_ids, name="ledger_b2.sqlite3")
+        client = FakeTaskTableClient()
+        self._supply(client, ledger, vision=self._vision_ok()).run(
+            [make_binding(profile_extra={"daily_limit": 1})], apply=True)
+        from services.external_supply_contract import ExternalSupplyContractStore
+        contract = ExternalSupplyContractStore(
+            str(self.root / "contracts.sqlite3")).find_by_record(
+                client.rows[0]["record_id"])
+        brief = contract.get("effective_brief") or {}
+        self.assertIn("冬季旅游穿搭", brief.get("source_topic") or "")  # 原题保留
+        self.assertNotIn("42", contract.get("topic_statement") or "")
+
+
+if __name__ == "__main__":
+    unittest.main()

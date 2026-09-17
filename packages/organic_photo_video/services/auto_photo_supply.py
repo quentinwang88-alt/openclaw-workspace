@@ -97,6 +97,22 @@ def parse_marker_slot(marker: str) -> int:
     return 0
 
 
+def _generalize_reference_topic(topic: str) -> str:
+    """把参考原题里依赖其原始组图规模的计数泛化（B2：不能复制「42套」）。
+
+    42套→多套、18图→组图、第2期/9款等同样收敛；参考的商品颜色等
+    事实性描述保留（商品一致性由商品快照另行权威约束）。
+    """
+    import re
+    text = str(topic or "")
+    text = re.sub(r"\d+\s*套", "多套", text)
+    text = re.sub(r"\d+\s*图", "组图", text)
+    text = re.sub(r"\d+\s*款", "多款", text)
+    text = re.sub(r"\d+\s*个\s*(look|Look|造型)", r"多个\1", text)
+    text = re.sub(r"[第]\d+\s*(期|弹|篇)", "", text)
+    return text.strip() or text
+
+
 def worker_identity() -> str:
     """名额租约的 worker 标识：host#pid#随机短码（日志可对账）。"""
     import socket
@@ -689,7 +705,11 @@ class AutoPhotoSupply:
 
         # 选题、来源说明、参考图、摘要全部来自同一选材结果（修复串配：
         # 此前主题取 narrowed[0] 而图片取模型终选，可能不是同一篇）。
-        topic = str(main_analysis.get("note_topic") or selection.rationale[:40])
+        # B2：source_topic 保留参考原题；topic_statement 是适配本篇的主张
+        # ——参考专属计数（42套/18图）不得照搬进本篇文案语境。
+        source_topic = str(main_analysis.get("note_topic") or "")
+        topic = source_topic or selection.rationale[:40]
+        topic = _generalize_reference_topic(topic)
         attachments, selected_pages = self._stage_reference_pages(
             package_obj, selection)
 
@@ -751,6 +771,7 @@ class AutoPhotoSupply:
             "source": band_source,
         }
         topic_statement = topic
+        effective_brief["source_topic"] = source_topic
 
         contract = {
             "account_id": binding.account_id,
