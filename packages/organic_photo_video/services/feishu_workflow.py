@@ -1694,11 +1694,13 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 reference_mode=reference_mode,
                 product_id=text_value(record.fields.get(FIELD_PRODUCT)),
             )
-            if (external_contract is not None and reference_mode == ""
-                    and not reference_attachments):
+            if (external_contract is not None and not reference_attachments
+                    and reference_mode != "COMPLETE_LOOK"):
                 # 方案 §6.5：外部合同零图行（narrative_only / 无可用细节页的
                 # outfit_only）按 STYLE 零参考执行——规划器按内容计划规划、
                 # 人物包出人物，参考只以文字化摘要进入内容要求。
+                # 带指定商品时同样走 STYLE（STYLE+product 有商品快照路径）；
+                # 旅行预设不支持 PRODUCT，外部行不得落入。
                 from services.photo_reference import REFERENCE_MODE_STYLE
                 reference_mode = REFERENCE_MODE_STYLE
             requires_product_supply = bool(
