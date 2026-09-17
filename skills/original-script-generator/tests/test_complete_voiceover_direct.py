@@ -772,5 +772,215 @@ class CompleteVoiceoverDirectTest(unittest.TestCase):
         )
 
 
+def _accessory_mainline(*, forbidden=("纱",)):
+    return {
+        "schema_version": "mixed-mainline-contract-v1",
+        "status": "FROZEN",
+        "audience_question": "适合日常约会、度假拍照、婚礼伴娘发型",
+        "core_value": "双层纱质蝴蝶造型，超唯美",
+        "core_value_safe": "双层蝴蝶造型，超唯美",
+        "fact_basis": {"source_text": "双层纱质蝴蝶造型，超唯美", "fact_type": "APPEARANCE_FACT"},
+        "visible_answer": {"shot_ref": "CU_01", "module": "WORN_DETAIL", "text": "能看到造型"},
+        "expression_boundary": {
+            "allowed_wording": "可描述图片支持的造型、层次、排列；材质只按可见观感表述",
+            "forbidden_wording": list(forbidden),
+            "experience_authority": "NONE",
+            "allowed_strength": "SOFT",
+            "max_main_value_count": 1,
+            "conflicts": [],
+        },
+        "observation_tasks": [
+            {
+                "unit_id": "CU_01",
+                "module": "WORN_DETAIL",
+                "distinct_observation_key": "HAIR|CLOSE|WORN_DETAIL",
+            }
+        ],
+    }
+
+
+class VoiceoverExpressionBoundaryTest(unittest.TestCase):
+    """表达边界必须作用在 ``run_central_complete_voiceover`` 真正发出的 payload 上。
+
+    真实批次实测漏法：``expression`` 已按口径清洗，但这份 payload 又从 direction
+    的原始字段取了一遍原文（``semantic_spine_contract.script_thesis.core_buying_reason``
+    与 ``context_bridge_contract``），于是模型照原文写出 ``dáng bướm bằng voan hai lớp``
+    —— 刚被口径拒掉的材质断言。清洗只覆盖一份副本，等于没清洗。
+    """
+
+    _EXPRESSION = {
+        "claim_atoms": [
+            {
+                "claim_key": "C1",
+                "fact_text": "双层纱质蝴蝶造型",
+                "argument_relation": "DIRECT_SUPPORT",
+                "supported_shot_nos": [1],
+            }
+        ],
+        "argument_contract": {
+            "content": {
+                "value_proposition": {"text": "双层纱质蝴蝶造型，超唯美"},
+                "audience_tension": {"text": ""},
+                "selling_argument": {
+                    "argument_id": "ARG_BUTTERFLY",
+                    "status": "AVAILABLE",
+                    "core_value": "双层纱质蝴蝶造型，超唯美",
+                    "operator_expression": "双层纱质蝴蝶造型",
+                    "source_operator_expression": "双层纱质蝴蝶造型，超唯美",
+                    "allowed_strength": "soft_only",
+                    "proof_match_status": "UNMATCHED",
+                },
+            }
+        },
+        "creative_voice_context": {},
+        "voiceover_context_contract": {},
+        "forbidden_leaps": [],
+    }
+
+    def _direction(self):
+        mainline = _accessory_mainline()
+        return {
+            "content_bundle_brief": {
+                "content_mode": "SELLING_ARGUMENT",
+                "semantic_spine_contract": {
+                    "script_thesis": {
+                        "core_buying_reason": "双层纱质蝴蝶造型，超唯美",
+                        "selected_source_span": "双层纱质蝴蝶造型，超唯美",
+                        "primary_narrative_context": "约会拍照",
+                    }
+                },
+                "context_bridge_contract": {
+                    "allowed_spoken_context": ["双层纱质蝴蝶造型，超唯美"],
+                    "speaker_context": "约会前整理发型",
+                },
+            },
+            "semantic_spine_contract": {
+                "script_thesis": {
+                    "core_buying_reason": "双层纱质蝴蝶造型，超唯美",
+                    "selected_source_span": "双层纱质蝴蝶造型，超唯美",
+                }
+            },
+            "context_bridge_contract": {
+                "allowed_spoken_context": ["双层纱质蝴蝶造型，超唯美"]
+            },
+            "category_execution_extension": {"mixed_mainline_contract": mainline},
+        }
+
+    def _run(self, *, generated_zh, captured):
+        def fake_invoke(_command, payload):
+            captured.update(payload)
+            return {
+                "candidate_id": "AUDIENCE_NEED_CALLOUT",
+                "hook_id": "AUDIENCE_NEED_CALLOUT",
+                "target_text": "Mình mê nhất dáng bướm hai lớp.",
+                "chinese_translation": generated_zh,
+                "used_claim_refs": ["C1"],
+                "used_selling_argument_id": "ARG_BUTTERFLY",
+                "selling_argument_realization": "Mình mê nhất dáng bướm hai lớp.",
+            }
+
+        with patch(
+            "core.complete_voiceover_direct.load_active_voiceover_hooks",
+            return_value=[{"hook_id": "AUDIENCE_NEED_CALLOUT"}],
+        ), patch(
+            "core.complete_voiceover_direct._expression_with_selected_claims",
+            return_value=(dict(self._EXPRESSION), list(self._EXPRESSION["claim_atoms"])),
+        ), patch(
+            "core.complete_voiceover_direct._invoke_model", side_effect=fake_invoke
+        ):
+            return run_central_complete_voiceover(
+                product_code="P1",
+                target_country="越南",
+                target_language="越南语",
+                top_category="配饰",
+                product_type="抓夹",
+                direction=self._direction(),
+                visual_plan={"shots": [{"supported_claim_keys": ["C1"]}]},
+                model_command="mock-command",
+                candidate_hook_id="AUDIENCE_NEED_CALLOUT",
+            )
+
+    def test_the_model_payload_carries_no_banned_wording(self):
+        from core.mixed_voiceover_mainline import speakable_forbidden_hits
+
+        captured = {}
+        self._run(generated_zh="我最喜欢它的双层蝴蝶造型。", captured=captured)
+        # 泄漏点是 semantic_spine_contract 与 context_bridge_contract —— 它们从
+        # direction 原始字段取，不受 expression 的清洗影响。
+        self.assertEqual(speakable_forbidden_hits(captured, ["纱"]), [])
+        self.assertNotIn("纱", captured["content_mainline"])
+        self.assertNotIn("纱", captured["spoken_brief"]["core_buying_reason"])
+        self.assertNotIn("纱", captured["spoken_brief"]["operator_context"])
+        self.assertNotIn("纱", json.dumps(captured["verified_facts"], ensure_ascii=False))
+
+    def test_the_forbidden_layer_is_dispatched_into_the_spoken_brief(self):
+        captured = {}
+        self._run(generated_zh="我最喜欢它的双层蝴蝶造型。", captured=captured)
+        # 禁止层放进写作指令区，而不是在顶层新增键（不改中央命令已知结构）。
+        self.assertNotIn("voiceover_expression_boundary", captured)
+        self.assertEqual(captured["spoken_brief"]["forbidden_wording"], ["纱"])
+        self.assertIn("任何语言", captured["spoken_brief"]["forbidden_wording_rule"])
+
+    def test_no_mainline_leaves_the_payload_structure_untouched(self):
+        captured = {}
+        direction = self._direction()
+        direction.pop("category_execution_extension")
+        direction.pop("semantic_spine_contract")
+        direction["content_bundle_brief"].pop("semantic_spine_contract")
+        direction["content_bundle_brief"].pop("context_bridge_contract")
+        direction.pop("context_bridge_contract")
+
+        def fake_invoke(_command, payload):
+            captured.update(payload)
+            return {
+                "candidate_id": "AUDIENCE_NEED_CALLOUT",
+                "hook_id": "AUDIENCE_NEED_CALLOUT",
+                "target_text": "Mình mê nhất dáng bướm hai lớp.",
+                "chinese_translation": "我最喜欢它的双层蝴蝶造型。",
+                "used_claim_refs": ["C1"],
+                "used_selling_argument_id": "ARG_BUTTERFLY",
+                "selling_argument_realization": "Mình mê nhất dáng bướm hai lớp.",
+            }
+
+        with patch(
+            "core.complete_voiceover_direct.load_active_voiceover_hooks",
+            return_value=[{"hook_id": "AUDIENCE_NEED_CALLOUT"}],
+        ), patch(
+            "core.complete_voiceover_direct._expression_with_selected_claims",
+            return_value=(dict(self._EXPRESSION), list(self._EXPRESSION["claim_atoms"])),
+        ), patch(
+            "core.complete_voiceover_direct._invoke_model", side_effect=fake_invoke
+        ):
+            run_central_complete_voiceover(
+                product_code="P1",
+                target_country="越南",
+                target_language="越南语",
+                top_category="配饰",
+                product_type="抓夹",
+                direction=direction,
+                visual_plan={"shots": [{"supported_claim_keys": ["C1"]}]},
+                model_command="mock-command",
+                candidate_hook_id="AUDIENCE_NEED_CALLOUT",
+            )
+        self.assertNotIn("voiceover_expression_boundary", captured)
+        self.assertNotIn("forbidden_wording", captured["spoken_brief"])
+
+    def test_the_finished_copy_is_checked_and_reported(self):
+        captured = {}
+        # 模型仍然说出了被禁断言 —— 兜底必须判 FAIL 并留下证据，而不是静默。
+        result = self._run(generated_zh="我最喜欢它的双层纱质蝴蝶造型。", captured=captured)
+        boundary = result["expression_boundary"]
+        self.assertTrue(boundary["applied"])
+        self.assertGreater(boundary["cleaned_field_count"], 0)
+        self.assertEqual(boundary["layer_dispatched_to"], "spoken_brief")
+        self.assertEqual(boundary["check"]["status"], "FAIL")
+        self.assertEqual(boundary["check"]["violations"][0]["term"], "纱")
+
+    def test_a_clean_finished_copy_passes_the_check(self):
+        captured = {}
+        result = self._run(generated_zh="我最喜欢它的双层蝴蝶造型。", captured=captured)
+        self.assertEqual(result["expression_boundary"]["check"]["status"], "PASS")
+
+
 if __name__ == "__main__":
     unittest.main()

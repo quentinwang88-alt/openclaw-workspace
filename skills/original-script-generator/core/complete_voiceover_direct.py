@@ -18,6 +18,11 @@ from typing import Any, Dict, List
 
 from core.complete_script_v3 import creative_product_profile
 from core.reality_reference import validate_voiceover_plan
+from core.mixed_voiceover_mainline import (
+    BOUNDARY_LAYER_KEY,
+    apply_expression_boundary_layer,
+    check_voiceover_target_against_boundary,
+)
 from core.reality_voiceover_bridge import (
     VOICEOVER_KNOWLEDGE_SNAPSHOT_PATH,
     build_voiceover_expression_contract,
@@ -210,6 +215,35 @@ def _invoke_model(model_command: str, payload: Dict[str, Any]) -> Dict[str, Any]
     if result.get("error"):
         raise RuntimeError(_text(result.get("error")))
     return result
+
+
+def _voiceover_mainline(direction: Dict[str, Any]) -> Dict[str, Any]:
+    """这条片子的冻结主线，simplified_v1 也要认它。
+
+    It is the only place that knows what this utterance is allowed to say.  The
+    mainline is frozen into the direction's ``category_execution_extension`` by
+    planning; older packages (and non-accessory lines) have none, in which case
+    the boundary step below is a no-op and today's behaviour is unchanged.
+    """
+
+    extension = (
+        direction.get("category_execution_extension")
+        if isinstance(direction.get("category_execution_extension"), dict)
+        else {}
+    )
+    bundle = (
+        direction.get("content_bundle_brief")
+        if isinstance(direction.get("content_bundle_brief"), dict)
+        else {}
+    )
+    for candidate in (
+        direction.get("mixed_mainline_contract"),
+        extension.get("mixed_mainline_contract"),
+        bundle.get("mixed_mainline_contract"),
+    ):
+        if isinstance(candidate, dict) and candidate:
+            return candidate
+    return {}
 
 
 def _expression_with_selected_claims(
@@ -996,6 +1030,22 @@ def run_central_complete_voiceover(
         ),
         "forbidden_leaps": list(expression.get("forbidden_leaps") or []),
     }
+    # C3：表达边界必须作用在**模型真正收到的那份 payload** 上。
+    # 实测漏法：``expression`` 已按口径清洗，但这份 payload 又从 direction 的原始
+    # 字段取了一遍原文（``semantic_spine_contract.script_thesis.core_buying_reason``
+    # 与 ``context_bridge_contract``），于是模型照原文写出"双层纱质蝴蝶造型"——
+    # 正是刚被口径拒掉的材质断言。清洗只覆盖一份副本，等于没清洗。
+    mainline = _voiceover_mainline(direction)
+    payload, boundary_application = apply_expression_boundary_layer(payload, mainline)
+    if boundary_application.get("applied"):
+        # 禁止层放进 spoken_brief（写作指令区），而不是在顶层新增键：模型读得到
+        # "不许说什么"，同时不改动中央命令已知的 payload 结构。
+        layer = payload.pop(BOUNDARY_LAYER_KEY, {})
+        brief = payload.get("spoken_brief")
+        if isinstance(brief, dict) and isinstance(layer, dict):
+            brief["forbidden_wording"] = list(layer.get("forbidden_wording") or [])
+            brief["forbidden_wording_rule"] = _text(layer.get("forbidden_wording_rule"))
+            brief["allowed_wording"] = _text(layer.get("allowed_wording"))
     generated = _invoke_model(model_command, payload)
     model_provenance = (
         generated.get("_model_provenance")
@@ -1010,6 +1060,13 @@ def run_central_complete_voiceover(
     valid_refs = {_text(item.get("claim_key")) for item in facts}
     if not target or not translation:
         raise ValueError("中央完整口播缺少目标语言正文或中文对照")
+    # 成品兜底：区分"模型确实说出来了"与"我们以为它没说"。判定依据是中译侧 ——
+    # 它是模型自报的、与目标语言正文语义等价的那句话。这里只报告，不阻断：
+    # 拦截会变成一次整条失败，而按既有约定，需要改时走那一次定向修订。
+    boundary_check = check_voiceover_target_against_boundary(
+        voice={"target_text": target, "chinese_translation": translation},
+        mainline=mainline,
+    )
     language_error = _target_language_error(target, target_language)
     if language_error:
         raise ValueError(language_error)
@@ -1075,6 +1132,18 @@ def run_central_complete_voiceover(
         "target_language": target_language,
         "target_language_key": _target_language_key(target_language),
         "language_validation": "PASSED",
+        # 口径落地的证据分两段：载荷侧（清洗了哪些字段、禁止层有没有发出去）
+        # 与成品侧（模型到底说没说出来）。两者都要在成稿里可查。
+        "expression_boundary": {
+            "forbidden_terms": list(boundary_application.get("terms") or []),
+            "applied": bool(boundary_application.get("applied")),
+            "cleaned_field_count": int(boundary_application.get("cleaned_field_count") or 0),
+            "cleaned_paths": list(boundary_application.get("cleaned_paths") or []),
+            "layer_dispatched_to": (
+                "spoken_brief" if boundary_application.get("applied") else ""
+            ),
+            "check": boundary_check,
+        },
         # Lineage and surface realization are intentionally separate.  The
         # command wrapper pins hook_id for reproducibility, so ID equality is
         # not evidence that the generated rhetoric actually realized the hook.
