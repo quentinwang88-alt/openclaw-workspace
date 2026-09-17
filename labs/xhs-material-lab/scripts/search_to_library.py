@@ -49,6 +49,13 @@ def main() -> None:
 
     conn = sqlite3.connect(args.db)
     conn.row_factory = sqlite3.Row
+    added, dup, skipped_video = import_feeds(conn, feeds, args.theme, args.limit)
+    conn.commit()
+    print(f"[{args.theme}] 新增 {added}，跨主题重复 {dup}，跳过视频 {skipped_video}")
+
+
+def import_feeds(conn, feeds, theme, limit):
+    """入库（note_id 去重、跳过视频）；collect_by_demand 复用同构逻辑。"""
     added = dup = skipped_video = 0
     for feed in feeds[: args.limit]:
         note_id = feed.get("id")
@@ -76,8 +83,7 @@ def main() -> None:
             added += 1
         else:
             dup += 1
-    conn.commit()
-    print(f"[{args.theme}] 新增 {added}，跨主题重复 {dup}，跳过视频 {skipped_video}")
+    return added, dup, skipped_video
 
 
 if __name__ == "__main__":

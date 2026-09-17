@@ -1,0 +1,98 @@
+{
+  "schema_version": "xhs-material-demand-query-families-v1",
+  "note": "需求驱动采集查询族（消费收敛方案 §7）。采集脚本消费消费侧缺口清单，按族搜索；查询词可被缺口里的商品品类/颜色/版型词动态补充。目标市场是适配条件，不要求参考来自当地。",
+  "families": [
+    {
+      "family_id": "same_item_multiway",
+      "label": "同件多搭",
+      "themes": [
+        "同件多搭",
+        "一衣多穿"
+      ],
+      "purposes": [
+        "outfit"
+      ],
+      "base_queries": [
+        "一衣多穿",
+        "一件外套多种搭配",
+        "同一件衣服不同穿法"
+      ],
+      "min_usable_pool": 6
+    },
+    {
+      "family_id": "travel_layering",
+      "label": "旅行穿脱/层次",
+      "themes": [
+        "旅行穿搭",
+        "凉爽旅行",
+        "旅游冬装"
+      ],
+      "purposes": [
+        "outfit",
+        "narrative"
+      ],
+      "base_queries": [
+        "旅行穿搭",
+        "旅行叠穿",
+        "出游穿搭多层次"
+      ],
+      "min_usable_pool": 8
+    },
+    {
+      "family_id": "color_ratio",
+      "label": "配色比例",
+      "themes": [
+        "配色比例",
+        "秋冬穿搭"
+      ],
+      "purposes": [
+        "visual",
+        "outfit"
+      ],
+      "base_queries": [
+        "穿搭配色",
+        "秋冬配色合集",
+        "高级感配色穿搭"
+      ],
+      "min_usable_pool": 6
+    },
+    {
+      "family_id": "shoes_pairing",
+      "label": "鞋履搭配",
+      "themes": [
+        "鞋履搭配"
+      ],
+      "purposes": [
+        "outfit"
+      ],
+      "base_queries": [
+        "鞋履搭配",
+        "裤子配什么鞋",
+        "裙子配鞋"
+      ],
+      "min_usable_pool": 4
+    },
+    {
+      "family_id": "scarf_pairing",
+      "label": "围巾搭配",
+      "themes": [
+        "围巾搭配"
+      ],
+      "purposes": [
+        "outfit",
+        "visual"
+      ],
+      "base_queries": [
+        "围巾搭配",
+        "丝巾穿搭",
+        "围巾系法"
+      ],
+      "min_usable_pool": 4
+    }
+  ],
+  "search_filters": {
+    "sort_by": "最多点赞",
+    "note_type": "图文",
+    "publish_time": "半年内"
+  }
+}
