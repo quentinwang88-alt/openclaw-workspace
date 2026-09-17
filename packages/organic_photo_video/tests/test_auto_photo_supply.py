@@ -534,42 +534,58 @@ class AutoPhotoSupplyTest(unittest.TestCase):
         self.assertIn("主题预设", band.get("source") or "")
         self.assertTrue(contract.get("topic_statement"))
 
-    def test_inventory_full_and_room_caps(self):
-        # 方案 §9 库存门：存量≥目标 → 不补；存量差 1 → 只补 1 行
+    def test_inventory_gate_caps_by_gap(self):
+        # 库存门：缺口约束新增量（受 daily_limit 封顶）；显式 target=4 时
+        # 存量 4 → inventory_full 不补
         ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
         existing = [{"record_id": f"inv{i}", "fields": {
             "目标账号（可选）": "tocrystal66", "进度": "已完成"}} for i in range(3)]
         client = FakeTaskTableClient(existing=existing)
         results = self._supply(client, ledger, vision=self._vision_ok()).run(
             [make_binding()], apply=True)
-        # 库存 3 < 默认目标 4 → 只补 1 行（daily_limit=2 被缺口压到 1）
-        self.assertEqual(len(client.created), 1)
-        self.assertEqual(results[0].slots[0].status, "created")
+        self.assertEqual(results[0].status, "supplied")
+        self.assertEqual(len(client.created), 2)   # 缺口 9 → daily_limit=2 封顶
 
         full_client = FakeTaskTableClient(existing=[
             {"record_id": f"f{i}", "fields": {
                 "目标账号（可选）": "tocrystal66", "进度": "待排班"}}
             for i in range(4)])
+        full_binding = make_binding(profile_extra={
+            "daily_limit": 2, "target_inventory": 4})
         results2 = self._supply(full_client, ledger, vision=self._vision_ok()).run(
-            [make_binding()], apply=True)
+            [full_binding], apply=True)
         self.assertEqual(results2[0].status, "inventory_full")
         self.assertEqual(full_client.created, [])
-        # 已发布/需处理不计库存
+
+    def test_inventory_zero_states_ignored(self):
+        # 已发布/需处理不计库存；该场景可正常建行
+        ledger = make_ledger_with_analysis(
+            self.root, self.lab.source(), self.note_ids, name="ledger_mixed.sqlite3")
         mixed = FakeTaskTableClient(existing=[
             {"record_id": "m1", "fields": {
                 "目标账号（可选）": "tocrystal66", "进度": "已发布"}},
             {"record_id": "m2", "fields": {
                 "目标账号（可选）": "tocrystal66", "进度": "需处理"}}])
-        ledger3 = make_ledger_with_analysis(
-            self.root, self.lab.source(), self.note_ids, name="ledger_mixed.sqlite3")
-        results3 = self._supply(mixed, ledger3, vision=self._vision_ok()).run(
-            [make_binding()], apply=True)
-        self.assertEqual(results3[0].status, "supplied")
-        # slot1 合同在第一段已绑定行（合同存储按账号×日期×slot 幂等），
-        # 本段只新建 slot2；已发布/需处理不计库存的语义由能继续建行体现
-        self.assertEqual([s.status for s in results3[0].slots],
-                         ["already_created", "created"])
+        results = self._supply(mixed, ledger, vision=self._vision_ok()).run(
+            [make_binding(profile_extra={"daily_limit": 1,
+                                          "target_inventory": 4})], apply=True)
+        self.assertEqual(results[0].status, "supplied")
         self.assertEqual(len(mixed.created), 1)
+
+    def test_budget_exhausted_skips_account(self):
+        import os
+        ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
+        for _ in range(2):
+            ledger.log_supply_call(purpose="analysis", model="m")
+        os.environ["OPV_SUPPLY_DAILY_CALL_CAP"] = "2"
+        try:
+            client = FakeTaskTableClient()
+            results = self._supply(client, ledger, vision=self._vision_ok()).run(
+                [make_binding()], apply=True)
+            self.assertEqual(results[0].status, "budget_exhausted")
+            self.assertEqual(client.created, [])
+        finally:
+            del os.environ["OPV_SUPPLY_DAILY_CALL_CAP"]
 
     def test_budget_exhausted_skips_account(self):
         import os

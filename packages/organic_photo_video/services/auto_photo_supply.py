@@ -76,7 +76,7 @@ _TEMPERATURE_BAND_OPTIONS = ("15°C 左右", "10°C 左右", "5°C 左右", "0°
 MARKER_PREFIX = "auto_supply"
 MAX_REFERENCE_IMAGES = 6
 DEFAULT_DAILY_LIMIT = 1
-DEFAULT_TARGET_INVENTORY = 4
+DEFAULT_TARGET_INVENTORY = 12
 
 
 def supply_marker(today: str, account_id: str, slot: int = 0) -> str:
