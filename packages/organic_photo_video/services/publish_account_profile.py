@@ -128,6 +128,7 @@ def default_supply_policy() -> Dict[str, Any]:
         "product_codes": [],
         "automation": SUPPLY_AUTOMATION_OFF,
         "daily_limit": 0,
+        "target_inventory": 0,
         "preset": "",
         "material_scope": [],
     }
