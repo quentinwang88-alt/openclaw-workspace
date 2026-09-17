@@ -139,3 +139,42 @@ class RenderTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CoverHierarchyTest(unittest.TestCase):
+    """评审 §C 标题层级：投票字母不得成为封面视觉主体。"""
+
+    def test_voting_line_becomes_cta_question_becomes_headline(self):
+        from services.photo_structured_layout import parse_page_spec
+        spec = parse_page_spec(
+            "这趟旅行有4套造型，适合4种场合\n选择A、B、C或D",
+            index=1, cover_index=1, total=4)
+        self.assertEqual(spec["headline"], "这趟旅行有4套造型，适合4种场合")
+        self.assertEqual(spec["cta"], "选择A、B、C或D")
+        self.assertEqual(spec["kicker"], "")
+
+    def test_thai_voting_line_detected(self):
+        from services.photo_structured_layout import parse_page_spec
+        spec = parse_page_spec(
+            "เลือกลุค A B C หรือ D\nไปเที่ยวเมืองหนาว 4 ลุคน่าสนใจ",
+            index=1, cover_index=1, total=4)
+        self.assertEqual(spec["cta"], "เลือกลุค A B C หรือ D")
+        self.assertEqual(spec["headline"], "ไปเที่ยวเมืองหนาว 4 ลุคน่าสนใจ")
+
+    def test_location_kicker_plus_question_plus_cta(self):
+        from services.photo_structured_layout import parse_page_spec
+        spec = parse_page_spec(
+            "日本·15-22°C\n哪套造型最适合凉爽城市旅行？\n你选 A B C 还是 D",
+            index=1, cover_index=1, total=4)
+        self.assertEqual(spec["kicker"], "日本·15-22°C")
+        self.assertEqual(spec["headline"], "哪套造型最适合凉爽城市旅行？")
+        self.assertEqual(spec["cta"], "你选 A B C 还是 D")
+
+    def test_plain_two_line_cover_unchanged(self):
+        from services.photo_structured_layout import parse_page_spec
+        spec = parse_page_spec(
+            "东京秋日\n轻装出行指南",
+            index=1, cover_index=1, total=4)
+        self.assertEqual(spec["kicker"], "东京秋日")
+        self.assertEqual(spec["headline"], "轻装出行指南")
+        self.assertEqual(spec["cta"], "")

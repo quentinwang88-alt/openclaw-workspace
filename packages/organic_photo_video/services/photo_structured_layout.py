@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -44,12 +45,29 @@ class StructuredLayoutError(RuntimeError):
 # 文本解析：slide_texts → 结构化页面规格（确定性，无模型调用）
 # ---------------------------------------------------------------------------
 
+_VOTING_LETTER_RE = re.compile(
+    r"(?:A|B|C|D)[\s、,，/|．.]*(?:A|B|C|D)")
+
+
+def _looks_like_voting_cta(line: str) -> bool:
+    """投票提示行：字母组合（A、B、C或D / A B C หรือ D）或短选择句。
+
+    评审 §C：封面两行固定「小标\\n大标题」把投票字母渲染成视觉主体；
+    此类行应降级为 CTA（小字号），主问题升为 headline。
+    """
+    text = str(line or "").strip()
+    if _VOTING_LETTER_RE.search(text):
+        return True
+    return any(key in text for key in ("你选", "เลือก")) and len(text) <= 20
+
+
 def parse_page_spec(overlay_text: str, *, index: int, cover_index: int,
                     total: int) -> Dict[str, Any]:
     """把一页的最终文字解析为 ``kicker/headline/body/cta`` 层级。
 
     约定（与现有 copy 生成约定一致）：
-    - 封面：两行＝「地点/小标 \\n 主标题」；单行＝只有主标题；
+    - 封面：投票类行识别为 CTA（小字号）；其余两行＝「地点/小标 \\n 主标题」，
+      单行＝只有主标题（评审 §C 标题层级修复，2026-09-17）；
     - 内页：`名称 — 理由`（分隔符 ``—``/``–``/``-``/``：``）拆成 headline/body；
     - 末页：第一行 headline（可含理由），第二行 CTA。
     """
@@ -65,17 +83,29 @@ def parse_page_spec(overlay_text: str, *, index: int, cover_index: int,
         else "detail"
     )
     if page_kind == "cover":
-        if len(lines) >= 2:
-            return {"page_kind": page_kind, "kicker": lines[0],
-                    "headline": lines[1], "body": "", "cta": ""}
-        return {"page_kind": page_kind, "kicker": "", "headline": lines[0],
-                "body": "", "cta": ""}
+        cta = ""
+        rest = list(lines)
+        for line in lines:
+            if _looks_like_voting_cta(line):
+                cta = line
+                rest.remove(line)
+                break
+        if not rest:
+            # 整页只有投票行：按 headline 兜底渲染，不丢字
+            return {"page_kind": page_kind, "kicker": "", "headline": lines[0],
+                    "body": "", "cta": ""}
+        if len(rest) >= 2:
+            return {"page_kind": page_kind, "kicker": rest[0],
+                    "headline": rest[1], "body": "", "cta": cta}
+        return {"page_kind": page_kind, "kicker": "", "headline": rest[0],
+                "body": "", "cta": cta}
     cta = ""
     if page_kind == "final" and len(lines) >= 2:
         cta = lines[-1]
         lines = lines[:-1]
     headline, body = _split_name_reason(" ".join(lines))
-    return {"page_kind": page_kind, "kicker": "", "headline": headline,
+    return {"page_kind": "detail" if page_kind != "final" else page_kind,
+            "kicker": "", "headline": headline,
             "body": body, "cta": cta}
 
 
