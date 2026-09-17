@@ -106,6 +106,80 @@ class SwitchTest(unittest.TestCase):
                 os.environ[MAINLINE_CONTRACT_ENV] = saved
 
 
+class SceneKeeperTest(unittest.TestCase):
+    """多场景封顶：素材要跟着收窄，光发约束没用。
+
+    冲突里只写了 ``resolution: KEEP_ONE``，**没说留哪个** —— 按冻结场景族反查；
+    查不出来（实测戒指那条是 ``GENERIC_INDOOR``）就不指认任何场景。
+    """
+
+    _CONFLICT = {
+        "kind": "MULTI_SCENARIO_UNAUTHORIZED",
+        "stacked_scenes": ["日常", "约会", "上班"],
+        "allowed_scenarios": 1,
+        "resolution": "KEEP_ONE",
+    }
+
+    def _build(self, *, core_value, scene_family, conflicts=None):
+        payload = [self._CONFLICT] if conflicts is None else conflicts
+        return build_mixed_mainline_contract(
+            selling_argument={
+                "core_value": core_value,
+                "audience_situation": "看场合",
+                "allowed_strength": "factual",
+            },
+            fact_evidence=_facts(forbidden_wording=[], conflicts=payload),
+            semantic_spine={"script_thesis": {"core_buying_reason": core_value}},
+            mixed_contract=_mixed_contract(FOUR_UNITS),
+            scene_family=scene_family,
+        )
+
+    def test_the_keeper_is_the_scene_matching_the_frozen_family(self):
+        contract = self._build(
+            core_value="上班、约会、日常都能戴，不挑场合",
+            scene_family="OFFICE_WORKBREAK",
+        )
+        boundary = contract["expression_boundary"]
+        self.assertEqual(boundary["keeper"], "上班")
+        self.assertFalse(boundary["keeper_unresolved"])
+        # 只留 keeper 那一项：其余场景与"不挑场合"这类概括语一起消失。
+        self.assertEqual(contract["core_value_safe"], "上班")
+        self.assertTrue(boundary["core_value_wording_constrained"])
+
+
+    def test_an_unknown_family_names_no_scene_and_keeps_no_generic_promise(self):
+        # 实测戒指那条的冻结场景族是 GENERIC_INDOOR（场地族兜底值，FALLBACK）。
+        contract = self._build(
+            core_value="上班、约会、日常都能戴，不挑场合",
+            scene_family="GENERIC_INDOOR",
+        )
+        boundary = contract["expression_boundary"]
+        self.assertEqual(boundary["keeper"], "")
+        self.assertTrue(boundary["keeper_unresolved"])
+        # 关键：删完场景后不能留下"不挑场合"—— 它比原文更概括，等于换个说法
+        # 继续承诺多场景（语义反转）。
+        self.assertEqual(contract["core_value_safe"], "")
+
+    def test_a_generic_only_core_value_is_narrowed_away(self):
+        # 真实批次里耳饰与抓夹的 core_value 是同一句模板措辞，本身就在承诺"多种"。
+        contract = self._build(
+            core_value="一件商品适配多种穿搭或使用场景",
+            scene_family="OFFICE_WORKBREAK",
+        )
+        self.assertEqual(contract["core_value_safe"], "")
+
+    def test_no_scenario_ceiling_leaves_the_core_value_alone(self):
+        contract = self._build(
+            core_value="适合骑摩托车时用",
+            scene_family="HOME_ROUTINE",
+            conflicts=[],
+        )
+        boundary = contract["expression_boundary"]
+        self.assertEqual(contract["core_value_safe"], "适合骑摩托车时用")
+        self.assertFalse(boundary["core_value_wording_constrained"])
+        self.assertNotIn("keeper", boundary)
+
+
 class MainlineFieldTest(unittest.TestCase):
     """方案点名的五个字段，一个来源一个，缺了记缺口。"""
 

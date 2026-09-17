@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 MAINLINE_CONTRACT_ENV = "ORIGINAL_SCRIPT_MIXED_MAINLINE_CONTRACT_ENABLED"
@@ -68,6 +69,40 @@ _VISIBLE_ANSWER_ORDER: Tuple[str, ...] = (
 
 #: C2 只要求"一条主线"，所以口播的主价值只允许一个。
 MAIN_VALUE_LIMIT = 1
+
+#: 使用场景词 → 冻结场景族（``outfit_scene_affinity_contract.selected_scene_family``）。
+#:
+#: 场景族只有 6 个（居家日常／咖啡品质室内／街头外出／镜前试穿／办公通勤／乘车等候），
+#: 所以这里**只放能逐字自圆其说的对应**。旅行／度假／海边／运动／婚礼／伴娘 六个词
+#: 故意不入表：硬塞"婚礼 → CAFE_DINING"会编出一个画面里不存在的假对应。
+SCENE_KEEPER_FAMILIES: Dict[str, str] = {
+    "通勤": "OFFICE_WORKBREAK",
+    "上班": "OFFICE_WORKBREAK",
+    "日常": "HOME_ROUTINE",
+    "约会": "CAFE_DINING",
+    "聚会": "CAFE_DINING",
+    "拍照": "VANITY_TRYON",
+    "逛街": "STREET_OUTING",
+    "出街": "STREET_OUTING",
+}
+
+#: 并列项的切分符。运营原文顿号与逗号两种都用。
+_KEEPER_SEPARATORS = re.compile(r"[、，,；;]")
+
+#: "处处适用"式的概括表达。删掉具体场景后，这类短语**本身就是并列承诺**，
+#: 留着等于换一种说法继续承诺"多个场景"。实测戒指那条删完场景只剩下
+#: "不挑场合" —— 比原文更概括，属于语义反转，必须一起删。
+_GENERIC_STACKING_TERMS: Tuple[str, ...] = (
+    "不挑场合",
+    "百搭",
+    "多种",
+    "各种",
+    "任何场合",
+    "都能戴",
+    "都合适",
+    "都适合",
+    "通用",
+)
 
 _TRUE_TOKENS = {"1", "true", "yes", "on"}
 
@@ -182,6 +217,7 @@ def build_mixed_mainline_contract(
     mixed_contract: Optional[Mapping[str, Any]] = None,
     audience_tension_text: str = "",
     requested_hook_id: str = "",
+    scene_family: str = "",
 ) -> Dict[str, Any]:
     """Freeze one mainline for one film: 观众问题／核心价值／事实依据／可见回答／表达边界。"""
 
@@ -285,6 +321,43 @@ def build_mixed_mainline_contract(
     expression_boundary["core_value_wording_constrained"] = bool(constrained_forbidden)
     expression_boundary["core_value_forbidden_matched"] = constrained_forbidden
 
+    # ── 多场景封顶：素材必须跟着收窄，光发约束没用 ────────────────────────
+    # 上面只删"禁词"，而多场景封顶的 ``forbidden_wording`` 恒为空（见
+    # ``selling_fact_evidence``：单个场景词是对的，错的只是并列堆叠）→
+    # ``core_value_safe`` 与原文**逐字相同**。于是模型一边收到"只说一个…不并列多个"，
+    # 一边收到并列三个场景的素材：约束与素材自相矛盾，它当然照素材写。
+    # 实测手镯／戒指两条真实稿就是这么把三个场景并列说出来的。
+    scene_conflicts = [
+        item
+        for item in expression_boundary["conflicts"]
+        if isinstance(item, Mapping)
+        and _text(item.get("kind")).upper() == "MULTI_SCENARIO_UNAUTHORIZED"
+    ]
+    stacked_scenes: List[str] = [
+        _text(scene)
+        for conflict in scene_conflicts
+        for scene in (conflict.get("stacked_scenes") or [])
+        if _text(scene)
+    ]
+    if stacked_scenes:
+        keeper, keeper_unresolved = resolve_scene_keeper(stacked_scenes, scene_family)
+        expression_boundary["scene_family"] = _text(scene_family)
+        expression_boundary["keeper"] = keeper
+        expression_boundary["keeper_unresolved"] = keeper_unresolved
+        expression_boundary["keeper_rule"] = (
+            "按冻结场景族从并列场景里挑一个"
+            if keeper
+            else "冻结场景族不可用，不指认具体场景"
+        )
+        expression_boundary["core_value_narrowed_from"] = core_value
+        core_value_safe = narrow_core_value_to_keeper(
+            core_value_safe, stacked_scenes, keeper
+        )
+        expression_boundary["core_value_narrowed_to"] = core_value_safe
+        expression_boundary["core_value_wording_constrained"] = (
+            core_value_safe != core_value
+        )
+
     # ── 观察任务与可见回答 ──────────────────────────────────────────────
     units = [unit for unit in (contract.get("capture_units") or []) if isinstance(unit, Mapping)]
     observations = _observation_tasks(units)
@@ -338,6 +411,75 @@ def build_mixed_mainline_contract(
             "expression_boundary": "selling_argument.fact_evidence.adaptation",
         },
     }
+
+
+def resolve_scene_keeper(
+    stacked_scenes: Sequence[str],
+    scene_family: str,
+) -> Tuple[str, bool]:
+    """从并列的场景里挑出与冻结场景族兼容的那一个。
+
+    冲突里只写了 ``resolution: "KEEP_ONE"`` 和 ``allowed_scenarios: 1`` —— **没说留哪个**。
+    所以这里按冻结场景族反查 ``SCENE_KEEPER_FAMILIES``。
+
+    返回 ``(keeper, unresolved)``。冻结场景族缺失、或不在映射里时返回 ``("", True)``，
+    调用方据此改为**不指认任何场景** —— 实测戒指那条的冻结场景族是 ``GENERIC_INDOOR``
+    （场地族兜底值，``match_status=FALLBACK``），随便挑一个去说会和画面打架。
+    """
+
+    family = _text(scene_family).upper()
+    if not family:
+        return "", True
+    for scene in stacked_scenes:
+        text = _text(scene)
+        if text and SCENE_KEEPER_FAMILIES.get(text) == family:
+            return text, False
+    return "", True
+
+
+def narrow_core_value_to_keeper(
+    core_value: str,
+    stacked_scenes: Sequence[str],
+    keeper: str,
+) -> str:
+    """把并列的场景列举收窄到只剩 keeper。**只删不换。**
+
+    逐**片段**删，不逐词删：运营原文的并列单位是"走亲访友、参加婚礼、日常配搭"
+    这样的短语，逐词删只会留下"、、都是可以的"这种残句。含非 keeper 场景词的片段
+    整段丢弃，不含任何场景词的片段（"都是可以的"）保留。
+
+    ⚠️ 已知边界：只认 ``stacked_scenes`` 里的词。词表外的场景表达（实测"走亲访友"
+    不在 ``selling_fact_evidence._SCENE_TERMS`` 里）删不掉，会留在收窄结果里。
+    合同会记 ``core_value_narrowed_to``，让这一点可被复核，而不是被当成功。
+    """
+
+    text = _text(core_value)
+    if not text:
+        return text
+    drop = [
+        _text(item)
+        for item in stacked_scenes
+        if _text(item) and _text(item) != _text(keeper)
+    ]
+    if not drop:
+        return text
+    kept: List[str] = []
+    for part in _KEEPER_SEPARATORS.split(text):
+        segment = part.strip()
+        if not segment:
+            continue
+        # "处处适用"式的概括句一并删掉：specific 场景都删了，留着它等于换个
+        # 说法继续承诺"多个场景"。实测戒指那条删完场景只剩"不挑场合"。
+        if any(term in segment for term in _GENERIC_STACKING_TERMS):
+            continue
+        carries_dropped = any(term in segment for term in drop)
+        carries_keeper = bool(keeper) and keeper in segment
+        if carries_dropped and not carries_keeper:
+            continue
+        kept.append(segment)
+    # **允许返回空**：宁可让"核心购买理由"缺席（下游 ``_join_parts`` 只用剩下的
+    # 观察任务），也不能留一句概括承诺或残句去误导模型。
+    return "、".join(kept).strip()
 
 
 def _join_parts(*parts: str) -> str:

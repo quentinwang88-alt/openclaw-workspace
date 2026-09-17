@@ -1616,6 +1616,16 @@ def _make_item(
                 mixed_contract=mixed_injection["contract"],
                 audience_tension_text=bundle.get("audience_tension_text", ""),
                 requested_hook_id=hook_id,
+                # 冻结场景族：多场景封顶要求"只说一个与实际冻结场景兼容的搭配"，
+                # 而"兼容"的那一个只能在这里查得出来。缺失时合同会记
+                # keeper_unresolved 并改为不指认场景（见 mixed_mainline_contract）。
+                scene_family=_text(
+                    (
+                        direction.get("outfit_scene_affinity_contract")
+                        or frozen_package.get("outfit_scene_affinity_contract")
+                        or {}
+                    ).get("selected_scene_family")
+                ),
             )
             if mainline:
                 frozen_bundle["mixed_mainline_contract"] = mainline
