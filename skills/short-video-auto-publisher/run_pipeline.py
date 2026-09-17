@@ -663,6 +663,19 @@ def ensure_account_nurture_fields(client: FeishuBitableClient, field_names: list
         )
     # 自动图文供稿策略（2026-09-16，OPV Phase 2）：只加不删；文本列起步，
     # 运营用法稳定后再升级单选（升级时保留历史值）。
+    if "旅行目的地范围" not in existing:
+        create_optional_field(
+            "旅行目的地范围",
+            field_type=4,
+            ui_type="MultiSelect",
+            property={"options": [
+                {"name": x} for x in (
+                    "东京", "京都", "大阪", "首尔", "釜山", "上海", "北京",
+                    "曼谷", "清迈", "新加坡", "巴黎", "伦敦", "日本", "韩国",
+                    "泰国", "中国",
+                )
+            ]},
+        )
     for field_name in ("图文内容策略", "商品使用方式", "默认产品编码",
                        "图文自动化模式", "每日自动生产上限",
                        "自动供稿预设", "素材范围"):

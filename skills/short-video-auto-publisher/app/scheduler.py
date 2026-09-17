@@ -385,7 +385,7 @@ def build_photo_content_profile(
     supply_strategy: str = "", supply_product_mode: str = "",
     supply_product_codes: Any = None, supply_automation: str = "",
     supply_daily_limit: Any = None, supply_preset: str = "",
-    supply_material_scope: Any = None,
+    supply_material_scope: Any = None, travel_destinations: Any = None,
 ) -> str:
     """把账号表的定位相关列收敛成 OPV 消费的 photo_content_profile JSON。
 
@@ -413,6 +413,11 @@ def build_photo_content_profile(
             "file_token": str(attachment.get("file_token") or ""),
             "name": str(attachment.get("name") or ""),
         }
+    destinations_raw = travel_destinations
+    if isinstance(destinations_raw, str):
+        destinations_raw = [x.strip() for x in re.split(r"[，,、\s]+", destinations_raw) if x.strip()]
+    if isinstance(destinations_raw, (list, tuple)) and destinations_raw:
+        profile["travel_destinations"] = [str(x) for x in destinations_raw if str(x).strip()]
     supply_policy = _build_supply_policy(
         strategy=supply_strategy, product_mode=supply_product_mode,
         product_codes=supply_product_codes, automation=supply_automation,
@@ -549,6 +554,7 @@ def sync_accounts(records: Iterable[Any], mapping: Dict[str, Optional[str]], db:
                     supply_daily_limit=fields.get(mapping.get("supply_daily_limit")),
                     supply_preset=normalize_text(fields.get(mapping.get("supply_preset"))),
                     supply_material_scope=fields.get(mapping.get("supply_material_scope")),
+                    travel_destinations=fields.get(mapping.get("travel_destinations")),
                 ),
                 "photo_claim_scope": normalize_photo_claim_scope(
                     fields.get(mapping.get("photo_claim_scope"))),

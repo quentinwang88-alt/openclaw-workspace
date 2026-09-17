@@ -236,11 +236,16 @@ def normalize_profile_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
         raise PublishAccountProfileError("风格图片必须是附件对象（file_token/name）")
     destinations = normalize_travel_destinations(
         payload.get("travel_destinations"))
-    # 国家/城市显式冲突（如 日本+首尔）→ 一次配置错误，不猜测修正（§2.2）
-    _countries = {d["country"] for d in destinations if d["country"]}
-    if len(_countries) > 1:
-        raise PublishAccountProfileError(
-            "旅行目的地范围存在国家冲突：" + "、".join(sorted(_countries)))
+    # §2.2 冲突口径：国家条目与异国城市并存（如 日本+首尔）才是配置错误；
+    # 多国城市（东京+首尔）是 §2.1 明确允许的轮换范围
+    _country_entries = {d["id"] for d in destinations
+                        if d["country"] and not d["city"]}
+    _city_countries = {d["country"] for d in destinations if d["city"]}
+    for entry in _country_entries:
+        if _city_countries and _city_countries != {entry}:
+            raise PublishAccountProfileError(
+                f"旅行目的地范围冲突：国家 {entry} 与异国城市并存"
+                f"（{'、'.join(sorted(_city_countries))}）；多国城市轮换可直接写城市名")
     profile = {
         "schema_version": PROFILE_SCHEMA_VERSION,
         "default_theme": str(raw.get("default_theme") or "").strip(),
