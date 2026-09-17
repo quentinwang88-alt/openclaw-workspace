@@ -30,7 +30,14 @@ from core.complete_script_v3 import CREATIVE_DIVERSITY_POLICY_VERSION
 
 STAGE_CHECKPOINT_SCHEMA_VERSION = "original-batch-stage-checkpoint-v1"
 VISUAL_PROJECTION_CHECKPOINT_VERSION = "event-projection-v2"
-VOICEOVER_CHECKPOINT_VERSION = "central-complete-voiceover-v11-semantic-spine"
+#: v12：口播 payload 的**可说素材**改为与表达口径同口径（合同收窄后的素材，而不是
+#: 运营原文）。产物内容变了，缓存键必须跟着变 —— 否则重跑会命中原产物，修复看起来
+#: 生效、写进飞书的还是旧口播。
+VOICEOVER_CHECKPOINT_VERSION = "central-complete-voiceover-v12-speakable-materials"
+#: 组装阶段的缓存键版本。组装是确定性的，所以只要输入（visual_script_id + voiceover）
+#: 相同就命中缓存 —— 而"**组装逻辑本身**改了"不会改变输入的哈希。实测代价：视频提示
+#: 词的语义主线改走合同口径后，旧 checkpoint 仍会命中原产物，交付里的提示词不跟着变。
+ASSEMBLY_CHECKPOINT_VERSION = "assembly-v2-speakable-semantic-context"
 BLUEPRINT_PRIMARY_TRANSIENT_ATTEMPTS = max(
     1, int(os.environ.get("ORIGINAL_SCRIPT_BLUEPRINT_PRIMARY_TRANSIENT_ATTEMPTS", "2"))
 )
@@ -2031,6 +2038,7 @@ def _execute_simplified_single_item(
 
     # 3. Assembly is deterministic and may not redesign the model output.
     assembly_dependency_hash = _stable_hash({
+        "assembly_checkpoint_version": ASSEMBLY_CHECKPOINT_VERSION,
         "visual_script_id": visual_script.get("simplified_script_id"),
         "voiceover": voiceover,
     })

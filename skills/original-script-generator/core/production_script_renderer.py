@@ -52,7 +52,8 @@ UGC_NATIVE_PROFILE = "ugc_native_v1"
 # The final execution audit binds its verdict to this string plus the prompt
 # hash, so a re-render that produces a different prompt is a different object
 # and has to be re-checked rather than inheriting the old PASS.
-SCRIPT_RENDERER_VERSION = "production-script-renderer-v4"
+#: v5：【整片语义主线】的两行改为各自判定 —— 表达口径收窄后只剩一行时不再整块丢弃。
+SCRIPT_RENDERER_VERSION = "production-script-renderer-v5-speakable-semantic-mainline"
 # Persisted shape of the execution audit.  Versioned separately from the
 # renderer: the audit schema can gain fields without implying the prompt changed
 # (and therefore without invalidating an existing ``PASS``).
