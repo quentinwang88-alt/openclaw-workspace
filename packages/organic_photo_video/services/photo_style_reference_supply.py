@@ -228,11 +228,16 @@ class PhotoStyleReferenceSupplyService:
         product: Mapping[str, Any] = None,
         locale: str = "th-TH",
         copy_repaired_from: Mapping[str, Any] = None,
+        allow_empty_references: bool = False,
     ) -> dict[str, Any]:
         variation = dict(variation or {})
         product = dict(product or {})
         paths = [str(Path(value).expanduser().resolve()) for value in reference_paths]
-        if not paths or any(not Path(value).is_file() for value in paths):
+        if not paths and allow_empty_references:
+            # 方案 §6.5 零外部图：外部合同零页行凭内容计划+人物包生成，
+            # 不需要风格参考图；仅供合同版本入口使用，手工模式仍校验
+            pass
+        elif not paths or any(not Path(value).is_file() for value in paths):
             raise PhotoStyleReferenceError("风格参考图缺失或不可读取")
         looks = style_look_specs(theme, variation)
         role_order = [str(look["role"]) for look in looks]

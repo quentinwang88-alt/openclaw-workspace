@@ -453,7 +453,17 @@ def _rebase_page_details(pages: Any, global_start: int, batch_len: int) -> List[
 def _merge_batch_results(batches: List[Dict[str, Any]]) -> Dict[str, Any]:
     """确定性合并分批结果：保序拼接页角色，全局字段取首批并标注页区间来源。"""
     if len(batches) == 1:
-        return batches[0]
+        merged = dict(batches[0])
+        # 单批早退也要派生兼容键（v3 prompt 不再输出 consumable——
+        # 2026-09-17 修复：单批笔记缺键导致 preview/旧消费方读到 None）
+        single_usability = merged.get("purpose_usability")
+        if isinstance(single_usability, dict) and single_usability:
+            flags = [bool((single_usability.get(name) or {}).get("usable"))
+                     for name in ("outfit", "visual", "narrative")
+                     if isinstance(single_usability.get(name), dict)]
+            if flags:
+                merged["consumable"] = any(flags)
+        return merged
     page_roles: List[Dict[str, Any]] = []
     for chunk in batches:
         for role in chunk.get("page_roles") or []:

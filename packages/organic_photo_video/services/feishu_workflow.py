@@ -1694,12 +1694,22 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 reference_mode=reference_mode,
                 product_id=text_value(record.fields.get(FIELD_PRODUCT)),
             )
+            if (external_contract is not None and reference_mode == ""
+                    and not reference_attachments):
+                # 方案 §6.5：外部合同零图行（narrative_only / 无可用细节页的
+                # outfit_only）按 STYLE 零参考执行——规划器按内容计划规划、
+                # 人物包出人物，参考只以文字化摘要进入内容要求。
+                from services.photo_reference import REFERENCE_MODE_STYLE
+                reference_mode = REFERENCE_MODE_STYLE
             requires_product_supply = bool(
                 recipe_for_input and (recipe_for_input.recipe_spec_json or {}).get("outfit_supply")
             )
             asset_status = text_value(record.fields.get(FIELD_PHOTO_ASSET_STATUS))
             if (requires_product_supply and not reference_attachments and not product_id
-                    and asset_status not in {"已确认，正在生成", "已匹配可用素材"}):
+                    and asset_status not in {"已确认，正在生成", "已匹配可用素材"}
+                    and not external_auto_supply):
+                # 外部自动供稿零图行（narrative_only / 无细节页 outfit_only）
+                # 由执行合同承载输入需求（方案 §6.5），不适用此手工输入校验
                 raise FeishuWorkflowError(
                     "该图文预设需要填写产品编码或上传参考图"
                 )
@@ -1852,6 +1862,8 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 ).stage_reference_images(
                     record_id=record.record_id, attachments=reference_attachments,
                     reference_kind="style",
+                    # 方案 §6.5：外部合同零页行无参考可下载
+                    allow_empty=bool(external_contract is not None),
                 )
                 reference_vision = self.photo_reference_vision or PhotoReferenceVisionService(
                     root=staging_root
@@ -1875,6 +1887,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     def _plan_travel_reference():
                         analysis = reference_vision.analyze_reference(
                             record_id=record.record_id, paths=style_reference_paths,
+                            allow_empty=not style_reference_paths,
                             theme=theme or variation_theme,
                             category_key=str((recipe_for_input.recipe_spec_json or {}).get("category_key") or preset.get("category_key") or ""),
                             content_requirement=content_requirement,
@@ -2205,6 +2218,7 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                     def _prepare_style_sources():
                         return supply_service.prepare(
                             record_id=item_id, reference_paths=paths,
+                            allow_empty_references=not paths,
                             theme=effective_theme or variation_theme,
                             account=account, persona=persona, variation=variation,
                             progress=_asset_progress, product=style_product,

@@ -599,7 +599,11 @@ def validate_batch_plan(plan: Mapping[str, Any]) -> None:
             local.add(signature)
         family = str(item.get("family_id") or "")
         if reference_mode == "STYLE" and style_profile:
-            if item.get("presentation_type") != style_profile.get("presentation_type"):
+            # 零外部图行（方案 §6.5）：无参考即无「与参考冲突」可言，
+            # 展示方式只由账号/内容方案决定
+            has_references = bool(style_profile.get("per_reference"))
+            if (has_references
+                    and item.get("presentation_type") != style_profile.get("presentation_type")):
                 raise PhotoContentPlanError("内容方案的展示方式与参考图冲突")
             expected_temperature = str(style_profile.get("temperature") or "")
             family_palette = str(item.get("palette_zh") or "")

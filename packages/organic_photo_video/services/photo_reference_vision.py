@@ -683,7 +683,19 @@ class PhotoReferenceVisionService:
             if str(Path(item).resolve()) not in product_references
         ]
         generated = [str(Path(value).resolve()) for value in generated_paths]
-        if not references or not generated or any(
+        if not references:
+            # 零外部图且无商品参考（方案 §6.5 零图行）：一致性检查无可对标，
+            # 显式跳过并记录——生成图缺失仍是硬错误
+            if not generated or any(not Path(value).is_file() for value in generated):
+                raise PhotoReferenceVisionError("视觉一致性检查缺少图片")
+            return {
+                "passed": True,
+                "skipped": "zero_reference",
+                "notes": "无外部/商品参考，跳过一致性对标",
+                "scope": scope,
+                "pages": [],
+            }
+        if not generated or any(
                 not Path(value).is_file() for value in references + generated):
             raise PhotoReferenceVisionError("视觉一致性检查缺少图片")
         prompt = self._alignment_prompt(
@@ -817,10 +829,22 @@ class PhotoReferenceVisionService:
     def analyze_reference(
         self, *, record_id: str, paths: Sequence[str], theme: Mapping[str, Any],
         category_key: str, content_requirement: str = "",
-        account_visual_baseline: str = "",
+        account_visual_baseline: str = "", allow_empty: bool = False,
     ) -> dict[str, Any]:
         """Step 1: describe references only — no scene planning, no copy."""
         images = [str(Path(value).expanduser().resolve()) for value in paths]
+        if not images and allow_empty:
+            # 方案 §6.5 零外部图：空分析（per_reference 为空，规划仅凭
+            # brief/内容要求/主题合同），不调用视觉模型。仅供外部合同
+            # 零页行使用；手工参考模式仍走下方校验。
+            return {
+                "schema_version": "opv-photo-travel-reference-analysis-v1",
+                "reference_count": 0,
+                "per_reference": [],
+                "palette": [],
+                "descriptions": [],
+                "content_requirement": str(content_requirement or ""),
+            }
         if not images or any(not Path(value).is_file() for value in images):
             raise PhotoReferenceVisionError("参考图缺失或不可读取")
         source_hashes = [hashlib.sha256(Path(value).read_bytes()).hexdigest() for value in images]
@@ -1080,8 +1104,10 @@ class PhotoReferenceVisionService:
             str(Path(value).resolve()) for value in reference_paths
         ]
         generated = [str(Path(value).resolve()) for value in image_paths]
-        if not references or not generated or any(
+        if not generated or any(
                 not Path(value).is_file() for value in references + generated):
+            # 零参考（方案 §6.5 零图行）允许：旅行语义质检以生成页对冻结
+            # moments 合同为主，参考图只是辅助上下文；生成图缺失仍是硬错误
             raise PhotoReferenceVisionError("旅行语义质检缺少图片")
         contract = dict(travel_contract or {})
         # 类目适配器声明本类目的逐项商品质检字段（review 修复 P0-3）。未注册

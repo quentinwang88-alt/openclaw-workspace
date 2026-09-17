@@ -139,10 +139,14 @@ class PhotoAssetSupplyService:
 
     def stage_reference_images(
         self, *, record_id: str, attachments: Sequence[Mapping[str, Any]],
-        reference_kind: str,
+        reference_kind: str, allow_empty: bool = False,
     ) -> list[str]:
         """Download immutable reference bytes into a role-specific cache."""
         if not attachments:
+            if allow_empty:
+                # 方案 §6.5 零外部图行（外部合同零页）：无参考可下载，
+                # 返回空列表交由规划器凭内容要求规划
+                return []
             raise PhotoAssetSupplyError("请至少上传一张参考图")
         kind = str(reference_kind or "reference").strip().lower()
         folder_name = "product_references" if kind == "product" else f"{self._safe(kind)}_references"
