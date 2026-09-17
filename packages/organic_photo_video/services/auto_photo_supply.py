@@ -76,6 +76,7 @@ _TEMPERATURE_BAND_OPTIONS = ("15°C 左右", "10°C 左右", "5°C 左右", "0°
 MARKER_PREFIX = "auto_supply"
 MAX_REFERENCE_IMAGES = 6
 DEFAULT_DAILY_LIMIT = 1
+DEFAULT_TARGET_INVENTORY = 4
 
 
 def supply_marker(today: str, account_id: str) -> str:
@@ -170,12 +171,16 @@ class AutoPhotoSupply:
         apply: bool = True,
     ) -> List[AccountRunResult]:
         rows_by_marker: Dict[str, int] = {}
+        inventory_by_handle: Dict[str, int] = {}
+        budget: Dict[str, int] = {}
         if apply:
-            rows_by_marker = self._count_existing_auto_rows()
+            rows_by_marker, inventory_by_handle = self._scan_task_rows()
+            budget = self.ledger.daily_call_usage(self.today)
         results: List[AccountRunResult] = []
         for binding in accounts:
             try:
-                results.append(self._run_account(binding, apply, rows_by_marker))
+                results.append(self._run_account(
+                    binding, apply, rows_by_marker, inventory_by_handle, budget))
             except Exception as exc:  # noqa: BLE001 - 单账号异常不阻塞其他账号
                 self.ledger.record_gap(
                     scope=f"supply:{binding.account_id}", reason="account_error",
@@ -188,23 +193,43 @@ class AutoPhotoSupply:
 
     # ---- 对账：统计飞书表里当日已建的自动行 ----
     # 优先读「来源标记」（工作流不覆写）；兼容旧数据的备注前缀作为兜底。
-    def _count_existing_auto_rows(self) -> Dict[str, int]:
-        counts: Dict[str, int] = {}
+    #: 库存口径（方案 §9）：生成中＋合格待发＋排队中；已发布/废弃/失败不计
+    INVENTORY_ACTIVE_STATES = frozenset({
+        "待执行", "规划中", "准备素材", "素材生成", "质检中", "生成中",
+        "人物表现质检中", "待审核", "待排班", "已排期", "提交中", "发布中",
+        "已完成"})
+
+    def _scan_task_rows(self) -> tuple:
+        """一次全表扫描同时产出：当日自动行对账 + 各账号待发库存。
+
+        手工及往日任务都计入库存（按目标账号归属）；进度列是文本或
+        富文本两种形态都兼容。
+        """
+        marker_counts: Dict[str, int] = {}
+        inventory: Dict[str, int] = {}
         for record in self.client.list_records(page_size=500):
             marker = _notes_text(record.fields.get(FIELD_SOURCE_TAG))
             if not marker:
                 notes = _notes_text(record.fields.get(FIELD_NOTES))
                 marker = notes if notes.startswith(MARKER_PREFIX) else ""
-            if not marker.startswith(MARKER_PREFIX):
-                continue
-            parts = marker.split("|")
-            if len(parts) >= 3 and parts[0] == MARKER_PREFIX and parts[1] == self.today:
-                counts[parts[2]] = counts.get(parts[2], 0) + 1
-        return counts
+            if marker.startswith(MARKER_PREFIX):
+                parts = marker.split("|")
+                if len(parts) >= 3 and parts[0] == MARKER_PREFIX and parts[1] == self.today:
+                    marker_counts[parts[2]] = marker_counts.get(parts[2], 0) + 1
+            handle = _notes_text(record.fields.get(FIELD_TARGET_ACCOUNT)).strip()
+            progress = _notes_text(record.fields.get("进度")).strip()
+            if handle and progress in self.INVENTORY_ACTIVE_STATES:
+                inventory[handle] = inventory.get(handle, 0) + 1
+        return marker_counts, inventory
+
+    def _count_existing_auto_rows(self) -> Dict[str, int]:
+        return self._scan_task_rows()[0]
 
     def _run_account(
         self, binding: PublishAccountBinding, apply: bool,
         rows_by_marker: Dict[str, int],
+        inventory_by_handle: Optional[Dict[str, int]] = None,
+        budget: Optional[Dict[str, int]] = None,
     ) -> AccountRunResult:
         policy = binding.supply_policy
         result = AccountRunResult(
@@ -227,6 +252,29 @@ class AutoPhotoSupply:
             result.status = "limit_reached"
             result.detail = f"今日已建 {created}/{limit}"
             return result
+
+        # 调用预算（方案 §9）：分析+终选调用计入当日额度，失败重试也计入
+        if apply and budget is not None:
+            usage_calls = int(budget.get("calls") or 0)
+            usage_images = int(budget.get("images") or 0)
+            cap_calls = int(os.environ.get("OPV_SUPPLY_DAILY_CALL_CAP") or 300)
+            cap_images = int(os.environ.get("OPV_SUPPLY_DAILY_IMAGE_CAP") or 3000)
+            if usage_calls >= cap_calls or usage_images >= cap_images:
+                result.status = "budget_exhausted"
+                result.detail = (f"当日调用 {usage_calls}/{cap_calls}、"
+                                 f"图片 {usage_images}/{cap_images}，预算用尽")
+                return result
+
+        # 待发库存（方案 §9）：缺口=目标库存-当前库存，新增量受缺口约束
+        if apply and inventory_by_handle is not None:
+            target = int(policy.get("target_inventory") or 0) or DEFAULT_TARGET_INVENTORY
+            current = inventory_by_handle.get(binding.account_id, 0)
+            room = max(0, target - current)
+            if room <= 0:
+                result.status = "inventory_full"
+                result.detail = f"待发库存 {current} ≥ 目标 {target}，本轮不补"
+                return result
+            limit = min(limit, created + room)
 
         codes = list(policy.get("product_codes") or [])
         specified = policy.get("product_mode") == SUPPLY_PRODUCT_MODE_SPECIFIED
@@ -489,6 +537,8 @@ class AutoPhotoSupply:
                 theme=default_theme if positioning_first else "",
                 product=product_brief,
                 temperature_band=band)
+            # 终选调用入账（方案 §9 预算口径；恢复路径不调模型不入账）
+            self.ledger.log_supply_call(purpose="selection", model=self.model)
         if selection is None:
             self.ledger.record_gap(
                 scope=f"supply:{binding.account_id}", reason="no_material",

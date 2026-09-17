@@ -125,6 +125,28 @@ class MaterialLedger:
     def close(self) -> None:
         self._conn.close()
 
+    # ---- 调用预算（方案 §9：失败重试也计入额度）----
+    def daily_call_usage(self, today: str) -> Dict[str, int]:
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS calls, COALESCE(SUM(images),0) AS images,"
+            " COALESCE(SUM(prompt_tokens+completion_tokens),0) AS tokens"
+            " FROM analysis_call_log"
+            " WHERE status='ok' AND ran_at >= ?", (str(today) + " 00:00:00",)).fetchone()
+        return {"calls": int(row["calls"]), "images": int(row["images"]),
+                "tokens": int(row["tokens"])}
+
+    def log_supply_call(self, *, purpose: str, model: str,
+                        prompt_tokens: int = 0, completion_tokens: int = 0,
+                        status: str = "ok", error: str = "") -> None:
+        """终选等供给侧调用入账（复用 analysis_call_log，note_id 留空）。"""
+        self._conn.execute(
+            "INSERT INTO analysis_call_log (purpose, note_id, model, images,"
+            " prompt_tokens, completion_tokens, duration_ms, status, error)"
+            " VALUES (?, '', ?, 0, ?, ?, 0, ?, ?)",
+            (str(purpose), str(model), int(prompt_tokens),
+             int(completion_tokens), str(status), str(error)[:200]))
+        self._conn.commit()
+
     # ---- 分析缓存 ----
     def get_cached_analysis(
         self, fingerprint: str, model: str, analysis_version: str

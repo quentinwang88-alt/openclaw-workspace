@@ -454,9 +454,6 @@ class AutoPhotoSupplyTest(unittest.TestCase):
         self.assertEqual(slots, [])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
     def test_frozen_intent_recovery_reuses_selection(self):
         # 评审 §D「冻结 A、执行 B」：崩溃后重跑必须复用冻结合同的选材输入，
         # 不重新调用模型（即使本轮模型会选另一篇）
@@ -526,3 +523,64 @@ if __name__ == "__main__":
         self.assertEqual(brief.get("content_strategy"), "positioning_first")
         self.assertEqual(brief.get("theme", {}).get("value"), "旅行穿搭")
         self.assertTrue(contract.get("topic_statement"))
+
+    def test_inventory_full_and_room_caps(self):
+        # 方案 §9 库存门：存量≥目标 → 不补；存量差 1 → 只补 1 行
+        ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
+        existing = [{"record_id": f"inv{i}", "fields": {
+            "目标账号（可选）": "tocrystal66", "进度": "已完成"}} for i in range(3)]
+        client = FakeTaskTableClient(existing=existing)
+        results = self._supply(client, ledger, vision=self._vision_ok()).run(
+            [make_binding()], apply=True)
+        # 库存 3 < 默认目标 4 → 只补 1 行（daily_limit=2 被缺口压到 1）
+        self.assertEqual(len(client.created), 1)
+        self.assertEqual(results[0].slots[0].status, "created")
+
+        full_client = FakeTaskTableClient(existing=[
+            {"record_id": f"f{i}", "fields": {
+                "目标账号（可选）": "tocrystal66", "进度": "待排班"}}
+            for i in range(4)])
+        results2 = self._supply(full_client, ledger, vision=self._vision_ok()).run(
+            [make_binding()], apply=True)
+        self.assertEqual(results2[0].status, "inventory_full")
+        self.assertEqual(full_client.created, [])
+        # 已发布/需处理不计库存
+        mixed = FakeTaskTableClient(existing=[
+            {"record_id": "m1", "fields": {
+                "目标账号（可选）": "tocrystal66", "进度": "已发布"}},
+            {"record_id": "m2", "fields": {
+                "目标账号（可选）": "tocrystal66", "进度": "需处理"}}])
+        ledger3 = make_ledger_with_analysis(
+            self.root, self.lab.source(), self.note_ids, name="ledger_mixed.sqlite3")
+        results3 = self._supply(mixed, ledger3, vision=self._vision_ok()).run(
+            [make_binding()], apply=True)
+        self.assertEqual(results3[0].status, "supplied")
+        # slot1 合同在第一段已绑定行（合同存储按账号×日期×slot 幂等），
+        # 本段只新建 slot2；已发布/需处理不计库存的语义由能继续建行体现
+        self.assertEqual([s.status for s in results3[0].slots],
+                         ["already_created", "created"])
+        self.assertEqual(len(mixed.created), 1)
+
+    def test_budget_exhausted_skips_account(self):
+        import os
+        ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
+        for _ in range(2):
+            ledger.log_supply_call(purpose="analysis", model="m")
+        os.environ["OPV_SUPPLY_DAILY_CALL_CAP"] = "2"
+        try:
+            client = FakeTaskTableClient()
+            results = self._supply(client, ledger, vision=self._vision_ok()).run(
+                [make_binding()], apply=True)
+            self.assertEqual(results[0].status, "budget_exhausted")
+            self.assertEqual(client.created, [])
+        finally:
+            del os.environ["OPV_SUPPLY_DAILY_CALL_CAP"]
+
+    def test_target_inventory_normalized(self):
+        profile = normalize_profile_payload({"photo_supply_policy": {
+            "automation": "自动生产", "target_inventory": "6"}})
+        self.assertEqual(profile["photo_supply_policy"]["target_inventory"], 6)
+
+
+if __name__ == "__main__":
+    unittest.main()

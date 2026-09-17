@@ -87,6 +87,12 @@ def normalize_supply_policy(raw: Any) -> Optional[Dict[str, Any]]:
         daily_limit = max(int(float(str(mapping.get("daily_limit")).strip() or 0)), 0)
     except (TypeError, ValueError):
         daily_limit = 0
+    try:
+        # 待发库存目标（方案 §9：缺口=目标库存-当前库存；0=沿用系统默认）
+        target_inventory = max(int(float(
+            str(mapping.get("target_inventory")).strip() or 0)), 0)
+    except (TypeError, ValueError):
+        target_inventory = 0
     policy: Dict[str, Any] = {
         "content_strategy": _supply_enum(
             mapping.get("content_strategy"),
@@ -103,6 +109,7 @@ def normalize_supply_policy(raw: Any) -> Optional[Dict[str, Any]]:
              SUPPLY_AUTOMATION_PRODUCE_PUBLISH),
             SUPPLY_AUTOMATION_OFF),
         "daily_limit": daily_limit,
+        "target_inventory": target_inventory,
         "preset": str(mapping.get("preset") or "").strip(),
         "material_scope": _split_codes(mapping.get("material_scope")),
     }
