@@ -554,6 +554,43 @@ class AutoPhotoSupply:
                     str(product_snapshot.get("category") or ""),
                     form=str(product_snapshot.get("variant_key") or ""),
                     key_features=[product_name] if product_name else [])
+        # effective_brief 前置（方案 B1）：筛候选前解析本篇有效需求，
+        # 贯穿初筛/终选/内容计划/合同；选材后仅回填推导项。
+        # 温度带只来自明确事实（显式参数/冻结合同/主题预设的公开含义），
+        # 来源记录在 band_source——不自动发明温度。
+        if self.thermal_band:
+            band_source = "显式参数"
+        elif frozen is not None and parse_thermal_band(frozen.get("temperature_band")):
+            band_source = "冻结合同"
+        elif theme_thermal_band(default_theme):
+            band_source = f"主题预设（{default_theme}）"
+        else:
+            band_source = ""
+        effective_brief = {
+            "account_id": binding.account_id,
+            "market": str(binding.target_country or ""),
+            "positioning": str(binding.profile.get("positioning") or "")[:120],
+            "content_strategy": (
+                "positioning_first" if positioning_first else "reference_first"),
+            "theme": {"value": default_theme, "source": (
+                "账号默认" if default_theme else "待定（参考推导）")},
+            "product": {
+                "mode": ("specified" if specified else "unspecified"),
+                "code": product_code,
+                "category": str(product_snapshot.get("category") or ""),
+                "name": str(product_snapshot.get("product_name") or ""),
+            },
+            "visual_preset": str(binding.profile.get("default_visual_preset") or ""),
+            "destination": {
+                "country": str(binding.profile.get("travel_country") or "").strip(),
+                "place": str(binding.profile.get("travel_place") or "").strip(),
+            },
+            "temperature_band": {
+                "value": (f"{band[0]}-{band[1]}°C" if band else ""),
+                "source": band_source,
+            },
+            "output": {"preset": preset, "quantity": 1},
+        }
         narrow_brief = product_brief or (
             ProductBrief(product_code, "") if product_code else None)
 
@@ -698,26 +735,20 @@ class AutoPhotoSupply:
             destination=destination, product=product_snapshot,
             temperature_band=band)
 
-        # effective_brief（方案 §4）：汇总本篇需求与来源（运营不填 JSON，
-        # 程序维护）；topic_statement=本篇主张（参考优先=素材提炼的选题）。
-        effective_brief = {
-            "account_id": binding.account_id,
-            "market": str(binding.target_country or ""),
-            "positioning": str(binding.profile.get("positioning") or "")[:120],
-            "content_strategy": (
-                "positioning_first" if positioning_first else "reference_first"),
-            "theme": {"value": theme_value, "source": (
-                "账号默认" if default_theme else "参考推导")},
-            "product": {
-                "mode": "specified" if specified else "unspecified",
-                "code": product_code,
-                "category": str(product_snapshot.get("category") or ""),
-                "name": str(product_snapshot.get("product_name") or ""),
-            },
-            "visual_preset": str(binding.profile.get("default_visual_preset") or ""),
-            "destination": destination,
-            "temperature_band": (f"{band[0]}-{band[1]}°C" if band else ""),
-            "output": {"preset": preset, "quantity": 1},
+        # B1：brief 在筛候选前已组装（见 narrow_brief 前）；此处只回填
+        # 选材后才能确定的部分——最终主题、本篇主张、目的地冻结值。
+        effective_brief["theme"] = {"value": theme_value, "source": (
+            "账号默认" if default_theme else "参考推导")}
+        effective_brief["product"] = {
+            "mode": "specified" if specified else "unspecified",
+            "code": product_code,
+            "category": str(product_snapshot.get("category") or ""),
+            "name": str(product_snapshot.get("product_name") or ""),
+        }
+        effective_brief["destination"] = destination
+        effective_brief["temperature_band"] = {
+            "value": (f"{band[0]}-{band[1]}°C" if band else ""),
+            "source": band_source,
         }
         topic_statement = topic
 

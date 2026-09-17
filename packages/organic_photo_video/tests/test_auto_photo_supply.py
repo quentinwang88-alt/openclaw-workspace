@@ -523,6 +523,10 @@ class AutoPhotoSupplyTest(unittest.TestCase):
         self.assertEqual(brief.get("account_id"), "tocrystal66")
         self.assertEqual(brief.get("content_strategy"), "positioning_first")
         self.assertEqual(brief.get("theme", {}).get("value"), "旅行穿搭")
+        # B1：温度带必须带来源（主题预设的公开含义），不自动发明
+        band = brief.get("temperature_band") or {}
+        self.assertEqual(band.get("value"), "15-22°C")
+        self.assertIn("主题预设", band.get("source") or "")
         self.assertTrue(contract.get("topic_statement"))
 
     def test_inventory_full_and_room_caps(self):
