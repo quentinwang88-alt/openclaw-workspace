@@ -676,9 +676,30 @@ def ensure_account_nurture_fields(client: FeishuBitableClient, field_names: list
                 )
             ]},
         )
-    for field_name in ("图文内容策略", "商品使用方式", "默认产品编码",
-                       "图文自动化模式", "每日自动生产上限",
-                       "自动供稿预设", "素材范围"):
+    # 2026-09-18：稳定枚举升级为下拉（历史文本值已迁移保留）；
+    # 默认产品编码/素材范围以外的自由文本保持 Text。
+    select_columns = (
+        ("图文内容策略", ("定位优先", "参考优先")),
+        ("商品使用方式", ("不指定商品", "使用指定商品")),
+        ("图文自动化模式", ("关闭", "自动生产", "自动生产并发布")),
+        ("自动供稿预设", ("图文｜TH｜旅行穿搭", "图文｜TH｜四选一穿搭",
+                        "图文｜MX｜四选一发型")),
+    )
+    for field_name, option_names in select_columns:
+        if field_name not in existing:
+            create_optional_field(
+                field_name, field_type=3, ui_type="SingleSelect",
+                property={"options": [{"name": x} for x in option_names]})
+    if "每日自动生产上限" not in existing:
+        create_optional_field("每日自动生产上限", field_type=2, ui_type="Number",
+                              property={"formatter": "0"})
+    if "素材范围" not in existing:
+        create_optional_field(
+            "素材范围", field_type=4, ui_type="MultiSelect",
+            property={"options": [{"name": x} for x in (
+                "旅游穿搭", "秋冬穿搭", "同件多搭", "配色比例", "鞋履搭配",
+                "围巾搭配", "旅游冬装", "显高搭配", "轻上装", "穿搭试点A")]})
+    for field_name in ("默认产品编码",):
         if field_name not in existing:
             create_optional_field(field_name, field_type=1, ui_type="Text")
     return client.list_field_names()
