@@ -91,14 +91,16 @@ def make_binding(account_id="tocrystal66", *, name="泰国女装1", profile_extr
 
 def make_ledger_with_analysis(root: Path, source: MaterialSource, note_ids,
                               model="mock-model", name="ledger.sqlite3",
-                              pages=3):
+                              pages=3, note_topic="冬季旅游穿搭"):
     ledger = MaterialLedger(str(root / name))
     for note_id in note_ids:
         package = source.get(note_id)
         ledger.put_cached_analysis(
             fingerprint=package.version_fingerprint, model=model,
             analysis_version=ANALYSIS_VERSION,
-            note_id=note_id, result=_analysis_payload(pages=pages), image_count=2,
+            note_id=note_id,
+            result=_analysis_payload(pages=pages, note_topic=note_topic),
+            image_count=2,
             calls=1, prompt_tokens=100, completion_tokens=20, duration_ms=10)
     return ledger
 
@@ -227,22 +229,25 @@ class AutoPhotoSupplyTest(unittest.TestCase):
             [binding], apply=True)
         fields = client.created[0]["fields"]
         self.assertEqual(fields["图文主题"], "凉爽旅行")   # 推导主题
-        self.assertIn("图文主题由参考推导：凉爽旅行",
+        self.assertIn("旅行选题：主题=凉爽旅行",
                       fields["内容要求（可选）"])
         self.assertIn("温度带 15–22°C", fields["内容要求（可选）"])
         self.assertEqual(fields["温度档"], "15°C 左右")
 
-    def test_positioning_first_without_theme_is_config_gap(self):
-        # 定位优先缺主题＝配置缺口：明确报错不建行（不替账号猜定位）
+    def test_positioning_first_without_theme_derives_within_positioning(self):
+        # B2：定位优先缺主题不再报错——按选题性质在定位内提炼
+        # （旅行 fixture → 凉爽旅行；配色 fixture 走通用结构，同 B2 规则）
         ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
         client = FakeTaskTableClient()
         binding = make_binding(profile_extra={"daily_limit": 1})
         binding.profile["default_theme"] = ""
         results = self._supply(client, ledger, vision=self._vision_ok()).run(
             [binding], apply=True)
-        self.assertEqual(results[0].slots[0].status, "error")
-        self.assertIn("定位优先", results[0].slots[0].detail)
-        self.assertEqual(client.created, [])
+        slot = results[0].slots[0]
+        self.assertEqual(slot.status, "created")
+        fields = client.created[0]["fields"]
+        self.assertEqual(fields["图文主题"], "凉爽旅行")   # 定位内提炼（旅行向定位+旅行选题）
+        self.assertEqual(fields["生产预设"], "图文｜TH｜旅行穿搭")
 
     def test_page_level_selection_limits_uploads(self):
         # 页级选材：只上传选材结果指定的页面，不再固定取前 N 张
@@ -732,6 +737,46 @@ class AutoPhotoSupplyTest(unittest.TestCase):
         brief = contract.get("effective_brief") or {}
         self.assertIn("冬季旅游穿搭", brief.get("source_topic") or "")  # 原题保留
         self.assertNotIn("42", contract.get("topic_statement") or "")
+
+
+    def test_b2_generic_structure_for_nontravel_topic(self):
+        # B2：配色选题（无旅行词）→ 切通用预设+非旅行主题+无温度
+        ledger = make_ledger_with_analysis(
+            self.root, self.lab.source(), self.note_ids,
+            name="ledger_b2g.sqlite3", note_topic="灰蓝配色穿搭的层次感")
+        client = FakeTaskTableClient()
+        binding = make_binding(profile_extra={
+            "content_strategy": "参考优先", "daily_limit": 1})
+        binding.profile["default_theme"] = ""
+        self._supply(client, ledger, vision=self._vision_ok()).run(
+            [binding], apply=True)
+        fields = client.created[0]["fields"]
+        self.assertEqual(fields["生产预设"], "图文｜TH｜四选一穿搭")  # 通用结构
+        self.assertEqual(fields["图文主题"], "日常通勤")              # 结构性映射
+        self.assertNotIn("温度档", fields)                            # 不发明温度
+        self.assertNotIn("温度带", fields["内容要求（可选）"])
+        self.assertIn("灰蓝配色穿搭的层次感", fields["内容要求（可选）"])  # 素材主张
+        from services.external_supply_contract import ExternalSupplyContractStore
+        contract = ExternalSupplyContractStore(
+            str(self.root / "contracts.sqlite3")).find_by_record(
+                client.rows[0]["record_id"])
+        brief = contract.get("effective_brief") or {}
+        self.assertEqual(brief["output"]["preset"], "图文｜TH｜四选一穿搭")
+        self.assertEqual(brief["temperature_band"].get("value"), "")
+
+    def test_b2_travel_topic_keeps_travel_preset(self):
+        # 旅行选题（fixture 默认 冬季旅游穿搭）→ 原路径不变
+        ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
+        client = FakeTaskTableClient()
+        binding = make_binding(profile_extra={
+            "content_strategy": "参考优先", "daily_limit": 1})
+        binding.profile["default_theme"] = ""
+        self._supply(client, ledger, vision=self._vision_ok()).run(
+            [binding], apply=True)
+        fields = client.created[0]["fields"]
+        self.assertEqual(fields["生产预设"], "图文｜TH｜旅行穿搭")
+        self.assertEqual(fields["图文主题"], "凉爽旅行")
+        self.assertEqual(fields["温度档"], "15°C 左右")
 
 
 if __name__ == "__main__":

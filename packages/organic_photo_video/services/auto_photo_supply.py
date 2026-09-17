@@ -97,6 +97,24 @@ def parse_marker_slot(marker: str) -> int:
     return 0
 
 
+#: B2 通用结构预设（已验证纯通用：PHOTO_TH_PICK_YOUR_LOOK_V3）
+GENERIC_CHOICE_PRESET = "图文｜TH｜四选一穿搭"
+
+
+def _nontravel_theme(topic: str) -> str:
+    """非旅行选题→结构性主题映射（photo_theme._PROFILES 现成项）。
+
+    只决定四页执行结构的文案族，不注入旅行/温度语境；配色/日常类
+    默认日常通勤，季节/约会关键词就近映射。
+    """
+    text = str(topic or "")
+    if any(k in text for k in ("秋", "秋冬", "春")):
+        return "秋季穿搭"
+    if any(k in text for k in ("约会", "咖啡", "甜美", "裙")):
+        return "咖啡约会"
+    return "日常通勤"
+
+
 def _generalize_reference_topic(topic: str) -> str:
     """把参考原题里依赖其原始组图规模的计数泛化（B2：不能复制「42套」）。
 
@@ -727,28 +745,32 @@ class AutoPhotoSupply:
                     "place": str(frozen_destination.get("place") or ""),
                 }
 
-        # 图文主题：账号默认 → 参考优先时从选材结果推导（2026-09-16：
-        # travel_two_step 等流程强制图文主题，无预设主题账号靠推导出正路，
-        # 不再一票暂停）。定位优先缺主题仍是配置缺口，明确报错。
-        # 主题先行确定：推导主题也参与温度带与内容要求。
+        # B2：选题性质决定执行结构——真旅行选题走旅行预设；其余切通用
+        # 结构（图文｜TH｜四选一穿搭，已验证纯通用：零 travel 键/choice-card/
+        # reference_contract_v1）。非旅行不注入旅行语境，也不声明温度带
+        # （B1：不发明温度）。定位优先缺主题同样在此提炼，不再一票报错。
         theme_value = default_theme or ""
         theme_derived_note = ""
-        if theme_value:
-            pass
-        elif positioning_first:
-            self.ledger.record_gap(
-                scope=f"supply:{binding.account_id}", reason="no_theme",
-                detail="定位优先但账号未配置默认图文主题")
-            plan.status = "error"
-            plan.detail = "定位优先但未配置默认图文主题，暂停本任务"
-            return plan
-        else:
+        effective_preset = preset
+        if not theme_value:
             structure = str(main_analysis.get("set_structure") or "")
-            theme_value = ("一衣多穿"
-                           if structure == "same_item_multiway" and product_code
-                           else "凉爽旅行")
-            theme_derived_note = f"内容方向以参考素材为基准（图文主题由参考推导：{theme_value}）｜"
-            band = band or theme_thermal_band(theme_value)
+            topic_blob = f"{source_topic}{selection.rationale}"
+            travelish = any(k in topic_blob for k in ("旅行", "旅游", "出游"))
+            if structure == "same_item_multiway" and product_code:
+                theme_value = "一衣多穿"
+                theme_derived_note = "内容方向以参考素材为基准（同件多搭结构：主题=一衣多穿）｜"
+                band = band or theme_thermal_band(theme_value)
+            elif travelish:
+                theme_value = "凉爽旅行"
+                theme_derived_note = "内容方向以参考素材为基准（旅行选题：主题=凉爽旅行）｜"
+                band = band or theme_thermal_band(theme_value)
+            else:
+                # 通用结构：非旅行主题（结构性映射，无旅行/温度注入）
+                effective_preset = GENERIC_CHOICE_PRESET
+                theme_value = _nontravel_theme(source_topic)
+                theme_derived_note = (
+                    f"内容方向以参考素材为基准（通用结构：主题={theme_value}）｜")
+                band = None
 
         requirement = theme_derived_note + self._content_requirement_text(
             selection=selection, analysis=main_analysis, topic=topic,
@@ -772,6 +794,7 @@ class AutoPhotoSupply:
         }
         topic_statement = topic
         effective_brief["source_topic"] = source_topic
+        effective_brief["output"] = {"preset": effective_preset, "quantity": 1}
 
         contract = {
             "account_id": binding.account_id,
@@ -824,7 +847,7 @@ class AutoPhotoSupply:
             return plan
 
         fields: Dict[str, Any] = {
-            FIELD_PRESET: preset,
+            FIELD_PRESET: effective_preset,
             FIELD_EXECUTE: True,
             FIELD_QUANTITY: 1,
             # 目标账号下拉选项是账号 handle（= account_id，如 tocrystal66），
