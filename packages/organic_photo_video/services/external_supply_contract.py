@@ -199,6 +199,27 @@ class ExternalSupplyContractStore:
                  str(contract.get("contract_fingerprint") or ""),
                  contract_id))
 
+    def mark_submitting(self, contract_id: str) -> None:
+        """外部建行请求发送前写提交意图（方案 §7.1）。
+
+        intent → submitting；空响应/超时/进程中断后保持 submitting，
+        不释放为可重新提交。attach_record（成功绑定）与 supersede
+        （人工新 revision）是仅有的出口。
+        """
+        conn = self._connect()
+        with conn:
+            conn.execute(
+                "UPDATE external_supply_contracts"
+                " SET status='submitting', updated_at=datetime('now')"
+                " WHERE contract_id=? AND status='intent'", (contract_id,))
+
+    def list_pending_submissions(self) -> List[Dict[str, Any]]:
+        """所有 submitting 合同（跨日）：每轮对账入口。"""
+        rows = self._connect().execute(
+            "SELECT * FROM external_supply_contracts WHERE status='submitting'"
+            " ORDER BY updated_at").fetchall()
+        return [self._to_dict(row) for row in rows]
+
     def attach_record(self, contract_id: str, record_id: str) -> None:
         conn = self._connect()
         with conn:

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+from tempfile import TemporaryDirectory
 import unittest
 from pathlib import Path
 
@@ -341,3 +342,22 @@ class BudgetReservationTest(unittest.TestCase):
                 datetime.now(ZoneInfo("UTC")).date().isoformat())
         finally:
             del os.environ["OPV_BUDGET_TIMEZONE"]
+
+
+class BudgetImagesTest(unittest.TestCase):
+    """方案 §7.3：调用次数与输入图片数同一短事务预留。"""
+
+    def test_image_cap_blocks_before_launch(self):
+        from services.material_analysis import MaterialLedger
+        with TemporaryDirectory() as tmp:
+            ledger = MaterialLedger(str(Path(tmp) / "bi.sqlite3"))
+            # IMAGE_CAP=1：首批 1 图可预留，第二批 2 图必须被拒（不发起）
+            self.assertTrue(ledger.reserve_budget(
+                purpose="analysis", cap=10, images=1, image_cap=1))
+            self.assertFalse(ledger.reserve_budget(
+                purpose="analysis", cap=10, images=2, image_cap=1))
+            ledger.settle_budget(purpose="analysis", state="consumed")
+            # 已占用不释放（失败也计）：1 图额度耗尽
+            self.assertFalse(ledger.reserve_budget(
+                purpose="analysis", cap=10, images=1, image_cap=1))
+            ledger.close()

@@ -222,9 +222,36 @@ class AutoPhotoSupply:
         inventory_by_handle: Dict[str, int] = {}
         budget: Dict[str, int] = {}
         rows_by_slot: Dict[tuple, List[str]] = {}
+        unknown_by_handle: Dict[str, int] = {}
+        rows_anyday: Dict[tuple, List[str]] = {}
         if apply:
-            rows_by_marker, inventory_by_handle, rows_by_slot = self._scan_task_rows()
+            (rows_by_marker, inventory_by_handle, rows_by_slot,
+             rows_anyday, unknown_by_handle) = self._scan_task_rows()
             budget = self.ledger.daily_call_usage(self.today)
+            # 方案 §7.1：跨日对账 submitting 合同——按合同自身日期/账号/slot
+            # 找行补绑；查空继续保留未知，不释放重提交、不重建。
+            try:
+                submissions = self.contract_store.list_pending_submissions()
+            except Exception:  # noqa: BLE001
+                submissions = []
+            for contract in submissions:
+                cid = str(contract.get("contract_id") or "")
+                date = str(contract.get("supply_date") or "")
+                account = str(contract.get("account_id") or "")
+                slot_no = int(contract.get("slot") or 0)
+                record_ids = rows_anyday.get((date, account, slot_no), [])
+                if len(record_ids) == 1:
+                    self.contract_store.attach_record(cid, record_ids[0])
+                    try:
+                        self.ledger.complete_slot(account, date, slot_no,
+                                                  record_id=record_ids[0])
+                    except Exception:  # noqa: BLE001
+                        pass
+                elif len(record_ids) > 1:
+                    self.ledger.record_gap(
+                        scope=f"supply:{account}", reason="marker_ambiguous",
+                        detail=f"submitting {cid} 匹配 {len(record_ids)} 行")
+                # 查空：保持 submitting（未知不当作未创建）
             # 方案 A2：先对账未完成绑定——行已建但合同未绑（attach 失败/
             # 响应未知）的，唯一匹配补绑；多匹配记异常，不猜不删不重建。
             for (account_id, slot_no), record_ids in sorted(rows_by_slot.items()):
@@ -254,7 +281,8 @@ class AutoPhotoSupply:
         for binding in accounts:
             try:
                 results.append(self._run_account(
-                    binding, apply, rows_by_marker, inventory_by_handle, budget))
+                    binding, apply, rows_by_marker, inventory_by_handle, budget,
+                    unknown_by_handle))
             except Exception as exc:  # noqa: BLE001 - 单账号异常不阻塞其他账号
                 self.ledger.record_gap(
                     scope=f"supply:{binding.account_id}", reason="account_error",
@@ -285,7 +313,9 @@ class AutoPhotoSupply:
         """
         marker_counts: Dict[str, int] = {}
         inventory: Dict[str, int] = {}
-        rows_by_slot: Dict[tuple, List[str]] = {}
+        unknown: Dict[str, int] = {}
+        rows_by_slot: Dict[tuple, List[str]] = {}          # 当日
+        rows_by_slot_anyday: Dict[tuple, List[str]] = {}   # 全日期（跨日对账 §7.1）
         for record in self.client.list_records(page_size=500):
             marker = _notes_text(record.fields.get(FIELD_SOURCE_TAG))
             if not marker:
@@ -293,19 +323,25 @@ class AutoPhotoSupply:
                 marker = notes if notes.startswith(MARKER_PREFIX) else ""
             if marker.startswith(MARKER_PREFIX):
                 parts = marker.split("|")
-                if len(parts) >= 3 and parts[0] == MARKER_PREFIX and parts[1] == self.today:
-                    marker_counts[parts[2]] = marker_counts.get(parts[2], 0) + 1
+                if len(parts) >= 3 and parts[0] == MARKER_PREFIX:
                     slot_no = parse_marker_slot(marker)
                     if slot_no:
-                        rows_by_slot.setdefault((parts[2], slot_no), []).append(
-                            record.record_id)
+                        rows_by_slot_anyday.setdefault(
+                            (parts[1], parts[2], slot_no), []).append(record.record_id)
+                    if parts[1] == self.today:
+                        marker_counts[parts[2]] = marker_counts.get(parts[2], 0) + 1
+                        if slot_no:
+                            rows_by_slot.setdefault((parts[2], slot_no), []).append(
+                                record.record_id)
             handle = _notes_text(record.fields.get(FIELD_TARGET_ACCOUNT)).strip()
             progress = _notes_text(record.fields.get("进度")).strip()
             executing = bool(record.fields.get(FIELD_EXECUTE))
             pieces, known = self._inventory_pieces(record.fields, progress, executing)
             if handle and known and pieces > 0:
                 inventory[handle] = inventory.get(handle, 0) + pieces
-        return marker_counts, inventory, rows_by_slot
+            elif handle and not known:
+                unknown[handle] = unknown.get(handle, 0) + 1
+        return marker_counts, inventory, rows_by_slot, rows_by_slot_anyday, unknown
 
     @classmethod
     def _inventory_pieces(cls, fields: Dict[str, Any], progress: str,
@@ -342,11 +378,22 @@ class AutoPhotoSupply:
         rows_by_marker: Dict[str, int],
         inventory_by_handle: Optional[Dict[str, int]] = None,
         budget: Optional[Dict[str, int]] = None,
+        unknown_by_handle: Optional[Dict[str, int]] = None,
     ) -> AccountRunResult:
         policy = binding.supply_policy
         result = AccountRunResult(
             account_id=binding.account_id, account_name=binding.account_name,
             status="supplied")
+        # 方案 §7.2：库存未知只暂停本账号新增，不阻塞其他账号/续跑
+        if apply and unknown_by_handle and unknown_by_handle.get(binding.account_id):
+            n_unknown = unknown_by_handle[binding.account_id]
+            self.ledger.record_gap(
+                scope=f"supply:{binding.account_id}",
+                reason="inventory_unknown",
+                detail=f"{n_unknown} 行进度无法识别，暂停该账号新增")
+            result.status = "inventory_unknown"
+            result.detail = f"库存未知（{n_unknown} 行进度无法分类）"
+            return result
         if policy.get("automation") == SUPPLY_AUTOMATION_OFF:
             result.status = "skipped_off"
             return result
@@ -492,8 +539,15 @@ class AutoPhotoSupply:
                     f"{binding.account_id}|{self.today}|{slot}")
             except Exception:  # noqa: BLE001 - 合同库异常按无冻结处理，走新建
                 frozen = None
-            if frozen is not None and frozen.get("status") != "intent":
+            if frozen is not None and frozen.get("status") not in (
+                    "intent", "submitting"):
                 frozen = None
+            if frozen is not None and frozen.get("status") == "submitting":
+                # 上次提交结果未知：本轮跨日对账未找到行——保留未知，
+                # 不重新选材也不重新提交（方案 §7.1）
+                plan.status = "submit_unknown"
+                plan.detail = "上次建行结果未知（submitting），等待对账，不重建"
+                return plan
 
         # 本篇温度带：显式参数 > 主题默认（未映射主题=None → 不启用检查）
         band = self.thermal_band or theme_thermal_band(default_theme)
@@ -910,13 +964,14 @@ class AutoPhotoSupply:
             plan.detail = "建行前租约复核失败（所有权已丢失）"
             return plan
 
+        # 方案 §7.1：外部请求发送前写提交意图；空响应/超时/中断保持
+        # submitting——不释放重提交，由下轮跨日对账补绑或保留未知
+        self.contract_store.mark_submitting(plan.contract_id)
         record_ids = self.client.batch_create_records([{"fields": fields}])
         record_id = record_ids[0] if record_ids else ""
         if not record_id:
-            # 响应未知/为空：合同保持 intent（冻结输入不丢），slot 释放回
-            # 待对账——下轮 run() 的标记回绑会补上真实行（方案 A2.6）
-            plan.status = "pending_reconcile"
-            plan.detail = "建行响应未知，合同保留待对账"
+            plan.status = "submit_unknown"
+            plan.detail = "建行响应未知，合同保持 submitting 待对账"
             return plan
         self.contract_store.attach_record(plan.contract_id, record_id)
         self.ledger.complete_slot(

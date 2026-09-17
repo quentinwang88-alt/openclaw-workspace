@@ -134,6 +134,12 @@ class MaterialLedger:
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(LEDGER_SCHEMA)
         # 既有库迁移（2026-09-16 租约修复）：supply_slots 加 owner/lease_until
+        budget_cols = {row[1] for row in self._conn.execute(
+            "PRAGMA table_info(budget_attempts)")}
+        if budget_cols and "images" not in budget_cols:
+            self._conn.execute(
+                "ALTER TABLE budget_attempts"
+                " ADD COLUMN images INTEGER NOT NULL DEFAULT 0")
         columns = {row[1] for row in self._conn.execute(
             "PRAGMA table_info(supply_slots)")}
         for column in ("owner", "lease_until"):
@@ -191,23 +197,30 @@ class MaterialLedger:
         except Exception:  # noqa: BLE001 - 非法时区名回落本地日
             return datetime.now().date().isoformat()
 
-    def reserve_budget(self, *, purpose: str, cap: int, note: str = "") -> bool:
-        """检查并预留一次调用额度。成功/已发起失败/结果未知都占额度；
-        只有确认未发起的取消可 release。BEGIN IMMEDIATE 保证跨 worker 原子。"""
+    def reserve_budget(self, *, purpose: str, cap: int, note: str = "",
+                       images: int = 0, image_cap: int = 0) -> bool:
+        """检查并预留一次调用额度（方案 §7.3：调用次数与输入图片数在
+        同一短事务预留）。成功/已发起失败/结果未知都占额度；只有确认
+        未发起的取消可 release。BEGIN IMMEDIATE 保证跨 worker 原子。"""
         day = self.budget_today()
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             row = self._conn.execute(
-                "SELECT COUNT(*) AS n FROM budget_attempts"
+                "SELECT COUNT(*) AS n, COALESCE(SUM(images),0) AS imgs"
+                " FROM budget_attempts"
                 " WHERE budget_day=? AND purpose=?"
                 " AND state IN ('reserved','consumed','unknown')",
                 (day, purpose)).fetchone()
             if int(row["n"]) >= int(cap):
                 self._conn.execute("ROLLBACK")
                 return False
+            if image_cap and int(row["imgs"]) + int(images) > int(image_cap):
+                self._conn.execute("ROLLBACK")
+                return False
             self._conn.execute(
-                "INSERT INTO budget_attempts (budget_day, purpose, state, note)"
-                " VALUES (?,?,'reserved',?)", (day, purpose, str(note)[:120]))
+                "INSERT INTO budget_attempts (budget_day, purpose, state,"
+                " note, images) VALUES (?,?,'reserved',?,?)",
+                (day, purpose, str(note)[:120], max(0, int(images))))
             self._conn.execute("COMMIT")
             return True
         except Exception:
@@ -821,10 +834,12 @@ class MaterialAnalyzer:
     def _call_once(self, note_id: str, batch: List[Path], prompt: str):
         # 方案 A3：分析调用逐次原子预留（缓存命中不会走到这里）
         cap = int(os.environ.get("OPV_SUPPLY_DAILY_CALL_CAP") or 300)
-        if not self.ledger.reserve_budget(purpose="analysis", cap=cap,
-                                          note=note_id):
+        image_cap = int(os.environ.get("OPV_SUPPLY_DAILY_IMAGE_CAP") or 3000)
+        if not self.ledger.reserve_budget(
+                purpose="analysis", cap=cap, note=note_id,
+                images=len(batch), image_cap=image_cap):
             raise MaterialAnalysisBudgetError(
-                f"当日分析调用额度已满（{cap} 次），本轮中止")
+                f"当日分析额度已满（{cap} 次或 {image_cap} 图），本轮中止")
         try:
             return self._call_once_inner(note_id, batch, prompt)
         except Exception:

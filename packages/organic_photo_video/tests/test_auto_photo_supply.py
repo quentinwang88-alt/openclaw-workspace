@@ -613,7 +613,7 @@ class AutoPhotoSupplyTest(unittest.TestCase):
         marker = row["fields"]["来源标记"]
         self.assertIn("slot1", marker)          # 标记带 slot 段
         self.assertEqual(broken.get(
-            "tocrystal66|2026-09-16|1")["status"], "intent")  # 合同未绑
+            "tocrystal66|2026-09-16|1")["status"], "submitting")  # 已发未绑
         # 第二次跑（新 store，attach 正常）：对账回绑该行，不再新建
         client2 = FakeTaskTableClient(existing=[row])
         ledger2 = make_ledger_with_analysis(
@@ -629,9 +629,8 @@ class AutoPhotoSupplyTest(unittest.TestCase):
         self.assertEqual(contract["record_id"], row["record_id"])
         self.assertEqual(results[0].status, "limit_reached")
 
-    def test_a2_response_unknown_keeps_intent_for_recovery(self):
-        # 建行返回空 ID（响应未知）：合同留 intent、状态 pending_reconcile；
-        # 下轮恢复路径复用冻结输入（不 supersede、不重选）
+    def test_a71_response_unknown_submitting_not_recreated(self):
+        # 方案 §7.1：空响应→submitting 保持未知；查空后仍不重建、不重选
         from services.external_supply_contract import ExternalSupplyContractStore
         store = ExternalSupplyContractStore(str(self.root / "contracts.sqlite3"))
         ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
@@ -646,11 +645,11 @@ class AutoPhotoSupplyTest(unittest.TestCase):
             today="2026-09-16", contract_store=store)
         results = supply1.run([make_binding(profile_extra={"daily_limit": 1})], apply=True)
         slot = results[0].slots[0]
-        self.assertEqual(slot.status, "pending_reconcile")
+        self.assertEqual(slot.status, "submit_unknown")
         contract = store.get("tocrystal66|2026-09-16|1")
-        self.assertEqual(contract["status"], "intent")
+        self.assertEqual(contract["status"], "submitting")
         self.assertEqual(contract["main_note_id"], "m" * 24)   # 冻结输入在
-        # 下轮正常客户端：恢复路径复用 m（vision 若被调会选 n——stub 给 n）
+        # 下轮（正常客户端但行确实不存在）：仍 submitting，不重建不重选
         client2 = FakeTaskTableClient()
         ledger2 = make_ledger_with_analysis(
             self.root, self.lab.source(), self.note_ids, name="ledger_r3.sqlite3")
@@ -660,8 +659,37 @@ class AutoPhotoSupplyTest(unittest.TestCase):
             vision_client=vision, model="mock-model",
             today="2026-09-16", contract_store=store)
         results2 = supply2.run([make_binding(profile_extra={"daily_limit": 1})], apply=True)
-        self.assertEqual(results2[0].slots[0].main_note_id, "m" * 24)
-        self.assertEqual(vision.calls, 0)      # 未重选
+        self.assertEqual(len(client2.created), 0)             # 不重建
+        self.assertEqual(vision.calls, 0)                      # 不重选
+        self.assertEqual(store.get("tocrystal66|2026-09-16|1")["status"],
+                         "submitting")
+
+    def test_a71_submitting_row_found_binds_cross_day(self):
+        # 方案 §7.1：行实际已创建（响应丢失）——跨日对账按合同自身日期补绑
+        from services.external_supply_contract import ExternalSupplyContractStore
+        store = ExternalSupplyContractStore(str(self.root / "contracts.sqlite3"))
+        store.persist_intent({
+            "account_id": "tocrystal66", "supply_date": "2026-09-15", "slot": 1,
+            "adoption": "overall", "main_note_id": "m" * 24, "main_note_title": "t",
+            "selected_pages": [], "product": {}, "destination": {},
+            "temperature_band": "", "content_requirement": "x",
+            "policy_version": "p", "contract_fingerprint": "f"})
+        store.mark_submitting("tocrystal66|2026-09-15|1")
+        # 行是昨天的标记（今天的扫描也必须看到它）
+        yesterday_row = {"record_id": "rec_yd", "fields": {
+            "来源标记": "auto_supply|2026-09-15|tocrystal66|slot1",
+            "目标账号（可选）": "tocrystal66", "进度": "已完成"}}
+        client = FakeTaskTableClient(existing=[yesterday_row])
+        ledger = make_ledger_with_analysis(
+            self.root, self.lab.source(), self.note_ids, name="ledger_xd.sqlite3")
+        AutoPhotoSupply(
+            client=client, source=self.lab.source(), ledger=ledger,
+            vision_client=self._vision_ok(), model="mock-model",
+            today="2026-09-16", contract_store=store).run(
+            [make_binding(profile_extra={"daily_limit": 1})], apply=True)
+        contract = store.get("tocrystal66|2026-09-15|1")
+        self.assertEqual(contract["status"], "created")
+        self.assertEqual(contract["record_id"], "rec_yd")
 
     def test_a2_marker_ambiguous_records_gap(self):
         # 同 slot 匹配多行：记异常不猜不删（gap reason=marker_ambiguous）
@@ -715,7 +743,7 @@ class AutoPhotoSupplyTest(unittest.TestCase):
         ])
         supply = AutoPhotoSupply(client=client, source=self.lab.source(),
                                  ledger=ledger, model="m", today="2026-09-16")
-        _, inventory, _ = supply._scan_task_rows()
+        inventory = supply._scan_task_rows()[1]
         self.assertEqual(inventory.get("tocrystal66"), 4)
 
     def test_b2_topic_statement_generalized(self):
