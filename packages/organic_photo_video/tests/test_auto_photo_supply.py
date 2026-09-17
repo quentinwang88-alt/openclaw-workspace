@@ -875,6 +875,26 @@ class AutoPhotoSupplyTest(unittest.TestCase):
                 client.rows[0]["record_id"])
         self.assertFalse((contract.get("destination") or {}).get("country"))
 
+    def test_d_matrix_explicit_destination_overrides_rotation(self):
+        # 矩阵§9-2：本篇明确目的地（账号单值 travel_country）覆盖范围轮换；
+        # 同名额重试（冻结合同）不换地点
+        from services.external_supply_contract import ExternalSupplyContractStore
+        ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
+        client = FakeTaskTableClient()
+        binding = make_binding(profile_extra={"daily_limit": 1})
+        binding.profile["travel_country"] = "首尔"          # 本篇/账号明确值
+        binding.profile["travel_destinations"] = [
+            {"id": "东京", "country": "日本", "city": "东京", "label": "东京"}]
+        self._supply(client, ledger, vision=self._vision_ok()).run(
+            [binding], apply=True)
+        contract = ExternalSupplyContractStore(
+            str(self.root / "contracts.sqlite3")).find_by_record(
+                client.rows[0]["record_id"])
+        dest = contract.get("destination") or {}
+        brief = contract.get("effective_brief") or {}
+        self.assertEqual(dest.get("country"), "韩国")       # 明确值优先
+        self.assertEqual(brief.get("destination_source"), "账号单值")
+
 
 if __name__ == "__main__":
     unittest.main()

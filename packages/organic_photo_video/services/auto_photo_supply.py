@@ -838,6 +838,12 @@ class AutoPhotoSupply:
         # B2 §3：目的地决策——本篇明确(行字段/冻结合同) > 账号范围内选择 >
         # 终选返回(参考优先) > 无。定位优先旅行主题在终选前程序轮换。
         destination_pick = dict(destination)     # 现值=冻结合同或账号 travel_country
+        if destination_pick.get("country") and not destination_pick.get("place"):
+            # 账号单值可能是城市名（首尔）→ 归一为国家+城市（§2.2 层级兼容）
+            raw = str(destination_pick["country"])
+            country = _city_country_of(raw)
+            if country and raw != country:
+                destination_pick = {"country": country, "place": raw}
         destination_source = ("冻结合同" if frozen is not None
                               and destination.get("country") else
                               "账号单值" if destination.get("country") else "")
@@ -997,8 +1003,9 @@ class AutoPhotoSupply:
         if destination.get("country"):
             # 执行侧从行字段读目的地（本篇明确值）；不覆盖为空值
             fields[FIELD_TRAVEL_COUNTRY] = destination["country"]
-        if destination.get("place"):
-            fields["旅行地点（可选）"] = destination["place"]
+        # 注：不写「旅行地点（可选）」——文案模板的 destination 走已审核
+        # 枚举标签（locale destinations），中文城市名会令 copy 填充失败；
+        # 具体选址由合同/brief/内容要求承载（2026-09-18 样片A/B实测）
         if attachments:
             fields[FIELD_REFERENCE] = attachments
 
