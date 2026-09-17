@@ -89,3 +89,35 @@ class CollectImportTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DemandLedgerTest(unittest.TestCase):
+    """方案 C1/C3：需求进台账（相同需求合并）+ 目的地组合查询词。"""
+
+    def test_record_and_merge_demand(self):
+        from services.material_analysis import MaterialLedger
+        with TemporaryDirectory() as tmp:
+            ledger = MaterialLedger(str(Path(tmp) / "d.sqlite3"))
+            demand = {"theme_direction": "旅行穿脱/层次", "purposes": ["outfit"],
+                      "product_form": "短外套", "destination_country": "日本",
+                      "destination_use": "environment_inspiration"}
+            ledger.record_demand(demand)
+            ledger.record_demand(demand)          # 相同需求合并计数
+            other = dict(demand, destination_country="韩国")
+            ledger.record_demand(other)           # 不同目的地=不同需求
+            rows = ledger.list_demands()
+            self.assertEqual(len(rows), 2)
+            top = max(rows, key=lambda r: r["hit_count"])
+            self.assertEqual(top["hit_count"], 2)
+            self.assertEqual(top["destination_country"], "日本")
+
+    def test_compose_demand_queries(self):
+        from export_material_gaps import compose_demand_queries
+        q = compose_demand_queries({"theme_direction": "配色", "product_form": "开衫",
+                                    "destination_country": ""})
+        self.assertIn("开衫搭配", q)               # 无目的地只用商品词+通用
+        q2 = compose_demand_queries({"theme_direction": "旅行穿脱/层次",
+                                     "product_form": "短外套",
+                                     "destination_country": "日本"})
+        self.assertEqual(len(q2), 3)               # 2 定向+1 通用
+        self.assertTrue(q2[0].startswith("日本"))

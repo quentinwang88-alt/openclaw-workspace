@@ -70,6 +70,13 @@ CREATE TABLE IF NOT EXISTS material_gaps (
     reason TEXT NOT NULL,
     detail TEXT
 );
+CREATE TABLE IF NOT EXISTS material_demands (
+    demand_key TEXT PRIMARY KEY,
+    payload TEXT NOT NULL,
+    hit_count INTEGER NOT NULL DEFAULT 1,
+    first_seen TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen TEXT NOT NULL DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS budget_attempts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     budget_day TEXT NOT NULL,
@@ -138,6 +145,38 @@ class MaterialLedger:
 
     def close(self) -> None:
         self._conn.close()
+
+    # ---- 素材需求台账（方案 C1：缺口即异步采集需求，相同需求合并）----
+    def record_demand(self, demand: Dict[str, Any]) -> None:
+        import hashlib as _h
+        key = _h.sha256("|".join(str(demand.get(k) or "") for k in (
+            "theme_direction", "purposes", "product_form",
+            "destination_country", "destination_use")).encode(
+                "utf-8")).hexdigest()[:24]
+        payload = json.dumps(demand, ensure_ascii=False)
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO material_demands (demand_key, payload)"
+                " VALUES (?,?) ON CONFLICT(demand_key) DO UPDATE SET"
+                " hit_count=hit_count+1, last_seen=datetime('now'),"
+                " payload=excluded.payload", (key, payload))
+
+    def list_demands(self, *, within_days: int = 14) -> List[Dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT payload, hit_count, last_seen FROM material_demands"
+            " WHERE last_seen >= datetime('now', ?)"
+            " ORDER BY hit_count DESC, last_seen DESC",
+            (f"-{int(within_days)} days",)).fetchall()
+        out = []
+        for row in rows:
+            try:
+                data = json.loads(row["payload"])
+            except (TypeError, ValueError):
+                continue
+            data["hit_count"] = int(row["hit_count"])
+            data["last_seen"] = str(row["last_seen"])
+            out.append(data)
+        return out
 
     # ---- 逐调用额度预留（方案 A3：短事务检查+预留，多 worker 原子）----
     @staticmethod

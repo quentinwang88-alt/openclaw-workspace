@@ -127,6 +127,27 @@ def build_demand(families, usable_by_theme, gap_rows):
     return demands
 
 
+def compose_demand_queries(demand: dict) -> list:
+    """方案 C3：目的地/商品词组合查询（2 定向＋1 通用）。
+
+    词只取明确字段（国家/城市/主题方向/商品形态），不补未知季节；
+    无目的地时只用通用词；命中词是检索来源而非拍摄地证明。
+    """
+    theme = str(demand.get("theme_direction") or "").strip()
+    country = str(demand.get("destination_country") or "").strip()
+    form = str(demand.get("product_form") or "").strip()
+    theme_kw = theme if theme and theme != "自由选题" else "穿搭"
+    queries = []
+    if country:
+        queries.append(f"{country}{theme_kw}穿搭")
+        if form:
+            queries.append(f"{country}{form}搭配")
+    elif form:
+        queries.append(f"{form}搭配")
+    queries.append(f"{theme_kw}穿搭灵感")     # 通用兜底词
+    return queries[:3]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="Doubao-Seed-2.1-turbo")
@@ -141,13 +162,22 @@ def main() -> int:
     ledger = MaterialLedger()
     usable = count_usable_by_theme(ledger, MaterialSource(), args.model, ANALYSIS_VERSION)
     gaps = recent_gap_hints(ledger, hours=args.gap_hours)
-    ledger.close()
     demands = build_demand(families, usable, gaps)
+    ledger_demands = []
+    try:
+        for item in ledger.list_demands(within_days=14):
+            item = dict(item)
+            item["queries"] = compose_demand_queries(item)
+            ledger_demands.append(item)
+    except Exception:  # noqa: BLE001 - 台账需求读取失败不阻塞族需求
+        ledger_demands = []
+    ledger.close()
     payload = {
         "schema_version": "opv-material-demand-list-v1",
         "generated_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
         "usable_by_theme": usable,
         "demands": demands,
+        "ledger_demands": ledger_demands,
     }
     text = json.dumps(payload, ensure_ascii=False, indent=2)
     if args.out:

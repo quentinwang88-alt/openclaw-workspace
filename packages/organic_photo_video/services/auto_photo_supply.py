@@ -645,6 +645,20 @@ class AutoPhotoSupply:
             self.ledger.record_gap(
                 scope=f"supply:{binding.account_id}", reason="no_material",
                 detail="无可用候选（补分析后仍不足或全部被拒）")
+            # 方案 C1：缺口即异步采集需求（相同需求在台账合并计数）
+            self.ledger.record_demand({
+                "account_id": binding.account_id,
+                "theme_direction": (
+                    default_theme
+                    or str(narrow_brief.category if narrow_brief else "")
+                    or "自由选题"),
+                "purposes": ["outfit", "visual", "narrative"],
+                "product_form": str(
+                    (product_snapshot or {}).get("category") or ""),
+                "destination_country": str(
+                    effective_brief.get("destination", {}).get("country") or ""),
+                "destination_use": "environment_inspiration",
+            })
             plan.status = "no_material"
             plan.detail = "无可用候选素材"
             return plan
