@@ -21,6 +21,7 @@ from core.reality_reference import validate_voiceover_plan
 from core.mixed_voiceover_mainline import (
     BOUNDARY_LAYER_KEY,
     apply_expression_boundary_layer,
+    apply_mainline_speakable_materials,
     check_voiceover_target_against_boundary,
 )
 from core.reality_voiceover_bridge import (
@@ -244,6 +245,27 @@ def _voiceover_mainline(direction: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(candidate, dict) and candidate:
             return candidate
     return {}
+
+
+def _frozen_scene_family(direction: Dict[str, Any]) -> str:
+    """这条片子**实际冻结**的使用场景族，供"只在合同允许的那一个场景里说"使用。
+
+    与 ``selected_scene_family`` 同源（见 ``outfit_scene_affinity_contract``）：它是
+    选场景模板时真正生效的那一个。``match_status`` 一并记进审计，因为
+    ``NO_PREFERENCE`` / ``FALLBACK`` 说明这是兜底选中的场景族，不是匹配上的偏好。
+    """
+
+    for holder in (
+        direction.get("outfit_scene_affinity_contract"),
+        (direction.get("content_bundle_brief") or {}).get(
+            "outfit_scene_affinity_contract"
+        )
+        if isinstance(direction.get("content_bundle_brief"), dict)
+        else None,
+    ):
+        if isinstance(holder, dict) and _text(holder.get("selected_scene_family")):
+            return _text(holder.get("selected_scene_family"))
+    return ""
 
 
 def _expression_with_selected_claims(
@@ -1036,6 +1058,14 @@ def run_central_complete_voiceover(
     # 与 ``context_bridge_contract``），于是模型照原文写出"双层纱质蝴蝶造型"——
     # 正是刚被口径拒掉的材质断言。清洗只覆盖一份副本，等于没清洗。
     mainline = _voiceover_mainline(direction)
+    # 先让素材与口径同口径，再下发禁止层。顺序有意义：**约束说得再清楚，也敌不过
+    # 一份自相矛盾的素材**。实测三条真实冻结包：``allowed_wording`` 说"只说一个场景、
+    # 不并列多个"，而下面的 ``content_mainline`` / ``core_buying_reason`` /
+    # ``primary_narrative_context`` / ``audience_or_need`` 同时念着三个场景，
+    # 模型照素材写，三场景并列地写了出来，全链路报 PASS。
+    payload, speakable_application = apply_mainline_speakable_materials(
+        payload, mainline, scene_family=_frozen_scene_family(direction)
+    )
     payload, boundary_application = apply_expression_boundary_layer(payload, mainline)
     # 门要设在 ``layer_present`` 上，不是 ``applied``。``applied`` 只说明"清洗发生了"：
     # 把下发条件绑在它上面，会让**只走 allowed_wording / wording_ceilings 的封顶约束
@@ -1156,6 +1186,24 @@ def run_central_complete_voiceover(
             "layer_dispatched_to": (
                 "spoken_brief" if boundary_application.get("layer_present") else ""
             ),
+            # 素材侧的证据：约束下发只证明"说了规矩"，这里证明"素材也照规矩改了"。
+            # 缺这一段，报告会显示约束已下发、而模型收到的素材仍是并列原文。
+            "speakable_materials": {
+                "applied": bool(speakable_application.get("applied")),
+                "reason": _text(speakable_application.get("reason")),
+                "keeper": _text(speakable_application.get("keeper")),
+                "keeper_unresolved": bool(
+                    speakable_application.get("keeper_unresolved")
+                ),
+                "stacked_scenes": list(
+                    speakable_application.get("stacked_scenes") or []
+                ),
+                "changed_paths": list(
+                    speakable_application.get("changed_paths") or []
+                ),
+                "originals": dict(speakable_application.get("originals") or {}),
+                "narrowed": dict(speakable_application.get("narrowed") or {}),
+            },
             "check": boundary_check,
         },
         # Lineage and surface realization are intentionally separate.  The

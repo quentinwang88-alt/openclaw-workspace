@@ -3479,6 +3479,60 @@ def build_simplified_voiceover_inputs(
     return direction, visual_plan
 
 
+def _speakable_semantic_context(
+    seed: Dict[str, Any], semantic_spine: Dict[str, Any]
+) -> Dict[str, str]:
+    """视觉提示词的「整片语义主线」，按合同的**可说口径**给。
+
+    这里是提示词侧唯一读「主消费情境／核心购买理由」的地方。先前直接取
+    ``semantic_spine.script_thesis`` 原文 —— 合同把并列场景收窄到实际冻结的那一个，
+    而这一份仍把三个场景递给视觉模型：**只洗一份副本等于没洗**（同类漏法在本条线
+    已复现三次：清洗只覆盖一个字段、声明与清洗绑在一个门上、冻结值与读值不同源）。
+
+    没有并列封顶时 ``speakable_text`` 逐字返回，所以非饰品线与早于 C2 的包行为
+    完全不变。
+    """
+
+    from core.mixed_mainline_contract import speakable_text
+
+    mainline: Dict[str, Any] = {}
+    for holder in (seed, seed.get("category_execution_extension")):
+        if not isinstance(holder, dict):
+            continue
+        candidate = holder.get("mixed_mainline_contract")
+        if isinstance(candidate, dict) and candidate:
+            mainline = candidate
+            break
+    thesis = (
+        semantic_spine.get("script_thesis")
+        if isinstance(semantic_spine.get("script_thesis"), dict)
+        else {}
+    )
+    diversity = seed.get("diversity_context")
+    scene_affinity = (
+        diversity.get("outfit_scene_affinity_contract")
+        if isinstance(diversity, dict)
+        else None
+    )
+    scene_family = (
+        _text(scene_affinity.get("selected_scene_family"))
+        if isinstance(scene_affinity, dict)
+        else ""
+    )
+    return {
+        "primary_narrative_context": speakable_text(
+            _text(thesis.get("primary_narrative_context")),
+            mainline,
+            scene_family=scene_family,
+        ),
+        "core_buying_reason": speakable_text(
+            _text(thesis.get("core_buying_reason")),
+            mainline,
+            scene_family=scene_family,
+        ),
+    }
+
+
 def assemble_simplified_complete_script(
     visual_script: Dict[str, Any],
     seed: Dict[str, Any],
@@ -3606,16 +3660,8 @@ def assemble_simplified_complete_script(
         ),
         "voiceover": result["continuous_voiceover"],
         "semantic_context": {
-            "primary_narrative_context": _text(
-                (semantic_spine.get("script_thesis") or {}).get(
-                    "primary_narrative_context"
-                )
-            ),
-            "core_buying_reason": _text(
-                (semantic_spine.get("script_thesis") or {}).get(
-                    "core_buying_reason"
-                )
-            ),
+            # 走合同口径：素材必须与表达边界同口径（见 _speakable_semantic_context）。
+            **_speakable_semantic_context(seed, semantic_spine),
             "scene_relation": dict(context_bridge.get("scene_relation") or {}),
             "bridge_mode": _text(
                 context_bridge.get("voiceover_context_mode")

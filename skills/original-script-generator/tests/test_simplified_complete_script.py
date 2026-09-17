@@ -1,4 +1,5 @@
 import copy
+import json
 import unittest
 
 from core.accessory_mixed_templates import compile_mixed_template_contract
@@ -2240,6 +2241,100 @@ class MixedTemplateFrozenContractTest(unittest.TestCase):
         self.assertEqual(
             [shot["continuity_group"] for shot in shot_plan],
             ["EVENT_1"] * 4,
+        )
+
+
+class SpeakableSemanticContextTest(unittest.TestCase):
+    """视频提示词的「整片语义主线」必须走合同口径，而不是 ``script_thesis`` 原文。
+
+    先前它直接取 ``semantic_spine.script_thesis`` —— 合同把并列场景收窄到实际冻结的
+    那一个，而这一份仍把三个场景递给视觉模型：**只洗一份副本等于没洗**。这里走真实
+    的组装入口，因为"只在直接调函数时成立"正是这条线的老毛病。
+    """
+
+    _THESIS = {
+        "primary_narrative_context": "上班、约会、日常穿搭",
+        "core_buying_reason": "上班、约会、日常穿搭，不挑场合",
+    }
+
+    def _seed(self, *, with_mainline: bool):
+        seed = build_simplified_creative_seed(
+            anchor_card=_anchor(),
+            structure_contract=_contract("WEARER_ACTIVE"),
+            content_bundle={
+                **_bundle(),
+                "selling_argument_lineage": {"status": "CONFIRMED"},
+                "selling_argument": {
+                    "argument_id": "ARG_1",
+                    "source_argument_id": "PCS_HUMAN_1",
+                    "source_claim_ids": ["C1"],
+                },
+            },
+            creative_contract={},
+            execution_reference={"content_carrier": "WEARER_ACTIVE"},
+            requested_hook_id="AUDIENCE_NEED_CALLOUT",
+            content_angle_key="FACT_DISCOVERY",
+            product_type="耳饰",
+            top_category="饰品",
+        )
+        seed["semantic_spine_contract"] = {"script_thesis": dict(self._THESIS)}
+        seed["diversity_context"] = {
+            **(seed.get("diversity_context") or {}),
+            "outfit_scene_affinity_contract": {
+                "selected_scene_family": "OFFICE_WORKBREAK"
+            },
+        }
+        if with_mainline:
+            seed["mixed_mainline_contract"] = {
+                "core_value": self._THESIS["core_buying_reason"],
+                "core_value_safe": self._THESIS["core_buying_reason"],
+                "expression_boundary": {
+                    "conflicts": [
+                        {
+                            "kind": "MULTI_SCENARIO_UNAUTHORIZED",
+                            "stacked_scenes": ["日常", "约会", "上班"],
+                            "allowed_scenarios": 1,
+                            "resolution": "KEEP_ONE",
+                        }
+                    ]
+                },
+            }
+        return seed
+
+    def _assemble(self, *, with_mainline: bool):
+        voiceover = {
+            "hook_id": "AUDIENCE_NEED_CALLOUT",
+            "selected_claim_ids": ["C1"],
+            "selected_selling_argument_id": "ARG_1",
+            "selling_argument_realization": "ใส่คลุมเวลาอยู่ในห้องแอร์",
+            "selling_argument_realization_zh": "空调房里披上更安心",
+            "voiceover_context_mode": "SELLING_SCENARIO",
+            "lines": [
+                {
+                    "voiceover_text_target_language": "สาวๆ ดูตัวนี้ก่อนนะ",
+                    "voiceover_text_zh": "姐妹们，先看这件。",
+                }
+            ],
+        }
+        assembled = assemble_simplified_complete_script(
+            _person_script(), self._seed(with_mainline=with_mainline), voiceover
+        )
+        return assembled["video_generation_brief"]["semantic_context"]
+
+    def test_the_prompt_context_follows_the_frozen_ceiling(self):
+        context = self._assemble(with_mainline=True)
+        self.assertEqual(context["primary_narrative_context"], "上班")
+        self.assertEqual(context["core_buying_reason"], "上班")
+        self.assertNotIn("约会", json.dumps(context, ensure_ascii=False))
+
+    def test_without_a_mainline_contract_the_context_is_verbatim(self):
+        # 非 C2 包（大多数线）行为必须逐字不变。
+        context = self._assemble(with_mainline=False)
+        self.assertEqual(
+            context["primary_narrative_context"], self._THESIS["primary_narrative_context"]
+        )
+        self.assertEqual(
+            context["core_buying_reason"], self._THESIS["core_buying_reason"]
         )
 
 

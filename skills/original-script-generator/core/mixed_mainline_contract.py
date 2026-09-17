@@ -70,6 +70,10 @@ _VISIBLE_ANSWER_ORDER: Tuple[str, ...] = (
 #: C2 只要求"一条主线"，所以口播的主价值只允许一个。
 MAIN_VALUE_LIMIT = 1
 
+#: 多场景并列的封顶类型。**只在封顶类**冲突上做收窄：单个场景词是对的，
+#: 错的只是把多个场景堆在一起承诺。
+CEILING_MULTI_SCENARIO = "MULTI_SCENARIO_UNAUTHORIZED"
+
 #: 使用场景词 → 冻结场景族（``outfit_scene_affinity_contract.selected_scene_family``）。
 #:
 #: 场景族只有 6 个（居家日常／咖啡品质室内／街头外出／镜前试穿／办公通勤／乘车等候），
@@ -331,7 +335,7 @@ def build_mixed_mainline_contract(
         item
         for item in expression_boundary["conflicts"]
         if isinstance(item, Mapping)
-        and _text(item.get("kind")).upper() == "MULTI_SCENARIO_UNAUTHORIZED"
+        and _text(item.get("kind")).upper() == CEILING_MULTI_SCENARIO
     ]
     stacked_scenes: List[str] = [
         _text(scene)
@@ -480,6 +484,80 @@ def narrow_core_value_to_keeper(
     # **允许返回空**：宁可让"核心购买理由"缺席（下游 ``_join_parts`` 只用剩下的
     # 观察任务），也不能留一句概括承诺或残句去误导模型。
     return "、".join(kept).strip()
+
+
+def multi_scenario_conflicts(
+    mainline: Optional[Mapping[str, Any]],
+) -> List[Mapping[str, Any]]:
+    """合同声明的"多场景并列"封顶冲突（没有则空）。"""
+
+    boundary = _boundary(mainline)
+    return [
+        item
+        for item in (boundary.get("conflicts") or [])
+        if isinstance(item, Mapping)
+        and _text(item.get("kind")).upper() == CEILING_MULTI_SCENARIO
+    ]
+
+
+def stacked_scenes_of(mainline: Optional[Mapping[str, Any]]) -> List[str]:
+    """合同里被点名的并列场景词。空 = 这条商品没有并列封顶。"""
+
+    return [
+        _text(scene)
+        for conflict in multi_scenario_conflicts(mainline)
+        for scene in (conflict.get("stacked_scenes") or [])
+        if _text(scene)
+    ]
+
+
+def resolve_keeper(
+    mainline: Optional[Mapping[str, Any]],
+    scene_family: str = "",
+) -> Tuple[str, bool]:
+    """这条片子里允许指认的那一个场景（``("", True)`` = 不指认任何场景）。
+
+    冻结时算出来的 keeper 优先（合同里记着，读的时候不再重算）；未记录时按冻结
+    场景族**现算** —— 早于本字段冻结的包因此也能被修好，不必重跑规划。
+
+    ``scene_family`` 缺省取合同自己记的 ``expression_boundary.scene_family``；
+    调用方有更权威的值（``outfit_scene_affinity_contract.selected_scene_family``）
+    时按参数传入。
+    """
+
+    boundary = _boundary(mainline)
+    recorded = _text(boundary.get("keeper"))
+    if recorded:
+        return recorded, False
+    family = _text(boundary.get("scene_family")) or _text(scene_family)
+    return resolve_scene_keeper(stacked_scenes_of(mainline), family)
+
+
+def speakable_text(
+    text: str,
+    mainline: Optional[Mapping[str, Any]],
+    *,
+    scene_family: str = "",
+) -> str:
+    """按合同口径收窄**任意**可说文本；没有并列封顶时**逐字返回**。
+
+    这是"可以讲什么"的唯一取数点。两条下游通路（中央口播 payload、视频提示词
+    的语义主线）都走它，避免再出现"合同收窄了一份副本、模型收到的却是另一份"。
+
+    幂等：收窄过的文本再收窄一次结果不变，所以记录值与现算值可以互相替代。
+    """
+
+    terms = stacked_scenes_of(mainline)
+    if not terms:
+        return _text(text)
+    keeper, _unresolved = resolve_keeper(mainline, scene_family)
+    return narrow_core_value_to_keeper(_text(text), terms, keeper)
+
+
+def _boundary(mainline: Optional[Mapping[str, Any]]) -> Mapping[str, Any]:
+    contract = mainline if isinstance(mainline, Mapping) else {}
+    boundary = contract.get("expression_boundary")
+    return boundary if isinstance(boundary, Mapping) else {}
 
 
 def _join_parts(*parts: str) -> str:

@@ -16,13 +16,20 @@
    计划里已经只送单一卖点，这个函数把"不许送"的键显式列出来并在出现时剔除，
    所以"没有投喂全部候选"是可验证的，而不是靠复述。
 3. ``compile_expression_boundary_layer`` / ``sanitize_payload_forbidden_wording`` /
-   ``check_voiceover_target_against_boundary`` —— 表达边界的三段落地。
+   ``apply_mainline_speakable_materials`` / ``check_voiceover_target_against_boundary``
+   —— 表达边界的四段落地。
    真实批次暴露过：主线把核心价值清洗成"双层蝴蝶造型"，同一条片子的口播却说出
    "双层**纱质**蝴蝶造型"（目标语言 ``dáng bướm bằng voan hai lớp``）。清洗只落在
    ``content_mainline`` 一个字段，其余十余处正面授权字段仍是原文，模型照抄授权字段
-   是合理行为 —— **禁止的措辞从来没有变成过约束**。三段各自补一个口子：
-   清洗（默认清洗全部可讲字段）、禁止层（显式告诉模型不许说什么）、成品兜底
-   （真写出来了要能被检出，而不是指望它没写）。
+   是合理行为 —— **禁止的措辞从来没有变成过约束**。四段各自补一个口子：
+   收窄（素材先与口径同口径）、清洗（默认清洗全部可讲字段）、禁止层（显式告诉模型
+   不许说什么）、成品兜底（真写出来了要能被检出，而不是指望它没写）。
+
+   第四段是本轮补的：封顶类约束（多场景并列）刻意不写进 ``forbidden_wording``，
+   于是"只准说一个场景"的约束发下去了，**素材本身仍在并列三个场景**。实测真实
+   冻结包：``allowed_wording`` 与 ``wording_ceilings`` 都到位，而同一份 payload 的
+   ``content_mainline`` / ``core_buying_reason`` / ``primary_narrative_context`` /
+   ``audience_or_need`` 同时在念三个场景 —— 模型照素材写，全链路报 PASS。
 4. ``resolve_language_label`` —— 交付文档的语种标签**只**认 ``target_language``，
    绝不拿目标语言正文（``target_text``）或某个默认语种顶上。
 
@@ -33,7 +40,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from core.mixed_mainline_contract import observation_tasks
+from core.mixed_mainline_contract import observation_tasks, speakable_text
 from core.selling_fact_evidence import (
     EXPERIENCE_NONE,
     TIER_APPEARANCE,
@@ -283,16 +290,17 @@ def reduce_voiceover_payload(payload: Optional[Mapping[str, Any]]) -> Dict[str, 
     return data
 
 
-# ── 表达边界：清洗 + 禁止层 + 成品兜底 ───────────────────────────────────
+# ── 表达边界：收窄 + 清洗 + 禁止层 + 成品兜底 ───────────────────────────
 #
-# 分工（三条各管一段，缺一段就有对应的漏法）：
+# 分工（四段各管一段，缺一段就有对应的漏法）：
 #
+#   apply_mainline_speakable_materials  把"可讲素材"收窄到合同口径（先让素材自洽）
 #   sanitize_payload_forbidden_wording  把"可讲素材"里的禁词删掉（不让它进模型）
 #   compile_expression_boundary_layer   把边界变成显式禁止层（模型知道不许说什么）
 #   check_voiceover_target_against_boundary  成品检（真说了要能被查出来）
 #
-# 只做前两段的话，模型仍可能从别处推断出被禁断言；只做第三段的话，是在等它出错。
-# 三段一起，"没有把材质说成事实"才是可验证的结论而不是期望。
+# 只做后三段的话，模型仍会照着"被禁止的素材"写；四段一起，"没有把材质说成事实"
+# 与"没有把三个场景并列说出来"才是可验证的结论而不是期望。
 
 #: 载荷里承载显式禁止层的键。它整体是**约束**，不是可讲素材。
 BOUNDARY_LAYER_KEY = "voiceover_expression_boundary"
@@ -522,6 +530,87 @@ def apply_expression_boundary_layer(
     # 并列说了出来，而 ``forbidden_wording`` 为空、下游一切检查都报 PASS。
     if declared:
         data[BOUNDARY_LAYER_KEY] = layer
+    return data, report
+
+
+#: "可以讲什么"的字段路径。只列**承载主线素材**的字段：它们是模型写稿时照抄的对象。
+#: 刻意不碰 ``voiceover_context_contract`` 之类的场景描述 —— 那些描述的就是冻结场景
+#: 本身（keeper 正是从它反查出来的），删它等于自相矛盾。
+SPEAKABLE_MATERIAL_PATHS: Tuple[Tuple[str, ...], ...] = (
+    ("content_mainline",),
+    ("spoken_brief", "core_buying_reason"),
+    ("spoken_brief", "primary_narrative_context"),
+    ("spoken_brief", "audience_or_need"),
+    ("spoken_brief", "operator_context"),
+    ("selling_argument", "core_value"),
+)
+
+
+def apply_mainline_speakable_materials(
+    payload: Optional[Mapping[str, Any]],
+    mainline: Optional[Mapping[str, Any]],
+    *,
+    scene_family: str = "",
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """把"可以讲什么"收窄到合同允许的口径。**只删不换。**
+
+    约束与素材必须同口径。真实冻结包（耳饰／手镯／戒指）实测：``allowed_wording``
+    写着"只说一个与实际冻结场景兼容的搭配，不并列多个"、``wording_ceilings`` 也
+    带着 ``max_allowed=1``，而同一份 payload 的四个字段同时在念三个场景。模型照
+    素材写，写出三个场景并列，下游一切检查都报 PASS —— 约束说得再清楚也没用，
+    因为它一边被要求"只说一个"，一边被喂"有三个"。
+
+    没有并列封顶时**逐字返回**（空边界的包行为完全不变）。允许收窄成空串：
+    核心购买理由缺席，好过留一句已被口径拒掉的承诺；改写了哪些字段、原值是什么
+    都记在报告里，可复核而不是被当成功。
+    """
+
+    contract = mainline if isinstance(mainline, Mapping) else {}
+    from core.mixed_mainline_contract import (
+        resolve_keeper,
+        stacked_scenes_of,
+    )
+
+    stacked = stacked_scenes_of(contract)
+    data = dict(payload) if isinstance(payload, Mapping) else {}
+    keeper, keeper_unresolved = resolve_keeper(contract, scene_family)
+    report: Dict[str, Any] = {
+        "schema_version": "voiceover-speakable-materials-v1",
+        "applied": False,
+        "reason": "" if stacked else "NO_SCENARIO_CEILING",
+        "stacked_scenes": stacked,
+        "scene_family": _text(scene_family),
+        "keeper": keeper,
+        "keeper_unresolved": keeper_unresolved if stacked else False,
+        "changed_paths": [],
+        "narrowed": {},
+        "originals": {},
+    }
+    if not stacked:
+        return data, report
+    changed: List[str] = []
+    for path in SPEAKABLE_MATERIAL_PATHS:
+        holder: Any = data
+        for step in path[:-1]:
+            holder = holder.get(step) if isinstance(holder, dict) else None
+        if not isinstance(holder, dict):
+            continue
+        key = path[-1]
+        original = _text(holder.get(key))
+        if not original:
+            continue
+        narrowed = speakable_text(original, contract, scene_family=scene_family)
+        if narrowed == original:
+            continue
+        holder[key] = narrowed
+        joined = ".".join(path)
+        changed.append(joined)
+        report["narrowed"][joined] = narrowed
+        report["originals"][joined] = original
+    report["changed_paths"] = changed
+    report["applied"] = bool(changed)
+    if not changed:
+        report["reason"] = "NO_SPEAKABLE_FIELD_CARRIED_THE_STACKED_SCENES"
     return data, report
 
 

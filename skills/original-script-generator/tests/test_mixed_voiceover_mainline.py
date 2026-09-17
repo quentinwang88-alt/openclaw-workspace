@@ -726,6 +726,108 @@ class ExpressionBoundaryTest(_BoundaryPayloadMixin, unittest.TestCase):
         self.assertEqual(result["expression_boundary"]["check"]["status"], CHECK_FAIL)
 
 
+class SpeakableMaterialTest(unittest.TestCase):
+    """素材必须与口径同口径：约束说"只说一个场景"，素材就不能念三个。
+
+    真实冻结包实测（耳饰／手镯／戒指）：``allowed_wording`` 写着"只说一个与实际冻结
+    场景兼容的搭配，不并列多个"、``wording_ceilings`` 也带着 ``max_allowed=1``，
+    而同一份 payload 的四个字段同时在念三个场景 —— 模型照素材写，全链路报 PASS。
+    """
+
+    _SCENES = "上班、约会、日常穿搭"
+    _THREE_SCENES = "上班、约会、日常都能戴，不挑场合"
+
+    def _mainline(self):
+        return {
+            "core_value": self._SCENES,
+            "core_value_safe": self._SCENES,
+            "expression_boundary": {
+                "conflicts": [
+                    {
+                        "kind": "MULTI_SCENARIO_UNAUTHORIZED",
+                        "stacked_scenes": ["日常", "约会", "上班"],
+                        "allowed_scenarios": 1,
+                        "resolution": "KEEP_ONE",
+                    }
+                ]
+            },
+        }
+
+    def _payload(self):
+        return {
+            "content_mainline": self._SCENES,
+            "spoken_brief": {
+                "core_buying_reason": self._SCENES,
+                "primary_narrative_context": self._SCENES,
+                "audience_or_need": self._SCENES,
+                "operator_context": self._SCENES,
+                "composition_goal": "像创作者对手机自然说完一个选择理由",
+            },
+            # 场景描述本身不属于"素材"：keeper 正是从冻结场景反查出来的，
+            # 删它等于自相矛盾，所以这里必须原样留着。
+            "voiceover_context_contract": {"allowed_spoken_context": [self._SCENES]},
+        }
+
+    def test_the_material_is_narrowed_to_the_keepers_scene(self):
+        from core.mixed_voiceover_mainline import apply_mainline_speakable_materials
+
+        narrowed, report = apply_mainline_speakable_materials(
+            self._payload(), self._mainline(), scene_family="OFFICE_WORKBREAK"
+        )
+        self.assertTrue(report["applied"])
+        self.assertEqual(report["keeper"], "上班")
+        self.assertEqual(narrowed["content_mainline"], "上班")
+        for key in (
+            "core_buying_reason",
+            "primary_narrative_context",
+            "audience_or_need",
+            "operator_context",
+        ):
+            self.assertEqual(narrowed["spoken_brief"][key], "上班", key)
+        self.assertIn("content_mainline", report["changed_paths"])
+        self.assertIn("spoken_brief.core_buying_reason", report["changed_paths"])
+        # 原值可复核，而不是"看起来没问题"。
+        self.assertEqual(report["originals"]["content_mainline"], self._SCENES)
+
+    def test_a_field_the_ceiling_does_not_touch_is_left_alone(self):
+        from core.mixed_voiceover_mainline import apply_mainline_speakable_materials
+
+        payload = self._payload()
+        narrowed, _ = apply_mainline_speakable_materials(
+            payload, self._mainline(), scene_family="OFFICE_WORKBREAK"
+        )
+        self.assertEqual(narrowed["spoken_brief"]["composition_goal"], "像创作者对手机自然说完一个选择理由")
+        self.assertEqual(
+            narrowed["voiceover_context_contract"],
+            {"allowed_spoken_context": [self._SCENES]},
+        )
+
+    def test_no_ceiling_leaves_the_payload_verbatim(self):
+        from core.mixed_voiceover_mainline import apply_mainline_speakable_materials
+
+        payload = self._payload()
+        unchanged, report = apply_mainline_speakable_materials(
+            payload, {}, scene_family="OFFICE_WORKBREAK"
+        )
+        self.assertFalse(report["applied"])
+        self.assertEqual(report["reason"], "NO_SCENARIO_CEILING")
+        self.assertEqual(unchanged, payload)
+
+    def test_an_unresolved_keeper_narrows_the_material_to_nothing(self):
+        # 冻结场景族兑不上（实测戒指那条）→ 不指认场景，素材也随之不再承诺任何场景。
+        # 允许为空：核心购买理由缺席，好过留一句刚被口径拒掉的承诺。
+        from core.mixed_voiceover_mainline import apply_mainline_speakable_materials
+
+        narrowed, report = apply_mainline_speakable_materials(
+            {"content_mainline": self._THREE_SCENES},
+            self._mainline(),
+            scene_family="GENERIC_INDOOR",
+        )
+        self.assertTrue(report["keeper_unresolved"])
+        self.assertEqual(report["keeper"], "")
+        self.assertEqual(narrowed["content_mainline"], "")
+
+
 class BoundaryCheckTest(unittest.TestCase):
     """成品兜底：真说出来了要能被检出，而不是指望它没写。"""
 

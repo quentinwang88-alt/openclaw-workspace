@@ -27,6 +27,9 @@ from core.mixed_mainline_contract import (  # noqa: E402
     observation_tasks,
     rebuild_mainline_for_frozen,
     repeated_observations,
+    resolve_keeper,
+    speakable_text,
+    stacked_scenes_of,
     validate_mainline_contract,
 )
 
@@ -178,6 +181,82 @@ class SceneKeeperTest(unittest.TestCase):
         self.assertEqual(contract["core_value_safe"], "适合骑摩托车时用")
         self.assertFalse(boundary["core_value_wording_constrained"])
         self.assertNotIn("keeper", boundary)
+
+
+class SpeakableTextTest(unittest.TestCase):
+    """读时的唯一取数点：下游两条通路都走 ``speakable_text``。
+
+    冻结时算出来的 ``core_value_safe`` 只覆盖"当时冻结的包"。实测三个真实包冻结在
+    该字段存在之前，读的时候必须能**再算一次**，否则合同收窄了一份副本、模型收到的
+    是另一份（同类漏法已在本条线复现三次）。
+    """
+
+    _SCENES = "上班、约会、日常穿搭"
+
+    def _mainline(self, **boundary):
+        return {
+            "core_value": self._SCENES,
+            "expression_boundary": {
+                "conflicts": [
+                    {
+                        "kind": "MULTI_SCENARIO_UNAUTHORIZED",
+                        "stacked_scenes": ["日常", "约会", "上班"],
+                        "allowed_scenarios": 1,
+                        "resolution": "KEEP_ONE",
+                    }
+                ],
+                **boundary,
+            },
+        }
+
+    def test_without_a_scenario_ceiling_the_text_is_returned_verbatim(self):
+        look_only = {
+            "expression_boundary": {
+                "conflicts": [
+                    {"kind": "MULTI_LOOK_UNAUTHORIZED", "stacked_looks": ["A", "B"]}
+                ]
+            }
+        }
+        self.assertEqual(speakable_text(self._SCENES, look_only), self._SCENES)
+        self.assertEqual(speakable_text(self._SCENES, {}), self._SCENES)
+        self.assertEqual(speakable_text(self._SCENES, None), self._SCENES)
+        self.assertEqual(stacked_scenes_of(look_only), [])
+
+    def test_a_recorded_keeper_wins_over_the_passed_family(self):
+        mainline = self._mainline(keeper="日常", scene_family="OFFICE_WORKBREAK")
+        self.assertEqual(resolve_keeper(mainline, "CAFE_DINING"), ("日常", False))
+        self.assertEqual(speakable_text(self._SCENES, mainline), "日常穿搭")
+
+    def test_an_unrecorded_keeper_is_derived_from_the_frozen_family(self):
+        # 早于 keeper 字段冻结的包：读时按冻结场景族现算，不必重跑规划。
+        mainline = self._mainline()
+        self.assertEqual(resolve_keeper(mainline, "OFFICE_WORKBREAK"), ("上班", False))
+        self.assertEqual(
+            speakable_text(self._SCENES, mainline, scene_family="OFFICE_WORKBREAK"), "上班"
+        )
+        self.assertEqual(
+            speakable_text(self._SCENES, mainline, scene_family="HOME_ROUTINE"), "日常穿搭"
+        )
+
+    def test_an_unknown_family_names_no_scene(self):
+        # 实测戒指那条的冻结场景族是 GENERIC_INDOOR → 随便挑一个说会和画面打架。
+        mainline = self._mainline()
+        self.assertEqual(resolve_keeper(mainline, "GENERIC_INDOOR"), ("", True))
+        self.assertEqual(
+            speakable_text(
+                "上班、约会、日常都能戴，不挑场合",
+                mainline,
+                scene_family="GENERIC_INDOOR",
+            ),
+            "",
+        )
+
+    def test_narrowing_is_idempotent(self):
+        # 记录值与现算值可以互相替代：已经是收窄结果的文本再收窄一次不变。
+        mainline = self._mainline()
+        once = speakable_text(self._SCENES, mainline, scene_family="HOME_ROUTINE")
+        self.assertEqual(once, "日常穿搭")
+        self.assertEqual(speakable_text(once, mainline, scene_family="HOME_ROUTINE"), once)
 
 
 class MainlineFieldTest(unittest.TestCase):

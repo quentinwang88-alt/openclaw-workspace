@@ -985,20 +985,19 @@ def render_stage0_video_generation_prompt(
         "【商品身份锁｜最高优先级】",
         "商品外观以参考图为唯一准则；商品一致性优先于人物表演、场景氛围和镜头效果。",
     ]
-    if _text(semantic_context.get("primary_narrative_context"), ""):
-        lines.extend(
-            [
-                "",
-                "【整片语义主线｜不做逐句逐镜绑定】",
-                "主消费情境："
-                + _text(semantic_context.get("primary_narrative_context"), ""),
-                "核心购买理由："
-                + _text(semantic_context.get("core_buying_reason"), ""),
-                (
-                    "画面、人物和口播保持在同一个消费世界；不要求每句口播由当前镜头证明，"
-                    "也不得让背景地点改写这条主线。"
-                ),
-            ]
+    # 两行各自独立判定：合同把并列场景收窄后，"主消费情境"可能被清空而"核心购买理由"
+    # 仍有内容（反之亦然）。用前者当整块的门，会把后者连带丢掉。
+    narrative_context = _text(semantic_context.get("primary_narrative_context"), "")
+    core_buying_reason = _text(semantic_context.get("core_buying_reason"), "")
+    if narrative_context or core_buying_reason:
+        lines.extend(["", "【整片语义主线｜不做逐句逐镜绑定】"])
+        if narrative_context:
+            lines.append("主消费情境：" + narrative_context)
+        if core_buying_reason:
+            lines.append("核心购买理由：" + core_buying_reason)
+        lines.append(
+            "画面、人物和口播保持在同一个消费世界；不要求每句口播由当前镜头证明，"
+            "也不得让背景地点改写这条主线。"
         )
     if must_preserve:
         lines.append("必须保持：" + _join(must_preserve))
@@ -1838,20 +1837,18 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
             else "商品外观以参考图为唯一准则；商品一致性优先于人物美感、场景氛围和镜头效果。"
         ),
     ]
-    if _text(semantic_context.get("primary_narrative_context"), ""):
-        lines.extend(
-            [
-                "",
-                "【整片语义主线｜不做逐句逐镜绑定】",
-                "主消费情境："
-                + _text(semantic_context.get("primary_narrative_context"), ""),
-                "核心购买理由："
-                + _text(semantic_context.get("core_buying_reason"), ""),
-                (
-                    "画面、人物和口播保持在同一个消费世界；不要求每句口播由当前镜头证明，"
-                    "也不得让背景地点改写这条主线。"
-                ),
-            ]
+    # 同 §整片语义主线：两行各自判定，缩窄后只剩余一行时不能整块丢掉。
+    narrative_context = _text(semantic_context.get("primary_narrative_context"), "")
+    core_buying_reason = _text(semantic_context.get("core_buying_reason"), "")
+    if narrative_context or core_buying_reason:
+        lines.extend(["", "【整片语义主线｜不做逐句逐镜绑定】"])
+        if narrative_context:
+            lines.append("主消费情境：" + narrative_context)
+        if core_buying_reason:
+            lines.append("核心购买理由：" + core_buying_reason)
+        lines.append(
+            "画面、人物和口播保持在同一个消费世界；不要求每句口播由当前镜头证明，"
+            "也不得让背景场景改写商品的核心购买理由。"
         )
     if visual_saliency:
         lines.append(

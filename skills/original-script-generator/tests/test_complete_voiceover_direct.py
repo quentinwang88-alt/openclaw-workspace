@@ -970,6 +970,46 @@ class VoiceoverExpressionBoundaryTest(unittest.TestCase):
         self.assertEqual(boundary["check"]["status"], "FAIL")
         self.assertEqual(boundary["check"]["reason"], "CEILING_EXCEEDED")
 
+    def test_the_speakable_material_follows_the_ceiling(self):
+        """约束与素材必须同口径：约束说"只说一个"，素材就不能还在念三个。
+
+        真实冻结包实测（耳饰／手镯／戒指）：``allowed_wording`` 与
+        ``wording_ceilings`` 都到位，而 ``content_mainline`` 等字段仍在并列三个
+        场景 —— 模型照素材写，写出三个场景并列，全链路报 PASS。
+        """
+
+        captured = {}
+        direction = self._direction()
+        mainline = direction["category_execution_extension"]["mixed_mainline_contract"]
+        mainline["expression_boundary"]["forbidden_wording"] = []
+        mainline["expression_boundary"]["conflicts"] = [
+            {
+                "kind": "MULTI_SCENARIO_UNAUTHORIZED",
+                "stacked_scenes": ["日常", "约会", "上班"],
+                "allowed_scenarios": 1,
+                "resolution": "KEEP_ONE",
+            }
+        ]
+        # 冻结场景族在方向包里，不在合同里 —— 读时必须能现算 keeper。
+        direction["outfit_scene_affinity_contract"] = {
+            "selected_scene_family": "OFFICE_WORKBREAK"
+        }
+        direction["semantic_spine_contract"]["script_thesis"][
+            "core_buying_reason"
+        ] = "上班、约会、日常穿搭"
+        result = self._run(
+            generated_zh="上班戴这枚就够了。", captured=captured, direction=direction
+        )
+        self.assertEqual(captured["content_mainline"], "上班")
+        self.assertEqual(captured["spoken_brief"]["core_buying_reason"], "上班")
+        # 模型收到的整份素材里不再有被口径拒掉的场景词。
+        self.assertNotIn("约会", json.dumps(captured, ensure_ascii=False))
+        materials = result["expression_boundary"]["speakable_materials"]
+        self.assertTrue(materials["applied"])
+        self.assertEqual(materials["keeper"], "上班")
+        self.assertIn("content_mainline", materials["changed_paths"])
+        self.assertEqual(materials["originals"]["content_mainline"], "上班、约会、日常穿搭")
+
     def test_a_single_scenario_ceiling_is_not_a_violation(self):
         captured = {}
         direction = self._direction()

@@ -1169,6 +1169,85 @@ class ProductionScriptRendererTest(unittest.TestCase):
         self.assertNotIn("农村妇女", row["complete_script"])
 
 
+class SemanticMainlinePromptTest(unittest.TestCase):
+    """「整片语义主线」两行各自判定：缩窄后只剩一行时不能整块丢掉。
+
+    合同把并列场景收窄到实际冻结的那一个后，"主消费情境"可能被清空而"核心购买
+    理由"仍有内容（反之亦然）。用前者当整块的门，会把后者一起带走 —— 素材的
+    收窄就变成了素材的消失。
+    """
+
+    def _script(self, semantic_context):
+        storyboard = [
+            {
+                "shot_no": index,
+                "duration": f"{index - 1}-{index}s",
+                "capture_unit_id": f"CU_{index:02d}",
+                "structure_role": "HOOK" if index == 1 else "PROOF",
+                "starts_new_take": True,
+                "visual_content": "人物自然看向镜头",
+                "framing_guidance": "胸部以上的近景",
+            }
+            for index in (1, 2)
+        ]
+        units = [
+            {
+                "capture_unit_id": f"CU_{index:02d}",
+                "shot_numbers": [index],
+                "structure_role": "HOOK" if index == 1 else "PROOF",
+                "framing_guidance": "胸部以上的近景",
+            }
+            for index in (1, 2)
+        ]
+        return {
+            "creative_blueprint": {"macro_visual_passages": []},
+            "continuous_voiceover": {"target_language": "马来语"},
+            "storyboard": storyboard,
+            "capture_units": units,
+            "video_generation_brief": {
+                "production_design": {"capture_mode": "CREATOR_SELF_SHOT"},
+                "semantic_context": semantic_context,
+            },
+        }
+
+    def test_both_lines_render_when_present(self):
+        text = render_stage0_video_generation_prompt(
+            script=self._script(
+                {"primary_narrative_context": "上班", "core_buying_reason": "上班"}
+            )
+        )
+        self.assertIn("【整片语义主线｜不做逐句逐镜绑定】", text)
+        self.assertIn("主消费情境：上班", text)
+        self.assertIn("核心购买理由：上班", text)
+
+    def test_the_reason_survives_an_empty_context_line(self):
+        text = render_stage0_video_generation_prompt(
+            script=self._script(
+                {"primary_narrative_context": "", "core_buying_reason": "上班"}
+            )
+        )
+        self.assertIn("【整片语义主线｜不做逐句逐镜绑定】", text)
+        self.assertIn("核心购买理由：上班", text)
+        self.assertNotIn("主消费情境：", text)
+
+    def test_the_context_survives_an_empty_reason_line(self):
+        text = render_stage0_video_generation_prompt(
+            script=self._script(
+                {"primary_narrative_context": "上班", "core_buying_reason": ""}
+            )
+        )
+        self.assertIn("主消费情境：上班", text)
+        self.assertNotIn("核心购买理由：", text)
+
+    def test_the_block_is_absent_when_both_lines_are_empty(self):
+        text = render_stage0_video_generation_prompt(
+            script=self._script(
+                {"primary_narrative_context": "", "core_buying_reason": ""}
+            )
+        )
+        self.assertNotIn("【整片语义主线", text)
+
+
 class FaceFreeConstraintTest(unittest.TestCase):
     """The mixed template's NO_FACE guarantee must be stated in the prompt.
 
