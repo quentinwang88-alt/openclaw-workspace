@@ -42,6 +42,54 @@ def _reference_cache_root() -> Path:
     return _anchor_cache_root().parent / "original_product_reference_cache"
 
 
+def load_cached_product_reference_assets(
+    product_code: str, *, anchor_card: Optional[Mapping[str, Any]] = None
+) -> list[Dict[str, Any]]:
+    """The reviewed product images already cached for this SKU, if any.
+
+    ``load_product_context`` reads its authority from the pipeline database and
+    has no image list of its own -- only this bootstrap caches the reviewed
+    images.  That made the two product-context paths disagree: a product loaded
+    from the database planned as if no picture existed, so every appearance
+    claim was capped even while the images sat in the cache.
+
+    Matching is by product code, and a candidate whose own anchor card equals the
+    one in hand wins, so a SKU whose pictures were re-reviewed never borrows the
+    previous version's images.  Only descriptors whose file still exists are
+    returned, mirroring the validation the bootstrap already applies.
+    """
+
+    code = _text(product_code)
+    if not code:
+        return []
+    root = _anchor_cache_root()
+    if not root.is_dir():
+        return []
+    wanted = dict(anchor_card) if isinstance(anchor_card, Mapping) else {}
+    matches: list[tuple[bool, list[Dict[str, Any]]]] = []
+    for path in sorted(root.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(data, Mapping) or _text(data.get("product_code")) != code:
+            continue
+        assets = [
+            dict(item)
+            for item in data.get("product_reference_assets") or []
+            if isinstance(item, Mapping)
+            and Path(_text(item.get("local_path"))).expanduser().is_file()
+        ]
+        if not assets:
+            continue
+        same_anchor = bool(wanted) and dict(data.get("anchor_card") or {}) == wanted
+        matches.append((same_anchor, assets))
+    if not matches:
+        return []
+    matches.sort(key=lambda pair: pair[0], reverse=True)
+    return matches[0][1]
+
+
 def _asset_descriptor(path: str | Path, *, attachment: Mapping[str, Any]) -> Dict[str, Any]:
     source = Path(path).expanduser().resolve()
     return {

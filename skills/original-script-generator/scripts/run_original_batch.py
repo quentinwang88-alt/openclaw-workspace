@@ -13,6 +13,88 @@ if str(SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILL_ROOT))
 
 
+def _render_validation_blocks(validation) -> bool:
+    """Does this audit say the delivered prompt contradicts its own contract?
+
+    Lazy import on purpose: this script is imported by tests with a minimal
+    environment, so a module-level ``core`` import would change import-time
+    behaviour.  Without the renderer the judgement is impossible, so it fails
+    *open* — reporting must never be the thing that blocks delivery.
+    """
+
+    try:
+        from core.production_script_renderer import render_validation_blocks_delivery
+    except Exception:  # noqa: BLE001
+        return False
+    return render_validation_blocks_delivery(validation)
+
+
+def _mixed_rendered_counts(items, result_of) -> Dict[str, object]:
+    """Aggregate the B2 counting axes from each item's rendered re-check.
+
+    这四项由**成稿差异裁决**产出，不是"生成成功数"的另一种写法：同一批里
+    四条都生成成功，仍可能只有两个独立主题。按唯一 ``script_id`` 去重，同一条
+    稿不会因为跟多个参照比过而被计两次。
+
+    ``None``（裁决不可用）与 ``0``（确实没有）必须分开：报告把"算不出来"印成
+    0，会被读成"这批什么都没产出"。
+    """
+
+    try:
+        from core.accessory_mixed_templates import (
+            MIXED_VERDICT_EXACT_DUPLICATE,
+            MIXED_VERDICT_NEEDS_REVIEW,
+            MIXED_VERDICT_SURFACE_ONLY,
+        )
+    except Exception:  # noqa: BLE001 - reporting must never break a run
+        return {
+            "distinct_theme_count": None,
+            "effective_variant_count": None,
+            "duplicate_or_surface_count": None,
+            "needs_review_count": None,
+            "not_compared_count": None,
+            "counts_available": False,
+        }
+
+    def _recheck(item):
+        value = result_of(item).get("mixed_final_shot_recheck")
+        return value if isinstance(value, dict) else {}
+
+    def _key(item):
+        return str(result_of(item).get("script_id") or getattr(item, "batch_item_id", ""))
+
+    def _compared(recheck):
+        return int(recheck.get("references_compared") or 0) > 0
+
+    def _deduped(predicate):
+        return len({_key(it) for it in items if predicate(_recheck(it))})
+
+    return {
+        "distinct_theme_count": _deduped(
+            lambda r: _compared(r) and bool(r.get("counts_as_theme"))
+        ),
+        "effective_variant_count": _deduped(
+            lambda r: _compared(r) and bool(r.get("counts_as_variant"))
+        ),
+        "duplicate_or_surface_count": _deduped(
+            lambda r: str(r.get("review_status") or "").upper()
+            in (MIXED_VERDICT_EXACT_DUPLICATE, MIXED_VERDICT_SURFACE_ONLY)
+        ),
+        "needs_review_count": _deduped(
+            lambda r: bool(r)
+            and (
+                str(r.get("review_status") or "").upper()
+                == MIXED_VERDICT_NEEDS_REVIEW
+                or bool(r.get("montage_collapsed"))
+            )
+        ),
+        "not_compared_count": sum(
+            1 for it in items if _recheck(it) and not _compared(_recheck(it))
+        ),
+        "counts_available": True,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="原创批次轻编排器 V1")
     parser.add_argument("--product-code", required=True)
@@ -235,6 +317,96 @@ def _save_report(output_dir, batch, items, summary):
             ),
         }
 
+    def _render_validation(item):
+        """Persisted execution audit for one item (``{}`` when not applicable).
+
+        Written at script-ready time and bound to the delivered prompt by
+        ``prompt_hash`` + ``renderer_version``; the same object the final
+        hand-off gates on, so the report and the gate cannot disagree.
+        """
+
+        value = _result(item).get("render_validation")
+        return value if isinstance(value, dict) else {}
+
+    def _mixed_delivery(item):
+        """Why a generated mixed script was or was not delivered as independent.
+
+        The operator only sees the item status otherwise, and "SCRIPT_DUPLICATE"
+        without the verdict and the nearest item is not actionable.
+        """
+
+        recheck = _result(item).get("mixed_final_shot_recheck")
+        if not isinstance(recheck, dict) or not recheck:
+            return {}
+        try:
+            from core.accessory_mixed_templates import mixed_delivery_decision
+
+            return mixed_delivery_decision(recheck)
+        except Exception:
+            return {}
+
+    def _mixed_difference_counts(item):
+        """B2 的两个计数轴：这条稿在成稿比对里算不算独立主题／有效变体。
+
+        Kept per item so a reviewer can see *which* script was counted, next to
+        the nearest reference and the dimensions that produced the verdict.
+        """
+
+        recheck = _result(item).get("mixed_final_shot_recheck")
+        if not isinstance(recheck, dict) or not recheck:
+            return {}
+        return {
+            "review_status": recheck.get("review_status", ""),
+            "counts_as_theme": bool(recheck.get("counts_as_theme")),
+            "counts_as_variant": bool(recheck.get("counts_as_variant")),
+            "order_only": bool(recheck.get("order_only")),
+            "references_compared": int(recheck.get("references_compared") or 0),
+            "nearest_script_id": recheck.get("nearest_script_id", ""),
+            "difference_dimensions": recheck.get("difference_dimensions") or [],
+            "new_observation_points": recheck.get("new_observation_points") or [],
+        }
+
+    def _mixed_history_persistence(item):
+        """成稿签名有没有真的写进台账（B4）。
+
+        A script whose rendered signature never reached the ledger has **no**
+        cross-batch protection: the next batch cannot compare 正文 against it.
+        Reporting the write as done would claim protection that is not there,
+        so the outcome travels into the report instead of being swallowed.
+        """
+
+        value = _result(item).get("mixed_rendered_history")
+        return value if isinstance(value, dict) else {}
+
+    duplicate_count = sum(
+        1 for it in items if str(it.status or "") == "SCRIPT_DUPLICATE"
+    )
+    # A deterministic execution conflict (delivered prompt vs its own frozen
+    # contract) is a *different* bucket from "similar to an earlier script": it
+    # is not an originality judgement, it is a defect.  It is deducted from the
+    # producible count here and reported separately rather than folded into
+    # ready/failed, and it is deliberately not turned into SCRIPT_FAILED — see
+    # ``render_validation_blocks_delivery``.
+    execution_blocked_count = sum(
+        1
+        for it in items
+        if _render_validation_blocks(_render_validation(it))
+    )
+    audit_error_count = sum(
+        1
+        for it in items
+        if str(_render_validation(it).get("status") or "") == "AUDIT_ERROR"
+    )
+    counts = _mixed_rendered_counts(items, _result)
+    # Only mixed items count: a non-mixed item has no rendered history slot at
+    # all, and "0 persisted" there would be a false alarm rather than a gap.
+    history_not_persisted_count = sum(
+        1
+        for it in items
+        if isinstance(_result(it).get("mixed_final_shot_recheck"), dict)
+        and _result(it).get("mixed_final_shot_recheck")
+        and not _mixed_history_persistence(it).get("history_persisted", False)
+    )
     report = {
         "batch_id": batch.batch_id,
         "request_id": batch.request_id,
@@ -246,6 +418,41 @@ def _save_report(output_dir, batch, items, summary):
         "planned_count": batch.planned_count,
         "ready_count": batch.ready_count,
         "failed_count": batch.failed_count,
+        # "完成" alone cannot answer "how much *distinct* content did this batch
+        # produce": a generated script whose shots repeat an earlier delivery is
+        # excluded from the independent set and reported separately.
+        "duplicate_count": duplicate_count,
+        # 请求数 / 生成成功数 / 执行校验通过数 / 独立主题数 / 有效变体数 /
+        # 重复与表层变化数 / 待复核数 / 可生产数 —— 八项分开。主题与变体来自
+        # 成稿差异裁决并按唯一 script_id 去重；没有可比参照的条目单列
+        # ``not_compared_count``，不得悄悄算进独立主题。
+        **counts,
+        "execution_blocked_count": execution_blocked_count,
+        "execution_audit_error_count": audit_error_count,
+        # 成稿签名没写进台账的条数。此时这些稿件**没有**跨批去重保护：下一批
+        # 拿不到它们的正文，也谈不上去重。单列出来，避免报告声称已完成保护。
+        "history_not_persisted_count": history_not_persisted_count,
+        "execution_validation_pass_count": sum(
+            1
+            for it in items
+            if str(_render_validation(it).get("status") or "") == "PASS"
+        ),
+        # "可生产"只认已经被判定为独立或有效变体的条目：重复/表层变化、执行
+        # 校验未通过、待复核、以及没有可比参照因而无法确认独立的，都要单独扣掉。
+        # 这一步故意保守 —— 把无法确认的条目算成可生产，就是把"生成成功"当质量。
+        "producible_count": max(
+            0,
+            int(batch.ready_count or 0)
+            - duplicate_count
+            - execution_blocked_count
+            - int(counts.get("needs_review_count") or 0)
+            - int(counts.get("not_compared_count") or 0),
+        ),
+        "counts_note": (
+            "独立主题数/有效变体数来自成稿差异裁决（按唯一 script_id 去重）；"
+            "重复与表层变化数、待复核数同理。不得用生成成功数、模板排列数"
+            "或背景数量代替。"
+        ),
         "allocation_summary": json.loads(batch.allocation_summary_json) if batch.allocation_summary_json else {},
         "items": [
             {
@@ -301,6 +508,10 @@ def _save_report(output_dir, batch, items, summary):
                 },
                 "status": it.status,
                 "script_mode": _result(it).get("script_mode", ""),
+                "mixed_delivery": _mixed_delivery(it),
+                "mixed_difference_counts": _mixed_difference_counts(it),
+                "mixed_history_persistence": _mixed_history_persistence(it),
+                "render_validation": _render_validation(it),
                 "stage_cache": _result(it).get("stage_cache", {}),
                 "retrieval_reference_provenance": _result(it).get(
                     "retrieval_reference_provenance", {}
@@ -321,6 +532,58 @@ def _save_report(output_dir, batch, items, summary):
     )
     print(f"\n报告: {report_path}")
     print(f"完整脚本: {complete_path}")
+
+
+def _counts_section(report) -> List[str]:
+    """八项分开汇报：请求 / 生成成功 / 执行校验通过 / 独立主题 / 有效变体 /
+    重复与表层变化 / 待复核 / 可生产。
+
+    The point of this section is that "完成 N 条" cannot be read as "N 条原创"：
+    a batch can generate four scripts and still deliver one theme.  The two
+    content axes come from the rendered difference verdicts (deduplicated by
+    ``script_id``), never from the generation count or the template count.
+    """
+
+    if not report.get("counts_available", False):
+        return [
+            "## 内容差异计数",
+            "",
+            "- 差异裁决模块不可用，独立主题数与有效变体数**未计算**（不是 0）。",
+            "",
+        ]
+    counts = [
+        ("请求数", report.get("requested_count")),
+        ("生成成功数", report.get("ready_count")),
+        ("执行校验通过数", report.get("execution_validation_pass_count")),
+        ("独立主题数", report.get("distinct_theme_count")),
+        ("有效变体数", report.get("effective_variant_count")),
+        ("重复／表层变化数", report.get("duplicate_or_surface_count")),
+        ("待复核数", report.get("needs_review_count")),
+        ("可生产数", report.get("producible_count")),
+    ]
+    lines = [
+        "## 内容差异计数",
+        "",
+        "- " + "；".join(f"{label} {int(value or 0)}" for label, value in counts),
+    ]
+    not_compared = int(report.get("not_compared_count") or 0)
+    if not_compared:
+        lines.append(
+            f"- 无可比参照因而未判定独立的条目：{not_compared}"
+            "（既不是重复，也不算已确认的独立主题）"
+        )
+    not_persisted = int(report.get("history_not_persisted_count") or 0)
+    if not_persisted:
+        lines.append(
+            f"- ⚠️ 成稿签名未写入台账的条目：{not_persisted}"
+            "（这些稿件**没有**跨批去重保护：下一批读不到它们的正文，"
+            "不得到报告里当成已完成去重）"
+        )
+    note = str(report.get("counts_note") or "").strip()
+    if note:
+        lines.append(f"- 口径：{note}")
+    lines.append("")
+    return lines
 
 
 def _md(value) -> str:
@@ -385,14 +648,53 @@ def _render_complete_scripts_markdown(report) -> str:
         f"- 产品：`{_md(report.get('product_code'))}`",
         f"- 状态：`{_md(report.get('status'))}`",
         f"- 完成：{int(report.get('ready_count') or 0)}/{int(report.get('planned_count') or 0)}",
-        "",
     ]
+    duplicate_count = int(report.get("duplicate_count") or 0)
+    if duplicate_count:
+        lines.append(
+            f"- 其中成稿重复（不计入独立可用）：{duplicate_count}；"
+            f"失败：{int(report.get('failed_count') or 0)}"
+        )
+    execution_blocked = int(report.get("execution_blocked_count") or 0)
+    if execution_blocked:
+        lines.append(
+            f"- 执行校验未通过（不计入可生产、未提交视频）：{execution_blocked}"
+        )
+    lines.append(f"- 可生产：{int(report.get('producible_count') or 0)}")
+    lines.extend(_counts_section(report))
+    lines.append("")
     lines.extend(_capacity_section(report))
     for item in report.get("items") or []:
         if not isinstance(item, dict):
             continue
         script = item.get("script") if isinstance(item.get("script"), dict) else {}
         structure = item.get("structure") if isinstance(item.get("structure"), dict) else {}
+        mixed_delivery = (
+            item.get("mixed_delivery")
+            if isinstance(item.get("mixed_delivery"), dict)
+            else {}
+        )
+        mixed_history = (
+            item.get("mixed_history_persistence")
+            if isinstance(item.get("mixed_history_persistence"), dict)
+            else {}
+        )
+        validation = (
+            item.get("render_validation")
+            if isinstance(item.get("render_validation"), dict)
+            else {}
+        )
+        validation_issues = (
+            validation.get("issues")
+            if isinstance(validation.get("issues"), list)
+            else []
+        )
+        validation_conflict = "、".join(
+            f"镜{_md(issue.get('shot_id'))}[{_md(issue.get('module'))}]"
+            f"{_md(issue.get('code'))}"
+            for issue in validation_issues[:6]
+            if isinstance(issue, dict)
+        )
         expression = item.get("expression") if isinstance(item.get("expression"), dict) else {}
         creative = item.get("creative") if isinstance(item.get("creative"), dict) else {}
         outfit_contract = (
@@ -458,6 +760,33 @@ def _render_complete_scripts_markdown(report) -> str:
                 "| 项目 | 内容 |",
                 "|---|---|",
                 f"| 状态 | {_md(item.get('status'))} |",
+                *(
+                    [
+                        f"| 成稿复核 | {_md(mixed_delivery.get('verdict'))}"
+                        f"{'｜需人工复核' if mixed_delivery.get('requires_review') else ''} |",
+                        f"| 复核说明 | {_md(mixed_delivery.get('reason'))} |",
+                    ]
+                    if mixed_delivery
+                    else []
+                ),
+                *(
+                    [
+                        f"| 跨批保护 | "
+                        f"{'已写入台账' if mixed_history.get('history_persisted') else '未写入台账：' + _md(mixed_history.get('reason'))} |"
+                    ]
+                    if mixed_history
+                    else []
+                ),
+                *(
+                    [
+                        f"| 执行校验 | {_md(validation.get('status'))}"
+                        f"{'｜' if validation_conflict else ''}{validation_conflict} |",
+                        f"| 交付绑定 | {_md(validation.get('renderer_version'))}"
+                        f" / {_md(validation.get('prompt_hash'))} |",
+                    ]
+                    if validation
+                    else []
+                ),
                 f"| 结构家族 | {_md(structure.get('macro_family_key'))} |",
                 f"| 承载方式 | {_md(structure.get('carrier_mode'))} |",
                 f"| 请求钩子 | {_md(expression.get('requested_hook_id'))} |",

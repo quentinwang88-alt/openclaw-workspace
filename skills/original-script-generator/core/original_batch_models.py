@@ -16,6 +16,12 @@ BATCH_STATUSES = frozenset({
 
 ITEM_STATUSES = frozenset({
     "PLANNED", "SCRIPT_RUNNING", "SCRIPT_READY", "SCRIPT_FAILED",
+    # Generated successfully, but the shots it actually wrote repeat something
+    # already delivered, so it is not an independent script.  A distinct status
+    # rather than SCRIPT_FAILED: nothing failed, and keeping it out of
+    # ``{PLANNED, SCRIPT_FAILED}`` also keeps resume from paying to regenerate
+    # the same repeat.
+    "SCRIPT_DUPLICATE",
 })
 
 ITEM_ROLES = frozenset({"STRUCTURE_MOTHER", "CONTENT_VARIANT", "HOOK_VARIANT"})

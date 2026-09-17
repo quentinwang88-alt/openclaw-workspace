@@ -20,9 +20,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from core.product_type_resolution import normalize_product_type
 
@@ -101,6 +102,24 @@ ERR_MIXED_CARRIER_MISMATCH = "MIXED_CARRIER_MISMATCH"
 ERR_MIXED_STATE_MISMATCH = "MIXED_STATE_MISMATCH"
 ERR_MIXED_UNIT_DURATION_INVALID = "MIXED_UNIT_DURATION_INVALID"
 ERR_MIXED_PART_CONTRADICTION = "MIXED_PART_CONTRADICTION"
+ERR_MIXED_THEME_INPUT_GAP = "MIXED_THEME_INPUT_GAP"
+
+# Where a readable ``thesis`` may legitimately come from, most authoritative
+# first.  These are *source field paths*, not IDs: the point of the axis is that
+# a reviewer can go read the sentence the theme was copied from.
+MIXED_THESIS_INPUT_GAP_READABILITY = "THESIS_NOT_READABLE"
+_MIXED_THESIS_UNREADABLE_SENTINELS = frozenset(
+    {"UNAVAILABLE", "UNKNOWN", "N/A", "NA", "NONE", "NULL", "TBD"}
+)
+_MIXED_THESIS_ID_PREFIXES = (
+    "ARGUMENT_OPERATOR_",
+    "OPERATOR_",
+    "PCL_",
+    "PCS_",
+    "CLM_",
+    "CBR_",
+    "TH_",
+)
 
 # ---------------------------------------------------------------------------
 # Part evidence (Review #6)
@@ -124,6 +143,38 @@ EVIDENCE_STATES: Tuple[str, ...] = (
     EVIDENCE_VERIFIED,
     EVIDENCE_ABSENT,
     EVIDENCE_UNKNOWN,
+)
+EVIDENCE_SOURCE_ANCHOR_UNCERTAIN = "ANCHOR_UNCERTAIN"
+
+# How a text says "I cannot tell".  A hedged statement must never be read as a
+# confirmation: "搭扣结构无法确认" contains the positive term "搭扣", so keyword
+# matching alone recorded the clasp as VERIFIED and then authorised the gated
+# action that displays it.  A hedge resolves to UNKNOWN -- never ABSENT, because
+# "cannot tell" is not "there is none", and the two are different instructions to
+# the camera.
+UNCERTAINTY_TERMS_KEY = "evidence_uncertainty_terms"
+DEFAULT_UNCERTAINTY_TERMS: Tuple[str, ...] = (
+    "无法确认",
+    "不能确认",
+    "没法确认",
+    "难以确认",
+    "无法判断",
+    "不能判断",
+    "无法核实",
+    "有待确认",
+    "待确认",
+    "看不清",
+    "看不出来",
+    "看不到",
+    "不清楚",
+    "不明确",
+    "不确定",
+    "不详",
+    "未提供",
+    "未说明",
+    "没有提供",
+    "未见",
+    "未知",
 )
 
 STRUCTURE_FACTS_KEY = "structure_facts"
@@ -399,6 +450,34 @@ def _part_terminology(part_key: str) -> Dict[str, Any]:
     return dict(entry) if isinstance(entry, Mapping) else {}
 
 
+def uncertainty_terms() -> Tuple[str, ...]:
+    """How the approved anchors say "cannot tell" (config-first, code fallback)."""
+
+    raw = load_mixed_template_definition().get(UNCERTAINTY_TERMS_KEY)
+    terms = tuple(_text(item) for item in (raw or []) if _text(item))
+    return terms or DEFAULT_UNCERTAINTY_TERMS
+
+
+def _hedged_about_part(
+    texts: Sequence[str],
+    part_terms: Sequence[str],
+    uncertainty: Sequence[str],
+) -> bool:
+    """True when one text hedges about *this* part.
+
+    Scoped to a single text on purpose: an unrelated "结构无法确认" elsewhere in
+    the anchor card must not withdraw evidence for a part that another line
+    states plainly.
+    """
+
+    for text in texts:
+        if any(term in text for term in part_terms) and any(
+            marker in text for marker in uncertainty
+        ):
+            return True
+    return False
+
+
 def project_module_framing(canonical_type: str, module: str) -> Dict[str, Any]:
     """The single projection for one ``(category, shot module)`` framing rule.
 
@@ -582,9 +661,20 @@ def resolve_part_evidence(
 ) -> Dict[str, str]:
     """Tri-state evidence for one optional part.
 
-    The structure registry wins when it has an opinion; otherwise the approved
-    anchors are scanned.  A negation such as "无吊坠" contains the positive
-    term as a substring, so negatives are scanned first.
+    Resolution order -- each step exists because the one after it would otherwise
+    over-claim:
+
+    1. the structure registry, when it has an opinion (it is authoritative about
+       its own physical form);
+    2. a **hedge about this part** -> ``UNKNOWN``.  "搭扣结构无法确认" contains the
+       positive term "搭扣", so keyword matching alone recorded the clasp as
+       VERIFIED and then authorised the gated action that displays it.  A hedge is
+       never promoted to a fact, and never demoted to ABSENT either: "cannot tell"
+       is a different shooting instruction from "there is none";
+    3. a negation such as "无搭扣" -> ``ABSENT`` (it contains the positive term as
+       a substring, so negatives are scanned first);
+    4. a plain positive term -> ``VERIFIED``;
+    5. otherwise ``UNKNOWN``.
     """
 
     key = _text(part_key)
@@ -599,13 +689,25 @@ def resolve_part_evidence(
     if base != EVIDENCE_UNKNOWN:
         return {"part_key": key, "state": base, "source": "STRUCTURE_REGISTRY"}
 
-    blob = "；".join(_text(item) for item in (anchor_texts or []) if _text(item))
+    texts = [_text(item) for item in (anchor_texts or []) if _text(item)]
+    blob = "；".join(texts)
     if not blob:
         return {"part_key": key, "state": EVIDENCE_UNKNOWN, "source": "NO_EVIDENCE"}
 
     terms = _part_terminology(key)
     negatives = [_text(item) for item in (terms.get("negative_terms") or []) if _text(item)]
     positives = [_text(item) for item in (terms.get("positive_terms") or []) if _text(item)]
+
+    # Every spelling that names this part, including those that only occur inside
+    # a negated term ("无搭扣" names the clasp in order to deny it).
+    part_terms = tuple(dict.fromkeys(positives + negatives))
+    if _hedged_about_part(texts, part_terms, uncertainty_terms()):
+        return {
+            "part_key": key,
+            "state": EVIDENCE_UNKNOWN,
+            "source": EVIDENCE_SOURCE_ANCHOR_UNCERTAIN,
+        }
+
     if any(term in blob for term in negatives):
         return {"part_key": key, "state": EVIDENCE_ABSENT, "source": "APPROVED_ANCHORS"}
     if any(term in blob for term in positives):
@@ -755,9 +857,11 @@ def _absent_part_terms(canonical_type: str) -> List[str]:
 
 def _normalize_theme(content_theme: Mapping[str, Any] | None) -> Dict[str, Any]:
     theme = dict(content_theme or {})
-    return {
-        "theme_id": _text(theme.get("theme_id")),
-        "parent_theme_id": _text(theme.get("parent_theme_id")) or _text(theme.get("theme_id")),
+    theme_id = _text(theme.get("theme_id"))
+    parent_theme_id = _text(theme.get("parent_theme_id")) or theme_id
+    normalized = {
+        "theme_id": theme_id,
+        "parent_theme_id": parent_theme_id,
         "candidate_role": (_text(theme.get("candidate_role")) or "PRIMARY").upper(),
         "thesis": _text(theme.get("thesis")),
         "approved_claim_refs": [
@@ -767,6 +871,19 @@ def _normalize_theme(content_theme: Mapping[str, Any] | None) -> Dict[str, Any]:
             _text(item) for item in (theme.get("evidence_refs") or []) if _text(item)
         ],
     }
+    # ``thesis`` is a *readable proposition* about why this product is worth
+    # buying; the internal argument IDs that used to be pasted into it now live
+    # only in the source fields below.  Keeping them means "which argument was
+    # this?" stays auditable, while the theme text stops being an ID wearing a
+    # theme's clothes (Review R4: two different themes were declared identical
+    # because both carried the same opaque operator ID shape).
+    provenance = {
+        "argument_id": _text(theme.get("argument_id")),
+        "thesis_source": _text(theme.get("thesis_source")),
+        "thesis_source_ref": _text(theme.get("thesis_source_ref")),
+        "thesis_input_gap": _text(theme.get("thesis_input_gap")),
+    }
+    return {**normalized, **provenance}
 
 
 def compile_mixed_template_contract(
@@ -997,6 +1114,14 @@ def validate_mixed_template_contract(contract: Mapping[str, Any] | None) -> List
     for field in _THEME_REQUIRED_FIELDS:
         if not _text(theme.get(field)):
             errors.append(f"MIXED_CONTRACT_THEME_FIELD_MISSING:{field}")
+    # A declared input gap is reported *by name* so the batch report can say
+    # "there was no readable buying reason to theme this video on" instead of
+    # the generic missing-field code.  It is still a hard error for the mixed
+    # mode: a contract whose theme is an opaque operator ID can be planned but
+    # never judged, and shipping it would re-create Review R4.
+    gap = _text(theme.get("thesis_input_gap"))
+    if gap:
+        errors.append(f"{ERR_MIXED_THEME_INPUT_GAP}:{gap}")
 
     # A subtype may not be asked to display a part its own form excludes.  This
     # is checked here, at compile time, so the promise holds regardless of what
@@ -1639,6 +1764,26 @@ def frozen_unit_timeline(
     return timeline, elapsed
 
 
+def format_mixed_shot_time_range(span: Mapping[str, Any] | None) -> str:
+    """The one string form of a frozen span, for storyboards and prompts.
+
+    Matches the production 15-second convention (``structure_execution_compiler``
+    emits ``"0-3s"``), so a projected storyboard reads like every other one.
+    """
+
+    data = span if isinstance(span, Mapping) else {}
+    try:
+        start = float(data.get("start_seconds") or 0)
+        end = float(data.get("end_seconds") or 0)
+    except (TypeError, ValueError):
+        return ""
+
+    def _fmt(value: float) -> str:
+        return str(int(value)) if float(value).is_integer() else f"{value:g}"
+
+    return f"{_fmt(start)}-{_fmt(end)}s"
+
+
 def validate_mixed_shot_projection(
     units: Any,
     contract: Mapping[str, Any] | None,
@@ -1832,12 +1977,21 @@ def project_mixed_template_onto_units(
 
     # Mirror the same carrier onto the storyboard so every downstream reader sees
     # one consistent per-shot answer.
+    #
+    # The timeline is mirrored too, and that is not cosmetic: the storyboard's own
+    # ``time_range`` is what the renderer puts in the prompt header
+    # (``production_script_renderer`` reads the storyboard, not the units), so
+    # mirroring only the carrier left a 15-second contract able to render as a
+    # 12-second video -- projection reported APPLIED and every check passed,
+    # because the checks only ever looked at ``capture_units`` (I4).
+    undated_shots: List[str] = []
     if isinstance(storyboard, list):
         for shot in storyboard:
             if not isinstance(shot, dict):
                 continue
             source = by_id.get(_unit_id_of(shot))
             if source is None:
+                undated_shots.append(_unit_id_of(shot) or "<no id>")
                 continue
             for key in (
                 "module",
@@ -1854,6 +2008,27 @@ def project_mixed_template_onto_units(
             ):
                 if key in source:
                     shot[key] = source[key]
+            span = timeline.get(_text(source.get("unit_id")))
+            shot_range = format_mixed_shot_time_range(span)
+            if shot_range:
+                shot["time_range"] = shot_range
+                shot["timeline_projection_version"] = TIMELINE_PROJECTION_VERSION
+            else:
+                undated_shots.append(_unit_id_of(shot) or "<no id>")
+
+    # The timeline is derived one way only, so a storyboard shot that could not be
+    # derived must fail loudly rather than keep a timeline of its own.
+    if undated_shots:
+        return {
+            "status": PROJECTION_STATUS_MISMATCH,
+            "errors": [
+                f"{ERR_MIXED_TIMELINE_MISMATCH}:storyboard 第 {position} 镜未能从"
+                f"冻结合同派生时间轴（{shot_id}）"
+                for position, shot_id in enumerate(undated_shots, start=1)
+            ],
+            "applied_units": 0,
+            "timeline": timeline,
+        }
 
     # Re-check the fields that only exist *after* projection (carrier, state).
     post_errors = validate_mixed_shot_projection(unit_list, data)
@@ -1896,6 +2071,19 @@ MIXED_SIGNATURE_VERSION = "mixed-signature-v1"
 MIXED_HISTORY_METADATA_KEY = "mixed_signature"
 MIXED_SIGNATURE_KEY = "final_shot_signature"
 
+# Which side of the plan/render boundary a signature was computed on.  A
+# planned signature answers "what was this item asked to shoot"; a rendered one
+# answers "what did the model actually write".  They are never interchangeable:
+# comparing across the two reports plan differences as if they were delivered
+# differences, which is precisely the confusion this axis exists to remove.
+MIXED_SIGNATURE_KIND_PLANNED = "PLANNED"
+MIXED_SIGNATURE_KIND_RENDERED = "RENDERED"
+
+# The ledger keeps both, under separate keys.  A reservation has a planned
+# signature from the moment it is created and a rendered one only once the model
+# has written the script, so they cannot share one slot.
+MIXED_RENDERED_HISTORY_METADATA_KEY = "mixed_rendered_signature"
+
 # Comparison outcomes.  Names are the review's own vocabulary; no new
 # production state machine is introduced for them.
 MIXED_VERDICT_EXACT_DUPLICATE = "EXACT_DUPLICATE"
@@ -1930,6 +2118,70 @@ MIXED_BLOCKING_VERDICTS = frozenset(
 MIXED_REJECT_DUPLICATE = "MIXED_DUPLICATE_CANDIDATE"
 MIXED_REJECT_EVIDENCE = "MIXED_EVIDENCE_UNVERIFIED"
 
+# Verdicts that also bar a *generated* script from the independent delivery set.
+# Both assert that the shots themselves are a repeat of something already
+# delivered -- only the light/tabletop differs in the second one -- so counting
+# the item as a finished, distinct script would overstate what the batch
+# produced.
+#
+# NEEDS_REVIEW is deliberately absent.  An uncertain similarity is not a repeat;
+# the plan asks for a human to look at those, not for an unbounded model
+# rewrite, so those items are delivered *flagged* instead of withheld.
+MIXED_NON_DELIVERABLE_VERDICTS = frozenset(
+    {
+        MIXED_VERDICT_EXACT_DUPLICATE,
+        MIXED_VERDICT_SURFACE_ONLY,
+    }
+)
+
+
+def mixed_delivery_decision(report: Mapping[str, Any] | None) -> Dict[str, Any]:
+    """May this item be delivered as an *independent* script?
+
+    ``usable`` False means the item must not enter the automatic production
+    candidate set (首帧任务 / 生产脚本表 / 生产交接), because a "完成数" that
+    counted it would not be a count of distinct content.
+
+    ``requires_review`` marks the opposite case: an item that is delivered but
+    whose rendered similarity to something else could not be resolved
+    mechanically.
+    """
+
+    data = report if isinstance(report, Mapping) else {}
+    if not data:
+        return {
+            "usable": True,
+            "verdict": "",
+            "reject_code": "",
+            "requires_review": False,
+            "reason": "",
+        }
+
+    verdict = _text(data.get("review_status")).upper()
+    summary = _text(data.get("difference_summary"))
+    nearest = _text(data.get("nearest_script_id"))
+    if verdict in MIXED_NON_DELIVERABLE_VERDICTS:
+        reason = f"{verdict}｜与 {nearest} 重复：{summary}" if nearest else f"{verdict}｜{summary}"
+        return {
+            "usable": False,
+            "verdict": verdict,
+            "reject_code": MIXED_REJECT_DUPLICATE,
+            "requires_review": False,
+            "nearest_script_id": nearest,
+            "reason": reason,
+        }
+
+    collapsed = bool(data.get("montage_collapsed"))
+    flagged = verdict == MIXED_VERDICT_NEEDS_REVIEW or collapsed
+    return {
+        "usable": True,
+        "verdict": verdict,
+        "reject_code": "",
+        "requires_review": flagged,
+        "nearest_script_id": nearest,
+        "reason": summary if flagged else "",
+    }
+
 
 def _signature_atom(value: Any) -> str:
     """Normalize one comparable token.
@@ -1957,6 +2209,512 @@ def _signature_atoms(values: Any) -> List[str]:
 def _signature_digest(payload: Any) -> str:
     blob = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:20]
+
+
+# ── 成稿特征：版本化 + 可回溯（开发包 B1）──────────────────────────────
+#
+# 为什么单独版本化：旧签名把成稿压成一个 ``visual_content`` 全文 hash，于是
+# "背景换词"会移动 digest，被读成"镜头变了"。这里改成**结构字段 + 表层分离**，
+# 并给特征加版本号，使新→旧签名比较能直接判"不可比"（Review R2 的第二个口子：
+# 旧版不可比时默认成不同）。旧签名没有该字段，一律按 v0 对待。
+MIXED_RENDERED_FEATURE_VERSION = "mixed-rendered-features-v1"
+MIXED_RENDERED_FEATURE_VERSION_LEGACY = "mixed-rendered-features-v0"
+MIXED_RENDERED_FEATURE_SOURCE = "RULE_BASED_V1"
+
+# 可见主体：由 module/carrier_mode 决定，不由措辞决定。
+_VISIBLE_SUBJECT_BY_MODULE = {
+    "HANDHELD_PRODUCT": "PRODUCT_ONLY",
+    "STATIC_PRODUCT": "PRODUCT_AND_SURFACE",
+    "WORN_DETAIL": "PRODUCT_AND_WEARER",
+    "WORN_RELATION": "PRODUCT_AND_WEARER",
+}
+
+# 表层词表（闭环）。只有出现在这里的差异才允许被判成 SURFACE_ONLY；表外的
+# 差异一律不下"只是换了说法"的结论 —— 判错成一个独立变体比判成待复核更贵。
+_SURFACE_HEADS = (
+    "背景", "台面", "桌面", "底布", "衬布", "布料", "毯", "垫",
+    "光线", "光影", "光斑", "光比", "亮度", "曝光", "色温", "色调", "影调",
+    "冷调", "暖调", "氛围", "景深", "虚化",
+    "BGM", "音乐", "配乐", "节奏点",
+)
+_SURFACE_MODIFIERS = (
+    "灰", "灰色", "白", "白色", "米", "米白", "米色", "木", "木色", "原木",
+    "暖", "冷", "柔", "硬", "亮", "暗", "深", "浅", "淡", "素", "净",
+    "逆光", "侧光", "顺光", "顶光", "自然光", "柔光", "窗光", "冷光", "暖光",
+    # 光源与反射类措辞：环境配方会写"侧窗柔光""轻微反射补亮"这类短语，
+    # 词表漏一个，"背景换词"就会掉进"结构差异"。
+    "侧窗", "天然光", "主光", "辅光", "补光", "高光", "反光", "反射光", "漫射光",
+    "反射", "补亮", "明暗", "阴影", "投影", "亮部", "暗部", "层次", "哑光",
+    # 近义措辞：同一套环境配方在实际分镜里会被写成不同说法（"侧窗柔光" 会写成
+    # "侧向窗光"，"浅木台面" 会写成 "木质台面"）。词表只认一种写法，"近义改写"
+    # 就会掉进"结构差异"。这里补的是**布景与光线**的同义词，不含商品名词、不含
+    # 动作词 —— 商品名词与装饰数量另由 ``_PRODUCT_NOUNS`` / ``_COUNT_RE`` 保护。
+    # 表外的新说法不倒向"独立变体"，而是走 NEEDS_REVIEW（提取不确定）。
+    "侧向", "同方向", "窗边", "窗台", "墙面", "地面", "地板", "室内光", "环境光",
+    "自然光线", "环境", "布景", "场景", "木纹", "木质", "原木色", "中性光",
+    "低饱和", "高饱和", "背景色", "环境色", "留白",
+)
+
+# 受保护内容：这些差异**不许**被当成表层措辞删掉。
+#  - 商品原色：颜色词与商品名词的共现（"灰色夹体" vs "灰色背景" 必须分开）
+#  - 装饰数量：数量 + 部件量词
+#  - 已验证部件名
+_PRODUCT_NOUNS = (
+    "商品", "本体", "夹体", "夹子", "发夹", "抓夹", "发饰", "耳饰", "耳钉", "耳环",
+    "手链", "手镯", "腕饰", "戒指", "指环", "发圈", "发带", "头绳", "丝带", "缎带",
+    "花朵", "花瓣", "蝶", "蝴蝶", "珍珠", "水钻", "钻", "链条", "链节", "搭扣",
+    "圈口", "弧架", "簪身", "齿口", "吊坠", "镶嵌", "金属",
+    # 装饰部件与表面的通称。实测成稿会写"乳白色半透明层叠装饰"，而颜色与最近
+    # 的商品名之间隔着 5 个字；不把这些通称算进来，"商品原色"就保护不住 ——
+    # 方案明确要求结构、装饰数量与商品原色不得被当成无关词删掉。
+    "装饰", "图案", "纹样", "花纹", "镶边", "部件", "表面",
+)
+_COLOR_TERMS = (
+    "灰", "灰色", "白", "白色", "米白", "米色", "棕", "棕色", "金", "金色",
+    "银", "银色", "粉", "粉色", "红", "红色", "蓝", "蓝色", "绿", "绿色",
+    "黑", "黑色", "紫", "紫色", "透明", "半透明",
+)
+_COUNT_RE = re.compile(
+    r"(?:[一二两三两三四五六七八九十百千单双半\d]+)\s*"
+    r"(?:层|个|片|只|对|排|枚|颗|条|圈|瓣|支|根|束)"
+)
+# 颜色词与商品名词之间允许隔多少个字才算"在说商品颜色"。
+#
+# 判据不是"附近出现过颜色字"，也不是固定窗口：还要**中间不能夹表层中心词**。
+# 否则 "米白背景下的手与商品画面" 里的 "米白" 会被误判成商品颜色（它离"商品"
+# 只有几个字），而 "商品整体呈灰色" 里的 "灰色" 反而漏判。两个方向都必须看：
+# 中文既可写"灰色夹体"，也可写"商品整体呈灰色"。
+#
+# 窗口取 6：中文里"乳白色半透明层叠装饰"这种修饰串正好 5 个字，取 4 会漏判。
+# 放宽窗口靠的是**表层中心词**继续挡住误判（"米白背景下的手与商品"仍被挡住），
+# 而不是靠窗口窄 —— 误判成"受保护"只会把结果推向待复核，不会变成表层豁免。
+_COLOR_ADJACENCY = 6
+_SURFACE_HEADS_PATTERN = (
+    "背景", "台面", "桌面", "底布", "衬布",
+    "墙面", "墙", "地面", "地板", "布景", "环境",
+)
+
+
+@lru_cache(maxsize=1)
+def surface_terms() -> Tuple[str, ...]:
+    """表层词汇：静态表 ∪ 环境配方里实际使用的措辞。
+
+    环境配方是这条线真正会写进分镜的布景词来源（浅木台面 / 米白背景 /
+    侧窗柔光 …）。手工词表漏一个词，"背景换词"就会掉进"结构差异"，
+    所以这里直接从配置采集，按长度降序供最长匹配使用。
+    """
+
+    terms = set(_SURFACE_HEADS) | set(_SURFACE_MODIFIERS)
+    try:
+        definition = load_mixed_template_definition()
+    except Exception:  # noqa: BLE001 - 读不到配置就用静态表
+        definition = {}
+    recipes = definition.get("environment_recipes")
+    if isinstance(recipes, Mapping):
+        for recipe in recipes.values():
+            if not isinstance(recipe, Mapping):
+                continue
+            for key in ("environment", "label"):
+                value = recipe.get(key)
+                if not isinstance(value, str):
+                    continue
+                for chunk in re.split(r"[、，,；;。/\s]+", value):
+                    chunk = chunk.strip()
+                    if 2 <= len(chunk) <= 12:
+                        terms.add(chunk)
+    return tuple(sorted(terms, key=len, reverse=True))
+
+
+def _feature_text(value: Any) -> str:
+    return _text(value)
+
+
+def rendered_visible_subject(module: Any) -> str:
+    return _VISIBLE_SUBJECT_BY_MODULE.get(_text(module).upper(), "UNKNOWN")
+
+
+def rendered_action_state(product_state: Any) -> str:
+    """冻结物理状态 → 可比较的机械状态（不含任何措辞）。"""
+
+    state = _text(product_state).upper()
+    return {
+        "ALREADY_WORN": "WORN",
+        "WORN": "WORN",
+        "HELD": "HELD",
+        "RESTING_ON_SURFACE": "RESTING",
+        "PLACED_ON_SURFACE": "RESTING",
+    }.get(state, state or "UNSPECIFIED")
+
+
+def protected_phrases(text: Any) -> List[str]:
+    """不受表层豁免保护的片段：商品原色、装饰数量、已验证部件名。
+
+    ``灰色背景`` 与 ``灰色夹体`` 必须分开：前者是布景措辞，后者是商品原色。
+    判据是颜色词是否**紧邻商品名词**，不是"出现过某个颜色字"。
+    """
+
+    source = _text(text)
+    if not source:
+        return []
+    found: List[str] = []
+    for match in _COUNT_RE.finditer(source):
+        found.append(_signature_atom(match.group(0)))
+    for noun in _PRODUCT_NOUNS:
+        start = 0
+        while True:
+            index = source.find(noun, start)
+            if index < 0:
+                break
+            noun_end = index + len(noun)
+            for color in _COLOR_TERMS:
+                for color_index in _find_all(source, color):
+                    if _color_binds_to_product(source, color_index, len(color), index, noun_end):
+                        found.append(_signature_atom(f"{color}{noun}"))
+            start = noun_end
+    return sorted({item for item in found if item})
+
+
+def _find_all(source: str, needle: str) -> List[int]:
+    out: List[int] = []
+    cursor = 0
+    while True:
+        index = source.find(needle, cursor)
+        if index < 0:
+            return out
+        out.append(index)
+        cursor = index + 1
+
+
+def _color_binds_to_product(
+    source: str,
+    color_index: int,
+    color_len: int,
+    noun_index: int,
+    noun_end: int,
+) -> bool:
+    """这个颜色词是在说商品，还是在说布景？
+
+    三种情况都算"说商品"：紧邻、隔少量字（"整体呈灰色"）、或写成"灰色夹体"。
+    只要颜色与商品之间存在表层中心词（"米白**背景**下的手与商品"），就不算 ——
+    那是布景颜色，属于表层措辞。
+    """
+
+    if color_index + color_len <= noun_index:
+        between = source[color_index + color_len: noun_index]
+    elif color_index >= noun_end:
+        between = source[noun_end: color_index]
+    else:
+        return True  # 与商品名词重叠，必然在修饰它
+    if len(between) > _COLOR_ADJACENCY:
+        return False
+    return not any(head in between for head in _SURFACE_HEADS_PATTERN)
+
+
+# 表层词按长度降序：先用最长匹配，避免"柔光"被"光"抢先切碎。
+# 实际词表由 ``surface_terms()`` 组装（静态表 ∪ 环境配方措辞）。
+
+
+def _surface_spans(source: str, protected: Sequence[str]) -> List[Tuple[int, int]]:
+    """表层措辞的字符区间。
+
+    从最长匹配出发，再向左吸收紧邻的表层修饰词 —— 这样 ``米白背景``、
+    ``浅木台面``、``侧窗柔光`` 各自成一个整体区间，而不是把词切碎。
+    与受保护短语重叠的区间一律不返回（那句话在说商品，不是在说布景）。
+    """
+
+    terms = surface_terms()
+    spans: List[Tuple[int, int]] = []
+    cursor = 0
+    while cursor < len(source):
+        matched = None
+        for term in terms:
+            if source.startswith(term, cursor):
+                matched = term
+                break
+        if not matched:
+            cursor += 1
+            continue
+        start, end = cursor, cursor + len(matched)
+        # 向左吸收紧邻的表层修饰词
+        extended = True
+        while extended:
+            extended = False
+            for term in terms:
+                if start - len(term) >= 0 and source.startswith(term, start - len(term)):
+                    start -= len(term)
+                    extended = True
+                    break
+        atom = _signature_atom(source[start:end])
+        if atom and not any(
+            atom and (atom in item or item in atom) for item in protected
+        ):
+            spans.append((start, end))
+        cursor = end
+    # 去掉被更长区间包住的碎片（"米白" 被 "米白背景" 包住），避免短语表被噪声撑满。
+    kept: List[Tuple[int, int]] = []
+    for span in sorted(spans, key=lambda item: (item[0], -(item[1] - item[0]))):
+        if any(span[0] >= outer[0] and span[1] <= outer[1] and span != outer for outer in spans):
+            continue
+        if span not in kept:
+            kept.append(span)
+    return sorted(kept)
+
+
+def surface_phrases(text: Any) -> List[str]:
+    """表层片段：环境、光线、台面、音乐等近义措辞所在的短语。"""
+
+    source = _text(text)
+    if not source:
+        return []
+    protected = protected_phrases(source)
+    return sorted(
+        {
+            atom
+            for start, end in _surface_spans(source, protected)
+            for atom in (_signature_atom(source[start:end]),)
+            if atom
+        }
+    )
+
+
+def strip_surface(text: Any) -> str:
+    """去掉表层片段后剩下的骨架 —— 用于判断"差异是否全在表层"。"""
+
+    source = _text(text)
+    if not source:
+        return ""
+    protected = protected_phrases(source)
+    spans = _surface_spans(source, protected)
+    if not spans:
+        return _signature_atom(source)
+    out: List[str] = []
+    cursor = 0
+    for start, end in sorted(spans):
+        if start < cursor:
+            continue
+        out.append(source[cursor:start])
+        cursor = end
+    out.append(source[cursor:])
+    return _signature_atom("".join(out))
+
+
+def _shot_framing_phrase(shot: Mapping[str, Any]) -> str:
+    """成稿自己声明的取景尺度。
+
+    成稿不写 ``view_scope``（那是冻结合同的取值域），但每一镜都写了 ``camera``，
+    开头就是取景描述（"竖屏佩戴近景，手机固定在鞋柜边，从后脑与侧后方记录…"）。
+    取**第一小句**：既是成稿自己的声明，又不会因为后文的机位与剪切措辞变化而
+    让取景尺度跟着漂移。成稿什么都没写才回落到冻结合同的 ``view_scope``。
+
+    这一步很关键：若取景一律以冻结合同为准，计划里的模板就会决定成稿 digest，
+    I3 修好的"计划抵消正文相同"会原地复现（同一条正文配不同模板 → 签名不同）。
+    """
+
+    for key in ("view_scope", "framing"):
+        value = _text(shot.get(key))
+        if value:
+            return value.upper() if key == "view_scope" else _signature_atom(value)
+    camera = _text(shot.get("camera"))
+    if not camera:
+        return ""
+    for boundary in ("，", "；", "。", ",", ";"):
+        index = camera.find(boundary)
+        if index > 0:
+            camera = camera[:index]
+            break
+    return _signature_atom(camera)[:24]
+
+
+def rendered_shot_features(
+    shot: Mapping[str, Any],
+    unit: Mapping[str, Any],
+    position: int,
+    *,
+    bound_by_id: bool = False,
+) -> Dict[str, Any]:
+    """一镜的成稿特征：结构字段 + 两个原句 + 回溯路径。
+
+    ``observed_part_or_relation`` / ``action_or_state`` / ``framing_scale`` /
+    ``actual_module`` 取冻结单元：它们是**硬边界**，成稿必须在该边界内执行，
+    而 A 包的一致性检查已经证明交付提示词确实执行了它们。措辞差异不进结构字段。
+
+    ``bound_by_id`` 记的是这一镜的冻结单元是**按 ``capture_unit_id`` 配到的**
+    还是按位置配到的。位置配对会把"换顺序"这件事抹掉（结构字段读的是单元列表，
+    而单元列表没变），于是真实换序看起来跟没动过一样。``position`` 始终是交付
+    顺序里的位置，用于回溯原文；结构字段的来源则按实际配对方式标注。
+
+    **字段来源：成稿先声明，冻结单元只补位。** 观众收到的是这一镜*实际写了*
+    什么，所以 ``module`` / ``observation_job`` / ``product_state`` 先读成稿
+    自己的声明；成稿没声明（旧稿、夹具）才回落到冻结单元，并用 ``feature_source``
+    如实标注。成稿不声明取景边界（``view_scope``），所以 ``framing_scale`` 由
+    冻结单元提供 —— 那是允许范围，不是措辞。若反过来一律以冻结单元为准，
+    计划里的模板顺序就会决定成稿 digest，I3 修的"计划抵消正文相同"会原地复现。
+    """
+
+    unit = unit if isinstance(unit, Mapping) else {}
+    shot = shot if isinstance(shot, Mapping) else {}
+    module = _text(unit.get("module")).upper()
+    job = _text(unit.get("observation_job"))
+    unit_ref = (
+        f"capture_units[capture_unit_id={_text(unit.get('unit_id'))}]"
+        if bound_by_id
+        else f"capture_units[{position - 1}]"
+    )
+    shot_ref = f"storyboard[{position - 1}]"
+
+    def _prefer(field: str, normalise) -> Tuple[str, str]:
+        """成稿声明优先，成稿没声明才回落到冻结单元；返回 (值, 来源)。"""
+
+        raw = shot.get(field)
+        if _text(raw):
+            return normalise(raw), shot_ref
+        return normalise(unit.get(field)), unit_ref
+
+    module, module_ref = _prefer("module", lambda value: _text(value).upper())
+    job, job_ref = _prefer("observation_job", _text)
+    state, state_ref = _prefer("product_state", rendered_action_state)
+    # 取景尺度先读成稿自己的声明（view_scope/framing/camera 首句），成稿什么都没
+    # 写才回落到冻结合同的 view_scope —— 那是允许范围，不是这镜实际拍了什么。
+    framing = _shot_framing_phrase(shot)
+    if framing:
+        framing_ref = shot_ref
+    else:
+        framing = _text(unit.get("view_scope")).upper()
+        framing_ref = unit_ref
+    return {
+        "sequence_position": int(position),
+        "actual_module": module,
+        "visible_subject": rendered_visible_subject(module),
+        "observed_part_or_relation": job,
+        "observation_supported": bool(job) and _signature_atom(job) in authored_observation_jobs(),
+        "action_or_state": state,
+        "framing_scale": framing,
+        "unit_binding": "CAPTURE_UNIT_ID" if bound_by_id else "POSITION",
+        # 每个特征出自成稿还是出自冻结边界。报告要能回答"这句话/这个模块是谁定的"。
+        "feature_source": {
+            "actual_module": "SHOT" if module_ref == shot_ref else "CONTRACT",
+            "observed_part_or_relation": "SHOT" if job_ref == shot_ref else "CONTRACT",
+            "action_or_state": "SHOT" if state_ref == shot_ref else "CONTRACT",
+            "framing_scale": "SHOT" if framing_ref == shot_ref else "CONTRACT",
+        },
+        # 原句保留：报告要能回答"这句话出自哪里"，审计要能回到原文。
+        "rendered_visual_content": _text(shot.get("visual_content")),
+        "rendered_character_action": _text(shot.get("character_action")),
+        "source_refs": {
+            "actual_module": f"{module_ref}.module",
+            "visible_subject": f"{module_ref}.module",
+            "observed_part_or_relation": f"{job_ref}.observation_job",
+            "action_or_state": f"{state_ref}.product_state",
+            "framing_scale": f"{framing_ref}.camera" if framing_ref == shot_ref
+            else f"{framing_ref}.view_scope",
+            "rendered_visual_content": f"{shot_ref}.visual_content",
+            "rendered_character_action": f"{shot_ref}.character_action",
+        },
+    }
+
+
+_STRUCTURAL_FEATURE_KEYS = (
+    "actual_module",
+    "visible_subject",
+    "observed_part_or_relation",
+    "action_or_state",
+    "framing_scale",
+)
+
+
+def structural_shot_tuple(shot: Mapping[str, Any]) -> List[str]:
+    """结构指纹：与顺序无关地取该镜的结构字段。
+
+    同时接受成稿特征与计划特征（``_mixed_unit_visual``）两种形状 —— 计划侧
+    用的是 ``module`` / ``observation_job`` / ``product_state``，成稿侧用的是
+    ``actual_*`` 前缀。归一化在这里做一次，比较层就不再关心版本。
+    """
+
+    data = shot if isinstance(shot, Mapping) else {}
+    module = _text(data.get("actual_module") or data.get("module")).upper()
+    subject = _text(data.get("visible_subject")) or rendered_visible_subject(module)
+    job = _signature_atom(
+        data.get("observed_part_or_relation") or data.get("observation_job")
+    )
+    state = _text(data.get("action_or_state")) or rendered_action_state(
+        data.get("product_state")
+    )
+    framing = _text(data.get("framing_scale") or data.get("view_scope")).upper()
+    return [module, subject, job, state, framing]
+
+
+def feature_version_of(visual: Mapping[str, Any]) -> str:
+    """该签名用的是哪一版特征提取。缺字段 = 旧版（v0），不是"未知"。"""
+
+    data = visual if isinstance(visual, Mapping) else {}
+    return _text(data.get("feature_version")) or MIXED_RENDERED_FEATURE_VERSION_LEGACY
+
+
+def rendered_text_delta(
+    candidate_visual: Mapping[str, Any],
+    reference_visual: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """成稿措辞差异的归因：全在表层，还是碰到了受保护内容。
+
+    比较必须区分"灰色背景"与"灰色商品"：前者是表层措辞，后者是商品原色。
+    受保护片段（商品原色 / 装饰数量 / 已确认部件）一旦不同，就不允许判成
+    SURFACE_ONLY。
+    """
+
+    def _texts(visual: Mapping[str, Any]) -> List[str]:
+        out: List[str] = []
+        for shot in (visual.get("shots") or []):
+            if not isinstance(shot, Mapping):
+                continue
+            out.append(_text(shot.get("rendered_visual_content")))
+            out.append(_text(shot.get("rendered_character_action")))
+        return out
+
+    cand_texts = _texts(candidate_visual)
+    ref_texts = _texts(reference_visual)
+    if not cand_texts or not ref_texts or not any(cand_texts + ref_texts):
+        # 两边都没有可比原文（计划签名、旧签名、只剩结构字段的夹具）。这里的
+        # `attributable=False` 与"原文相同"必须分开：否则空文本互相比等会被读成
+        # "正文一字未改"，进而把只改了口播卖点的稿判成"完全相同"。
+        return {
+            "surface_only": False,
+            "protected_differ": [],
+            "skeleton_differ": [],
+            "attributable": False,
+            "texts_identical": None,
+        }
+    # None = 无原文可比（计划签名/旧签名）。这与 False（有原文且不同）必须分开：
+    # 前者退回签名摘要比较，后者才允许下"只是换说法"的结论。
+    texts_identical = cand_texts == ref_texts
+    cand_protected: List[str] = []
+    ref_protected: List[str] = []
+    cand_skeleton: List[str] = []
+    ref_skeleton: List[str] = []
+    for text in cand_texts:
+        cand_protected.extend(protected_phrases(text))
+        cand_skeleton.append(strip_surface(text))
+    for text in ref_texts:
+        ref_protected.extend(protected_phrases(text))
+        ref_skeleton.append(strip_surface(text))
+    protected_differ = sorted(set(cand_protected) ^ set(ref_protected))
+    skeleton_differ = sorted(
+        {
+            item
+            for left, right in zip(cand_skeleton, ref_skeleton)
+            if left != right
+            for item in (left, right)
+            if item
+        }
+    )
+    surface_only = not protected_differ and not skeleton_differ
+    return {
+        "surface_only": surface_only,
+        "protected_differ": protected_differ,
+        "skeleton_differ": skeleton_differ,
+        "texts_identical": texts_identical,
+        # 能否把这次差异归因到表层。归因不了就不许下"只是换了说法"的结论。
+        "attributable": True,
+    }
 
 
 @lru_cache(maxsize=1)
@@ -2011,20 +2769,208 @@ def authored_observation_jobs() -> frozenset:
     return frozenset(authored)
 
 
-def mixed_semantic_signature(contract: Mapping[str, Any] | None) -> Dict[str, Any]:
-    """主题命题 / 观众问题 / 核心证据所对应的具体意义。
+def _first_sentence(text: Any) -> str:
+    source = _text(text)
+    if not source:
+        return ""
+    for boundary in ("。", "！", "？", ".", "!", "?", "\n"):
+        index = source.find(boundary)
+        if index > 0:
+            return source[: index + 1]
+    return source
 
-    The *digest* deliberately excludes the thesis prose.  ``theme_id`` rotates
-    per item and a thesis can be paraphrased without changing what the viewer
-    learns, so neither may create difference on its own -- that is exactly the
-    hole Review #3 found.  Only the claim/evidence the shots are allowed to
-    assert, plus the observation vocabulary the product can actually show,
-    counts as meaning.  The prose is still recorded for the report.
+
+def mixed_rendered_semantic_signature(
+    script: Mapping[str, Any] | None,
+    base: Mapping[str, Any] | None,
+    rendered_shots: Sequence[Mapping[str, Any]] = (),
+) -> Dict[str, Any]:
+    """主题语义：读**成稿**，不读计划。
+
+    R4 的两个口子都在这里堵：
+
+    1. 旧 digest 对 ``approved_claim_refs`` / ``evidence_refs`` 求 hash。那两个
+       列表是**商品事实**引用，不同主题只要引用同一组商品事实就会算出同一个
+       digest —— 于是"不同主题"被判成相同。商品事实只该回答"用了哪些商品事实"。
+    2. ``thesis`` 在规划期会退化成内部 ID（实测为
+       ``ARGUMENT_OPERATOR_PCS_..._PCL_...``）。内部 ID 不是主题文案，不能当作
+       观众问题，也不能成为主题判定的依据。
+
+    现在 digest 只由**成稿里实际说出口的购买理由**（``selling_argument_realization_zh``）
+    与结构化的观众问题（``hook_id`` + ``voiceover_context_mode``）决定；
+    ``selected_selling_argument_id`` 只作为来源保留，不参与 digest。
+    对不上的取值一律记 ``input_gap``，不用内部 ID 冒充主题文案。
+    """
+
+    data = script if isinstance(script, Mapping) else {}
+    contract = base if isinstance(base, Mapping) else {}
+    theme = (
+        contract.get("content_theme")
+        if isinstance(contract.get("content_theme"), Mapping)
+        else {}
+    )
+    voice = (
+        data.get("continuous_voiceover")
+        if isinstance(data.get("continuous_voiceover"), Mapping)
+        else {}
+    )
+    core_value = _text(
+        voice.get("selling_argument_realization_zh")
+        or voice.get("selling_argument_realization")
+    )
+    audience_question = _first_sentence(voice.get("chinese_translation"))
+    hook_id = _text(voice.get("hook_id"))
+    context_mode = _text(voice.get("voiceover_context_mode")).upper()
+    claim_source_id = _text(voice.get("selected_selling_argument_id"))
+
+    # 读得出来就写读出来的；读不出来就明确记缺口，不用内部 ID 顶上。
+    thesis = _text(theme.get("thesis"))
+    input_gap = ""
+    if not is_readable_theme_proposition(thesis, theme):
+        input_gap = MIXED_THESIS_INPUT_GAP_READABILITY
+        thesis = core_value
+    if not core_value:
+        input_gap = "|".join(filter(None, (input_gap, "CORE_VALUE_UNAVAILABLE")))
+    if not hook_id and not context_mode and not audience_question:
+        input_gap = "|".join(filter(None, (input_gap, "AUDIENCE_QUESTION_UNAVAILABLE")))
+
+    # 结构化的观众问题 + 实际说出口的购买理由 = 语义。措辞归一，标点与大小写
+    # 不算差异（"看着柔美又梦幻。" 与 "看着柔美又梦幻" 是同一句）。
+    meaning = {
+        "hook_id": hook_id,
+        "voiceover_context_mode": context_mode,
+        "core_value": _signature_atom(core_value),
+    }
+    visible_answer = sorted(
+        {
+            _text(shot.get("observed_part_or_relation"))
+            for shot in rendered_shots
+            if isinstance(shot, Mapping) and _text(shot.get("observed_part_or_relation"))
+        }
+    )
+    return {
+        "proposition": thesis,
+        "audience_question": audience_question,
+        "core_value": core_value,
+        "visible_answer": visible_answer,
+        "claim_type": hook_id or context_mode,
+        "claim_source_id": claim_source_id,
+        "input_gap": input_gap,
+        "theme_label": _text(theme.get("theme_id")),
+        "digest": _signature_digest(meaning),
+        "source_refs": {
+            "core_value": "script.continuous_voiceover.selling_argument_realization_zh",
+            "audience_question": "script.continuous_voiceover.chinese_translation",
+            "hook_id": "script.continuous_voiceover.hook_id",
+            "voiceover_context_mode": "script.continuous_voiceover.voiceover_context_mode",
+            "claim_source_id": "script.continuous_voiceover.selected_selling_argument_id",
+            "visible_answer": "storyboard[*] × capture_units[*].observation_job",
+        },
+        # 计划侧只留作审计：它回答"原本要被安排成什么主题"，不参与判定。
+        "planned": {
+            "theme_id": _text(theme.get("theme_id")),
+            "thesis": _text(theme.get("thesis")),
+            "approved_claim_refs": _signature_atoms(theme.get("approved_claim_refs")),
+            "evidence_refs": _signature_atoms(theme.get("evidence_refs")),
+            "candidate_role": _text(theme.get("candidate_role")),
+        },
+    }
+
+
+def is_readable_theme_proposition(
+    value: Any, theme: Mapping[str, Any] | None = None
+) -> bool:
+    """Can ``value`` be shown to a reviewer as *what this video claims*?
+
+    Not readable: empty text, the ``UNAVAILABLE``-family sentinels the upstream
+    books use for "no value", anything shaped like an internal ID, and any
+    string that merely repeats one of the theme's own identifiers.
+    """
+
+    text = _text(value).strip()
+    if not text:
+        return False
+    if text.upper() in _MIXED_THESIS_UNREADABLE_SENTINELS:
+        return False
+    if text.upper().startswith(_MIXED_THESIS_ID_PREFIXES):
+        return False
+    data = theme if isinstance(theme, Mapping) else {}
+    markers = {
+        _text(data.get("theme_id")),
+        _text(data.get("parent_theme_id")),
+        _text(data.get("candidate_role")),
+        _text(data.get("argument_id")),
+    }
+    markers.discard("")
+    return text not in markers
+
+
+def resolve_theme_proposition(
+    candidates: Any,
+) -> Dict[str, str]:
+    """从候选来源里挑第一条**可读**命题，来源一并留下。
+
+    ``candidates`` 是 ``[{"source": 短标签, "ref": 来源路径, "text": 文本}, ...]``，
+    **列表顺序即优先级**。返回 ``thesis`` / ``thesis_source`` /
+    ``thesis_source_ref`` / ``thesis_input_gap`` 四项。全部读不出来时 ``thesis``
+    为空并给出缺口码 —— 宁可口径上少一条主题，也不拿内部 ID 冒充主题文案
+    （Review R4）。
+    """
+
+    for entry in candidates if isinstance(candidates, (list, tuple)) else []:
+        if not isinstance(entry, Mapping):
+            continue
+        text = _text(entry.get("text")).strip()
+        if not is_readable_theme_proposition(text):
+            continue
+        return {
+            "thesis": text,
+            "thesis_source": _text(entry.get("source")),
+            "thesis_source_ref": _text(entry.get("ref")),
+            "thesis_input_gap": "",
+        }
+    return {
+        "thesis": "",
+        "thesis_source": "",
+        "thesis_source_ref": "",
+        "thesis_input_gap": MIXED_THESIS_INPUT_GAP_READABILITY,
+    }
+
+
+def theme_proposition(theme: Mapping[str, Any] | None) -> Tuple[str, str]:
+    """主题命题：只接受**可读文案**，内部 ID 不算命题。
+
+    规划期的 ``thesis`` 曾退化成 ``ARGUMENT_OPERATOR_PCS_..._PCL_...``（实测四条
+    真实稿全部如此）。那是内部 ID，既不是观众问题也不是购买理由；把它当主题
+    文案，报告看起来"有主题"，实际上什么也没说（Review R4）。返回
+    ``(命题, 输入缺口)``：读不出来就明确记缺口，不用内部 ID 冒充。
+
+    规划期的写入侧现在由 ``resolve_theme_proposition`` 负责，本函数是读取侧的
+    同一套判据 —— 历史包里已经写坏的 ``thesis`` 依然会被读成缺口。
+    """
+
+    data = theme if isinstance(theme, Mapping) else {}
+    if is_readable_theme_proposition(data.get("thesis"), data):
+        return _text(data.get("thesis")).strip(), ""
+    return "", MIXED_THESIS_INPUT_GAP_READABILITY
+
+
+def mixed_product_fact_signature(contract: Mapping[str, Any] | None) -> Dict[str, Any]:
+    """这一条**用了哪些商品事实** —— 与主题语义分开的一支。
+
+    它回答的只是"引用了哪些 claim/evidence、商品有哪些已确认结构"，因此允许
+    按 ID 比较。旧实现把 claim/evidence 的 ID 哈希当成主题语义，于是两个*不同*
+    主题只要引用同一组商品事实，就被判成同一个主题（Review R4）—— 商品事实
+    不是主题，主题是观众问题与购买理由。
     """
 
     data = contract if isinstance(contract, Mapping) else {}
-    theme = data.get("content_theme") if isinstance(data.get("content_theme"), Mapping) else {}
-    meaning = {
+    theme = (
+        data.get("content_theme")
+        if isinstance(data.get("content_theme"), Mapping)
+        else {}
+    )
+    payload = {
         "claims": _signature_atoms(theme.get("approved_claim_refs")),
         "evidence": _signature_atoms(theme.get("evidence_refs")),
         "observations": _signature_atoms(data.get("observation_focus")),
@@ -2033,14 +2979,60 @@ def mixed_semantic_signature(contract: Mapping[str, Any] | None) -> Dict[str, An
             for key, state in (data.get("structure_facts") or {}).items()
             if _text(key)
         },
+        "verified_parts": _mixed_verified_parts(data),
     }
     return {
-        "proposition": _text(theme.get("thesis")),
-        "audience_question": _text(theme.get("thesis")),
+        **payload,
+        "digest": _signature_digest(payload),
+        "source_refs": {
+            "claims": "content_theme.approved_claim_refs",
+            "evidence": "content_theme.evidence_refs",
+            "structure": "structure_facts",
+            "verified_parts": "structure_facts（三态：VERIFIED/ABSENT/UNKNOWN）",
+        },
+        "note": "商品事实轴：只回答用了哪些商品事实，不参与主题语义判定",
+    }
+
+
+def mixed_semantic_signature(contract: Mapping[str, Any] | None) -> Dict[str, Any]:
+    """主题语义 = 观众问题 + 购买理由（**可读文案**）。
+
+    The digest excludes the theme id and the claim/evidence ids: ``theme_id``
+    rotates per item, and the claim set only says which product facts were
+    quoted.  Two different buying reasons built on the same product facts
+    would otherwise collapse into one theme -- exactly the hole Review R4
+    found.
+    """
+
+    data = contract if isinstance(contract, Mapping) else {}
+    theme = data.get("content_theme") if isinstance(data.get("content_theme"), Mapping) else {}
+    proposition, gap = theme_proposition(theme)
+    core_value = _text(theme.get("core_value") or theme.get("value_proposition"))
+    audience_question = _text(theme.get("audience_question"))
+    if not proposition:
+        proposition = core_value
+    if not core_value:
+        core_value = proposition
+    if not proposition:
+        gap = "|".join(filter(None, (gap, "THEME_PROPOSITION_UNAVAILABLE")))
+    if not audience_question:
+        gap = "|".join(filter(None, (gap, "AUDIENCE_QUESTION_UNAVAILABLE")))
+    meaning = {
+        "proposition": _signature_atom(proposition),
+        "audience_question": _signature_atom(audience_question),
+    }
+    return {
+        "proposition": proposition,
+        "core_value": core_value,
+        "audience_question": audience_question,
         "theme_label": _text(theme.get("theme_id")),
-        "claims": meaning["claims"],
-        "evidence": meaning["evidence"],
-        "observations": meaning["observations"],
+        "input_gap": gap,
+        "claims": _signature_atoms(theme.get("approved_claim_refs")),
+        "evidence": _signature_atoms(theme.get("evidence_refs")),
+        "observations": _signature_atoms(data.get("observation_focus")),
+        # 商品事实与 claim/evidence 的 ID 属于**商品事实轴**
+        # （``mixed_product_fact_signature``），不再参与主题语义 digest。
+        "product_fact_digest_source": "mixed_product_fact_signature",
         "digest": _signature_digest(meaning),
     }
 
@@ -2104,19 +3096,20 @@ def mixed_visual_signature(contract: Mapping[str, Any] | None) -> Dict[str, Any]
         shot["opening_job"] = shot["observation_job"] if position == 1 else ""
         shots.append(shot)
     verified_parts = _mixed_verified_parts(data)
-    return {
+    payload = {
+        "signature_kind": MIXED_SIGNATURE_KIND_PLANNED,
         "template_id": _text(data.get("template_id")),
         "face_policy": _text(data.get("face_policy")).upper(),
         "verified_parts": verified_parts,
         "shots": shots,
-        "digest": _signature_digest(
-            {
-                "template_id": _text(data.get("template_id")),
-                "face_policy": _text(data.get("face_policy")).upper(),
-                "verified_parts": verified_parts,
-                "shots": shots,
-            }
-        ),
+    }
+    return {
+        "signature_kind": MIXED_SIGNATURE_KIND_PLANNED,
+        "template_id": payload["template_id"],
+        "face_policy": payload["face_policy"],
+        "verified_parts": verified_parts,
+        "shots": shots,
+        "digest": _signature_digest(payload),
     }
 
 
@@ -2151,16 +3144,25 @@ def mixed_signature_bundle(contract: Mapping[str, Any] | None) -> Dict[str, Any]
         "semantic": mixed_semantic_signature(data),
         "visual": mixed_visual_signature(data),
         "surface": mixed_surface_signature(data),
+        # 商品事实单独一支：它回答"用了哪些商品事实"，与"主题是什么"是两件事。
+        "product_fact": mixed_product_fact_signature(data),
     }
 
 
-def mixed_reference_signature(record: Mapping[str, Any] | None) -> Dict[str, Any]:
+def _ledger_reference(
+    record: Mapping[str, Any] | None,
+    metadata_key: str,
+    *,
+    missing_reason: str,
+) -> Dict[str, Any]:
     """A comparable reference built from one historical usage record.
 
-    ``complete`` is False when the record predates these signatures.  A missing
-    final-shot set is *not* reconstructed from the legacy scene signature: a
-    fabricated reference would silently mark real repeats as new content, which
-    is the failure this whole mechanism exists to prevent.
+    ``complete`` is False when the record carries no bundle under
+    ``metadata_key``, when the bundle predates these signatures, or when its
+    version is not the one this module computes.  A missing final-shot set is
+    *not* reconstructed from the legacy scene signature: a fabricated reference
+    would silently mark real repeats as new content, which is the failure this
+    whole mechanism exists to prevent.
     """
 
     data = record if isinstance(record, Mapping) else {}
@@ -2181,12 +3183,12 @@ def mixed_reference_signature(record: Mapping[str, Any] | None) -> Dict[str, Any
         or _text(data.get("usage_id"))
         or _text(data.get("direction_id"))
     )
-    bundle = metadata.get(MIXED_HISTORY_METADATA_KEY)
+    bundle = metadata.get(metadata_key)
     if not isinstance(bundle, Mapping) or not bundle:
         return {
             "identity": identity,
             "complete": False,
-            "reason": "HISTORY_INCOMPLETE",
+            "reason": missing_reason,
             "signature": {},
             "signature_version": "",
         }
@@ -2202,7 +3204,7 @@ def mixed_reference_signature(record: Mapping[str, Any] | None) -> Dict[str, Any
         return {
             "identity": identity,
             "complete": False,
-            "reason": "HISTORY_INCOMPLETE",
+            "reason": missing_reason,
             "signature": dict(bundle),
             "signature_version": MIXED_SIGNATURE_VERSION,
         }
@@ -2213,6 +3215,122 @@ def mixed_reference_signature(record: Mapping[str, Any] | None) -> Dict[str, Any
         "signature": dict(bundle),
         "signature_version": MIXED_SIGNATURE_VERSION,
     }
+
+
+def ledger_row_identity(record: Mapping[str, Any] | None) -> Dict[str, str]:
+    """The identifying fields of one usage-ledger row.
+
+    ``batch_id`` / ``batch_item_id`` are written into ``metadata_json`` at
+    reservation time, ``usage_id`` is the primary key, and ``script_id`` appears
+    once a script was produced.  Reading all four in one place keeps the "is
+    this row mine?" test from drifting between the planner and the executor.
+    """
+
+    row = record if isinstance(record, Mapping) else {}
+    # The ledger persists metadata as one JSON column and ``SELECT *`` hands back
+    # ``metadata_json``, while in-memory callers pass the parsed ``metadata``
+    # dict.  Both shapes must work: reading only one of them makes every row
+    # look like it belongs to nobody, and the "my own row" filter then silently
+    # stops filtering.
+    metadata = row.get("metadata")
+    if metadata is None:
+        metadata = row.get("metadata_json")
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except (TypeError, ValueError):
+            metadata = {}
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    return {
+        "usage_id": _text(row.get("usage_id")) or _text(metadata.get("usage_id")),
+        "batch_id": _text(row.get("batch_id")) or _text(metadata.get("batch_id")),
+        "batch_item_id": _text(row.get("batch_item_id"))
+        or _text(metadata.get("batch_item_id")),
+        "script_id": _text(row.get("script_id")) or _text(metadata.get("script_id")),
+    }
+
+
+def ledger_row_is_own_record(
+    record: Mapping[str, Any] | None,
+    *,
+    batch_ids: Any = (),
+    usage_ids: Any = (),
+    batch_item_ids: Any = (),
+    script_ids: Any = (),
+) -> bool:
+    """Does this ledger row belong to the batch being processed *right now*?
+
+    Any single match is enough: the four keys are written at different moments
+    (usage id and batch id at reservation, script id at generation), so a row
+    that survived a partial run may carry only some of them.  When every key set
+    is empty this always returns ``False``, so a fresh plan filters nothing it
+    did not filter before.
+
+    Why the question matters: resuming a batch re-plans (or re-runs) it, and its
+    own earlier rows come back as "history".  Every candidate would then be
+    compared against its own previous incarnation, read as a duplicate, and the
+    batch would deliver nothing -- Review R3.
+    """
+
+    wanted = {
+        "batch_id": {_text(item) for item in (batch_ids or ()) if _text(item)},
+        "usage_id": {_text(item) for item in (usage_ids or ()) if _text(item)},
+        "batch_item_id": {
+            _text(item) for item in (batch_item_ids or ()) if _text(item)
+        },
+        "script_id": {_text(item) for item in (script_ids or ()) if _text(item)},
+    }
+    if not any(wanted.values()):
+        return False
+    identity = ledger_row_identity(record)
+    for key, values in wanted.items():
+        value = identity.get(key) or ""
+        if value and value in values:
+            return True
+    return False
+
+
+def mixed_reference_signature(record: Mapping[str, Any] | None) -> Dict[str, Any]:
+    """The *planned* signature of one historical usage record.
+
+    This is the reference planning compares against: it is the reservation the
+    ledger made, which is all that exists before anything has been generated.
+    """
+
+    return _ledger_reference(
+        record, MIXED_HISTORY_METADATA_KEY, missing_reason="HISTORY_INCOMPLETE"
+    )
+
+
+def mixed_rendered_reference_signature(
+    record: Mapping[str, Any] | None,
+) -> Dict[str, Any]:
+    """The *rendered* signature of one historical usage record.
+
+    Kept on its own key with its own reason: a reservation that never generated
+    has a planned signature and no rendered one, which is a different fact from
+    a history row that could not be read -- and neither may be counted as "this
+    product delivered that already".
+    """
+
+    return _ledger_reference(
+        record,
+        MIXED_RENDERED_HISTORY_METADATA_KEY,
+        missing_reason="RENDERED_HISTORY_MISSING",
+    )
+
+
+def _signature_kind(visual: Mapping[str, Any] | None) -> str:
+    """Which side of the plan/render boundary one visual signature was built on.
+
+    Bundles written before the kinds existed only ever held planned signatures,
+    so a missing kind reads as PLANNED rather than "unknown".  The alternative
+    would declare the entire existing ledger uncomparable, and the one thing
+    this field must never do is let a plan difference pass as a rendered one.
+    """
+
+    data = visual if isinstance(visual, Mapping) else {}
+    return _text(data.get("signature_kind")).upper() or MIXED_SIGNATURE_KIND_PLANNED
 
 
 def compare_mixed_signatures(
@@ -2235,58 +3353,287 @@ def compare_mixed_signatures(
     if not cand_visual or not ref_visual:
         return {}
 
-    same_visual = (
-        _text(cand_visual.get("digest")) == _text(ref_visual.get("digest"))
-        and bool(_text(cand_visual.get("digest")))
+    # Two signatures only describe the same object when they sit on the same
+    # side of the plan/render boundary.  A planned template difference must
+    # never be allowed to veto a rendered script, and vice versa; the honest
+    # outcome for an incomparable pair is "needs review", not "different".
+    cand_kind = _signature_kind(cand_visual)
+    ref_kind = _signature_kind(ref_visual)
+    if cand_kind != ref_kind:
+        return {
+            "review_status": MIXED_VERDICT_NEEDS_REVIEW,
+            "difference_dimensions": ["SIGNATURE_KIND_MISMATCH"],
+            "difference_summary": (
+                f"{cand_kind} 签名与 {ref_kind} 签名不可直接比较，"
+                "计划差异不得当成成稿差异"
+            ),
+            "counts_as_independent": False,
+            "counts_as_theme": False,
+            "counts_as_variant": False,
+            "order_only": False,
+            "semantic_identical": False,
+            "visual_identical": False,
+            "surface_identical": False,
+        }
+
+    # Two different feature versions describe the same script differently.
+    # Treating that as "different" would book a version bump as original
+    # content, so an incomparable pair is routed to review instead.
+    cand_feature = feature_version_of(cand_visual)
+    ref_feature = feature_version_of(ref_visual)
+    if cand_feature != ref_feature:
+        return {
+            "review_status": MIXED_VERDICT_NEEDS_REVIEW,
+            "difference_dimensions": ["FEATURE_VERSION_MISMATCH"],
+            "difference_summary": (
+                f"成稿特征版本 {cand_feature} 与 {ref_feature} 不可直接比较；"
+                "旧签名需先转换或明确按不可比处理"
+            ),
+            "counts_as_independent": False,
+            "counts_as_theme": False,
+            "counts_as_variant": False,
+            "order_only": False,
+            "candidate_feature_version": cand_feature,
+            "reference_feature_version": ref_feature,
+            "semantic_identical": False,
+            "visual_identical": False,
+            "surface_identical": False,
+        }
+
+    cand_shots = [
+        shot for shot in (cand_visual.get("shots") or []) if isinstance(shot, Mapping)
+    ]
+    ref_shots = [
+        shot for shot in (ref_visual.get("shots") or []) if isinstance(shot, Mapping)
+    ]
+    cand_struct = [structural_shot_tuple(shot) for shot in cand_shots]
+    ref_struct = [structural_shot_tuple(shot) for shot in ref_shots]
+    # 逐位比较：结构相同 = 同样的模块/主体/观察点/状态/取景，且顺序一致。
+    same_visual = bool(cand_struct) and cand_struct == ref_struct
+    # ``SHOT_ORDER_DIFFERS`` 只在**实际比较过序列**之后才允许输出。
+    # 不能把它当成"没找到新观察点"的默认落点 —— R2 的误判正是这么来的：
+    # 背景换词让 digest 变了，代码找不到新观察点，就把结论写成"顺序不同"。
+    order_only = (
+        not same_visual
+        and bool(cand_struct)
+        and len(cand_struct) == len(ref_struct)
+        and sorted(cand_struct) == sorted(ref_struct)
     )
     same_surface = _text((cand.get("surface") or {}).get("digest")) == _text(
         (ref.get("surface") or {}).get("digest")
     )
-    same_semantic = (
-        _text((cand.get("semantic") or {}).get("digest"))
-        == _text((ref.get("semantic") or {}).get("digest"))
-        and bool(_text((cand.get("semantic") or {}).get("digest")))
+    cand_semantic_digest = _text((cand.get("semantic") or {}).get("digest"))
+    ref_semantic_digest = _text((ref.get("semantic") or {}).get("digest"))
+    cand_fact_digest = _text((cand.get("product_fact") or {}).get("digest"))
+    ref_fact_digest = _text((ref.get("product_fact") or {}).get("digest"))
+    # 商品事实轴单独比较：只有两边都算得出来才算"可比且相同"。
+    same_product_fact = bool(
+        cand_fact_digest and cand_fact_digest == ref_fact_digest
     )
+    delta = rendered_text_delta(cand_visual, ref_visual)
+    # 只有两边都算得出来、且**有可比原文**时才能谈"语义变了但画面没变"。
+    # 计划签名没有成稿原文，它这里只能回答"计划安排的观察点是否相同"，不能
+    # 回答"说出口的卖点变了没有" —— 那要靠成稿口播字段。
+    semantic_changed = bool(
+        delta.get("attributable")
+        and cand_semantic_digest
+        and ref_semantic_digest
+        and cand_semantic_digest != ref_semantic_digest
+    )
+    same_semantic = bool(
+        cand_semantic_digest and cand_semantic_digest == ref_semantic_digest
+    )
+    texts_identical = delta.get("texts_identical")
+    surface_only_delta = bool(delta.get("attributable")) and bool(delta.get("surface_only"))
+    protected_delta = bool(delta.get("attributable")) and bool(delta.get("protected_differ"))
 
     dimensions: List[str] = []
-    if same_visual and same_surface:
-        verdict = MIXED_VERDICT_EXACT_DUPLICATE
-        dimensions = ["FINAL_SHOTS_IDENTICAL", "SURFACE_IDENTICAL"]
-        summary = "四镜最终约束与台面光线完全一致，仅序号/旧场景签名不同"
-    elif same_visual:
-        verdict = MIXED_VERDICT_SURFACE_ONLY
-        dimensions = ["FINAL_SHOTS_IDENTICAL", "SURFACE_DIFFERENT"]
-        summary = "最终镜头约束相同，只有环境/光线等辅助变化"
-    else:
-        new_jobs = _new_observation_jobs(cand_visual, ref_visual)
-        dimensions = ["FINAL_SHOTS_DIFFERENT"]
-        if new_jobs:
-            dimensions.append("NEW_OBSERVATION_POINT")
+    order_only_flag = False
+    new_jobs: List[str] = []
+    if same_visual:
+        # 四镜一模一样，但说出口的购买理由变了：这不是"同一个视频"。画面没有
+        # 对应支撑，所以既不能算独立内容，也不该被报成"完全相同"——那会把
+        # "口播换了卖点、画面没跟上"这件事从报告里抹掉（§B2 同一格）。
+        if protected_delta:
+            # 结构一致但商品原色/装饰数量/已确认部件变了：这不是措辞差异，
+            # 不得用"表层变化"把它抹掉，也不能当成独立变体直接放行。
+            verdict = MIXED_VERDICT_NEEDS_REVIEW
+            dimensions = ["FINAL_SHOTS_IDENTICAL", "PROTECTED_CONTENT_DIFFERS"]
+            summary = (
+                "结构相同，但商品原色/装饰数量/已确认部件出现差异，需人工确认："
+                + "、".join(delta.get("protected_differ") or [])[:120]
+            )
+        elif semantic_changed:
+            verdict = MIXED_VERDICT_NEEDS_REVIEW
+            dimensions = ["FINAL_SHOTS_IDENTICAL", "THEME_CHANGED_WITHOUT_VISIBLE_SUPPORT"]
+            summary = (
+                "四镜画面完全相同，但购买理由/观众问题变了且画面未给出对应支撑，"
+                "需人工复核（仅口播换卖点不自动计为独立视频，也不宣布为完全相同）"
+            )
+        elif same_surface and texts_identical is not False:
+            verdict = MIXED_VERDICT_EXACT_DUPLICATE
+            dimensions = ["FINAL_SHOTS_IDENTICAL", "SURFACE_IDENTICAL"]
+            summary = "四镜最终约束与台面光线完全一致，仅序号/旧场景签名不同"
+        elif surface_only_delta:
+            verdict = MIXED_VERDICT_SURFACE_ONLY
+            dimensions = ["FINAL_SHOTS_IDENTICAL", "SURFACE_DIFFERENT"]
+            summary = "四镜结构相同，差异全部落在背景/光线等表层措辞"
+        elif texts_identical is False:
+            # 原文确实不同，但既归因不到表层、也没碰到受保护内容 —— 分类器
+            # 说不清这是什么差异。此时**不能**说"正文完全一致"（那是漏报重复），
+            # 也不能说"新增了独立内容"（那是虚报原创）。按不可确定处理。
+            verdict = MIXED_VERDICT_NEEDS_REVIEW
+            dimensions = ["FINAL_SHOTS_IDENTICAL", "UNATTRIBUTABLE_TEXT_DIFFERENCE"]
+            summary = (
+                "结构相同但成稿措辞存在无法机械归因的差异，需人工复核"
+                "（不据此宣布为独立内容，也不宣布为完全相同）"
+            )
         else:
-            # The same evidenced observations, arranged into a different
-            # montage.  The three authored templates exist precisely for this,
-            # so it is a legitimate execution variant -- not a duplicate.
+            verdict = MIXED_VERDICT_SURFACE_ONLY
+            dimensions = ["FINAL_SHOTS_IDENTICAL", "SURFACE_DIFFERENT"]
+            summary = "最终镜头约束相同，只有环境/光线等辅助变化"
+    else:
+        dimensions = ["FINAL_SHOTS_DIFFERENT"]
+        new_jobs = _new_observation_jobs(cand_visual, ref_visual)
+        if order_only:
+            # 同一组镜头、只换了顺序：是执行变体，但**默认不增有效变体**。
+            # 这条分支必须排在"新观察点"之前 —— 顺序变化不会带来新观察点，
+            # 但重复出现的观察点会让 new_jobs 看起来非空。
+            order_only_flag = True
             dimensions.append("SHOT_ORDER_DIFFERS")
+        elif new_jobs:
+            dimensions.append("NEW_OBSERVATION_POINT")
+        elif surface_only_delta and texts_identical is False:
+            # 结构指纹不同（例如为了换环境换了模板），但**成稿措辞**的差异全在
+            # 表层，且没有受保护内容变化 —— 这正是 R2 的"背景换词被判独立变体"
+            # 应落的位置。要求原文确实不同：措辞一字未改而结构声明不同，是另一
+            # 回事（见下一支）。
+            verdict = MIXED_VERDICT_SURFACE_ONLY
+            dimensions.append("SURFACE_ONLY_REWORDED")
+            summary = "结构相同范围内仅表层措辞变化，不计为独立变体"
+            return _mixed_comparison_payload(
+                verdict, dimensions, summary, same_semantic, same_visual,
+                same_surface, order_only_flag, delta, same_product_fact=same_product_fact,
+            )
+        elif surface_only_delta:
+            # 成稿原文一字未改，却声明了不同的模块/观察点/物理状态：这不是重复
+            # （执行契约不同），也不是有证据的新观察点（没有任何新观察内容）。
+            # 归因不了就不许自动计为独立变体，交给人工（§B2 提取不确定）。
+            verdict = MIXED_VERDICT_NEEDS_REVIEW
+            dimensions.append("STRUCTURE_DIVERGES_WITH_IDENTICAL_TEXT")
+            summary = (
+                "成稿正文一字未改，但交付的模块/观察点声明与参照不同，"
+                "需人工复核后再决定是否独立"
+            )
+            return _mixed_comparison_payload(
+                verdict, dimensions, summary, same_semantic, same_visual,
+                same_surface, order_only_flag, delta, same_product_fact=same_product_fact,
+            )
+        elif cand_feature == MIXED_RENDERED_FEATURE_VERSION_LEGACY:
+            # 旧签名没有原文可归因，保持历史语义；但不再假称"顺序不同"。
+            dimensions.append("SHOT_SET_DIFFERS")
+        else:
+            # 差异解释不了：既没有新的有证据观察点，也不是顺序变化，也归因不到
+            # 表层。不许自动当成独立变体 —— 那会把"看起来有点不一样"变成
+            # 原创质量指标。交给人工看。
+            verdict = MIXED_VERDICT_NEEDS_REVIEW
+            dimensions.append("UNEXPLAINED_DIFFERENCE")
+            summary = "镜头结构存在无法机械归因的差异，需人工复核后再决定是否独立"
+            return _mixed_comparison_payload(
+                verdict, dimensions, summary, same_semantic, same_visual,
+                same_surface, order_only_flag, delta, same_product_fact=same_product_fact,
+            )
+
         if same_semantic:
             dimensions.append("SEMANTIC_IDENTICAL")
         else:
             dimensions.append("SEMANTIC_DIFFERENT")
-        authored = authored_observation_jobs()
-        unsupported = sorted(job for job in new_jobs if job not in authored)
+        unsupported = sorted(job for job in new_jobs if job not in authored_observation_jobs())
+        legacy_features = (
+            cand_feature == MIXED_RENDERED_FEATURE_VERSION_LEGACY
+        )
         if unsupported:
             verdict = MIXED_VERDICT_NEEDS_REVIEW
             dimensions.append("UNVERIFIED_NEW_OBSERVATION")
             summary = "新增观察点缺少可核查证据：" + "、".join(unsupported[:3])
-        elif same_semantic and new_jobs:
+        elif order_only:
+            verdict = MIXED_VERDICT_EXECUTION_VARIANT
+            summary = "同主题，相同观察重点以不同镜头顺序执行（默认不计为新增有效变体）"
+        elif new_jobs and same_semantic:
+            # 同主题 + 新增有证据的观察内容 → 执行变体（增有效变体，不增主题）
             verdict = MIXED_VERDICT_EXECUTION_VARIANT
             summary = "同主题下增加有证据支撑的新观察重点"
+        elif new_jobs:
+            # 购买理由也不同，且新增观察点有成稿画面支撑 → 独立主题。
+            # 这一支必须排在"执行变体"之前：否则"不同购买理由"永远被
+            # 吸收成变体，主题数恒为 1，报告就再也看不出真实差异（B2 表）。
+            verdict = MIXED_VERDICT_DISTINCT_THEME
+            summary = "购买理由有实质变化，并安排了有证据支撑的新观察镜头"
         elif same_semantic:
             verdict = MIXED_VERDICT_EXECUTION_VARIANT
-            summary = "同主题，相同观察重点以不同镜头顺序执行"
-        else:
+            summary = "同主题，镜头集合与顺序与参照不同"
+        elif legacy_features:
+            # 旧签名没有原文可归因，保持历史语义，避免把版本差异当内容差异。
             verdict = MIXED_VERDICT_DISTINCT_THEME
-            summary = "主题问题有实质变化，并安排了相应可见镜头"
+            summary = "主题问题有实质变化（旧签名无可归因原文，按历史口径处理）"
+        else:
+            # 购买理由不同，但成稿里没有一条新的可见观察点来支撑它 ——
+            # 只有口播换了卖点、画面没跟上。这正是方案点名的情形：
+            # "只有口播换卖点、四镜完全相同，不自动计为独立视频"。
+            verdict = MIXED_VERDICT_NEEDS_REVIEW
+            dimensions.append("THEME_CHANGED_WITHOUT_VISIBLE_SUPPORT")
+            summary = (
+                "购买理由变化但成稿未给出对应的新观察镜头，需人工复核"
+                "（仅口播换卖点不自动计为独立视频）"
+            )
 
+    return _mixed_comparison_payload(
+        verdict, dimensions, summary, same_semantic, same_visual, same_surface,
+        order_only_flag, delta, new_jobs_locals=new_jobs,
+        same_product_fact=same_product_fact,
+    )
+
+
+def _mixed_comparison_payload(
+    verdict: str,
+    dimensions: List[str],
+    summary: str,
+    same_semantic: bool,
+    same_visual: bool,
+    same_surface: bool,
+    order_only: bool,
+    delta: Mapping[str, Any],
+    *,
+    new_jobs_locals: Any = None,
+    same_product_fact: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """One comparison result, with the counting axes the batch report needs.
+
+    ``counts_as_independent`` keeps its original meaning (may this be delivered
+    as usable content) so the delivery gate is unchanged.  Two narrower axes are
+    added because "producible" and "new" are different claims:
+
+    * ``counts_as_theme`` — does this establish a *distinct buying reason*.
+    * ``counts_as_variant`` — is this a *new effective variant* of the theme.
+      An order-only re-shuffle is executed differently but adds nothing new, so
+      it counts as neither.
+
+    ``NEEDS_REVIEW`` counts as neither: an unresolved similarity must not be
+    spent as original content in either column.
+    """
+
+    new_jobs = [
+        job for job in (new_jobs_locals or []) if isinstance(job, str) and job
+    ]
+    supported_new = [
+        job for job in new_jobs if job in authored_observation_jobs()
+    ]
+    counts_as_theme = verdict == MIXED_VERDICT_DISTINCT_THEME
+    counts_as_variant = bool(
+        verdict == MIXED_VERDICT_EXECUTION_VARIANT
+        and not order_only
+        and supported_new
+    )
     return {
         "review_status": verdict,
         "difference_dimensions": dimensions,
@@ -2295,6 +3642,14 @@ def compare_mixed_signatures(
         # independent content.  NEEDS_REVIEW is included on purpose: claiming a
         # dedup pass we could not verify is the same defect one layer down.
         "counts_as_independent": verdict not in MIXED_BLOCKING_VERDICTS,
+        "counts_as_theme": counts_as_theme,
+        "counts_as_variant": counts_as_variant,
+        "order_only": bool(order_only),
+        "new_observation_points": supported_new,
+        "protected_content_differ": list(delta.get("protected_differ") or []),
+        # 商品事实轴：与主题语义分开汇报。两者可以同时不同（用了不同商品事实
+        # 支撑不同主题），也可以只差一项 —— 混在一起就无法解释裁决。
+        "product_fact_identical": same_product_fact,
         "semantic_identical": same_semantic,
         "visual_identical": same_visual,
         "surface_identical": same_surface,
@@ -2305,11 +3660,19 @@ def _new_observation_jobs(
     candidate_visual: Mapping[str, Any],
     reference_visual: Mapping[str, Any],
 ) -> List[str]:
+    """观察点差异，按归一化的结构指纹取，不按措辞取。
+
+    旧实现读的是 ``observation_job`` 这个键，而成稿特征用的是
+    ``observed_part_or_relation``；于是成稿比较时这里恒为空 —— 那句"没有新观察点"
+    就成了 ``SHOT_ORDER_DIFFERS`` 的默认落点（R2 的误判链条）。
+    统一走 ``structural_shot_tuple`` 后，同一个观察点被重新措辞不再算作新观察点。
+    """
+
     def _jobs(visual: Mapping[str, Any]) -> List[str]:
         return [
-            _text(shot.get("observation_job"))
+            structural_shot_tuple(shot)[2]
             for shot in (visual.get("shots") or [])
-            if isinstance(shot, Mapping) and _text(shot.get("observation_job"))
+            if isinstance(shot, Mapping) and structural_shot_tuple(shot)[2]
         ]
 
     existing = set(_jobs(reference_visual))
@@ -2342,6 +3705,11 @@ def judge_mixed_candidate(
         "comparison_scope": "CANDIDATE_ONLY",
         "history_compared": int(history_compared),
         "history_incomplete": int(history_incomplete),
+        # 与成稿侧同口径：没有可比参照时三项一律 False。规划的批次报告按唯一
+        # script_id 汇总时只能读这里，不能从"规划成功"或"换了模板"推。
+        "counts_as_theme": False,
+        "counts_as_variant": False,
+        "order_only": False,
     }
     if not signature:
         report["review_status"] = MIXED_VERDICT_NEEDS_REVIEW
@@ -2367,6 +3735,29 @@ def judge_mixed_candidate(
             best = outcome
 
     if not best:
+        # Nothing comparable existed.  Two very different situations produce
+        # this, and the report must not let them collapse into one:
+        #
+        # * no history at all  -> "nothing to compare against" is the honest
+        #   statement, and ``CANDIDATE_ONLY`` already says so.
+        # * same-product history that could not be read (written before the
+        #   final-shot signatures, or under an older version) -> the comparison
+        #   did *not* happen.  Reporting a bare ``DISTINCT_THEME`` would book an
+        #   inferior record as "checked and found different".
+        #
+        # The candidate still ships: an unreadable *historical* record must not
+        # block new content (that rule predates this change).  What changes is
+        # that the pass is now named, so a reader can tell "compared" from
+        # "could not compare".
+        if int(history_incomplete) > 0:
+            report["comparison_scope"] = "HISTORY_INCOMPARABLE"
+            report["difference_dimensions"] = ["HISTORY_INCOMPARABLE"]
+            report["difference_summary"] = (
+                f"同商品历史有 {int(history_incomplete)} 条缺少可比签名"
+                "（版本不同或未写最终镜头），本次**未完成**跨批比对；"
+                "不得读成『已比对且确认不同』"
+            )
+            report["history_incomparable"] = int(history_incomplete)
         return report
 
     verdict = best["review_status"]
@@ -2378,6 +3769,10 @@ def judge_mixed_candidate(
             "review_status": verdict,
             "counts_as_independent": bool(best.get("counts_as_independent")),
             "comparison_scope": "BATCH_AND_HISTORY",
+            # B2 的计数轴随裁决一起落盘；规划期汇总只能读这里。
+            "counts_as_theme": bool(best.get("counts_as_theme")),
+            "counts_as_variant": bool(best.get("counts_as_variant")),
+            "order_only": bool(best.get("order_only")),
         }
     )
     return report
@@ -2387,12 +3782,19 @@ def mixed_signature_from_script(
     script: Mapping[str, Any] | None,
     contract: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    """Final-shot signature read back from a generated script.
+    """Final-shot signature of what the model *actually wrote*.
 
-    This is the second check the plan asks for: once the 正文 exists, the shots
-    the model actually wrote are compared again, so a candidate that looked
-    distinct while planned cannot stay accepted if the model collapsed it into
-    the same shots as something already delivered.
+    This is the second check the plan asks for, so it must not smuggle the plan
+    back in.  An earlier revision folded ``template_id`` and the frozen
+    per-shot requirements into the digest, which made two scripts with
+    byte-identical 正文 look different merely because they had been planned onto
+    different templates -- the plan silently cancelled the 正文 comparison it was
+    supposed to be checked against.
+
+    The digest is therefore computed from the rendered shots alone.  Everything
+    the frozen contract contributed stays under ``planned``, for audit only: it
+    answers a different question ("what was asked") than the digest does
+    ("what was delivered").
 
     ``contract`` is the frozen contract to read the requirements from.  It is
     passed explicitly because the assembled script carries the storyboard but
@@ -2416,33 +3818,89 @@ def mixed_signature_from_script(
     ]
     if len(storyboard) != len(units):
         return {}
-    projected: List[Dict[str, Any]] = []
+    # 一镜的冻结单元按它自己的 ``capture_unit_id`` 找。位置配对在"只换了顺序"
+    # 的情形下会给出与参照完全相同的结构指纹 —— 因为结构字段读的是单元列表，
+    # 而单元列表没动 —— 于是真实换序看起来像没变过。按 id 配对后顺序才是
+    # 可比较的：换序会体现在结构指纹的序列上，才能输出 SHOT_ORDER_DIFFERS。
+    # 没有 id 的旧稿退回位置配对，行为与之前一致。
+    units_by_id = {
+        _text(unit.get("unit_id")): unit
+        for unit in units
+        if _text(unit.get("unit_id"))
+    }
+    rendered: List[Dict[str, Any]] = []
+    planned: List[Dict[str, Any]] = []
     for position, (unit, shot) in enumerate(zip(units, storyboard), start=1):
-        entry = _mixed_unit_visual(unit)
-        entry["is_opening"] = position == 1
-        entry["opening_job"] = entry["observation_job"] if position == 1 else ""
-        # The generated shot's own visible event is what the viewer receives;
-        # the frozen job is the requirement it was asked to satisfy.
-        entry["rendered_event"] = _signature_atom(shot.get("visual_content"))
-        projected.append(entry)
+        # The generated shot's own visible event is what the viewer receives.
+        # Nothing derived from the frozen unit may *replace* it: that is the
+        # whole point of keeping the two apart.  The frozen unit supplies the
+        # structural boundary the shot must execute inside; the two delivered
+        # sentences are kept verbatim so every feature can be traced back to the
+        # text that produced it (``source_refs``).
+        bound = units_by_id.get(_text(shot.get("capture_unit_id")))
+        bound_by_id = bound is not None
+        rendered.append(
+            rendered_shot_features(
+                shot, bound if bound_by_id else unit, position, bound_by_id=bound_by_id
+            )
+        )
+        requirement = _mixed_unit_visual(unit)
+        requirement["is_opening"] = position == 1
+        requirement["opening_job"] = (
+            requirement["observation_job"] if position == 1 else ""
+        )
+        planned.append(requirement)
+    content_payload = [
+        structural_shot_tuple(shot) for shot in rendered
+    ]
+    surface_text = " ".join(
+        _text(shot.get("rendered_visual_content"))
+        + " "
+        + _text(shot.get("rendered_character_action"))
+        for shot in rendered
+    )
     return {
         "signature_version": MIXED_SIGNATURE_VERSION,
         "visual": {
-            "template_id": _text(base.get("template_id")),
-            "face_policy": _text(base.get("face_policy")).upper(),
-            "verified_parts": _mixed_verified_parts(base),
-            "shots": projected,
+            "signature_kind": MIXED_SIGNATURE_KIND_RENDERED,
+            "feature_version": MIXED_RENDERED_FEATURE_VERSION,
+            "feature_source": MIXED_RENDERED_FEATURE_SOURCE,
+            "shots": rendered,
+            # ``digest`` 保持存在（旧消费者仍在读它），但它现在由**结构指纹 +
+            # 去表层后的骨架**决定，不再由全文 hash 决定 —— 换背景措辞不会移动它。
             "digest": _signature_digest(
                 {
-                    "template_id": _text(base.get("template_id")),
-                    "face_policy": _text(base.get("face_policy")).upper(),
-                    "verified_parts": _mixed_verified_parts(base),
-                    "shots": projected,
+                    "signature_kind": MIXED_SIGNATURE_KIND_RENDERED,
+                    "feature_version": MIXED_RENDERED_FEATURE_VERSION,
+                    "content": content_payload,
+                    "skeleton": [strip_surface(text) for text in (
+                        _text(shot.get("rendered_visual_content")) for shot in rendered
+                    )],
                 }
             ),
+            "content_digest": _signature_digest(content_payload),
+            "surface_text_digest": _signature_digest(surface_text),
+            "surface_phrases": sorted(
+                {phrase for phrase in surface_phrases(surface_text) if phrase}
+            ),
+            "protected_phrases": sorted(
+                {phrase for phrase in protected_phrases(surface_text) if phrase}
+            ),
+            "planned": {
+                "template_id": _text(base.get("template_id")),
+                "face_policy": _text(base.get("face_policy")).upper(),
+                "verified_parts": _mixed_verified_parts(base),
+                "shots": planned,
+            },
         },
-        "semantic": mixed_semantic_signature(base),
+        # The theme is read from the delivered script, not from the plan.  The
+        # frozen thesis/theme_id stay under ``semantic.planned``: a theme claim
+        # derived from an id would let a plan difference pass as delivered
+        # meaning (Review R4).
+        "semantic": mixed_rendered_semantic_signature(script, base, rendered),
         "surface": mixed_surface_signature(base),
+        # 商品事实轴读的是冻结合同（商品事实在规划期就冻结了），与成稿措辞无关。
+        "product_fact": mixed_product_fact_signature(base),
     }
 
 
@@ -2457,16 +3915,31 @@ def judge_rendered_script(
     reported alongside the planned verdict rather than replacing it: a
     disagreement between the two is exactly the signal a reviewer needs
     ("planned as a variant, generated as a repeat").
+
+    Only *rendered* signatures are usable as references.  A sibling that has
+    not generated yet is represented by its frozen shots, and those were
+    already compared at planning time; folding them back in here would let a
+    planned template difference veto a rendered script, which is the confusion
+    this re-check exists to remove.  Such references are counted, not ignored.
     """
 
     signature = mixed_signature_from_script(script, contract)
     if not signature:
         return {}
-    reference_list = [
-        reference
-        for reference in (references or [])
-        if isinstance(reference, Mapping) and reference.get("signature")
-    ]
+    reference_list: List[Mapping[str, Any]] = []
+    skipped_not_rendered = 0
+    for reference in references or []:
+        if not isinstance(reference, Mapping) or not reference.get("signature"):
+            continue
+        reference_visual = (reference.get("signature") or {}).get("visual") or {}
+        if _signature_kind(reference_visual) != MIXED_SIGNATURE_KIND_RENDERED:
+            skipped_not_rendered += 1
+            continue
+        reference_list.append(reference)
+    from_history = any(
+        _text(reference.get("source")) == "RENDERED_HISTORY"
+        for reference in reference_list
+    )
     report: Dict[str, Any] = {
         "signature_version": MIXED_SIGNATURE_VERSION,
         "nearest_script_id": "",
@@ -2474,8 +3947,19 @@ def judge_rendered_script(
         "difference_summary": "本批暂无其它已生成镜头可比对",
         "review_status": MIXED_VERDICT_DISTINCT_THEME,
         "counts_as_independent": True,
+        # 没有可比参照时，这三项一律为 False：批次报告要能把"没比对"与
+        # "比对后确认是独立主题"分开，否则"没有历史"会被读成"全是新主题"。
+        "counts_as_theme": False,
+        "counts_as_variant": False,
+        "order_only": False,
         "comparison_scope": "RENDERED_ONLY",
         "references_compared": len(reference_list),
+        "references_skipped_not_rendered": skipped_not_rendered,
+        "history_rendered_compared": sum(
+            1
+            for reference in reference_list
+            if _text(reference.get("source")) == "RENDERED_HISTORY"
+        ),
     }
     best: Dict[str, Any] = {}
     for reference in reference_list:
@@ -2497,21 +3981,44 @@ def judge_rendered_script(
                 "difference_summary": _text(best.get("difference_summary")),
                 "review_status": best["review_status"],
                 "counts_as_independent": bool(best.get("counts_as_independent")),
-                "comparison_scope": "RENDERED_BATCH",
+                # Which axis produced the verdict.  Without these a reviewer
+                # cannot tell "the shots really differ" from "only the light
+                # differed", and the two call for opposite actions.
+                "visual_identical": bool(best.get("visual_identical")),
+                "surface_identical": bool(best.get("surface_identical")),
+                "semantic_identical": bool(best.get("semantic_identical")),
+                # B2 的两个计数轴随成稿一起落盘：批次报告按唯一 script_id
+                # 汇总时只能读这里，不能从"生成成功"或"模板排列"推。
+                "counts_as_theme": bool(best.get("counts_as_theme")),
+                "counts_as_variant": bool(best.get("counts_as_variant")),
+                "order_only": bool(best.get("order_only")),
+                "new_observation_points": list(best.get("new_observation_points") or []),
+                "protected_content_differ": list(best.get("protected_content_differ") or []),
+                "comparison_scope": (
+                    "RENDERED_BATCH_AND_HISTORY"
+                    if from_history
+                    else "RENDERED_BATCH"
+                ),
             }
         )
 
     # The generated montage still has to *be* a montage.  Four shots whose
     # visible contents are identical are one shot delivered four times, whatever
     # the frozen requirements said.
+    #
+    # 读的是这一镜**实际交付的画面描述**。B1 把每镜特征换成
+    # ``rendered_visual_content`` 之后，旧键 ``rendered_event`` 已不存在 ——
+    # 继续读旧键会让 ``events`` 恒为全空，"画面重复"守卫变成恒真，把每一份
+    # 成稿都拦成待复核（离线夹具里就是这样被发现的）。空文本也不算"重复"：
+    # 那是缺内容，由别的检查报告。
     events = [
-        _text(shot.get("rendered_event"))
+        _signature_atom(shot.get("rendered_visual_content"))
         for shot in (signature.get("visual") or {}).get("shots") or []
     ]
     distinct_events = {event for event in events if event}
     report["rendered_shot_count"] = len(events)
     report["distinct_rendered_events"] = len(distinct_events)
-    report["montage_collapsed"] = bool(events) and len(distinct_events) <= 1
+    report["montage_collapsed"] = bool(distinct_events) and len(distinct_events) <= 1
     if report["montage_collapsed"]:
         report["review_status"] = MIXED_VERDICT_NEEDS_REVIEW
         report["counts_as_independent"] = False
@@ -2532,4 +4039,681 @@ def final_shot_reference(
     return {
         "identity": _text(identity),
         "signature": mixed_signature_bundle(contract),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 每镜执行对象（A 包：让最终渲染服从混合模块自己的边界）
+# ---------------------------------------------------------------------------
+# R1 的根因不是某个词，而是一条**按位置索引**的旧角色弧：
+# ``accessory.py:_deduplicate_framing`` / ``renderer:_apply_small_accessory_*``
+# 把 ``unit_role`` 按 0/1/2/last 赋成
+# ``PRODUCT_RESULT_CLOSE -> NATURAL_MOTION_RELATION -> PRODUCT_DETAIL_RELATION
+# -> PRODUCT_REACQUISITION``，再由 ``_capture_unit_passages`` 用它取出
+# ``core_action`` / ``movement_guidance`` / ``ending_guidance``。
+# 混合模板的四镜是 **模块**（佩戴近景 / 手持 / 静物 / 佩戴关系），与旧弧毫无
+# 关系，于是手持镜与静物镜被套上"人物在颈肩关系内改变重心""录制上半身"这类
+# 佩戴动作，并且**违反本镜自己的 forbidden_framing**。
+#
+# 下面这组纯函数把"每镜该执行什么"收敛成单一出口。判据只有两个来源：
+#   1. 冻结合同（硬边界：时间 / 模块 / 载体 / 不露脸范围 / 允许部位 / 物理状态）
+#   2. 已通过审查的成稿（创意内容：本镜观察什么、实际做什么、怎么运镜）
+# 旧 ``unit_role`` 只作为 ``legacy_role`` 保留作审计，**不再授权身体动作**。
+
+SHOT_EXECUTION_VERSION = "mixed-shot-execution-v1"
+EXECUTION_AUDIT_VERSION = "mixed-execution-audit-v1"
+
+ERR_MIXED_EXECUTION_MODULE_UNKNOWN = "MIXED_EXECUTION_MODULE_UNKNOWN"
+ERR_MIXED_EXECUTION_TIMELINE = "MIXED_EXECUTION_TIMELINE"
+ERR_MIXED_EXECUTION_ACTION_BOUNDARY = "MIXED_EXECUTION_ACTION_BOUNDARY"
+ERR_MIXED_EXECUTION_CAMERA_BOUNDARY = "MIXED_EXECUTION_CAMERA_BOUNDARY"
+ERR_MIXED_EXECUTION_ROLE_MISMATCH = "MIXED_EXECUTION_ROLE_MISMATCH"
+ERR_MIXED_EXECUTION_ANCHOR_MISSING = "MIXED_EXECUTION_ANCHOR_MISSING"
+
+WORN_MODULES: Tuple[str, ...] = ("WORN_DETAIL", "WORN_RELATION")
+NON_BODY_MODULES: Tuple[str, ...] = ("HANDHELD_PRODUCT", "STATIC_PRODUCT")
+MIXED_MODULES: Tuple[str, ...] = (
+    "WORN_DETAIL",
+    "HANDHELD_PRODUCT",
+    "STATIC_PRODUCT",
+    "WORN_RELATION",
+)
+
+# 提示词里"商品执行关系"那一行在混合模式下显示什么。旧 ``unit_role`` 是内部
+# 叙事标签，对拍摄者没有意义；模块 + 载体才是本镜真正的执行关系。
+_MODULE_EXECUTION_ROLE = {
+    "WORN_DETAIL": "佩戴局部近景（真人局部佩戴）",
+    "HANDHELD_PRODUCT": "手持商品（纯手部承载）",
+    "STATIC_PRODUCT": "商品静物（静物承载）",
+    "WORN_RELATION": "佩戴关系（真人局部佩戴）",
+}
+
+# 模块边界词表。来源是与 ``module_framing_rules`` 已经写死的
+# ``forbidden_framing`` 同一套语义：手持/静物镜不得出现人物与佩戴部位，静物镜
+# 连手都不许有。这里刻意用固定词表而不是解析 forbidden 文案——forbidden 是给
+# 人读的句子，拆词比列词更脆。
+# 刻意**不含**"创作者 / 她 / 模特"这类泛称：它们出现在
+# "保持普通创作者展示随身物件的自然节奏" 这类风格句里，并不要求人物入画。
+# R1 的旧动作全部由身体部位与镜面词命中（颈肩 / 肩部 / 头部 / 上半身 /
+# 重心 / 侧移 / 转头 / 人物 / 佩戴部位），所以去掉泛称不会削弱检出，只会少
+# 一类误报。
+_BODY_PRESENCE_TERMS: Tuple[str, ...] = (
+    "人物", "上半身", "肩部", "肩膀", "肩颈", "颈肩", "颈部",
+    "头部", "转头", "侧脸", "半脸", "正脸", "全脸", "脸", "眼部", "眼", "鼻",
+    "嘴", "面部", "头肩", "镜中", "镜面", "重心", "侧移", "站姿", "站定",
+    "坐下", "坐着", "走动", "走出", "走向", "佩戴部位", "全身", "穿搭展示",
+)
+_HAND_PRESENCE_TERMS: Tuple[str, ...] = (
+    "手", "手指", "手臂", "手腕", "承托", "举起", "握", "拿", "掌心",
+)
+_STATIC_MOTION_TERMS: Tuple[str, ...] = (
+    "转动", "移动", "翻转", "摇晃", "位移", "改变角度",
+)
+
+# NO_FACE 合同下任何一镜都不得**正向**要求出现脸/镜面。旧角色弧的
+# "先观察镜中或侧后方的发饰位置"正是靠这条被抓住。
+_NO_FACE_POSITIVE_BAN_TERMS: Tuple[str, ...] = (
+    "镜中", "镜面", "侧脸", "半脸", "正脸", "全脸", "头肩", "自拍",
+    "眼部", "眼", "鼻", "嘴", "面部",
+)
+
+# 否定/禁止措辞：命中即视为"禁止说明"而不是"正向动作"。
+# 这是方案要求的判据 —— 不能因为出现"头部"就判定违规，
+# "不出现头部""无人物入画"必须被认成禁令。
+_PROHIBITION_MARKERS: Tuple[str, ...] = (
+    "不得", "不能", "不可", "禁止", "不要", "不许", "勿", "避免",
+    "不", "无", "没有", "未", "非", "严禁", "不出现", "不入画",
+)
+
+_CLAUSE_SPLIT_RE = re.compile(r"[；;。，,、\n]")
+# 中文分句。"，"、"、" 是句内枚举，；。\n 才是句界——这个区别决定了禁令能否
+# 正确覆盖它后面枚举出来的整串条目。
+_CLAUSE_TOKEN_RE = re.compile(r"([^；;。，,、\n]*)([；;。，,、\n]?)")
+_SENTENCE_BOUNDARIES = "；;。\n"
+
+# 显式禁令引导词。**刻意不含单独的"不"**：它是 `_clause_is_prohibitive` 的
+# 判据之一，但不足以把后续枚举一起染成禁令
+# （"人物不入画，商品全程静置"的第二句是正向要求）。
+_BAN_LEAD_INS: Tuple[str, ...] = (
+    "不得出现", "不得再", "不得", "禁止", "不要", "严禁", "避免", "不出现", "不入画",
+)
+
+
+def _is_no_face(face_policy: Any) -> bool:
+    return _text(face_policy).upper() == NO_FACE_POLICY
+
+
+def _clause_is_prohibitive(clause: str) -> bool:
+    """True when a clause states a ban rather than a positive instruction."""
+
+    return any(marker in clause for marker in _PROHIBITION_MARKERS)
+
+
+def execution_clauses(text: Any) -> List[Dict[str, Any]]:
+    """Split one action/framing sentence into polarity-tagged clauses.
+
+    Two things are deliberate here:
+
+    * ``手机`` is stripped before term matching — it contains ``手``, and a phone
+      reposition is not a hand instruction.
+    * A ban *enumerates*: ``不得出现：脸与头部入画、正面全脸、镜面反射露脸`` is
+      one prohibition with three items, not one prohibition followed by two
+      requirements.  A per-clause keyword test would read the second and third
+      items as instructions and report the prompt's own ban list as a
+      violation, so an enumeration lead-in carries its polarity across the
+      ``、``/``，`` list until the next ``；``/``。``/newline.
+    """
+
+    out: List[Dict[str, Any]] = []
+    enumerated = False
+    for clause, separator in _CLAUSE_TOKEN_RE.findall(_text(text)):
+        clause = clause.strip()
+        if not clause:
+            if separator in _SENTENCE_BOUNDARIES:
+                enumerated = False
+            continue
+        prohibitive = _clause_is_prohibitive(clause) or enumerated
+        out.append(
+            {
+                "clause": clause,
+                "probe": clause.replace("手机", ""),
+                "prohibitive": prohibitive,
+            }
+        )
+        if separator in _SENTENCE_BOUNDARIES:
+            enumerated = False
+        elif any(lead in clause for lead in _BAN_LEAD_INS):
+            enumerated = True
+    return out
+
+
+def _module_boundary_terms(module: str) -> Tuple[str, ...]:
+    module = _text(module).upper()
+    if module == "HANDHELD_PRODUCT":
+        return _BODY_PRESENCE_TERMS
+    if module == "STATIC_PRODUCT":
+        return (*_BODY_PRESENCE_TERMS, *_HAND_PRESENCE_TERMS, *_STATIC_MOTION_TERMS)
+    return ()
+
+
+def module_action_violations(
+    module: str,
+    text: Any,
+    *,
+    face_policy: str = "",
+) -> List[Dict[str, Any]]:
+    """Positive clauses that cross this module's own boundary.
+
+    Order matters: polarity first, then terms.  A ban is not an instruction, and
+    the single most common false positive for this check is treating
+    "人物不入画" as "the person is in frame".
+    """
+
+    module = _text(module).upper()
+    terms = list(_module_boundary_terms(module))
+    if _is_no_face(face_policy):
+        terms.extend(_NO_FACE_POSITIVE_BAN_TERMS)
+    if not terms:
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for item in execution_clauses(text):
+        if item["prohibitive"]:
+            continue
+        hits = [term for term in terms if term in item["probe"]]
+        if not hits:
+            continue
+        out.append(
+            {
+                "module": module,
+                "clause": item["clause"],
+                "terms": hits,
+                "code": ERR_MIXED_EXECUTION_ACTION_BOUNDARY,
+            }
+        )
+    return out
+
+
+def mixed_module_execution_role(module: str) -> str:
+    module = _text(module).upper()
+    return _MODULE_EXECUTION_ROLE.get(module, "") or _MODULE_LABELS.get(module, module)
+
+
+def mixed_shot_camera_line(unit: Mapping[str, Any] | None) -> str:
+    """本段手机构图，逐字取自该镜自己冻结的取景范围。
+
+    Derived rather than authored so the two non-body modules cannot inherit the
+    worn arc's "上半身 / 重新放置手机" wording: whatever the frozen unit allows
+    is what the shot gets, and whatever it bans is stated as a ban.
+    """
+
+    data = unit if isinstance(unit, Mapping) else {}
+    module = _text(data.get("module")).upper()
+    if not module:
+        return ""
+    label = (
+        _text(data.get("view_label"))
+        or _MODULE_LABELS.get(module)
+        or module
+    )
+    allowed = [_text(item) for item in (data.get("allowed_framing") or []) if _text(item)]
+    forbidden = [
+        _text(item) for item in (data.get("forbidden_framing") or []) if _text(item)
+    ]
+    parts: List[str] = []
+    if allowed:
+        parts.append(f"{label}取景只保留：{'、'.join(allowed)}")
+    else:
+        parts.append(f"{label}取景")
+    if forbidden:
+        parts.append("不得出现：" + "、".join(forbidden))
+    return "；".join(parts)
+
+
+def _execution_environment(contract: Mapping[str, Any]) -> Dict[str, Any]:
+    """单片冻结光影配方：镜头可换角度，不得换另一套配方。"""
+
+    recipe = contract.get("environment_recipe")
+    recipe = recipe if isinstance(recipe, Mapping) else {}
+    return {
+        "environment_recipe_id": _text(contract.get("environment_recipe_id")),
+        "environment_recipe_version": int(
+            contract.get("environment_recipe_version") or 0
+        ),
+        "label": _text(recipe.get("label") or recipe.get("display_name")),
+        "light_direction": _text(recipe.get("light_direction")),
+        "white_balance": _text(recipe.get("white_balance")),
+        "surface": _text(recipe.get("surface") or recipe.get("table_surface")),
+        "background": _text(recipe.get("background")),
+    }
+
+
+def _execution_product_identity(contract: Mapping[str, Any]) -> Dict[str, Any]:
+    """全片一致的商品身份与已知结构；未知部件不补造。"""
+
+    facts = contract.get("structure_facts")
+    facts = facts if isinstance(facts, Mapping) else {}
+    return {
+        "product_code": _text(contract.get("product_code")),
+        "canonical_type": _text(contract.get("canonical_type") or contract.get("product_type")),
+        "zone": _text(contract.get("zone")),
+        "visible_quantity_rule": _text(contract.get("visible_quantity_rule")),
+        "structure_facts": {
+            _text(key): _text(state).upper()
+            for key, state in facts.items()
+            if _text(key)
+        },
+    }
+
+
+def mixed_shot_execution_object(
+    unit: Mapping[str, Any] | None,
+    shot: Mapping[str, Any] | None = None,
+    contract: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """The single per-shot execution object the final renderer must obey.
+
+    Hard boundary (time / module / carrier / face range / allowed body parts /
+    physical state) comes from the frozen unit.  Creative content (what this
+    shot observes, what it actually does, how it is framed) comes from the
+    approved storyboard.  When the approved action crosses the module boundary
+    the frozen requirement replaces it and the substitution is recorded, so the
+    failure is visible instead of silently shipped.
+    """
+
+    frozen = unit if isinstance(unit, Mapping) else {}
+    approved = shot if isinstance(shot, Mapping) else {}
+    base = contract if isinstance(contract, Mapping) else {}
+    module = _text(frozen.get("module")).upper()
+    face_policy = _text(frozen.get("face_policy")).upper()
+    issues: List[Dict[str, Any]] = []
+
+    if not module:
+        issues.append(
+            {
+                "code": ERR_MIXED_EXECUTION_MODULE_UNKNOWN,
+                "field": "module",
+                "actual": "",
+                "detail": "冻结合同的该镜没有模块，无法确定执行边界",
+            }
+        )
+
+    approved_action = _text(approved.get("character_action"))
+    required_action = _text(frozen.get("action"))
+    violations = (
+        module_action_violations(module, approved_action, face_policy=face_policy)
+        if approved_action
+        else []
+    )
+    if approved_action and not violations:
+        action, action_source = approved_action, "APPROVED_SCRIPT"
+    elif required_action:
+        action, action_source = required_action, "MODULE_REQUIREMENT"
+        if approved_action:
+            action_source = "MODULE_REQUIREMENT_REPLACED_APPROVED"
+    else:
+        action, action_source = approved_action, "APPROVED_SCRIPT"
+    if violations and action_source != "APPROVED_SCRIPT":
+        issues.append(
+            {
+                "code": ERR_MIXED_EXECUTION_ACTION_BOUNDARY,
+                "field": "character_action",
+                "module": module,
+                "actual": approved_action,
+                "detail": "成稿动作越出本镜模块边界，已替换为该镜冻结要求",
+                "clauses": violations,
+            }
+        )
+
+    approved_visual = _text(approved.get("visual_content"))
+    camera_line = mixed_shot_camera_line(frozen)
+    for clause in execution_clauses(approved_visual):
+        if clause["prohibitive"]:
+            continue
+        hits = [
+            term
+            for term in _module_boundary_terms(module)
+            if term in clause["probe"]
+        ]
+        if hits:
+            issues.append(
+                {
+                    "code": ERR_MIXED_EXECUTION_CAMERA_BOUNDARY,
+                    "field": "visual_content",
+                    "module": module,
+                    "actual": clause["clause"],
+                    "terms": hits,
+                    "detail": "成稿画面事件越出本镜模块取景范围",
+                }
+            )
+
+    # 视线与自然反响：只用成稿自己的，拿不到就留空。旧角色弧的
+    # "先观察镜中或侧后方的发饰位置" 在 NO_FACE 下会直接违反本镜禁令。
+    gaze = _text(approved.get("gaze_target"))
+    reaction = _text(
+        approved.get("natural_emotion") or approved.get("natural_reaction")
+    )
+    for field, value in (("gaze_target", gaze), ("natural_reaction", reaction)):
+        if not value:
+            continue
+        hits = module_action_violations(module, value, face_policy=face_policy)
+        if hits:
+            issues.append(
+                {
+                    "code": ERR_MIXED_EXECUTION_ACTION_BOUNDARY,
+                    "field": field,
+                    "module": module,
+                    "actual": value,
+                    "detail": "成稿自由文本越出本镜模块边界，已丢弃",
+                    "clauses": hits,
+                }
+            )
+            if field == "gaze_target":
+                gaze = ""
+            else:
+                reaction = ""
+
+    return {
+        "execution_version": SHOT_EXECUTION_VERSION,
+        "shot_id": _text(frozen.get("unit_id") or approved.get("capture_unit_id")),
+        "time_range": _text(approved.get("time_range")),
+        "module": module,
+        "module_label": _text(frozen.get("view_label"))
+        or _MODULE_LABELS.get(module)
+        or module,
+        "execution_role": mixed_module_execution_role(module),
+        # Audit only.  The old role arc keeps its narrative label but owns no
+        # body action any more.
+        "legacy_role": _text(frozen.get("unit_role")).upper(),
+        "carrier_mode": _text(frozen.get("carrier_mode")).upper(),
+        "face_policy": face_policy,
+        "body_zone": _text(frozen.get("body_zone")),
+        "view_scope": _text(frozen.get("view_scope")),
+        "allowed_framing": [
+            _text(item) for item in (frozen.get("allowed_framing") or []) if _text(item)
+        ],
+        "forbidden_framing": [
+            _text(item) for item in (frozen.get("forbidden_framing") or []) if _text(item)
+        ],
+        "action_boundary": [
+            _text(item) for item in (frozen.get("action_boundary") or []) if _text(item)
+        ],
+        "state_boundary": _text(frozen.get("state_boundary")),
+        "product_state": _text(frozen.get("product_state")).upper(),
+        "quantity_rule": _text(
+            frozen.get("visible_quantity_rule") or frozen.get("quantity_rule")
+        ),
+        "observation_job": _text(frozen.get("observation_job")),
+        "continuity_group": _text(frozen.get("continuity_group")),
+        "action": action,
+        "action_source": action_source,
+        "camera_guidance": camera_line,
+        "gaze_target": gaze,
+        "micro_reaction": reaction,
+        "product_identity": _execution_product_identity({**base, **frozen}),
+        "environment": _execution_environment(base),
+        "issues": issues,
+    }
+
+
+def mixed_execution_objects(
+    contract: Mapping[str, Any] | None,
+    storyboard: Any = None,
+) -> List[Dict[str, Any]]:
+    """One execution object per frozen shot, matched to the approved shot."""
+
+    data = contract if isinstance(contract, Mapping) else {}
+    units = [
+        unit for unit in (data.get("capture_units") or []) if isinstance(unit, Mapping)
+    ]
+    by_id: Dict[str, Mapping[str, Any]] = {}
+    for shot in storyboard or []:
+        if not isinstance(shot, Mapping):
+            continue
+        key = _text(shot.get("capture_unit_id"))
+        if key and key not in by_id:
+            by_id[key] = shot
+    out: List[Dict[str, Any]] = []
+    for index, unit in enumerate(units, start=1):
+        shot = by_id.get(_text(unit.get("unit_id")))
+        obj = mixed_shot_execution_object(unit, shot, data)
+        obj["position"] = index
+        if not obj["time_range"]:
+            span = (frozen_unit_timeline(data)[0] or {}).get(_text(unit.get("unit_id")))
+            obj["time_range"] = format_mixed_shot_time_range(span)
+        out.append(obj)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 最终执行一致性检查（A 包：跑在拼接与压缩之后）
+# ---------------------------------------------------------------------------
+# 只检查冻结合同是不够的：上一轮的冲突正是发生在合同检查**之后**的最后一步
+# 投影。所以这一节读的是**最终提示词文本**，逐镜回比冻结合同与成稿。
+
+_FINAL_SHOT_HEADER_RE = re.compile(
+    r"^【(?:拍摄片段|连续内容段|片段)(?P<index>\d{2})｜(?P<time>[^｜]+)｜(?P<role>[^】]*)】$"
+)
+_FINAL_SHOT_FIELDS = (
+    "画面事件",
+    "人物动作",
+    "商品执行关系",
+    "视线关系",
+    "自然反应",
+    "本段手机构图",
+    "手机机位",
+    "每段商品必须可见",
+    "商品必须可见",
+)
+
+
+def parse_final_shot_blocks(prompt: Any) -> List[Dict[str, Any]]:
+    """Read back the per-shot blocks actually delivered to the video model."""
+
+    blocks: List[Dict[str, Any]] = []
+    current: Optional[Dict[str, Any]] = None
+    for raw in _text(prompt).splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        header = _FINAL_SHOT_HEADER_RE.match(line)
+        if header:
+            current = {
+                "index": int(header.group("index")),
+                "time_range": header.group("time").strip(),
+                "header_role": header.group("role").strip(),
+                "fields": {},
+                "lines": [],
+            }
+            blocks.append(current)
+            continue
+        if current is None:
+            continue
+        if line.startswith("【") and line.endswith("】"):
+            # Any other section header closes the shot run.
+            current = None
+            continue
+        current["lines"].append(line)
+        for label in _FINAL_SHOT_FIELDS:
+            prefix = label + "："
+            if line.startswith(prefix):
+                current["fields"].setdefault(label, line[len(prefix):].strip())
+                break
+    return blocks
+
+
+def _prompt_hash(prompt: Any) -> str:
+    return hashlib.sha1(_text(prompt).encode("utf-8")).hexdigest()[:20]
+
+
+def audit_mixed_final_execution(
+    prompt: Any,
+    contract: Mapping[str, Any] | None,
+    *,
+    storyboard: Any = None,
+    renderer_version: str = "",
+    pre_compaction_prompt: Any = None,
+) -> Dict[str, Any]:
+    """Structural audit of the *final* prompt against the frozen mixed contract.
+
+    Runs after splicing and compaction, because that is where R1 lived.  Every
+    issue names the shot, the field, the module boundary it crossed, the actual
+    delivered value, and which stage introduced it.
+
+    ``status`` is ``PASS`` / ``FAIL`` / ``NOT_APPLICABLE``.  A ``FAIL`` means the
+    prompt asks the video model for two contradictory things at once and must
+    not be submitted.
+    """
+
+    data = contract if isinstance(contract, Mapping) else {}
+    if _text(data.get("execution_profile")) != ACCESSORY_MIXED_TEMPLATE_PROFILE:
+        return {
+            "version": EXECUTION_AUDIT_VERSION,
+            "status": "NOT_APPLICABLE",
+            "issues": [],
+            "issue_count": 0,
+            "checked_shots": 0,
+            "block_count": 0,
+            "anchored_blocks": 0,
+            "prompt_hash": _prompt_hash(prompt),
+            "renderer_version": renderer_version,
+            "reason": "NOT_MIXED_MODE",
+        }
+
+    objects = mixed_execution_objects(data, storyboard)
+    if not objects:
+        return {
+            "version": EXECUTION_AUDIT_VERSION,
+            "status": "NOT_APPLICABLE",
+            "issues": [],
+            "issue_count": 0,
+            "checked_shots": 0,
+            "block_count": 0,
+            "anchored_blocks": 0,
+            "prompt_hash": _prompt_hash(prompt),
+            "renderer_version": renderer_version,
+            "reason": "NO_FROZEN_SHOTS",
+        }
+
+    blocks = parse_final_shot_blocks(prompt)
+    storyboard_text = json.dumps(storyboard or [], ensure_ascii=False, default=str)
+    pre_text = _text(pre_compaction_prompt)
+
+    def _stage_of(actual: str, field: str) -> str:
+        needle = _text(actual)
+        if needle and needle in storyboard_text:
+            return "GENERATION"
+        if needle and pre_text and needle in pre_text and needle not in _text(prompt):
+            return "COMPACTION"
+        return "RENDERER"
+
+    issues: List[Dict[str, Any]] = []
+    anchored_blocks = 0
+    for position, obj in enumerate(objects, start=1):
+        shot_id = obj.get("shot_id") or f"CU_{position:02d}"
+        block = blocks[position - 1] if position - 1 < len(blocks) else {}
+        fields = block.get("fields") or {}
+        if not block:
+            issues.append(
+                {
+                    "shot_id": shot_id,
+                    "field": "<block>",
+                    "module": obj.get("module", ""),
+                    "code": ERR_MIXED_EXECUTION_TIMELINE,
+                    "actual": "",
+                    "detail": "最终提示词里找不到该镜的片段块",
+                    "source": "RENDERER",
+                }
+            )
+            continue
+        expected_time = _text(obj.get("time_range"))
+        actual_time = _text(block.get("time_range"))
+        if expected_time and actual_time and expected_time != actual_time:
+            issues.append(
+                {
+                    "shot_id": shot_id,
+                    "field": "time_range",
+                    "module": obj.get("module", ""),
+                    "code": ERR_MIXED_EXECUTION_TIMELINE,
+                    "expected": expected_time,
+                    "actual": actual_time,
+                    "detail": "片段表头时间轴与冻结合同不一致",
+                    "source": "RENDERER",
+                }
+            )
+        for label in ("画面事件", "人物动作", "本段手机构图", "手机机位",
+                      "视线关系", "自然反应"):
+            value = _text(fields.get(label))
+            if not value:
+                continue
+            for hit in module_action_violations(
+                _text(obj.get("module")),
+                value,
+                face_policy=_text(obj.get("face_policy")),
+            ):
+                issues.append(
+                    {
+                        "shot_id": shot_id,
+                        "field": label,
+                        "module": obj.get("module", ""),
+                        "code": ERR_MIXED_EXECUTION_ACTION_BOUNDARY,
+                        "expected": _text(obj.get("camera_guidance")),
+                        "actual": hit["clause"],
+                        "terms": hit["terms"],
+                        "detail": f"{label}正向要求越出本镜模块边界",
+                        "source": _stage_of(value, label),
+                    }
+                )
+        role_line = _text(fields.get("商品执行关系"))
+        if role_line and obj.get("module"):
+            expected_role = _text(obj.get("execution_role"))
+            if role_line not in expected_role:
+                issues.append(
+                    {
+                        "shot_id": shot_id,
+                        "field": "商品执行关系",
+                        "module": obj.get("module", ""),
+                        "code": ERR_MIXED_EXECUTION_ROLE_MISMATCH,
+                        "expected": expected_role,
+                        "actual": role_line,
+                        "detail": "该镜仍写着旧的按位置索引角色，不是本镜模块",
+                        "source": "RENDERER",
+                    }
+                )
+        anchors = [
+            _text(item)
+            for item in (block.get("lines") or [])
+            if item.startswith("每段商品必须可见：")
+            or item.startswith("商品必须可见：")
+        ]
+        if anchors:
+            anchored_blocks += 1
+
+    # 锚点可以（也应该）被提升成全片一行：四镜声明同一个锚点时，压缩会把整行
+    # 留在首镜并只保留一份（I6）。所以这里判的是"全片是否还有商品可见锚点"，
+    # 不是"每一块都有一行"——后者会把正确的提升判成丢失。
+    if objects and anchored_blocks == 0:
+        issues.append(
+            {
+                "shot_id": "<all>",
+                "field": "商品必须可见",
+                "module": "",
+                "code": ERR_MIXED_EXECUTION_ANCHOR_MISSING,
+                "actual": "",
+                "detail": "最终提示词里没有任何商品可见锚点",
+                "source": "COMPACTION",
+            }
+        )
+
+    return {
+        "version": EXECUTION_AUDIT_VERSION,
+        "status": "FAIL" if issues else "PASS",
+        "issues": issues,
+        "issue_count": len(issues),
+        "checked_shots": len(objects),
+        "block_count": len(blocks),
+        "anchored_blocks": anchored_blocks,
+        "prompt_hash": _prompt_hash(prompt),
+        "renderer_version": renderer_version,
+        "execution_version": SHOT_EXECUTION_VERSION,
     }

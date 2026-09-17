@@ -7,7 +7,19 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from core.bitable import FeishuBitableClient, TaskRecord, extract_attachments
 from core.product_type_resolution import load_type_registry, normalize_product_type
-from core.production_script_renderer import build_production_projection
+from core.production_script_renderer import (
+    RENDER_VALIDATION_FIELD,
+    RENDER_VALIDATION_SCHEMA_VERSION,
+    build_production_projection,
+    render_validation_block_reason,
+    render_validation_blocks_delivery,
+)
+
+# Operator-visible marker for "the delivered prompt contradicts its own frozen
+# contract".  Kept as a literal so an operator can filter the sheet on it.
+EXECUTION_VALIDATION_BLOCKED_STATUS = "执行校验未通过"
+EXECUTION_VALIDATION_BLOCKED_FIRST_FRAME = "执行校验未通过"
+
 
 
 TOP_CATEGORY_OPTIONS: Tuple[str, ...] = ("女装", "配饰")
@@ -590,6 +602,8 @@ def export_ready_batch(
     creates: List[Dict[str, Any]] = []
     updated = 0
     skipped = 0
+    execution_blocked = 0
+    f = PRODUCTION_SCRIPT_FIELD_NAMES
 
     workflow_fields = {
         PRODUCTION_SCRIPT_FIELD_NAMES["processing_status"],
@@ -628,17 +642,58 @@ def export_ready_batch(
             store_id=store_id,
             include_workflow_defaults=existing_record is None,
         )
+        # ── 最终交接处的执行校验（开发包 A）─────────────────────────────
+        # A deterministic execution conflict — the delivered prompt contradicting
+        # its own frozen per-shot contract — must never reach video submission.
+        # The row is still written so the operator can see *why*, but production
+        # and the first-frame task are forced off.  That override also applies to
+        # a row a human had already enabled: a self-contradicting prompt cannot
+        # be repaired downstream, and the note says so.
+        validation = projection.get(RENDER_VALIDATION_FIELD) or {}
+        blocked = render_validation_blocks_delivery(validation)
+        if blocked:
+            execution_blocked += 1
+            fields[f["processing_status"]] = EXECUTION_VALIDATION_BLOCKED_STATUS
+            fields[f["production_enabled"]] = False
+            fields[f["first_frame_requested"]] = False
+            fields[f["first_frame_status"]] = EXECUTION_VALIDATION_BLOCKED_FIRST_FRAME
+            fields[f["review_note"]] = render_validation_block_reason(validation)
         if existing_record is not None:
             update_fields = {
                 key: value for key, value in fields.items() if key not in workflow_fields
             }
+            if blocked:
+                # Deliberate override of the workflow columns, which are
+                # otherwise owned by the operator.
+                update_fields.update(
+                    {
+                        name: fields[name]
+                        for name in (
+                            f["processing_status"],
+                            f["production_enabled"],
+                            f["first_frame_requested"],
+                            f["first_frame_status"],
+                            f["review_note"],
+                        )
+                        if name in fields
+                    }
+                )
             target_client.update_record_fields(existing_record.record_id, update_fields)
             updated += 1
         else:
             creates.append({"fields": fields})
 
     created_ids = target_client.batch_create_records(creates)
-    return {"created": len(created_ids), "updated": updated, "skipped": skipped}
+    return {
+        "created": len(created_ids),
+        "updated": updated,
+        "skipped": skipped,
+        # Reported separately for the same reason ``duplicate_count`` is: an item
+        # whose prompt contradicts its own contract is not producible content,
+        # so it must be deducted rather than folded into the created/updated tally.
+        "execution_blocked": execution_blocked,
+        "render_validation_schema": RENDER_VALIDATION_SCHEMA_VERSION,
+    }
 
 
 def operation_record_values(record: TaskRecord) -> Dict[str, Any]:

@@ -176,13 +176,172 @@ class ProductionScriptFeishuTest(unittest.TestCase):
                 target_client=client,
             )
 
-        self.assertEqual({"created": 0, "updated": 1, "skipped": 0}, result)
+        # The two counters added by the execution-validation gate are part of the
+        # returned summary now; the workflow columns must still be untouched
+        # because a projection without an audit is not a conflict.
+        self.assertEqual(
+            {
+                "created": 0,
+                "updated": 1,
+                "skipped": 0,
+                "execution_blocked": 0,
+                "render_validation_schema": "mixed-render-validation-v1",
+            },
+            result,
+        )
         self.assertEqual([], client.created)
         self.assertEqual("rec-existing", client.updated[0][0])
         fields = client.updated[0][1]
         self.assertEqual("NEW_SCRIPT_ID", fields["脚本ID"])
         self.assertNotIn("处理状态", fields)
         self.assertNotIn("进入生产", fields)
+
+    def _export_with_validation(self, validation, *, existing_record):
+        """Run the hand-off with one ready item and a given audit result."""
+
+        class FakeClient:
+            def __init__(self):
+                self.updated = []
+                self.created = []
+
+            def list_records(self, *, page_size):
+                return [existing_record] if existing_record else []
+
+            def update_record_fields(self, record_id, fields):
+                self.updated.append((record_id, fields))
+
+            def batch_create_records(self, records):
+                self.created.extend(records)
+                return ["new-record"] * len(records)
+
+        projection = {
+            "script_id": "SCRIPT_CONFLICT",
+            "product_code": "1730000000000000000",
+            "batch_id": "BATCH_1",
+            "batch_item_id": "ITEM_1",
+            "item_index": 1,
+            "script_title": "test",
+            "duration_seconds": 15,
+            "processing_status": "待审核",
+            "render_validation": validation,
+        }
+        item = type("Item", (), {"status": "SCRIPT_READY"})()
+        client = FakeClient()
+        with patch.object(
+            production_feishu,
+            "build_production_projection",
+            return_value=projection,
+        ):
+            result = export_ready_batch(
+                batch=object(), items=[item], target_client=client
+            )
+        return result, client
+
+    def test_execution_conflict_forces_production_off_on_existing_row(self):
+        """A hard conflict must not stay enabled for production.
+
+        The row already has 进入生产=True (a human turned it on).  A delivered
+        prompt that contradicts its own frozen contract cannot be repaired
+        downstream, so the hand-off has to switch it back off and say why.
+        """
+
+        existing = TaskRecord(
+            record_id="rec-enabled",
+            fields={
+                "脚本ID": "SCRIPT_CONFLICT",
+                "批次ID": "BATCH_1",
+                "批次ItemID": "ITEM_1",
+                "处理状态": "已审核",
+                "进入生产": True,
+            },
+        )
+        result, client = self._export_with_validation(
+            {
+                "status": "FAIL",
+                "renderer_version": "production-script-renderer-v4",
+                "prompt_hash": "abc123",
+                "issues": [
+                    {
+                        "shot_id": 2,
+                        "module": "HANDHELD_PRODUCT",
+                        "code": "MIXED_EXECUTION_ACTION_BOUNDARY",
+                        "source": "RENDERER",
+                    }
+                ],
+            },
+            existing_record=existing,
+        )
+
+        self.assertEqual(1, result["execution_blocked"])
+        self.assertEqual(0, result["created"])
+        self.assertEqual(1, result["updated"])
+        fields = client.updated[0][1]
+        self.assertIs(False, fields["进入生产"])
+        self.assertIs(False, fields["生成首帧（需勾选）"])
+        self.assertEqual("执行校验未通过", fields["处理状态"])
+        self.assertEqual("执行校验未通过", fields["首帧准备状态（系统）"])
+        self.assertIn("镜2", fields["审核意见"])
+        self.assertIn("MIXED_EXECUTION_ACTION_BOUNDARY", fields["审核意见"])
+
+    def test_execution_conflict_creates_row_with_production_disabled(self):
+        """No existing row: the row is still created so the reason is visible,
+        but production and the first-frame task are off from the start."""
+
+        result, client = self._export_with_validation(
+            {"status": "FAIL", "issues": []}, existing_record=None
+        )
+
+        self.assertEqual(1, result["execution_blocked"])
+        self.assertEqual(1, result["created"])
+        self.assertEqual(1, len(client.created))
+        fields = client.created[0]["fields"]
+        self.assertIs(False, fields["进入生产"])
+        self.assertIs(False, fields["生成首帧（需勾选）"])
+        self.assertEqual("执行校验未通过", fields["处理状态"])
+
+    def test_passing_audit_leaves_workflow_columns_to_the_operator(self):
+        """PASS must not touch a human's choices — the gate is conflict-only."""
+
+        existing = TaskRecord(
+            record_id="rec-enabled",
+            fields={
+                "脚本ID": "SCRIPT_CONFLICT",
+                "批次ID": "BATCH_1",
+                "批次ItemID": "ITEM_1",
+                "处理状态": "已审核",
+                "进入生产": True,
+            },
+        )
+        result, client = self._export_with_validation(
+            {"status": "PASS", "issues": []}, existing_record=existing
+        )
+
+        self.assertEqual(0, result["execution_blocked"])
+        fields = client.updated[0][1]
+        self.assertNotIn("进入生产", fields)
+        self.assertNotIn("处理状态", fields)
+        self.assertNotIn("审核意见", fields)
+
+    def test_audit_error_does_not_block_delivery(self):
+        """Our own bookkeeping failing must never stop real content."""
+
+        existing = TaskRecord(
+            record_id="rec-enabled",
+            fields={
+                "脚本ID": "SCRIPT_CONFLICT",
+                "批次ID": "BATCH_1",
+                "批次ItemID": "ITEM_1",
+                "处理状态": "已审核",
+                "进入生产": True,
+            },
+        )
+        result, client = self._export_with_validation(
+            {"status": "AUDIT_ERROR", "reason": "RuntimeError: boom"},
+            existing_record=existing,
+        )
+
+        self.assertEqual(0, result["execution_blocked"])
+        self.assertNotIn("进入生产", client.updated[0][1])
 
 
 if __name__ == "__main__":

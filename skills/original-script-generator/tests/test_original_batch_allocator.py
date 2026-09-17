@@ -35,8 +35,10 @@ from core.original_batch_allocator import (
 )
 from core.accessory_mixed_templates import (
     MIXED_HISTORY_METADATA_KEY,
+    MIXED_SIGNATURE_VERSION,
     compile_mixed_template_contract,
     judge_mixed_candidate,
+    ledger_row_identity,
     mixed_reference_signature,
     mixed_signature_bundle,
     mixed_template_ids,
@@ -1311,7 +1313,7 @@ def _acc_direction(da_id: str, output_slot: str) -> dict:
     }
 
 
-def _acc_allocate(requested_count: int, *, recent_usage=None):
+def _acc_allocate(requested_count: int, *, recent_usage=None, exclusions=None):
     with patch.dict(os.environ, {_MIXED_GATE_ENV: "1"}, clear=False):
         return allocate_batch_items(
             product_code="P_ACC",
@@ -1326,6 +1328,7 @@ def _acc_allocate(requested_count: int, *, recent_usage=None):
             product_type="耳饰",
             top_category="配饰",
             execution_scope=None,
+            mixed_history_exclusions=exclusions,
         )
 
 
@@ -1344,9 +1347,18 @@ def _acc_contract(template_id: str, recipe_id: str = "") -> dict:
     )
 
 
-def _acc_history_row(contract: dict) -> dict:
+def _acc_history_row(contract: dict, product_code: str = "P_ACC") -> dict:
+    """One ledger row as it is really written.
+
+    ``product_code`` is not optional in production (``creative_usage_row`` always
+    writes it) and the mixed history filter needs it: content-level hard
+    de-duplication applies within one product only (I2).  A fixture without it
+    would be testing a row shape that cannot occur.
+    """
+
     return {
         "usage_id": f"CPU_{contract.get('template_id')}",
+        "product_code": product_code,
         "visual_signature": "OLD_SCENE_SIG|WHICH|MUST|NOT|BE|REUSED",
         "scene_motif": "OLD_SCENE",
         "persona_role": "OLD_PERSONA",
@@ -1506,6 +1518,53 @@ class MixedReservationAndResumeTest(unittest.TestCase):
         for item in items:
             self.assertTrue(_acc_contract_of(item).get("difference_report"))
 
+    def test_cross_product_history_never_exhausts_the_templates(self):
+        """I2: 不同商品不得互相耗尽 A/B/C 模板。
+
+        同一套 A/B/C 蒙太奇在目录里跨商品重复出现是**预期的**；跨商品复用属于
+        账号风格/排期问题，不是重复成片。所以只有同商品的历史参与内容硬去重，
+        而跨商品的行必须**单独可见**，不能被读成"已比对、未发现重复"。
+        """
+
+        # 别款商品把三种模板 + 本 index 会用的光影全部占用。
+        other = [
+            _acc_history_row(
+                _acc_contract(template_id, select_environment_recipe_id(0)),
+                product_code="P_OTHER",
+            )
+            for template_id in mixed_template_ids()
+        ]
+
+        references, skipped = _mixed_history_references(other, "P_ACC")
+        self.assertEqual(references, [], "别款商品的历史不作本商品的内容硬去重引用")
+        self.assertEqual(skipped["other_product"], len(mixed_template_ids()))
+        self.assertEqual(
+            skipped["incomplete"], 0,
+            "它们完整、只是不同商品，不得被记成『历史不完整』",
+        )
+
+        items, summary = _acc_allocate(1, recent_usage=other)
+        self.assertTrue(items, "别款商品用过同一模板不得使本商品规划出 0 条")
+        self.assertEqual(summary["mixed_duplicate_rejected_count"], 0)
+        coverage = summary["mixed_history_coverage"]
+        self.assertEqual(coverage["history_compared"], 0)
+        self.assertEqual(coverage["history_other_product"], len(mixed_template_ids()))
+        self.assertEqual(coverage["product_code"], "P_ACC")
+
+    def test_same_product_history_still_hard_deduplicates(self):
+        """修 I2 不能把真正的同商品去重一起打掉。"""
+
+        mine = [
+            _acc_history_row(
+                _acc_contract(template_id, select_environment_recipe_id(0)),
+                product_code="P_ACC",
+            )
+            for template_id in mixed_template_ids()
+        ]
+        items, summary = _acc_allocate(1, recent_usage=mine)
+        self.assertEqual(items, [], "同商品、同模板、同光影的历史仍须硬去重")
+        self.assertGreater(summary["mixed_duplicate_rejected_count"], 0)
+
     def test_the_same_candidate_reserved_twice_is_still_one_duplicate(self):
         # 重复/并发预留同一个候选，不得让它变成"多一条独立内容"。
 
@@ -1516,8 +1575,9 @@ class MixedReservationAndResumeTest(unittest.TestCase):
             for _ in range(2)
         ]
 
-        references, incomplete = _mixed_history_references(rows)
-        self.assertEqual((len(references), incomplete), (6, 0))
+        references, skipped = _mixed_history_references(rows, "P_ACC")
+        self.assertEqual((len(references), skipped["incomplete"]), (6, 0))
+        self.assertEqual(skipped["other_product"], 0)
 
         contract = _acc_contract("AMX_A_WORN_FIRST", select_environment_recipe_id(0))
         report = judge_mixed_candidate(contract, references)
@@ -1675,6 +1735,170 @@ class MixedReservationAndResumeTest(unittest.TestCase):
                 "预留台账必须带上最终镜头签名，下一批才能按镜头比对",
             )
             self.assertTrue(reference["identity"])
+
+
+class MixedHistoryOwnershipTest(unittest.TestCase):
+    """B4: 恢复时历史不得包含本批次自己。
+
+    重跑一个批次会重新规划它。它上一次已经写进台账的记录会被当成"历史"读回来，
+    于是每条候选都在和自己的前世比较、全部读成重复，批次交付 0 条 —— Review R3。
+    同时**不能**为了排除自己就把整个当前批次排除掉：同批兄弟是合法的比较对象
+    （执行变体就是这么被发现的），它走的是运行内的预留引用列表。
+    """
+
+    _SELF_BATCH = "B_ACC_SELF"
+
+    def _own_rows(self):
+        rows = [
+            _acc_history_row(
+                _acc_contract(template_id, select_environment_recipe_id(0))
+            )
+            for template_id in mixed_template_ids()
+        ]
+        for row in rows:
+            row["metadata"]["batch_id"] = self._SELF_BATCH
+        return rows
+
+    def test_own_rows_are_excluded_and_counted(self):
+        rows = self._own_rows()
+        references, skipped = _mixed_history_references(
+            rows, "P_ACC", exclusions={"batch_ids": [self._SELF_BATCH]}
+        )
+        self.assertEqual(references, [], "本批次自己写的台账记录不是历史")
+        self.assertEqual(skipped["own_record"], len(mixed_template_ids()))
+        self.assertEqual(skipped["incomplete"], 0)
+        self.assertEqual(skipped["other_product"], 0)
+        self.assertEqual(
+            sum(skipped.values()),
+            len(rows),
+            "被排除的行必须计数，不能静默丢弃",
+        )
+
+    def test_the_persisted_metadata_column_is_read(self):
+        """台账回来的是 ``metadata_json`` 文本；只读 ``metadata`` 会让排除静默失效。
+
+        ``SELECT *`` 不会把 JSON 列解析好，而调用方传进来的是解析后的字典。
+        两种形状都必须认；只认一种时每行都看起来"不属于任何人"，排除就变成了
+        空操作 —— 而且不会报错。
+        """
+
+        rows = [
+            {
+                "usage_id": row["usage_id"],
+                "product_code": row["product_code"],
+                "metadata_json": json.dumps(row["metadata"]),
+            }
+            for row in self._own_rows()
+        ]
+        first_item_id = f"HIST_{mixed_template_ids()[0]}"
+        identity = ledger_row_identity(rows[0])
+        self.assertEqual(identity["batch_item_id"], first_item_id)
+        self.assertEqual(identity["batch_id"], self._SELF_BATCH)
+
+        references, skipped = _mixed_history_references(
+            rows, "P_ACC", exclusions={"batch_item_ids": [first_item_id]}
+        )
+        self.assertEqual(skipped["own_record"], 1)
+        self.assertEqual(len(references), len(mixed_template_ids()) - 1)
+
+    def test_a_resumed_batch_can_plan_again(self):
+        rows = self._own_rows()
+        blocked, _blocked_summary = _acc_allocate(2, recent_usage=rows)
+        self.assertEqual(
+            blocked, [], "不加排除时，批次被自己的记录挡住（这正是 R3 的现象）",
+        )
+
+        items, summary = _acc_allocate(
+            2, recent_usage=rows, exclusions={"batch_ids": [self._SELF_BATCH]}
+        )
+        self.assertTrue(items, "排除自身记录后，同一请求必须能再次规划")
+        self.assertEqual(
+            summary["mixed_history_coverage"]["history_excluded_own"],
+            len(mixed_template_ids()),
+        )
+
+    def test_excluding_own_rows_keeps_in_batch_sibling_comparison(self):
+        items, _summary = _acc_allocate(
+            2, recent_usage=[], exclusions={"batch_ids": [self._SELF_BATCH]}
+        )
+        self.assertEqual(len(items), 2, "排除历史里的自己不得影响同批互相比较")
+        sibling = _acc_contract_of(items[1])["difference_report"]
+        self.assertEqual(
+            sibling["comparison_scope"],
+            "BATCH_AND_HISTORY",
+            "同批兄弟仍然要真比一次",
+        )
+        self.assertTrue(sibling["counts_as_independent"])
+
+    def test_an_empty_exclusion_set_changes_nothing(self):
+        rows = self._own_rows()
+        with_none, _ = _mixed_history_references(rows, "P_ACC", exclusions=None)
+        with_empty, skipped = _mixed_history_references(
+            rows, "P_ACC", exclusions={"batch_ids": [], "usage_ids": []}
+        )
+        self.assertEqual(len(with_none), len(with_empty))
+        self.assertEqual(skipped["own_record"], 0)
+
+    def test_incomparable_history_is_reported_as_uncompared_not_distinct(self):
+        """历史版本不同必须**明确不可比**，不得默认成 ``DISTINCT_THEME``。"""
+
+        rows = [
+            _acc_history_row(
+                _acc_contract(template_id, select_environment_recipe_id(0))
+            )
+            for template_id in mixed_template_ids()
+        ]
+        for row in rows:
+            row["metadata"][MIXED_HISTORY_METADATA_KEY]["signature_version"] = (
+                "mixed-signature-v0"
+            )
+        self.assertNotEqual(MIXED_SIGNATURE_VERSION, "mixed-signature-v0")
+
+        references, skipped = _mixed_history_references(rows, "P_ACC")
+        self.assertEqual(references, [], "版本不同的旧签名不得当引用")
+        self.assertEqual(skipped["incomplete"], len(mixed_template_ids()))
+
+        items, summary = _acc_allocate(1, recent_usage=rows)
+        self.assertTrue(items, "旧版历史不得阻断新内容")
+        report = _acc_contract_of(items[0])["difference_report"]
+        self.assertEqual(
+            report["comparison_scope"],
+            "HISTORY_INCOMPARABLE",
+            "未完成跨批比对必须写明，不能读成『已比对且确认不同』",
+        )
+        self.assertIn("HISTORY_INCOMPARABLE", report["difference_dimensions"])
+        # 第一条只有不可比的旧历史可看 -> 未判定；第二条与同批第一条**真比过**
+        # -> 独立主题。两个桶必须分别是 1，既不能把未判定的算成主题，也不能
+        # 因为历史不可比就停掉同批比较。
+        self.assertEqual(summary["mixed_uncompared_count"], 1)
+        self.assertEqual(summary["mixed_distinct_theme_count"], 1)
+        self.assertEqual(
+            _acc_contract_of(items[1])["difference_report"]["comparison_scope"],
+            "BATCH_AND_HISTORY",
+        )
+
+    def test_a_shared_batch_id_is_the_only_row_shape_excluded(self):
+        """只有"本批次自己的行"被排除，别款商品的行仍按商品过滤计数。"""
+
+        rows = []
+        for template_id in mixed_template_ids():
+            row = _acc_history_row(
+                _acc_contract(template_id, select_environment_recipe_id(0))
+            )
+            rows.append(row)
+            other = _acc_history_row(
+                _acc_contract(template_id, select_environment_recipe_id(0)),
+                product_code="P_OTHER",
+            )
+            rows.append(other)
+        rows[0]["metadata"]["batch_id"] = self._SELF_BATCH
+
+        references, skipped = _mixed_history_references(
+            rows, "P_ACC", exclusions={"batch_ids": [self._SELF_BATCH]}
+        )
+        self.assertEqual(skipped["own_record"], 1)
+        self.assertEqual(skipped["other_product"], len(mixed_template_ids()))
+        self.assertEqual(len(references), len(mixed_template_ids()) - 1)
 
 
 if __name__ == "__main__":

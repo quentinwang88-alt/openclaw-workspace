@@ -520,6 +520,8 @@ def build_content_bundle_candidates(
     product_type: str = "",
     selling_point_catalog: Optional[Iterable[Dict[str, Any]]] = None,
     product_selling_note: str = "",
+    product_reference_assets: Optional[Iterable[Dict[str, Any]]] = None,
+    top_category: str = "",
     max_candidates: int = 3,
 ) -> List[Dict[str, Any]]:
     """Generate up to max_candidates distinct content directions.
@@ -527,6 +529,11 @@ def build_content_bundle_candidates(
     Value arguments are diversified before hooks, structures or visual facts.
     Facts can repeat as proof across different arguments; rotating "five
     buttons" into the thesis is deliberately not a diversity mechanism.
+
+    ``product_reference_assets`` / ``top_category`` only feed the per-argument
+    fact-evidence record (plan §4 / C1): which product-image version the argument
+    was reviewed against, and which part registry its wording should be checked
+    against.  They change no existing field.
     """
     # First bundle: the existing logic
     primary = build_content_bundle_brief(
@@ -535,6 +542,8 @@ def build_content_bundle_candidates(
         product_type=product_type,
         selling_point_catalog=selling_point_catalog,
         product_selling_note=product_selling_note,
+        product_reference_assets=product_reference_assets,
+        top_category=top_category,
     )
     primary_argument = primary.get("selling_argument") if isinstance(primary.get("selling_argument"), dict) else {}
     primary_argument_id = _text(primary_argument.get("argument_id"))
@@ -587,6 +596,8 @@ def build_content_bundle_candidates(
             product_type=product_type,
             selling_point_catalog=[value_angle],
             product_selling_note=product_selling_note,
+            product_reference_assets=product_reference_assets,
+            top_category=top_category,
         )
         argument = variant.get("selling_argument") if isinstance(variant.get("selling_argument"), dict) else {}
         argument_id = _text(argument.get("argument_id"))
@@ -766,6 +777,8 @@ def allocate_batch_items(
     multidim_reference_contexts: Optional[Dict[str, Dict[str, Any]]] = None,
     category_execution_extension: Optional[Dict[str, Any]] = None,
     execution_scope: Optional[Dict[str, Any]] = None,
+    mixed_history_exclusions: Optional[Dict[str, Any]] = None,
+    product_reference_assets: Optional[Iterable[Dict[str, Any]]] = None,
 ) -> Tuple[List[PlanItem], Dict[str, Any]]:
     """Three-round deterministic allocation returning items and allocation summary.
 
@@ -776,6 +789,12 @@ def allocate_batch_items(
     borrows this same entry point with a 15-second duration while owning a
     different parent task, so the category and the environment flag alone cannot
     decide it.  ``None`` keeps the historical behaviour for direct callers.
+
+    ``mixed_history_exclusions`` names the ledger rows that belong to the batch
+    being planned *now* (``batch_ids`` / ``usage_ids`` / ``batch_item_ids`` /
+    ``script_ids``).  A resumed batch must not be compared against its own first
+    attempt (R3).  ``None`` -- a fresh plan, every other category, every existing
+    caller -- filters nothing.
     """
     recent = list(recent_creative_usage or [])
     rng = random.Random(random_seed)
@@ -786,28 +805,46 @@ def allocate_batch_items(
     # legacy scene signatures above: they measure a different axis and mixing
     # them would let a rotating scene label hide a repeated montage.
     reserved_mixed_references: List[Dict[str, Any]] = []
-    mixed_history_references, mixed_history_incomplete = _mixed_history_references(
-        recent
+    mixed_history_references, mixed_history_skipped = _mixed_history_references(
+        recent, product_code, exclusions=mixed_history_exclusions
     )
     # 历史比较覆盖范围: a reader must be able to see how much history was
     # actually available before believing a "no duplicate found" statement.
     # ``scope_status`` says whether this mechanism applied to the batch at all,
     # so an all-zero coverage on a women's-wear batch is never read as a dedup
-    # verdict.
+    # verdict.  ``history_other_product`` is listed separately from
+    # ``history_incomplete`` on purpose: those rows *were* complete, they simply
+    # belong to another product and are therefore not a duplicate verdict (I2).
+    # ``history_excluded_own`` is a third bucket again: those rows were written
+    # by the batch being planned right now, so they were never history to begin
+    # with (R3).  It is reported because a resume that silently compared a batch
+    # against itself is indistinguishable from a resume that found nothing.
     mixed_scope_status = _mixed_scope_status(
         product_type, top_category, execution_scope
     )
     mixed_history_coverage: Dict[str, Any] = {
         "scope_status": mixed_scope_status,
+        "product_code": _text(product_code),
         "history_compared": len(mixed_history_references),
-        "history_incomplete": mixed_history_incomplete,
-        "history_rows_seen": len(mixed_history_references) + mixed_history_incomplete,
+        "history_incomplete": mixed_history_skipped.get("incomplete", 0),
+        "history_other_product": mixed_history_skipped.get("other_product", 0),
+        "history_excluded_own": mixed_history_skipped.get("own_record", 0),
+        "history_rows_seen": (
+            len(mixed_history_references)
+            + mixed_history_skipped.get("incomplete", 0)
+            + mixed_history_skipped.get("other_product", 0)
+            + mixed_history_skipped.get("own_record", 0)
+        ),
     }
+    # Kept as a plain int for the per-item difference report, which records how
+    # much of the history could not be compared at all.
+    mixed_history_incomplete = int(mixed_history_coverage["history_incomplete"])
     mixed_difference_tally: Dict[str, int] = {
         "distinct_theme": 0,
         "execution_variant": 0,
         "duplicate_rejected": 0,
         "insufficient_evidence": 0,
+        "uncompared": 0,
     }
     reference_video_usage: Counter = Counter()
     deferred_content: List[Dict[str, Any]] = []
@@ -859,6 +896,8 @@ def allocate_batch_items(
             product_type=product_type,
             selling_point_catalog=catalog_rows,
             product_selling_note=product_selling_note,
+            product_reference_assets=product_reference_assets,
+            top_category=top_category,
             # A test batch should see the available selling-point breadth.
             # The previous fixed limit of three candidates per carrier made a
             # six-point product repeat two arguments before reaching the rest.
@@ -1532,6 +1571,10 @@ def _make_item(
         history_references=mixed_history_references,
         history_incomplete=mixed_history_incomplete,
         identity=f"{da_id}#{int(item_index):02d}",
+        # The theme the contract carries must be a sentence a reviewer can read
+        # back, not the angle key.  Resolution stays here because this is where
+        # the content bundle is in scope.
+        theme_proposition=_mixed_theme_proposition(bundle, fallback_theme_id=angle_key),
     )
     if mixed_injection.get("contract"):
         mixed_extension = dict(category_execution_extension or {})
@@ -1556,6 +1599,27 @@ def _make_item(
                     or {},
                 }
             )
+        # C2: freeze one mainline per film and let it carry the observation tasks.
+        # This has to happen *before* ``build_simplified_creative_seed`` below,
+        # otherwise the frozen package would hold the mainline while the seed the
+        # script stage consumes verbatim would not.
+        from core.mixed_mainline_contract import (
+            build_mixed_mainline_contract,
+            mixed_mainline_enabled,
+        )
+
+        if mixed_mainline_enabled():
+            mainline = build_mixed_mainline_contract(
+                selling_argument=selling_argument,
+                fact_evidence=selling_argument.get("fact_evidence") or {},
+                semantic_spine=semantic_spine,
+                mixed_contract=mixed_injection["contract"],
+                audience_tension_text=bundle.get("audience_tension_text", ""),
+                requested_hook_id=hook_id,
+            )
+            if mainline:
+                frozen_bundle["mixed_mainline_contract"] = mainline
+                frozen_package["mixed_mainline_contract"] = mainline
     elif mixed_injection.get("rejected"):
         # A valid contract whose four final shots repeat one this batch already
         # owns.  Delivering it anyway is exactly what Review #3 found: the batch
@@ -1594,6 +1658,13 @@ def _make_item(
         # is exactly the hole this closes.  The reason codes travel back to the
         # caller so the batch report can say *why* the candidate was dropped.
         errors = [str(item) for item in mixed_injection["errors"] if str(item)]
+        # A missing readable theme is reported *by name*.  "There was no buying
+        # reason to build this video on" is a different operational problem from
+        # "the contract contradicted itself", and a reader must be able to tell
+        # them apart from the report alone (package B3).
+        theme_gap = next(
+            (item for item in errors if item.startswith("MIXED_THEME_INPUT_GAP")), ""
+        )
         if planning_rejections is not None:
             planning_rejections.append(
                 {
@@ -1604,9 +1675,13 @@ def _make_item(
                     "argument_readiness": bundle.get(
                         "argument_readiness", "NOT_APPLICABLE"
                     ),
-                    "downgrade_reason": "MIXED_CONTRACT_REJECTED",
+                    "downgrade_reason": theme_gap or "MIXED_CONTRACT_REJECTED",
                     "contract_errors": errors,
-                    "recommended_flow": "REPLAN_MIXED_CONTRACT",
+                    "recommended_flow": (
+                        "REPLAN_MIXED_THEME"
+                        if theme_gap
+                        else "REPLAN_MIXED_CONTRACT"
+                    ),
                 }
             )
         return None
@@ -1626,6 +1701,21 @@ def _make_item(
         category_execution_extension=category_execution_extension,
         creator_recording_profile=recording_profile,
     )
+    # C2: carry the mainline into the seed as well.  The seed is what the script
+    # stage consumes verbatim, so a contract living only on the frozen package
+    # would look present in the plan and be missing from generation -- the exact
+    # failure the mixed template contract already taught us (see
+    # ``_repair_frozen_seed_mixed_extension``).  It goes beside the template
+    # contract, in ``category_execution_extension``, so a reviewer can check both
+    # frozen hand-offs at the same place.
+    mainline_contract = frozen_package.get("mixed_mainline_contract")
+    if isinstance(mainline_contract, dict) and mainline_contract:
+        seed_payload = frozen_package.get("simplified_creative_seed")
+        if isinstance(seed_payload, dict):
+            seed_payload["mixed_mainline_contract"] = dict(mainline_contract)
+            seed_extension = dict(seed_payload.get("category_execution_extension") or {})
+            seed_extension["mixed_mainline_contract"] = dict(mainline_contract)
+            seed_payload["category_execution_extension"] = seed_extension
 
     item_snapshot = {
         "item_index": item_index,
@@ -1734,47 +1824,229 @@ def _mixed_structure_rejection(
 
 def _mixed_history_references(
     recent_usage: Optional[List[Dict[str, Any]]],
-) -> Tuple[List[Dict[str, Any]], int]:
+    product_code: str = "",
+    exclusions: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     """Comparable mixed references from the historical usage ledger.
 
-    Returns ``(references, incomplete_count)``.  A row that predates the
-    final-shot signatures is *counted* but never used as a reference: treating a
-    missing record as "nothing similar found" would report a dedup pass that
-    never happened, and rebuilding a signature from the legacy scene id would
-    fabricate a reference outright.
+    Returns ``(references, skipped)``.
+
+    Three kinds of row are deliberately left out, and all three are **counted**
+    rather than silently dropped -- reading a skip as "compared and found
+    nothing" is how a dedup pass gets reported that never happened:
+
+    * ``incomplete`` -- the row predates the final-shot signatures.  Treating a
+      missing record as "nothing similar found" would overstate the comparison,
+      and rebuilding a signature from the legacy scene id would fabricate a
+      reference outright.
+    * ``other_product`` -- the row belongs to a different SKU.  Reusing a
+      template across products is an account-style / scheduling question, not a
+      duplicate video: the same A/B/C montage is *supposed* to recur across a
+      catalogue.  Content-level hard de-duplication only applies within one
+      product (I2).
+    * ``own_record`` -- the row was written by the batch being planned right
+      now.  Resuming a batch re-plans it, and its first attempt already reserved
+      ledger rows; without this filter every re-planned candidate is compared
+      against its own earlier incarnation, reads as a duplicate, and the batch
+      delivers nothing (Review R3).  Excluding these rows loses no comparison:
+      sibling comparison inside a run happens through the reserved-reference
+      list, so the same row would otherwise be compared twice.
+
+    A row whose product code is missing cannot be attributed, so it is treated as
+    ``incomplete``: an unattributable row must not silently become a hard filter
+    for whichever product happens to be planning.
     """
 
     try:
-        from core.accessory_mixed_templates import mixed_reference_signature
+        from core.accessory_mixed_templates import (
+            ledger_row_is_own_record,
+            mixed_reference_signature,
+        )
     except Exception:  # noqa: BLE001 - never break planning
-        return [], 0
+        return [], {"incomplete": 0, "other_product": 0, "own_record": 0}
 
+    declared = exclusions if isinstance(exclusions, dict) else {}
+    own = {
+        "batch_ids": declared.get("batch_ids") or (),
+        "usage_ids": declared.get("usage_ids") or (),
+        "batch_item_ids": declared.get("batch_item_ids") or (),
+        "script_ids": declared.get("script_ids") or (),
+    }
+
+    wanted = _text(product_code)
     references: List[Dict[str, Any]] = []
-    incomplete = 0
+    skipped = {"incomplete": 0, "other_product": 0, "own_record": 0}
     for row in recent_usage or []:
         if not isinstance(row, dict):
             continue
+        if ledger_row_is_own_record(row, **own):
+            skipped["own_record"] += 1
+            continue
+        row_product = _text(row.get("product_code"))
+        # Product attribution is decided *before* readability.  ``history_incomplete``
+        # must mean "same product, but the record cannot be compared" -- if rows
+        # of other products were counted here, an unreadable foreign row would
+        # make a same-product candidate look uncomparable when it is not.
+        if wanted and row_product and row_product != wanted:
+            skipped["other_product"] += 1
+            continue
         reference = mixed_reference_signature(row)
-        if reference.get("complete"):
-            references.append(reference)
-        else:
-            incomplete += 1
-    return references, incomplete
+        if not reference.get("complete"):
+            skipped["incomplete"] += 1
+            continue
+        if not row_product:
+            # An unattributable row cannot be filtered by product above, so it
+            # must not become a reference either.
+            skipped["incomplete"] += 1
+            continue
+        references.append(reference)
+    return references, skipped
 
 
 def _record_mixed_difference(
     tally: Optional[Dict[str, int]],
     report: Optional[Dict[str, Any]],
 ) -> None:
-    """Count one accepted candidate into the report's independent-content tally."""
+    """Count one accepted candidate into the report's independent-content tally.
+
+    A ``DISTINCT_THEME`` reached with **no comparable reference** is not a
+    finding -- it is the absence of one.  ``comparison_scope ==
+    "HISTORY_INCOMPARABLE"`` says exactly that: same-product history existed but
+    could not be read (written before the final-shot signatures, or under an
+    older version).  Counting those as independent themes is how an unperformed
+    comparison gets reported as a verified difference, so they go to their own
+    bucket and the summary names them.
+    """
 
     if not isinstance(tally, dict) or not isinstance(report, dict):
         return
     verdict = _text(report.get("review_status")).upper()
+    scope = _text(report.get("comparison_scope")).upper()
+    if scope == "HISTORY_INCOMPARABLE":
+        tally["uncompared"] = tally.get("uncompared", 0) + 1
+        return
     if verdict == "DISTINCT_THEME":
         tally["distinct_theme"] = tally.get("distinct_theme", 0) + 1
     elif verdict == "EXECUTION_VARIANT":
         tally["execution_variant"] = tally.get("execution_variant", 0) + 1
+
+
+# ── Readable theme proposition (package B3) ────────────────────────────────
+# The mixed contract's ``content_theme.thesis`` used to be
+# ``audience_tension_text or content_angle_key or theme_id``.  In a real run all
+# three are unusable as a *theme sentence*: ``audience_tension.status`` comes
+# back ``UNAVAILABLE`` with empty text, and the two fallbacks are internal IDs.
+# Measured on the four real scripts of 2026-09-17, every plan wrote
+# ``"thesis": "ARGUMENT_OPERATOR_PCS_..._PCL_..."`` -- an opaque key with a
+# theme's name on it.  A reader cannot tell two buying reasons apart from it,
+# and the difference judge was comparing exactly that shape (Review R4).
+#
+# The readable proposition does exist; it simply lives further down the bundle.
+# Order below is most-authoritative first, and every rung names the *field it
+# was copied from*, so "why does this video have this theme?" is answerable by
+# opening the bundle rather than by decoding an ID.
+_MIXED_THESIS_SOURCES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    (
+        "SPINE_CORE_BUYING_REASON",
+        ("semantic_spine_contract", "script_thesis", "core_buying_reason"),
+    ),
+    ("SELLING_ARGUMENT_CORE_VALUE", ("selling_argument", "core_value")),
+    ("CONTENT_MAINLINE", ("content_mainline",)),
+    ("SELLING_ARGUMENT_OPERATOR_EXPRESSION", ("selling_argument", "operator_expression")),
+    (
+        "SELLING_ARGUMENT_CREATIVE_CORE_VALUE",
+        ("selling_argument", "creative_core_value"),
+    ),
+    (
+        "SELLING_ARGUMENT_SOURCE_OPERATOR_EXPRESSION",
+        ("selling_argument", "source_operator_expression"),
+    ),
+    ("AUDIENCE_SITUATION", ("audience_situation",)),
+    # Legacy projection of the same block; only consulted last, and only for
+    # the fields it actually carries.
+    ("VALUE_PROPOSITION_OPERATOR_EXPRESSION", ("value_proposition", "operator_expression")),
+    ("VALUE_PROPOSITION_SOURCE_OPERATOR_EXPRESSION", ("value_proposition", "source_operator_expression")),
+)
+
+# Where the *argument ID* is kept once the readable text takes over ``thesis``.
+_MIXED_ARGUMENT_ID_SOURCES: Tuple[Tuple[str, ...], ...] = (
+    ("selling_argument", "argument_id"),
+    ("value_proposition", "argument_id"),
+    ("selling_argument", "source_argument_id"),
+    ("value_proposition", "source_argument_id"),
+    ("selling_argument_lineage", "source_argument_id"),
+)
+
+
+def _mixed_bundle_path(bundle: Any, path: Sequence[str]) -> str:
+    """Read a dotted bundle path, tolerating every intermediate being absent."""
+
+    node: Any = bundle
+    for key in path:
+        if not isinstance(node, dict):
+            return ""
+        node = node.get(key)
+    return _text(node)
+
+
+def _mixed_argument_id(bundle: Any) -> str:
+    for path in _MIXED_ARGUMENT_ID_SOURCES:
+        value = _mixed_bundle_path(bundle, path)
+        if value:
+            return value
+    return ""
+
+
+def _mixed_theme_proposition(
+    bundle: Any,
+    *,
+    fallback_theme_id: str = "",
+) -> Dict[str, str]:
+    """Resolve the readable proposition this item's video is built around.
+
+    Returns ``thesis`` / ``thesis_source`` / ``thesis_source_ref`` /
+    ``thesis_input_gap`` plus ``argument_id``.  When nothing readable exists the
+    ``thesis`` is empty and ``thesis_input_gap`` names the gap -- the internal
+    angle key is deliberately *not* promoted into the theme slot, because doing
+    exactly that is what made four different buying reasons look alike.
+    """
+
+    angle = _text(fallback_theme_id)
+    try:
+        from core.accessory_mixed_templates import resolve_theme_proposition
+    except Exception:  # noqa: BLE001 - a missing module must not break planning
+        resolve_theme_proposition = None  # type: ignore[assignment]
+
+    candidates: List[Dict[str, str]] = []
+    for label, path in _MIXED_THESIS_SOURCES:
+        text = _mixed_bundle_path(bundle, path)
+        if not text:
+            continue
+        candidates.append(
+            {
+                "source": label,
+                "ref": "bundle." + ".".join(path),
+                "text": text,
+            }
+        )
+    # The angle key is offered last and *labelled as an ID*: if the readability
+    # guard ever let it through, the source field would still say where it came
+    # from, so it could never be mistaken for an authored proposition.
+    if angle:
+        candidates.append(
+            {
+                "source": "CONTENT_ANGLE_KEY",
+                "ref": "original_content_item.content_angle_key",
+                "text": angle,
+            }
+        )
+
+    if resolve_theme_proposition is None:
+        resolved = {"thesis": "", "thesis_source": "", "thesis_source_ref": "", "thesis_input_gap": "THESIS_NOT_READABLE"}
+    else:
+        resolved = resolve_theme_proposition(candidates)
+    resolved["argument_id"] = _mixed_argument_id(bundle)
+    return resolved
 
 
 def _build_mixed_template_injection(
@@ -1792,6 +2064,7 @@ def _build_mixed_template_injection(
     history_references: Optional[List[Dict[str, Any]]] = None,
     history_incomplete: int = 0,
     identity: str = "",
+    theme_proposition: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Compile the authored mixed-accessory contract for one plan item.
 
@@ -1867,6 +2140,44 @@ def _build_mixed_template_injection(
     preferred = select_template_id(int(item_index) - 1)
     ordered = [preferred] + [tid for tid in template_ids if tid != preferred]
 
+    # The theme written into the contract is a *readable proposition*.  Callers
+    # that own the content bundle resolve it there and hand it over; callers
+    # that only have the legacy argument text are still guarded, so an internal
+    # ID can never be promoted into the theme slot (package B3 / Review R4).
+    declared = dict(theme_proposition or {})
+    if declared:
+        thesis = _text(declared.get("thesis"))
+        thesis_source = _text(declared.get("thesis_source"))
+        thesis_source_ref = _text(declared.get("thesis_source_ref"))
+        thesis_input_gap = _text(declared.get("thesis_input_gap"))
+        argument_id = _text(declared.get("argument_id"))
+    else:
+        gap_code = "THESIS_NOT_READABLE"
+        try:
+            from core.accessory_mixed_templates import (
+                MIXED_THESIS_INPUT_GAP_READABILITY,
+                is_readable_theme_proposition,
+            )
+
+            gap_code = MIXED_THESIS_INPUT_GAP_READABILITY
+            readable = is_readable_theme_proposition(
+                audience_tension_text,
+                {"theme_id": theme_id, "parent_theme_id": angle or theme_id},
+            )
+        except Exception:  # noqa: BLE001 - never break planning on a missing guard
+            readable = bool(_text(audience_tension_text))
+        if readable:
+            thesis = _text(audience_tension_text).strip()
+            thesis_source = "AUDIENCE_TENSION_TEXT"
+            thesis_source_ref = "bundle.audience_tension.text"
+            thesis_input_gap = ""
+        else:
+            thesis = ""
+            thesis_source = ""
+            thesis_source_ref = ""
+            thesis_input_gap = gap_code
+        argument_id = ""
+
     attempted: List[Dict[str, Any]] = []
     first_contract: Dict[str, Any] = {}
     for template_id in ordered:
@@ -1881,7 +2192,11 @@ def _build_mixed_template_injection(
                     "theme_id": theme_id,
                     "parent_theme_id": angle or theme_id,
                     "candidate_role": candidate_role,
-                    "thesis": _text(audience_tension_text) or angle or theme_id,
+                    "thesis": thesis,
+                    "argument_id": argument_id,
+                    "thesis_source": thesis_source,
+                    "thesis_source_ref": thesis_source_ref,
+                    "thesis_input_gap": thesis_input_gap,
                     "approved_claim_refs": [
                         _text(item) for item in (claim_keys or []) if _text(item)
                     ],
@@ -2150,6 +2465,7 @@ def _build_summary(
     execution_variant = int(tally.get("execution_variant", 0))
     duplicate_rejected = int(tally.get("duplicate_rejected", 0))
     insufficient_evidence = int(tally.get("insufficient_evidence", 0))
+    uncompared = int(tally.get("uncompared", 0))
     mixed_usable = distinct_theme + execution_variant
     outfit_provider_snapshot = get_outfit_template_provider_snapshot()
     persona_provider_snapshot = load_persona_templates()
@@ -2164,6 +2480,9 @@ def _build_summary(
         "mixed_execution_variant_count": execution_variant,
         "mixed_duplicate_rejected_count": duplicate_rejected,
         "mixed_insufficient_evidence_count": insufficient_evidence,
+        # 同商品历史存在但读不出可比签名（版本不同 / 未写最终镜头）时的条数。
+        # 单列出来是因为它既不是"独立主题"，也不是"重复"，更不是"没历史"。
+        "mixed_uncompared_count": uncompared,
         "mixed_usable_count": mixed_usable,
         "mixed_history_coverage": dict(mixed_history_coverage or {}),
         "mixed_shortage_reason": (

@@ -2,7 +2,10 @@ import os
 import unittest
 from unittest import mock
 
-from scripts.run_original_batch import _render_complete_scripts_markdown
+from scripts.run_original_batch import (
+    _counts_section,
+    _render_complete_scripts_markdown,
+)
 from core.original_batch_executor import DIRECTION_LIMIT_ENV, _resolve_direction_limit
 
 
@@ -187,6 +190,85 @@ class DirectionLimitTest(unittest.TestCase):
         self.assertEqual(_resolve_direction_limit(None), 1)
         self.assertEqual(_resolve_direction_limit("x"), 1)
         self.assertEqual(_resolve_direction_limit(0), 1)
+
+
+class MixedHistoryProtectionReportTest(unittest.TestCase):
+    """B4: 报告不得声称一次并未落盘的跨批去重保护。
+
+    The rendered signature is what the *next* batch compares 正文 against.  When
+    the write failed, the item has no such protection, and a report that shows
+    only "生成成功" would read as if the ledger had been updated.
+    """
+
+    def _report(self, persistence, *, not_persisted=None):
+        failed = not persistence.get("history_persisted")
+        return {
+            "counts_available": True,
+            "requested_count": 1,
+            "planned_count": 1,
+            "ready_count": 1,
+            "items": [
+                {
+                    "item_index": 1,
+                    "compatibility_slot": "S1",
+                    "status": "SCRIPT_READY",
+                    "structure": {},
+                    "expression": {},
+                    "content": {},
+                    "script": {},
+                    "mixed_delivery": {
+                        "verdict": "DISTINCT_THEME",
+                        "reason": "与最近参照在最终镜头上不同",
+                    },
+                    "mixed_history_persistence": persistence,
+                }
+            ],
+            "history_not_persisted_count": (
+                1 if failed else 0
+            ) if not_persisted is None else not_persisted,
+        }
+
+    def test_a_failed_write_is_shown_per_item(self):
+        markdown = _render_complete_scripts_markdown(
+            self._report(
+                {
+                    "history_persisted": False,
+                    "reason": "LEDGER_ERROR:RuntimeError",
+                    "usage_id": "CPU_1",
+                }
+            )
+        )
+        self.assertIn("跨批保护", markdown)
+        self.assertIn("未写入台账", markdown)
+        self.assertIn("LEDGER_ERROR:RuntimeError", markdown)
+
+    def test_a_successful_write_says_so(self):
+        markdown = _render_complete_scripts_markdown(
+            self._report(
+                {"history_persisted": True, "reason": "", "usage_id": "CPU_1"}
+            )
+        )
+        self.assertIn("已写入台账", markdown)
+        self.assertNotIn("未写入台账", markdown)
+
+    def test_the_counts_section_warns_when_a_write_failed(self):
+        joined = "\n".join(
+            _counts_section(
+                self._report(
+                    {"history_persisted": False, "reason": "ROW_NOT_FOUND"}
+                )
+            )
+        )
+        self.assertIn("**没有**跨批去重保护", joined)
+        self.assertIn("成稿签名未写入台账的条目：1", joined)
+
+    def test_the_counts_section_stays_silent_when_every_write_landed(self):
+        joined = "\n".join(
+            _counts_section(
+                self._report({"history_persisted": True, "reason": ""})
+            )
+        )
+        self.assertNotIn("未写入台账", joined)
 
 
 if __name__ == "__main__":

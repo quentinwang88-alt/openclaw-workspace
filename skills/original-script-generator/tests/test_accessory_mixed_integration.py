@@ -8,13 +8,16 @@ face-free accessory behaviour must apply).
 import copy
 import json
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 from core.accessory_mixed_templates import (
     ACCESSORY_MIXED_TEMPLATE_ENV,
     MIXED_HISTORY_METADATA_KEY,
+    MIXED_RENDERED_HISTORY_METADATA_KEY,
     MIXED_TEMPLATE_CONTRACT_KEY,
     ERR_MIXED_PART_CONTRADICTION,
     ERR_MIXED_SCOPE_UNSUPPORTED,
@@ -29,14 +32,19 @@ from core.accessory_mixed_templates import (
     _signature_atom,
     anchor_evidence_texts,
     attach_mixed_part_evidence,
+    compare_mixed_signatures,
     compile_mixed_template_contract,
     frozen_unit_timeline,
     judge_mixed_candidate,
+    judge_rendered_script,
     load_mixed_template_definition,
     map_structure_beats_to_units,
+    mixed_delivery_decision,
     mixed_reference_signature,
+    mixed_rendered_reference_signature,
     mixed_scope_decision,
     mixed_signature_bundle,
+    mixed_signature_from_script,
     mixed_template_ids,
     mixed_template_unit_count,
     mixed_visual_signature,
@@ -44,6 +52,7 @@ from core.accessory_mixed_templates import (
     project_mixed_template_onto_units,
     render_mixed_blueprint_guidance,
     resolve_part_evidence,
+    select_environment_recipe_id,
     validate_mixed_template_contract,
 )
 from core.category_execution import (
@@ -62,6 +71,9 @@ from core.original_batch_allocator import (
 )
 from core.original_batch_executor import (
     _mixed_preflight_error,
+    _mixed_render_references,
+    _persist_mixed_rendered_signature,
+    _script_item_outcome,
     resolve_planning_execution_scope,
 )
 from core.original_batch_models import BatchRequest
@@ -73,6 +85,7 @@ from core.simplified_complete_script import (
     compile_capture_units,
     validate_simplified_visual_script,
 )
+from core.storage import PipelineStorage
 from core.visual_execution_contract import build_visual_execution_contract
 
 _GATE_OFF = {ACCESSORY_MIXED_TEMPLATE_ENV: "0"}
@@ -1309,11 +1322,18 @@ def _allocate_mixed(requested_count, *, recent_usage=None, product_type="耳饰"
 
 
 def _mixed_history_row(contract, *, legacy_signature="OLD_SCENE_SIG|WHICH|MUST|NOT|BE|REUSED",
-                       identity=""):
-    """One historical usage row that already owns a final-shot signature."""
+                       identity="", product_code="P_E"):
+    """One historical usage row that already owns a final-shot signature.
+
+    ``product_code`` is part of the fixture because the ledger column is always
+    populated by ``reserve_creative_pattern``.  Content dedup is per product
+    (another product's history must not exhaust this one's templates), so a row
+    without it is unreadable history rather than a comparable reference.
+    """
 
     return {
         "usage_id": identity or f"CPU_{contract.get('template_id')}",
+        "product_code": product_code,
         "visual_signature": legacy_signature,
         "scene_motif": "OLD_SCENE",
         "persona_role": "OLD_PERSONA",
@@ -1605,6 +1625,690 @@ class MixedOtherBranchesNeverEnterTest(unittest.TestCase):
             "SCOPE_UNSUPPORTED",
             "借用同一入口的长视频规划必须声明该模式不适用",
         )
+
+
+class _NoSiblingItems:
+    """A batch whose other items have not generated yet."""
+
+    def get_items(self, _batch_id):
+        return []
+
+
+class MixedRenderedSignatureTest(unittest.TestCase):
+    """I3: 成稿签名只由实际正文决定，且必须能跨批与历史成稿比较。
+
+    The field case: two candidates whose 正文 is byte-identical were reported as
+    different content because they had been planned onto different templates.
+    The planned fields are the plan's business; the 正文 is the delivered
+    content, and only the latter may decide whether two items are the same.
+    """
+
+    BEATS = ["HOOK", "PROOF", "USE_PROCESS", "ENDING"]
+    _SAME_TEXT = [
+        "后脑发束近景，白色蝴蝶与深色头发形成对比",
+        "手持抓夹小幅转动，展示蝴蝶沿夹身的排列",
+        "浅木台面上自然放置，看清蝴蝶装饰层次",
+        "回到同一发型，交代抓夹与发束的比例",
+    ]
+    # 真实成稿的每个镜头都自己声明"这一镜执行的是哪个模块、看什么、商品处于
+    # 什么物理状态"（storyboard[i].module / observation_job / product_state）。
+    # 夹具省掉这三个字段，成稿特征就只能回落到冻结合同 —— 那样"正文相同 =
+    # 同签名"会被计划模板抵消，测出来的就是夹具的缺口，而不是实现的行为。
+    _SHOT_FIELDS = [
+        {
+            "module": "WORN_DETAIL",
+            "observation_job": "商品本体与耳垂落点的关系",
+            "product_state": "ALREADY_WORN",
+        },
+        {
+            "module": "HANDHELD_PRODUCT",
+            "observation_job": "脱离身体关系单独看清商品本体造型",
+            "product_state": "HELD",
+        },
+        {
+            "module": "STATIC_PRODUCT",
+            "observation_job": "在冻结环境中稳定停住，看清材质、结构与核心细节",
+            "product_state": "RESTING_ON_SURFACE",
+        },
+        {
+            "module": "WORN_RELATION",
+            "observation_job": "耳饰与颈侧、领口的搭配关系",
+            "product_state": "ALREADY_WORN",
+        },
+    ]
+
+    def _script(self, texts=None):
+        rhythm = build_capture_rhythm_contract(
+            capture_mode=CAPTURE_MODE_CREATOR_SELF_SHOT,
+            macro_structure=self.BEATS,
+        )
+        rows = _shots(self.BEATS)
+        for row, text in zip(rows, texts or self._SAME_TEXT):
+            row["visual_content"] = text
+        storyboard, units = compile_capture_units(rows, rhythm)
+        for shot, declared in zip(storyboard, self._SHOT_FIELDS):
+            shot.update(declared)
+        return {"storyboard": storyboard, "capture_units": units}
+
+    def test_the_same_rendered_text_signs_the_same_under_any_template(self):
+        script = self._script()
+        first = mixed_signature_from_script(
+            script, _contract_for("AMX_A_WORN_FIRST")
+        )
+        second = mixed_signature_from_script(
+            script, _contract_for("AMX_B_FORM_FIRST")
+        )
+
+        self.assertEqual(
+            first["visual"]["digest"],
+            second["visual"]["digest"],
+            "正文逐字相同必须同签名，计划 template_id 不得抵消正文相同",
+        )
+        self.assertEqual(first["visual"]["signature_kind"], "RENDERED")
+        self.assertEqual(
+            sorted({key for shot in second["visual"]["shots"] for key in shot}),
+            [
+                "action_or_state",
+                "actual_module",
+                "feature_source",
+                "framing_scale",
+                "observation_supported",
+                "observed_part_or_relation",
+                "rendered_character_action",
+                "rendered_visual_content",
+                "sequence_position",
+                "source_refs",
+                "unit_binding",
+                "visible_subject",
+            ],
+            "成稿镜头只记录成稿自身声明与冻结边界；计划字段只能进 planned",
+        )
+        self.assertEqual(
+            second["visual"]["planned"]["template_id"], "AMX_B_FORM_FIRST",
+            "计划模板仍然留档，只是不参与 digest",
+        )
+
+    def test_planned_and_rendered_signatures_are_never_compared(self):
+        contract = _contract_for("AMX_A_WORN_FIRST")
+        rendered = mixed_signature_from_script(self._script(), contract)
+        report = compare_mixed_signatures(rendered, mixed_signature_bundle(contract))
+
+        self.assertEqual(
+            report["review_status"], "NEEDS_REVIEW",
+            "计划签名与成稿签名不可比，既不能算相同也不能算不同",
+        )
+        self.assertIn("SIGNATURE_KIND_MISMATCH", report["difference_dimensions"])
+        self.assertFalse(report["counts_as_independent"])
+
+    def test_a_repeat_of_the_rendered_text_is_refused(self):
+        recipe = select_environment_recipe_id(0)
+        first = mixed_signature_from_script(
+            self._script(), _contract_with_recipe("AMX_A_WORN_FIRST", recipe)
+        )
+        report = judge_rendered_script(
+            self._script(),
+            _contract_with_recipe("AMX_B_FORM_FIRST", recipe),
+            [{"identity": "ITEM_1", "signature": first, "source": "RENDERED"}],
+        )
+
+        self.assertEqual(report["review_status"], "EXACT_DUPLICATE")
+        self.assertFalse(report["counts_as_independent"])
+        self.assertEqual(report["nearest_script_id"], "ITEM_1")
+
+    def test_a_montage_of_one_repeated_frame_is_refused(self):
+        """四镜画面同一 → 必须判"没形成混合"，而正常稿不得被误判。
+
+        守卫读的是每镜**实际交付的画面描述**。它曾经读一个在特征版本升级后不
+        存在的键（``rendered_event``），于是 ``distinct_rendered_events`` 恒为 0：
+        每一份成稿都会被拦成待复核，而"画面重复"这条守卫再也没真的生效过。
+        """
+
+        repeated = self._script(texts=["同一画面"] * 4)
+        collapsed = judge_rendered_script(repeated, _contract_for("AMX_A_WORN_FIRST"), [])
+        self.assertTrue(collapsed["montage_collapsed"], "四镜同一画面必须被判为未形成混合")
+        self.assertEqual(collapsed["review_status"], "NEEDS_REVIEW")
+        self.assertIn("RENDERED_SHOTS_COLLAPSED", collapsed["difference_dimensions"])
+        self.assertEqual(collapsed["distinct_rendered_events"], 1)
+
+        normal = judge_rendered_script(self._script(), _contract_for("AMX_A_WORN_FIRST"), [])
+        self.assertFalse(
+            normal["montage_collapsed"],
+            "四镜画面各不相同的正常稿不得被判成画面重复",
+        )
+        self.assertEqual(normal["distinct_rendered_events"], 4)
+
+    def test_a_planned_sibling_is_not_a_rendered_reference(self):
+        contract = _contract_for("AMX_A_WORN_FIRST")
+        report = judge_rendered_script(
+            self._script(),
+            contract,
+            [
+                {
+                    "identity": "ITEM_PENDING",
+                    "signature": mixed_signature_bundle(contract),
+                    "source": "FROZEN",
+                }
+            ],
+        )
+
+        self.assertEqual(
+            report["references_compared"], 0,
+            "尚未生成的兄弟只有计划镜头，不能作为正文比较的引用",
+        )
+        self.assertEqual(
+            report["references_skipped_not_rendered"], 1,
+            "被跳过的计划引用必须显式计数，不能读成『已比对无重复』",
+        )
+
+    def _reserve_row(self, store, usage_id, *, batch_item_id, batch_id, product="P_E"):
+        return store.reserve_creative_pattern(
+            {
+                "usage_id": usage_id,
+                "product_code": product,
+                "country": "泰国",
+                "category": "配饰",
+                "status": "MACHINE_SCREENED",
+                "metadata": {"batch_id": batch_id, "batch_item_id": batch_item_id},
+            }
+        )
+
+    def _ledger(self, tmp):
+        """An isolated ledger holding the two rows that really coexist.
+
+        * ``CPU_I3_SELF`` -- the reservation *this* run's item owns; the frozen
+          package carries exactly this ``usage_id``, and its ``batch_id`` /
+          ``batch_item_id`` name the run.
+        * ``CPU_I3_HISTORY`` -- a row delivered by an *earlier* batch.
+
+        The fixture must keep them apart.  Using the item's own row as "history"
+        would be modelling the very defect Review R3 found (a resumed run
+        comparing itself against itself), and would make the exclusion
+        untestable.
+        """
+
+        db_path = Path(tmp) / "ledger.sqlite3"
+        store = PipelineStorage(db_path=db_path, database_url="sqlite")
+        own = self._reserve_row(
+            store, "CPU_I3_SELF", batch_id="B_I3", batch_item_id="ITEM_I3"
+        )
+        self._reserve_row(
+            store, "CPU_I3_HISTORY", batch_id="B_OLD", batch_item_id="HIST_I3"
+        )
+        return store, own
+
+    def _reserve_foreign(self, store, *, usage_id, batch_item_id, product):
+        return self._reserve_row(
+            store,
+            usage_id,
+            batch_id="B_OTHER",
+            batch_item_id=batch_item_id,
+            product=product,
+        )
+
+    def _seed_rendered_signature(self, store, usage_id, *, batch_item_id, script=None):
+        """Give one ledger row a rendered signature, as a finished run would."""
+
+        contract = _contract_for("AMX_A_WORN_FIRST")
+        outcome = _persist_mixed_rendered_signature(
+            item=SimpleNamespace(
+                batch_item_id=batch_item_id,
+                product_code="P_E",
+                frozen_direction_package_json=json.dumps(
+                    {"creative_usage_id": usage_id}
+                ),
+            ),
+            script=script if script is not None else self._script(),
+            contract=contract,
+            storage=store,
+        )
+        self.assertTrue(
+            outcome.get("history_persisted"),
+            f"夹具必须写出成稿签名：{outcome}",
+        )
+        return contract
+
+    def _isolated_env(self, tmp):
+        return mock.patch.dict(
+            os.environ,
+            {"ORIGINAL_SCRIPT_GENERATOR_DB_PATH": str(Path(tmp) / "ledger.sqlite3")},
+            clear=False,
+        )
+
+    def _item(self, usage_id):
+        return SimpleNamespace(
+            batch_item_id="ITEM_I3",
+            product_code="P_E",
+            frozen_direction_package_json=json.dumps({"creative_usage_id": usage_id}),
+        )
+
+    def test_the_rendered_signature_round_trips_through_the_ledger(self):
+        with tempfile.TemporaryDirectory() as tmp, self._isolated_env(tmp):
+            store, own_id = self._ledger(tmp)
+            contract = _contract_for("AMX_A_WORN_FIRST")
+            item = self._item(own_id)
+
+            written = _persist_mixed_rendered_signature(
+                item=item,
+                script=self._script(),
+                contract=contract,
+                storage=store,
+            )
+            self.assertTrue(
+                written["history_persisted"],
+                "成稿签名必须能随台账持久化",
+            )
+            self.assertEqual(written["reason"], "")
+            self.assertEqual(written["usage_id"], own_id)
+
+            row = store.get_creative_pattern(own_id)
+            self.assertEqual(
+                row["status"], "MACHINE_SCREENED",
+                "回写成稿签名不得改变台账生命周期状态",
+            )
+            metadata = json.loads(row["metadata_json"])
+            self.assertIn(MIXED_RENDERED_HISTORY_METADATA_KEY, metadata)
+            self.assertEqual(
+                metadata["batch_item_id"], "ITEM_I3",
+                "回写不得把本条目改挂到别的条目名下",
+            )
+            self.assertEqual(
+                mixed_rendered_reference_signature({"metadata": metadata})["complete"],
+                True,
+                "回写的成稿签名必须可被下一批读成可比引用",
+            )
+
+            # A row delivered by an *earlier* batch is what history means.
+            self._seed_rendered_signature(
+                store, "CPU_I3_HISTORY", batch_item_id="HIST_I3"
+            )
+            batch = SimpleNamespace(
+                batch_id="B_I3", target_country="泰国", top_category="配饰"
+            )
+            references = _mixed_render_references(_NoSiblingItems(), batch, item)
+            self.assertEqual(
+                [(ref["identity"], ref["source"]) for ref in references],
+                [("HIST_I3", "RENDERED_HISTORY")],
+                "跨批比较必须能取到历史成稿签名，且只取别的批次",
+            )
+            report = judge_rendered_script(self._script(), contract, references)
+            self.assertEqual(report["comparison_scope"], "RENDERED_BATCH_AND_HISTORY")
+            self.assertEqual(report["history_rendered_compared"], 1)
+            self.assertEqual(report["review_status"], "EXACT_DUPLICATE")
+            self.assertFalse(report["counts_as_independent"])
+
+    def test_the_items_own_row_is_not_a_rendered_reference(self):
+        """R3: 重跑时不得把稿件判成"自己的重复"。"""
+
+        with tempfile.TemporaryDirectory() as tmp, self._isolated_env(tmp):
+            store, own_id = self._ledger(tmp)
+            item = self._item(own_id)
+            # This item already ran once, so both rows carry a rendered
+            # signature.  Without the exclusion the item would compare against
+            # its own previous output and could never be delivered again.
+            self._seed_rendered_signature(store, own_id, batch_item_id="ITEM_I3")
+            self._seed_rendered_signature(
+                store, "CPU_I3_HISTORY", batch_item_id="HIST_I3"
+            )
+
+            batch = SimpleNamespace(
+                batch_id="B_I3", target_country="泰国", top_category="配饰"
+            )
+            references = _mixed_render_references(_NoSiblingItems(), batch, item)
+            self.assertEqual(
+                [ref["identity"] for ref in references],
+                ["HIST_I3"],
+                "本批次自身的台账行必须排除，只与真正别的批次比较",
+            )
+
+    def test_rerunning_an_item_updates_its_own_row_in_place(self):
+        """签名写回按稳定条目键幂等更新：不新增行、不改变状态。"""
+
+        with tempfile.TemporaryDirectory() as tmp, self._isolated_env(tmp):
+            store, own_id = self._ledger(tmp)
+            contract = _contract_for("AMX_A_WORN_FIRST")
+            item = self._item(own_id)
+
+            first = _persist_mixed_rendered_signature(
+                item=item, script=self._script(), contract=contract, storage=store
+            )
+            before = store.get_creative_pattern(own_id)
+            second = _persist_mixed_rendered_signature(
+                item=item, script=self._script(), contract=contract, storage=store
+            )
+            after = store.get_creative_pattern(own_id)
+
+            self.assertTrue(first["history_persisted"] and second["history_persisted"])
+            self.assertEqual(
+                json.loads(before["metadata_json"]),
+                json.loads(after["metadata_json"]),
+                "同一成稿重复回写必须得到同一份 metadata",
+            )
+            self.assertEqual(after["status"], before["status"])
+            self.assertEqual(
+                after["created_at"], before["created_at"], "不得另建一行"
+            )
+            self.assertEqual(after["usage_id"], own_id)
+
+    def test_a_row_owned_by_another_item_is_not_overwritten(self):
+        """把成稿签名写到别的条目名下，会让去重比对错对象。"""
+
+        with tempfile.TemporaryDirectory() as tmp, self._isolated_env(tmp):
+            store, _own_id = self._ledger(tmp)
+            contract = _contract_for("AMX_A_WORN_FIRST")
+            # The frozen package points at the *history* row: a copied package,
+            # a resumed item whose reservation was reassigned -- either way the
+            # write must be refused, not silently applied.
+            item = self._item("CPU_I3_HISTORY")
+
+            outcome = _persist_mixed_rendered_signature(
+                item=item, script=self._script(), contract=contract, storage=store
+            )
+            self.assertFalse(outcome["history_persisted"])
+            self.assertEqual(outcome["reason"], "ROW_OWNED_BY_ANOTHER_ITEM")
+            row = store.get_creative_pattern("CPU_I3_HISTORY")
+            self.assertNotIn(
+                MIXED_RENDERED_HISTORY_METADATA_KEY,
+                json.loads(row["metadata_json"]),
+                "被拒绝的回写不得落盘",
+            )
+
+    def test_a_ledger_outage_reports_history_not_persisted(self):
+        """台账写不进去时稿件保留，但不得报告已完成跨批保护。"""
+
+        with tempfile.TemporaryDirectory() as tmp, self._isolated_env(tmp):
+            store, own_id = self._ledger(tmp)
+            contract = _contract_for("AMX_A_WORN_FIRST")
+            item = self._item(own_id)
+
+            with mock.patch.object(
+                PipelineStorage,
+                "update_creative_pattern_status",
+                side_effect=RuntimeError("ledger down"),
+            ):
+                outcome = _persist_mixed_rendered_signature(
+                    item=item,
+                    script=self._script(),
+                    contract=contract,
+                    storage=store,
+                )
+
+            self.assertFalse(
+                outcome["history_persisted"],
+                "写失败必须自报未持久化，不能默认成已完成去重保护",
+            )
+            self.assertTrue(
+                outcome["reason"].startswith("LEDGER_ERROR:"), outcome["reason"]
+            )
+            # The script itself is untouched: bookkeeping never fails an item.
+            row = store.get_creative_pattern(own_id)
+            self.assertNotIn(
+                MIXED_RENDERED_HISTORY_METADATA_KEY,
+                json.loads(row["metadata_json"]),
+            )
+
+    def test_an_interruption_after_the_write_leaves_exactly_one_row(self):
+        """故障注入：签名已写、READY 尚未落盘时中断。
+
+        稿件必须还在（它是上一次运行的产物），台账里必须只有一行，且再次
+        运行得到的 metadata 与中断前一致 —— 恢复不得另建预留、也不得把两次
+        运行的成稿签名叠成两条不同的记录。
+        """
+
+        with tempfile.TemporaryDirectory() as tmp, self._isolated_env(tmp):
+            store, own_id = self._ledger(tmp)
+            contract = _contract_for("AMX_A_WORN_FIRST")
+            item = self._item(own_id)
+
+            written = _persist_mixed_rendered_signature(
+                item=item, script=self._script(), contract=contract, storage=store
+            )
+            self.assertTrue(written["history_persisted"])
+            interrupted = json.loads(
+                store.get_creative_pattern(own_id)["metadata_json"]
+            )
+
+            # ... the run dies here, before the item's READY row is written ...
+            rows = store.list_recent_creative_patterns(
+                country="泰国", category="配饰", limit=50
+            )
+            self.assertEqual(
+                len([row for row in rows if row["usage_id"] == own_id]),
+                1,
+                "中断不得留下重复预留行",
+            )
+
+            # Recovery re-runs the item and writes the same fact again.
+            resumed = _persist_mixed_rendered_signature(
+                item=item, script=self._script(), contract=contract, storage=store
+            )
+            self.assertTrue(resumed["history_persisted"])
+            self.assertEqual(
+                json.loads(store.get_creative_pattern(own_id)["metadata_json"]),
+                interrupted,
+                "恢复后的台账必须与中断前逐字一致",
+            )
+            self.assertEqual(
+                len(
+                    [
+                        row
+                        for row in store.list_recent_creative_patterns(
+                            country="泰国", category="配饰", limit=50
+                        )
+                        if row["usage_id"] == own_id
+                    ]
+                ),
+                1,
+            )
+
+    def test_another_products_rendered_history_is_not_a_reference(self):
+        with tempfile.TemporaryDirectory() as tmp, self._isolated_env(tmp):
+            store, own_id = self._ledger(tmp)
+            # A genuinely foreign row: different batch, different item, and a
+            # different product -- so the exclusion under test is the product
+            # filter, not the "my own row" filter.
+            self._reserve_foreign(
+                store,
+                usage_id="CPU_I3_OTHER_PRODUCT",
+                batch_item_id="HIST_OTHER",
+                product="P_OTHER",
+            )
+            self._seed_rendered_signature(
+                store, "CPU_I3_OTHER_PRODUCT", batch_item_id="HIST_OTHER"
+            )
+
+            batch = SimpleNamespace(
+                batch_id="B_I3", target_country="泰国", top_category="配饰"
+            )
+            references = _mixed_render_references(
+                _NoSiblingItems(), batch, self._item(own_id)
+            )
+            self.assertEqual(
+                references,
+                [],
+                "别款商品的成稿历史不得作本商品的正文去重引用",
+            )
+
+
+class MixedDeliveryStatusTest(unittest.TestCase):
+    """I1: 生成后判成重复的条目不得作为独立可用交付。
+
+    The field case: the post-generation re-check returned
+    ``review_status=EXACT_DUPLICATE, counts_as_independent=false`` and the item
+    still went ``SCRIPT_RUNNING → SCRIPT_READY``.  Since SCRIPT_READY is what
+    feeds the first-frame task list, the 生产脚本表 and the production
+    hand-off, the batch's "完成数" was not a count of distinct content.
+    """
+
+    _DUPLICATE = {
+        "review_status": "EXACT_DUPLICATE",
+        "counts_as_independent": False,
+        "nearest_script_id": "ITEM_A",
+        "difference_dimensions": ["FINAL_SHOTS_IDENTICAL", "SURFACE_IDENTICAL"],
+        "difference_summary": "四镜最终约束与台面光线完全一致，仅序号/旧场景签名不同",
+    }
+    _SURFACE_ONLY = {
+        "review_status": "SURFACE_ONLY",
+        "counts_as_independent": False,
+        "nearest_script_id": "ITEM_B",
+        "difference_summary": "最终镜头约束相同，只有环境/光线等辅助变化",
+    }
+    _UNCERTAIN = {
+        "review_status": "NEEDS_REVIEW",
+        "counts_as_independent": False,
+        "nearest_script_id": "ITEM_C",
+        "difference_summary": "新增观察点缺少可核查证据：展示商品内部从未验证过的隐藏结构",
+    }
+    _COLLAPSED = {
+        "review_status": "DISTINCT_THEME",
+        "counts_as_independent": True,
+        "montage_collapsed": True,
+        "difference_summary": "各镜实际画面内容相同，未形成混合展示",
+    }
+    _VARIANT = {
+        "review_status": "EXECUTION_VARIANT",
+        "counts_as_independent": True,
+        "nearest_script_id": "ITEM_D",
+        "difference_summary": "同主题下增加有证据支撑的新观察重点",
+    }
+
+    def _item_outcome(self, recheck):
+        return _script_item_outcome(
+            {"status": "SUCCESS", "mixed_final_shot_recheck": recheck}
+        )
+
+    def test_the_duplicate_status_exists_outside_the_resume_set(self):
+        from core.original_batch_models import ITEM_STATUSES
+
+        self.assertIn("SCRIPT_DUPLICATE", ITEM_STATUSES)
+        self.assertNotIn(
+            "SCRIPT_DUPLICATE", {"PLANNED", "SCRIPT_FAILED"},
+            "重复条目不得落入 resume 会重跑的状态，否则会反复付费重生同一份重复",
+        )
+
+    def test_a_repeat_of_delivered_shots_is_not_delivered_as_ready(self):
+        status, code, message = self._item_outcome(self._DUPLICATE)
+        self.assertEqual(status, "SCRIPT_DUPLICATE")
+        self.assertEqual(code, "MIXED_DUPLICATE_CANDIDATE")
+        self.assertIn("ITEM_A", message, "拒绝原因必须指出与谁重复")
+
+        # 只换光影：最终镜头仍然相同，同样是重复内容，不是新内容。
+        self.assertEqual(self._item_outcome(self._SURFACE_ONLY)[0], "SCRIPT_DUPLICATE")
+
+    def test_uncertainty_is_delivered_with_a_review_flag(self):
+        status, _, _ = self._item_outcome(self._UNCERTAIN)
+        self.assertEqual(
+            status, "SCRIPT_READY",
+            "不确定的相似性交付并标记，不扩大成无界模型重写",
+        )
+        decision = mixed_delivery_decision(self._UNCERTAIN)
+        self.assertTrue(decision["usable"])
+        self.assertTrue(decision["requires_review"])
+
+        collapsed_status, _, _ = self._item_outcome(self._COLLAPSED)
+        self.assertEqual(collapsed_status, "SCRIPT_READY")
+        self.assertTrue(mixed_delivery_decision(self._COLLAPSED)["requires_review"])
+
+    def test_a_demonstrated_variant_stays_ready_and_unflagged(self):
+        status, code, _ = self._item_outcome(self._VARIANT)
+        self.assertEqual(status, "SCRIPT_READY")
+        self.assertEqual(code, "")
+        self.assertFalse(mixed_delivery_decision(self._VARIANT)["requires_review"])
+
+    def test_a_real_failure_is_not_masked_by_the_duplicate_path(self):
+        status, code, _ = _script_item_outcome(
+            {"status": "FAILED", "error_code": "MODEL_TIMEOUT"}
+        )
+        self.assertEqual(status, "SCRIPT_FAILED")
+        self.assertEqual(code, "MODEL_TIMEOUT")
+        self.assertEqual(
+            _script_item_outcome({"status": "SUCCESS"})[0], "SCRIPT_READY",
+            "没有混合复核结果的条目照旧 READY（旧行为零变化）",
+        )
+
+    def test_the_duplicate_is_excluded_from_the_independent_set(self):
+        self.assertFalse(mixed_delivery_decision(self._DUPLICATE)["usable"])
+        self.assertFalse(mixed_delivery_decision(self._SURFACE_ONLY)["usable"])
+        self.assertTrue(
+            mixed_delivery_decision(self._VARIANT)["usable"],
+            "有证据的执行变体仍然计入独立可用数",
+        )
+        self.assertTrue(
+            mixed_delivery_decision({})["usable"],
+            "没有复核报告时不得凭空判定为重复",
+        )
+
+    def _item(self):
+        return SimpleNamespace(
+            batch_item_id="BI_DUP",
+            batch_id="B_DUP",
+            item_index=1,
+            item_role="STRUCTURE_MOTHER",
+            requested_hook_id="GENERAL_PRODUCT_SHARE",
+            status="PLANNED",
+            attempt_count=0,
+            frozen_direction_package_json=json.dumps(
+                {"schema_version": "original-frozen-direction-package-v1"},
+                ensure_ascii=False,
+            ),
+        )
+
+    def test_the_status_machine_records_a_duplicate_instead_of_ready(self):
+        from core import original_batch_executor as executor
+
+        batch = SimpleNamespace(
+            batch_id="B_DUP", requested_count=1, status="PLANNED", planned_count=1
+        )
+        storage = mock.MagicMock()
+        storage.get_batch.return_value = batch
+        storage.get_items.return_value = [self._item()]
+
+        def _spy(**_kwargs):
+            return {
+                "status": "SUCCESS",
+                "script_id": "SCRIPT_DUP",
+                "mixed_final_shot_recheck": self._DUPLICATE,
+            }
+
+        with mock.patch.object(executor, "BatchStorage", return_value=storage):
+            with mock.patch.object(
+                executor, "_execute_single_item_with_timeout", side_effect=_spy
+            ):
+                executor.run_script_only("B_DUP", resume=False)
+
+        calls = {
+            call.args[1]: call.kwargs
+            for call in storage.update_item_status.call_args_list
+        }
+        self.assertIn("SCRIPT_DUPLICATE", calls)
+        self.assertNotIn(
+            "SCRIPT_READY", calls,
+            "判成重复的条目不得被标记为 SCRIPT_READY",
+        )
+        self.assertEqual(
+            calls["SCRIPT_DUPLICATE"].get("error_code"),
+            "MIXED_DUPLICATE_CANDIDATE",
+        )
+        self.assertEqual(
+            calls["SCRIPT_DUPLICATE"].get("script_id"), "SCRIPT_DUP",
+            "重复条目仍要保留脚本号，供人工复核而不是消失",
+        )
+
+    def test_a_batch_made_only_of_repeats_is_not_reported_as_ready(self):
+        from core import original_batch_executor as executor
+
+        storage = mock.MagicMock()
+        storage.get_batch.return_value = SimpleNamespace(planned_count=2)
+        storage.get_items.return_value = [
+            SimpleNamespace(status="SCRIPT_DUPLICATE") for _ in range(2)
+        ]
+
+        batch = executor._refresh_batch_totals(storage, "B_DUP")
+
+        self.assertEqual(
+            batch.status, "FAILED",
+            "整批都是重复时不得报成 PLANNED/READY",
+        )
+        self.assertEqual(storage.update_batch_status.call_args.kwargs["ready_count"], 0)
 
 
 if __name__ == "__main__":

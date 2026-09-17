@@ -52,6 +52,12 @@ BLUEPRINT_LLM_TIMEOUT_SECONDS = int(
 DIRECTION_LIMIT_ENV = "ORIGINAL_SCRIPT_DIRECTION_LIMIT"
 DEFAULT_DIRECTION_LIMIT = 4
 
+# How many ledger rows the post-generation re-check reads when comparing this
+# item's rendered 正文 against what the same product delivered before.  Same
+# bound as planning reads, for the same reason: it is a dedup window, not a
+# history export.
+_MIXED_RENDER_HISTORY_LIMIT = 120
+
 
 def _resolve_direction_limit(requested_count: Any) -> int:
     """Clamp the number of independent content directions for one batch.
@@ -367,6 +373,26 @@ def validate_batch_script_integrity(
 # ── Product context loader ─────────────────────────────────────────────
 
 
+def _resolve_cached_reference_assets(
+    product_code: str, anchor_card: Dict[str, Any]
+) -> list:
+    """The reviewed product images cached for this SKU, or [].
+
+    Kept deliberately forgiving: product-context loading is on the critical path
+    of every batch, and a missing or unreadable cache must degrade to "no images
+    recorded" (today's behaviour) rather than fail the load.
+    """
+
+    try:
+        from core.operation_product_bootstrap import (
+            load_cached_product_reference_assets,
+        )
+
+        return load_cached_product_reference_assets(product_code, anchor_card=anchor_card)
+    except Exception:  # noqa: BLE001 - never fail a load over an optional cache
+        return []
+
+
 def load_product_context(
     product_code: str,
     *,
@@ -488,6 +514,15 @@ def load_product_context(
                     "selected_source": "central_operator" if central_catalog else "legacy_strategy",
                 },
                 "product_selling_note": _text(anchor.get("product_selling_note") or strategy.get("product_selling_note", "")),
+                # C1 records which product-image version an appearance claim was
+                # reviewed against.  This path reads its authority from the
+                # pipeline database, which holds no image list, so the reviewed
+                # images cached by the operation bootstrap are attached here.
+                # Without them every appearance claim is capped as UNKNOWN even
+                # when the product pictures are sitting in the cache.
+                "product_reference_assets": _resolve_cached_reference_assets(
+                    product_code, anchor
+                ),
             }
 
     if not found_non_stage0:
@@ -692,6 +727,81 @@ def _frozen_package_of(item: Any) -> Dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _mixed_own_history_exclusions(
+    existing: Any,
+    *,
+    storage: Any = None,
+    request_id: str = "",
+) -> Dict[str, List[str]]:
+    """The ledger rows this batch *already owns*, so a resume cannot see itself.
+
+    Resuming a batch re-plans it.  Its first attempt already reserved ledger
+    rows, and those rows come back through ``list_recent_creative_patterns`` as
+    "history"; every re-planned candidate is then compared against its own
+    earlier incarnation, reads as a duplicate, and the batch delivers nothing --
+    which is exactly Review R3.  The ledger really does hold them: the reservation
+    writes ``metadata.batch_id`` / ``metadata.batch_item_id`` and then stores
+    ``creative_usage_id`` back into the item's frozen package.
+
+    Only *this* batch is excluded.  A sibling inside a fresh plan is a legitimate
+    comparison target (it is how ``EXECUTION_VARIANT`` is detected), and it is
+    compared through the reserved-reference list, so nothing is lost -- the same
+    row would otherwise simply be compared twice.
+
+    Four keys are collected because a partially completed run may have written
+    only some of them: ``batch_id`` (deterministic for the request, so it is
+    usually the same on resume), ``usage_id`` (reservation), ``batch_item_id``
+    (item persistence) and ``script_id`` (generation, the cross-check).
+    """
+
+    batch_ids: List[str] = []
+    seen_batches = set()
+    for candidate in (existing,):
+        batch_id = _text(getattr(candidate, "batch_id", ""))
+        if batch_id and batch_id not in seen_batches:
+            seen_batches.add(batch_id)
+            batch_ids.append(batch_id)
+    # A policy upgrade supersedes the request id, which changes the derived
+    # batch id while the old batch's rows are still in the ledger.  Excluding
+    # both keeps an upgraded resume from comparing against the pre-upgrade plan.
+    if storage is not None and request_id:
+        try:
+            superseding = storage.get_batch_by_request_id(request_id)
+        except Exception:  # noqa: BLE001 - bookkeeping must not break planning
+            superseding = None
+        batch_id = _text(getattr(superseding, "batch_id", ""))
+        if batch_id and batch_id not in seen_batches:
+            seen_batches.add(batch_id)
+            batch_ids.append(batch_id)
+    if not batch_ids:
+        return {}
+
+    usage_ids: List[str] = []
+    batch_item_ids: List[str] = []
+    script_ids: List[str] = []
+    for batch_id in batch_ids:
+        try:
+            rows = storage.get_items(batch_id) if storage is not None else []
+        except Exception:  # noqa: BLE001 - never break planning on a read failure
+            rows = []
+        for item in rows or []:
+            batch_item_id = _text(getattr(item, "batch_item_id", ""))
+            if batch_item_id:
+                batch_item_ids.append(batch_item_id)
+            script_id = _text(getattr(item, "script_id", ""))
+            if script_id:
+                script_ids.append(script_id)
+            usage_id = _text(_frozen_package_of(item).get("creative_usage_id"))
+            if usage_id:
+                usage_ids.append(usage_id)
+    return {
+        "batch_ids": sorted(set(batch_ids)),
+        "usage_ids": sorted(set(usage_ids)),
+        "batch_item_ids": sorted(set(batch_item_ids)),
+        "script_ids": sorted(set(script_ids)),
+    }
+
+
 def _mixed_preflight_error(frozen: Dict[str, Any]) -> str:
     """Hard error code when a mixed item may not reach the first model call.
 
@@ -774,6 +884,14 @@ def run_plan_only(
             items = storage.get_items(upgraded.batch_id)
             summary = json.loads(upgraded.allocation_summary_json) if upgraded.allocation_summary_json else {}
             return upgraded, items, summary
+
+    # A batch that is being re-planned must not be compared against the rows its
+    # own first attempt already reserved (Review R3).  Computed here, once, from
+    # the batch this request already owns; a first-ever plan yields no exclusion
+    # at all, so a fresh plan filters nothing.
+    mixed_history_exclusions = _mixed_own_history_exclusions(
+        existing, storage=storage, request_id=request_id
+    )
 
     # Load product context
     ctx = (
@@ -934,6 +1052,12 @@ def run_plan_only(
         multidim_reference_contexts=multidim_reference_contexts,
         category_execution_extension=category_execution_extension,
         execution_scope=resolve_planning_execution_scope(request, ctx),
+        mixed_history_exclusions=mixed_history_exclusions,
+        # The batch's own product images decide the recorded image version for
+        # every selected argument (plan §4 / C1).  Read from the context the
+        # operation path already resolved, so the record cannot drift onto
+        # whatever a later run happens to have.
+        product_reference_assets=list(ctx.get("product_reference_assets") or []),
     )
 
     # Persist batch
@@ -1069,6 +1193,69 @@ def run_plan_only(
 # ── Script-only execution ──────────────────────────────────────────────
 
 
+def _attach_render_validation_for_item(
+    *, item: Any, result: Dict[str, Any], batch: Any
+) -> Dict[str, Any]:
+    """``{"render_validation": …}`` for a finished mixed item, else ``{}``.
+
+    A thin, defensive wrapper: the renderer is imported locally because the
+    renderer layer already imports the batch models, so a module-level import
+    here would be circular.  It also guarantees a bookkeeping failure can never
+    convert a finished script into a failure — the audit itself already reports
+    ``AUDIT_ERROR`` rather than raising, and this is the second belt.
+    """
+
+    try:
+        from core.production_script_renderer import attach_render_validation
+
+        return attach_render_validation(
+            item=item,
+            result=result,
+            duration_seconds=float(getattr(batch, "duration_seconds", 15) or 15),
+        )
+    except Exception:  # noqa: BLE001 - bookkeeping must not fail an item
+        return {}
+
+
+def _script_item_outcome(result: Dict[str, Any]) -> Tuple[str, str, str]:
+    """``(item_status, error_code, error_message)`` for one finished item.
+
+    Generation success is not the same as delivery readiness.  A mixed-template
+    item whose post-generation re-check says the shots it actually wrote repeat
+    what has already been delivered must not be marked ``SCRIPT_READY``: that
+    status is what feeds the first-frame task list, the 飞书 生产脚本表 and the
+    production hand-off, so counting it would claim distinct content the batch
+    does not have.
+
+    Items that are merely *uncertain* (NEEDS_REVIEW, collapsed montage) stay
+    ready and carry the report, because the plan asks a human to look at those
+    rather than an unbounded model rewrite.
+    """
+
+    if _text(result.get("status")) != "SUCCESS":
+        return (
+            "SCRIPT_FAILED",
+            _text(result.get("error_code")) or "SCRIPT_FAILED",
+            _text(result.get("error_message")),
+        )
+    recheck = result.get("mixed_final_shot_recheck")
+    if not isinstance(recheck, dict) or not recheck:
+        return "SCRIPT_READY", "", ""
+    try:
+        from core.accessory_mixed_templates import mixed_delivery_decision
+
+        decision = mixed_delivery_decision(recheck)
+    except Exception:  # noqa: BLE001 - bookkeeping must not fail an item
+        decision = {}
+    if decision.get("usable") is False:
+        return (
+            "SCRIPT_DUPLICATE",
+            _text(decision.get("reject_code")) or "MIXED_DUPLICATE_CANDIDATE",
+            _text(decision.get("reason")),
+        )
+    return "SCRIPT_READY", "", ""
+
+
 def run_script_only(
     batch_id: str,
     *,
@@ -1108,6 +1295,7 @@ def run_script_only(
 
     completed = 0
     failed = 0
+    duplicates = 0
     for item in executable:
         print(
             f"\n  🧩 处理 {item.batch_item_id} "
@@ -1164,10 +1352,27 @@ def run_script_only(
                 item_timeout_seconds=item_timeout_seconds,
             )
             if result.get("status") == "SUCCESS":
+                # Audit the prompt *before* it is stored, so the delivered video
+                # prompt and its execution audit are persisted together and
+                # bound by prompt_hash + renderer_version (Review R1 / 开发包 A).
+                # Returns {} for anything that is not a frozen montage, so the
+                # legacy payload is byte-identical.
+                result = {
+                    **result,
+                    **_attach_render_validation_for_item(
+                        item=item,
+                        result=result,
+                        batch=batch,
+                    ),
+                }
+                # The re-check verdict decides *which* successful status this
+                # item gets; the script itself is stored either way so a
+                # duplicate stays reviewable instead of disappearing.
+                item_status, outcome_code, outcome_message = _script_item_outcome(result)
                 storage.update_item_status(
-                    item.batch_item_id, "SCRIPT_READY",
-                    error_code="",
-                    error_message="",
+                    item.batch_item_id, item_status,
+                    error_code=outcome_code,
+                    error_message=outcome_message,
                     actual_hook_id=result.get("actual_hook_id", ""),
                     consumer_run_id=result.get("consumer_run_id", ""),
                     script_id=result.get("script_id", ""),
@@ -1181,12 +1386,20 @@ def run_script_only(
                     storage,
                     item.batch_item_id,
                     stage="item_execution",
-                    status="SCRIPT_READY",
-                    message="item execution completed",
+                    status=item_status,
+                    message="item execution completed" if item_status == "SCRIPT_READY" else outcome_message,
                 )
-                _update_batch_creative_usage(item, "MACHINE_SCREENED")
-                completed += 1
-                print(f"  ✅ SCRIPT_READY {item.batch_item_id}")
+                if item_status == "SCRIPT_READY":
+                    _update_batch_creative_usage(item, "MACHINE_SCREENED")
+                    completed += 1
+                    print(f"  ✅ SCRIPT_READY {item.batch_item_id}")
+                else:
+                    # The reservation is left where it is rather than promoted
+                    # to MACHINE_SCREENED: nothing was accepted.  Its rendered
+                    # signature was still written back, so the next batch keeps
+                    # avoiding this repeat.
+                    duplicates += 1
+                    print(f"  ⛔ {item_status} {item.batch_item_id}: {outcome_message}")
             else:
                 storage.update_item_status(
                     item.batch_item_id, "SCRIPT_FAILED",
@@ -1246,10 +1459,14 @@ def run_script_only(
         batch = _refresh_batch_totals(storage, batch_id)
         print(
             f"  📌 批次进度 ready={batch.ready_count}/{batch.planned_count} "
-            f"failed={batch.failed_count} status={batch.status}"
+            f"failed={batch.failed_count}"
+            + (f" duplicate={duplicates}" if duplicates else "")
+            + f" status={batch.status}"
         )
 
-        if delay_between_items > 0 and (completed + failed) < len(executable):
+        if delay_between_items > 0 and (
+            completed + failed + duplicates
+        ) < len(executable):
             import time as _time
             _time.sleep(delay_between_items)
 
@@ -1299,10 +1516,11 @@ def _mixed_sibling_references(
     """Final-shot references from this batch's *other* mixed items.
 
     A sibling that already generated is referenced by the shots it actually
-    produced; one that has not is referenced by its frozen shots.  Mixing the
-    two is intentional -- refusing a candidate because it repeats something
-    merely *planned* is as wrong as accepting one that repeats something
-    already rendered.
+    produced; one that has not is referenced only by its frozen shots, tagged
+    ``source=FROZEN``.  Both are returned because a reviewer wants to see that
+    the not-yet-generated siblings exist -- but only the rendered ones may be
+    used as references by the rendered re-check (see
+    ``_mixed_render_references``).
     """
 
     try:
@@ -1346,6 +1564,202 @@ def _mixed_sibling_references(
             }
         )
     return references
+
+
+def _mixed_own_ledger_keys(
+    batch: Any,
+    item: Any,
+) -> Dict[str, List[str]]:
+    """Ledger keys that identify *this* run's own rows, for the rendered re-check.
+
+    Same reasoning as the planner's exclusion: a re-run compares the script it
+    just wrote against history, and its own previously persisted signature would
+    come back as "a delivered duplicate of itself".  Siblings stay comparable --
+    they are supplied separately by the sibling reference pass, so excluding the
+    batch here removes a double comparison, not a comparison.
+    """
+
+    frozen = _frozen_package_of(item)
+    return {
+        "batch_ids": [_text(getattr(batch, "batch_id", ""))],
+        "usage_ids": [_text(frozen.get("creative_usage_id"))],
+        "batch_item_ids": [_text(getattr(item, "batch_item_id", ""))],
+        "script_ids": [_text(getattr(item, "script_id", ""))],
+    }
+
+
+def _mixed_render_history_references(
+    batch: BatchRecord,
+    item: PlanItem,
+    *,
+    ledger_rows: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """Rendered signatures this product delivered in *earlier* batches.
+
+    Same-product only, for the same reason planning is: another product's
+    history is not evidence that this one repeats itself.  Rows that were
+    reserved but never generated carry no rendered signature and are skipped
+    silently by design -- "not yet rendered" is not "already delivered".
+
+    Rows owned by the batch being executed are excluded and counted separately
+    rather than silently dropped: comparing an item against its own earlier run
+    is how a resumed batch reports itself as a duplicate (R3).
+    """
+
+    try:
+        from core.accessory_mixed_templates import (
+            ledger_row_is_own_record,
+            mixed_rendered_reference_signature,
+        )
+    except Exception:  # noqa: BLE001 - never break execution
+        return []
+
+    if ledger_rows is None:
+        try:
+            from core.storage import PipelineStorage
+
+            ledger_rows = PipelineStorage(
+                database_url="sqlite"
+            ).list_recent_creative_patterns(
+                country=_text(getattr(batch, "target_country", "")),
+                category=_text(getattr(batch, "top_category", "")),
+                limit=_MIXED_RENDER_HISTORY_LIMIT,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"  ⚠️ 成稿历史暂不可读，本次仅与同批成稿比对：{str(exc)[:180]}")
+            return []
+
+    own = _mixed_own_ledger_keys(batch, item)
+    wanted = _text(getattr(item, "product_code", ""))
+    references: List[Dict[str, Any]] = []
+    skipped_own = 0
+    for row in ledger_rows or []:
+        if not isinstance(row, dict):
+            continue
+        if ledger_row_is_own_record(row, **own):
+            skipped_own += 1
+            continue
+        if wanted and _text(row.get("product_code")) != wanted:
+            continue
+        reference = mixed_rendered_reference_signature(row)
+        if not reference.get("complete"):
+            continue
+        references.append(
+            {
+                "identity": reference.get("identity", ""),
+                "signature": reference.get("signature") or {},
+                "source": "RENDERED_HISTORY",
+            }
+        )
+    if skipped_own:
+        print(f"  ℹ️ 成稿历史已排除本批次自身记录 {skipped_own} 条（R3）")
+    return references
+
+
+def _mixed_render_references(
+    storage: Any,
+    batch: BatchRecord,
+    item: PlanItem,
+    *,
+    ledger_rows: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """Every comparable-by-正文 reference the post-generation re-check uses.
+
+    Two sources, one rule: both sides must be *rendered* signatures, because a
+    signature comparison only means something between two delivered scripts.
+    Not-yet-generated siblings are represented by frozen shots, and folding
+    those in would let a planned template difference veto a rendered script --
+    the plan would again be deciding a question about the 正文.
+    """
+
+    references = [
+        reference
+        for reference in _mixed_sibling_references(storage, batch, item)
+        if _text(reference.get("source")) == "RENDERED"
+    ]
+    references.extend(
+        _mixed_render_history_references(batch, item, ledger_rows=ledger_rows)
+    )
+    return references
+
+
+def _persist_mixed_rendered_signature(
+    *,
+    item: PlanItem,
+    script: Any,
+    contract: Any,
+    storage: Any = None,
+) -> Dict[str, Any]:
+    """Write what this item *actually rendered* onto its ledger reservation.
+
+    Planning reserves the row with the planned signature.  That is a different
+    fact from the script the model ended up writing, and cross-batch 正文
+    comparison needs the latter -- otherwise the next batch would compare its
+    candidate against a plan the model may never have followed.
+
+    The update is keyed on the item's **stable** reservation (``usage_id``, which
+    travels inside the item's frozen package), so re-running an item updates the
+    same row with the same value instead of minting a second reservation.  A row
+    that already declares a *different* ``batch_item_id`` is refused rather than
+    overwritten: writing one item's rendered shots onto another item's
+    reservation would silently de-duplicate against the wrong video.
+
+    Bookkeeping only: the row's lifecycle status is preserved, the metadata
+    column is merged rather than replaced, and a ledger outage must not fail an
+    otherwise valid script.  The outcome is *returned* though -- a script whose
+    signature did not reach the ledger has no cross-batch protection, and the
+    report must not claim otherwise.
+    """
+
+    def _result(persisted: bool, reason: str, usage_id: str = "") -> Dict[str, Any]:
+        return {
+            "history_persisted": bool(persisted),
+            "reason": "" if persisted else reason,
+            "usage_id": usage_id,
+        }
+
+    try:
+        frozen = json.loads(item.frozen_direction_package_json or "{}")
+        usage_id = _text(frozen.get("creative_usage_id"))
+        if not usage_id:
+            return _result(False, "NO_RESERVATION")
+        from core.accessory_mixed_templates import (
+            MIXED_RENDERED_HISTORY_METADATA_KEY,
+            ledger_row_identity,
+            mixed_signature_from_script,
+        )
+
+        signature = mixed_signature_from_script(script, contract)
+        if not signature:
+            return _result(False, "SIGNATURE_UNAVAILABLE", usage_id)
+        if storage is None:
+            from core.storage import PipelineStorage
+
+            storage = PipelineStorage(database_url="sqlite")
+        row = storage.get_creative_pattern(usage_id)
+        if not row:
+            return _result(False, "ROW_NOT_FOUND", usage_id)
+        owner = _text(ledger_row_identity(row).get("batch_item_id"))
+        mine = _text(item.batch_item_id)
+        if owner and mine and owner != mine:
+            return _result(False, "ROW_OWNED_BY_ANOTHER_ITEM", usage_id)
+        metadata = row.get("metadata")
+        if metadata is None:
+            raw = row.get("metadata_json")
+            try:
+                metadata = json.loads(raw) if raw else {}
+            except (TypeError, ValueError):
+                metadata = {}
+        metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        metadata[MIXED_RENDERED_HISTORY_METADATA_KEY] = signature
+        metadata["batch_item_id"] = owner or mine
+        storage.update_creative_pattern_status(
+            usage_id, _text(row.get("status")) or "RESERVED", metadata=metadata
+        )
+        return _result(True, "", usage_id)
+    except Exception as exc:  # noqa: BLE001 - bookkeeping must not fail an item
+        print(f"  ⚠️ 成稿签名回写失败，仍保留本次成稿：{str(exc)[:180]}")
+        return _result(False, f"LEDGER_ERROR:{type(exc).__name__}")
 
 
 def _repair_frozen_seed_mixed_extension(
@@ -1693,12 +2107,23 @@ def _execute_simplified_single_item(
             mixed_recheck = judge_rendered_script(
                 script,
                 mixed_contract,
-                _mixed_sibling_references(storage, batch, item),
+                _mixed_render_references(storage, batch, item),
             )
         except Exception:  # noqa: BLE001 - a re-check must never fail the item
             mixed_recheck = {}
         if mixed_recheck:
             script["mixed_final_shot_recheck"] = mixed_recheck
+            # The next batch must be able to compare 正文 against 正文, so the
+            # shots this item really produced go back onto its ledger row.  The
+            # outcome is recorded on the script because a failed write means this
+            # item has *no* cross-batch protection -- and a report that says
+            # "de-duplicated across batches" while the write failed would be
+            # claiming protection that is not there.
+            script["mixed_rendered_history"] = _persist_mixed_rendered_signature(
+                item=item,
+                script=script,
+                contract=mixed_contract,
+            )
 
     binding_id = ""
     try:
@@ -1729,6 +2154,7 @@ def _execute_simplified_single_item(
                     mixed_recheck.get("signature_version")
                 ),
                 "mixed_final_shot_recheck": mixed_recheck,
+                "mixed_rendered_history": script.get("mixed_rendered_history") or {},
                 "retrieval_reference": {
                     "contract_hash": retrieval_reference.get("contract_hash", ""),
                     "primary_video_id": primary_reference.get("video_id", ""),
@@ -1868,6 +2294,12 @@ def _refresh_batch_totals(storage: BatchStorage, batch_id: str) -> BatchRecord:
     latest_items = storage.get_items(batch_id)
     ready = sum(1 for item in latest_items if item.status == "SCRIPT_READY")
     failed_total = sum(1 for item in latest_items if item.status == "SCRIPT_FAILED")
+    # A generated-but-duplicate item is neither a failure nor finished content.
+    # It has to count as "not ready" here, or a batch made only of repeats would
+    # be reported as fully planned with nothing wrong.
+    duplicate_total = sum(
+        1 for item in latest_items if item.status == "SCRIPT_DUPLICATE"
+    )
     pending_total = sum(
         1 for item in latest_items if item.status in {"PLANNED", "SCRIPT_RUNNING"}
     )
@@ -1876,7 +2308,7 @@ def _refresh_batch_totals(storage: BatchStorage, batch_id: str) -> BatchRecord:
         batch_status = "SCRIPT_READY"
     elif pending_total > 0:
         batch_status = "DISPATCHING"
-    elif failed_total > 0:
+    elif failed_total > 0 or duplicate_total > 0:
         batch_status = "PARTIAL_FAILED" if ready > 0 else "FAILED"
     elif ready > 0:
         batch_status = "SCRIPT_READY"

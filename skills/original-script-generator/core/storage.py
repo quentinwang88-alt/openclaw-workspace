@@ -233,6 +233,25 @@ class PipelineStorage:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_creative_pattern(self, usage_id: str) -> Optional[Dict[str, Any]]:
+        """One reservation row by id.
+
+        Needed for read-modify-write metadata updates: the ledger stores
+        metadata as one JSON column, so a later stage that must add a fact
+        (e.g. the rendered final-shot signature) has to merge with what is
+        already there instead of replacing it.
+        """
+
+        identifier = str(usage_id or "").strip()
+        if not identifier:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM creative_pattern_usage WHERE usage_id = ?",
+                (identifier,),
+            ).fetchone()
+        return dict(row) if row else None
+
     def reserve_creative_pattern(self, row: Dict[str, Any]) -> str:
         usage_id = str(row.get("usage_id") or "").strip()
         if not usage_id:

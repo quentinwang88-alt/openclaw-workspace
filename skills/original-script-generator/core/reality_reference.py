@@ -998,6 +998,9 @@ def _select_value_proposition(
     *,
     selling_point_catalog: Optional[Iterable[Dict[str, Any]]] = None,
     product_selling_note: str = "",
+    product_reference_assets: Optional[Iterable[Dict[str, Any]]] = None,
+    product_type: str = "",
+    top_category: str = "",
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Select one governed value without mistaking a visual fact for a benefit.
 
@@ -1005,7 +1008,22 @@ def _select_value_proposition(
     source in stage 0.  Anchor-card candidates remain a factual fallback.  A
     raw operator note is retained as provenance/context; it is never expanded
     into a stronger promise here.
+
+    Every candidate that could be selected also gets a fact-evidence record
+    (plan §4 / C1): which of the five fact tiers its wording is, which source
+    that tier needs, and what wording the evidence permits.  The record is
+    additive; only when
+    ``ORIGINAL_SCRIPT_SELLING_FACT_EVIDENCE_ENABLED`` is on does a blocking
+    verdict ("this depends on a part that is contradicted or not confirmed")
+    keep that candidate out of selection.
     """
+
+    from core.selling_fact_evidence import (
+        record_selected_argument,
+        selling_fact_evidence_enabled,
+    )
+
+    filter_by_evidence = selling_fact_evidence_enabled()
 
     reference_carrier = _text(reference.get("content_carrier")).upper()
     mechanisms = {_text(item).upper() for item in reference.get("proof_mechanisms", [])}
@@ -1021,6 +1039,19 @@ def _select_value_proposition(
         text = _text(item.get("primary_selling_point") or item.get("selling_point"))
         if not text:
             continue
+        # C1: a candidate whose theme depends on a part that is contradicted or
+        # not confirmed may not be planned.  Only that verdict blocks; "needs a
+        # source" and "wording ceiling" are recorded, not filtered, because
+        # dropping a direction is a bigger decision than downgrading its wording.
+        if filter_by_evidence:
+            probe = record_selected_argument(
+                item,
+                product_reference_assets=product_reference_assets,
+                product_type=product_type,
+                top_category=top_category,
+            )
+            if not (probe.get("adaptation") or {}).get("eligible", True):
+                continue
         role = _text(item.get("script_role"))
         searchable = " ".join(
             _text(item.get(key))
@@ -1210,8 +1241,19 @@ def build_content_bundle_brief(
     max_claim_atoms: int = 3,
     selling_point_catalog: Optional[Iterable[Dict[str, Any]]] = None,
     product_selling_note: str = "",
+    product_reference_assets: Optional[Iterable[Dict[str, Any]]] = None,
+    top_category: str = "",
 ) -> Dict[str, Any]:
-    """Build one coherent 15s mainline with multiple governed fact atoms."""
+    """Build one coherent 15s mainline with multiple governed fact atoms.
+
+    ``product_reference_assets`` is the batch's own product-image list.  It is
+    carried through to the selected argument's fact-evidence record (plan §4 / C1)
+    so the recorded image version is the one this plan was reviewed against --
+    not whatever the latest run happens to have.  ``None`` keeps every existing
+    caller on its exact previous behaviour.
+    """
+
+    from core.selling_fact_evidence import record_selected_argument
 
     legacy = build_p2_lite(
         anchor_card,
@@ -1277,6 +1319,9 @@ def build_content_bundle_brief(
         reference,
         selling_point_catalog=selling_point_catalog,
         product_selling_note=product_selling_note,
+        product_reference_assets=product_reference_assets,
+        product_type=product_type,
+        top_category=top_category,
     )
     selling_argument_available = _text(value_proposition.get("status")) == "AVAILABLE"
     # Determine the value before cutting the compact fact set.  Otherwise an
@@ -1371,6 +1416,15 @@ def build_content_bundle_brief(
         value_proposition, audience_tension
     )
     selling_argument.update(context_semantics)
+    # C1: 事实类型与适配结论必须看到 ``multi_scenario_authorized``，所以放在
+    # context_semantics 之后算。放在前面的话，"原文并列多个场景但没有多场景授权"
+    # 这条结论永远不成立——那条授权正是在 context_semantics 里才算出来的。
+    selling_argument["fact_evidence"] = record_selected_argument(
+        selling_argument,
+        product_reference_assets=product_reference_assets,
+        product_type=product_type,
+        top_category=top_category,
+    )
     if (
         not _text(selling_argument.get("target_need"))
         and _text(context_semantics.get("audience_need_authority"))

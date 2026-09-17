@@ -19,6 +19,11 @@ if str(SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILL_ROOT))
 
 from core.bitable import FeishuBitableClient, resolve_wiki_bitable_app_token  # noqa: E402
+from core.accessory_mixed_templates import (  # noqa: E402
+    ACCESSORY_MIXED_TEMPLATE_ENV,
+)
+from core.selling_fact_evidence import SELLING_FACT_EVIDENCE_ENV  # noqa: E402
+from core.mixed_mainline_contract import MAINLINE_CONTRACT_ENV  # noqa: E402
 from core.feishu_url_parser import parse_feishu_bitable_url  # noqa: E402
 from core.original_batch_executor import (  # noqa: E402
     load_product_context,
@@ -123,9 +128,32 @@ def _enable_production_category_extensions() -> None:
     this only prevents a recognised scarf/headscarf task from silently losing
     its physical execution contract because a shell-level feature flag was not
     exported.
+
+    The second switch turns on the authored accessory mixed-display templates
+    (AMX_A/B/C) for *new* plans.  It is scoped inside the code, not here: only a
+    15-second short-video original for an accessory physical subtype compiles a
+    mixed contract, and every other branch -- apparel, long-form, remake,
+    resumed legacy plans -- is refused by ``mixed_scope_decision`` and keeps its
+    exact previous behaviour.  Enabling it where the other adapter switch is
+    enabled is what makes it part of the official workbench path instead of a
+    flag someone has to remember to export.
     """
 
     os.environ.setdefault("ORIGINAL_SCRIPT_ACCESSORY_PROFILE_ENABLED", "1")
+    os.environ.setdefault(ACCESSORY_MIXED_TEMPLATE_ENV, "1")
+    # The per-argument fact-evidence record (plan §4 / C1) is produced either
+    # way; this switch is what lets a *blocking* verdict keep a candidate out of
+    # planning.  Only two verdicts block -- "the theme depends on a part the
+    # confirmed structure says is absent" and "the candidate itself declares a
+    # required part that is still unconfirmed".  Nothing on the current catalog
+    # declares a required part, so enabling it cannot silently shrink a plan;
+    # it only refuses an argument that contradicts a confirmed structure.
+    os.environ.setdefault(SELLING_FACT_EVIDENCE_ENV, "1")
+    # C2: freeze one mainline (观众问题／核心价值／事实依据／可见回答／表达边界) per film
+    # and let it carry the observation tasks.  It is a *planning-time* switch: a
+    # frozen package that has no mainline keeps its previous behaviour, so turning
+    # this on never rewrites an existing plan.
+    os.environ.setdefault(MAINLINE_CONTRACT_ENV, "1")
 
 
 def _client(url: str) -> FeishuBitableClient:

@@ -201,6 +201,53 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _mixed_mainline_contract(direction: Dict[str, Any]) -> Dict[str, Any]:
+    """The frozen mainline, wherever the frozen package happens to carry it.
+
+    One accessor, because two call sites (the expression contract and the
+    central voiceover's own selling-point path) must agree on which mainline
+    they are honouring -- reading it two different ways is how a boundary ends
+    up applying to one of them only.
+    """
+
+    bundle = (
+        direction.get("content_bundle_brief")
+        if isinstance(direction.get("content_bundle_brief"), dict)
+        else {}
+    )
+    for candidate in (direction.get("mixed_mainline_contract"), bundle.get("mixed_mainline_contract")):
+        if isinstance(candidate, dict) and candidate:
+            return candidate
+    return {}
+
+
+def _boundary_forbidden_terms(direction: Dict[str, Any]) -> List[str]:
+    """Wording the frozen mainline bans, as a plain list.  [] when none."""
+
+    mainline = _mixed_mainline_contract(direction)
+    boundary = (
+        mainline.get("expression_boundary")
+        if isinstance(mainline.get("expression_boundary"), dict)
+        else {}
+    )
+    return [
+        _text(item)
+        for item in (boundary.get("forbidden_wording") or [])
+        if _text(item)
+    ]
+
+
+def _strip_banned_terms(value: Any, terms: List[str]) -> str:
+    """Delete banned wording from one speakable string.  No terms -> unchanged."""
+
+    text = _text(value)
+    if not text or not terms:
+        return text
+    from core.selling_fact_evidence import strip_forbidden_wording
+
+    return strip_forbidden_wording(text, terms)
+
+
 def _hook_qc_status(
     expected_hook_id: str,
     actual_hook_id: str,
@@ -844,13 +891,25 @@ def build_voiceover_expression_contract(
         if isinstance(direction.get("context_bridge_contract"), dict)
         else bundle.get("context_bridge_contract", {})
     )
-    return {
+    # C2: the frozen mainline is the single source for both the observation tasks
+    # and this central voiceover.  Absent contract (older frozen packages, or the
+    # switch off) leaves every value below exactly as it was.
+    mainline = _mixed_mainline_contract(direction)
+    # ``core_value_safe`` is the operator's sentence with wording the same
+    # contract banned removed (only deletion, never substitution).  Falling back
+    # to the raw ``core_value`` keeps packages frozen before it existed working.
+    mainline_core_value = _text(mainline.get("core_value_safe")) or _text(
+        mainline.get("core_value")
+    )
+    contract = {
         "schema_version": "voiceover-expression-contract-v2",
-        "content_mainline": _text(
+        "content_mainline": mainline_core_value
+        or _text(
             argument_contract.get("content", {}).get("value_proposition", {}).get("text")
             or bundle.get("content_mainline")
             or p2_lite.get("primary_observation")
         ),
+        "mixed_mainline_contract": dict(mainline),
         "argument_contract": argument_contract,
         # These two contracts are the lossless hand-off to both the embedded
         # original-script voiceover call and the separate run-manager
@@ -969,6 +1028,35 @@ def build_voiceover_expression_contract(
             "不得从单次画面推断舒适、百搭、多场景或材质性能",
         ],
     }
+    # C3: both the payload whitelist and the expression boundary are applied
+    # *here*, on the one entry every caller already uses, instead of in a
+    # parallel function nobody calls.  Planning already narrows the bundle to a
+    # single argument; the whitelist makes "全部候选卖点／动作库／工程错误码
+    # 没有被投喂" checkable rather than merely asserted.  The boundary does the
+    # other half: it deletes banned wording from every speakable field and
+    # declares what must not be said.  Both are no-ops when there is nothing to
+    # remove, so today's payload stays byte-for-byte the same.
+    from core.mixed_voiceover_mainline import (
+        apply_expression_boundary_layer,
+        reduce_voiceover_payload,
+    )
+
+    contract, _ = apply_expression_boundary_layer(contract, mainline)
+    return reduce_voiceover_payload(contract)
+
+
+def build_voiceover_expression_contract_reduced(
+    direction: Dict[str, Any], visual_plan: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Kept for callers that asked for the reduced payload by name.
+
+    The whitelist now lives inside ``build_voiceover_expression_contract``, which
+    is what the central engine actually receives, so this is an alias rather than
+    a second code path.  It used to be a parallel entry point with no production
+    caller -- which meant the reduction was testable but never applied.
+    """
+
+    return build_voiceover_expression_contract(direction, visual_plan)
 
 
 def build_voiceover_argument_contract(
@@ -1259,7 +1347,35 @@ def run_central_voiceover(
         for item in claim_atoms
         if _text(item.get("fact_text")) and _text(item.get("fact_text")) != "UNAVAILABLE"
     ]
-    primary = selling_points[0] if selling_points else _text(p2_lite.get("primary_observation"))
+    # The expression contract is not the only way the operator's wording reaches
+    # the model: ``core_selling_points`` / ``visual_fact_inputs`` /
+    # ``primary_selling_point`` are separate fields on the engine request, and
+    # they carry the same raw sentences.  Cleaning only the contract left the
+    # banned material claim in place on this path -- measured: the voiceover
+    # said "双层纱质蝴蝶造型" while the contract that governed it had already
+    # narrowed the sentence and banned 纱.
+    boundary_terms = _boundary_forbidden_terms(direction)
+    if boundary_terms:
+        cleaned_points = [
+            cleaned
+            for cleaned in (
+                _strip_banned_terms(item, boundary_terms) for item in selling_points
+            )
+            if cleaned
+        ]
+        if not cleaned_points:
+            # Deleting banned wording must not be able to turn a workable film
+            # into a hard failure.  Fall back to the same observation sentence
+            # the legacy path used, cleaned the same way.
+            fallback = _strip_banned_terms(p2_lite.get("primary_observation"), boundary_terms)
+            if fallback:
+                cleaned_points = [fallback]
+        selling_points = cleaned_points
+    primary = (
+        selling_points[0]
+        if selling_points
+        else _strip_banned_terms(p2_lite.get("primary_observation"), boundary_terms)
+    )
     secondary_points = selling_points[1:]
     if primary and primary not in selling_points:
         selling_points.insert(0, primary)
@@ -1271,7 +1387,7 @@ def run_central_voiceover(
     visual_fact_inputs = [
         {
             "claim_key": _text(atom.get("claim_key")),
-            "fact_text": _text(atom.get("fact_text")),
+            "fact_text": _strip_banned_terms(atom.get("fact_text"), boundary_terms),
             "supported_shot_nos": supported_shots.get(_text(atom.get("claim_key")), []),
         }
         for atom in claim_atoms
@@ -1406,6 +1522,23 @@ def run_central_voiceover(
                 "spoken_line_task": "+".join(dict.fromkeys(_text(item.get("role")) for item in beats if _text(item.get("role")))),
             }
         )
+    # C3 兜底：口播真的写出来之后，查它有没有把刚被禁掉的断言说回来。
+    # 这是"查出来"，不是"指望它不写" —— 清洗与禁止层都只能降低概率。
+    from core.mixed_voiceover_mainline import (
+        BOUNDARY_LAYER_KEY,
+        check_voiceover_target_against_boundary,
+    )
+
+    boundary_layer = expression_contract.get(BOUNDARY_LAYER_KEY)
+    expression_boundary_check = check_voiceover_target_against_boundary(
+        mainline=_mixed_mainline_contract(direction),
+        lines=lines,
+    )
+    expression_boundary = {
+        "forbidden_terms": list(boundary_terms),
+        "layer_present_in_payload": isinstance(boundary_layer, dict) and bool(boundary_layer),
+        "check": expression_boundary_check,
+    }
     shot_count = len([item for item in visual_plan.get("shots", []) if isinstance(item, dict)])
     spoken = {
         covered_shot
@@ -1469,6 +1602,7 @@ def run_central_voiceover(
         "suppressed_claim_keys": [
             _text(item.get("claim_key")) for item in suppressed_claim_atoms
         ],
+        "expression_boundary": expression_boundary,
         "selected_claim_ids": ready.get("selected_claim_ids", []),
         "selected_claim_count": selected_claim_count,
         "hook_source": "voiceover_copy_engine.hook_archetypes",

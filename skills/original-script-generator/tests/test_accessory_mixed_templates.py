@@ -14,10 +14,12 @@ from core.accessory_mixed_templates import (
     ACCESSORY_MIXED_TEMPLATE_ENV,
     ACCESSORY_MIXED_TEMPLATE_PROFILE,
     ACCESSORY_MIXED_TEMPLATE_SCHEMA,
+    ERR_MIXED_THEME_INPUT_GAP,
     EVIDENCE_ABSENT,
     EVIDENCE_STATES,
     EVIDENCE_UNKNOWN,
     EVIDENCE_VERIFIED,
+    MIXED_THESIS_INPUT_GAP_READABILITY,
     PAIRING_OUTPUT_TERMS,
     SINGLE_OUTPUT_TERMS,
     accessory_mixed_template_enabled,
@@ -26,7 +28,10 @@ from core.accessory_mixed_templates import (
     contains_pairing_claim,
     get_environment_recipe,
     is_accessory_mixed_type,
+    is_readable_theme_proposition,
     load_mixed_template_definition,
+    mixed_product_fact_signature,
+    mixed_semantic_signature,
     mixed_supported_canonical_types,
     mixed_template_ids,
     module_framing_projection,
@@ -35,16 +40,21 @@ from core.accessory_mixed_templates import (
     render_mixed_blueprint_guidance,
     resolve_mixed_zone,
     resolve_part_gated_actions,
+    resolve_theme_proposition,
     sanitize_pairing_claims,
     scrub_no_face_prose_in_place,
     select_environment_recipe_id,
     subtype_structure_facts,
     summarize_mixed_contract,
+    theme_proposition,
     unit_carrier_map,
     validate_mixed_template_contract,
     worn_body_framing,
 )
-from core.original_batch_allocator import _build_mixed_template_injection
+from core.original_batch_allocator import (
+    _build_mixed_template_injection,
+    _mixed_theme_proposition,
+)
 
 # One representative product per supported family, expressed as ordinary
 # operator input (alias) rather than canonical identifiers.
@@ -1013,6 +1023,197 @@ class PairedEarringCropRuleTest(unittest.TestCase):
         for term in (*PAIRING_OUTPUT_TERMS, *SINGLE_OUTPUT_TERMS):
             with self.subTest(term=term):
                 self.assertNotIn(term, joined)
+
+
+class MixedThemePropositionTest(unittest.TestCase):
+    """Package B3: the theme must be a readable claim, never an operator ID.
+
+    Measured on the four real scripts of 2026-09-17, every plan wrote
+    ``"thesis": "ARGUMENT_OPERATOR_PCS_..._PCL_..."``.  Two different buying
+    reasons then looked identical to a reader *and* to the difference judge
+    (Review R4).  These tests pin the replacement: a readable proposition plus
+    the source field it was copied from, with the internal ID kept only as
+    provenance.
+    """
+
+    ANGLE = "ARGUMENT_OPERATOR_PCS_EB7F5A7B62C24DDF_PCL_B0821D5D7D8D4BE3"
+
+    def _bundle(self, **overrides):
+        bundle = {
+            "content_angle_key": self.ANGLE,
+            "semantic_spine_contract": {
+                "script_thesis": {"core_buying_reason": "双层纱质蝴蝶造型，超唯美"}
+            },
+            "content_mainline": "适合日常穿搭场景",
+            "selling_argument": {
+                "core_value": "适合日常穿搭场景",
+                "argument_id": "OPERATOR_PCS_EB7F5A7B62C24DDF",
+            },
+        }
+        bundle.update(overrides)
+        return bundle
+
+    def test_the_spine_buying_reason_is_the_first_source(self):
+        resolved = _mixed_theme_proposition(
+            self._bundle(), fallback_theme_id=self.ANGLE
+        )
+        self.assertEqual(resolved["thesis"], "双层纱质蝴蝶造型，超唯美")
+        self.assertEqual(resolved["thesis_source"], "SPINE_CORE_BUYING_REASON")
+        self.assertEqual(
+            resolved["thesis_source_ref"],
+            "bundle.semantic_spine_contract.script_thesis.core_buying_reason",
+        )
+        self.assertEqual(resolved["argument_id"], "OPERATOR_PCS_EB7F5A7B62C24DDF")
+        self.assertEqual(resolved["thesis_input_gap"], "")
+
+    def test_selling_argument_core_value_outranks_content_mainline(self):
+        resolved = _mixed_theme_proposition(
+            self._bundle(semantic_spine_contract={}, content_mainline="适合日常穿搭场景"),
+            fallback_theme_id=self.ANGLE,
+        )
+        self.assertEqual(resolved["thesis"], "适合日常穿搭场景")
+        self.assertEqual(resolved["thesis_source"], "SELLING_ARGUMENT_CORE_VALUE")
+
+    def test_content_mainline_is_the_last_resort(self):
+        resolved = _mixed_theme_proposition(
+            self._bundle(semantic_spine_contract={}, selling_argument={}),
+            fallback_theme_id=self.ANGLE,
+        )
+        self.assertEqual(resolved["thesis"], "适合日常穿搭场景")
+        self.assertEqual(resolved["thesis_source"], "CONTENT_MAINLINE")
+        self.assertEqual(resolved["thesis_source_ref"], "bundle.content_mainline")
+
+    def test_the_angle_key_never_becomes_the_theme(self):
+        resolved = _mixed_theme_proposition(
+            self._bundle(
+                semantic_spine_contract={}, selling_argument={}, content_mainline=""
+            ),
+            fallback_theme_id=self.ANGLE,
+        )
+        self.assertEqual(resolved["thesis"], "")
+        self.assertNotEqual(resolved["thesis"], self.ANGLE)
+        self.assertEqual(
+            resolved["thesis_input_gap"], MIXED_THESIS_INPUT_GAP_READABILITY
+        )
+
+    def test_the_uuid_family_of_id_shapes_is_not_a_proposition(self):
+        for shape in (
+            "ARGUMENT_OPERATOR_PCS_X",
+            "OPERATOR_PCS_X",
+            "TH_ITEM_1",
+            "CLM_abc",
+            "PCS_abc",
+        ):
+            with self.subTest(shape=shape):
+                self.assertFalse(is_readable_theme_proposition(shape))
+
+    def test_the_unavailable_sentinel_is_not_a_proposition(self):
+        for sentinel in ("UNAVAILABLE", "unavailable", "N/A", "NULL"):
+            with self.subTest(sentinel=sentinel):
+                self.assertFalse(is_readable_theme_proposition(sentinel))
+
+    def test_resolve_declares_a_gap_when_nothing_is_readable(self):
+        resolved = resolve_theme_proposition(
+            [
+                {"source": "A", "ref": "bundle.a", "text": ""},
+                {"source": "B", "ref": "bundle.b", "text": "UNAVAILABLE"},
+                {"source": "C", "ref": "bundle.c", "text": "ARGUMENT_OPERATOR_PCS_X"},
+            ]
+        )
+        self.assertEqual(resolved["thesis"], "")
+        self.assertEqual(
+            resolved["thesis_input_gap"], MIXED_THESIS_INPUT_GAP_READABILITY
+        )
+
+    def test_the_writing_and_reading_sides_share_one_rule(self):
+        self.assertEqual(
+            theme_proposition({"theme_id": "TH_1", "thesis": self.ANGLE}),
+            ("", MIXED_THESIS_INPUT_GAP_READABILITY),
+        )
+        self.assertEqual(
+            theme_proposition({"theme_id": "TH_1", "thesis": "双层纱质蝴蝶造型，超唯美"}),
+            ("双层纱质蝴蝶造型，超唯美", ""),
+        )
+
+    def test_the_injection_carries_proposition_and_keeps_the_ids(self):
+        with mock.patch.dict(os.environ, {ACCESSORY_MIXED_TEMPLATE_ENV: "1"}, clear=False):
+            result = _build_mixed_template_injection(
+                product_type="耳饰",
+                top_category="耳饰",
+                item_index=1,
+                item_role="STRUCTURE_MOTHER",
+                content_angle_key=self.ANGLE,
+                audience_tension_text="不知道耳饰怎么搭",
+                claim_keys=["CLM_1"],
+                product_code="P1",
+                theme_proposition=_mixed_theme_proposition(
+                    self._bundle(), fallback_theme_id=self.ANGLE
+                ),
+            )
+        theme = result["contract"]["content_theme"]
+        self.assertEqual(theme["thesis"], "双层纱质蝴蝶造型，超唯美")
+        self.assertEqual(theme["thesis_source"], "SPINE_CORE_BUYING_REASON")
+        self.assertEqual(theme["argument_id"], "OPERATOR_PCS_EB7F5A7B62C24DDF")
+        # The old theme id is still there to audit against.
+        self.assertEqual(theme["theme_id"], self.ANGLE)
+        self.assertEqual(validate_mixed_template_contract(result["contract"]), [])
+
+    def test_the_injection_refuses_a_theme_with_no_readable_proposition(self):
+        with mock.patch.dict(os.environ, {ACCESSORY_MIXED_TEMPLATE_ENV: "1"}, clear=False):
+            result = _build_mixed_template_injection(
+                product_type="耳饰",
+                top_category="耳饰",
+                item_index=1,
+                item_role="STRUCTURE_MOTHER",
+                content_angle_key=self.ANGLE,
+                audience_tension_text="",
+                claim_keys=["CLM_1"],
+                product_code="P1",
+            )
+        self.assertNotIn("contract", result)
+        self.assertIn(
+            f"{ERR_MIXED_THEME_INPUT_GAP}:{MIXED_THESIS_INPUT_GAP_READABILITY}",
+            result["errors"],
+        )
+
+    def test_a_declared_gap_is_reported_by_name(self):
+        contract = compile_mixed_template_contract(
+            product_type="耳饰",
+            top_category="耳饰",
+            template_id=mixed_template_ids()[0],
+            content_theme={
+                "theme_id": "TH_1",
+                "candidate_role": "PRIMARY",
+                "thesis": "",
+                "thesis_input_gap": MIXED_THESIS_INPUT_GAP_READABILITY,
+            },
+        )
+        errors = validate_mixed_template_contract(contract)
+        self.assertIn(
+            f"{ERR_MIXED_THEME_INPUT_GAP}:{MIXED_THESIS_INPUT_GAP_READABILITY}", errors
+        )
+
+    def test_product_facts_and_theme_meaning_are_separate_axes(self):
+        """Two buying reasons quoting the same product facts are two themes."""
+
+        def _theme(theme_id: str, thesis: str):
+            return {
+                "theme_id": theme_id,
+                "parent_theme_id": theme_id,
+                "candidate_role": "PRIMARY",
+                "thesis": thesis,
+                "approved_claim_refs": ["CLM_shared_a", "CLM_shared_b"],
+                "evidence_refs": ["CLM_shared_a", "CLM_shared_b"],
+            }
+
+        left = _theme("TH_A", "雪纺花朵抓夹，仙气感十足")
+        right = _theme("TH_B", "无需繁琐步骤，随手一夹就能打造高颅顶或蓬松丸子头")
+        facts = [mixed_product_fact_signature({"content_theme": theme}) for theme in (left, right)]
+        meanings = [mixed_semantic_signature({"content_theme": theme}) for theme in (left, right)]
+        self.assertEqual(facts[0]["digest"], facts[1]["digest"])
+        self.assertNotEqual(meanings[0]["digest"], meanings[1]["digest"])
+        self.assertEqual(meanings[0]["proposition"], "雪纺花朵抓夹，仙气感十足")
+        self.assertNotIn("CLM_shared_a", json.dumps(meanings[0]["digest"]))
 
 
 if __name__ == "__main__":

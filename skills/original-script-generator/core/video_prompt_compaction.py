@@ -512,7 +512,20 @@ def _compact_lines(text: str) -> Tuple[str, Tuple[str, ...]]:
         _normalize_constraint(_value_of(step1[position]))
         for position in anchor_positions
     }
-    lift_anchors = len(anchor_values) == 1
+
+    # Counting distinct *values* is not enough.  When only the first shot declares
+    # an anchor the value set still has exactly one member, so the requirement used
+    # to be promoted to a film-level rule that the remaining shots never agreed to
+    # (I6).  **A missing declaration is not the same as an equal one**: the lift
+    # asserts "every shot shows this", which is only true when every shot says so.
+    owners = _shot_block_index(step1)
+    shot_ids = {owner for owner in owners if owner >= 0}
+    declared_in = {owners[position] for position in anchor_positions}
+    lift_anchors = (
+        len(anchor_values) == 1
+        and bool(shot_ids)
+        and declared_in == shot_ids
+    )
 
     step2: List[str] = []
     seen: Set[str] = set()

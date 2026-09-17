@@ -4,13 +4,20 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from core import production_script_renderer as renderer
 from core.production_script_renderer import (
+    SCRIPT_RENDERER_VERSION,
     _apply_small_accessory_capture_projection,
     _capture_rhythm_contract,
     _preserve_category_capture_projection,
+    _ResultProxy,
+    attach_render_validation,
     build_production_projection,
+    load_item_result,
     render_complete_production_script,
     render_stage0_video_generation_prompt,
+    render_validation_block_reason,
+    render_validation_blocks_delivery,
     render_video_generation_prompt,
 )
 
@@ -1162,10 +1169,6 @@ class ProductionScriptRendererTest(unittest.TestCase):
         self.assertNotIn("农村妇女", row["complete_script"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class FaceFreeConstraintTest(unittest.TestCase):
     """The mixed template's NO_FACE guarantee must be stated in the prompt.
 
@@ -1247,3 +1250,164 @@ class FaceFreeConstraintTest(unittest.TestCase):
             item=self._item(contract), duration_seconds=15
         )
         self.assertNotIn("【全片不露脸｜硬约束】", rendered)
+
+
+class RenderValidationDeliveryTest(unittest.TestCase):
+    """开发包 A：执行校验的交付语义。
+
+    规则本身是结构的（提示词与冻结合同逐镜比对），所以"确定的冲突"必须在
+    最终交接处被拦下；但拦截**不得**走 ``SCRIPT_FAILED`` —— 那是 ``resume``
+    会重试的状态，会把一个可离线修复的渲染缺陷变成一次付费重生成。
+    """
+
+    def test_only_fail_blocks_delivery(self):
+        for status in ("PASS", "NOT_APPLICABLE", "AUDIT_ERROR", "", None, "FAILED"):
+            self.assertFalse(
+                render_validation_blocks_delivery({"status": status}),
+                f"{status!r} 不应拦交付",
+            )
+        self.assertFalse(render_validation_blocks_delivery(None))
+        self.assertFalse(render_validation_blocks_delivery({}))
+        self.assertTrue(render_validation_blocks_delivery({"status": "FAIL"}))
+
+    def test_block_reason_names_the_shot_and_source(self):
+        reason = render_validation_block_reason(
+            {
+                "status": "FAIL",
+                "issues": [
+                    {
+                        "shot_id": 2,
+                        "module": "HANDHELD_PRODUCT",
+                        "code": "MIXED_EXECUTION_ACTION_BOUNDARY",
+                        "source": "RENDERER",
+                    }
+                ],
+            }
+        )
+        self.assertIn("镜2", reason)
+        self.assertIn("HANDHELD_PRODUCT", reason)
+        self.assertIn("MIXED_EXECUTION_ACTION_BOUNDARY", reason)
+        self.assertIn("RENDERER", reason)
+
+    def test_block_reason_is_empty_for_non_conflict_verdicts(self):
+        """相似性不确定（NEEDS_REVIEW）不是执行冲突，不得混用同一措辞。"""
+
+        self.assertEqual("", render_validation_block_reason({"status": "NEEDS_REVIEW"}))
+        self.assertEqual("", render_validation_block_reason({"status": "PASS"}))
+        self.assertEqual("", render_validation_block_reason(None))
+
+    def test_result_proxy_audits_the_pending_result(self):
+        """审计必须针对**即将落盘**的稿，而不是 item 上残留的旧结果。"""
+
+        stale = SimpleNamespace(
+            result_json=json.dumps({"stale": True}), script_id="SCRIPT_1"
+        )
+        proxy = _ResultProxy(stale, {"status": "SUCCESS", "script": {}})
+
+        self.assertEqual({"status": "SUCCESS", "script": {}}, load_item_result(proxy))
+        # 其余属性透传，无需维护一份会失效的字段清单
+        self.assertEqual("SCRIPT_1", proxy.script_id)
+        # 缺失属性仍走 getattr 默认值（renderer 大量使用该形式）
+        self.assertEqual("", getattr(proxy, "frozen_direction_package_json", ""))
+        # 原对象未被改动
+        self.assertEqual({"stale": True}, load_item_result(stale))
+
+    def test_attach_skips_non_mixed_and_failed_results(self):
+        item = SimpleNamespace(result_json="", script_id="SCRIPT_1")
+        # 非混合模式：返回空，旧流程的 result_json 逐字不变
+        self.assertEqual(
+            {},
+            attach_render_validation(
+                item=item,
+                result={"status": "SUCCESS", "script": {}},
+                duration_seconds=15,
+            ),
+        )
+        # 未成功的结果不审
+        self.assertEqual(
+            {},
+            attach_render_validation(
+                item=item, result={"status": "FAILED"}, duration_seconds=15
+            ),
+        )
+        self.assertEqual(
+            {},
+            attach_render_validation(
+                item=item, result={"status": "SUCCESS"}, duration_seconds=15
+            ),
+        )
+
+    def test_attach_reports_audit_error_instead_of_raising(self):
+        """记账失败不得把一条已完成的脚本变成失败稿。"""
+
+        item = SimpleNamespace(result_json="", script_id="SCRIPT_1")
+        with patch.object(
+            renderer,
+            "_frozen_mixed_contract_for_item",
+            side_effect=RuntimeError("boom"),
+        ):
+            self.assertEqual(
+                {},
+                attach_render_validation(
+                    item=item,
+                    result={"status": "SUCCESS", "script": {}},
+                    duration_seconds=15,
+                ),
+            )
+
+        with patch.object(
+            renderer,
+            "_frozen_mixed_contract_for_item",
+            return_value={"execution_profile": "ACCESSORY_MIXED_TEMPLATE"},
+        ), patch.object(
+            renderer,
+            "render_video_generation_prompt_checked",
+            side_effect=RuntimeError("boom"),
+        ):
+            payload = attach_render_validation(
+                item=item,
+                result={"status": "SUCCESS", "script": {}},
+                duration_seconds=15,
+            )
+        validation = payload["render_validation"]
+        self.assertEqual("AUDIT_ERROR", validation["status"])
+        self.assertIn("boom", validation["reason"])
+        # 关键：AUDIT_ERROR 不拦交付
+        self.assertFalse(render_validation_blocks_delivery(validation))
+
+    def test_attach_binds_the_validation_to_the_delivered_prompt(self):
+        item = SimpleNamespace(result_json="", script_id="SCRIPT_1")
+        with patch.object(
+            renderer,
+            "_frozen_mixed_contract_for_item",
+            return_value={"execution_profile": "ACCESSORY_MIXED_TEMPLATE"},
+        ), patch.object(
+            renderer,
+            "render_video_generation_prompt_checked",
+            return_value={
+                "text": "prompt-body",
+                "report": SimpleNamespace(ok=True, over_limit=True),
+                "render_validation": {
+                    "status": "PASS",
+                    "prompt_hash": "hash-1",
+                    "renderer_version": SCRIPT_RENDERER_VERSION,
+                },
+            },
+        ):
+            payload = attach_render_validation(
+                item=item,
+                result={"status": "SUCCESS", "script": {}},
+                duration_seconds=15,
+            )
+        validation = payload["render_validation"]
+        self.assertEqual("PASS", validation["status"])
+        self.assertEqual("hash-1", validation["prompt_hash"])
+        self.assertEqual(SCRIPT_RENDERER_VERSION, validation["renderer_version"])
+        self.assertEqual(len("prompt-body"), validation["prompt_chars"])
+        # 超内部预算只报告，不据此判失败、不截断
+        self.assertTrue(validation["over_limit"])
+        self.assertTrue(validation["compaction_ok"])
+
+
+if __name__ == "__main__":
+    unittest.main()

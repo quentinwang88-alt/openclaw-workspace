@@ -19,6 +19,10 @@ from typing import Any, Dict, Iterable
 from core.accessory_mixed_templates import (
     ACCESSORY_MIXED_TEMPLATE_PROFILE,
     MIXED_TEMPLATE_CONTRACT_KEY,
+    audit_mixed_final_execution,
+    frozen_mixed_contract,
+    mixed_execution_objects,
+    module_framing_legend_lines,
     worn_body_framing,
 )
 from core.category_execution import (
@@ -43,6 +47,18 @@ from core.video_prompt_compaction import (
 
 VIDEO_PROMPT_PROFILE_ENV = "ORIGINAL_SCRIPT_VIDEO_PROMPT_PROFILE"
 UGC_NATIVE_PROFILE = "ugc_native_v1"
+
+# Bumped whenever this renderer changes what a delivered prompt may contain.
+# The final execution audit binds its verdict to this string plus the prompt
+# hash, so a re-render that produces a different prompt is a different object
+# and has to be re-checked rather than inheriting the old PASS.
+SCRIPT_RENDERER_VERSION = "production-script-renderer-v4"
+# Persisted shape of the execution audit.  Versioned separately from the
+# renderer: the audit schema can gain fields without implying the prompt changed
+# (and therefore without invalidating an existing ``PASS``).
+RENDER_VALIDATION_SCHEMA_VERSION = "mixed-render-validation-v1"
+RENDER_VALIDATION_FIELD = "render_validation"
+
 LEGACY_PROFILE = "legacy"
 STAGE0_VIDEO_PROMPT_PROFILE = "stage0-ugc-compact-v2-capture-fidelity"
 UGC_NATIVE_POSITIVE = (
@@ -467,15 +483,149 @@ def _multiclip_text(value: Any, *, max_chars: int) -> str:
     return _compact_native_description(text, max_segments=3, max_chars=max_chars)
 
 
+_MIXED_BANNED_SUMMARY_TERMS = (
+    "镜面", "镜中", "正脸", "全脸", "半脸", "侧脸", "头肩", "自拍",
+)
+
+
+def _mixed_banned_framing_terms(contract: Dict[str, Any]) -> list:
+    """Framing concepts this frozen montage bans, in summary form.
+
+    Used to filter the older whole-film accessory prose: a sentence that tells a
+    no-face film to prefer ``镜面反射`` is not a stale wording problem, it is a
+    direct contradiction of the contract the same prompt states two lines above.
+    """
+
+    out: list = []
+    for unit in _list(_dict(contract).get("capture_units")):
+        for item in _list(_dict(unit).get("forbidden_framing")):
+            text = _text(item)
+            for term in _MIXED_BANNED_SUMMARY_TERMS:
+                if term in text and term not in out:
+                    out.append(term)
+    return out
+
+
+def _mixed_capture_unit_passages(
+    storyboard: list,
+    units: list,
+    *,
+    mixed_contract: Dict[str, Any],
+) -> list:
+    """Per-shot passages for a mixed montage, taken from the execution objects.
+
+    Nothing here reads ``unit_role``.  That is the fix: the old arc could only
+    reach the prompt through the role lookup, so removing the lookup removes the
+    whole class of "handheld shot told to shift its weight" defects rather than
+    one sentence of it.
+    """
+
+    by_id: Dict[str, list] = {}
+    for raw in storyboard:
+        shot = _dict(raw)
+        by_id.setdefault(_text(shot.get("capture_unit_id"), "CU_01"), []).append(shot)
+    compiled_by_id: Dict[str, Dict[str, Any]] = {}
+    for raw in units or []:
+        unit = _dict(raw)
+        key = _text(unit.get("capture_unit_id"))
+        if key and key not in compiled_by_id:
+            compiled_by_id[key] = unit
+
+    out: list = []
+    for obj in mixed_execution_objects(mixed_contract, storyboard):
+        unit_id = _text(obj.get("shot_id")) or "CU_01"
+        group = by_id.get(unit_id) or []
+        compiled = compiled_by_id.get(unit_id) or {}
+        if not group and not compiled:
+            continue
+        visuals = [
+            _video_safe_closure_text(shot.get("visual_content"), {})
+            for shot in group
+            if _text(shot.get("visual_content"), "")
+        ]
+        anchors: list = []
+        for shot in group:
+            for anchor in _list(shot.get("product_anchors_visible")):
+                if anchor not in anchors:
+                    anchors.append(anchor)
+        first_range = _text(group[0].get("time_range"), "") if group else ""
+        last_range = _text(group[-1].get("time_range"), "") if group else ""
+        structure_role = _text(
+            compiled.get("structure_role")
+            or (group[0].get("structure_role") if group else "")
+            or (group[0].get("narrative_role") if group else ""),
+            "",
+        ).upper()
+        out.append(
+            {
+                **compiled,
+                "capture_unit_id": unit_id,
+                "time_range": (
+                    first_range
+                    if not last_range or first_range == last_range
+                    else f"{first_range} → {last_range}"
+                ),
+                # The approved script's own visible event and action.  The
+                # frozen contract no longer overwrites them: its ending
+                # guidance used to replace the last shot's picture with worn
+                # vocabulary ("补录后脑发饰区域") even when the montage ended on
+                # a relation shot with its own, better detail.
+                "visual_content": _multiclip_text("；".join(visuals), max_chars=150),
+                "character_action": _multiclip_text(
+                    _text(obj.get("action")), max_chars=95
+                ),
+                "framing_guidance": _text(obj.get("camera_guidance"), ""),
+                # ``_text`` defaults to the literal "UNAVAILABLE"; a shot that
+                # simply has no gaze instruction must render *no line*, not a
+                # line that says "UNAVAILABLE" -- the compaction pass would then
+                # report the placeholder as a lost per-shot constraint.
+                "gaze_target": _text(obj.get("gaze_target"), ""),
+                "micro_reaction": _text(obj.get("micro_reaction"), ""),
+                "natural_reaction": _text(obj.get("micro_reaction"), ""),
+                "module": _text(obj.get("module"), ""),
+                "module_label": _text(obj.get("module_label"), ""),
+                "execution_role": _text(obj.get("execution_role"), ""),
+                "execution_version": _text(obj.get("execution_version"), ""),
+                "action_source": _text(obj.get("action_source"), ""),
+                "mixed_execution_applied": True,
+                "structure_role": structure_role,
+                "observable_change_job": _text(
+                    compiled.get("observable_change_job")
+                    or (group[0].get("observable_change_job") if group else ""),
+                    "",
+                ).upper(),
+                "product_anchors_visible": anchors,
+                "compiled_clip_passage": True,
+            }
+        )
+    return out
+
+
 def _capture_unit_passages(
     storyboard: list,
     units: list,
     *,
     accessory_brief: Dict[str, Any] | None = None,
     action_design: Dict[str, Any] | None = None,
+    mixed_contract: Dict[str, Any] | None = None,
 ) -> list:
     accessory_brief = _dict(accessory_brief)
     action_design = _dict(action_design)
+    # ── 混合模板：每镜从自己的执行对象派生 ────────────────────────────
+    # R1: the old role arc assigns ``unit_role`` by *position*
+    # (PRODUCT_RESULT_CLOSE -> NATURAL_MOTION_RELATION -> ... -> PRODUCT_
+    # REACQUISITION) and then hands out worn body actions from it.  A montage
+    # whose second shot is a handheld close-up and third is a still life has
+    # nothing to do with that arc, so it received "the person shifts weight in
+    # the neck-and-shoulder relation" and "record a continuous upper body" --
+    # in direct violation of those units' own ``forbidden_framing``.
+    #
+    # In mixed mode the per-shot execution object is the only authority: the
+    # frozen unit owns the boundaries, the approved storyboard owns the content.
+    if _dict(mixed_contract).get("execution_profile") == ACCESSORY_MIXED_TEMPLATE_PROFILE:
+        return _mixed_capture_unit_passages(
+            storyboard, units, mixed_contract=_dict(mixed_contract)
+        )
     prominence = _dict(accessory_brief.get("product_prominence_contract"))
     # Current category projection supplies the unit-level motion language.  A
     # frozen action design may override individual fields, but must not erase a
@@ -922,11 +1072,17 @@ def render_stage0_video_generation_prompt(
         if anchors:
             lines.append("本段商品焦点：" + _join(anchors))
 
+    # 交付文档的语种标签只认 target_language。``target_text`` 是目标语言**正文**，
+    # 拿它当语种标签会把越南语脚本标成别的（Review R3）。
+    from core.mixed_voiceover_mainline import resolve_language_label
+
+    _language_label = resolve_language_label(voice=voice)
+
     lines.extend(
         [
             "",
             "【连续口播｜必须原样使用目标语言】",
-            _text(voice.get("target_language") or voice.get("target_text"), ""),
+            _language_label["label"] or _text(voice.get("target_text"), ""),
             "",
             "【统一执行优先级】",
             (
@@ -1163,6 +1319,102 @@ def build_script_title(item: Any, script: Dict[str, Any]) -> str:
     )
 
 
+def _frozen_mainline_for_item(item: Any) -> Dict[str, Any]:
+    """The frozen mainline this delivered script has to be reviewed against.
+
+    Absent for packages predating C2 (and for non-accessory lines), in which
+    case the review reports ``NOT_APPLICABLE`` and the delivery text is
+    unchanged -- byte for byte -- from what it was before.
+    """
+
+    result = load_item_result(item)
+    script = _dict(result.get("script"))
+    brief = _dict(script.get("video_generation_brief")) or script
+    for holder in (
+        _dict(brief.get("category_execution_extension")),
+        script,
+        result,
+        _json_dict(getattr(item, "frozen_direction_package_json", "")),
+    ):
+        contract = holder.get("mixed_mainline_contract")
+        if isinstance(contract, dict) and contract:
+            return contract
+    return {}
+
+
+def review_delivered_voiceover(script: Dict[str, Any], mainline: Dict[str, Any]) -> Dict[str, Any]:
+    """成稿口播的两项核对合成一份结论：三类核对 + 口径兜底。
+
+    Both are *reports*.  Neither rewrites the script: the review's own design
+    note says the fix, when one is needed, goes through the single targeted
+    revision instead.  Wiring them into delivery is what makes 方案 C3's
+    "成稿核对分三类" a produced artefact instead of a test-only helper.
+    """
+
+    from core.mixed_voiceover_mainline import (
+        CHECK_ATTENTION,
+        CHECK_FAIL,
+        CHECK_NOT_APPLICABLE,
+        CHECK_PASS,
+        check_voiceover_target_against_boundary,
+        review_voiceover_against_mainline,
+    )
+
+    contract = _dict(mainline)
+    voice = _dict(_dict(script).get("continuous_voiceover"))
+    review = review_voiceover_against_mainline(script, contract)
+    boundary = check_voiceover_target_against_boundary(voice=voice, mainline=contract)
+    reported = [
+        item
+        for item in (review.get("status"), boundary.get("status"))
+        if item and item != CHECK_NOT_APPLICABLE
+    ]
+    status = CHECK_NOT_APPLICABLE
+    for candidate in (CHECK_FAIL, CHECK_ATTENTION, CHECK_PASS):
+        if candidate in reported:
+            status = candidate
+            break
+    return {
+        "schema_version": "delivered-voiceover-review-v1",
+        "status": status,
+        "mainline_review": review,
+        "boundary_check": boundary,
+    }
+
+
+def voiceover_review_delivery_lines(review: Dict[str, Any]) -> list:
+    """Human-readable summary lines.  None at all without a mainline contract."""
+
+    from core.mixed_voiceover_mainline import CHECK_ATTENTION, CHECK_FAIL, CHECK_NOT_APPLICABLE
+
+    data = _dict(review)
+    if data.get("status") in ("", CHECK_NOT_APPLICABLE):
+        return []
+    boundary = _dict(data.get("boundary_check"))
+    mainline_review = _dict(data.get("mainline_review"))
+    if boundary.get("status") == CHECK_FAIL:
+        hits = "、".join(
+            f"{_text(item.get('term'))}（{_text(item.get('scope'))}）"
+            for item in (boundary.get("violations") or [])
+            if isinstance(item, dict)
+        )
+        lines = [f"口播口径核对：未通过 —— 成稿说出被禁措辞：{hits or '见机读结论'}"]
+    else:
+        lines = ["口播口径核对：通过（成稿未出现被禁措辞）"]
+    buckets = _dict(mainline_review.get("buckets"))
+    details = [
+        f"{_text(_dict(bucket).get('requirement'))}：{_text(_dict(bucket).get('detail'))}"
+        for bucket in (buckets.get("visible_result"), buckets.get("spec_fact"), buckets.get("suggestion_and_aesthetic"))
+        if _dict(bucket)
+    ]
+    if buckets:
+        verdict = "通过" if mainline_review.get("status") == "PASS" else "需注意"
+        lines.append(f"主线三类核对：{verdict}｜" + "；".join(details))
+    elif mainline_review.get("status") == CHECK_ATTENTION:
+        lines.append(f"主线三类核对：需注意 —— {_text(mainline_review.get('reason'))}")
+    return lines
+
+
 def render_complete_production_script(
     *,
     item: Any,
@@ -1201,6 +1453,16 @@ def render_complete_production_script(
     )
     capture_units = _list(script.get("capture_units")) or _list(
         _dict(script.get("video_generation_brief")).get("capture_units")
+    )
+
+    # 语种标签单一来源：只认 target_language，目标语言正文单独一行（Review R3）。
+    from core.mixed_voiceover_mainline import resolve_language_label
+
+    _language_label = resolve_language_label(voice=voice, batch=frozen_package)
+    # 成稿口播的两项核对（三类核对 + 口径兜底）。没有冻结主线时不产出任何行，
+    # 所以旧包与其它类目的交付文本逐字不变。
+    _voiceover_review = review_delivered_voiceover(
+        script, _frozen_mainline_for_item(item)
     )
 
     lines = [
@@ -1251,8 +1513,10 @@ def render_complete_production_script(
         _join(_list(product_usage.get("identity_anchors_preserved"))),
         "",
         "【连续口播】",
-        f"目标语言：{_text(voice.get('target_text'))}",
+        f"目标语言：{_language_label['label'] or '目标语言（未记录）'}",
+        f"目标语言正文：{_text(voice.get('target_text'))}",
         f"中文：{_text(voice.get('chinese_translation'))}",
+        *voiceover_review_delivery_lines(_voiceover_review),
     ]
 
     for index, raw_shot in enumerate(storyboard, 1):
@@ -1453,6 +1717,14 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
     identity_lock = _dict(brief.get("product_identity_lock"))
     category_extension = _dict(brief.get("category_execution_extension"))
     face_free = _is_face_free_contract(category_extension)
+    # The frozen mixed montage, when this item is one.  Read once and threaded
+    # through: every downstream line that used to be written from the small-
+    # accessory role arc has to consult it instead.
+    mixed_contract = frozen_mixed_contract(category_extension)
+    mixed_mode = (
+        _text(mixed_contract.get("execution_profile"))
+        == ACCESSORY_MIXED_TEMPLATE_PROFILE
+    )
     accessory_brief = _upgrade_small_accessory_brief_for_render(
         category_extension=category_extension,
         accessory_brief=_dict(brief.get("accessory_execution_brief")),
@@ -1714,7 +1986,7 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
             )
         if required_result:
             accessory_lines.append(f"必要结果：{required_result}")
-        if product_prominence:
+        if product_prominence and not mixed_mode:
             prominence_parts = [
                 _text(product_prominence.get("opening_guidance"), ""),
                 _text(product_prominence.get("context_guidance"), ""),
@@ -1733,11 +2005,20 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
                     + prominence_text
                     + "。只调整兼容内容段的景别，不改变结构、佩戴状态或动作主线。"
                 )
+        if mixed_mode:
+            # The prominence contract above describes a *worn-only* film ("首个
+            # 核心展示段优先使用后脑发饰区域近景", "镜面必须裁到颈肩范围") and
+            # contradicts a montage that opens on a still life and bans every
+            # mirror. The frozen per-module range is the same information,
+            # stated for the film that will actually be shot.
+            accessory_lines.extend(module_framing_legend_lines(mixed_contract))
         if interaction_limit:
             accessory_lines.append(f"交互边界：{_join(interaction_limit)}")
         if selected_action:
             accessory_lines.append(
-                "核心互动已冻结，按下方“本条动作主线”执行一次并服从交互边界"
+                "按下方每段自己的执行行执行；整片只锁商品身份、穿戴连续与直接剪切"
+                if mixed_mode
+                else "核心互动已冻结，按下方“本条动作主线”执行一次并服从交互边界"
             )
         elif optional_interactions:
             accessory_lines.append(
@@ -1751,16 +2032,27 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
         if claim_boundary:
             accessory_lines.append(f"表达边界：{claim_boundary}")
         if accessory_capture_relationship:
-            accessory_lines.append(
-                f"配饰拍摄位置关系：{accessory_capture_relationship}"
-            )
+            # 混合模式：这一行是旧的"后脑优先用镜面反射"口径，与本片自己的
+            # NO_FACE 禁令（镜面反射露脸）直接冲突。按句删掉点名的取景方式，
+            # 保留仍然成立的那半句（"不要求人物正对前置镜头"）。
+            text = accessory_capture_relationship
+            if mixed_mode:
+                banned = _mixed_banned_framing_terms(mixed_contract)
+                text = "；".join(
+                    clause
+                    for clause in text.split("；")
+                    if clause.strip()
+                    and not any(term in clause for term in banned)
+                )
+            if _text(text):
+                accessory_lines.append(f"配饰拍摄位置关系：{text}")
         if _text(hand_guard.get("guidance_zh"), ""):
             accessory_lines.append(
                 "手部结构：" + _text(hand_guard.get("guidance_zh"), "")
             )
         lines.extend(accessory_lines)
 
-    if action_design and not direct_creator_share:
+    if action_design and not direct_creator_share and not mixed_mode:
         action_lines = [
             "",
             "【本条动作主线｜只执行这一条】",
@@ -1795,6 +2087,33 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
                     + "；只作自然衔接，不与核心动作叠成动作清单。"
                 )
         lines.extend(action_lines)
+
+    if mixed_mode:
+        # 一次拍摄里只有一条旧"核心动作"，而混合片段的第 2/3 段是手持与静物。
+        # 把那条动作整片派发，等于让静物镜去演佩戴动作。所以混合模式不发布
+        # 整片核心动作：每段只服从自己那一行。
+        mixed_roles = [
+            _text(_dict(unit).get("module"))
+            for unit in _list(mixed_contract.get("capture_units"))
+        ]
+        lines.extend(
+            [
+                "",
+                "【本条动作主线｜按每段自己的模块执行】",
+                (
+                    "整片只有一条主线：同一商品、同一创作者、同一地点，"
+                    f"分成{len([role for role in mixed_roles if role])}段直接剪切。"
+                ),
+                (
+                    "每段的动作、构图、商品状态和身体范围由该段自己那一行给出；"
+                    "不得把某一段的动作套用到其他段，也不得为凑连续性补拍摘戴过程。"
+                ),
+                (
+                    "跨段是普通直接剪切，可以从已经拿稳切到已经静置、已经佩戴；"
+                    "不要求拍摄摘下、戴上、扣合或夹取的中间过程。"
+                ),
+            ]
+        )
 
     if direct_creator_share:
         preset = normalize_creator_capture_preset(recording_profile)
@@ -1990,6 +2309,7 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
             capture_units,
             accessory_brief=accessory_brief,
             action_design=action_design,
+            mixed_contract=mixed_contract,
         )
         if multiclip_enabled
         else _creator_content_moments(storyboard)
@@ -2054,7 +2374,13 @@ def _render_ugc_native_video_generation_prompt(*, item: Any, duration_seconds: f
             )
         physical_unit_role = _text(shot.get("unit_role"), "")
         structure_role = _text(shot.get("structure_role"), "")
-        if (
+        # 「角色说明」在混合模式下由本镜模块派生。旧 unit_role 是按位置索引的
+        # 内部叙事标签，把它写进提示词等于把"这是中段所以要演佩戴动作"的旧弧
+        # 又请回现场。审计时仍可从 ``legacy_role`` 读到它。
+        execution_role = _text(shot.get("execution_role"), "")
+        if execution_role:
+            lines.append(f"商品执行关系：{execution_role}")
+        elif (
             multiclip_enabled
             and physical_unit_role
             and structure_role
@@ -2105,6 +2431,175 @@ def render_video_generation_prompt(*, item: Any, duration_seconds: float) -> str
     return render_video_generation_prompt_report(
         item=item, duration_seconds=duration_seconds
     ).text
+
+
+def _frozen_mixed_contract_for_item(item: Any) -> Dict[str, Any]:
+    """The frozen montage a delivered prompt has to be audited against."""
+
+    result = load_item_result(item)
+    script = _dict(result.get("script"))
+    brief = _dict(script.get("video_generation_brief")) or script
+    for holder in (
+        _dict(brief.get("category_execution_extension")),
+        script,
+        result,
+        _json_dict(getattr(item, "frozen_direction_package_json", "")),
+    ):
+        contract = frozen_mixed_contract(holder)
+        if contract:
+            return contract
+    return {}
+
+
+def render_video_generation_prompt_checked(
+    *, item: Any, duration_seconds: float
+) -> Dict[str, Any]:
+    """The final prompt *plus* the execution audit that binds it.
+
+    The audit runs on the text that is actually delivered — after splicing and
+    after compaction — because R1 lived in exactly that last step and every
+    earlier check ran on the frozen contract instead.
+
+    ``render_validation`` is bound to the delivered text through ``prompt_hash``
+    and ``renderer_version``.  A re-render that changes the prompt is a
+    different object and has to be re-checked; it cannot inherit an earlier
+    ``PASS``.
+    """
+
+    result = load_item_result(item)
+    script = _dict(result.get("script"))
+    brief = _dict(script.get("video_generation_brief")) or script
+    if _video_prompt_profile(brief) == LEGACY_PROFILE:
+        text = _render_legacy_video_generation_prompt(
+            item=item, duration_seconds=duration_seconds
+        )
+        report = _unchanged_report(text)
+        pre = text
+    else:
+        pre = _render_ugc_native_video_generation_prompt(
+            item=item, duration_seconds=duration_seconds
+        )
+        report = compact_video_prompt_report(pre)
+        text = report.text
+
+    contract = _frozen_mixed_contract_for_item(item)
+    storyboard = _list(brief.get("storyboard")) or _list(script.get("storyboard"))
+    validation = audit_mixed_final_execution(
+        text,
+        contract,
+        storyboard=storyboard,
+        renderer_version=SCRIPT_RENDERER_VERSION,
+        pre_compaction_prompt=pre,
+    )
+    return {"text": text, "report": report, "render_validation": validation}
+
+
+class _ResultProxy:
+    """A view of ``item`` whose ``result_json`` is a not-yet-persisted result.
+
+    The audit has to run against the script that is *about to be stored*.  At
+    that moment ``item.result_json`` still holds the previous state (usually the
+    planning-time payload), so rendering from ``item`` directly would audit an
+    empty shell and hand back a ``PASS`` that says nothing about the delivered
+    text.  Only ``result_json`` is overridden; every other attribute is passed
+    through, so no easily-stale field list has to be maintained here.
+    """
+
+    def __init__(self, item: Any, result: Dict[str, Any]) -> None:
+        object.__setattr__(self, "_item", item)
+        object.__setattr__(
+            self,
+            "_result_json",
+            json.dumps(result, ensure_ascii=False, default=str),
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "result_json":
+            return object.__getattribute__(self, "_result_json")
+        return getattr(object.__getattribute__(self, "_item"), name)
+
+
+def render_validation_blocks_delivery(validation: Any) -> bool:
+    """``True`` iff the audit found a deterministic execution conflict.
+
+    Only ``FAIL`` blocks.  ``PASS`` and ``NOT_APPLICABLE`` (legacy / non-montage)
+    do not, and neither does ``AUDIT_ERROR``: our own bookkeeping must never be
+    the reason real content stops shipping.
+
+    A blocked item is deliberately **not** ``SCRIPT_FAILED``.  A render conflict
+    is reproducible offline and fixable by re-rendering, while
+    ``PLANNED``/``SCRIPT_FAILED`` are exactly the statuses ``resume`` retries —
+    so routing it through failure would buy a paid model call that cannot change
+    a deterministic template projection.
+    """
+
+    return _text(_dict(validation).get("status")) == "FAIL"
+
+
+def render_validation_block_reason(validation: Any, *, limit: int = 6) -> str:
+    """One operator-facing line: which shot contradicted which boundary."""
+
+    validation = _dict(validation)
+    if not render_validation_blocks_delivery(validation):
+        return ""
+    issues = _list(validation.get("issues"))
+    parts = []
+    for issue in issues[:limit]:
+        issue = _dict(issue)
+        parts.append(
+            f"镜{_text(issue.get('shot_id'), '?')}"
+            f"[{_text(issue.get('module'), '?')}]"
+            f"{_text(issue.get('code'))}"
+            f"（来源 {_text(issue.get('source'), '?')}）"
+        )
+    suffix = f"；共 {len(issues)} 项" if len(issues) > len(parts) else ""
+    return "最终提示词与冻结合同冲突，未进入视频提交：" + "、".join(parts) + suffix
+
+
+def attach_render_validation(
+    *, item: Any, result: Dict[str, Any], duration_seconds: float
+) -> Dict[str, Any]:
+    """Audit the prompt of a result that is about to be persisted.
+
+    Returns ``{}`` for anything that is not a frozen accessory montage, so the
+    legacy result payload stays byte-identical and pays nothing for this step.
+
+    Never raises.  A finished script must not become a failure because
+    bookkeeping broke; that case is recorded as ``AUDIT_ERROR`` instead, which
+    does not block delivery and is counted separately in the batch report.
+    """
+
+    if not isinstance(result, dict) or _text(result.get("status")) != "SUCCESS":
+        return {}
+    proxy = _ResultProxy(item, result)
+    try:
+        if not _frozen_mixed_contract_for_item(proxy):
+            return {}
+    except Exception:  # noqa: BLE001 - detection must not fail an item
+        return {}
+    try:
+        checked = render_video_generation_prompt_checked(
+            item=proxy, duration_seconds=float(duration_seconds or 15)
+        )
+    except Exception as exc:  # noqa: BLE001 - bookkeeping must not fail an item
+        return {
+            RENDER_VALIDATION_FIELD: {
+                "version": RENDER_VALIDATION_SCHEMA_VERSION,
+                "status": "AUDIT_ERROR",
+                "reason": f"{type(exc).__name__}: {exc}"[:300],
+                "issues": [],
+                "checked_shots": 0,
+                "prompt_hash": "",
+                "renderer_version": SCRIPT_RENDERER_VERSION,
+            }
+        }
+    validation = dict(checked.get("render_validation") or {})
+    report = checked.get("report")
+    validation["compaction_ok"] = bool(getattr(report, "ok", True))
+    validation["over_limit"] = bool(getattr(report, "over_limit", False))
+    validation["prompt_chars"] = len(checked.get("text") or "")
+    return {RENDER_VALIDATION_FIELD: validation}
+
 
 
 def render_video_generation_prompt_report(
@@ -2207,6 +2702,24 @@ def build_production_projection(*, batch: Any, item: Any) -> Dict[str, Any]:
         or getattr(item, "script_id", "")
         or getattr(item, "batch_item_id", "")
     )
+    # The delivered prompt and its execution audit must be produced by one call:
+    # the audit is bound to the exact text through ``prompt_hash`` and
+    # ``renderer_version``, so a re-render can never inherit an earlier PASS.
+    checked = render_video_generation_prompt_checked(
+        item=item,
+        duration_seconds=float(getattr(batch, "duration_seconds", 15) or 15),
+    )
+    render_validation = dict(checked.get("render_validation") or {})
+    _compaction_report = checked.get("report")
+    render_validation["compaction_ok"] = bool(
+        getattr(_compaction_report, "ok", True)
+    )
+    render_validation["over_limit"] = bool(
+        getattr(_compaction_report, "over_limit", False)
+    )
+    render_validation["prompt_chars"] = len(checked.get("text") or "")
+    # 成稿口播核对进投影：三类核对 + 口径兜底，状态与逐项证据都留在结构化字段里。
+    voiceover_review = review_delivered_voiceover(script, _frozen_mainline_for_item(item))
     return {
         "script_id": complete_script_id,
         "batch_id": _text(getattr(batch, "batch_id", "")),
@@ -2227,12 +2740,13 @@ def build_production_projection(*, batch: Any, item: Any) -> Dict[str, Any]:
         "scene_summary": _text(scene.get("location")),
         "target_voiceover": _text(voice.get("target_text")),
         "chinese_voiceover": _text(voice.get("chinese_translation")),
+        "voiceover_review": voiceover_review,
+        "voiceover_review_status": _text(voiceover_review.get("status"), ""),
         "complete_script": render_complete_production_script(
             item=item, duration_seconds=getattr(batch, "duration_seconds", 15)
         ),
-        "video_prompt": render_video_generation_prompt(
-            item=item, duration_seconds=getattr(batch, "duration_seconds", 15)
-        ),
+        "video_prompt": _text(checked.get("text")),
+        "render_validation": render_validation,
         "cluster_id": getattr(item, "cluster_id", None),
         "cluster_version": _text(getattr(item, "cluster_version", ""), ""),
         "selection_run_id": _text(getattr(item, "selection_run_id", ""), ""),
