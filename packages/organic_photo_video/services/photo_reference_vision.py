@@ -1046,10 +1046,16 @@ class PhotoReferenceVisionService:
             path = Path(str(raw)).expanduser().resolve()
             if not path.is_file():
                 raise PhotoReferenceVisionError(f"旅行规划参考图不存在：{path}")
-            uses = _normalize_reference_uses(
-                per_reference.get(index, {}).get("reference_uses")
-            ) or [str(u) for u in untagged_uses] or [
-                "OUTFIT", "ENVIRONMENT", "VISUAL_STYLE"]
+            typed = _normalize_reference_uses(
+                per_reference.get(index, {}).get("reference_uses"))
+            allowed = [str(u) for u in untagged_uses if str(u)]
+            if allowed:
+                # 方案 §5.2：合同控制用途——视觉分析的模型标注只能收窄，
+                # 不能扩大（typed ∩ allowed；空交集退回 allowed）
+                uses = [u for u in typed if u in allowed] or list(allowed)
+            else:
+                uses = typed or [
+                    "OUTFIT", "ENVIRONMENT", "VISUAL_STYLE"]
             selected[str(path)] = {
                 "uses": uses,
                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),

@@ -181,6 +181,23 @@ def build_demand(families, usable_by_theme, gap_rows):
     return demands
 
 
+def _infer_family(demand: dict) -> str:
+    """台账需求→查询族推断（§6.3：语义资格由分析决定，此处仅归属）。"""
+    text = " ".join(str(demand.get(k) or "") for k in
+                    ("theme_direction", "product_form"))
+    if any(k in text for k in ("围巾", "丝巾")):
+        return "scarf_pairing"
+    if any(k in text for k in ("鞋",)):
+        return "shoes_pairing"
+    if any(k in text for k in ("配色", "颜色", "色系")):
+        return "color_ratio"
+    if any(k in text for k in ("一衣多穿", "多搭")):
+        return "same_item_multiway"
+    if any(k in text for k in ("旅行", "旅游", "穿脱", "层次")):
+        return "travel_layering"
+    return ""
+
+
 def compose_demand_queries(demand: dict) -> list:
     """方案 C3：目的地/商品词组合查询（2 定向＋1 通用）。
 
@@ -220,21 +237,35 @@ def main() -> int:
         lab_db=str(DEFAULT_LIBRARY_DB))
     gaps = recent_gap_hints(ledger, hours=args.gap_hours)
     demands = build_demand(families, usable, gaps)
+    # 方案 §6.1：统一 demands 合同——族需求带 demand_key；台账需求按
+    # family 推断归属、需求消退（所属族库存达标即视为已满足不导出）
+    for item in demands:
+        item.setdefault("demand_key", f"family:{item.get('family')}")
+    fam_usable = {fid: (v.get("usable") if isinstance(v, dict) else v)
+                  for fid, v in (usable or {}).items()}
     ledger_demands = []
     try:
         for item in ledger.list_demands(within_days=14):
             item = dict(item)
+            fid = _infer_family(item)
+            threshold = next(
+                (int(f.get("min_usable_pool") or 0)
+                 for f in families if f.get("family_id") == fid), 0)
+            if fid and int(fam_usable.get(fid) or 0) >= threshold:
+                continue     # 需求消退：该族库存已达标
+            item["family"] = fid or ""
+            item["demand_key"] = f"ledger:{item.get('theme_direction')}|"                                  f"{item.get('destination_country')}"
             item["queries"] = compose_demand_queries(item)
             ledger_demands.append(item)
     except Exception:  # noqa: BLE001 - 台账需求读取失败不阻塞族需求
         ledger_demands = []
     ledger.close()
+    unified = demands + ledger_demands
     payload = {
-        "schema_version": "opv-material-demand-list-v1",
+        "schema_version": "opv-material-demand-list-v2",
         "generated_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
         "usable_by_theme": usable,
-        "demands": demands,
-        "ledger_demands": ledger_demands,
+        "demands": unified,
     }
     text = json.dumps(payload, ensure_ascii=False, indent=2)
     if args.out:

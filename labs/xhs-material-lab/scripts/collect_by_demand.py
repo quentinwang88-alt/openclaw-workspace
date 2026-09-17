@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS query_hits (
     note_id TEXT NOT NULL,
     family TEXT NOT NULL,
     query TEXT NOT NULL,
+    demand_key TEXT NOT NULL DEFAULT '',
     hit_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (note_id, family, query)
 );
@@ -75,12 +76,26 @@ def main() -> None:
     conn = sqlite3.connect(args.db)
     conn.row_factory = sqlite3.Row
     conn.executescript(QUERY_HITS_SCHEMA)
+    # 迁移：既有库补 demand_key 列（幂等）
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(query_hits)")}
+    if "demand_key" not in cols:
+        conn.execute(
+            "ALTER TABLE query_hits ADD COLUMN demand_key TEXT NOT NULL DEFAULT ''")
+        conn.commit()
     out_dir = Path(args.out_root)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for item in demand.get("demands") or []:
         family = str(item.get("family") or "")
         if not family:
+            continue
+        demand_key = str(item.get("demand_key") or f"family:{family}")
+        # 方案 §6.3：简单冷却——24h 内同需求已搜过则跳过，不重复搜索
+        recent = conn.execute(
+            "SELECT COUNT(*) FROM query_hits WHERE demand_key=?"
+            " AND hit_at >= datetime('now','-1 day')", (demand_key,)).fetchone()[0]
+        if recent:
+            print(f"  [cooldown] {demand_key} 24h 内已搜过，跳过")
             continue
         print(f"== {family}（{item.get('reason')}）可用存量 {item.get('usable_now')}")
         for query in item.get("queries") or []:
@@ -98,8 +113,9 @@ def main() -> None:
                 note_id = feed.get("id")
                 if note_id:
                     conn.execute(
-                        "INSERT OR IGNORE INTO query_hits (note_id, family, query)"
-                        " VALUES (?,?,?)", (note_id, family, query))
+                        "INSERT OR IGNORE INTO query_hits"
+                        " (note_id, family, query, demand_key)"
+                        " VALUES (?,?,?,?)", (note_id, family, query, demand_key))
             conn.commit()
             print(f"  {query}: 新增 {added}，重复 {dup}，跳过视频 {skipped}")
     # 消费侧以 mode=ro 读库；WAL 模式下 ro 打不开——写完切回 DELETE 日志

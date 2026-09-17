@@ -1906,12 +1906,17 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                             # B3：外部合同的 adoption 决定未标注参考图的
                             # 用途（不再一律三用途全补；手工行保持旧行为）
                             untagged_uses=(
-                                {"outfit_only": ["OUTFIT"],
-                                 "visual_only": ["VISUAL_STYLE"],
-                                 "narrative_only": [],
-                                 "overall": ["OUTFIT"]}.get(
-                                    str((external_contract or {}).get("adoption")
-                                        or ""), ("",))
+                                [u for u in {
+                                    "outfit_only": ["OUTFIT"],
+                                    "visual_only": ["VISUAL_STYLE"],
+                                    "narrative_only": [],
+                                    "overall": ["OUTFIT"]}.get(
+                                        str((external_contract or {}).get("adoption")
+                                            or ""), ())
+                                 # 固定背景屏蔽 ENVIRONMENT（§5.2）：
+                                 # 相交入口会同步剥掉模型标注的该用途
+                                 if not (fixed_background_payload
+                                         and u == "ENVIRONMENT")]
                                 if external_contract is not None else ()),
                             product_reference_paths=list(
                                 style_product.get("reference_images") or []

@@ -104,11 +104,19 @@ def main() -> int:
 
     client = FeishuBitableClient(
         resolve_wiki_bitable_app_token(args.wiki_token), args.table_id)
+    from services.material_analysis import MaterialAnalyzer
+    analyzer = None
+    if vision_client is not None:
+        # 方案 §6.4：0 候选时的有限补分析走正式入口（复用 Doubao 与额度）
+        analyzer = MaterialAnalyzer(
+            MaterialSource(), MaterialLedger(args.ledger or None),
+            vision_client, model=model)
     supply = AutoPhotoSupply(
         client=client,
         source=MaterialSource(),
         ledger=MaterialLedger(args.ledger or None),
         vision_client=vision_client,
+        analyzer=analyzer,
         model=model,
         product_snapshot_resolver=build_product_snapshot_resolver(),
     )

@@ -166,3 +166,108 @@ class FamilyInventoryTest(unittest.TestCase):
             self.assertEqual(mw["adaptable"], 0)
             # 主题别名归属：notes.theme 不在 themes 里则不归属
             self.assertEqual(counts["travel_layering"]["usable"], 0)
+
+
+class UnifiedDemandsTest(unittest.TestCase):
+    """方案 §6.1/§6.3：统一 demands 合同、需求消退、搜索冷却。"""
+
+    def test_export_unifies_and_fades(self):
+        from services.material_analysis import MaterialLedger
+        with TemporaryDirectory() as tmp:
+            ledger = MaterialLedger(str(Path(tmp) / "u.sqlite3"))
+            # 台账需求：旅行穿脱/层次+日本（旅行族库存达标→消退）
+            ledger.record_demand({"theme_direction": "旅行穿脱/层次",
+                                  "purposes": ["outfit"], "product_form": "",
+                                  "destination_country": "日本",
+                                  "destination_use": "environment_inspiration"})
+            # 台账需求：围巾（围巾族库存 0→导出，带 demand_key/queries）
+            ledger.record_demand({"theme_direction": "围巾搭配",
+                                  "purposes": ["outfit"], "product_form": "",
+                                  "destination_country": "",
+                                  "destination_use": ""})
+            ledger.close()
+            import export_material_gaps as E
+            families = [
+                {"family_id": "travel_layering", "themes": ["旅行穿搭"],
+                 "base_queries": ["x"], "purposes": ["outfit"],
+                 "min_usable_pool": 8},
+                {"family_id": "scarf_pairing", "themes": ["围巾搭配"],
+                 "base_queries": ["y"], "purposes": ["outfit"],
+                 "min_usable_pool": 4}]
+            usable = {"travel_layering": {"usable": 18}, "scarf_pairing": {"usable": 0}}
+            fam_demands = E.build_demand(families, usable, [])
+            for item in fam_demands:
+                item.setdefault("demand_key", f"family:{item.get('family')}")
+            # 复刻 main 的合并+消退路径
+            fam_usable = {fid: (v.get("usable") if isinstance(v, dict) else v)
+                          for fid, v in usable.items()}
+            out = []
+            led = MaterialLedger(str(Path(tmp) / "u.sqlite3"))
+            for item in led.list_demands(within_days=14):
+                item = dict(item)
+                fid = E._infer_family(item)
+                threshold = next(
+                    (int(f.get("min_usable_pool") or 0)
+                     for f in families if f.get("family_id") == fid), 0)
+                if fid and int(fam_usable.get(fid) or 0) >= threshold:
+                    continue
+                item["family"] = fid or ""
+                item["demand_key"] = "ledger:x"
+                item["queries"] = E.compose_demand_queries(item)
+                out.append(item)
+            led.close()
+            themes = [x.get("theme_direction") for x in out]
+            self.assertNotIn("旅行穿脱/层次", themes)   # 消退
+            self.assertIn("围巾搭配", themes)           # 未满足→导出
+            self.assertTrue(out[0].get("demand_key"))
+            self.assertTrue(E._infer_family(
+                {"theme_direction": "东京配色层次"}) == "color_ratio")
+
+    def test_collector_cooldown_skips_recent_demand(self):
+        import sqlite3
+        import collect_by_demand as C
+        with TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "lab.sqlite3")
+            conn = sqlite3.connect(db)
+            conn.executescript(C.QUERY_HITS_SCHEMA
+                               + """
+CREATE TABLE notes (id INTEGER PRIMARY KEY AUTOINCREMENT,
+  note_id TEXT UNIQUE, xsec_token TEXT, source_url TEXT, theme TEXT,
+  origin TEXT, title TEXT, author_id TEXT, author_nickname TEXT,
+  like_count INTEGER, collected_count INTEGER, status TEXT,
+  fetch_status TEXT);
+""")
+            conn.execute(
+                "INSERT INTO query_hits (note_id, family, query, demand_key)"
+                " VALUES ('n','scarf_pairing','q','ledger:scarf')")
+            conn.commit()
+            calls = []
+            C.mcp_search = lambda q, f, timeout=60: calls.append(q) or []
+            import types
+            args = types.SimpleNamespace(
+                demand={"demands": [{"family": "scarf_pairing",
+                                     "demand_key": "ledger:scarf",
+                                     "queries": ["围巾搭配"]}]},
+                db=db, families=str(Path(__file__).resolve().parents[3] /
+                                    "labs/xhs-material-lab/config/query_families.json"),
+                limit_per_query=5, out_root=str(Path(tmp)))
+            C.main.__wrapped__ if hasattr(C.main, "__wrapped__") else None
+            # 直接调用 main 会走 argparse——用 sys.argv 注入
+            import sys as _sys
+            old_argv = _sys.argv
+            _sys.argv = ["collect_by_demand.py", "--demand", "/dev/null"]
+            (Path(tmp) / "d.json").write_text(
+                '{"demands": [{"family": "scarf_pairing", "demand_key":'
+                ' "ledger:scarf", "queries": ["围巾搭配"]}]}', encoding="utf-8")
+            _sys.argv = ["collect_by_demand.py", "--demand",
+                         str(Path(tmp) / "d.json"), "--db", db,
+                         "--limit-per-query", "5",
+                         "--out-root", str(Path(tmp)),
+                         "--families", str(
+                             Path(__file__).resolve().parents[3] /
+                             "labs/xhs-material-lab/config/query_families.json")]
+            try:
+                C.main()
+            finally:
+                _sys.argv = old_argv
+            self.assertEqual(calls, [])      # 冷却命中：不发起搜索
