@@ -417,5 +417,32 @@ class MaterialAdapterTest(unittest.TestCase):
         self.assertIsNone(select_reference(MockClient([]), [], theme="四选一"))
 
 
+    def test_b3_purpose_compatibility_enforced(self):
+        # B3：用途与可用性强校验——摄影不可用→visual_tone 页被丢、
+        # visual_only 确定性降级 outfit_only；不默认 overall
+        from services.material_adapter import enforce_purpose_compatibility
+        from services.material_adapter import SelectionResult
+        base = _analysis_payload(visual_usable=False, outfit_usable=True)
+        sel = SelectionResult(main_note_id="1" * 24, adoption="visual_only",
+                              pages=[{"note_id": "1" * 24, "seq": 1, "purpose": "visual_tone"},
+                                     {"note_id": "1" * 24, "seq": 2, "purpose": "outfit_detail"}])
+        out = enforce_purpose_compatibility(sel, base)
+        self.assertEqual(out.adoption, "outfit_only")          # 降级不 overall
+        self.assertEqual([p_["purpose"] for p_ in out.pages], ["outfit_detail"])
+        # 全不可用 → narrative_only 零图
+        none_ok = _analysis_payload(outfit_usable=False, visual_usable=False,
+                                    narrative_usable=True)
+        out2 = enforce_purpose_compatibility(
+            SelectionResult(main_note_id="1" * 24, adoption="outfit_only",
+                            pages=[{"note_id": "1" * 24, "seq": 1, "purpose": "outfit_detail"}]),
+            none_ok)
+        self.assertEqual(out2.adoption, "narrative_only")
+        self.assertEqual(out2.pages, [])
+        # v2 旧缓存（用途未知）不拦截
+        legacy = dict(base); legacy.pop("purpose_usability")
+        out3 = enforce_purpose_compatibility(sel, legacy)
+        self.assertEqual(out3.adoption, "visual_only")
+
+
 if __name__ == "__main__":
     unittest.main()

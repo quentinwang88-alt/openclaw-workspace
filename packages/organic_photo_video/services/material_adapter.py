@@ -357,6 +357,50 @@ _SELECT_PROMPT = """你是穿搭图文的参考选材器。根据候选素材摘
 """
 
 
+def enforce_purpose_compatibility(selection: SelectionResult,
+                                   analysis: Mapping[str, Any]) -> SelectionResult:
+    """B3：所选用途必须与 analysis 可用用途一致。
+
+    - 摄影不可用（visual=False）→ 丢弃 visual_tone 页；visual_only 降级
+    - 搭配不可用（outfit=False）→ 丢弃搭配页；outfit_only 降级
+    - 降级顺序确定性（不默认 overall、不循环重试）；无可兼容页 →
+      narrative_only 零图（文字化借鉴），剩余不足由调用方记缺口
+    - v2 旧缓存（用途未知）不拦截，原样返回
+    """
+    usability = analysis.get("purpose_usability")
+    if not isinstance(usability, dict) or not usability:
+        return selection
+
+    def usable(name: str):
+        entry = usability.get(name)
+        return bool(entry.get("usable")) if isinstance(entry, dict) else None
+
+    visual_ok = usable("visual")
+    outfit_ok = usable("outfit")
+    pages = list(selection.pages or [])
+    if visual_ok is False:
+        pages = [p_ for p_ in pages if p_.get("purpose") != "visual_tone"]
+    if outfit_ok is False:
+        pages = [p_ for p_ in pages if p_.get("purpose") == "visual_tone"]
+    adoption = str(selection.adoption or "overall")
+    if adoption == "visual_only" and visual_ok is False:
+        adoption = "outfit_only" if outfit_ok is not False else "narrative_only"
+    elif adoption in ("outfit_only", "overall") and outfit_ok is False:
+        if adoption == "outfit_only":
+            adoption = "visual_only" if visual_ok is not False else "narrative_only"
+    if adoption == "narrative_only":
+        pages = []
+    # 注：outfit_only/visual_only 零页是合法的文字化/纯视觉降级形态
+    # （方案 B3：没有细节页不阻断），不因无页强改 narrative。
+    return SelectionResult(
+        main_note_id=selection.main_note_id,
+        supplement_note_ids=list(selection.supplement_note_ids or []),
+        adoption=adoption,
+        rationale=selection.rationale,
+        rejected=list(selection.rejected or []),
+        pages=pages)
+
+
 def select_reference(
     client: Any,
     candidates: Sequence[Candidate],
@@ -458,7 +502,7 @@ def select_reference(
     # 去重（同页多用途保留第一条）
     seen = set()
     pages = [p for p in pages if not (p["seq"] in seen or seen.add(p["seq"]))]
-    return SelectionResult(
+    result = SelectionResult(
         main_note_id=main,
         supplement_note_ids=supplements,
         adoption=adoption,
@@ -469,3 +513,5 @@ def select_reference(
             for item in (parsed.get("rejected") or []) if isinstance(item, dict)
         ],
     )
+    # B3：用途与可用性强校验（含确定性降级），旧缓存未知用途不拦
+    return enforce_purpose_compatibility(result, main_analysis)

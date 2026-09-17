@@ -902,6 +902,7 @@ class PhotoReferenceVisionService:
         expression_mode: str = "",
         account_visual_baseline: str = "",
         fixed_background: Mapping[str, Any] = None,
+        untagged_uses: Sequence[str] = (),
     ) -> Dict[str, Any]:
         """Step 2: recipe-bound travel plan; strongly validated with one auto-revise.
 
@@ -1032,6 +1033,7 @@ class PhotoReferenceVisionService:
     def _travel_planning_images(
         *, analysis: Mapping[str, Any], reference_paths: Sequence[str],
         product_reference_paths: Sequence[str],
+        untagged_uses: Sequence[str] = (),
     ) -> tuple[list[str], list[dict[str, Any]]]:
         """Select and fingerprint existing inputs without new operator fields."""
         selected: dict[str, dict[str, Any]] = {}
@@ -1046,7 +1048,8 @@ class PhotoReferenceVisionService:
                 raise PhotoReferenceVisionError(f"旅行规划参考图不存在：{path}")
             uses = _normalize_reference_uses(
                 per_reference.get(index, {}).get("reference_uses")
-            ) or ["OUTFIT", "ENVIRONMENT", "VISUAL_STYLE"]
+            ) or [str(u) for u in untagged_uses] or [
+                "OUTFIT", "ENVIRONMENT", "VISUAL_STYLE"]
             selected[str(path)] = {
                 "uses": uses,
                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),

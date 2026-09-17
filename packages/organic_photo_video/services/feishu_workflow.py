@@ -1903,6 +1903,16 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                             travel_topic=travel_topic or None,
                             product_context=product_context,
                             reference_paths=style_reference_paths,
+                            # B3：外部合同的 adoption 决定未标注参考图的
+                            # 用途（不再一律三用途全补；手工行保持旧行为）
+                            untagged_uses=(
+                                {"outfit_only": ["OUTFIT"],
+                                 "visual_only": ["VISUAL_STYLE"],
+                                 "narrative_only": [],
+                                 "overall": ["OUTFIT"]}.get(
+                                    str((external_contract or {}).get("adoption")
+                                        or ""), ("",))
+                                if external_contract is not None else ()),
                             product_reference_paths=list(
                                 style_product.get("reference_images") or []
                             ),
