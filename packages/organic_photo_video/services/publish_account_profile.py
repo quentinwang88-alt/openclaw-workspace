@@ -137,7 +137,50 @@ def default_supply_policy() -> Dict[str, Any]:
 _FINGERPRINT_FIELDS = (
     "default_theme", "positioning", "expression_mode", "visual_baseline",
     "photo_claim_scope", "style_image", "default_visual_preset",
+    "travel_destinations",
 )
+
+#: 轻量国家↔城市映射（方案 §2.2：兼容层级，不做城市数据库/热度排名）
+COUNTRY_CITIES = {
+    "日本": ("东京", "京都", "大阪", "奈良", "札幌", "冲绳"),
+    "韩国": ("首尔", "釜山", "济州"),
+    "泰国": ("曼谷", "清迈", "普吉"),
+    "中国": ("上海", "北京", "成都", "杭州"),
+    "法国": ("巴黎",), "英国": ("伦敦",), "新加坡": ("新加坡",),
+    "马来西亚": ("吉隆坡",), "越南": ("胡志明", "河内"),
+}
+
+
+def _city_country(name: str) -> str:
+    for country, cities in COUNTRY_CITIES.items():
+        if name == country or name in cities:
+            return country
+    return ""
+
+
+def normalize_travel_destinations(raw) -> list:
+    """账号「旅行目的地范围」归一化（方案 §2.1/§2.2）。
+
+    接受字符串/列表（飞书多选同步为 list[str]）；输出稳定结构
+    [{id, country, city, label}]：城市→补国家；仅国家→city 空
+    （不自动替运营补城市）；未识别地名保留、country 空（不推断）。
+    """
+    if isinstance(raw, str):
+        items = [part.strip() for part in re.split(r"[，,、\s]+", raw) if part.strip()]
+    elif isinstance(raw, (list, tuple)):
+        items = [str(x).strip() for x in raw if str(x).strip()]
+    else:
+        return []
+    out, seen = [], set()
+    for name in items:
+        if name in seen:
+            continue
+        seen.add(name)
+        country = _city_country(name)
+        city = "" if name == country or not country else name
+        out.append({"id": name, "country": country, "city": city, "label": name})
+    return out
+
 
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -191,6 +234,13 @@ def normalize_profile_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
         style_image = None
     else:
         raise PublishAccountProfileError("风格图片必须是附件对象（file_token/name）")
+    destinations = normalize_travel_destinations(
+        payload.get("travel_destinations"))
+    # 国家/城市显式冲突（如 日本+首尔）→ 一次配置错误，不猜测修正（§2.2）
+    _countries = {d["country"] for d in destinations if d["country"]}
+    if len(_countries) > 1:
+        raise PublishAccountProfileError(
+            "旅行目的地范围存在国家冲突：" + "、".join(sorted(_countries)))
     profile = {
         "schema_version": PROFILE_SCHEMA_VERSION,
         "default_theme": str(raw.get("default_theme") or "").strip(),
@@ -203,6 +253,9 @@ def normalize_profile_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
     }
     # 供给策略是运营开关而非内容冻结配置：不进 _FINGERPRINT_FIELDS，
     # 且未配置时完全不加键（旧账号 profile 序列化字节不变）。
+    if destinations:
+        # 目的地影响后续内容 → 进指纹（§2.2）；未配置账号不加键保持兼容
+        profile["travel_destinations"] = destinations
     supply_policy = normalize_supply_policy(raw.get("photo_supply_policy"))
     if supply_policy is not None:
         profile["photo_supply_policy"] = supply_policy

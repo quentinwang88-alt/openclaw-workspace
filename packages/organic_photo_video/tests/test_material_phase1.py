@@ -443,6 +443,43 @@ class MaterialAdapterTest(unittest.TestCase):
         out3 = enforce_purpose_compatibility(sel, legacy)
         self.assertEqual(out3.adoption, "visual_only")
 
+    def test_b3_brief_and_destination_in_actual_prompt(self):
+        # §4.1/§9-4：brief 与目的地范围必须出现在实际终选 prompt 里
+        self.lab.add_note(note_id="1" * 24, title="候选", images=2)
+        packages = self.lab.source().list_packages()
+        analyses = {"1" * 24: _analysis_payload(pages=3)}
+        candidates = narrow_candidates(packages, analyses, theme="")
+        captured = {}
+        class PromptSpy:
+            def chat_with_multiple_images(self, paths, prompt, max_tokens):
+                captured["prompt"] = prompt
+                return {"choices": [{"message": {"content": json.dumps({
+                    "main_note_id": "1" * 24, "adoption": "overall",
+                    "destination": "东京", "pages": [], "rationale": "x",
+                    "rejected": []}, ensure_ascii=False)}}],
+                    "usage": {}}
+        result = select_reference(
+            PromptSpy(), candidates, theme="",
+            effective_brief={"market": "TH", "positioning": "旅行高级感",
+                             "visual_preset": "旅行场景穿搭",
+                             "temperature_band": {"value": "", "source": ""}},
+            allowed_destinations=["东京", "首尔"])
+        self.assertIn("旅行高级感", captured["prompt"])      # 定位进 prompt
+        self.assertIn("旅行场景穿搭", captured["prompt"])     # 视觉预设进 prompt
+        self.assertIn("东京、首尔", captured["prompt"])        # 允许范围进 prompt
+        self.assertEqual(result.destination, "东京")          # 范围内选点带回
+        # 范围外选点被程序丢弃
+        class BadSpy(PromptSpy):
+            def chat_with_multiple_images(self, paths, prompt, max_tokens):
+                captured["p2"] = prompt
+                return {"choices": [{"message": {"content": json.dumps({
+                    "main_note_id": "1" * 24, "adoption": "overall",
+                    "destination": "巴黎", "pages": [], "rationale": "x",
+                    "rejected": []}, ensure_ascii=False)}}], "usage": {}}
+        result2 = select_reference(BadSpy(), candidates, theme="",
+                                   allowed_destinations=["东京", "首尔"])
+        self.assertEqual(result2.destination, "")             # 巴黎被丢弃
+
 
 if __name__ == "__main__":
     unittest.main()

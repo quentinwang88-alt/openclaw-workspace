@@ -202,6 +202,9 @@ class SelectionResult:
     adoption: str = "overall"          # overall | outfit_only | visual_only | narrative_only
     rationale: str = ""
     rejected: List[Dict[str, str]] = field(default_factory=list)
+    # B2 §3.3：参考优先同次终选返回的目的地（已程序校验在允许范围内；
+    # 空字符串=本篇不需要地点）
+    destination: str = ""
     # 页级选材（Phase 1）：[{note_id, seq, purpose}]，只含主参考笔记。
     # purpose ∈ outfit_detail（搭配/单品细节）| full_outfit（完整穿搭页）|
     # visual_tone（色调/氛围参考）。narrative_only 时必须为空。
@@ -320,7 +323,7 @@ _SELECT_PROMPT = """你是穿搭图文的参考选材器。根据候选素材摘
 
 本篇主题：{theme}
 主题策略：优先 {strategy_prefer}；可借鉴 {strategy_fallback}；禁止 {strategy_forbidden}
-{product_line}
+{product_line}{brief_line}{destination_line}
 要求：
 - 只选一篇主参考；本轮不支持补充参考，supplement_note_ids 恒为空数组。
 - 摄影质量影响视觉采用（B3）：photography_quality=poor 或镜面自拍类素材
@@ -350,6 +353,7 @@ _SELECT_PROMPT = """你是穿搭图文的参考选材器。根据候选素材摘
  "main_note_id": "主参考笔记ID或空字符串",
  "supplement_note_ids": [],
  "adoption": "overall | outfit_only | visual_only | narrative_only 之一",
+ "destination": "若本篇为旅行内容：允许地点之一；否则空字符串",
  "pages": [{{"seq": 页码, "purpose": "outfit_detail | full_outfit | visual_tone"}}],
  "rationale": "选择理由与采用方式（两三句）",
  "rejected": [{{"note_id": "ID", "reason": "不采用原因"}}]
@@ -396,6 +400,7 @@ def enforce_purpose_compatibility(selection: SelectionResult,
         main_note_id=selection.main_note_id,
         supplement_note_ids=list(selection.supplement_note_ids or []),
         adoption=adoption,
+        destination=str(selection.destination or ""),
         rationale=selection.rationale,
         rejected=list(selection.rejected or []),
         pages=pages)
@@ -409,8 +414,15 @@ def select_reference(
     product: Optional[ProductBrief] = None,
     max_tokens: int = 900,
     temperature_band: Optional[tuple] = None,
+    effective_brief: Optional[Dict[str, Any]] = None,
+    allowed_destinations: Sequence[str] = (),
 ) -> Optional[SelectionResult]:
-    """Doubao 终选：读文字摘要定主参考/补充/采用方式。无合适候选返回 None。"""
+    """Doubao 终选：读文字摘要定主参考/补充/采用方式。无合适候选返回 None。
+
+    B3（§4.1）：brief 是真实输入——市场/定位/视觉预设/商品事实显式进入
+    prompt；B2（§3.3）：参考优先时同一次调用返回本篇主题是否需要目的地
+    及选点（不得超出 allowed_destinations，程序校验）。
+    """
     if not candidates:
         return None
     strategy = strategy_for(theme)
@@ -446,6 +458,32 @@ def select_reference(
             f"｜主题:{str(analysis.get('note_topic') or '')[:40]}"
         )
     product_line = f"本篇商品：{product.summary_line()}" if product else "本篇不指定商品（自由搭配）"
+    brief = dict(effective_brief or {})
+    if brief:
+        brief_bits = []
+        if brief.get("market"):
+            brief_bits.append(f"市场{brief['market']}")
+        if brief.get("positioning"):
+            brief_bits.append(f"账号定位：{str(brief['positioning'])[:60]}")
+        if brief.get("visual_preset"):
+            brief_bits.append(f"视觉预设：{brief['visual_preset']}")
+        if (brief.get("temperature_band") or {}).get("value"):
+            brief_bits.append(
+                f"明确温度{(brief['temperature_band'])['value']}"
+                f"（来源：{(brief['temperature_band'])['source'] or '未注'}）")
+        if brief.get("content_strategy") == "reference_first":
+            brief_bits.append("账号默认主题仅是偏好，素材主张优先")
+        brief_line = ("账号需求（effective_brief）：" + "；".join(brief_bits) + "\n") if brief_bits else ""
+    else:
+        brief_line = ""
+    dest_list = [str(x) for x in allowed_destinations if str(x)]
+    if dest_list:
+        destination_line = (
+            "目的地规则：若本篇主张确属旅行内容，从以下允许地点中选择一个"
+            f"（{'、'.join(dest_list)}）填入 destination；普通配色/通勤/一衣多穿等"
+            "非旅行主张填空字符串，不要强行旅行。不得选择范围外城市。\n")
+    else:
+        destination_line = ""
     band_line = (
         f"- 温度带约束：本篇温度区间 {temperature_band[0]}–{temperature_band[1]}°C；"
         "pages 不得选择羽绒/棉服/厚外套等冬装搭配为主的页，也不得选择夏装为主的页。\n"
@@ -457,6 +495,8 @@ def select_reference(
         strategy_forbidden="；".join(strategy.get("forbidden") or []) or "—",
         product_line=product_line,
         band_line=band_line,
+        brief_line=brief_line,
+        destination_line=destination_line,
         candidates_text="\n".join(lines),
     )
     from services.photo_reference_vision import parse_vision_envelope
@@ -473,6 +513,11 @@ def select_reference(
     adoption = str(parsed.get("adoption") or "overall")
     if adoption not in {"overall", "outfit_only", "visual_only", "narrative_only"}:
         adoption = "overall"
+    # B2 §3.3：模型选点必须在允许范围内；范围外丢弃（程序不猜补），
+    # 由调用方按需用程序轮换补齐
+    destination = str(parsed.get("destination") or "").strip()
+    if destination and destination not in set(dest_list):
+        destination = ""
     # 页级选材：只接受主参考笔记里真实存在的页码，按 adoption 语义约束
     main_analysis = {}
     for cand in candidates:
@@ -506,6 +551,7 @@ def select_reference(
         main_note_id=main,
         supplement_note_ids=supplements,
         adoption=adoption,
+        destination=destination,
         rationale=str(parsed.get("rationale") or ""),
         pages=pages,
         rejected=[

@@ -72,6 +72,7 @@ RUN_MANAGER_FIELD_ALIASES: Dict[str, List[str]] = {
 }
 
 ACCOUNT_FIELD_ALIASES: Dict[str, List[str]] = {
+    "travel_destinations": ["旅行目的地范围", "旅行目的地"],
     "account_id": ["账号ID"],
     "account_name": ["账号名称"],
     "store_id": ["店铺ID"],

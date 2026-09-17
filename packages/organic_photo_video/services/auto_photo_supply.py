@@ -131,6 +131,11 @@ def _generalize_reference_topic(topic: str) -> str:
     return text.strip() or text
 
 
+def _city_country_of(name: str) -> str:
+    from services.publish_account_profile import _city_country
+    return _city_country(str(name or ""))
+
+
 def worker_identity() -> str:
     """名额租约的 worker 标识：host#pid#随机短码（日志可对账）。"""
     import socket
@@ -679,6 +684,12 @@ class AutoPhotoSupply:
             },
             "output": {"preset": preset, "quantity": 1},
         }
+        # B2 §2/§3：账号目的地范围（一次配置；未配置→空列表保持原行为）
+        destinations = [
+            str(d.get("id") or "")
+            for d in (binding.profile.get("travel_destinations") or [])
+            if isinstance(d, dict) and d.get("id")
+        ]
         narrow_brief = product_brief or (
             ProductBrief(product_code, "") if product_code else None)
 
@@ -770,7 +781,10 @@ class AutoPhotoSupply:
                     self.vision_client, narrowed,
                     theme=default_theme if positioning_first else "",
                     product=product_brief,
-                    temperature_band=band)
+                    temperature_band=band,
+                    effective_brief=effective_brief,
+                    allowed_destinations=(
+                        destinations if not positioning_first else ()))
                 self.ledger.settle_budget(purpose="selection", state="consumed")
             except Exception:
                 self.ledger.settle_budget(purpose="selection", state="consumed",
@@ -821,6 +835,32 @@ class AutoPhotoSupply:
                     "place": str(frozen_destination.get("place") or ""),
                 }
 
+        # B2 §3：目的地决策——本篇明确(行字段/冻结合同) > 账号范围内选择 >
+        # 终选返回(参考优先) > 无。定位优先旅行主题在终选前程序轮换。
+        destination_pick = dict(destination)     # 现值=冻结合同或账号 travel_country
+        destination_source = ("冻结合同" if frozen is not None
+                              and destination.get("country") else
+                              "账号单值" if destination.get("country") else "")
+        if not positioning_first and selection is not None:
+            picked = str(getattr(selection, "destination", "") or "")
+            if picked:
+                destination_pick = {"country": _city_country_of(picked),
+                                    "place": picked}
+                destination_source = "参考终选"
+        travelish_flag = any(k in f"{source_topic}{selection.rationale}"
+                             for k in ("旅行", "旅游", "出游")) if selection else False
+        # 主题需要地点：定位优先的旅行向默认主题，或参考选题本身旅行向
+        theme_needs_place = travelish_flag or (
+            positioning_first and "旅行" in str(default_theme or ""))
+        if (not destination_pick.get("country") and destinations
+                and theme_needs_place):
+            # 程序轮换：近期少用优先，同分稳定取首个（§3.2，零模型调用）
+            picked = self._rotate_destination(
+                binding.account_id, destinations)
+            destination_pick = {"country": _city_country_of(picked), "place": picked}
+            destination_source = "账号范围轮换"
+        destination = destination_pick
+
         # B2：选题性质决定执行结构——真旅行选题走旅行预设；其余切通用
         # 结构（图文｜TH｜四选一穿搭，已验证纯通用：零 travel 键/choice-card/
         # reference_contract_v1）。非旅行不注入旅行语境，也不声明温度带
@@ -863,7 +903,9 @@ class AutoPhotoSupply:
             "category": str(product_snapshot.get("category") or ""),
             "name": str(product_snapshot.get("product_name") or ""),
         }
-        effective_brief["destination"] = destination
+        effective_brief["destination"] = dict(destination)
+        if destination_source:
+            effective_brief["destination_source"] = destination_source
         effective_brief["temperature_band"] = {
             "value": (f"{band[0]}-{band[1]}°C" if band else ""),
             "source": band_source,
@@ -1011,6 +1053,25 @@ class AutoPhotoSupply:
         return narrow_candidates(
             packages, analyses, theme=theme, product=brief,
             recent_note_ids=recent, temperature_band=band)
+
+    def _rotate_destination(self, account_id: str, destinations: List[str]) -> str:
+        """账号范围内程序轮换（§3.2）：近 14 天合同少用优先，同分稳定取首。"""
+        from collections import Counter
+        used = Counter()
+        try:
+            rows = self.ledger._conn.execute(
+                "SELECT note FROM supply_slots WHERE account_id=?"
+                " AND updated_at >= datetime('now','-14 days')", (account_id,)
+            ).fetchall()
+            for row in rows:
+                text = str(row["note"] or "")
+                for d in destinations:
+                    if d in text:
+                        used[d] += 1
+        except Exception:  # noqa: BLE001
+            pass
+        return min(destinations, key=lambda d: (used.get(d, 0),
+                                                 destinations.index(d)))
 
     # ---- 页级供图（Phase 1/3）：只上传选材结果指定的页面 ----
     def _stage_reference_pages(

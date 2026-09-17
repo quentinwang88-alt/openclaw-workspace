@@ -840,6 +840,41 @@ class AutoPhotoSupplyTest(unittest.TestCase):
                          msg=f"slots={results[0].slots} detail={results[0].detail}")
         self.assertEqual(results[0].slots[0].status, "no_material")
 
+    def test_b2_destination_rotation_frozen_in_contract(self):
+        # §3.2/§3.4：定位优先旅行主题→账号范围程序轮换进合同；
+        # 重试（同合同恢复）不重新选址
+        from services.external_supply_contract import ExternalSupplyContractStore
+        ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
+        client = FakeTaskTableClient()
+        binding = make_binding(profile_extra={"daily_limit": 1})
+        binding.profile["travel_destinations"] = [
+            {"id": "东京", "country": "日本", "city": "东京", "label": "东京"},
+            {"id": "首尔", "country": "韩国", "city": "首尔", "label": "首尔"}]
+        self._supply(client, ledger, vision=self._vision_ok()).run(
+            [binding], apply=True)
+        fields = client.created[0]["fields"]
+        self.assertEqual(fields["生产预设"], "图文｜TH｜旅行穿搭")   # 旅行 fixture
+        contract = ExternalSupplyContractStore(
+            str(self.root / "contracts.sqlite3")).find_by_record(
+                client.rows[0]["record_id"])
+        dest = contract.get("destination") or {}
+        brief = contract.get("effective_brief") or {}
+        self.assertIn(dest.get("place"), ("东京", "首尔"))          # 范围内轮换
+        self.assertEqual(brief.get("destination_source"), "账号范围轮换")
+        self.assertIn(dest.get("place"), fields.get("内容要求（可选）", ""))
+
+    def test_b2_no_destination_no_invention(self):
+        # 范围未配置：不发明地点（§2.1 留空原行为）
+        ledger = make_ledger_with_analysis(self.root, self.lab.source(), self.note_ids)
+        client = FakeTaskTableClient()
+        self._supply(client, ledger, vision=self._vision_ok()).run(
+            [make_binding(profile_extra={"daily_limit": 1})], apply=True)
+        from services.external_supply_contract import ExternalSupplyContractStore
+        contract = ExternalSupplyContractStore(
+            str(self.root / "contracts.sqlite3")).find_by_record(
+                client.rows[0]["record_id"])
+        self.assertFalse((contract.get("destination") or {}).get("country"))
+
 
 if __name__ == "__main__":
     unittest.main()
