@@ -989,6 +989,11 @@ class PhotoReferenceVisionService:
             raw, travel_contract, count, background_features=background_features,
             travel_topic=topic, outfit_reference_indices=outfit_reference_indices,
             product_context=product_context, locale_pack=locale_pack)
+        # 文案 token 填充依赖 travel_variables（destination/temperature 枚举）；
+        # 模型漏报（固定背景分支实测，样片B 2026-09-18）时用输入 variables
+        # 兜底，否则 copy 阶段报「缺少 destination 的已审核填充值」
+        if plan is not None and not dict(plan.get("travel_variables") or {}):
+            plan["travel_variables"] = dict(variables or {})
         if errors:
             revise_prompt = base_prompt + "\n\n上一次输出存在以下结构错误，必须全部修正后重新输出完整 JSON：\n- " + "\n- ".join(errors)
             response, model_routing = self._travel_planning_chat(

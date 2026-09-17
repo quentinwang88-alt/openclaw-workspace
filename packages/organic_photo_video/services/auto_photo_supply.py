@@ -308,7 +308,8 @@ class AutoPhotoSupply:
         "已完成"})
     #: 终态（0 库存）：已发布（含部分发布后的剩余按篇数折算前的整行）、
     #: 废弃/需处理/发布失败
-    INVENTORY_ZERO_STATES = frozenset({"已发布", "需处理", "发布失败", "已取消"})
+    INVENTORY_ZERO_STATES = frozenset({
+        "已发布", "需处理", "发布失败", "已取消", "失败可重试"})
 
     def _scan_task_rows(self) -> tuple:
         """一次全表扫描同时产出：当日自动行对账 + 各账号待发库存。
