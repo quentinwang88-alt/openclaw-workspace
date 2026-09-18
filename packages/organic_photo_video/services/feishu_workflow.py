@@ -1730,6 +1730,13 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
             style_profile: dict[str, Any] = {}
             content_requirement = text_value(record.fields.get(FIELD_CONTENT_REQUIREMENT))
             travel_place = text_value(record.fields.get(FIELD_TRAVEL_PLACE))
+            # Phase 1.2（§1.2）：自动行行字段缺地点时，从绑定冻结合同补齐。
+            # 优先级：行显式字段 > 冻结合同 > 无（不能凭空发明）。
+            if not travel_place and external_contract is not None:
+                contract_dest = dict(external_contract.get("destination") or {})
+                contract_place = str(contract_dest.get("place") or "").strip()
+                if contract_place:
+                    travel_place = contract_place
             # 统一旅行目的地（Phase 3）：国家 + 地点合并解析，冲突规划前报错；
             # 空值表示未指定——生成不得凭空标注真实国家/景点。
             try:

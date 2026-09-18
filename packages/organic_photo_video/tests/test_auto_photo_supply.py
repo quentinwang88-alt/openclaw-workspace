@@ -950,5 +950,53 @@ class AutoPhotoSupplyTest(unittest.TestCase):
         self.assertIn("以本店", out)
 
 
+    def test_p11_specific_travel_theme_needs_destination(self):
+        # Phase 1.1 验收：具体旅行主题+无可用地点 → 供稿阶段结束，不建行
+        ledger = make_ledger_with_analysis(
+            self.root, self.lab.source(), self.note_ids, name="ledger_p11.sqlite3")
+        client = FakeTaskTableClient()
+        binding = make_binding(profile_extra={"daily_limit": 1})
+        binding.profile["default_theme"] = "旅行·打卡穿搭"
+        results = self._supply(client, ledger, vision=self._vision_ok()).run(
+            [binding], apply=True)
+        self.assertEqual(results[0].slots[0].status, "no_material")
+        self.assertIn("需要旅行地点", results[0].slots[0].detail)
+        self.assertEqual(client.created, [])
+
+    def test_p11_specific_theme_with_range_picks_destination(self):
+        # 具体旅行主题+有范围 → 轮换选址+行字段带地点
+        ledger = make_ledger_with_analysis(
+            self.root, self.lab.source(), self.note_ids, name="ledger_p11b.sqlite3")
+        client = FakeTaskTableClient()
+        binding = make_binding(profile_extra={"daily_limit": 1})
+        binding.profile["default_theme"] = "旅行·打卡穿搭"
+        binding.profile["travel_destinations"] = [
+            {"id": "东京", "country": "日本", "city": "东京", "label": "东京"}]
+        self._supply(client, ledger, vision=self._vision_ok()).run(
+            [binding], apply=True)
+        fields = client.created[0]["fields"]
+        self.assertEqual(fields["图文主题"], "旅行·打卡穿搭")
+        self.assertEqual(fields["旅行地点（可选）"], "东京")
+
+    def test_p13_unresolved_submitting_pauses_account(self):
+        # Phase 1.3：submitting 查空 → 账号暂停新增
+        from services.external_supply_contract import ExternalSupplyContractStore
+        store = ExternalSupplyContractStore(str(self.root / "contracts.sqlite3"))
+        store.persist_intent({
+            "account_id": "tocrystal66", "supply_date": "2026-09-17", "slot": 1,
+            "adoption": "overall", "main_note_id": "m" * 24, "main_note_title": "t",
+            "selected_pages": [], "product": {}, "destination": {},
+            "temperature_band": "", "content_requirement": "x",
+            "policy_version": "p", "contract_fingerprint": "f"})
+        store.mark_submitting("tocrystal66|2026-09-17|1")
+        ledger = make_ledger_with_analysis(
+            self.root, self.lab.source(), self.note_ids, name="ledger_p13.sqlite3")
+        client = FakeTaskTableClient()
+        results = self._supply(client, ledger, vision=self._vision_ok()).run(
+            [make_binding(profile_extra={"daily_limit": 1})], apply=True)
+        self.assertEqual(results[0].status, "submitting_unresolved")
+        self.assertEqual(client.created, [])
+
+
 if __name__ == "__main__":
     unittest.main()

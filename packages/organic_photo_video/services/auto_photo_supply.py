@@ -264,6 +264,7 @@ class AutoPhotoSupply:
         rows_by_slot: Dict[tuple, List[str]] = {}
         unknown_by_handle: Dict[str, int] = {}
         rows_anyday: Dict[tuple, List[str]] = {}
+        unresolved_submissions: Dict[str, int] = {}
         if apply:
             (rows_by_marker, inventory_by_handle, rows_by_slot,
              rows_anyday, unknown_by_handle) = self._scan_task_rows()
@@ -281,17 +282,26 @@ class AutoPhotoSupply:
                 slot_no = int(contract.get("slot") or 0)
                 record_ids = rows_anyday.get((date, account, slot_no), [])
                 if len(record_ids) == 1:
-                    self.contract_store.attach_record(cid, record_ids[0])
+                    # Phase 1.3：单合同异常隔离——失败保留未知态，不终止整批
                     try:
+                        self.contract_store.attach_record(cid, record_ids[0])
                         self.ledger.complete_slot(account, date, slot_no,
                                                   record_id=record_ids[0])
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception as exc:  # noqa: BLE001
+                        self.ledger.record_gap(
+                            scope=f"supply:{account}",
+                            reason="submitting_attach_failed",
+                            detail=f"{cid}: {str(exc)[:120]}")
+                        unresolved_submissions[account] = (
+                            unresolved_submissions.get(account, 0) + 1)
                 elif len(record_ids) > 1:
                     self.ledger.record_gap(
                         scope=f"supply:{account}", reason="marker_ambiguous",
                         detail=f"submitting {cid} 匹配 {len(record_ids)} 行")
-                # 查空：保持 submitting（未知不当作未创建）
+                else:
+                    # 查空：保持 submitting（未知不当作未创建）
+                    unresolved_submissions[account] = (
+                        unresolved_submissions.get(account, 0) + 1)
             # 方案 A2：先对账未完成绑定——行已建但合同未绑（attach 失败/
             # 响应未知）的，唯一匹配补绑；多匹配记异常，不猜不删不重建。
             for (account_id, slot_no), record_ids in sorted(rows_by_slot.items()):
@@ -322,7 +332,7 @@ class AutoPhotoSupply:
             try:
                 results.append(self._run_account(
                     binding, apply, rows_by_marker, inventory_by_handle, budget,
-                    unknown_by_handle))
+                    unknown_by_handle, unresolved_submissions))
             except Exception as exc:  # noqa: BLE001 - 单账号异常不阻塞其他账号
                 self.ledger.record_gap(
                     scope=f"supply:{binding.account_id}", reason="account_error",
@@ -420,11 +430,25 @@ class AutoPhotoSupply:
         inventory_by_handle: Optional[Dict[str, int]] = None,
         budget: Optional[Dict[str, int]] = None,
         unknown_by_handle: Optional[Dict[str, int]] = None,
+        unresolved_submissions: Optional[Dict[str, int]] = None,
     ) -> AccountRunResult:
         policy = binding.supply_policy
         result = AccountRunResult(
             account_id=binding.account_id, account_name=binding.account_name,
             status="supplied")
+        # Phase 1.3：未解决未知提交按账号暂停新增（§1.3——防止继续补货
+        # 造成同一账号更多不可见行）；既有任务续跑与对账不受影响。
+        if apply and unresolved_submissions and unresolved_submissions.get(
+                binding.account_id):
+            n_unresolved = unresolved_submissions[binding.account_id]
+            self.ledger.record_gap(
+                scope=f"supply:{binding.account_id}",
+                reason="unresolved_submitting",
+                detail=f"{n_unresolved} 条未知提交未对账，暂停该账号新增")
+            result.status = "submitting_unresolved"
+            result.detail = (f"{n_unresolved} 条未知提交未对账，"
+                             "暂停该账号新增（不阻塞其他账号）")
+            return result
         # 方案 §7.2：库存未知只暂停本账号新增，不阻塞其他账号/续跑
         if apply and unknown_by_handle and unknown_by_handle.get(binding.account_id):
             n_unknown = unknown_by_handle[binding.account_id]
@@ -819,8 +843,9 @@ class AutoPhotoSupply:
                     product=product_brief,
                     temperature_band=band,
                     effective_brief=effective_brief,
-                    allowed_destinations=(
-                        destinations if not positioning_first else ()))
+                    # §1.1：定位优先也传范围——模型可在同次调用中确认
+                    # 或选择地点；终选结果由程序校验
+                    allowed_destinations=destinations)
                 self.ledger.settle_budget(purpose="selection", state="consumed")
             except Exception:
                 self.ledger.settle_budget(purpose="selection", state="consumed",
@@ -873,42 +898,8 @@ class AutoPhotoSupply:
                     "place": str(frozen_destination.get("place") or ""),
                 }
 
-        # B2 §3：目的地决策——本篇明确(行字段/冻结合同) > 账号范围内选择 >
-        # 终选返回(参考优先) > 无。定位优先旅行主题在终选前程序轮换。
-        destination_pick = dict(destination)     # 现值=冻结合同或账号 travel_country
-        if destination_pick.get("country") and not destination_pick.get("place"):
-            # 账号单值可能是城市名（首尔）→ 归一为国家+城市（§2.2 层级兼容）
-            raw = str(destination_pick["country"])
-            country = _city_country_of(raw)
-            if country and raw != country:
-                destination_pick = {"country": country, "place": raw}
-        destination_source = ("冻结合同" if frozen is not None
-                              and destination.get("country") else
-                              "账号单值" if destination.get("country") else "")
-        if not positioning_first and selection is not None:
-            picked = str(getattr(selection, "destination", "") or "")
-            if picked:
-                destination_pick = {"country": _city_country_of(picked),
-                                    "place": picked}
-                destination_source = "参考终选"
-        travelish_flag = any(k in f"{source_topic}{selection.rationale}"
-                             for k in ("旅行", "旅游", "出游")) if selection else False
-        # 主题需要地点：定位优先的旅行向默认主题，或参考选题本身旅行向
-        theme_needs_place = travelish_flag or (
-            positioning_first and "旅行" in str(default_theme or ""))
-        if (not destination_pick.get("country") and destinations
-                and theme_needs_place):
-            # 程序轮换：近期少用优先，同分稳定取首个（§3.2，零模型调用）
-            picked = self._rotate_destination(
-                binding.account_id, destinations)
-            destination_pick = {"country": _city_country_of(picked), "place": picked}
-            destination_source = "账号范围轮换"
-        destination = destination_pick
-
-        # B2：选题性质决定执行结构——真旅行选题走旅行预设；其余切通用
-        # 结构（图文｜TH｜四选一穿搭，已验证纯通用：零 travel 键/choice-card/
-        # reference_contract_v1）。非旅行不注入旅行语境，也不声明温度带
-        # （B1：不发明温度）。定位优先缺主题同样在此提炼，不再一票报错。
+        # Phase 1.1（方案 §1.1）：主题先定，选址跟着主题走。
+        # 具体旅行主题（旅行·打卡穿搭等）必须有地点；无可用地点不建行。
         theme_value = default_theme or ""
         theme_derived_note = ""
         effective_preset = preset
@@ -925,15 +916,59 @@ class AutoPhotoSupply:
                 theme_derived_note = "内容方向以参考素材为基准（旅行选题：主题=凉爽旅行）｜"
                 band = band or theme_thermal_band(theme_value)
             else:
-                # 通用结构：非旅行主题（结构性映射，无旅行/温度注入）。
-                # §4.2：本篇明确温度（显式参数/冻结合同）不得被通用结构
-                # 清除——只有随主题推导出的温度才随之消失。
                 effective_preset = GENERIC_CHOICE_PRESET
                 theme_value = _nontravel_theme(source_topic)
                 theme_derived_note = (
                     f"内容方向以参考素材为基准（通用结构：主题={theme_value}）｜")
                 if band_source not in ("显式参数", "冻结合同"):
                     band = None
+
+        # Phase 1.1：目的地决策（主题确定后）——本篇明确 > 冻结合同 >
+        # 账号单值 > 参考终选 > 范围轮换 > 无。
+        destination_pick = dict(destination)
+        if destination_pick.get("country") and not destination_pick.get("place"):
+            raw = str(destination_pick["country"])
+            country = _city_country_of(raw)
+            if country and raw != country:
+                destination_pick = {"country": country, "place": raw}
+        destination_source = ("冻结合同" if frozen is not None
+                              and destination.get("country") else
+                              "账号单值" if destination.get("country") else "")
+        if not positioning_first and selection is not None:
+            picked = str(getattr(selection, "destination", "") or "")
+            if picked:
+                destination_pick = {"country": _city_country_of(picked),
+                                    "place": picked}
+                destination_source = "参考终选"
+
+        # 主题是否需要地点：具体旅行主题必须有；泛旅行/非旅行不需要
+        from services.photo_theme import resolve_travel_theme_type
+        is_specific_travel = bool(resolve_travel_theme_type(theme_value))
+        travelish_flag = any(k in f"{source_topic}{selection.rationale}"
+                             for k in ("旅行", "旅游", "出游")) if selection else False
+        theme_needs_place = is_specific_travel or (
+            travelish_flag and positioning_first)
+
+        if (not destination_pick.get("country") and destinations
+                and theme_needs_place):
+            picked = self._rotate_destination(binding.account_id, destinations)
+            destination_pick = {"country": _city_country_of(picked), "place": picked}
+            destination_source = "账号范围轮换"
+
+        # Phase 1.1：具体旅行主题+无可用地点 → 供稿阶段结束该名额，
+        # 不创建注定失败的生成任务（方案 §1.1 明确要求）
+        if is_specific_travel and not destination_pick.get("place"):
+            self.ledger.record_gap(
+                scope=f"supply:{binding.account_id}",
+                reason="no_destination_for_specific_travel",
+                detail=(f"主题 {theme_value} 需要旅行地点，但账号未配置"
+                        "目的地范围且行字段无地点"))
+            plan.status = "no_material"
+            plan.detail = (f"主题「{theme_value}」需要旅行地点；"
+                           "请配置目的地范围或改选非地点主题")
+            return plan
+
+        destination = destination_pick
 
         requirement = theme_derived_note + self._content_requirement_text(
             selection=selection, analysis=main_analysis, topic=topic,
@@ -1041,9 +1076,10 @@ class AutoPhotoSupply:
         if destination.get("country"):
             # 执行侧从行字段读目的地（本篇明确值）；不覆盖为空值
             fields[FIELD_TRAVEL_COUNTRY] = destination["country"]
-        # 注：不写「旅行地点（可选）」——文案模板的 destination 走已审核
-        # 枚举标签（locale destinations），中文城市名会令 copy 填充失败；
-        # 具体选址由合同/brief/内容要求承载（2026-09-18 样片A/B实测）
+        if destination.get("place"):
+            # §1.2：恢复行字段回显（生成入口从行字段读取地点）；
+            # 中文城市名不直接进文案 token（那个走枚举），只进业务 place
+            fields["旅行地点（可选）"] = destination["place"]
         if attachments:
             fields[FIELD_REFERENCE] = attachments
 
