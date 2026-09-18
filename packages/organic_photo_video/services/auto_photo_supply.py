@@ -250,6 +250,8 @@ class AutoPhotoSupply:
         self.contract_store = contract_store
         self.product_snapshot_resolver = product_snapshot_resolver
         self.thermal_band = parse_thermal_band(thermal_band) if thermal_band else None
+        # P3.3（§3.3）：本轮补析总预算（所有 slot 共享，不每 slot 再扩 5）
+        self._refill_budget = 5
 
     # ---- 主入口 ----
     def run(
@@ -758,10 +760,12 @@ class AutoPhotoSupply:
         narrowed = self._narrow(
             candidates, default_theme if positioning_first else "",
             narrow_brief, recent, band)
-        if not narrowed and apply and self.analyzer is not None:
-            # 方案 C4：0 候选先做一次有限补分析（正式入口，限 5 篇），
-            # 再判缺口——不能提前 return 把"未分析"当"无素材"。
-            self.analyzer.analyze_pending(limit=5)
+        if not narrowed and apply and self.analyzer is not None \
+                and self._refill_budget > 0:
+            # 方案 C4/P3.3：0 候选先做有限补分析（本轮共享预算 ≤5 篇）
+            limit = min(5, self._refill_budget)
+            self.analyzer.analyze_pending(limit=limit)
+            self._refill_budget -= limit
             candidates = self._collect_candidates(scope_themes)
             narrowed = self._narrow(
                 candidates, default_theme if positioning_first else "",
@@ -794,8 +798,11 @@ class AutoPhotoSupply:
                            f"（不调用模型不建行）")
             return plan
 
-        if self.analyzer is not None and len(narrowed) < 3:
-            self.analyzer.analyze_pending(limit=5)
+        if self.analyzer is not None and len(narrowed) < 3 \
+                and self._refill_budget > 0:
+            limit = min(5, self._refill_budget)
+            self.analyzer.analyze_pending(limit=limit)
+            self._refill_budget -= limit
             candidates = self._collect_candidates(scope_themes)
             narrowed = self._narrow(
                 candidates, default_theme if positioning_first else "",

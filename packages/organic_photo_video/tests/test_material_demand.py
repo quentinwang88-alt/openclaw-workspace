@@ -238,8 +238,8 @@ CREATE TABLE notes (id INTEGER PRIMARY KEY AUTOINCREMENT,
   fetch_status TEXT);
 """)
             conn.execute(
-                "INSERT INTO query_hits (note_id, family, query, demand_key)"
-                " VALUES ('n','scarf_pairing','q','ledger:scarf')")
+                "INSERT INTO search_attempts (demand_key, query, state,"
+                " result_count) VALUES ('ledger:scarf','围巾搭配','done',0)")
             conn.commit()
             calls = []
             C.mcp_search = lambda q, f, timeout=60: calls.append(q) or []

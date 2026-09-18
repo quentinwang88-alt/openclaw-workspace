@@ -251,8 +251,13 @@ def main() -> int:
             threshold = next(
                 (int(f.get("min_usable_pool") or 0)
                  for f in families if f.get("family_id") == fid), 0)
-            if fid and int(fam_usable.get(fid) or 0) >= threshold:
-                continue     # 需求消退：该族库存已达标
+            has_destination = bool(str(item.get("destination_country") or "").strip())
+            if (fid and not has_destination
+                    and int(fam_usable.get(fid) or 0) >= threshold):
+                # 需求消退：无目的地的族级需求，库存达标即可消退。
+                # 有目的地（如「日本短外套」）的需求不被旅行族总量冲掉——
+                # 需检查具体目的地候选（§3.1 评审实锤）
+                continue
             item["family"] = fid or ""
             item["demand_key"] = f"ledger:{item.get('theme_direction')}|"                                  f"{item.get('destination_country')}"
             item["queries"] = compose_demand_queries(item)

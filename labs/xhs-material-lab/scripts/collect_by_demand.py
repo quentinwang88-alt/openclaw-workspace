@@ -29,6 +29,17 @@ DEFAULT_FAMILIES = LAB_ROOT / "config" / "query_families.json"
 MCP_BASE = "http://127.0.0.1:18060/mcp/v1/search_feeds"
 
 QUERY_HITS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS search_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    demand_key TEXT NOT NULL,
+    query TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'running',
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at TEXT,
+    result_count INTEGER,
+    error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_search_attempts ON search_attempts (demand_key, query);
 CREATE TABLE IF NOT EXISTS query_hits (
     note_id TEXT NOT NULL,
     family TEXT NOT NULL,
@@ -90,20 +101,37 @@ def main() -> None:
         if not family:
             continue
         demand_key = str(item.get("demand_key") or f"family:{family}")
-        # 方案 §6.3：简单冷却——24h 内同需求已搜过则跳过，不重复搜索
+        # P3.2（§3.2）：冷却读搜索尝试记录（零命中也冷却），不只看命中
         recent = conn.execute(
-            "SELECT COUNT(*) FROM query_hits WHERE demand_key=?"
-            " AND hit_at >= datetime('now','-1 day')", (demand_key,)).fetchone()[0]
+            "SELECT COUNT(*) FROM search_attempts WHERE demand_key=?"
+            " AND state IN ('done','error') AND started_at >= datetime('now','-1 day')"
+            " AND query IN (" + ",".join("?" for _ in (item.get("queries") or [])) + ")",
+            [demand_key] + [str(q) for q in (item.get("queries") or [])]).fetchone()[0]
         if recent:
-            print(f"  [cooldown] {demand_key} 24h 内已搜过，跳过")
+            print(f"  [cooldown] {demand_key} 24h 内已尝试，跳过")
             continue
         print(f"== {family}（{item.get('reason')}）可用存量 {item.get('usable_now')}")
         for query in item.get("queries") or []:
+            cursor = conn.execute(
+                "INSERT INTO search_attempts (demand_key, query, state)"
+                " VALUES (?,?,'running')", (demand_key, query))
+            conn.commit()
+            attempt_id = cursor.lastrowid
             try:
                 feeds = mcp_search(query, filters)
             except Exception as exc:  # noqa: BLE001 - 单查询失败不阻塞族
+                conn.execute(
+                    "UPDATE search_attempts SET state='error', finished_at="
+                    "datetime('now'), error=? WHERE id=?",
+                    (str(exc)[:120], attempt_id))
+                conn.commit()
                 print(f"  [skip] {query}: {exc}")
                 continue
+            conn.execute(
+                "UPDATE search_attempts SET state='done', finished_at="
+                "datetime('now'), result_count=? WHERE id=?",
+                (len(feeds), attempt_id))
+            conn.commit()
             raw_path = out_dir / f"{family}_{query.replace('/', '_')}.json"
             raw_path.write_text(json.dumps(feeds, ensure_ascii=False), encoding="utf-8")
             theme = labels.get(family, family)

@@ -127,7 +127,14 @@ def _compose(
     if layout == "grid_2x2":
         if len(source_paths) != 4:
             raise PhotoPackageError("grid_2x2 requires exactly four source images")
-        cell_width, cell_height = (width - gap) // 2, (height - gap) // 2
+        # P3.4（§3.4）：四宫格封面独立文字区——图片区约占 80%、下 20% 留白。
+        # 文字排在结构化排版 bottom 带内（text_position=bottom），不再压脸/腿。
+        text_band_ratio = float(template.get("grid_text_band_ratio") or 0.0)
+        if text_band_ratio <= 0:
+            text_band_ratio = 0.20
+        image_zone_height = int(height * (1.0 - text_band_ratio))
+        cell_width = (width - gap) // 2
+        cell_height = (image_zone_height - gap) // 2
         for index, path in enumerate(source_paths):
             x = (index % 2) * (cell_width + gap)
             y = (index // 2) * (cell_height + gap)
