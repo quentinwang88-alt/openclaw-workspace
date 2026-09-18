@@ -483,3 +483,22 @@ class MaterialAdapterTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_p23_product_slot_filtered_from_core_items(self):
+        # P2.3：指定商品时参考的同槽位品类描述被过滤，配套保留
+        from services.auto_photo_supply import AutoPhotoSupply
+        product = {"product_name": "浅蓝色短款蓬松外套", "category": "outerwear"}
+        analysis = _analysis_payload(pages=3)
+        analysis["core_items"] = [
+            {"item": "奶油色羊羔毛短外套", "role": "核心"},
+            {"item": "高领毛衣", "role": "配角"},
+            {"item": "黑色阔腿裤", "role": "配角"},
+        ]
+        text = AutoPhotoSupply._content_requirement_text(
+            selection=type("S", (), {"adoption": "overall"})(),
+            analysis=analysis, topic="测试", destination={},
+            product=product, temperature_band=None)
+        self.assertNotIn("奶油色羊羔毛", text)     # 同槽位被过滤
+        self.assertNotIn("外套", text.split("本篇商品")[0])  # 前半段无外套干扰
+        self.assertIn("高领毛衣", text)             # 配套保留
+        self.assertIn("黑色阔腿裤", text)

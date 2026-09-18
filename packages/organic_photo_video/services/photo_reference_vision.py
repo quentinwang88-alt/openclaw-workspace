@@ -924,6 +924,7 @@ class PhotoReferenceVisionService:
         planning_paths, planning_images = self._travel_planning_images(
             analysis=analysis, reference_paths=reference_paths,
             product_reference_paths=product_reference_paths,
+            untagged_uses=untagged_uses,
         )
         input_contract = {
             "prompt_version": TRAVEL_PROMPT_VERSION,

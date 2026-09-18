@@ -231,8 +231,9 @@ class AutoPhotoSupplyTest(unittest.TestCase):
         self.assertEqual(fields["图文主题"], "凉爽旅行")   # 推导主题
         self.assertIn("旅行选题：主题=凉爽旅行",
                       fields["内容要求（可选）"])
-        self.assertIn("温度带 15–22°C", fields["内容要求（可选）"])
-        self.assertEqual(fields["温度档"], "15°C 左右")
+        # P2.4：旅行关键词不自动产生温度带——无显式温度来源时温度留空
+        self.assertNotIn("温度带", fields["内容要求（可选）"])
+        self.assertNotIn("温度档", fields)
 
     def test_positioning_first_without_theme_derives_within_positioning(self):
         # B2：定位优先缺主题不再报错——按选题性质在定位内提炼
@@ -820,7 +821,7 @@ class AutoPhotoSupplyTest(unittest.TestCase):
         fields = client.created[0]["fields"]
         self.assertEqual(fields["生产预设"], "图文｜TH｜旅行穿搭")
         self.assertEqual(fields["图文主题"], "凉爽旅行")
-        self.assertEqual(fields["温度档"], "15°C 左右")
+        self.assertNotIn("温度档", fields)   # P2.4：不自动温度
 
 
     def test_c4_zero_candidates_triggers_limited_refill(self):

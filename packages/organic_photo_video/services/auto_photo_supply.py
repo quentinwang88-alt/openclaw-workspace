@@ -914,7 +914,10 @@ class AutoPhotoSupply:
             elif travelish:
                 theme_value = "凉爽旅行"
                 theme_derived_note = "内容方向以参考素材为基准（旅行选题：主题=凉爽旅行）｜"
-                band = band or theme_thermal_band(theme_value)
+                # P2.4（§2.4）：旅行关键词不自动产生 15–22°C——
+                # 只有显式温度或冻结合同才产生温度带
+                if band_source not in ("显式参数", "冻结合同"):
+                    band = None
             else:
                 effective_preset = GENERIC_CHOICE_PRESET
                 theme_value = _nontravel_theme(source_topic)
@@ -1216,9 +1219,30 @@ class AutoPhotoSupply:
         lines.append(adoption_rules.get(adoption, adoption_rules["overall"]))
         if adoption in {"outfit_only", "narrative_only", "overall"}:
             relations = str(analysis.get("outfit_relations") or "")
+            core_items = list(analysis.get("core_items") or [])[:6]
+            if product:
+                # P2.3（§2.3）：指定商品时过滤参考的同槽位品类——
+                # 参考原题的外套/开衫等品类描述与本店商品冲突（实测：
+                # 指定浅蓝外套仍出现「奶油色羊羔毛外套」干扰）。
+                # 保留下装/鞋/配饰/内搭等配套描述。
+                p_name = str(product.get("product_name") or "")
+                p_cat = str(product.get("category") or "")
+                outerwear_words = ("外套", "开衫", "卫衣", "毛衣", "衬衫",
+                                   "夹克", "大衣", "风衣", "羽绒服", "棉服",
+                                   "羊羔毛", "蓬松", "针织")
+                def _is_product_slot(item_text: str) -> bool:
+                    if p_cat == "outerwear":
+                        return any(w in item_text for w in outerwear_words)
+                    return p_cat and p_cat in item_text
+                core_items = [
+                    {"item": str((it or {}).get("item") or ""),
+                     "role": str((it or {}).get("role") or "")}
+                    for it in core_items
+                ]
+                core_items = [it for it in core_items
+                              if not _is_product_slot(it["item"])]
             core = "、".join(
-                str((item or {}).get("item") or "")
-                for item in (analysis.get("core_items") or [])[:6])
+                str((item or {}).get("item") or "") for item in core_items)
             if core:
                 lines.append(f"参考搭配要点（文字化借鉴）：{core}"
                              + (f"；{relations}" if relations else ""))

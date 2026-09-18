@@ -1963,6 +1963,10 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                         product_context=product_context,
                         planning_flow=planning_flow, required_roles=roles,
                     )
+                    # P2.1（§2.1）：通用分支同样携带视觉预设快照——
+                    # 旅行分支在 1926 行做，此处此前漏掉（评审§P1-2 实锤）
+                    if visual_preset_snapshot is not None:
+                        style_profile["visual_preset"] = dict(visual_preset_snapshot)
                 if product_context:
                     style_profile["product_context"] = dict(product_context)
             content_plan = None
