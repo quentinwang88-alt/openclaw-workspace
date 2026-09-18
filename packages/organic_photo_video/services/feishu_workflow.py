@@ -3542,9 +3542,13 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 raise FeishuWorkflowError(
                     f"旅行图文缺少完整的最终 {expected_pages} 页文案"
                 )
-            if (not theme_brief.get("travel_theme_type")
-                    or theme_brief.get("travel_theme_type") != frozen_theme.get("travel_theme_type")
-                    or theme_brief.get("theme_key") != frozen_theme.get("theme_key")):
+            # 主题绑定：theme_key 必须一致；travel_theme_type 是六主题功能
+            # 之后才有的字段，通用主题（如凉爽旅行）两侧都没有 type，此时
+            # 只按 key 绑定，不阻断历史合法内容。
+            if theme_brief.get("theme_key") != frozen_theme.get("theme_key"):
+                raise FeishuWorkflowError("旅行图文的主题与最终发布包没有正确绑定")
+            if ((frozen_theme.get("travel_theme_type") or theme_brief.get("travel_theme_type"))
+                    and theme_brief.get("travel_theme_type") != frozen_theme.get("travel_theme_type")):
                 raise FeishuWorkflowError("旅行图文的主题与最终发布包没有正确绑定")
             issues = placeholder_errors(copy_block)
             issues.extend(copy_locale_issues(
