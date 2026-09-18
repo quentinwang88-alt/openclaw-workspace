@@ -467,6 +467,13 @@ def _family_plan(
     }
 
 
+def _find_family(policy, family_id):
+    for family in policy.get("families") or []:
+        if str(family.get("family_id")) == str(family_id):
+            return family
+    return None
+
+
 def _neutral_four_choice_copy(
     locale_pack: Mapping[str, Any], *, index: int,
 ) -> dict[str, str]:
@@ -833,6 +840,25 @@ def plan_th_choice_batch(
     for item in items:
         item.setdefault("planning_flow", planning_flow)
         item.setdefault("required_roles", list(frozen_required_roles))
+        # B 缺口修复（2026-09-19）：通用路径的模型文案可能混入中文主题词
+        # （视觉模型看到中文主题名「秋季」在泰语里输出「4 ลุค秋季...」）。
+        # CJK 检测到时用 planning policy 的纯泰语内联文案兜底。
+        copy_block = item.get("copy")
+        if isinstance(copy_block, dict):
+            from services.locale_quality import copy_locale_issues
+            issues = copy_locale_issues(copy_block, "th-TH")
+            if any("CJK" in issue for issue in issues):
+                family = _find_family(policy, item.get("family_id"))
+                if family:
+                    from services.photo_locale import family_copy
+                    thai_copy = family_copy(family, locale_pack=None)
+                    if thai_copy.get("title") or thai_copy.get("cover"):
+                        item["copy"] = {
+                            **dict(copy_block),
+                            "title": thai_copy.get("title") or copy_block.get("title", ""),
+                            "cover": thai_copy.get("cover") or copy_block.get("cover", ""),
+                            "caption": thai_copy.get("caption") or copy_block.get("caption", ""),
+                        }
     plan = {
         "schema_version": "opv-photo-content-plan-v1",
         "policy_id": policy["policy_id"], "policy_version": policy["policy_version"],
