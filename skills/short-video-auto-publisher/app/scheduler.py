@@ -73,6 +73,7 @@ RUN_MANAGER_FIELD_ALIASES: Dict[str, List[str]] = {
 
 ACCOUNT_FIELD_ALIASES: Dict[str, List[str]] = {
     "travel_destinations": ["旅行目的地范围", "旅行目的地"],
+    "supply_product_codes": ["指定商品编码"],
     "account_id": ["账号ID"],
     "account_name": ["账号名称"],
     "store_id": ["店铺ID"],
@@ -96,19 +97,12 @@ ACCOUNT_FIELD_ALIASES: Dict[str, List[str]] = {
     # 列同时服务图文摄影基准），缺列时由 ensure_account_nurture_fields 补建。
     "positioning": ["账号定位", "定位"],
     "default_theme": ["默认主题", "账号默认主题"],
-    "expression_mode": ["内容表达"],
-    "visual_style": ["视觉风格", "视频风格"],
     "style_image": ["风格图片"],
-    "photo_claim_scope": ["图文领取范围"],
     # 自动图文供稿策略（2026-09-16，OPV 自动供稿 Phase 2）：全部为空＝未配置，
     # profile 不加 photo_supply_policy 键，账号行为与旧版完全一致。
     "supply_strategy": ["图文内容策略"],
-    "supply_product_mode": ["商品使用方式"],
-    "supply_product_codes": ["默认产品编码"],
     "supply_automation": ["图文自动化模式"],
-    "supply_daily_limit": ["每日自动生产上限"],
     "supply_preset": ["自动供稿预设"],
-    "supply_material_scope": ["素材范围"],
 }
 
 
@@ -402,17 +396,18 @@ def build_photo_content_profile(
         profile["positioning"] = str(positioning).strip()
     if str(default_theme or "").strip():
         profile["default_theme"] = str(default_theme).strip()
-    mode = normalize_photo_expression_mode(expression_mode)
-    if mode:
-        profile["expression_mode"] = mode
-    if str(visual_style or "").strip():
-        profile["visual_baseline"] = str(visual_style).strip()
+    # P2 精简：内容表达/视频风格列已删——程序接管默认值
+    profile["expression_mode"] = "STYLE_INSPIRATION"
+    profile["visual_baseline"] = (
+        "中性奶白底、自然肤色、柔和对比与低至中饱和；商品真实颜色与自然肤色优先")
     attachment = extract_attachment(style_image)
     if attachment:
         profile["style_image"] = {
             "file_token": str(attachment.get("file_token") or ""),
             "name": str(attachment.get("name") or ""),
         }
+    # P2 精简：领取范围列已删——统一默认仅本账号任务
+    profile["photo_claim_scope"] = "own_tasks_only"
     destinations_raw = travel_destinations
     if isinstance(destinations_raw, str):
         destinations_raw = [x.strip() for x in re.split(r"[，,、\s]+", destinations_raw) if x.strip()]
@@ -544,16 +539,11 @@ def sync_accounts(records: Iterable[Any], mapping: Dict[str, Optional[str]], db:
                 "photo_content_profile": build_photo_content_profile(
                     positioning=normalize_text(fields.get(mapping.get("positioning"))),
                     default_theme=normalize_text(fields.get(mapping.get("default_theme"))),
-                    expression_mode=fields.get(mapping.get("expression_mode")),
-                    visual_style=normalize_text(fields.get(mapping.get("visual_style"))),
                     style_image=fields.get(mapping.get("style_image")),
                     supply_strategy=normalize_text(fields.get(mapping.get("supply_strategy"))),
-                    supply_product_mode=normalize_text(fields.get(mapping.get("supply_product_mode"))),
                     supply_product_codes=fields.get(mapping.get("supply_product_codes")),
                     supply_automation=normalize_text(fields.get(mapping.get("supply_automation"))),
-                    supply_daily_limit=fields.get(mapping.get("supply_daily_limit")),
                     supply_preset=normalize_text(fields.get(mapping.get("supply_preset"))),
-                    supply_material_scope=fields.get(mapping.get("supply_material_scope")),
                     travel_destinations=fields.get(mapping.get("travel_destinations")),
                 ),
                 "photo_claim_scope": normalize_photo_claim_scope(

@@ -11,6 +11,13 @@
     "expression_mode": "PRACTICAL_GUIDE",
     "visual_baseline": "自然日光、柔和对比、干净构图与适度留白；日系是摄影与穿搭审美，市场仍为 TH、文案仍为泰语，不切换日本市场",
     "photo_claim_scope": "own_tasks_only",
-    "default_visual_preset": "旅行场景穿搭"
+    "default_visual_preset": "旅行场景穿搭",
+    "photo_supply_policy": {
+      "content_strategy": "positioning_first",
+      "product_mode": "none",
+      "automation": "produce",
+      "daily_limit": 1,
+      "preset": "图文｜TH｜旅行穿搭"
+    }
   }
 }
