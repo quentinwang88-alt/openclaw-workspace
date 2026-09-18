@@ -908,6 +908,8 @@ class AutoPhotoSupply:
         # Phase 1.1（方案 §1.1）：主题先定，选址跟着主题走。
         # 具体旅行主题（旅行·打卡穿搭等）必须有地点；无可用地点不建行。
         theme_value = default_theme or ""
+        if theme_value == "自动":
+            theme_value = ""       # "自动"=由程序/参考推导，不是有效主题枚举
         theme_derived_note = ""
         effective_preset = preset
         if not theme_value:
