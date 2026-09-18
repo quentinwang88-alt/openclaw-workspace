@@ -912,5 +912,43 @@ class AutoPhotoSupplyTest(unittest.TestCase):
         self.assertEqual(brief.get("destination_source"), "账号单值")
 
 
+
+    def test_d_specified_product_lands_in_row_and_contract(self):
+        # 使用指定商品配置：产品编码进行与合同，brief 商品事实完整
+        ledger = make_ledger_with_analysis(
+            self.root, self.lab.source(), self.note_ids, name="ledger_dp.sqlite3")
+        client = FakeTaskTableClient()
+        binding = make_binding(profile_extra={
+            "content_strategy": "定位优先", "daily_limit": 1,
+            "product_mode": "使用指定商品", "product_codes": "P1"})
+        resolver = self._fake_product_resolver({
+            "P1": {"category": "开衫", "product_name": "米白色薄款针织开衫",
+                   "variant_key": "slim"}})
+        self._supply(client, ledger, vision=self._vision_ok(),
+                     product_resolver=resolver).run([binding], apply=True)
+        fields = client.created[0]["fields"]
+        self.assertEqual(fields["产品编码"], "P1")
+        from services.external_supply_contract import ExternalSupplyContractStore
+        contract = ExternalSupplyContractStore(
+            str(self.root / "contracts.sqlite3")).find_by_record(
+                client.rows[0]["record_id"])
+        product = contract.get("product") or {}
+        self.assertEqual(product.get("name"), "米白色薄款针织开衫")
+        brief = contract.get("effective_brief") or {}
+        self.assertEqual((brief.get("product") or {}).get("name"),
+                         "米白色薄款针织开衫")
+
+    def test_d_product_anchored_statement(self):
+        # 方案 §4.1：指定商品时主张以本店商品事实重写，参考品类/颜色不残留
+        from services.auto_photo_supply import _product_anchored_statement
+        out = _product_anchored_statement(
+            "奶油色羊羔毛短外套的8种秋冬日常场景搭配展示",
+            {"product_name": "浅蓝色短款蓬松外套", "category": "outerwear"})
+        self.assertIn("浅蓝", out)
+        self.assertNotIn("奶油", out)
+        self.assertNotIn("羊羔毛", out)
+        self.assertIn("以本店", out)
+
+
 if __name__ == "__main__":
     unittest.main()

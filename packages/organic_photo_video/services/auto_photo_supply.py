@@ -19,6 +19,8 @@ workflow、不触碰生成与发布状态机；对既有代码的唯一依赖是
 """
 from __future__ import annotations
 
+import re
+
 import os
 from dataclasses import dataclass, field
 from datetime import date as _date
@@ -113,6 +115,39 @@ def _nontravel_theme(topic: str) -> str:
     if any(k in text for k in ("约会", "咖啡", "甜美", "裙")):
         return "咖啡约会"
     return "日常通勤"
+
+
+def _product_anchored_statement(topic: str, product_snapshot: Dict[str, Any]) -> str:
+    """B2 §4.1：指定商品时，本篇主张围绕本店商品重写。
+
+    参考原题的「颜色+材质+品类」短语（奶油色羊羔毛短外套/灰色卫衣）是
+    参考事实，照搬会让规划与生图围绕参考商品展开（样片实测：指定浅蓝
+    外套渲染成奶油色）。做法：剥离参考的颜色+材质+长短修饰+品类名词，
+    换上本店商品的颜色+品类；场景/搭配/季节等中性词保留。
+    无商品事实时仅返回泛化题。
+    """
+    text = _generalize_reference_topic(topic)
+    name = str(product_snapshot.get("product_name") or "")
+    category = str(product_snapshot.get("category") or "")
+    color = next((token for token in ("浅蓝", "奶白", "米白", "黑色", "白色",
+                                      "棕色", "灰色", "焦糖", "驼色", "深蓝",
+                                      "藏蓝", "红色", "绿色")
+                  if token in name), "")
+    if not (name or category):
+        return text
+    color_re = "浅蓝|奶白|米白|奶油色|奶油|黑色|白色|灰色|驼色|棕色|焦糖|深蓝|藏蓝|红色|绿色"
+    garment_re = ("(奶油色|奶白|米白|浅蓝|深蓝|藏蓝|黑色|白色|灰色|驼色|棕色|焦糖|红色|绿色)?"
+                  "(羊羔毛|羊毛|蓬松|羽绒|针织|毛呢|灯芯绒|麂皮|皮革|摇粒绒|抓绒|棉)?"
+                  "(短|长|中|宽松|oversize|修身)?(款|式)?"
+                  "(外套|大衣|开衫|卫衣|毛衣|衬衫|夹克|风衣|羽绒服|棉服|棉衣)")
+    text = re.sub(garment_re, "单品", text)
+    text = re.sub(f"({color_re})?单品", "单品", text)
+    text = re.sub(r"单品{2,}", "单品", text)
+    anchor = "".join(x for x in (color, category if category != "outerwear" else "外套")
+                     if x) or (name or "本店商品")
+    tail = re.sub(r"^单品[^，。；]*?(?=的)", "", text).strip()
+    tail = re.sub(r"^的", "", tail).strip() or "多种日常搭配展示"
+    return f"以本店{anchor}为核心：{tail}"
 
 
 def _generalize_reference_topic(topic: str) -> str:
@@ -817,8 +852,10 @@ class AutoPhotoSupply:
         # B2：source_topic 保留参考原题；topic_statement 是适配本篇的主张
         # ——参考专属计数（42套/18图）不得照搬进本篇文案语境。
         source_topic = str(main_analysis.get("note_topic") or "")
-        topic = source_topic or selection.rationale[:40]
-        topic = _generalize_reference_topic(topic)
+        topic = _generalize_reference_topic(source_topic or selection.rationale[:40])
+        if product_snapshot:
+            # §4.1：指定商品时主张以本店商品事实重写（压制参考品类/颜色词）
+            topic = _product_anchored_statement(topic, product_snapshot)
         attachments, selected_pages = self._stage_reference_pages(
             package_obj, selection)
 
