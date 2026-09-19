@@ -973,6 +973,15 @@ class PhotoReferenceVisionService:
             account_visual_baseline=baseline,
             fixed_background=fixed_backdrop,
         )
+        # B2（§B2）：讲解主题用专属规则块替换选择型规则——不同时携带
+        # "每页只造型名称"和"每页需要解释"
+        guide_block = self._guide_plan_prompt_block(
+            theme=topic or {},
+            content_requirement=content_requirement,
+            account_positioning=positioning,
+        )
+        if guide_block:
+            base_prompt = guide_block
         if planning_images:
             base_prompt += self._travel_planning_image_prompt(planning_images)
         background_features = [
@@ -1983,6 +1992,40 @@ class PhotoReferenceVisionService:
         if isinstance(raw.get("color_grading_plan"), Mapping):
             plan["color_grading_plan"] = _normalize_color_grading_plan(
                 raw.get("color_grading_plan"))
+        # B3（§B1/B3）：讲解主题在 plan 里补 narrative_plan——
+        # 从模型响应的 posts + slide_texts 构建（问题/takeaways/页职责）。
+        # 旧主题不加键，行为不变。
+        from services.photo_content_planner import is_guide_theme
+        if is_guide_theme(travel_topic or {}):
+            theme_key = str((travel_topic or {}).get("theme_key") or "")
+            kind = ("travel_guide" if theme_key == "TRAVEL_STYLING_GUIDE"
+                    else "color_tutorial")
+            question = str((travel_topic or {}).get("planning_focus") or "")[:200]
+            first = posts[0] if posts else {}
+            copy = dict(first.get("copy") or {})
+            slides = [str(v) for v in copy.get("slide_texts") or []]
+            takeaways = []
+            for slide in slides[1:]:
+                for sep in ("：", ":", "—", "–", "-"):
+                    if sep in slide:
+                        part = slide.split(sep, 1)[0].strip()
+                        if 2 <= len(part) <= 20:
+                            takeaways.append(part)
+                            break
+                if len(takeaways) >= 3:
+                    break
+            plan["narrative_plan"] = {
+                "version": 1,
+                "kind": kind,
+                "question_zh": question,
+                "takeaways": takeaways[:3],
+                "pages": [
+                    {"page_index": idx + 1, "source_role": f"look_{chr(97 + idx)}",
+                     "page_text": slides[idx] if idx < len(slides) else ""}
+                    for idx in range(min(4, max(4, len(slides))))
+                ],
+                "reference_basis": "",
+            }
         return plan, []
 
     @staticmethod
