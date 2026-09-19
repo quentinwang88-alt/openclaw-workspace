@@ -6,7 +6,7 @@ import hashlib
 import json
 import random
 from collections import Counter
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from core.original_batch_models import (
     PlanItem,
@@ -1575,6 +1575,10 @@ def _make_item(
         # back, not the angle key.  Resolution stays here because this is where
         # the content bundle is in scope.
         theme_proposition=_mixed_theme_proposition(bundle, fallback_theme_id=angle_key),
+        # 项链实例证据只在项链分支被读取；其它类目拿到 None，冻结合同逐字不变。
+        product_evidence=_mixed_product_evidence(
+            anchor_card=anchor_card, product_code=product_code
+        ),
     )
     if mixed_injection.get("contract"):
         mixed_extension = dict(category_execution_extension or {})
@@ -2059,6 +2063,316 @@ def _mixed_theme_proposition(
     return resolved
 
 
+def _mixed_theme_inputs(
+    *,
+    theme_proposition: Optional[Mapping[str, Any]],
+    audience_tension_text: str,
+    theme_id: str,
+    fallback_theme_id: str,
+) -> Dict[str, Any]:
+    """Resolve the readable-proposition fields every mixed contract carries.
+
+    Extracted unchanged from the shared compile loop so the necklace branch and
+    the A/B/C branch cannot drift apart on what a "theme" is.  Callers that own
+    the content bundle hand over an already-resolved ``theme_proposition``;
+    callers that only have the legacy argument text still fall back to the
+    readability guard, and an internal ID is never promoted into the theme slot.
+    """
+
+    declared = dict(theme_proposition or {})
+    if declared:
+        return {
+            "thesis": _text(declared.get("thesis")),
+            "thesis_source": _text(declared.get("thesis_source")),
+            "thesis_source_ref": _text(declared.get("thesis_source_ref")),
+            "thesis_input_gap": _text(declared.get("thesis_input_gap")),
+            "argument_id": _text(declared.get("argument_id")),
+        }
+
+    gap_code = "THESIS_NOT_READABLE"
+    try:
+        from core.accessory_mixed_templates import (
+            MIXED_THESIS_INPUT_GAP_READABILITY,
+            is_readable_theme_proposition,
+        )
+
+        gap_code = MIXED_THESIS_INPUT_GAP_READABILITY
+        readable = is_readable_theme_proposition(
+            audience_tension_text,
+            {"theme_id": theme_id, "parent_theme_id": fallback_theme_id},
+        )
+    except Exception:  # noqa: BLE001 - never break planning on a missing guard
+        readable = bool(_text(audience_tension_text))
+    if readable:
+        return {
+            "thesis": _text(audience_tension_text).strip(),
+            "thesis_source": "AUDIENCE_TENSION_TEXT",
+            "thesis_source_ref": "bundle.audience_tension.text",
+            "thesis_input_gap": "",
+            "argument_id": "",
+        }
+    return {
+        "thesis": "",
+        "thesis_source": "",
+        "thesis_source_ref": "",
+        "thesis_input_gap": gap_code,
+        "argument_id": "",
+    }
+
+
+def _mixed_content_theme(
+    *,
+    theme_id: str,
+    parent_theme_id: str,
+    candidate_role: str,
+    claim_keys: Optional[Iterable[str]],
+    thesis: str,
+    argument_id: str,
+    thesis_source: str,
+    thesis_source_ref: str,
+    thesis_input_gap: str,
+) -> Dict[str, Any]:
+    """The single shape every mixed ``content_theme`` is built from."""
+
+    approved = [_text(item) for item in (claim_keys or []) if _text(item)]
+    return {
+        "theme_id": theme_id,
+        "parent_theme_id": parent_theme_id,
+        "candidate_role": candidate_role,
+        "thesis": thesis,
+        "argument_id": argument_id,
+        "thesis_source": thesis_source,
+        "thesis_source_ref": thesis_source_ref,
+        "thesis_input_gap": thesis_input_gap,
+        "approved_claim_refs": list(approved),
+        "evidence_refs": list(approved),
+    }
+
+
+def _mixed_product_evidence(
+    *,
+    anchor_card: Optional[Mapping[str, Any]],
+    product_code: str,
+) -> Optional[Dict[str, Any]]:
+    """Instance evidence for the necklace profile, or ``None`` for anyone else.
+
+    Runs on *every* plan item, so it short-circuits on the necklace switch before
+    touching the anchor card: with the switch off (the default) the cost is one
+    environment read and no parsing at all.  A missing or broken profile also
+    degrades to ``None`` -- which the shared path simply ignores -- rather than
+    interrupting planning for a category that has nothing to do with necklaces.
+    """
+
+    try:
+        from core.necklace_mixed_profile import (
+            build_necklace_product_evidence,
+            necklace_mixed_v1_enabled,
+        )
+
+        if not necklace_mixed_v1_enabled():
+            return None
+        return build_necklace_product_evidence(
+            anchor_card=anchor_card,
+            evidence_ref=product_code,
+        )
+    except Exception:  # noqa: BLE001 - never break planning
+        return None
+
+
+def _build_necklace_template_injection(
+    *,
+    product_type: str,
+    top_category: str,
+    item_index: int,
+    item_role: str,
+    content_angle_key: str,
+    audience_tension_text: str,
+    claim_keys: List[str],
+    product_code: str,
+    execution_scope: Optional[Dict[str, Any]],
+    product_evidence: Optional[Mapping[str, Any]],
+    theme_proposition: Optional[Mapping[str, Any]],
+    reserved_references: Optional[List[Dict[str, Any]]],
+    history_references: Optional[List[Dict[str, Any]]],
+    history_incomplete: int,
+    identity: str,
+) -> Optional[Dict[str, Any]]:
+    """The necklace V1 branch, or ``None`` when it does not own this request.
+
+    ``None`` is the *only* answer that means "not my business, take the legacy
+    path", and it is returned for exactly two cases: the product is not a
+    necklace, or the necklace switch is off (section 4 keeps the legacy path
+    byte-for-byte even for a necklace while the switch is off -- that is not a
+    rejection).  Everything else is deliberate:
+
+    * a necklace that *is* applicable but fails an eligibility gate returns an
+      explicit ``{"errors": [...]}``.  The caller records it as a planning
+      rejection and produces no item.  Quietly falling back to an earring or
+      womenwear montage is precisely what section 4 forbids;
+    * a valid contract is compiled from the *overlay* definition -- never the
+      shared one -- so this branch can only ever see the NMX template, the NMX
+      light setup and the NECK zone.
+    """
+
+    try:
+        from core.necklace_mixed_profile import (
+            attach_necklace_contract,
+            build_necklace_profile_overlay,
+            necklace_mixed_v1_enabled,
+            resolve_necklace_v1_scope,
+            select_necklace_environment_recipe_id,
+            select_necklace_template_id,
+            validate_necklace_v1_contract,
+        )
+        from core.accessory_mixed_templates import (
+            MIXED_SIGNATURE_KEY,
+            compile_mixed_template_contract,
+            judge_mixed_candidate,
+            validate_mixed_template_contract,
+        )
+    except Exception:  # noqa: BLE001 - a missing profile must not break planning
+        return None
+
+    if not necklace_mixed_v1_enabled():
+        # Switch off: section 4 keeps the legacy path byte-for-byte, even for a
+        # necklace.  This is *not* a rejection, and nothing claims the new
+        # template took effect.
+        return None
+
+    evidence = dict(product_evidence or {})
+    decision = resolve_necklace_v1_scope(
+        {
+            "product_type": product_type,
+            "top_category": top_category,
+            "product_code": _text(product_code),
+            "part_evidence": evidence.get("part_evidence"),
+            "counts": evidence.get("counts"),
+            "evidence_ref": _text(evidence.get("evidence_ref")) or _text(product_code),
+            # "A usable, non-empty mainline" is read from the same readable
+            # proposition the shared path already resolved and handed over.
+            # Deriving a second authority for that question is how the two
+            # would eventually disagree.
+            "mainline": {
+                "core_value": _text((theme_proposition or {}).get("thesis")),
+                "source": _text((theme_proposition or {}).get("thesis_source")),
+            },
+        },
+        execution_scope,
+        enabled=True,
+    )
+    if not decision.get("applicable"):
+        return None
+    if not decision.get("eligible"):
+        if not decision.get("scope_eligible", False):
+            # A parent-task mismatch (not a 15-second short original, a
+            # long-form source build, a remake, a resumed plan) is not this
+            # branch's business -- the same stance the shared path takes for
+            # its own scope rejection.  The request keeps the legacy path.
+            return None
+        return {
+            "errors": [_text(decision.get("reason")) or "NECKLACE_EVIDENCE_INCOMPLETE"]
+        }
+
+    overlay = build_necklace_profile_overlay(product_evidence=evidence)
+    template_id = select_necklace_template_id()
+    recipe_id = select_necklace_environment_recipe_id()
+
+    role = _text(item_role).upper()
+    candidate_role = "PRIMARY" if role == "STRUCTURE_MOTHER" else "EXECUTION_VARIANT"
+    angle = _text(content_angle_key)
+    theme_id = angle or f"TH_ITEM_{int(item_index)}"
+    theme_inputs = _mixed_theme_inputs(
+        theme_proposition=theme_proposition,
+        audience_tension_text=audience_tension_text,
+        theme_id=theme_id,
+        fallback_theme_id=angle or theme_id,
+    )
+
+    try:
+        contract = compile_mixed_template_contract(
+            product_type=product_type,
+            top_category=top_category,
+            template_id=template_id,
+            environment_recipe_id=recipe_id,
+            product_identity_ref=_text(product_code),
+            content_theme=_mixed_content_theme(
+                theme_id=theme_id,
+                parent_theme_id=angle or theme_id,
+                candidate_role=candidate_role,
+                claim_keys=claim_keys,
+                **theme_inputs,
+            ),
+            definition=overlay,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"errors": [f"MIXED_CONTRACT_COMPILE_FAILED:{type(exc).__name__}"]}
+
+    # The namespace is attached *before* either validator runs.  The necklace
+    # validator owns the "is this really an NMX contract carrying the necklace
+    # promise block?" question, so asking it about a contract that has not been
+    # stamped yet can only ever answer "missing" -- an ordering bug that would
+    # have refused every necklace while looking like a config problem.
+    identity_ref = _text(product_code)
+    contract = attach_necklace_contract(
+        contract,
+        eligibility=decision,
+        chain_identity={
+            "product_identity_ref": identity_ref,
+            "source": "PRODUCT_IDENTITY_REF",
+        },
+        pendant_identity={
+            "product_identity_ref": identity_ref,
+            "source": "PRODUCT_IDENTITY_REF",
+        },
+        wearing_relation={
+            "adornment_state": "ALREADY_WORN",
+            "source": "TEMPLATE_CONTRACT",
+        },
+    )
+
+    # Compiled *and* validated against the same local context.  Compiling from
+    # the necklace definition while validating against the shared one is the
+    # exact mismatch section 6 calls out.
+    errors = list(validate_mixed_template_contract(contract, definition=overlay))
+    errors.extend(validate_necklace_v1_contract(contract))
+    if errors:
+        return {"errors": errors}
+
+    identifier = _text(identity) or f"{identity_ref}#{int(item_index):02d}"
+    # One template means no rotation, but the *same* duplicate judge still
+    # applies: two necklace candidates that differ only by light or a synonym
+    # must not both ship.  The judge's theme axis is what separates them, so
+    # this reuses the shared verdict vocabulary instead of inventing one.
+    report = judge_mixed_candidate(
+        contract,
+        [
+            *(reserved_references or []),
+            *(history_references or []),
+        ],
+        history_compared=len(history_references or []),
+        history_incomplete=int(history_incomplete),
+    )
+    contract["difference_report"] = report
+    if report.get("counts_as_independent", True):
+        return {"contract": contract}
+
+    verdict = _text(report.get("review_status")).upper()
+    return {
+        "rejected": {
+            "reason": (
+                "MIXED_EVIDENCE_UNVERIFIED"
+                if verdict == "NEEDS_REVIEW"
+                else "MIXED_DUPLICATE_CANDIDATE"
+            ),
+            "review_status": verdict,
+            "difference_report": report,
+            "identity": identifier,
+            "template_id": template_id,
+            "signature": contract.get(MIXED_SIGNATURE_KEY) or {},
+        }
+    }
+
+
 def _build_mixed_template_injection(
     *,
     product_type: str,
@@ -2075,6 +2389,7 @@ def _build_mixed_template_injection(
     history_incomplete: int = 0,
     identity: str = "",
     theme_proposition: Optional[Dict[str, str]] = None,
+    product_evidence: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Compile the authored mixed-accessory contract for one plan item.
 
@@ -2101,6 +2416,11 @@ def _build_mixed_template_injection(
     The theme reuses the existing content semantics (``content_angle_key`` /
     ``audience_tension_text`` / ``claim_keys``) and the existing item role, so no
     parallel theme registry or creative-history database is introduced.
+
+    The necklace V1 profile owns the request *before* any of the shapes above,
+    through :func:`_build_necklace_template_injection`.  It answers ``None`` for
+    every other product and while its own switch is off, so nothing below
+    changes for any existing category.
     """
 
     try:
@@ -2120,6 +2440,30 @@ def _build_mixed_template_injection(
         return {}
     if not accessory_mixed_template_enabled():
         return {}
+    # ── 项链专属混合展示 V1（默认关闭的独立分支）───────────────────────
+    # 必须先于共享 zone 解析：共享定义里 ``necklace`` 没有混合 zone，旧代码会对
+    # 它返回 ``{}``，让脚本悄悄退回单载体取景 —— 项链开关显式打开后，这正是
+    # 第 4 节明令禁止的「不声称新模板生效」的静默回退。
+    necklace_result = _build_necklace_template_injection(
+        product_type=product_type,
+        top_category=top_category,
+        item_index=item_index,
+        item_role=item_role,
+        content_angle_key=content_angle_key,
+        audience_tension_text=audience_tension_text,
+        claim_keys=claim_keys,
+        product_code=product_code,
+        execution_scope=execution_scope,
+        product_evidence=product_evidence,
+        theme_proposition=theme_proposition,
+        reserved_references=reserved_references,
+        history_references=history_references,
+        history_incomplete=history_incomplete,
+        identity=identity,
+    )
+    if necklace_result is not None:
+        return necklace_result
+
     scope_decision = mixed_scope_decision(execution_scope)
     if not scope_decision.get("eligible"):
         return {"scope_rejected": str(scope_decision.get("reason") or "")}
@@ -2154,39 +2498,12 @@ def _build_mixed_template_injection(
     # that own the content bundle resolve it there and hand it over; callers
     # that only have the legacy argument text are still guarded, so an internal
     # ID can never be promoted into the theme slot (package B3 / Review R4).
-    declared = dict(theme_proposition or {})
-    if declared:
-        thesis = _text(declared.get("thesis"))
-        thesis_source = _text(declared.get("thesis_source"))
-        thesis_source_ref = _text(declared.get("thesis_source_ref"))
-        thesis_input_gap = _text(declared.get("thesis_input_gap"))
-        argument_id = _text(declared.get("argument_id"))
-    else:
-        gap_code = "THESIS_NOT_READABLE"
-        try:
-            from core.accessory_mixed_templates import (
-                MIXED_THESIS_INPUT_GAP_READABILITY,
-                is_readable_theme_proposition,
-            )
-
-            gap_code = MIXED_THESIS_INPUT_GAP_READABILITY
-            readable = is_readable_theme_proposition(
-                audience_tension_text,
-                {"theme_id": theme_id, "parent_theme_id": angle or theme_id},
-            )
-        except Exception:  # noqa: BLE001 - never break planning on a missing guard
-            readable = bool(_text(audience_tension_text))
-        if readable:
-            thesis = _text(audience_tension_text).strip()
-            thesis_source = "AUDIENCE_TENSION_TEXT"
-            thesis_source_ref = "bundle.audience_tension.text"
-            thesis_input_gap = ""
-        else:
-            thesis = ""
-            thesis_source = ""
-            thesis_source_ref = ""
-            thesis_input_gap = gap_code
-        argument_id = ""
+    theme_inputs = _mixed_theme_inputs(
+        theme_proposition=theme_proposition,
+        audience_tension_text=audience_tension_text,
+        theme_id=theme_id,
+        fallback_theme_id=angle or theme_id,
+    )
 
     attempted: List[Dict[str, Any]] = []
     first_contract: Dict[str, Any] = {}
@@ -2198,22 +2515,13 @@ def _build_mixed_template_injection(
                 template_id=template_id,
                 environment_recipe_id=recipe_id,
                 product_identity_ref=_text(product_code),
-                content_theme={
-                    "theme_id": theme_id,
-                    "parent_theme_id": angle or theme_id,
-                    "candidate_role": candidate_role,
-                    "thesis": thesis,
-                    "argument_id": argument_id,
-                    "thesis_source": thesis_source,
-                    "thesis_source_ref": thesis_source_ref,
-                    "thesis_input_gap": thesis_input_gap,
-                    "approved_claim_refs": [
-                        _text(item) for item in (claim_keys or []) if _text(item)
-                    ],
-                    "evidence_refs": [
-                        _text(item) for item in (claim_keys or []) if _text(item)
-                    ],
-                },
+                content_theme=_mixed_content_theme(
+                    theme_id=theme_id,
+                    parent_theme_id=angle or theme_id,
+                    candidate_role=candidate_role,
+                    claim_keys=claim_keys,
+                    **theme_inputs,
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             return {"errors": [f"MIXED_CONTRACT_COMPILE_FAILED:{type(exc).__name__}"]}

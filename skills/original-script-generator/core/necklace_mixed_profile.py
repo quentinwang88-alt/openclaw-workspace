@@ -38,7 +38,7 @@ import json
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from core.accessory_mixed_templates import (
     EVIDENCE_ABSENT,
@@ -391,6 +391,193 @@ def _count_of(counts: Mapping[str, Any] | None, key: str) -> Optional[int]:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Instance evidence production
+# ---------------------------------------------------------------------------
+# The eligibility judge reads *instance* evidence, so something has to produce
+# it.  Two shapes are consulted, in this order:
+#
+# 1. an explicit structured count on the anchor card (``layer_count`` /
+#    ``pendant_count``) -- the authoritative shape once an upstream stage can
+#    supply one;
+# 2. a count the approved anchor text *states outright* ("单层", "双吊坠").
+#
+# Nothing here promotes a value out of the product name.  That is the whole
+# point of separating the two: "项链" proves neither a chain nor a pendant, and
+# a coiled chain in a photo is not evidence of several layers.  An unstated
+# count stays ``None`` and the judge reports ``UNKNOWN`` and refuses -- never a
+# guessed 1.
+
+
+def resolve_necklace_part_evidence(
+    *,
+    structure_facts: Mapping[str, Any] | None = None,
+    anchor_texts: Iterable[Any] | None = None,
+) -> Dict[str, Dict[str, str]]:
+    """Evidence for exactly the parts this profile's eligibility reads.
+
+    The enumeration source is the necklace profile's own
+    ``eligibility.required_part_states``, deliberately *not* the shared
+    :func:`resolve_part_evidence_map`.  The shared helper enumerates
+    ``optional_actions[].requires``, and V1 declares no optional action at all
+    (the two worn shots add no chain-pulling move).  Calling it here would
+    therefore return an empty map -- and an empty map is indistinguishable from
+    "no source confirmed anything", so a *missing enumeration entry* would read
+    as "there is no chain" and refuse every genuine necklace.  That silent
+    conflation is what this function exists to avoid.
+
+    The per-part judgement is still the shared, already-authoritative
+    :func:`resolve_part_evidence`: registry fact first, then approved anchor
+    text with negatives scanned before positives, else ``UNKNOWN``.  The shared
+    ``part_evidence_terms`` table already carries ``has_chain`` /
+    ``has_pendant``, so no second fact table is introduced.
+    """
+
+    from core.accessory_mixed_templates import resolve_part_evidence
+
+    rule = necklace_v1_eligibility_rule()
+    keys: List[str] = []
+    for part_key in (rule.get("required_part_states") or {}):
+        name = _text(part_key)
+        if name and name not in keys:
+            keys.append(name)
+
+    facts = dict(
+        structure_facts
+        if isinstance(structure_facts, Mapping) and structure_facts
+        else (necklace_v1_subtype_rule().get("structure_facts") or {})
+    )
+    return {
+        key: resolve_part_evidence(key, structure_facts=facts, anchor_texts=anchor_texts)
+        for key in keys
+    }
+
+
+def _declared_count(
+    anchor_card: Mapping[str, Any] | None,
+    keys: Sequence[str],
+) -> Optional[int]:
+    """Read an explicit structured count, or ``None`` when it is not stated."""
+
+    card = anchor_card if isinstance(anchor_card, Mapping) else {}
+    for key in keys:
+        raw = card.get(key)
+        if raw is None or raw == "":
+            continue
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return None
+
+
+def _count_from_anchor_text(
+    anchor_texts: Iterable[Any] | None,
+    term_groups: Mapping[str, Any] | None,
+) -> Tuple[Optional[int], str]:
+    """Read an *explicitly stated* count out of the approved anchor text.
+
+    Returns ``(count, matched_term)``.  Groups are scanned from the largest
+    count down, so a "双层" statement can never be read as a single layer just
+    because a one-layer spelling also appears somewhere in the same text.
+    """
+
+    texts = [_text(item) for item in (anchor_texts or []) if _text(item)]
+    blob = "；".join(texts)
+    if not blob or not isinstance(term_groups, Mapping):
+        return None, ""
+
+    groups: List[Tuple[int, List[str]]] = []
+    for label, terms in term_groups.items():
+        try:
+            count = int(_text(label))
+        except (TypeError, ValueError):
+            continue
+        terms_list = [_text(term) for term in (terms or []) if _text(term)]
+        if terms_list:
+            groups.append((count, terms_list))
+
+    for count, terms_list in sorted(groups, key=lambda item: -item[0]):
+        for term in terms_list:
+            if term in blob:
+                return count, term
+    return None, ""
+
+
+def resolve_necklace_structure_counts(
+    *,
+    anchor_card: Mapping[str, Any] | None = None,
+    anchor_texts: Iterable[Any] | None = None,
+) -> Dict[str, Any]:
+    """Layer / pendant counts, each carrying the source it was read from.
+
+    The trailing ``*_source`` keys are what make the number reviewable: a
+    reviewer can open the anchor card and see the exact field or phrase the
+    count came from instead of trusting a bare integer.
+    """
+
+    rule = necklace_v1_eligibility_rule()
+    card = anchor_card if isinstance(anchor_card, Mapping) else {}
+
+    out: Dict[str, Any] = {}
+    for key, term_field in (
+        (_text(rule.get("layer_count_key")) or "layer_count", "layer_count_terms"),
+        (_text(rule.get("pendant_count_key")) or "pendant_count", "pendant_count_terms"),
+    ):
+        value = _declared_count(card, (key, f"structure_{key}"))
+        source = "ANCHOR_CARD_FIELD" if value is not None else ""
+        if value is None:
+            value, matched = _count_from_anchor_text(
+                anchor_texts, rule.get(term_field)
+            )
+            source = f"ANCHOR_TEXT:{matched}" if value is not None else ""
+        if value is not None:
+            out[key] = value
+            out[f"{key}_source"] = source
+    return out
+
+
+def build_necklace_product_evidence(
+    *,
+    anchor_card: Mapping[str, Any] | None = None,
+    counts: Mapping[str, Any] | None = None,
+    evidence_ref: str = "",
+    structure_facts: Mapping[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """Assemble the instance evidence ``resolve_necklace_v1_scope`` consumes.
+
+    Only authoritative anchor text confirms a part: ``anchor_evidence_texts``
+    reads ``hard_anchors`` and deliberately excludes ``display_anchors``, which
+    may hold a model-authored presentation idea ("手持展示吊坠") that must never
+    be promoted into a product fact.
+
+    An explicit ``counts`` argument wins outright; otherwise the anchor card and
+    the approved anchor text are consulted.  A count that nobody states simply
+    does not appear in the map, and the judge reports ``UNKNOWN`` and refuses.
+    """
+
+    from core.accessory_mixed_templates import anchor_evidence_texts
+
+    card = anchor_card if isinstance(anchor_card, Mapping) else {}
+    anchor_texts = anchor_evidence_texts(card)
+    resolved_counts: Dict[str, Any] = dict(counts or {})
+    if not resolved_counts:
+        resolved_counts = resolve_necklace_structure_counts(
+            anchor_card=card, anchor_texts=anchor_texts
+        )
+    return {
+        "part_evidence": resolve_necklace_part_evidence(
+            structure_facts=structure_facts,
+            anchor_texts=anchor_texts,
+        ),
+        "counts": resolved_counts,
+        "evidence_ref": _text(evidence_ref) or _text(card.get("product_code")),
+        "anchor_texts": anchor_texts,
+    }
+
+
 def judge_necklace_eligibility(
     *,
     part_evidence: Mapping[str, Any] | None = None,
@@ -529,7 +716,8 @@ def resolve_necklace_v1_scope(
     from core.accessory_mixed_templates import mixed_scope_decision
 
     scope_decision = mixed_scope_decision(execution_scope)
-    if not scope_decision.get("eligible"):
+    decision["scope_eligible"] = bool(scope_decision.get("eligible"))
+    if not decision["scope_eligible"]:
         decision["reason"] = (
             f"{NECKLACE_SCOPE_UNSUPPORTED}:scope="
             f"{_text(scope_decision.get('reason'))}"

@@ -25,7 +25,17 @@
     "layer_count_key": "layer_count",
     "pendant_count_key": "pendant_count",
     "max_layer_count": 1,
-    "max_pendant_count": 1
+    "max_pendant_count": 1,
+    "_count_terms_note": "计数只能来自'明确写出的数字'：锚点卡的显式字段优先，其次是已批准锚点文本里明说的词。这里只收录明确表达件数的说法，且按件数从大到小匹配，所以'双层'不会被读成单层。没有明说就是 UNKNOWN 并拒绝，不猜 1 —— 图片里看到的绕圈摆放不构成多层证据。",
+    "layer_count_terms": {
+      "3": ["三层", "四层", "多层", "多条链"],
+      "2": ["双层", "两层", "两条链", "叠戴两条", "双重链"],
+      "1": ["单层", "一层", "单条链", "一条链", "一根链", "单链"]
+    },
+    "pendant_count_terms": {
+      "2": ["双吊坠", "两个吊坠", "双坠", "两颗吊坠"],
+      "1": ["单吊坠", "一个吊坠", "一颗吊坠", "单坠", "一枚吊坠"]
+    }
   },
   "environment_recipe": {
     "recipe_version": 1,
