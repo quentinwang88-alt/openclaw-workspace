@@ -133,6 +133,18 @@ _WORN_ONLY_TERMS: Tuple[str, ...] = (
     "佩戴中",
 )
 
+#: The delivered shot fields that *ask* for something.  The sweeps over
+#: foreign-zone words and worn body-zone words read only these, never the
+#: 不得出现 lists or the 本段手机构图 line: those have to name the banned thing
+#: in order to ban it, so including them turns a correct prohibition into a
+#: reported defect.
+_NECKLACE_POSITIVE_FIELDS: Tuple[str, ...] = (
+    "画面事件",
+    "人物动作",
+    "自然反应",
+    "视线关系",
+)
+
 #: Generic expressions that turn "show one detail" into a promise about the
 #: whole product.  They are refused in an observation job the same way the
 #: mainline contract refuses them in the core value (semantic reversal: after
@@ -158,7 +170,15 @@ NECKLACE_PROMPT_HANDHELD_CARRIER = "NECKLACE_PROMPT_HANDHELD_CARRIER"
 NECKLACE_PROMPT_STATIC_CARRIER = "NECKLACE_PROMPT_STATIC_CARRIER"
 NECKLACE_PROMPT_IDENTITY_REF = "NECKLACE_PROMPT_IDENTITY_REF"
 NECKLACE_PROMPT_FOREIGN_ZONE = "NECKLACE_PROMPT_FOREIGN_ZONE"
-NECKLACE_PROMPT_AUDIT_VERSION = "necklace-final-prompt-audit-v1"
+#: v2 changes *what the audit asks*, not just its wording: v1 required the
+#: frozen ``action`` clause verbatim in the delivered shot text and required the
+#: four ``商品必须可见`` lines to be identical.  Both are impossible for a real
+#: film (the 画面事件 is written by the generation model; the visible-anchor line
+#: is per-shot by construction), so v1 reported every correct necklace film as
+#: ``FAIL``.  The version is stamped into the delivered ``render_validation`` and
+#: pinned by the sync consumer, so a v1 audit must not be read as a v2 one -- a
+#: consumer that accepted v1 would be accepting a check that never ran.
+NECKLACE_PROMPT_AUDIT_VERSION = "necklace-final-prompt-audit-v2"
 
 #: The necklace profile's audit status is deliberately the same three-value
 #: vocabulary the shared audit uses, so callers can merge the two reports
@@ -174,22 +194,6 @@ def _text(value: Any) -> str:
 
 def _flag_enabled(value: Any) -> bool:
     return _text(value).lower() in _TRUE_TOKENS
-
-
-def _first_clause(text: str) -> str:
-    """The leading clause of a shot action -- what identifies that shot.
-
-    The renderer compacts long descriptions before they reach the video model,
-    so demanding the whole frozen sentence in the delivered prompt would report
-    a correctly rendered film as broken.  The leading clause is what survives
-    compaction, and it is what makes one shot distinguishable from another.
-    """
-
-    value = _text(text)
-    for separator in ("，", "。", "；"):
-        if separator in value:
-            return value.split(separator, 1)[0].strip()
-    return value
 
 
 def necklace_mixed_v1_enabled(enabled: Optional[bool] = None) -> bool:
@@ -1017,8 +1021,14 @@ def audit_necklace_final_prompt(
     * the two worn shots staying on the neck zone,
     * the hand-held shot carrying no body-zone wording,
     * the static last shot carrying no person,
-    * one unchanged product-identity reference across shots,
+    * one unchanged product across all shots,
     * no ear / wrist / hair action coming back.
+
+    Every assertion is made against something the *renderer* owns -- the frozen
+    contract, the header splice, or the lines the renderer writes from the
+    frozen unit.  Nothing here demands that the generation model copy frozen
+    wording into its own prose; see the two markers below for why that
+    distinction is the whole ballgame.
 
     Returns the same shape as the shared audit so callers can merge the two
     without learning a second state machine.  A non-necklace contract reports
@@ -1032,6 +1042,7 @@ def audit_necklace_final_prompt(
     from core.accessory_mixed_templates import (
         format_mixed_shot_time_range,
         frozen_unit_timeline,
+        mixed_shot_camera_line,
         parse_final_shot_blocks,
     )
 
@@ -1111,7 +1122,7 @@ def audit_necklace_final_prompt(
         )
 
     timeline, _total = frozen_unit_timeline(data)
-    identity_refs: List[str] = []
+    identity_clause_sets: List[List[str]] = []
 
     for position, unit in enumerate(units, start=1):
         if position > len(blocks):
@@ -1120,20 +1131,36 @@ def audit_necklace_final_prompt(
         unit_id = _text(unit.get("unit_id"))
         module = _text(unit.get("module"))
         lines = [_text(line) for line in (block.get("lines") or [])]
-        delivered = " ".join([_text(block.get("header_role"))] + lines)
+        fields = block.get("fields") or {}
 
         # Order, read as "is the shot this position owns actually the shot that
-        # shipped here?".  Compared against the frozen action rather than the
-        # header label: the header lists every module of the film, so it is not
-        # a per-shot answer and judging it as one would report a correct film as
-        # broken.
-        marker = _first_clause(_text(unit.get("action")))
-        if marker and marker not in delivered:
+        # shipped here?".
+        #
+        # The marker is the shot's own 本段手机构图 line, which the renderer
+        # writes from ``mixed_shot_camera_line(unit)`` -- "逐字取自该镜自己冻结
+        # 的取景范围" -- so the delivered value can be compared byte for byte
+        # with the frozen unit instead of being fuzzy-matched.  The four NMX
+        # framings share no text, so this is a per-shot answer; the header is not,
+        # because it lists every module of the film.
+        #
+        # The frozen ``action`` deliberately is *not* the marker.  The delivered
+        # 画面事件 / 人物动作 are written by the generation model from the frozen
+        # package: they realise the action semantically and never copy it word for
+        # word.  Demanding the clause verbatim failed all four shots of the first
+        # real production-shaped film (2026-09-19) while the film itself was
+        # correct -- the same over-strictness the earlier compaction fix had
+        # already hit once, one level deeper.  Whether an action was *respected*
+        # is a separate question, answered on the contract by
+        # ``validate_necklace_v1_contract`` and on the delivery by the shared
+        # module-boundary audit -- not by string equality against model prose.
+        framing_line = _text(fields.get("本段手机构图")) or _text(fields.get("手机机位"))
+        expected_framing = _text(mixed_shot_camera_line(unit))
+        if expected_framing and framing_line != expected_framing:
             issues.append(
-                _issue(position, unit_id, "画面事件", NECKLACE_PROMPT_SHOT_ORDER,
-                       delivered,
-                       f"第{position}镜（{module}）的冻结动作未出现在交付文本里"
-                       f"（标志：{marker}）")
+                _issue(position, unit_id, "本段手机构图", NECKLACE_PROMPT_SHOT_ORDER,
+                       framing_line,
+                       f"第{position}镜（{module}）的本段手机构图与该镜冻结取景不一致"
+                       f"（应为：{expected_framing}）")
             )
 
         expected_range = _text(format_mixed_shot_time_range(timeline.get(unit_id)))
@@ -1145,8 +1172,20 @@ def audit_necklace_final_prompt(
             )
 
         # Foreign vocabulary must not come back through any shot.
+        # Both sweeps read the *positive* instruction fields only.  The
+        # 本段手机构图 line and every 不得出现 list must *name* what is banned
+        # ("嘴部入画", "佩戴部位入画"), so sweeping the whole block would report a
+        # correct prohibition as the defect -- section 8's own warning, and the
+        # false positive this project has already paid for once.  Nothing is
+        # lost by narrowing: that line is byte-compared against the frozen unit
+        # above, so a foreign term spliced into it fails NECKLACE_PROMPT_SHOT_ORDER
+        # anyway.
+        positive = " ".join(
+            [_text(block.get("header_role"))]
+            + [_text(fields.get(label)) for label in _NECKLACE_POSITIVE_FIELDS]
+        )
         for term in _FOREIGN_ZONE_TERMS:
-            if term in delivered:
+            if term in positive:
                 issues.append(
                     _issue(position, unit_id, "画面事件",
                            NECKLACE_PROMPT_FOREIGN_ZONE, term,
@@ -1156,7 +1195,7 @@ def audit_necklace_final_prompt(
         # The two non-worn shots must not inherit worn body-zone wording.
         if module in ("HANDHELD_PRODUCT", "STATIC_PRODUCT"):
             for term in _WORN_ONLY_TERMS:
-                if term in delivered:
+                if term in positive:
                     code = (
                         NECKLACE_PROMPT_HANDHELD_CARRIER
                         if module == "HANDHELD_PRODUCT"
@@ -1168,17 +1207,41 @@ def audit_necklace_final_prompt(
                     )
 
         # One product across every shot.
+        #
+        # The delivered line is ``商品必须可见：`` + the *shot's own* visible
+        # anchors (``production_script_renderer`` reads them from the shot's
+        # ``product_anchors_visible``), and those anchors are chosen per shot:
+        # the worn shots state the落点, the hand-held shot states the pendant
+        # detail, the static shot states the chain layout.  Requiring the four
+        # lines to be *equal* therefore failed the first real film for the right
+        # reason (they differ by design).  What "商品身份引用一致" actually means
+        # is that the four shots are still talking about one product, so the
+        # check is on the clause every shot still states -- the intersection.
         for line in lines:
             if line.startswith("商品必须可见：") or line.startswith("每段商品必须可见："):
-                identity_refs.append(line.split("：", 1)[-1].strip())
+                clauses = [
+                    _text(part)
+                    for part in line.split("：", 1)[-1].split("；")
+                    if _text(part)
+                ]
+                if clauses:
+                    identity_clause_sets.append(clauses)
 
-    distinct_ids = [item for item in dict.fromkeys(identity_refs) if item]
-    if len(distinct_ids) > 1:
-        issues.append(
-            _issue(0, "", "商品必须可见", NECKLACE_PROMPT_IDENTITY_REF,
-                   " | ".join(distinct_ids),
-                   "同一片内出现了多个不同的商品身份引用")
-        )
+    # Fewer than two declaring shots means compaction hoisted the shared line to
+    # film level and left one copy (the I6 promotion the shared audit already
+    # documents) -- there is nothing to compare and nothing to accuse.
+    if len(identity_clause_sets) >= 2:
+        shared_identity = set(identity_clause_sets[0])
+        for clause_set in identity_clause_sets[1:]:
+            shared_identity &= set(clause_set)
+        if not shared_identity:
+            issues.append(
+                _issue(0, "", "商品必须可见", NECKLACE_PROMPT_IDENTITY_REF,
+                       " | ".join(
+                           "；".join(clause_set) for clause_set in identity_clause_sets
+                       ),
+                       "各镜声明的商品可见内容没有任何一条相同，无法确认全片是同一件商品")
+            )
 
     report["issues"] = issues
     report["issue_count"] = len(issues)

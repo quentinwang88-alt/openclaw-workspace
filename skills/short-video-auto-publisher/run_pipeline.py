@@ -674,7 +674,7 @@ def ensure_account_nurture_fields(client: FeishuBitableClient, field_names: list
             create_optional_field(
                 field_name, field_type=3, ui_type="SingleSelect",
                 property={"options": [{"name": x} for x in option_names]})
-    for field_name in ("默认产品编码",):
+    for field_name in ("指定商品编码",):
         if field_name not in existing:
             create_optional_field(field_name, field_type=1, ui_type="Text")
     return client.list_field_names()

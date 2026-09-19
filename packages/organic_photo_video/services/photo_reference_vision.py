@@ -2096,9 +2096,9 @@ class PhotoReferenceVisionService:
                 "6. 四套可围绕同一商品，不强制在轮廓颜色场景全部变化。")
         context = ""
         if str(content_requirement or "").strip():
-            context += "\\n内容要求：" + str(content_requirement)[:200]
+            context += "\\n内容要求：" + str(content_requirement)[:2000]
         if str(account_positioning or "").strip():
-            context += "\\n账号定位：" + str(account_positioning)[:200]
+            context += "\\n账号定位：" + str(account_positioning)[:400]
         return rules + context
 
     @staticmethod

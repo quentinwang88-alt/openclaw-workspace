@@ -307,11 +307,26 @@ class AutoPhotoSupply:
             # 方案 A2：先对账未完成绑定——行已建但合同未绑（attach 失败/
             # 响应未知）的，唯一匹配补绑；多匹配记异常，不猜不删不重建。
             for (account_id, slot_no), record_ids in sorted(rows_by_slot.items()):
-                if len(record_ids) != 1:
+                if len(record_ids) > 1:
                     self.ledger.record_gap(
                         scope=f"supply:{account_id}", reason="marker_ambiguous",
                         detail=f"slot{slot_no} 匹配到 {len(record_ids)} 行："
                                + ",".join(record_ids[:5]))
+                    continue
+                # F5.2: 单合同异常隔离——attach 失败不终止整批（评审§F5.2）
+                if len(record_ids) == 1:
+                    try:
+                        contract_id = f"{account_id}|{self.today}|{slot_no}"
+                        current = self.contract_store.get(contract_id)
+                        if (current is not None
+                                and current.get("status") == "intent"):
+                            self.contract_store.attach_record(
+                                contract_id, record_ids[0])
+                    except Exception as exc:  # noqa: BLE001
+                        self.ledger.record_gap(
+                            scope=f"supply:{account_id}",
+                            reason="intent_attach_failed",
+                            detail=f"slot{slot_no}: {str(exc)[:120]}")
                     continue
                 contract_id = f"{account_id}|{self.today}|{slot_no}"
                 try:
@@ -1032,14 +1047,33 @@ class AutoPhotoSupply:
             "content_requirement": requirement,
             "policy_version": SUPPLY_POLICY_VERSION,
         }
-        # C（§Phase C）：合同冻结参考讲解依据——选中页的逐页摘要
-        # （供攻略/教程主题追溯参考来源；旧主题多一个键不影响行为）
-        contract["reference_basis"] = "; ".join(
-            str((pg or {}).get("outfit_summary") or "").strip()
-            for pg in (main_analysis.get("pages") or [])
-            if int((pg or {}).get("seq") or 0) in {
-                int(p.get("seq") or 0) for p in selected_pages}
-        )[:500]
+        # F3.2（§Phase 2/F3）：采用页（语义依据）与上传页（生图图片）分离。
+        # 语义依据 = 终选结果的 adoption + selected_pages（可能为空=零图）；
+        # 不再取"笔记前四页"。指定商品时同槽位过滤也覆盖页摘要。
+        reference_pages = []
+        if selection is not None:
+            selected_seqs = {
+                int(p.get("seq") or 0) for p in (selection.pages or [])
+            }
+            for pg in (main_analysis.get("pages") or []):
+                seq = int((pg or {}).get("seq") or 0)
+                summary = str((pg or {}).get("outfit_summary") or "").strip()
+                if not summary:
+                    continue
+                # 语义采用页 = 终选选中页（有图模式）或所有有摘要的页（零图模式）
+                if selected_seqs and seq not in selected_seqs:
+                    continue
+                # 指定商品时过滤同槽位品类（F3.2：覆盖页摘要）
+                if product_snapshot:
+                    p_name = str(product_snapshot.get("product_name") or "")
+                    p_cat = str(product_snapshot.get("category") or "")
+                    outerwear_words = ("外套", "开衫", "卫衣", "毛衣", "衬衫",
+                                       "夹克", "大衣", "风衣", "羽绒服", "棉服",
+                                       "羊羔毛", "蓬松", "针织")
+                    if p_cat == "outerwear" and any(w in summary for w in outerwear_words):
+                        continue
+                reference_pages.append(f"p{seq}:{summary}")
+        contract["reference_basis"] = "; ".join(reference_pages)[:2000]
 
         contract["contract_fingerprint"] = contract_fingerprint(
             adoption=contract["adoption"],

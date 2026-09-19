@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS external_supply_contracts (
     temperature_band TEXT NOT NULL DEFAULT '',
     topic_statement TEXT NOT NULL DEFAULT '',
     effective_brief TEXT NOT NULL DEFAULT '',
+    reference_basis TEXT NOT NULL DEFAULT '',
     content_requirement TEXT NOT NULL DEFAULT '',
     policy_version TEXT NOT NULL,
     contract_fingerprint TEXT NOT NULL,
@@ -116,7 +117,8 @@ class ExternalSupplyContractStore:
             # 既有库迁移：temperature_band / topic_statement / effective_brief 列
             columns = {row[1] for row in conn.execute(
                 "PRAGMA table_info(external_supply_contracts)")}
-            for column in ("temperature_band", "topic_statement", "effective_brief"):
+            for column in ("temperature_band", "topic_statement", "effective_brief",
+                           "reference_basis"):
                 if column not in columns:
                     conn.execute(
                         "ALTER TABLE external_supply_contracts"
@@ -151,8 +153,9 @@ class ExternalSupplyContractStore:
                 " source_type, authorization, adoption, main_note_id,"
                 " main_note_title, selected_pages, product, destination,"
                 " temperature_band, topic_statement, effective_brief,"
-                " content_requirement, policy_version, contract_fingerprint)"
-                " VALUES (?,?,?,?, 'intent',?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " reference_basis, content_requirement, policy_version,"
+                " contract_fingerprint)"
+                " VALUES (?,?,?,?, 'intent',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (contract_id, account_id, supply_date, slot,
                  str(contract.get("source_type") or "xhs_reference"),
                  str(contract.get("authorization") or "reference_only"),
@@ -167,6 +170,7 @@ class ExternalSupplyContractStore:
                  str(contract.get("topic_statement") or "")[:300],
                  json.dumps(contract.get("effective_brief") or {},
                             ensure_ascii=False),
+                 str(contract.get("reference_basis") or "")[:2000],
                  str(contract.get("content_requirement") or "")[:2000],
                  str(contract.get("policy_version") or SUPPLY_POLICY_VERSION),
                  str(contract.get("contract_fingerprint") or "")))

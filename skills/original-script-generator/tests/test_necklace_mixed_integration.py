@@ -597,6 +597,73 @@ def _necklace_contract():
         return _inject()["contract"]
 
 
+#: The capture-rhythm contract a real necklace film is rendered under, copied
+#: from the first production-shaped batch (2026-09-19, run 466).  It matters more
+#: than it looks: ``_capture_rhythm_contract`` only takes the multiclip branch
+#: when the profile is exactly ``NATIVE_MULTI_CLIP_V1``, and *that* branch is the
+#: only one that writes the per-shot ``本段手机构图`` line out of the frozen unit.
+#: Without it the renderer falls back to ``手机机位：<shot camera prose>``, so the
+#: fixture used to exercise a render shape production never emits -- and the
+#: order check, which reads ``本段手机构图``, could not see the marker at all.
+_MULTICLIP_RHYTHM = {
+    "schema_version": "capture-rhythm-contract-v5-structure-visible-clips",
+    "profile": "NATIVE_MULTI_CLIP_V1",
+    "capture_unit_count": 4,
+    "capture_grammar": "ROUTED_STRUCTURE_VISIBLE_CLIPS",
+    "edit_style": "NATIVE_HARD_CUT",
+}
+
+#: The narrative roles the projection assigns to the four shots of the one V1
+#: template.  The fixture used to reuse the *module* name, which rendered a
+#: header no real film has (``【片段01｜0-4s｜WORN_DETAIL+WORN_RELATION+…】``).
+_SHOT_ROLES = ("HOOK", "PROOF", "PROOF", "ENDING")
+
+#: Per-shot visible anchors, verbatim from that same real film.  They differ
+#: from shot to shot *by design* -- the worn shots state the落点, the hand-held
+#: shot states the pendant detail, the static shot states the chain layout --
+#: and they share exactly one clause.  A fixture that handed all four shots the
+#: same list is why "the four lines must be equal" could pass the whole suite
+#: while refusing a correct film.
+_VISIBLE_ANCHORS = (
+    (
+        "项链主体为金色调细链搭配中央字母H吊坠",
+        "吊坠表面有透明闪光小颗粒装饰",
+        "佩戴落点在颈部正前方、锁骨附近",
+    ),
+    (
+        "项链主体为金色调细链搭配中央字母H吊坠",
+        "佩戴落点在颈部正前方、锁骨附近",
+        "单层金色细链，只挂一枚吊坠",
+    ),
+    (
+        "项链主体为金色调细链搭配中央字母H吊坠",
+        "吊坠表面有透明闪光小颗粒装饰",
+    ),
+    (
+        "项链主体为金色调细链搭配中央字母H吊坠",
+        "吊坠表面有透明闪光小颗粒装饰",
+        "单层金色细链，只挂一枚吊坠",
+    ),
+)
+
+#: What the generation model actually writes into 画面事件: it *realises* the
+#: frozen action, it does not copy it.  Same source as above -- the frozen action
+#: of shot 1 was "颈部下段与锁骨小幅自然变化，展示链条弧度与吊坠的落点" and the
+#: delivered prose was "办公室出口附近的自然光墙面前，画面只取创作者颈部下段…".
+#: Feeding the frozen wording back would make this suite blind to precisely the
+#: over-strictness the audit was corrected for, so the fixture must not do it.
+_REALISED_PROSE = (
+    "办公室出口附近的自然光墙面前，画面只取创作者颈部下段与锁骨，"
+    "金色调细链和位于正前方的字母H吊坠清楚进入画面",
+    "直接切到同一固定手机布置下稍宽的领口与肩部画面，"
+    "项链与领口的整体比例同时可见，背景仍是同一面自然光墙",
+    "直接切到同一地点的手持商品近景，少量手指稳定承托商品，"
+    "字母H吊坠成为清楚主体，链条自然铺落",
+    "同一矮柜上的哑光首饰展示托盘占据画面主体，项链自然静置，"
+    "单层细链布局与中央字母H吊坠轮廓完整可见",
+)
+
+
 def _storyboard_for(contract, *, time_override=None, action_override=None):
     """A storyboard carrying the frozen timeline, as the projection produces it."""
 
@@ -606,22 +673,39 @@ def _storyboard_for(contract, *, time_override=None, action_override=None):
     )
 
     timeline, _total = frozen_unit_timeline(contract)
+    units = contract.get("capture_units") or []
     shots = []
-    for index, unit in enumerate(contract.get("capture_units") or []):
+    for index, unit in enumerate(units):
         rng = format_mixed_shot_time_range(timeline.get(unit.get("unit_id")) or {})
         if time_override and index in time_override:
             rng = time_override[index]
-        action = (action_override or {}).get(index) or unit.get("action")
+        role = (
+            _SHOT_ROLES[index]
+            if index < len(_SHOT_ROLES)
+            else str(unit.get("module") or "")
+        )
+        anchors = (
+            list(_VISIBLE_ANCHORS[index])
+            if index < len(_VISIBLE_ANCHORS)
+            else ["单层链圆形吊坠项链"]
+        )
+        prose = (
+            _REALISED_PROSE[index]
+            if index < len(_REALISED_PROSE)
+            else str(unit.get("action") or "").strip()
+        )
+        action = (action_override or {}).get(index) or prose
         shots.append(
             {
                 "shot_no": index + 1,
                 "capture_unit_id": unit.get("unit_id"),
                 "time_range": rng,
-                "narrative_role": unit.get("module"),
+                "narrative_role": role,
+                "structure_role": role,
                 "visual_content": action,
                 "character_action": action,
                 "camera": unit.get("view_label"),
-                "product_anchors_visible": ["单层链圆形吊坠项链"],
+                "product_anchors_visible": anchors,
                 "supported_claim_keys": ["C1"],
             }
         )
@@ -642,6 +726,7 @@ def _render(contract, storyboard, *, product_identity="单层链圆形吊坠项�
             "capture_mode": "MIXED_MODULES",
         },
         "storyboard": storyboard,
+        "capture_rhythm_contract": dict(_MULTICLIP_RHYTHM),
         "product_truth": {
             "product_identity": product_identity,
             "identity_anchors": [product_identity],
@@ -796,10 +881,88 @@ class NecklaceRenderedPromptAuditTest(unittest.TestCase):
         storyboard = _storyboard_for(self.contract)
         storyboard[2] = dict(storyboard[2])
         storyboard[2]["product_anchors_visible"] = ["另一款银链吊坠"]
-        # The prompt echoes the per-shot anchor line, so two identities appear.
+        # The prompt echoes the per-shot anchor line, so the third shot declares a
+        # second product and the four shots stop sharing any clause.  Asserting
+        # the echo first keeps the code assertion from passing vacuously -- the
+        # earlier version wrapped it in an ``if``, which silently turned this into
+        # a no-op the moment the shape of the prompt changed.
         out, audit = self._audit(storyboard)
-        if "另一款银链吊坠" in out["text"]:
-            self.assertIn("NECKLACE_PROMPT_IDENTITY_REF", self._codes(audit))
+        self.assertIn("另一款银链吊坠", out["text"])
+        self.assertIn("NECKLACE_PROMPT_IDENTITY_REF", self._codes(audit))
+
+    def test_every_shot_carries_the_frozen_framing_verbatim(self):
+        # The order check reads 本段手机构图 as its per-shot marker.  That check
+        # only means something if the line is the *renderer's* own output, so the
+        # fixture asserts the delivered value is byte-identical to the frozen
+        # framing of the unit that shipped in that position -- and that it took
+        # the multiclip branch at all, since the legacy branch never writes it.
+        from core.accessory_mixed_templates import (
+            mixed_shot_camera_line,
+            parse_final_shot_blocks,
+        )
+
+        units = self.contract.get("capture_units") or []
+        out = _render(self.contract, _storyboard_for(self.contract))
+        blocks = parse_final_shot_blocks(out["text"])
+        self.assertEqual(len(blocks), len(units))
+        for position, (block, unit) in enumerate(zip(blocks, units), start=1):
+            with self.subTest(position=position):
+                self.assertEqual(
+                    (block.get("fields") or {}).get("本段手机构图"),
+                    mixed_shot_camera_line(unit),
+                )
+
+    def test_the_four_anchor_lines_differ_and_the_film_still_passes(self):
+        # The exact shape that refused the first real film.  ``商品必须可见`` is
+        # written from each shot's own ``product_anchors_visible``, so the four
+        # lines are deliberately different; "one product across the film" can
+        # therefore only mean "the shots still share a clause", never "the four
+        # lines are equal".  Both halves are asserted: the lines really do
+        # differ, and the audit accepts them.
+        from core.accessory_mixed_templates import parse_final_shot_blocks
+
+        storyboard = _storyboard_for(self.contract)
+        anchors = [tuple(shot["product_anchors_visible"]) for shot in storyboard]
+        self.assertEqual(len(set(anchors)), len(anchors), anchors)
+        shared = set(anchors[0])
+        for value in anchors[1:]:
+            shared &= set(value)
+        self.assertTrue(shared, "夹具必须保留至少一条四镜共同锚点")
+
+        out = _render(self.contract, storyboard)
+        blocks = parse_final_shot_blocks(out["text"])
+        lines = [
+            (block.get("fields") or {}).get("商品必须可见") for block in blocks
+        ]
+        self.assertEqual(len(set(lines)), len(lines), lines)
+        _, audit = self._audit(storyboard)
+        self.assertEqual(audit["status"], "PASS", audit)
+
+    def test_the_fixture_never_feeds_the_frozen_action_back_to_the_audit(self):
+        # Guards the fixture itself.  When 画面事件 was the frozen action copied
+        # verbatim, every over-strict "the model must repeat the frozen wording"
+        # rule looked satisfied here and failed on real output.  If this ever
+        # regresses, the order check goes back to being unverified.
+        units = self.contract.get("capture_units") or []
+        out = _render(self.contract, _storyboard_for(self.contract))
+        for position, unit in enumerate(units, start=1):
+            frozen = str(unit.get("action") or "").strip()
+            with self.subTest(position=position):
+                self.assertTrue(frozen)
+                self.assertNotIn(frozen, out["text"])
+
+    def test_the_audit_revision_is_the_one_the_consumer_pins(self):
+        # The final consumer (``skills/script-run-manager-sync``) refuses a frozen
+        # row whose necklace audit is not stamped with the revision it knows, so
+        # the two literals have to move together.  Pinning the value here is what
+        # makes the consumer's own drift guard meaningful.
+        from core.necklace_mixed_profile import NECKLACE_PROMPT_AUDIT_VERSION
+
+        _out, audit = self._audit(_storyboard_for(self.contract))
+        self.assertEqual(
+            NECKLACE_PROMPT_AUDIT_VERSION, "necklace-final-prompt-audit-v2"
+        )
+        self.assertEqual(audit.get("version"), "necklace-final-prompt-audit-v2")
 
     def test_a_non_necklace_contract_is_not_applicable(self):
         from core.necklace_mixed_profile import audit_necklace_final_prompt

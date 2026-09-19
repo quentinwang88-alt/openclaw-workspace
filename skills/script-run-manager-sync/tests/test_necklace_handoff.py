@@ -382,6 +382,19 @@ class NecklaceHandoffGateTest(unittest.TestCase):
         reason = self.verdict(prompt)
         self.assertTrue(reason.startswith(NECKLACE_HANDOFF_STALE_LOCAL_VERSION), reason)
 
+    def test_a_row_audited_by_the_previous_revision_is_refused(self):
+        # The realistic upgrade case, not a synthetic one: rows frozen before the
+        # v1 -> v2 correction carry a v1 stamp, and v1 compared the generated
+        # prose against the frozen action and demanded four equal anchor lines.
+        # Such a PASS is not evidence about the current checks, so the gate has to
+        # keep those rows out rather than grandfather them in.
+        prompt = nmx_prompt()
+        validation = validation_payload(prompt, local_audit_version="necklace-final-prompt-audit-v1")
+        self.source.add("S1", result_json(prompt, validation=validation))
+        reason = self.verdict(prompt)
+        self.assertTrue(reason.startswith(NECKLACE_HANDOFF_STALE_LOCAL_VERSION), reason)
+        self.assertIn(NECKLACE_HANDOFF_AUDIT_VERSION, reason)
+
     def test_an_older_shared_audit_revision_is_refused(self):
         prompt = nmx_prompt()
         validation = validation_payload(prompt, shared_version="mixed-execution-audit-v0")

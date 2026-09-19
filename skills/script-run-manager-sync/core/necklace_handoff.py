@@ -73,7 +73,17 @@ NECKLACE_HANDOFF_TEMPLATE_ID = "NMX_01_WEAR_DETAIL_STATIC"
 # The necklace audit revision this consumer is able to judge.  Kept in step with
 # ``core.necklace_mixed_profile.NECKLACE_PROMPT_AUDIT_VERSION`` in the
 # original-script skill; the drift guard in the test suite pins both literals.
-NECKLACE_HANDOFF_AUDIT_VERSION = "necklace-final-prompt-audit-v1"
+#
+# Why the revision moved to v2 (2026-09-19): v1 judged two things against the
+# wrong authority and refused a correct film.  It compared each shot's frozen
+# ``action`` with the delivered 画面事件 / 人物动作, which the generation model
+# writes in its own words, and it required the four ``商品必须可见`` lines to be
+# *equal* even though the renderer derives each one from that shot's own anchors.
+# v2 reads the shot's 本段手机构图 line (renderer-owned, byte-identical to the
+# frozen framing) and compares the four anchor lines by the clause they share.
+# A row frozen with a v1 audit is therefore not evidence about the current
+# checks: it may have been stamped PASS without either check meaning anything.
+NECKLACE_HANDOFF_AUDIT_VERSION = "necklace-final-prompt-audit-v2"
 
 # The shared execution-audit revision the necklace gate is written against
 # (``core.accessory_mixed_templates.EXECUTION_AUDIT_VERSION`` in the
