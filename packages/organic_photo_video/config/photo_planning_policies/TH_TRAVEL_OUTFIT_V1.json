@@ -13,7 +13,9 @@
     "AUTUMN_OUTFIT",
     "COOL_WEATHER_TRAVEL",
     "DAILY_COMMUTE",
-    "CAFE_DATE"
+    "CAFE_DATE",
+    "TRAVEL_STYLING_GUIDE",
+    "COLOR_TUTORIAL"
   ],
   "minimum_cross_post_axis_difference": 2,
   "theme_family_order": {

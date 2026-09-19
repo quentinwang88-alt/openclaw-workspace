@@ -48,7 +48,7 @@
 - **任务 1**：账号 `OPV_TH_TEST_001`；市场/语言 `TH`/`th-TH`；钩子 `destination_temperature`
   - 配方：`PHOTO_TH_TRAVEL_OUTFIT_V2`（native_photo，5 页，锚点槽位 2）
   - 规划流程：`travel_two_step`
-  - 主题范围：`AUTUMN_OUTFIT`、`COOL_WEATHER_TRAVEL`、`DAILY_COMMUTE`、`CAFE_DATE`
+  - 主题范围：`AUTUMN_OUTFIT`、`COOL_WEATHER_TRAVEL`、`DAILY_COMMUTE`、`CAFE_DATE`、`TRAVEL_STYLING_GUIDE`、`COLOR_TUTORIAL`
   - 主题缺省：必填
   - 文案来源：v1 内联（随「图文主题」携带 th-TH 文案）
   - 排版：版式 `FULL_BLEED`、`CHOICE_DETAIL`；角色 `travel_cover`、`look_a`、`look_b`、`look_c`、`look_d_with_cta`
@@ -166,7 +166,7 @@
 - **任务 1**：账号 `OPV_VN_TEST_001`；市场/语言 `VN`/`vi-VN`；钩子 `destination_temperature`
   - 配方：`PHOTO_TRAVEL_OUTFIT_V3`（native_photo，5 页，锚点槽位 2）
   - 规划流程：`travel_two_step`
-  - 主题范围：`AUTUMN_OUTFIT`、`COOL_WEATHER_TRAVEL`、`DAILY_COMMUTE`、`CAFE_DATE`
+  - 主题范围：`AUTUMN_OUTFIT`、`COOL_WEATHER_TRAVEL`、`DAILY_COMMUTE`、`CAFE_DATE`、`TRAVEL_STYLING_GUIDE`、`COLOR_TUTORIAL`
   - 主题缺省：必填
   - 文案来源：语言包 `th-TH` → `TH_TRAVEL_OUTFIT_V3`；`vi-VN` → `VN_TRAVEL_OUTFIT_V1`
   - 排版：版式 `FULL_BLEED`、`CHOICE_DETAIL`；角色 `travel_cover`、`look_a`、`look_b`、`look_c`、`look_d_with_cta`
