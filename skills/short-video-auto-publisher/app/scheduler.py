@@ -396,18 +396,22 @@ def build_photo_content_profile(
         profile["positioning"] = str(positioning).strip()
     if str(default_theme or "").strip():
         profile["default_theme"] = str(default_theme).strip()
-    # P2 精简：内容表达/视频风格列已删——程序接管默认值
-    profile["expression_mode"] = "STYLE_INSPIRATION"
-    profile["visual_baseline"] = (
-        "中性奶白底、自然肤色、柔和对比与低至中饱和；商品真实颜色与自然肤色优先")
+    # A2（§A2）：只补缺省，不无条件覆盖——不同账号保持差异化。
+    # 新主题（攻略/教程）由 supply strategy 或 default_theme 驱动 PRACTICAL_GUIDE；
+    # 无明确攻略信号时保持空（不写默认表达/基调），由下游视觉预设决定画面。
+    if not profile.get("expression_mode"):
+        theme_hint = str(default_theme or "")
+        if "攻略" in theme_hint or "教程" in theme_hint:
+            profile["expression_mode"] = "PRACTICAL_GUIDE"
     attachment = extract_attachment(style_image)
     if attachment:
         profile["style_image"] = {
             "file_token": str(attachment.get("file_token") or ""),
             "name": str(attachment.get("name") or ""),
         }
-    # P2 精简：领取范围列已删——统一默认仅本账号任务
-    profile["photo_claim_scope"] = "own_tasks_only"
+    # A2：领取范围列已删——只在完全无来源时补默认（own_tasks_only）
+    if not profile.get("photo_claim_scope"):
+        profile["photo_claim_scope"] = "own_tasks_only"
     destinations_raw = travel_destinations
     if isinstance(destinations_raw, str):
         destinations_raw = [x.strip() for x in re.split(r"[，,、\s]+", destinations_raw) if x.strip()]
@@ -453,9 +457,16 @@ def _build_supply_policy(
     if (not automation_text or automation_text == "关闭") and not preset \
             and not codes and not scope and not limit:
         return {}
+    # A1（§A1）：填码即指定——编码非空推导 specified；矛盾（明确"不指定"却填了码）
+    # 时编码优先（运营可能换模式忘清码），但记录原因在 preset 同层不占字段
+    mode = str(product_mode or "").strip()
+    if codes and mode != "使用指定商品":
+        mode = "使用指定商品"
+    elif not codes and not mode:
+        mode = "不指定商品"
     return {
         "content_strategy": str(strategy or "").strip() or "定位优先",
-        "product_mode": str(product_mode or "").strip() or "不指定商品",
+        "product_mode": mode,
         "product_codes": codes,
         "automation": automation_text or "关闭",
         "daily_limit": limit,

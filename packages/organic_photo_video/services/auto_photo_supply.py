@@ -505,7 +505,10 @@ class AutoPhotoSupply:
         codes = list(policy.get("product_codes") or [])
         specified = policy.get("product_mode") == SUPPLY_PRODUCT_MODE_SPECIFIED
         scope_themes = [t for t in (policy.get("material_scope") or []) if t] or None
+        # A3（§A3）："自动"在最前面归一为空——后续所有分支统一处理
         default_theme = str(binding.profile.get("default_theme") or "").strip()
+        if default_theme == "自动":
+            default_theme = ""
         positioning_first = policy.get("content_strategy") == SUPPLY_STRATEGY_POSITIONING_FIRST
 
         for slot in range(created + 1, limit + 1):
@@ -907,9 +910,7 @@ class AutoPhotoSupply:
 
         # Phase 1.1（方案 §1.1）：主题先定，选址跟着主题走。
         # 具体旅行主题（旅行·打卡穿搭等）必须有地点；无可用地点不建行。
-        theme_value = default_theme or ""
-        if theme_value == "自动":
-            theme_value = ""       # "自动"=由程序/参考推导，不是有效主题枚举
+        theme_value = default_theme or ""   # "自动"已在入口归一
         theme_derived_note = ""
         effective_preset = preset
         if not theme_value:
