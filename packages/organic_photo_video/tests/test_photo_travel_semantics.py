@@ -15,7 +15,8 @@ from services.photo_reference_vision import (
     PhotoReferenceVisionError, PhotoReferenceVisionService,
 )
 from services.photo_travel_qa import (
-    FAILURE_SCENE_MISMATCH, FAILURE_WEATHER_MISMATCH, moment_rules_from_contract,
+    FAILURE_SCENE_MISMATCH, FAILURE_UNKNOWN_SCENE, FAILURE_WEATHER_MISMATCH,
+    moment_rules_from_contract,
     failed_roles_from_travel_qa, normalize_travel_qa, travel_qa_as_alignment,
 )
 from services.photo_style_reference_supply import (
@@ -1310,6 +1311,32 @@ class FixedBackgroundGuardTest(unittest.TestCase):
         )
         self.assertTrue(qa["passed"])
         self.assertTrue(all(item["passed"] for item in qa["roles"]))
+
+    def test_fixed_background_unknown_moment_is_not_a_failure(self):
+        # 教程收口（2026-09-19 任务二④）：纯色棚拍背景看不出场所是设计本身，
+        # unknown moment 在固定背景下不再判硬失败；证据与商品检查照常执行。
+        raw = self.raw_all_same_scene()
+        raw["destination_conflict"] = False
+        for page in raw["pages"]:
+            page["observed_moment"] = "unknown"
+        qa = normalize_travel_qa(
+            raw, look_plans=travel_looks(), moment_rules=self.moment_rules,
+            travel_place="", fixed_background=True,
+        )
+        self.assertTrue(qa["passed"], [r.get("failure_code") for r in qa["roles"]])
+        self.assertTrue(all(item["passed"] for item in qa["roles"]))
+
+    def test_unknown_moment_still_fails_without_fixed_background(self):
+        raw = self.raw_all_same_scene()
+        raw["destination_conflict"] = False
+        for page in raw["pages"]:
+            page["observed_moment"] = "unknown"
+        qa = normalize_travel_qa(
+            raw, look_plans=travel_looks(), moment_rules=self.moment_rules,
+        )
+        self.assertFalse(qa["passed"])
+        self.assertTrue(all(
+            item["failure_code"] == FAILURE_UNKNOWN_SCENE for item in qa["roles"]))
 
     def test_without_fixed_background_the_guard_still_fails(self):
         raw = self.raw_all_same_scene()

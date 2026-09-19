@@ -196,7 +196,11 @@ def normalize_travel_qa(
         )
 
         failure_code = ""
-        if not observed or observed.lower() == "unknown":
+        if (not observed or observed.lower() == "unknown") and not fixed_background:
+            # 固定背景（2026-09-19 教程收口）：moment 只是鞋履/步行规则的
+            # 规划语境，纯色/棚拍背景看不出场所是设计本身——unknown 不再
+            # 判硬失败，证据与商品/穿搭检查继续。此前纯色教程四页全被
+            # FAILURE_UNKNOWN_SCENE 拒掉（真实跑测任务二④）。
             failure_code = FAILURE_UNKNOWN_SCENE
         elif observed != moment and not fixed_background:
             # 固定背景（Phase 3）：moment 只是鞋履/步行规则的规划语境，画面

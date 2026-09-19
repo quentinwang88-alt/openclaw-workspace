@@ -99,6 +99,21 @@ class RenderTest(unittest.TestCase):
         self.assertTrue(FONT_REGULAR.is_file() and FONT_BOLD.is_file())
         self.assertEqual(ImageFont.truetype(str(FONT_BOLD), 40).getname()[1], "Bold")
 
+    def test_bottom_zone_tall_thai_ink_stays_inside_canvas(self):
+        # 教程收口（2026-09-19 任务二④）：底部条带按 font.size 估算块高会低估
+        # 泰文上下声调墨迹，末行贴边被裁。渲染后整块按实测墨迹上移，最末行
+        # 墨迹下缘必须留在画布安全边距内。
+        template = self._template("PHOTO_STRUCTURED_CLEAN_V1")
+        text = "ใช้สีซ้ำเชื่อมลุค — เชื่อมช่วงบนและล่าง มีกระโปรงครีมช่วยพักสายตา บันทึกไว้จัดลุคทริปหน้า"
+        image = Image.new("RGB", (template["width"], template["height"]), "#FAF8F4")
+        draw = ImageDraw.Draw(image)
+        render_structured_page(image, text, template, index=4, cover_index=1, total=4)
+        # 扫最下方 2% 行带：允许渐变底色，但不允许纯黑/深色文字墨迹贴到最后一行
+        bottom_band = image.crop((
+            0, int(image.height * 0.985), image.width, image.height))
+        extrema = bottom_band.convert("L").getextrema()
+        self.assertGreater(extrema[0], 30, "底部最后1.5%不应出现文字墨迹（被裁的末行）")
+
     def test_unknown_overlay_style_rejected(self):
         bad = {"schema_version": "opv-photo-layout-v2", "layout_id": "X",
                "layout_version": 1,

@@ -276,15 +276,26 @@ def _paint(
     # 统一 bbox：渐变底/对齐均以同一 textbbox 结果计算。
     ink_left, ink_right = margin_x, image.width - margin_x
     y = top
+    ink_bottom = top + block_height
     for (lines, font, color), _height in zip(laid, line_heights):
         for line in lines:
             bbox = draw.textbbox((margin_x, y), line, font=font, anchor="la")
             ink_left = min(ink_left, bbox[0])
             ink_right = max(ink_right, bbox[2])
+            ink_bottom = max(ink_bottom, bbox[3])
             y = bbox[3] + spacing
+    ink_overflow = 0
+    if not top_zone:
+        # 底部条带（2026-09-19 教程收口）：block_height 按 font.size 估算会
+        # 低估泰文上下声调/元音的实际墨迹高度，末行下缘贴边被裁（真实跑测
+        # 任务二④ P3/P4）。按实测墨迹下缘把整块上移，保持安全边距完整。
+        ink_overflow = max(0, ink_bottom - (top + block_height))
+        if ink_overflow > 0:
+            top -= int(ink_overflow) + spacing
+            ink_bottom -= int(ink_overflow) + spacing
     if style == "scene":
         _draw_scrim(image, top_zone=top_zone,
-                    top=top, bottom=top + block_height,
+                    top=top, bottom=max(top + block_height, ink_bottom + spacing),
                     left=max(0, ink_left - 18), right=min(image.width, ink_right + 18),
                     template=template)
         draw = ImageDraw.Draw(image)
