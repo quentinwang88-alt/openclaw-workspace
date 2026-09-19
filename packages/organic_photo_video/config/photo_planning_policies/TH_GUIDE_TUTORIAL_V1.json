@@ -1,0 +1,60 @@
+{
+  "schema_version": "opv-photo-planning-policy-v1",
+  "policy_id": "TH_GUIDE_TUTORIAL_V1",
+  "policy_version": 1,
+  "supported_theme_keys": ["TRAVEL_STYLING_GUIDE", "COLOR_TUTORIAL"],
+  "narrative_kinds": {
+    "travel_guide": {
+      "label_zh": "旅行穿搭攻略",
+      "question_hints": [
+        "长时间步行如何搭配",
+        "室内外穿脱如何安排",
+        "少带衣服如何多组合"
+      ],
+      "page_structure": [
+        {"page": 1, "source_role": "look_a", "page_role": "question_answer", "要点": "问题+整体答案预览", "画面": "单张完整穿搭"},
+        {"page": 2, "source_role": "look_b", "page_role": "method_1", "要点": "第一条可执行建议", "画面": "造型突出相关部位"},
+        {"page": 3, "source_role": "look_c", "page_role": "method_2", "要点": "第二条可执行建议", "画面": "造型突出相关部位"},
+        {"page": 4, "source_role": "look_d", "page_role": "method_3_summary", "要点": "第三条建议+收束", "画面": "造型体现配件/组合"}
+      ]
+    },
+    "color_tutorial": {
+      "label_zh": "配色教程",
+      "question_hints": [
+        "浅蓝外套怎么配",
+        "灰色系如何做出层次",
+        "同色系如何不单调"
+      ],
+      "page_structure": [
+        {"page": 1, "source_role": "look_a", "page_role": "question_preview", "要点": "提问+完整效果", "画面": "一套吸引人的搭配"},
+        {"page": 2, "source_role": "look_b", "page_role": "method_1", "要点": "方法一：浅色衔接", "画面": "展示对应配色"},
+        {"page": 3, "source_role": "look_c", "page_role": "method_2", "要点": "方法二：明暗对比", "画面": "展示对应配色"},
+        {"page": 4, "source_role": "look_d", "page_role": "method_3_summary", "要点": "方法三：局部呼应+总结", "画面": "展示对应配色"}
+      ]
+    }
+  },
+  "shared_rules": {
+    "pages": 4,
+    "cover_from": "look_a",
+    "no_choice_cta": true,
+    "no_pants_or_skirt_axis": true,
+    "narrative_plan_schema": {
+      "version": 1,
+      "kind": "travel_guide | color_tutorial",
+      "question_zh": "本篇具体回答什么问题",
+      "takeaways": ["2-3条读者能照做的方法"],
+      "pages": [
+        {
+          "page_index": 1,
+          "source_role": "look_a",
+          "page_role": "question_answer | method_1 | ...",
+          "key_point": "本页要点",
+          "visual_basis": "画面依据",
+          "page_text": "发布语言文字",
+          "color_chips": ["可选：色卡颜色名"]
+        }
+      ],
+      "reference_basis": "相关参考note/页码和借鉴的方法"
+    }
+  }
+}

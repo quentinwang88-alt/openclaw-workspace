@@ -2022,6 +2022,43 @@ class PhotoReferenceVisionService:
 }}"""
 
     @staticmethod
+    def _guide_plan_prompt_block(
+        *, theme, content_requirement="", account_positioning="",
+    ):
+        """B2: 讲解主题的专属规则块——新主题返回规则文本，旧主题返回空。"""
+        from services.photo_content_planner import is_guide_theme
+        if not is_guide_theme(theme):
+            return ""
+        theme_key = str(theme.get("theme_key") or "")
+        kind = "travel_guide" if theme_key == "TRAVEL_STYLING_GUIDE" else "color_tutorial"
+        if kind == "travel_guide":
+            rules = (
+                "【讲解模式：旅行穿搭攻略】\\n"
+                "本篇不是投票/四选一内容，是一页一方法的攻略教程。规则：\\n"
+                "1. 先确定本篇回答的具体问题，问题来自账号定位或内容要求。\\n"
+                "2. 提炼2-3条读者能照做的建议。\\n"
+                "3. 四套造型分别承担：第1套=问题+整体答案预览；第2-3套=各承担一条建议；第4套=第三条建议+收束。\\n"
+                "4. 每页短标题=本页要点（如「裤脚与鞋」），不是造型名称。\\n"
+                "5. 不使用选择A/B/C/D或裤子还是裙子的默认CTA；结尾用总结或收藏提示。\\n"
+                "6. 允许同人物同色调同场景稳定，变化集中在讲解内容。")
+        else:
+            rules = (
+                "【讲解模式：配色教程】\\n"
+                "本篇不是投票/四选一内容，是一页一方法的配色教程。规则：\\n"
+                "1. 先确定本篇回答的配色问题，围绕一个商品或一个色系。\\n"
+                "2. 提炼2-3种可应用的配色方法（如浅色衔接/明暗对比/局部呼应）。\\n"
+                "3. 四套造型分别承担：第1套=问题+完整效果；第2-3套=各展示一种方法；第4套=第三种+总结。\\n"
+                "4. 每页短标题=配色方法名，一句解释原理。\\n"
+                "5. 不使用选择A/B/C/D或裤子还是裙子的默认CTA。\\n"
+                "6. 四套可围绕同一商品，不强制在轮廓颜色场景全部变化。")
+        context = ""
+        if str(content_requirement or "").strip():
+            context += "\\n内容要求：" + str(content_requirement)[:200]
+        if str(account_positioning or "").strip():
+            context += "\\n账号定位：" + str(account_positioning)[:200]
+        return rules + context
+
+    @staticmethod
     def _travel_plan_prompt(*, analysis, travel_contract, variables, content_requirement, count,
                             travel_topic=None, product_context=None, locale_pack=None,
                             account_positioning: str = "",

@@ -36,7 +36,8 @@ LEGACY_LOOK_LABEL_PREFIX = "ลุค "
 #: ``_PROFILES`` 仍保留它们的解析能力，历史行与显式输入不受影响。
 THEME_OPTIONS = ("自动", "凉爽旅行", "一衣多穿", "冷热切换",
                  "温度穿搭", "旅行·打卡穿搭", "旅行·环境协调", "旅行·拍照穿搭",
-                 "旅行·温度穿搭", "旅行·四选一", "旅行·配色参考")
+                 "旅行·温度穿搭", "旅行·四选一", "旅行·配色参考",
+                 "旅行·穿搭攻略", "配色教程")
 
 _TRAVEL_THEME_CONFIG = (
     Path(__file__).resolve().parents[1] / "config" / "travel_theme_templates.json"
@@ -99,6 +100,30 @@ _PROFILES = {
         "caption": "ถ้าไปคาเฟ่วันนี้ คุณอยากใส่ลุค A B C หรือ D?",
         "hashtags": ["#ลุคคาเฟ่", "#ไอเดียแต่งตัว", "#OOTD"],
         "cta": "ไปคาเฟ่จะเลือกลุคไหน?",
+    },
+    "旅行·穿搭攻略": {
+        "theme_key": "TRAVEL_STYLING_GUIDE",
+        "label_zh": "旅行穿搭攻略",
+        "expression_hint": "PRACTICAL_GUIDE",
+        "narrative_kind": "travel_guide",
+        "visual_brief": "问题驱动的旅行穿搭攻略：每页回答一个具体问题（如步行舒适、室内外穿脱、少带衣服多组合），画面展示对应方法",
+        "title": "เทคนิคแต่งตัวเที่ยวให้เดินสบาย",
+        "cover": "แต่งตัวยังไงให้เที่ยวสบายทั้งวัน",
+        "caption": "เทคนิคแต่งตัวสำหรับเที่ยวที่เดินเยอะ แต่งตามง่ายและถ่ายรูปสวย",
+        "hashtags": ["#เทคนิคแต่งตัว", "#แต่งตัวไปเที่ยว", "#OOTD"],
+        "cta": "ลองใช้เทคนิคนี้ดูนะ",
+    },
+    "配色教程": {
+        "theme_key": "COLOR_TUTORIAL",
+        "label_zh": "配色教程",
+        "expression_hint": "PRACTICAL_GUIDE",
+        "narrative_kind": "color_tutorial",
+        "visual_brief": "配色方法教程：围绕一个配色问题展示多种可应用的配色方法，每页讲解一种方法及其原理",
+        "title": "จับคู่สียังไงให้ดูดี",
+        "cover": "3 วิธีจับคู่สีที่ใช้ได้จริง",
+        "caption": "รวมวิธีจับคู่สีที่ง่ายและใช้ได้จริงกับเสื้อผ้าที่มี",
+        "hashtags": ["#จับคู่สี", "#ไอเดียแต่งตัว", "#OOTD"],
+        "cta": "ลองจับคู่สีตามนี้ดูนะ",
     },
     "冷热切换": {
         "theme_key": "THERMAL_TRANSITION",

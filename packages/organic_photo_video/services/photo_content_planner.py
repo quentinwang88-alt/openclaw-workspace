@@ -467,6 +467,56 @@ def _family_plan(
     }
 
 
+#: 讲解主题（§B1）：这两个主题走 shared guide/tutorial 讲解合同
+GUIDE_THEME_KEYS = {"TRAVEL_STYLING_GUIDE", "COLOR_TUTORIAL"}
+
+
+def is_guide_theme(theme: Mapping[str, Any]) -> bool:
+    return str(theme.get("theme_key") or "") in GUIDE_THEME_KEYS
+
+
+def _load_guide_policy() -> Dict[str, Any]:
+    import json as _json
+    path = Path(__file__).resolve().parents[1] / "config" / "photo_planning_policies" / "TH_GUIDE_TUTORIAL_V1.json"
+    return _json.loads(path.read_text(encoding="utf-8"))
+
+
+def _guide_narrative_plan(
+    *, kind: str, question: str, takeaways: List[str],
+    looks: List[Mapping[str, Any]], locale_texts: List[str],
+    reference_basis: str = "",
+) -> Dict[str, Any]:
+    """B1（§B1）：从问题+takeaways+looks 构建 narrative_plan。
+
+    pages 的 source_role 对应 look_a/b/c/d；page_text 来自 locale_texts
+    （由规划模型产出或模板兜底）；color_chips 可选。
+    """
+    guide = _load_guide_policy()
+    kinds = guide.get("narrative_kinds") or {}
+    kind_cfg = kinds.get(kind) or {}
+    structure = kind_cfg.get("page_structure") or []
+    pages = []
+    for idx, spec in enumerate(structure):
+        role = str(spec.get("source_role") or f"look_{chr(97 + idx)}")
+        pages.append({
+            "page_index": int(spec.get("page") or idx + 1),
+            "source_role": role,
+            "page_role": str(spec.get("page_role") or f"method_{idx}"),
+            "key_point": str(spec.get("要点") or ""),
+            "visual_basis": str(spec.get("画面") or ""),
+            "page_text": locale_texts[idx] if idx < len(locale_texts) else "",
+            "color_chips": [],
+        })
+    return {
+        "version": 1,
+        "kind": kind,
+        "question_zh": question,
+        "takeaways": takeaways[:3],
+        "pages": pages,
+        "reference_basis": reference_basis,
+    }
+
+
 def _find_family(policy, family_id):
     for family in policy.get("families") or []:
         if str(family.get("family_id")) == str(family_id):
