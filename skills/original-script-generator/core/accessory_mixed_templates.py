@@ -224,15 +224,42 @@ def load_mixed_template_definition() -> Dict[str, Any]:
     return payload
 
 
-def mixed_supported_canonical_types() -> set:
+def definition_or_default(
+    definition: Mapping[str, Any] | None,
+) -> Mapping[str, Any]:
+    """Return the explicit definition context, or the shared cached one.
+
+    A handful of profile-specific branches (currently only the necklace V1
+    profile) need to compile against their *own* template set without the new
+    template ever entering the shared A/B/C rotation.  The context is threaded
+    through explicitly as a keyword-only argument -- never a global, never a
+    temporary reassignment of ``_DEFINITION_PATH`` and never an edit to the
+    ``lru_cache``d object, all three of which would leak across concurrent
+    planning of different categories.
+
+    When the context is ``None`` every call keeps the historical path byte for
+    byte, so no existing caller changes behaviour.
+    """
+
+    if isinstance(definition, Mapping) and definition:
+        return definition
+    return load_mixed_template_definition()
+
+
+def mixed_supported_canonical_types(
+    *, definition: Mapping[str, Any] | None = None
+) -> set:
     """Canonical product types that may use the mixed template mode."""
 
-    definition = load_mixed_template_definition()
-    return set((definition.get("canonical_type_to_zone") or {}).keys())
+    data = definition_or_default(definition)
+    return set((data.get("canonical_type_to_zone") or {}).keys())
 
 
 def resolve_mixed_zone(
-    product_type: str, top_category: str = ""
+    product_type: str,
+    top_category: str = "",
+    *,
+    definition: Mapping[str, Any] | None = None,
 ) -> Tuple[Optional[str], str]:
     """Resolve the mixed-display body zone for one product.
 
@@ -252,9 +279,12 @@ def resolve_mixed_zone(
     falls back to ``womenwear`` for them.  A direct hit is only trusted for the
     exact registered spellings, so unknown products are still refused rather
     than guessed.
+
+    ``definition`` is the optional local context described on
+    :func:`definition_or_default`; results are identical when it is omitted.
     """
 
-    zones = load_mixed_template_definition().get("canonical_type_to_zone") or {}
+    zones = definition_or_default(definition).get("canonical_type_to_zone") or {}
     raw = _text(product_type).lower()
     if raw in zones:
         return zones[raw], raw
@@ -272,60 +302,79 @@ def is_accessory_mixed_type(product_type: str, top_category: str = "") -> bool:
     return zone is not None
 
 
-def list_mixed_templates() -> List[Dict[str, Any]]:
-    definition = load_mixed_template_definition()
-    templates = definition.get("templates") or []
+def list_mixed_templates(
+    *, definition: Mapping[str, Any] | None = None
+) -> List[Dict[str, Any]]:
+    data = definition_or_default(definition)
+    templates = data.get("templates") or []
     return [dict(item) for item in templates if isinstance(item, Mapping)]
 
 
-def mixed_template_ids() -> List[str]:
-    return [str(item.get("template_id") or "") for item in list_mixed_templates()]
+def mixed_template_ids(*, definition: Mapping[str, Any] | None = None) -> List[str]:
+    return [
+        str(item.get("template_id") or "")
+        for item in list_mixed_templates(definition=definition)
+    ]
 
 
-def default_template_id() -> str:
-    ids = mixed_template_ids()
+def default_template_id(*, definition: Mapping[str, Any] | None = None) -> str:
+    ids = mixed_template_ids(definition=definition)
     if not ids:
         raise ValueError("模板定义未包含任何 template_id")
     return ids[0]
 
 
-def get_mixed_template(template_id: str) -> Dict[str, Any]:
-    wanted = _text(template_id) or default_template_id()
-    for item in list_mixed_templates():
+def get_mixed_template(
+    template_id: str, *, definition: Mapping[str, Any] | None = None
+) -> Dict[str, Any]:
+    wanted = _text(template_id) or default_template_id(definition=definition)
+    for item in list_mixed_templates(definition=definition):
         if _text(item.get("template_id")) == wanted:
             return item
     raise ValueError(f"未知的饰品混合模板: {wanted}")
 
 
-def select_template_id(index: int) -> str:
-    """Deterministically rotate templates so a batch spreads across A/B/C."""
+def select_template_id(index: int, *, definition: Mapping[str, Any] | None = None) -> str:
+    """Deterministically rotate templates so a batch spreads across A/B/C.
 
-    ids = mixed_template_ids()
+    With an explicit context that holds a single template (the necklace V1
+    profile), the rotation degenerates to that one template -- deliberately:
+    a profile with one authored montage has nothing to rotate onto, and must
+    never borrow one from the shared pool.
+    """
+
+    ids = mixed_template_ids(definition=definition)
     if not ids:
         raise ValueError("模板定义未包含任何 template_id")
     return ids[int(index) % len(ids)]
 
 
-def select_environment_recipe_id(index: int) -> str:
-    definition = load_mixed_template_definition()
-    recipes = definition.get("environment_recipes") or {}
+def select_environment_recipe_id(
+    index: int, *, definition: Mapping[str, Any] | None = None
+) -> str:
+    data = definition_or_default(definition)
+    recipes = data.get("environment_recipes") or {}
     ids = [str(key) for key in recipes.keys()]
     if not ids:
         raise ValueError("模板定义未包含任何 environment_recipe")
     return ids[int(index) % len(ids)]
 
 
-def get_environment_recipe(recipe_id: str) -> Dict[str, Any]:
-    definition = load_mixed_template_definition()
-    recipes = definition.get("environment_recipes") or {}
+def get_environment_recipe(
+    recipe_id: str, *, definition: Mapping[str, Any] | None = None
+) -> Dict[str, Any]:
+    data = definition_or_default(definition)
+    recipes = data.get("environment_recipes") or {}
     recipe = recipes.get(_text(recipe_id))
     if not isinstance(recipe, Mapping):
         raise ValueError(f"未知的饰品光影配方: {recipe_id}")
     return dict(recipe)
 
 
-def _category_rule(zone: str) -> Dict[str, Any]:
-    rules = load_mixed_template_definition().get("category_rules") or {}
+def _category_rule(
+    zone: str, *, definition: Mapping[str, Any] | None = None
+) -> Dict[str, Any]:
+    rules = definition_or_default(definition).get("category_rules") or {}
     rule = rules.get(zone)
     if not isinstance(rule, Mapping):
         raise ValueError(f"缺少类目局部规则: {zone}")
@@ -418,15 +467,19 @@ def frozen_mixed_contract(container: Mapping[str, Any] | None) -> Dict[str, Any]
     return dict(candidate) if isinstance(candidate, Mapping) and candidate else {}
 
 
-def physical_subtype_rule(canonical_type: str) -> Dict[str, Any]:
+def physical_subtype_rule(
+    canonical_type: str, *, definition: Mapping[str, Any] | None = None
+) -> Dict[str, Any]:
     """The physical-form rule for one canonical registry type (may be empty)."""
 
-    rules = load_mixed_template_definition().get("physical_subtype_rules") or {}
+    rules = definition_or_default(definition).get("physical_subtype_rules") or {}
     rule = rules.get(_text(canonical_type))
     return dict(rule) if isinstance(rule, Mapping) else {}
 
 
-def subtype_structure_facts(canonical_type: str) -> Dict[str, str]:
+def subtype_structure_facts(
+    canonical_type: str, *, definition: Mapping[str, Any] | None = None
+) -> Dict[str, str]:
     """Registry-level structural facts, normalised onto the three evidence states.
 
     The subtype registry is authoritative about its own form: a ``bangle`` is a
@@ -435,7 +488,12 @@ def subtype_structure_facts(canonical_type: str) -> Dict[str, str]:
     """
 
     facts: Dict[str, str] = {}
-    raw = physical_subtype_rule(canonical_type).get(STRUCTURE_FACTS_KEY) or {}
+    raw = (
+        physical_subtype_rule(canonical_type, definition=definition).get(
+            STRUCTURE_FACTS_KEY
+        )
+        or {}
+    )
     for key, value in raw.items():
         name = _text(key)
         state = _text(value).upper()
@@ -444,8 +502,13 @@ def subtype_structure_facts(canonical_type: str) -> Dict[str, str]:
     return facts
 
 
-def _part_terminology(part_key: str) -> Dict[str, Any]:
-    terms = load_mixed_template_definition().get("part_evidence_terms") or {}
+def _part_terminology(
+    part_key: str, *, definition: Mapping[str, Any] | None = None
+) -> Dict[str, Any]:
+    # Part vocabulary is shared across every subtype and is intentionally NOT
+    # overridable per profile: the necklace profile registers a new subtype, it
+    # does not get to redefine what "链节" means for the other categories.
+    terms = definition_or_default(definition).get("part_evidence_terms") or {}
     entry = terms.get(_text(part_key))
     return dict(entry) if isinstance(entry, Mapping) else {}
 
@@ -478,7 +541,9 @@ def _hedged_about_part(
     return False
 
 
-def project_module_framing(canonical_type: str, module: str) -> Dict[str, Any]:
+def project_module_framing(
+    canonical_type: str, module: str, *, definition: Mapping[str, Any] | None = None
+) -> Dict[str, Any]:
     """The single projection for one ``(category, shot module)`` framing rule.
 
     Returns ``{}`` -- never a half-filled default -- in two cases:
@@ -490,16 +555,23 @@ def project_module_framing(canonical_type: str, module: str) -> Dict[str, Any]:
     on, so answering with an empty allowed-range list would hand consumers a
     "rule" that silently permits nothing.  Callers must decide explicitly
     instead of inheriting a guess.
+
+    ``definition`` must be the *same* context the contract was compiled under.
+    Compiling with a profile overlay and then projecting framing from the
+    shared definition would silently drop the worn framing (the profile's
+    canonical type has no zone there), which is exactly the "compile with one
+    definition, validate with another" failure this argument exists to prevent.
     """
 
     module = _text(module).upper()
-    rules = load_mixed_template_definition().get("module_framing_rules") or {}
+    data = definition_or_default(definition)
+    rules = data.get("module_framing_rules") or {}
     spec = rules.get(module)
     if not isinstance(spec, Mapping):
         return {}
 
-    zone, _canonical = resolve_mixed_zone(canonical_type, "")
-    category = _category_rule(zone) if zone else {}
+    zone, _canonical = resolve_mixed_zone(canonical_type, "", definition=data)
+    category = _category_rule(zone, definition=data) if zone else {}
     source = _text(spec.get("framing_source")).upper()
 
     if source == "CATEGORY_ZONE" and not zone:
@@ -835,19 +907,25 @@ def attach_mixed_part_evidence(
     return evidence
 
 
-def _absent_part_terms(canonical_type: str) -> List[str]:
+def _absent_part_terms(
+    canonical_type: str, *, definition: Mapping[str, Any] | None = None
+) -> List[str]:
     """Part names that the registry has ruled out for this subtype.
 
     Their vocabulary must not appear in any authored action, or the model is
     told to display something the product does not have.
+
+    Resolved against the *same* context the contract is compiled under: a
+    profile that registers its own subtype gets its own ``ABSENT`` list, and
+    must not be judged by the shared registry's absence of that subtype.
     """
 
-    facts = subtype_structure_facts(canonical_type)
+    facts = subtype_structure_facts(canonical_type, definition=definition)
     blocked: List[str] = []
     for part, state in facts.items():
         if state != EVIDENCE_ABSENT:
             continue
-        terms = _part_terminology(part)
+        terms = _part_terminology(part, definition=definition)
         for term in terms.get("positive_terms") or []:
             text = _text(term)
             if text and text not in blocked:
@@ -896,31 +974,38 @@ def compile_mixed_template_contract(
     local_body_style_ref: str = "",
     environment_recipe_id: str = "",
     structure_role_by_module: Mapping[str, str] | None = None,
+    definition: Mapping[str, Any] | None = None,
 ) -> Dict[str, Any]:
     """Compile one frozen ``mixed_template_contract``.
 
     Raises ``ValueError`` for products outside the four supported families so a
     misrouted request fails loudly *before* any paid generation instead of
     silently falling back to the legacy self-shot path.
+
+    ``definition`` is the optional local context (see
+    :func:`definition_or_default`).  Every resolution below -- zone, template,
+    category rule, recipe, subtype rule, per-module framing -- uses that one
+    context, so a profile can never be compiled from one definition and
+    validated against another.  ``None`` keeps the historical shared path.
     """
 
-    zone, canonical = resolve_mixed_zone(product_type, top_category)
+    data = definition_or_default(definition)
+    zone, canonical = resolve_mixed_zone(product_type, top_category, definition=data)
     if zone is None:
         raise ValueError(
             f"商品类型 {canonical or product_type!r} 不属于饰品混合模板支持范围"
         )
 
-    definition = load_mixed_template_definition()
-    template = get_mixed_template(template_id)
-    rule = _category_rule(zone)
-    structural = definition.get("structural") or {}
+    template = get_mixed_template(template_id, definition=data)
+    rule = _category_rule(zone, definition=data)
+    structural = data.get("structural") or {}
     carrier_by_module = structural.get("carrier_by_module") or {}
     state_by_module = structural.get("product_state_by_module") or {}
     labels = structural.get("module_labels") or {}
     recipe_id = _text(environment_recipe_id) or _text(
-        definition.get("default_environment_recipe")
+        data.get("default_environment_recipe")
     )
-    recipe = get_environment_recipe(recipe_id)
+    recipe = get_environment_recipe(recipe_id, definition=data)
     theme = _normalize_theme(content_theme)
     role_map = {
         _text(module): _text(role)
@@ -928,8 +1013,8 @@ def compile_mixed_template_contract(
         if _text(module)
     }
 
-    subtype = physical_subtype_rule(canonical)
-    structure_facts = subtype_structure_facts(canonical)
+    subtype = physical_subtype_rule(canonical, definition=data)
+    structure_facts = subtype_structure_facts(canonical, definition=data)
     subtype_actions = subtype.get("action_by_module")
     subtype_actions = subtype_actions if isinstance(subtype_actions, Mapping) else {}
     subtype_jobs = subtype.get("distinct_jobs")
@@ -944,7 +1029,7 @@ def compile_mixed_template_contract(
             _text(subtype_jobs.get(module))
             or _text((rule.get("distinct_jobs") or {}).get(module))
         )
-        framing = project_module_framing(canonical, module)
+        framing = project_module_framing(canonical, module, definition=data)
         capture_units.append({
             "unit_id": unit_id,
             "unit_index": position,
@@ -1034,9 +1119,22 @@ def compile_mixed_template_contract(
     return contract
 
 
-def validate_mixed_template_contract(contract: Mapping[str, Any] | None) -> List[str]:
-    """Return hard blocking errors.  Empty list means the contract is usable."""
+def validate_mixed_template_contract(
+    contract: Mapping[str, Any] | None,
+    *,
+    definition: Mapping[str, Any] | None = None,
+) -> List[str]:
+    """Return hard blocking errors.  Empty list means the contract is usable.
 
+    The *shared* promises -- four required modules, the carrier per module and
+    the 15-second total -- are always read from the shared definition on
+    purpose.  A profile may register its own subtype, but it may not redefine
+    what "15 seconds" or "MIXED" mean, so those checks must not be
+    parameterisable.  ``definition`` is used only where profile-specific
+    knowledge is genuinely required (the subtype's ``ABSENT`` part list).
+    """
+
+    ctx = definition_or_default(definition)
     errors: List[str] = []
     data = dict(contract or {})
     if not data:
@@ -1128,7 +1226,7 @@ def validate_mixed_template_contract(contract: Mapping[str, Any] | None) -> List
     # the anchors say later -- "手链与手镯不得互相冒充" as a negative rule could
     # not cancel a positive instruction to show a solid bangle's chain links.
     canonical = _text(data.get("canonical_product_type"))
-    blocked = _absent_part_terms(canonical)
+    blocked = _absent_part_terms(canonical, definition=ctx)
     if blocked:
         for unit in units:
             action = _text(unit.get("action"))
