@@ -577,5 +577,273 @@ class CacheKeyTest(unittest.TestCase):
         self.assertNotEqual(digest(topic_a), digest(no_topic), "主题变化必须换缓存")
 
 
+def guide_travel_payload(*, with_copy: bool = True, same_moment: bool = True):
+    """教程样例：四页共用一个 moment（同场景稳定），4 条讲解页文案。"""
+    moments = ["old_town_walk"] * 4 if same_moment else [
+        "airport_departure", "old_town_walk", "cafe_visit", "evening_stroll"]
+    copy = {
+        "place_localized": "โตเกียว",
+        "title": "เที่ยวโตเกียวเดินทั้งวัน ใส่อะไรให้สบาย",
+        "caption": "จับคู่รองเท้าผ้าใบกับกางเกงยืด ยืดเส้นให้เดินได้ทั้งวัน",
+        "hashtags": ["#แต่งตัวเที่ยวโตเกียว"],
+        "slide_texts": [
+            "เที่ยวโตเกียว เดินทั้งวันไม่เมื่อย\nใส่อะไรให้สบาย?",
+            "รองเท้าผ้าใบ+กางเกงยืด — เดินเกินหนึ่งหมื่นก้าวไม่เมื่อย",
+            "เสื้อผ้าบางเบา พับเก็บง่าย — ห่อเล็กพกไปได้",
+            "ชั้นในผ้าคอตตอน ระบายอากาศดี — บันทึกไอเดียนี้ไว้ใช้",
+        ],
+    }
+    post = {
+        "content_angle_zh": "东京全天步行怎么穿", "scene_zh": "东京街头",
+        "palette_zh": "奶白、浅蓝", "background_prompt": "", "style_modifier": "",
+        "looks": [
+            {"role": f"look_{letter}", "travel_moment": moments[index],
+             "scene_prompt": f"东京画面{index + 1}", "weather_logic": "室内外过渡",
+             "display_label": "", "footwear_type": "SNEAKER",
+             "outerwear": f"外套{letter}", "top_inner": f"内搭{letter}",
+             "bottom": f"下装{letter}", "shoes": f"鞋{letter}",
+             "outerwear_type": "", "bottom_type": ""}
+            for index, letter in enumerate("abcd")
+        ],
+    }
+    if with_copy:
+        post["topic_zh"] = "在东京走一整天怎么穿才舒服？"
+        post["copy"] = copy
+    return {"travel_variables": {}, "posts": [post]}
+
+
+GUIDE_TRAVEL_TOPIC = {
+    "theme_type": "",
+    "theme_version": 1,
+    "theme_key": "TRAVEL_STYLING_GUIDE",
+    "theme_label_zh": "旅行穿搭攻略",
+    "planning_focus": "问题驱动的旅行穿搭攻略：每页回答一个具体问题",
+    "topic_patterns": [], "body_copy_focus": "", "cta_patterns": [],
+    "place": "东京", "temperature_band": "",
+    "temperature_context": {"value": "", "source": "execution_profile"},
+    "content_requirement": "",
+}
+
+GUIDE_COLOR_TOPIC = {
+    "theme_type": "", "theme_version": 1, "theme_key": "COLOR_TUTORIAL",
+    "theme_label_zh": "配色教程",
+    "planning_focus": "围绕同一商品的配色方法教程",
+    "topic_patterns": [], "body_copy_focus": "", "cta_patterns": [],
+    "place": "", "temperature_band": "",
+    "temperature_context": {"value": "", "source": "execution_profile"},
+    "content_requirement": "",
+}
+
+
+class GuideTopicEntryTest(unittest.TestCase):
+    """新教程主题从真实入口进入讲解：topic 携 theme_key，4 页讲解合同，
+    normalize 产出 narrative_plan；旧六主题契约逐字不变。"""
+
+    def setUp(self):
+        self.contract = {"moments": [
+            {"key": m, "label_zh": m, "evidence_zh": "e", "label_th": "t",
+             "forbidden_footwear_types": []}
+            for m in ("airport_departure", "old_town_walk", "cafe_visit", "evening_stroll")
+        ]}
+
+    def normalize(self, payload, travel_topic):
+        return PhotoReferenceVisionService(root=Path("/tmp"))._normalize_travel_plan(
+            payload, self.contract, 1, travel_topic=travel_topic)
+
+    # ---- 入口：build_travel_topic 携带 theme_key ----
+    def test_build_travel_topic_carries_theme_key_for_guide_themes(self):
+        from services.feishu_workflow import build_travel_topic
+        guide = build_travel_topic(
+            theme=resolve_photo_theme("旅行·穿搭攻略"), travel_place="东京",
+            travel_variables={})
+        self.assertEqual(guide["theme_key"], "TRAVEL_STYLING_GUIDE")
+        self.assertEqual(guide["place"], "东京")
+
+        color = build_travel_topic(
+            theme=resolve_photo_theme("配色教程"), travel_place="",
+            travel_variables={})
+        self.assertEqual(color["theme_key"], "COLOR_TUTORIAL")
+
+        legacy = build_travel_topic(
+            theme=resolve_photo_theme("旅行·打卡穿搭"), travel_place="首尔",
+            travel_variables={})
+        self.assertNotIn("theme_key", legacy, "旧六主题冻结契约不得新增键")
+
+    # ---- 提示词：教程合同 + 公共合同保留 ----
+    def test_guide_prompt_uses_teaching_contract_and_keeps_public_contract(self):
+        prompt = PhotoReferenceVisionService._travel_plan_prompt(
+            analysis={}, travel_contract=self.contract,
+            variables={}, content_requirement="", count=1,
+            travel_topic=GUIDE_TRAVEL_TOPIC)
+        self.assertIn("讲解教程", prompt)
+        self.assertIn("一页一方法", prompt)
+        self.assertIn("slide_texts 必须 4 条", prompt)
+        self.assertIn("禁止选择 A/B/C/D 投票 CTA", prompt)
+        # 公共合同保留（F2）：JSON 结构与旅行变量合同不丢
+        self.assertIn("travel_moment", prompt)
+        self.assertIn("scene_prompt", prompt)
+        self.assertIn("topic_zh", prompt)
+        self.assertIn("发布文案", prompt)
+        self.assertNotIn("不要生成标题、正文或 CTA 文案", prompt)
+        # 东京进合同
+        self.assertIn("东京", prompt)
+        self.assertIn("โตเกียว", prompt)
+
+    def test_color_tutorial_prompt_requires_no_place(self):
+        prompt = PhotoReferenceVisionService._travel_plan_prompt(
+            analysis={}, travel_contract=self.contract,
+            variables={}, content_requirement="", count=1,
+            travel_topic=GUIDE_COLOR_TOPIC)
+        self.assertIn("配色", prompt)
+        self.assertIn("place_localized 留空", prompt)
+        self.assertIn("slide_texts 必须 4 条", prompt)
+
+    def test_guide_schema_example_is_four_pages(self):
+        # 基础 JSON 示例必须与讲解合同一致（4 条页文案、无 A/B/C/D），
+        # 否则模型跟示例走 5 条投票格式导致降级（任务二真实跑测根因）。
+        prompt = PhotoReferenceVisionService._travel_plan_prompt(
+            analysis={}, travel_contract=self.contract,
+            variables={}, content_requirement="", count=1,
+            travel_topic=GUIDE_TRAVEL_TOPIC)
+        schema = prompt[prompt.index("只返回 JSON"):]
+        self.assertIn("页2要点", schema)
+        self.assertNotIn("A · 当地语言短名称", schema)
+        self.assertNotIn("完整选择 CTA", schema)
+
+        legacy = PhotoReferenceVisionService._travel_plan_prompt(
+            analysis={}, travel_contract=self.contract,
+            variables={}, content_requirement="", count=1,
+            travel_topic=TRAVEL_TOPIC)
+        legacy_schema = legacy[legacy.index("只返回 JSON"):]
+        self.assertEqual(legacy_schema.count("A · 当地语言短名称"), 1)
+
+    # ---- Normalize：4 页讲解 + narrative_plan ----
+    def test_guide_normalize_accepts_four_slides_and_builds_narrative(self):
+        plan, errors = self.normalize(guide_travel_payload(), GUIDE_TRAVEL_TOPIC)
+        self.assertEqual(errors, [], errors)
+        copy = plan["posts"][0]["copy"]
+        self.assertEqual(len(copy["slide_texts"]), 4)
+        self.assertNotIn("A · ", "\n".join(copy["slide_texts"]))
+        self.assertNotIn("copy_degraded", plan["posts"][0])
+        narrative = plan.get("narrative_plan") or {}
+        self.assertEqual(narrative.get("kind"), "travel_guide")
+        self.assertEqual(len(narrative.get("pages") or []), 4)
+        # 问题取模型实际选题，不是主题规划要点
+        self.assertEqual(narrative.get("question_zh"), "在东京走一整天怎么穿才舒服？")
+        self.assertTrue(narrative.get("takeaways"), "要点应从页标题解析")
+
+    def test_guide_allows_same_travel_moment_across_pages(self):
+        payload = guide_travel_payload(same_moment=True)
+        plan, errors = self.normalize(payload, GUIDE_TRAVEL_TOPIC)
+        self.assertEqual(errors, [], errors)
+        self.assertFalse(any("互不相同" in e for e in errors))
+
+    def test_guide_five_slide_copy_is_degraded_not_accepted(self):
+        payload = guide_travel_payload()
+        payload["posts"][0]["copy"]["slide_texts"].append("หน้าเพิ่ม")
+        plan, errors = self.normalize(payload, GUIDE_TRAVEL_TOPIC)
+        self.assertEqual(errors, [], errors)
+        # 5 条不满足教程 4 页合同 → 降级为 4 页模板，而不是按 5 条放行
+        self.assertEqual(len(plan["posts"][0]["copy"]["slide_texts"]), 4)
+        self.assertTrue(plan["posts"][0].get("copy_degraded"))
+
+    def test_guide_degraded_copy_has_no_voting_cta(self):
+        # 真实降级场景：模型给了地点与文案但页数结构错（3 条）→ 模板重建
+        payload = guide_travel_payload()
+        payload["posts"][0]["copy"]["slide_texts"] = (
+            payload["posts"][0]["copy"]["slide_texts"][:3])
+        plan, errors = self.normalize(payload, GUIDE_TRAVEL_TOPIC)
+        self.assertEqual(errors, [], errors)
+        slides = plan["posts"][0]["copy"]["slide_texts"]
+        self.assertEqual(len(slides), 4)
+        joined = "\n".join(slides)
+        self.assertNotIn("A · ", joined)
+        self.assertNotIn("B · ", joined)
+        self.assertNotIn("เลือก A B C", joined)
+        # 地点名保留在降级封面首行，不因降级触发地点结构错误
+        self.assertIn("โตเกียว", slides[0])
+
+    def test_color_tutorial_normalize_builds_color_narrative(self):
+        plan, errors = self.normalize(guide_travel_payload(), GUIDE_COLOR_TOPIC)
+        self.assertEqual(errors, [], errors)
+        self.assertEqual((plan.get("narrative_plan") or {}).get("kind"),
+                         "color_tutorial")
+
+    def test_legacy_theme_topic_still_has_no_narrative_plan(self):
+        payload = travel_payload()
+        plan, errors = self.normalize(payload, TRAVEL_TOPIC)
+        self.assertEqual(errors, [], errors)
+        self.assertNotIn("narrative_plan", plan)
+        self.assertEqual(len(plan["posts"][0]["copy"]["slide_texts"]), 5)
+
+    # ---- style_profile 贯穿：叙事结构随冻结进入内容计划 ----
+    def test_style_profile_carries_narrative_plan(self):
+        plan, _ = self.normalize(guide_travel_payload(), GUIDE_TRAVEL_TOPIC)
+        profile = PhotoReferenceVisionService.build_travel_style_profile(
+            {"schema_version": "x"}, {**plan,
+                                      "narrative_plan": plan.get("narrative_plan")},
+            count=1)
+        self.assertEqual((profile.get("narrative_plan") or {}).get("kind"),
+                         "travel_guide")
+
+    def test_style_profile_without_narrative_has_no_key(self):
+        profile = PhotoReferenceVisionService.build_travel_style_profile(
+            {"schema_version": "x"}, {"posts": []}, count=1)
+        self.assertNotIn("narrative_plan", profile)
+
+    def test_build_theme_copy_keeps_four_page_guide_slides(self):
+        # 最后一公里：冻结请求的 copy 由 build_theme_copy 组装——4 条教程
+        # slide_texts 必须原样进发布契约，不能回退「A · 造型」投票组装。
+        from services.photo_theme import build_theme_copy
+        theme = resolve_photo_theme("旅行·穿搭攻略")
+        variation = {
+            "planning_flow": "travel_two_step",
+            "copy": {
+                "title": "ไอเดียแต่งตัวเที่ยวโตเกียว",
+                "caption": "แคปชันโตเกียว",
+                "hashtags": ["#ทริปโตเกียว"],
+                "place_localized": "โตเกียว",
+                "slide_texts": ["หน้าปก", "วิธีที่ 1", "วิธีที่ 2", "วิธีที่ 3"],
+                "language_review_status": "DRAFT_TRAVEL_TOPIC",
+            },
+        }
+        copy = build_theme_copy(
+            theme, [], variation, expression_mode="PRACTICAL_GUIDE")
+        self.assertEqual(copy["slide_texts"],
+                         ["หน้าปก", "วิธีที่ 1", "วิธีที่ 2", "วิธีที่ 3"])
+        self.assertEqual(copy["language_review_status"], "DRAFT_TRAVEL_TOPIC")
+        self.assertNotIn("เลือก A B C", "\n".join(copy["slide_texts"]))
+
+    def test_guide_plan_freezes_model_copy_and_allows_same_moment(self):
+        # 计划层入口：教程主题走主题联动——四页同 travel_moment（固定背景
+        # 教程的设计要求）不再被旧投票语义判重复，模型讲解文案按 v2 冻结。
+        from services.photo_content_planner import plan_th_choice_batch
+        profile = {
+            "analysis_method": "doubao_seed_2_1",
+            "presentation_type": "SCENE_MODEL",
+            "planning_flow": "travel_two_step",
+            "travel_topic": GUIDE_COLOR_TOPIC,
+            "recommended_sets": guide_travel_payload()["posts"],
+        }
+        plan = plan_th_choice_batch(
+            record_id="rec-guide-color", recipe_id="PHOTO_TH_TRAVEL_OUTFIT_V2",
+            theme=resolve_photo_theme("配色教程"), reference_mode="STYLE",
+            count=1, style_profile=profile,
+            travel_contract={"moments": [
+                {"key": m, "label_zh": m, "evidence_zh": "e", "label_th": "t",
+                 "forbidden_footwear_types": []}
+                for m in ("old_town_walk", "cafe_visit")
+            ]},
+        )
+        self.assertTrue(plan["allow_repeated_travel_moments"])
+        item = plan["items"][0]
+        self.assertEqual(len(item["copy"]["slide_texts"]), 4)
+        self.assertEqual(item["copy"]["copy_policy_version"], 2)
+        self.assertEqual(item["copy"]["language_review_status"],
+                         "DRAFT_TRAVEL_TOPIC")
+        moments = {look["travel_moment"] for look in item["looks"]}
+        self.assertEqual(moments, {"old_town_walk"})
+
+
 if __name__ == "__main__":
     unittest.main()

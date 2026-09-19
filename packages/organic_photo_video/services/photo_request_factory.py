@@ -87,8 +87,14 @@ def validate_frozen_request(request: Mapping[str, Any]) -> None:
 
 def apply_travel_single_cover(
     request: Mapping[str, Any], recommendation: Mapping[str, Any] = None,
+    *, allow_four_slide_copy: bool = False,
 ) -> dict[str, Any]:
-    """Make Look A the cover and remove its duplicate detail page."""
+    """Make Look A the cover and remove its duplicate detail page.
+
+    ``allow_four_slide_copy``：教程主题的发布文案本来就是「封面+第2/3/4页」
+    4 条（无 Look A 重复详情页可删），此时只折叠内容卡、不动文案；默认
+    False 保持旧五条语义逐字不变。
+    """
     result = copy.deepcopy(dict(request))
     if not str(result.get("recipe_id") or "").startswith("PHOTO_TH_TRAVEL"):
         return result
@@ -122,9 +128,13 @@ def apply_travel_single_cover(
     card["travel_first_look_cover"] = True
     copy_block = copy.deepcopy(dict(result.get("copy") or {}))
     slide_texts = list(copy_block.get("slide_texts") or [])
-    if len(slide_texts) != 5:
-        raise PhotoRequestError("旅行首套封面需要完整五条原始排版文案")
-    copy_block["slide_texts"] = [slide_texts[0]] + slide_texts[2:]
+    if allow_four_slide_copy and len(slide_texts) == 4:
+        # 教程 4 条文案已是「封面+三页方法」，没有重复页需要删除。
+        pass
+    else:
+        if len(slide_texts) != 5:
+            raise PhotoRequestError("旅行首套封面需要完整五条原始排版文案")
+        copy_block["slide_texts"] = [slide_texts[0]] + slide_texts[2:]
     copy_block["cover"] = copy_block["slide_texts"][0]
     result["copy"] = copy_block
     result["content_card"] = freeze_content_card(
@@ -315,16 +325,21 @@ class PhotoRequestFactory:
                         continue
                     for variant in _localized_variants(profile, str(spec.language or "")):
                         copy_block = {**copy.deepcopy(variant["copy"]), **dict(override.get("copy") or {})}
+                        # 教程收口（2026-09-19）：override 文案自带 slide_texts 时
+                        # 页数以它为准（教程 4 页），缺失时保持旧行为（5 条）。
+                        override_slides = list(
+                            (override.get("copy") or {}).get("slide_texts") or [])
+                        expected_slides = len(override_slides) or 5
                         try:
                             extra_tokens = contract_copy_tokens(
                                 recipe_spec, variables, locale_pack=locale_pack)
                         except ValueError as exc:
                             raise PhotoRequestError(str(exc)) from exc
                         try:
-                            copy_block = resolve_photo_copy(copy_block, assets=candidate.manifest_json["assets"], locale=spec.language, extra_tokens=extra_tokens)
+                            copy_block = resolve_photo_copy(copy_block, assets=candidate.manifest_json["assets"], locale=spec.language, extra_tokens=extra_tokens, expected_slide_count=expected_slides)
                         except ValueError as exc:
                             raise PhotoRequestError(str(exc)) from exc
-                        errors = validate_copy(copy_block)
+                        errors = validate_copy(copy_block, expected_slide_count=expected_slides)
                         if errors:
                             raise PhotoRequestError("; ".join(errors))
                         identity = (recipe.recipe_id, profile["profile_id"], candidate.asset_set_id, variant["copy_id"])

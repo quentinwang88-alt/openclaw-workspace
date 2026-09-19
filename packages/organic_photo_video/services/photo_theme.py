@@ -491,7 +491,10 @@ def build_theme_copy(
     # 它的 title 可能来自模型自由撰写，也可能来自**上一轮已冻结**的 variation
     # copy（断点续跑不会重跑规划）。封版校验发生在付费素材生成之后，所以超限
     # 必须在这里就夹掉——否则续跑会拿着同一个超限 title 再失败一次。
-    if len(topic_slides) == 5 and all(topic_slides):
+    # 2026-09-19 教程收口：4 条 slide_texts（封面+第2/3/4页讲解）与 5 条
+    # （封面+A/B/C/D）同样放行——此前只认 5 条，教程的 4 页文案在这里被丢弃、
+    # 回退投票组装，正是成片仍带「เลือก A B C」的最后一公里。
+    if len(topic_slides) in (4, 5) and all(topic_slides):
         return normalize_publish_copy({
             "copy_policy_version": 2,
             "place_localized": str(planned_copy.get("place_localized") or ""),

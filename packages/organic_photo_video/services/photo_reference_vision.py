@@ -1660,6 +1660,10 @@ class PhotoReferenceVisionService:
         if isinstance(travel_plan.get("color_grading_plan"), Mapping):
             profile["color_grading_plan"] = dict(
                 travel_plan.get("color_grading_plan"))
+        # 教程叙事结构贯穿（F2）：问题/takeaways/页职责随 style_profile 进入
+        # 内容计划冻结，供交付审计与渲染侧按页消费；旧主题无该键，字节不变。
+        if isinstance(travel_plan.get("narrative_plan"), Mapping):
+            profile["narrative_plan"] = dict(travel_plan.get("narrative_plan"))
         return profile
 
     def review_travel_final_pages(
@@ -1907,7 +1911,11 @@ class PhotoReferenceVisionService:
                         adapter=None, look=normalized_look, product_snapshot=product,
                     )
                 normalized_looks.append(normalized_look)
-            topic_active = bool(travel_topic and travel_topic.get("theme_type"))
+            from services.photo_content_planner import is_guide_theme as _guide_topic
+            topic_active = bool(travel_topic and (
+                travel_topic.get("theme_type") or _guide_topic(travel_topic)))
+            guide_topic_active = bool(
+                travel_topic and _guide_topic(travel_topic))
             if (len(plan_moments) == len(ROLES)
                     and len(set(plan_moments)) != len(ROLES) and not topic_active):
                 errors.append(f"第 {post_index} 篇四个 travel_moment 必须互不相同")
@@ -1924,8 +1932,11 @@ class PhotoReferenceVisionService:
                 # 发布语言纯度按绑定的 Locale Pack 判定；未绑定时仍是 th-TH
                 # 契约，TH V2 行为逐字不变（review 修复 P0-2）。
                 copy_locale = str((locale_pack or {}).get("locale") or "") or "th-TH"
+                # 教程按 4 页讲解校验（封面+第2/3/4页）；投票/主题联动仍 5 条。
+                expected_slides = 4 if guide_topic_active else 5
                 copy_valid = bool(
-                    title and caption and len(slide_texts) == 5 and all(slide_texts)
+                    title and caption and len(slide_texts) == expected_slides
+                    and all(slide_texts)
                     and not copy_locale_issues({
                         "title": title,
                         "caption": caption,
@@ -1939,22 +1950,47 @@ class PhotoReferenceVisionService:
                     # 该发布语言自身，未绑定时沿用主题内联泰语模板。
                     template = _travel_copy_template(
                         locale_pack, post_index, travel_topic, topic_zh)
-                    look_label = str(template.get("look_label") or "{letter}")
-                    localized_labels = [
-                        str(look.get("display_label") or look_label.replace("{letter}", letter))
-                        for look, letter in zip(normalized_looks, "ABCD")
-                    ]
-                    slide_texts = [
-                        str(template.get("cover") or ""),
-                        f"A · {localized_labels[0]}",
-                        f"B · {localized_labels[1]}",
-                        f"C · {localized_labels[2]}",
-                        f"D · {localized_labels[3]}\n{str(template.get('cta') or '')}",
-                    ]
+                    if guide_topic_active:
+                        # 教程降级：仍是 4 页、无投票 CTA——页标题退化为
+                        # Look 短名称，不引入 A/B/C/D 选择文案。地点行保留
+                        # （模型已给 place_localized 时进降级封面首行），
+                        # 避免降级本身触发地点结构错误。
+                        look_label = str(template.get("look_label") or "{letter}")
+                        page_labels = [
+                            str(look.get("display_label")
+                                or look_label.replace("{letter}", letter))
+                            for look, letter in zip(normalized_looks, "ABCD")
+                        ]
+                        degraded_cover = str(template.get("cover") or "")
+                        if place and place_localized:
+                            degraded_cover = (
+                                f"{place_localized}\n{degraded_cover}")
+                        slide_texts = [
+                            degraded_cover,
+                            f"{page_labels[1]} — {str(template.get('cta') or '')}",
+                            page_labels[2],
+                            page_labels[3],
+                        ]
+                        hashtags = hashtags or [
+                            str(v) for v in template.get("hashtags") or []]
+                        post["copy_degraded"] = True
+                    else:
+                        look_label = str(template.get("look_label") or "{letter}")
+                        localized_labels = [
+                            str(look.get("display_label") or look_label.replace("{letter}", letter))
+                            for look, letter in zip(normalized_looks, "ABCD")
+                        ]
+                        slide_texts = [
+                            str(template.get("cover") or ""),
+                            f"A · {localized_labels[0]}",
+                            f"B · {localized_labels[1]}",
+                            f"C · {localized_labels[2]}",
+                            f"D · {localized_labels[3]}\n{str(template.get('cta') or '')}",
+                        ]
+                        post["copy_degraded"] = True
                     title = title or str(template.get("title") or "")
                     caption = caption or str(template.get("caption") or "")
                     hashtags = hashtags or [str(v) for v in template.get("hashtags") or []]
-                    post["copy_degraded"] = True
                 if place:
                     if not place_localized:
                         errors.append(
@@ -2001,16 +2037,19 @@ class PhotoReferenceVisionService:
             theme_key = str((travel_topic or {}).get("theme_key") or "")
             kind = ("travel_guide" if theme_key == "TRAVEL_STYLING_GUIDE"
                     else "color_tutorial")
-            question = str((travel_topic or {}).get("planning_focus") or "")[:200]
             first = posts[0] if posts else {}
             copy = dict(first.get("copy") or {})
             slides = [str(v) for v in copy.get("slide_texts") or []]
+            # 问题优先取模型实际选题（topic_zh）；模型未给时才用主题规划要点。
+            question = str(first.get("topic_zh")
+                           or (travel_topic or {}).get("planning_focus")
+                           or "")[:200]
             takeaways = []
             for slide in slides[1:]:
                 for sep in ("：", ":", "—", "–", "-"):
                     if sep in slide:
                         part = slide.split(sep, 1)[0].strip()
-                        if 2 <= len(part) <= 20:
+                        if 2 <= len(part) <= 40:
                             takeaways.append(part)
                             break
                 if len(takeaways) >= 3:
@@ -2131,6 +2170,8 @@ class PhotoReferenceVisionService:
         topic = dict(travel_topic or {})
         product = dict(product_context or {})
         topic_theme_type = str(topic.get("theme_type") or "")
+        from services.photo_content_planner import is_guide_theme as _topic_is_guide
+        topic_guide = _topic_is_guide(topic)
         positioning = str(account_positioning or "").strip()
         expression = str(expression_mode or "").strip()
         baseline = str(account_visual_baseline or "").strip()
@@ -2181,15 +2222,16 @@ class PhotoReferenceVisionService:
             )
         expression_copy_block = ""
         # 表达差异已并入主题联动文案合同（单一规则源）；此处不再输出后置覆盖块。
+        topic_linked = bool(topic_theme_type or topic_guide)
         topic_block = ""
         copy_rules = (
             "9. 主题联动分支必须同时输出 topic_zh 与 copy（结构见上）；"
             "title/caption/逐页说明围绕同一选题和地点。"
-            if topic_theme_type else
+            if topic_linked else
             "9. 不要生成标题、正文或 CTA 文案。"
         )
         moment_rule = (
-            "；主题联动分支可共用同一 key" if topic_theme_type
+            "；主题联动分支可共用同一 key" if topic_linked
             else "，每篇四个必须互不相同"
         )
         same_moment_rule = (
@@ -2197,7 +2239,46 @@ class PhotoReferenceVisionService:
             "（在选定地点内规划不同画面），系统以 scene_prompt 区分四页；"
             if topic_theme_type else "每套绑定一个不同的 travel_moment；"
         )
-        if topic_theme_type:
+        if topic_guide:
+            # F1/F2 真实入口收口：教程主题的文案合同——一页一方法、4 页、
+            # 无投票 CTA。与公共 JSON 结构、商品/旅行变量合同并存；guide
+            # 规则块在提示尾部追加问题定义与建议分配，不与本块冲突。
+            guide_is_travel = (
+                str(topic.get("theme_key") or "") == "TRAVEL_STYLING_GUIDE")
+            guide_place_rule = (
+                "填写了地点时 title 与封面必须包含 place_localized（目标市场常用"
+                "地点名，如东京→โตเกียว），place_localized 填该地点名；未填写地点"
+                "时 place_localized 留空；" if guide_is_travel else
+                "place_localized 留空；")
+            topic_block = (
+                "\n【旅行主题联动｜讲解教程】主题：{label}；地点：{place}；"
+                "规划重点：{focus}\n"
+                "本任务启用讲解分支：四套 Look 是一页一方法的教程页，不是四选一投票。\n"
+                "- 允许四套共用同一个 travel_moment（同场景同色调稳定，变化集中在"
+                "讲解内容与穿搭方法）；travel_moment 仍从枚举选择，鞋履步行实用性"
+                "规则继续生效；\n"
+                "- 每页画面展示该页讲解的方法本身（部位衔接/层次/配色关系），"
+                "读者遮住文字也能看出方法差异。\n"
+                "\n【发布文案（讲解教程必须生成）】以四套 Look 为依据，同时输出：\n"
+                '{{"topic_zh":"中文选题（一句话说清本篇回答的问题）",'
+                '"copy":{{"place_localized":"","title":"当地语言发布标题",'
+                '"caption":"当地语言发布正文","hashtags":["当地语言标签"],'
+                '"slide_texts":["两行短封面：第一行主题钩子，第二行本篇问题",'
+                '"页2要点 — 一句当地语言解释","页3要点 — 一句当地语言解释",'
+                '"页4要点 — 一句当地语言解释与收藏提示"]}}}}\n'
+                "文案要求：slide_texts 必须 4 条，顺序为封面+第2/3/4页；每页标题是"
+                "本页方法要点（如「裤脚与鞋的衔接」「浅色衔接降低对比」），不是造型"
+                "名称；禁止选择 A/B/C/D 投票 CTA，第 4 页结尾用总结或收藏提示；"
+                "caption 给读者一句可执行的结论，每条建议必须与画面和规划的服装相符。\n"
+                "标题规则（最重要）：{place_rule}title 围绕本篇回答的一个具体穿搭/配色"
+                "问题（一句说清读者能学会什么），不能退化成“4 套穿搭”罗列。\n"
+            ).format(
+                label=str(topic.get("theme_label_zh") or ""),
+                place=str(topic.get("place") or "未指定（不猜测具体地名）"),
+                focus=str(topic.get("planning_focus") or ""),
+                place_rule=guide_place_rule,
+            )
+        elif topic_theme_type:
             # 表达模式只有这一份逐页文案合同（2026-09-15 收敛）：每种表达输出
             # 一致的规则，不再出现「基础规则+后置覆盖」两份可能冲突的合同。
             if expression == "PRACTICAL_GUIDE":
@@ -2303,15 +2384,28 @@ class PhotoReferenceVisionService:
                 if outfit_indices else ""
             )
         )
-        topic_schema = (
-            '{{"travel_variables":{{}},"posts":[{{"content_angle_zh":"","scene_zh":"","palette_zh":"","background_prompt":"","style_modifier":"","topic_zh":"中文选题（填入地点）","copy":{{"place_localized":"目标市场常用地点名","title":"当地语言发布标题","caption":"当地语言发布正文","hashtags":["当地语言标签"],"slide_texts":["两行短封面","A · 当地语言短名称","B · 当地语言短名称","C · 当地语言短名称","D · 当地语言短名称\\n完整选择 CTA"]}},"looks":[\n'
-            '{{"role":"look_a","travel_moment":"old_town_walk","scene_prompt":"中文场景描述","weather_logic":"中文逻辑（无具体温度）","display_label":"","footwear_type":"SNEAKER","background_feature_zh":"该场景延续的参考背景特征","outfit_reference_indices":[],"styling_intent":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":""}},\n'
-            '{{"role":"look_b","travel_moment":"shopping_day","scene_prompt":"","weather_logic":"","display_label":"","footwear_type":"LOAFER","background_feature_zh":"","outfit_reference_indices":[],"styling_intent":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":""}},\n'
-            '{{"role":"look_c","travel_moment":"cafe_visit","scene_prompt":"","weather_logic":"","display_label":"","footwear_type":"LOW_HEEL","background_feature_zh":"","outfit_reference_indices":[],"styling_intent":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":""}},\n'
-            '{{"role":"look_d","travel_moment":"evening_stroll","scene_prompt":"","weather_logic":"","display_label":"","footwear_type":"FLAT","background_feature_zh":"","outfit_reference_indices":[],"styling_intent":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":""}}]}}]}}'
-            if topic_theme_type else
-            '{{"travel_variables":{{}},"posts":[{{"content_angle_zh":"","scene_zh":"","palette_zh":"","background_prompt":"","style_modifier":"","looks":[\n'
-            '{{"role":"look_a","travel_moment":"old_town_walk","scene_prompt":"中文场景描述","weather_logic":"中文逻辑（无具体温度）","display_label":"","footwear_type":"SNEAKER","background_feature_zh":"该场景延续的参考背景特征","outfit_reference_indices":[],"styling_intent":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":""}},\n'
+        if topic_guide:
+            # 教程：基础 JSON 示例与讲解合同一致（4 条页文案、无 A/B/C/D），
+            # 避免示例与教程块冲突把模型带回 5 条投票格式（降级根因）。
+            topic_schema = (
+                '{{"travel_variables":{{}},"posts":[{{"content_angle_zh":"","scene_zh":"","palette_zh":"","background_prompt":"","style_modifier":"","topic_zh":"中文选题（一句话说清本篇回答的问题）","copy":{{"place_localized":"","title":"当地语言发布标题","caption":"当地语言发布正文","hashtags":["当地语言标签"],"slide_texts":["两行短封面：第一行主题钩子，第二行本篇问题","页2要点 — 一句当地语言解释","页3要点 — 一句当地语言解释","页4要点 — 一句当地语言解释与收藏提示"]}},"looks":[\n'
+                '{{"role":"look_a","travel_moment":"old_town_walk","scene_prompt":"中文场景描述","weather_logic":"中文逻辑（无具体温度）","display_label":"","footwear_type":"SNEAKER","background_feature_zh":"该场景延续的参考背景特征","outfit_reference_indices":[],"styling_intent":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":""}},\n'
+                '{{"role":"look_b","travel_moment":"shopping_day","scene_prompt":"","weather_logic":"","display_label":"","footwear_type":"LOAFER","background_feature_zh":"","outfit_reference_indices":[],"styling_intent":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":""}},\n'
+                '{{"role":"look_c","travel_moment":"cafe_visit","scene_prompt":"","weather_logic":"","display_label":"","footwear_type":"LOW_HEEL","background_feature_zh":"","outfit_reference_indices":[],"styling_intent":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":""}},\n'
+                '{{"role":"look_d","travel_moment":"evening_stroll","scene_prompt":"","weather_logic":"","display_label":"","footwear_type":"FLAT","background_feature_zh":"","outfit_reference_indices":[],"styling_intent":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":""}}]}}]}}'
+            )
+        elif topic_theme_type:
+            topic_schema = (
+                '{{"travel_variables":{{}},"posts":[{{"content_angle_zh":"","scene_zh":"","palette_zh":"","background_prompt":"","style_modifier":"","topic_zh":"中文选题（填入地点）","copy":{{"place_localized":"目标市场常用地点名","title":"当地语言发布标题","caption":"当地语言发布正文","hashtags":["当地语言标签"],"slide_texts":["两行短封面","A · 当地语言短名称","B · 当地语言短名称","C · 当地语言短名称","D · 当地语言短名称\\n完整选择 CTA"]}},"looks":[\n'
+                '{{"role":"look_a","travel_moment":"old_town_walk","scene_prompt":"中文场景描述","weather_logic":"中文逻辑（无具体温度）","display_label":"","footwear_type":"SNEAKER","background_feature_zh":"该场景延续的参考背景特征","outfit_reference_indices":[],"styling_intent":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":""}},\n'
+                '{{"role":"look_b","travel_moment":"shopping_day","scene_prompt":"","weather_logic":"","display_label":"","footwear_type":"LOAFER","background_feature_zh":"","outfit_reference_indices":[],"styling_intent":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":""}},\n'
+                '{{"role":"look_c","travel_moment":"cafe_visit","scene_prompt":"","weather_logic":"","display_label":"","footwear_type":"LOW_HEEL","background_feature_zh":"","outfit_reference_indices":[],"styling_intent":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":""}},\n'
+                '{{"role":"look_d","travel_moment":"evening_stroll","scene_prompt":"","weather_logic":"","display_label":"","footwear_type":"FLAT","background_feature_zh":"","outfit_reference_indices":[],"styling_intent":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":""}}]}}]}}'
+            )
+        else:
+            topic_schema = (
+                '{{"travel_variables":{{}},"posts":[{{"content_angle_zh":"","scene_zh":"","palette_zh":"","background_prompt":"","style_modifier":"","looks":[\n'
+                '{{"role":"look_a","travel_moment":"old_town_walk","scene_prompt":"中文场景描述","weather_logic":"中文逻辑（无具体温度）","display_label":"","footwear_type":"SNEAKER","background_feature_zh":"该场景延续的参考背景特征","outfit_reference_indices":[],"styling_intent":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":""}},\n'
             '{{"role":"look_b","travel_moment":"shopping_day","scene_prompt":"","weather_logic":"","display_label":"","footwear_type":"LOAFER","background_feature_zh":"","outfit_reference_indices":[],"styling_intent":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":""}},\n'
             '{{"role":"look_c","travel_moment":"cafe_visit","scene_prompt":"","weather_logic":"","display_label":"","footwear_type":"LOW_HEEL","background_feature_zh":"","outfit_reference_indices":[],"styling_intent":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":""}},\n'
             '{{"role":"look_d","travel_moment":"evening_stroll","scene_prompt":"","weather_logic":"","display_label":"","footwear_type":"FLAT","background_feature_zh":"","outfit_reference_indices":[],"styling_intent":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":""}}]}}]}}'

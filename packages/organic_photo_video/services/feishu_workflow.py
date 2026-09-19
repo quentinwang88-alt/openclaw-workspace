@@ -399,6 +399,11 @@ def build_travel_topic(
         topic["thermal_sensitivity_planning"] = dict(
             theme.get("thermal_sensitivity_planning") or {}
         )
+    # F1（补全）：教程主题把 theme_key 带进选题冻结。规划端的教程判定
+    # （guide 规则块 / narrative_plan / 文案分支）全部按 theme_key，缺它则
+    # 整链回落旧投票分支——旧六主题不加该键，冻结契约逐字不变。
+    if is_guide_theme(theme):
+        topic["theme_key"] = str(theme.get("theme_key") or "")
     return topic
 
 
@@ -2461,6 +2466,18 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                                 variation_index=index + 1,
                                 expression_mode=expression_mode,
                             )
+                            # 教程收口（2026-09-19）：build_theme_copy 放行 4 条
+                            # 讲解文案后，必须在视觉预设预校验（按卡页数断言
+                            # 文案条数）之前先把内容卡折叠成 4 页，否则
+                            # 「卡5页×文案4条」会在冻结时被判 5 条不匹配。
+                            if len(list(
+                                (request.get("copy") or {}).get("slide_texts") or []
+                            )) == 4:
+                                # 写回列表：后续 theme_brief/预设修改必须落在
+                                # 同一个对象上，重绑循环变量会丢失这些修改。
+                                request = requests[index - 1] = (
+                                    apply_travel_single_cover(
+                                        request, allow_four_slide_copy=True))
                         request["theme_brief"] = {
                             **dict(variation_theme), "reference_mode": reference_mode,
                             "reference_count": len(reference_attachments),

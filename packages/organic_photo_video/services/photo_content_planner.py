@@ -817,7 +817,11 @@ def plan_th_choice_batch(
             raise PhotoContentPlanError(str(exc)) from exc
         travel_flow = profile_flow_handler.travel_semantics
         travel_topic = dict(style_profile.get("travel_topic") or {})
-        topic_linked = bool(travel_flow and travel_topic.get("theme_type"))
+        # 教程主题无 theme_type 但同样走主题联动（F1 真实入口收口）：
+        # 冻结模型讲解文案 + 允许四页共用 travel_moment（固定背景/同场景
+        # 稳定是教程设计要求，不能再按旧投票语义判重复场景）。
+        topic_linked = bool(travel_flow and (
+            travel_topic.get("theme_type") or is_guide_theme(travel_topic)))
         if travel_flow and not topic_linked and (
                 not travel_contract or not copy_templates):
             raise PhotoContentPlanError("旅行两步规划缺少 travel_contract 或审核文案模板")
