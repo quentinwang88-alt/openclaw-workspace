@@ -61,7 +61,7 @@
 - **任务 1**：账号 `OPV_TH_TEST_001`；市场/语言 `TH`/`th-TH`；钩子 `pick_one_of_four`
   - 配方：`PHOTO_TH_PICK_YOUR_LOOK_V3`（native_photo，5 页，锚点槽位 2）
   - 规划流程：`reference_contract_v1`
-  - 主题范围：`AUTUMN_OUTFIT`、`COOL_WEATHER_TRAVEL`、`DAILY_COMMUTE`、`CAFE_DATE`
+  - 主题范围：`AUTUMN_OUTFIT`、`COOL_WEATHER_TRAVEL`、`DAILY_COMMUTE`、`CAFE_DATE`、`TRAVEL_STYLING_GUIDE`、`COLOR_TUTORIAL`
   - 主题缺省：必填
   - 文案来源：v1 内联（随「图文主题」携带 th-TH 文案）
   - 排版：版式 `GRID_FOUR`、`CHOICE_DETAIL`；角色 `choice_grid`、`look_a`、`look_b`、`look_c`、`look_d_with_cta`
