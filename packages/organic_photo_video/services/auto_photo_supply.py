@@ -1032,6 +1032,15 @@ class AutoPhotoSupply:
             "content_requirement": requirement,
             "policy_version": SUPPLY_POLICY_VERSION,
         }
+        # C（§Phase C）：合同冻结参考讲解依据——选中页的逐页摘要
+        # （供攻略/教程主题追溯参考来源；旧主题多一个键不影响行为）
+        contract["reference_basis"] = "; ".join(
+            str((pg or {}).get("outfit_summary") or "").strip()
+            for pg in (main_analysis.get("pages") or [])
+            if int((pg or {}).get("seq") or 0) in {
+                int(p.get("seq") or 0) for p in selected_pages}
+        )[:500]
+
         contract["contract_fingerprint"] = contract_fingerprint(
             adoption=contract["adoption"],
             main_note_id=contract["main_note_id"],
@@ -1256,6 +1265,15 @@ class AutoPhotoSupply:
             if core:
                 lines.append(f"参考搭配要点（文字化借鉴）：{core}"
                              + (f"；{relations}" if relations else ""))
+            # C（§Phase C）：逐页讲解摘要——参考素材每页讲了什么方法/论点，
+            # 传给规划做 narrative 依据（v3 pages[].outfit_summary）
+            page_notes = []
+            for pg in (analysis.get("pages") or [])[:4]:
+                summary = str((pg or {}).get("outfit_summary") or "").strip()
+                if summary:
+                    page_notes.append(summary)
+            if page_notes:
+                lines.append(f"参考逐页讲解（可借鉴的方法/顺序）：{'；'.join(page_notes)}")
         country = str(destination.get("country") or "")
         place = str(destination.get("place") or "")
         if country or place:

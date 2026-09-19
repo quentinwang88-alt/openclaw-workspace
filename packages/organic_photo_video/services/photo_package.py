@@ -96,6 +96,18 @@ def _font(template: Mapping[str, Any], *, required: bool,
     return None
 
 
+def _fit_source_contain(path: str, size: tuple[int, int]) -> Image.Image:
+    """D1: 等比完整容纳——不裁头脚，允许留边。"""
+    src = Image.open(path).convert("RGB")
+    tw, th = size
+    scale = min(tw / src.width, th / src.height)
+    nw, nh = max(1, round(src.width * scale)), max(1, round(src.height * scale))
+    resized = src.resize((nw, nh), Image.LANCZOS)
+    canvas = Image.new("RGB", size, (255, 255, 255))
+    canvas.paste(resized, ((tw - nw) // 2, (th - nh) // 2))
+    return canvas
+
+
 def _fit_source(path: str, size: tuple[int, int]) -> Image.Image:
     source = Image.open(path)
     source.load()
@@ -138,7 +150,8 @@ def _compose(
         for index, path in enumerate(source_paths):
             x = (index % 2) * (cell_width + gap)
             y = (index // 2) * (cell_height + gap)
-            canvas.paste(_fit_source(path, (cell_width, cell_height)), (x, y))
+            canvas.paste(
+                _fit_source_contain(path, (cell_width, cell_height)), (x, y))
         return canvas
     if layout == "triptych_3":
         # Three equal vertical columns, in frozen role order.  Every column is
