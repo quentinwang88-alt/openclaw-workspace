@@ -2449,6 +2449,41 @@ def _frozen_mixed_contract_for_item(item: Any) -> Dict[str, Any]:
     return {}
 
 
+def _with_necklace_execution_audit(
+    validation: Dict[str, Any],
+    text: str,
+    contract: Dict[str, Any],
+    *,
+    renderer_version: str,
+) -> Dict[str, Any]:
+    """Fold the necklace V1 audit into the shared execution audit.
+
+    Section 8's necklace assertions are checked here -- on the *same delivered
+    string*, at the same stage, as the shared audit.  A non-necklace contract
+    returns the shared report *unchanged*, so no other category's validation
+    payload (or its ``prompt_hash``) moves at all.
+
+    Never raises: an audit is bookkeeping, and bookkeeping must not turn a
+    finished film into a failure.
+    """
+
+    try:
+        from core.necklace_mixed_profile import (
+            AUDIT_NOT_APPLICABLE,
+            audit_necklace_final_prompt,
+            merge_prompt_audits,
+        )
+
+        necklace = audit_necklace_final_prompt(
+            text, contract, renderer_version=renderer_version
+        )
+    except Exception:  # noqa: BLE001 - bookkeeping must not fail an item
+        return validation
+    if _text(_dict(necklace).get("status")) == AUDIT_NOT_APPLICABLE:
+        return validation
+    return merge_prompt_audits(validation, necklace)
+
+
 def render_video_generation_prompt_checked(
     *, item: Any, duration_seconds: float
 ) -> Dict[str, Any]:
@@ -2488,6 +2523,12 @@ def render_video_generation_prompt_checked(
         storyboard=storyboard,
         renderer_version=SCRIPT_RENDERER_VERSION,
         pre_compaction_prompt=pre,
+    )
+    # Section 8: the necklace promises are audited on the delivered text as well,
+    # in the same place and on the same string.  A non-necklace contract leaves
+    # the shared report untouched.
+    validation = _with_necklace_execution_audit(
+        validation, text, contract, renderer_version=SCRIPT_RENDERER_VERSION
     )
     return {"text": text, "report": report, "render_validation": validation}
 

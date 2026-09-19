@@ -398,5 +398,132 @@ class FrozenSeedMixedExtensionRepairTest(unittest.TestCase):
         self.assertEqual(_repair_frozen_seed_mixed_extension(seed, None), seed)
 
 
+def _necklace_frozen_package(*, profile_hash: str = "cafe0123456789ab", version: int = 1) -> str:
+    """A frozen package carrying the NECKLACE_MIXED_V1 namespace."""
+
+    return json.dumps(
+        {
+            "schema_version": "original-frozen-direction-package-v1",
+            "creative_diversity_contract": {"contract_id": "CDC_1"},
+            "category_execution_extension": {
+                "mixed_template_contract": {
+                    "execution_profile": "ACCESSORY_MIXED_TEMPLATE_V1",
+                    "template_id": "NMX_01_WEAR_DETAIL_STATIC",
+                    "feature_profile": "NECKLACE_MIXED_V1",
+                    "feature_version": version,
+                    "necklace_contract": {
+                        "subtype": "SINGLE_LAYER_SINGLE_PENDANT",
+                        "interaction_mode": "NONE",
+                        "profile_config_hash": profile_hash,
+                        "feature_profile": "NECKLACE_MIXED_V1",
+                        "feature_version": version,
+                    },
+                }
+            },
+        },
+        ensure_ascii=False,
+    )
+
+
+class NecklaceCheckpointMaterialTest(unittest.TestCase):
+    """Section 7's local cache version: only the necklace item may gain keys.
+
+    The checkpoint identity is what decides whether a cached voiceover /
+    assembly stage is reused.  A necklace template edit has to invalidate the
+    necklace items -- and nothing else, because a global bump would throw away
+    every other category's cached work for a change that cannot affect it.
+    """
+
+    def setUp(self):
+        self.provenance = {
+            "stage": "complete_script_blueprint",
+            "route": "primary",
+            "model": "gpt-5.6-sol",
+            "reasoning_effort": "high",
+        }
+
+    def test_a_non_necklace_item_gains_no_local_material(self):
+        item = _checkpoint_item()
+        identity = _checkpoint_identity(item, self.provenance)
+        self.assertNotIn("necklace_profile", identity)
+        # And it is *identical* to what the same item produces when the necklace
+        # module cannot even be imported -- i.e. the new code adds nothing at all
+        # to a non-necklace identity.
+        with patch.dict("sys.modules", {"core.necklace_mixed_profile": None}):
+            without_module = _checkpoint_identity(item, self.provenance)
+        self.assertEqual(identity, without_module)
+
+    def test_a_necklace_item_carries_its_own_profile_version(self):
+        item = _checkpoint_item()
+        item.frozen_direction_package_json = _necklace_frozen_package()
+        material = _checkpoint_identity(item, self.provenance)["necklace_profile"]
+        self.assertEqual(material["feature_profile"], "NECKLACE_MIXED_V1")
+        self.assertEqual(material["feature_version"], 1)
+        self.assertEqual(material["profile_config_hash"], "cafe0123456789ab")
+        self.assertTrue(material["frozen_contract_hash"])
+
+    def test_a_profile_edit_invalidates_the_necklace_item_only(self):
+        necklace = _checkpoint_item()
+        necklace.batch_item_id = "OCI_N"
+        necklace.frozen_direction_package_json = _necklace_frozen_package()
+        other = _checkpoint_item()
+        other.batch_item_id = "OCI_E"
+        other.frozen_direction_package_json = json.dumps(
+            {
+                "schema_version": "original-frozen-direction-package-v1",
+                "category_execution_extension": {
+                    "mixed_template_contract": {
+                        "execution_profile": "ACCESSORY_MIXED_TEMPLATE_V1",
+                        "template_id": "AMX_A_WORN_FIRST",
+                    }
+                },
+            },
+            ensure_ascii=False,
+        )
+        before_other = _checkpoint_identity(other, self.provenance)
+
+        necklace.frozen_direction_package_json = _necklace_frozen_package(
+            profile_hash="0000000000000000"
+        )
+        after_necklace = _checkpoint_identity(necklace, self.provenance)
+        after_other = _checkpoint_identity(other, self.provenance)
+
+        visited = _checkpoint_item()
+        visited.frozen_direction_package_json = _necklace_frozen_package()
+        self.assertNotEqual(
+            after_necklace["necklace_profile"]["frozen_contract_hash"],
+            _checkpoint_identity(visited, self.provenance)["necklace_profile"][
+                "frozen_contract_hash"
+            ],
+        )
+        self.assertEqual(before_other, after_other)
+        self.assertNotIn("necklace_profile", after_other)
+
+    def test_a_feature_version_bump_also_invalidates_it(self):
+        first = _checkpoint_item()
+        first.frozen_direction_package_json = _necklace_frozen_package(version=1)
+        second = _checkpoint_item()
+        second.frozen_direction_package_json = _necklace_frozen_package(version=2)
+        self.assertNotEqual(
+            _checkpoint_identity(first, self.provenance),
+            _checkpoint_identity(second, self.provenance),
+        )
+
+    def test_a_broken_profile_degrades_instead_of_failing_the_item(self):
+        item = _checkpoint_item()
+        item.frozen_direction_package_json = _necklace_frozen_package()
+        with patch.dict("sys.modules", {"core.necklace_mixed_profile": None}):
+            identity = _checkpoint_identity(item, self.provenance)
+        self.assertNotIn("necklace_profile", identity)
+        self.assertEqual(identity["item_snapshot_hash"], "SNAP_1")
+
+    def test_an_unparsable_frozen_package_is_still_identified(self):
+        item = _checkpoint_item()
+        item.frozen_direction_package_json = "这不是 JSON"
+        identity = _checkpoint_identity(item, self.provenance)
+        self.assertNotIn("necklace_profile", identity)
+        self.assertIn("frozen_direction_hash", identity)
+
+
 if __name__ == "__main__":
     unittest.main()

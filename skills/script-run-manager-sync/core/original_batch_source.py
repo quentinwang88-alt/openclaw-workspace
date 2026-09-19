@@ -61,6 +61,26 @@ ORIGINAL_BATCH_SOURCE_FIELD_ALIASES: Dict[str, List[str]] = {
 POOL_SOURCES = {"成功脚本复刻", "原创生成", "视频复刻", "人工编写"}
 
 
+def _necklace_handoff_reason(*, script_id: str, prompt: str) -> str:
+    """Section 8's necklace-only gate: a per-row reason, or ``""``.
+
+    The final consumer has to verify a NECKLACE_MIXED_V1 row against the frozen
+    source rather than against an editable table marker.  A row that is not
+    identified as necklace V1 returns ``""``.
+
+    The import is local and this is the *only* guard: the gate itself never
+    raises and never touches another category, so a broken gate cannot become a
+    new preflight failure for earrings, wristwear, rings, hair accessories or
+    women's wear.
+    """
+
+    try:
+        from core.necklace_handoff import check_necklace_handoff
+    except Exception:  # noqa: BLE001 - an absent gate must not block other categories
+        return ""
+    return check_necklace_handoff(script_id=script_id, prompt=prompt) or ""
+
+
 def _pool_policy(fields: Dict[str, Any], mapping: Dict[str, Optional[str]], script_id: str) -> dict:
     def value(key: str) -> str:
         return normalize_text(fields.get(mapping.get(key))) if mapping.get(key) else ""
@@ -193,6 +213,14 @@ def build_original_batch_sync_tasks(
             policy = _pool_policy(fields, mapping, script_id)
             if not code and not policy["script_pool_entry"]:
                 raise ValueError("ORIGINAL_PRODUCT_CODE_MISSING:历史原创记录缺少产品编码")
+            # The final necklace check runs last of the preflight checks, so a
+            # row that is incomplete for an older reason still reports that
+            # reason.  Refusing here means: no target task, the source checkbox
+            # is left alone, and nothing is regenerated -- fixing the script and
+            # re-exporting lets the row continue normally.
+            necklace_reason = _necklace_handoff_reason(script_id=script_id, prompt=prompt)
+            if necklace_reason:
+                raise ValueError(necklace_reason)
         except ValueError as exc:
             if errors is None:
                 raise

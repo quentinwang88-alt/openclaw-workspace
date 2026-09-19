@@ -243,6 +243,40 @@ def _checkpoint_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _necklace_checkpoint_material(frozen: Any) -> Dict[str, Any]:
+    """Local version material for a necklace V1 item, or ``{}`` for everyone else.
+
+    Section 7: the necklace plan / visual / voiceover / assembly checkpoints have
+    to depend on the profile version and on the frozen contract, so editing the
+    necklace template or its light recipe invalidates *its own* checkpoints --
+    without a global version bump that would throw away every other category's
+    cached work.
+
+    The other direction matters just as much.  A non-necklace item gains no new
+    key at all, so its hash material -- and therefore its cache keys -- stays
+    character-for-character what it was, and an earring voiceover is never
+    invalidated because somebody touched the necklace profile.
+
+    Never raises: a broken profile degrades to "no local material", which keeps
+    the historical behaviour instead of failing the stage.
+    """
+
+    try:
+        from core.necklace_mixed_profile import frozen_necklace_contract
+
+        block = frozen_necklace_contract(frozen if isinstance(frozen, dict) else {})
+    except Exception:  # noqa: BLE001 - checkpoint bookkeeping must not fail a run
+        return {}
+    if not block:
+        return {}
+    return {
+        "feature_profile": _text(block.get("feature_profile")),
+        "feature_version": block.get("feature_version"),
+        "profile_config_hash": _text(block.get("profile_config_hash")),
+        "frozen_contract_hash": _stable_hash(block),
+    }
+
+
 def _checkpoint_identity(
     item: PlanItem,
     blueprint_provenance: Dict[str, Any],
@@ -251,7 +285,7 @@ def _checkpoint_identity(
         frozen = json.loads(item.frozen_direction_package_json or "{}")
     except Exception:
         frozen = item.frozen_direction_package_json or ""
-    return {
+    identity = {
         "item_snapshot_hash": item.item_snapshot_hash,
         "frozen_direction_hash": _stable_hash(frozen),
         "blueprint_provenance": {
@@ -262,6 +296,12 @@ def _checkpoint_identity(
             )
         },
     }
+    # Local only: the necklace profile's own versions ride on the necklace
+    # checkpoints.  Every other category's identity object is untouched.
+    necklace_material = _necklace_checkpoint_material(frozen)
+    if necklace_material:
+        identity["necklace_profile"] = necklace_material
+    return identity
 
 
 def _load_stage_checkpoint(

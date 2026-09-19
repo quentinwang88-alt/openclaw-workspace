@@ -587,5 +587,251 @@ class ProductEvidenceHelperTest(unittest.TestCase):
         self.assertIn("双层", str(evidence["counts"].get("layer_count_source")))
 
 
+# ---------------------------------------------------------------------------
+# Section 8: the audit runs on the prompt the video model actually receives.
+# ---------------------------------------------------------------------------
+
+
+def _necklace_contract():
+    with _switches():
+        return _inject()["contract"]
+
+
+def _storyboard_for(contract, *, time_override=None, action_override=None):
+    """A storyboard carrying the frozen timeline, as the projection produces it."""
+
+    from core.accessory_mixed_templates import (
+        format_mixed_shot_time_range,
+        frozen_unit_timeline,
+    )
+
+    timeline, _total = frozen_unit_timeline(contract)
+    shots = []
+    for index, unit in enumerate(contract.get("capture_units") or []):
+        rng = format_mixed_shot_time_range(timeline.get(unit.get("unit_id")) or {})
+        if time_override and index in time_override:
+            rng = time_override[index]
+        action = (action_override or {}).get(index) or unit.get("action")
+        shots.append(
+            {
+                "shot_no": index + 1,
+                "capture_unit_id": unit.get("unit_id"),
+                "time_range": rng,
+                "narrative_role": unit.get("module"),
+                "visual_content": action,
+                "character_action": action,
+                "camera": unit.get("view_label"),
+                "product_anchors_visible": ["单层链圆形吊坠项链"],
+                "supported_claim_keys": ["C1"],
+            }
+        )
+    return shots
+
+
+def _render(contract, storyboard, *, product_identity="单层链圆形吊坠项链"):
+    from types import SimpleNamespace
+
+    from core.production_script_renderer import render_video_generation_prompt_checked
+
+    brief = {
+        "schema_version": "production-video-brief-v11-semantic-context",
+        "render_profile": "UGC_NATIVE_V2_MULTICLIP",
+        "capture_mode": "MIXED_MODULES",
+        "production_design": {
+            "presentation_mode": "MIXED",
+            "capture_mode": "MIXED_MODULES",
+        },
+        "storyboard": storyboard,
+        "product_truth": {
+            "product_identity": product_identity,
+            "identity_anchors": [product_identity],
+            "canonical_product_type": "necklace",
+        },
+        "voiceover": {
+            "hook_id": "H1",
+            "target_text": "สร้อยคอเส้นนี้ห้อยพอดี",
+            "chinese_translation": "这条项链落点刚好。",
+        },
+        "category_execution_extension": {"mixed_template_contract": contract},
+        "macro_structure": ["HOOK", "PROOF"],
+    }
+    script = {
+        "complete_script_id": "S_N1",
+        "script_concept": {"macro_structure": ["HOOK", "PROOF"]},
+        "production_design": brief["production_design"],
+        "storyboard": storyboard,
+        "video_generation_brief": brief,
+        "continuous_voiceover": brief["voiceover"],
+    }
+    item = SimpleNamespace(
+        result_json=json.dumps({"script": script}, ensure_ascii=False),
+        content_bundle_json=json.dumps(
+            {"selling_argument": {"core_value": "链条弧度与吊坠落点"}}, ensure_ascii=False
+        ),
+        batch_item_id="OCI_N1",
+        item_index=1,
+        product_code="PC_NECK_01",
+        macro_family_key="HOOK>PROOF",
+        carrier_mode="MIXED",
+        actual_hook_id="H1",
+        requested_hook_id="H1",
+        visual_signature="颈|锁骨|链条|吊坠",
+        cluster_id=1,
+    )
+    return render_video_generation_prompt_checked(item=item, duration_seconds=15)
+
+
+class NecklaceRenderedPromptAuditTest(unittest.TestCase):
+    """The delivered prompt, not the frozen contract, is what gets audited."""
+
+    def setUp(self):
+        self.contract = _necklace_contract()
+
+    def _audit(self, storyboard, **kwargs):
+        from core.necklace_mixed_profile import audit_necklace_final_prompt
+
+        out = _render(self.contract, storyboard, **kwargs)
+        return out, audit_necklace_final_prompt(out["text"], self.contract)
+
+    def _codes(self, audit):
+        return [issue.get("code") for issue in audit.get("issues") or []]
+
+    def test_the_audit_records_the_contract_revision_it_cleared(self):
+        # Section 8's final consumer judges a finished row, long after the
+        # audit ran, and it has to be able to tell "this prompt was audited
+        # against *this* contract" from "this prompt carries an audit of some
+        # other revision".  Those three fields are the only place that statement
+        # can live, so they have to be stamped on the report itself.
+        _out, audit = self._audit(_storyboard_for(self.contract))
+        block = self.contract.get(NECKLACE_CONTRACT_KEY) or {}
+        self.assertTrue(block.get("profile_config_hash"), block)
+        self.assertEqual(audit.get("profile_config_hash"), block.get("profile_config_hash"))
+        self.assertEqual(audit.get("feature_version"), self.contract.get("feature_version"))
+        self.assertEqual(audit.get("template_version"), self.contract.get("template_version"))
+
+    def test_the_audit_records_a_fail_against_the_same_revision(self):
+        # A refused film is stamped the same way: the consumer needs to know
+        # *which* revision refused it, not only which one passed it.
+        storyboard = _storyboard_for(self.contract, time_override={3: "12-16s"})
+        _out, audit = self._audit(storyboard)
+        block = self.contract.get(NECKLACE_CONTRACT_KEY) or {}
+        self.assertEqual(audit["status"], "FAIL")
+        self.assertEqual(audit.get("profile_config_hash"), block.get("profile_config_hash"))
+
+    def test_a_non_necklace_contract_gains_no_version_stamp(self):
+        from core.necklace_mixed_profile import audit_necklace_final_prompt
+
+        with _switches():
+            amx = _inject(product_type="耳饰", top_category="饰品")["contract"]
+        audit = audit_necklace_final_prompt("任意文本", amx)
+        self.assertEqual(audit["status"], "NOT_APPLICABLE")
+        self.assertNotIn("profile_config_hash", audit)
+
+    def test_a_correct_film_passes(self):
+        _out, audit = self._audit(_storyboard_for(self.contract))
+        self.assertEqual(audit["status"], "PASS", audit)
+        self.assertEqual(audit["checked_shots"], 4)
+
+    def test_the_audit_is_off_by_default(self):
+        # No switch is set here at all: the audit reads the frozen contract, so
+        # it must work (and stay quiet) in the shipped state.
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(NECKLACE_MIXED_V1_ENV, None)
+            from core.necklace_mixed_profile import audit_necklace_final_prompt
+
+            out = _render(self.contract, _storyboard_for(self.contract))
+            audit = audit_necklace_final_prompt(out["text"], self.contract)
+        self.assertEqual(audit["status"], "PASS", audit)
+
+    def test_a_drifted_timeline_is_caught_even_though_the_shared_audit_passes(self):
+        storyboard = _storyboard_for(self.contract, time_override={3: "12-16s"})
+        out, audit = self._audit(storyboard)
+        self.assertIn("NECKLACE_PROMPT_TIMELINE", self._codes(audit))
+        self.assertEqual(audit["status"], "FAIL")
+
+    def test_the_shared_audit_alone_does_not_see_the_timeline_drift(self):
+        # Guards the reason this audit exists: without it, a 16-second film that
+        # claims 15 seconds would ship unremarked.
+        from core.accessory_mixed_templates import (
+            audit_mixed_final_execution,
+        )
+
+        storyboard = _storyboard_for(self.contract, time_override={3: "12-16s"})
+        out = _render(self.contract, storyboard)
+        shared = audit_mixed_final_execution(
+            out["text"], self.contract, storyboard=storyboard
+        )
+        self.assertEqual(shared["status"], "PASS")
+
+    def test_a_handheld_shot_inheriting_neck_wording_is_caught(self):
+        storyboard = _storyboard_for(
+            self.contract,
+            action_override={2: "手指承托吊坠，锁骨与颈部关系清楚"},
+        )
+        _out, audit = self._audit(storyboard)
+        self.assertIn("NECKLACE_PROMPT_HANDHELD_CARRIER", self._codes(audit))
+
+    def test_a_static_last_shot_inheriting_worn_wording_is_caught(self):
+        storyboard = _storyboard_for(
+            self.contract,
+            action_override={3: "项链静置于托盘，人物锁骨仍在画面内"},
+        )
+        _out, audit = self._audit(storyboard)
+        self.assertIn("NECKLACE_PROMPT_STATIC_CARRIER", self._codes(audit))
+
+    def test_an_ear_wrist_or_hair_action_coming_back_is_caught(self):
+        storyboard = _storyboard_for(
+            self.contract,
+            action_override={0: "耳侧小幅转头，展示手腕与发梢"},
+        )
+        _out, audit = self._audit(storyboard)
+        self.assertIn("NECKLACE_PROMPT_FOREIGN_ZONE", self._codes(audit))
+
+    def test_a_missing_shot_is_caught(self):
+        storyboard = _storyboard_for(self.contract)[:3]
+        _out, audit = self._audit(storyboard)
+        self.assertIn("NECKLACE_PROMPT_SHOT_COUNT", self._codes(audit))
+
+    def test_a_second_product_identity_in_one_film_is_caught(self):
+        storyboard = _storyboard_for(self.contract)
+        storyboard[2] = dict(storyboard[2])
+        storyboard[2]["product_anchors_visible"] = ["另一款银链吊坠"]
+        # The prompt echoes the per-shot anchor line, so two identities appear.
+        out, audit = self._audit(storyboard)
+        if "另一款银链吊坠" in out["text"]:
+            self.assertIn("NECKLACE_PROMPT_IDENTITY_REF", self._codes(audit))
+
+    def test_a_non_necklace_contract_is_not_applicable(self):
+        from core.necklace_mixed_profile import audit_necklace_final_prompt
+
+        with _switches():
+            earring = _inject(product_type="耳饰", top_category="饰品")["contract"]
+        out = _render(self.contract, _storyboard_for(self.contract))
+        audit = audit_necklace_final_prompt(out["text"], earring)
+        self.assertEqual(audit["status"], "NOT_APPLICABLE")
+        self.assertEqual(audit["reason"], "NOT_NECKLACE_V1")
+
+    def test_the_renderer_merges_the_audit_for_a_necklace(self):
+        out = _render(self.contract, _storyboard_for(self.contract))
+        validation = out["render_validation"]
+        self.assertIn("necklace_audit", validation)
+        self.assertEqual(validation["status"], "PASS")
+
+    def test_the_renderer_leaves_a_non_necklace_validation_untouched(self):
+        # The necklace key must not appear for anyone else -- that is what keeps
+        # every other category's validation payload byte-identical.
+        with _switches():
+            earring = _inject(product_type="耳饰", top_category="饰品")["contract"]
+        out = _render(earring, _storyboard_for(earring))
+        self.assertNotIn("necklace_audit", out["render_validation"])
+
+    def test_a_merged_failure_blocks_delivery(self):
+        from core.production_script_renderer import render_validation_blocks_delivery
+
+        storyboard = _storyboard_for(self.contract, time_override={3: "12-16s"})
+        out = _render(self.contract, storyboard)
+        self.assertTrue(render_validation_blocks_delivery(out["render_validation"]))
+
+
 if __name__ == "__main__":
     unittest.main()

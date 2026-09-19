@@ -115,6 +115,24 @@ _FOREIGN_ZONE_TERMS: Tuple[str, ...] = (
     "耳夹",
 )
 
+#: Wording that only belongs in a *worn* shot.  The hand-held and static shots
+#: must not inherit it: a hand-only shot that still asks for a body zone is the
+#: exact defect this project has already paid for once (a handheld unit
+#: inheriting a worn framing), and the last static shot asking for a person is
+#: the other half of the same failure.
+_WORN_ONLY_TERMS: Tuple[str, ...] = (
+    "锁骨",
+    "颈部",
+    "脖颈",
+    "领口",
+    "肩上",
+    "肩部",
+    "已经佩戴",
+    "已佩戴",
+    "佩戴完成",
+    "佩戴中",
+)
+
 #: Generic expressions that turn "show one detail" into a promise about the
 #: whole product.  They are refused in an observation job the same way the
 #: mainline contract refuses them in the core value (semantic reversal: after
@@ -126,6 +144,29 @@ _GENERIC_OBSERVATION_TERMS: Tuple[str, ...] = (
     "整体展示",
 )
 
+# ── Final-prompt audit vocabulary ───────────────────────────────────────────
+# Section 8's necklace assertions, checked on the text that is actually
+# delivered to the video model rather than on the frozen contract.  R1 lived in
+# the last step (splice + compaction), so a contract that was right at planning
+# time is not evidence that the delivered prompt is still right.  The shared
+# audit already covers the generic promises; these codes are the necklace ones.
+NECKLACE_PROMPT_SHOT_COUNT = "NECKLACE_PROMPT_SHOT_COUNT"
+NECKLACE_PROMPT_SHOT_ORDER = "NECKLACE_PROMPT_SHOT_ORDER"
+NECKLACE_PROMPT_TIMELINE = "NECKLACE_PROMPT_TIMELINE"
+NECKLACE_PROMPT_WORN_ZONE = "NECKLACE_PROMPT_WORN_ZONE"
+NECKLACE_PROMPT_HANDHELD_CARRIER = "NECKLACE_PROMPT_HANDHELD_CARRIER"
+NECKLACE_PROMPT_STATIC_CARRIER = "NECKLACE_PROMPT_STATIC_CARRIER"
+NECKLACE_PROMPT_IDENTITY_REF = "NECKLACE_PROMPT_IDENTITY_REF"
+NECKLACE_PROMPT_FOREIGN_ZONE = "NECKLACE_PROMPT_FOREIGN_ZONE"
+NECKLACE_PROMPT_AUDIT_VERSION = "necklace-final-prompt-audit-v1"
+
+#: The necklace profile's audit status is deliberately the same three-value
+#: vocabulary the shared audit uses, so callers can merge the two reports
+#: without learning a second state machine.
+AUDIT_NOT_APPLICABLE = "NOT_APPLICABLE"
+AUDIT_PASS = "PASS"
+AUDIT_FAIL = "FAIL"
+
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
@@ -133,6 +174,22 @@ def _text(value: Any) -> str:
 
 def _flag_enabled(value: Any) -> bool:
     return _text(value).lower() in _TRUE_TOKENS
+
+
+def _first_clause(text: str) -> str:
+    """The leading clause of a shot action -- what identifies that shot.
+
+    The renderer compacts long descriptions before they reach the video model,
+    so demanding the whole frozen sentence in the delivered prompt would report
+    a correctly rendered film as broken.  The leading clause is what survives
+    compaction, and it is what makes one shot distinguishable from another.
+    """
+
+    value = _text(text)
+    for separator in ("，", "。", "；"):
+        if separator in value:
+            return value.split(separator, 1)[0].strip()
+    return value
 
 
 def necklace_mixed_v1_enabled(enabled: Optional[bool] = None) -> bool:
@@ -937,6 +994,226 @@ def validate_necklace_v1_contract(contract: Mapping[str, Any] | None) -> List[st
     return errors
 
 
+# ---------------------------------------------------------------------------
+# Final-prompt audit (section 8)
+# ---------------------------------------------------------------------------
+
+
+def audit_necklace_final_prompt(
+    prompt: Any,
+    contract: Mapping[str, Any] | None,
+    *,
+    renderer_version: str = "",
+) -> Dict[str, Any]:
+    """Audit the *delivered* prompt against the frozen necklace contract.
+
+    Runs on the text the video model actually receives -- after splicing and
+    after compaction -- because a contract that was correct at planning time is
+    no evidence about the prompt.  The shared
+    ``audit_mixed_final_execution`` already owns the generic promises (four
+    shots, 15 seconds, MIXED carrier, no face); this one owns the necklace ones:
+
+    * shot order and shot timeline,
+    * the two worn shots staying on the neck zone,
+    * the hand-held shot carrying no body-zone wording,
+    * the static last shot carrying no person,
+    * one unchanged product-identity reference across shots,
+    * no ear / wrist / hair action coming back.
+
+    Returns the same shape as the shared audit so callers can merge the two
+    without learning a second state machine.  A non-necklace contract reports
+    ``NOT_APPLICABLE`` and costs nothing.
+
+    Only the delivered *text* is judged here.  Whether the chain physically
+    breaks or clips through the neck in the finished video stays a human review
+    item, and this audit must never be reported as having verified it.
+    """
+
+    from core.accessory_mixed_templates import (
+        format_mixed_shot_time_range,
+        frozen_unit_timeline,
+        parse_final_shot_blocks,
+    )
+
+    text = _text(prompt)
+    report: Dict[str, Any] = {
+        "version": NECKLACE_PROMPT_AUDIT_VERSION,
+        "status": AUDIT_NOT_APPLICABLE,
+        "issues": [],
+        "issue_count": 0,
+        "checked_shots": 0,
+        "prompt_hash": hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
+        "renderer_version": _text(renderer_version),
+        "reason": "",
+    }
+
+    data = contract if isinstance(contract, Mapping) else {}
+    block = frozen_necklace_contract({"mixed_template_contract": data})
+    if not block:
+        report["reason"] = "NOT_NECKLACE_V1"
+        return report
+
+    # Which contract revision this audit actually cleared.  A consumer that only
+    # sees the finished row has to tell "this prompt was audited against *this*
+    # contract" from "this prompt carries an audit of some other revision", and
+    # the audit is the only place that statement can live.  The values are read
+    # from the *frozen* contract on purpose: the audit asserts things about the
+    # frozen film, so a later config edit must not make an unchanged film look
+    # like it needs re-auditing -- and re-exporting the same frozen contract has
+    # to keep clearing it.
+    #
+    # Each value is copied with its own JSON type (``template_version`` and
+    # ``feature_version`` are integers in the contract).  Stringifying one here
+    # would make a consumer's equality check fail against the contract it is
+    # supposed to agree with.
+    report["feature_version"] = data.get("feature_version")
+    report["profile_config_hash"] = _text(block.get("profile_config_hash"))
+    report["template_version"] = data.get("template_version")
+
+    units = [
+        unit for unit in (data.get("capture_units") or []) if isinstance(unit, Mapping)
+    ]
+
+    def _issue(
+        position: int,
+        unit_id: str,
+        field: str,
+        code: str,
+        actual: Any,
+        detail: str,
+    ) -> Dict[str, Any]:
+        return {
+            "shot_id": _text(unit_id) or f"CU_{position:02d}",
+            "field": field,
+            "module": "",
+            "code": code,
+            "actual": _text(actual)[:120],
+            "detail": detail,
+            "source": "RENDERER",
+        }
+
+    issues: List[Dict[str, Any]] = []
+    blocks = parse_final_shot_blocks(text)
+    if not units or not blocks:
+        report["status"] = AUDIT_FAIL
+        report["reason"] = "NO_DELIVERED_SHOTS"
+        report["issues"] = [
+            _issue(0, "", "镜块", NECKLACE_PROMPT_SHOT_COUNT, len(blocks),
+                   "最终提示词里没有可核对的镜块")
+        ]
+        report["issue_count"] = 1
+        return report
+
+    if len(blocks) != len(units):
+        issues.append(
+            _issue(len(units), "", "镜块", NECKLACE_PROMPT_SHOT_COUNT, len(blocks),
+                   f"交付镜块数 {len(blocks)} 与冻结合同的 {len(units)} 不一致")
+        )
+
+    timeline, _total = frozen_unit_timeline(data)
+    identity_refs: List[str] = []
+
+    for position, unit in enumerate(units, start=1):
+        if position > len(blocks):
+            break
+        block = blocks[position - 1]
+        unit_id = _text(unit.get("unit_id"))
+        module = _text(unit.get("module"))
+        lines = [_text(line) for line in (block.get("lines") or [])]
+        delivered = " ".join([_text(block.get("header_role"))] + lines)
+
+        # Order, read as "is the shot this position owns actually the shot that
+        # shipped here?".  Compared against the frozen action rather than the
+        # header label: the header lists every module of the film, so it is not
+        # a per-shot answer and judging it as one would report a correct film as
+        # broken.
+        marker = _first_clause(_text(unit.get("action")))
+        if marker and marker not in delivered:
+            issues.append(
+                _issue(position, unit_id, "画面事件", NECKLACE_PROMPT_SHOT_ORDER,
+                       delivered,
+                       f"第{position}镜（{module}）的冻结动作未出现在交付文本里"
+                       f"（标志：{marker}）")
+            )
+
+        expected_range = _text(format_mixed_shot_time_range(timeline.get(unit_id)))
+        delivered_range = _text(block.get("time_range"))
+        if expected_range and delivered_range != expected_range:
+            issues.append(
+                _issue(position, unit_id, "时间范围", NECKLACE_PROMPT_TIMELINE,
+                       delivered_range, f"应为 {expected_range}")
+            )
+
+        # Foreign vocabulary must not come back through any shot.
+        for term in _FOREIGN_ZONE_TERMS:
+            if term in delivered:
+                issues.append(
+                    _issue(position, unit_id, "画面事件",
+                           NECKLACE_PROMPT_FOREIGN_ZONE, term,
+                           f"第{position}镜出现不属于本类目的动作/部位：{term}")
+                )
+
+        # The two non-worn shots must not inherit worn body-zone wording.
+        if module in ("HANDHELD_PRODUCT", "STATIC_PRODUCT"):
+            for term in _WORN_ONLY_TERMS:
+                if term in delivered:
+                    code = (
+                        NECKLACE_PROMPT_HANDHELD_CARRIER
+                        if module == "HANDHELD_PRODUCT"
+                        else NECKLACE_PROMPT_STATIC_CARRIER
+                    )
+                    issues.append(
+                        _issue(position, unit_id, "画面事件", code, term,
+                               f"{module} 镜不应出现佩戴身体区表述：{term}")
+                    )
+
+        # One product across every shot.
+        for line in lines:
+            if line.startswith("商品必须可见：") or line.startswith("每段商品必须可见："):
+                identity_refs.append(line.split("：", 1)[-1].strip())
+
+    distinct_ids = [item for item in dict.fromkeys(identity_refs) if item]
+    if len(distinct_ids) > 1:
+        issues.append(
+            _issue(0, "", "商品必须可见", NECKLACE_PROMPT_IDENTITY_REF,
+                   " | ".join(distinct_ids),
+                   "同一片内出现了多个不同的商品身份引用")
+        )
+
+    report["issues"] = issues
+    report["issue_count"] = len(issues)
+    report["checked_shots"] = min(len(blocks), len(units))
+    report["status"] = AUDIT_FAIL if issues else AUDIT_PASS
+    report["reason"] = "NECKLACE_EXECUTION_CONFLICT" if issues else "OK"
+    return report
+
+
+def merge_prompt_audits(
+    shared: Mapping[str, Any] | None,
+    necklace: Mapping[str, Any] | None,
+) -> Dict[str, Any]:
+    """Fold the necklace audit into the shared one, keeping one status.
+
+    The shared report keeps its own keys; the necklace issues are appended and
+    counted separately so a reviewer can still tell which layer refused.  A
+    ``NOT_APPLICABLE`` necklace audit changes nothing at all, which is what
+    keeps every other category byte-identical.
+    """
+
+    base = dict(shared or {})
+    extra = dict(necklace or {})
+    if _text(extra.get("status")) == AUDIT_NOT_APPLICABLE:
+        return base
+
+    issues = list(base.get("issues") or []) + list(extra.get("issues") or [])
+    base["issues"] = issues
+    base["issue_count"] = len(issues)
+    base["necklace_audit"] = extra
+    if _text(extra.get("status")) == AUDIT_FAIL:
+        base["status"] = AUDIT_FAIL
+    return base
+
+
 __all__ = [
     "NECKLACE_MIXED_V1_ENV",
     "NECKLACE_MIXED_V1_PROFILE",
@@ -973,4 +1250,7 @@ __all__ = [
     "attach_necklace_contract",
     "frozen_necklace_contract",
     "validate_necklace_v1_contract",
+    "audit_necklace_final_prompt",
+    "merge_prompt_audits",
+    "NECKLACE_PROMPT_AUDIT_VERSION",
 ]
