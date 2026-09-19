@@ -973,15 +973,16 @@ class PhotoReferenceVisionService:
             account_visual_baseline=baseline,
             fixed_background=fixed_backdrop,
         )
-        # B2（§B2）：讲解主题用专属规则块替换选择型规则——不同时携带
-        # "每页只造型名称"和"每页需要解释"
+        # F2（§F2）：讲解主题用专属规则块**追加**到公共提示尾部——
+        # 不再整体覆盖（整体覆盖会丢 JSON schema/商品/旅行变量/背景合同）。
+        # 公共提示的选择型规则被规则块的明确讲解指令覆盖（后者优先）。
         guide_block = self._guide_plan_prompt_block(
             theme=topic or {},
             content_requirement=content_requirement,
             account_positioning=positioning,
         )
         if guide_block:
-            base_prompt = guide_block
+            base_prompt = base_prompt + "\n\n" + guide_block
         if planning_images:
             base_prompt += self._travel_planning_image_prompt(planning_images)
         background_features = [

@@ -360,11 +360,13 @@ def build_travel_topic(
     theme's own adjustment guidance.  All five other travel themes return the
     exact brief they returned before, so their planning prompt cannot change.
     """
-    if not travel_place:
+    from services.photo_content_planner import is_guide_theme
+    if not travel_place and not is_guide_theme(theme):
         raise FeishuWorkflowError(
             "当前选择的是具体旅行主题，请填写旅行地点；"
             "如不需要具体目的地，请改选“凉爽旅行”"
         )
+    # F1：教程主题不强制地点——地点为空时允许构建（配色教程默认无地点需求）
     theme_type = str(theme.get("travel_theme_type") or "")
     band = str(travel_variables.get("temperature_band") or "")
     topic: dict[str, Any] = {
@@ -1812,7 +1814,12 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 travel_copy_templates = profile_copy_variants(
                     travel_profile, locale=publish_locale,
                 ) or None
-                if theme and theme.get("travel_theme_type"):
+                from services.photo_content_planner import is_guide_theme
+                if theme and (theme.get("travel_theme_type") or is_guide_theme(theme)):
+                    # F1（§6.1）：新教程主题（TRAVEL_STYLING_GUIDE/COLOR_TUTORIAL）
+                    # 也进入选题构建分支——没有 travel_theme_type 但有 theme_key。
+                    # build_travel_topic 对缺地点会报错，教程主题不强制地点
+                    # → 传空 place 让它跳过地点校验（已有分支处理 place=""）
                     travel_topic = build_travel_topic(
                         theme=theme, travel_place=travel_place,
                         travel_variables=travel_variables,

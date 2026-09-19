@@ -418,8 +418,13 @@ class PhotoPackageExporter:
             )
             if str(template.get("overlay_style") or "") == "structured_v1":
                 from services.photo_structured_layout import render_structured_page
+                render_template = template
+                if str(spec.get("layout") or "") == "grid_2x2":
+                    # F4（§7.2）：四宫格图片区缩至 80% 后，封面文字必须
+                    # 绑定到底部 20% 文字区（不压人物），仅该 layout 覆盖
+                    render_template = {**dict(template), "text_position": "bottom"}
                 renderer_pages.append(render_structured_page(
-                    image, str(spec.get("overlay_text") or ""), template,
+                    image, str(spec.get("overlay_text") or ""), render_template,
                     index=index, cover_index=cover_index, total=expected_count,
                 ))
             else:
