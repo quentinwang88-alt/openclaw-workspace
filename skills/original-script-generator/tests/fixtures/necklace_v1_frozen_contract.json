@@ -1,0 +1,564 @@
+{
+  "audio_route": "VOICEOVER_POST",
+  "canonical_product_type": "necklace",
+  "capture_units": [
+    {
+      "action": "颈部下段与锁骨小幅自然变化，展示链条弧度与吊坠的落点",
+      "action_boundary": [
+        "展示摘下或戴上的过程",
+        "拉动链条",
+        "扣合或展示搭扣",
+        "快速甩动",
+        "展示未确认的链层数或扣头结构"
+      ],
+      "allowed_framing": [
+        "颈部下段与锁骨近景",
+        "链条弧度与吊坠落点的关系"
+      ],
+      "body_zone": "NECK",
+      "carrier_mode": "WEARER_ACTIVE",
+      "continuity_group": "CU_01",
+      "duration_seconds": 4,
+      "edit_before": "START",
+      "evidence_refs": [
+        "CLM_7d8f19b9add241df71ffd734",
+        "CLM_f75c6926a6be9a21a5daace7",
+        "CLM_2f1ec268ad60ae38d9abbbdd"
+      ],
+      "face_policy": "NO_FACE",
+      "forbidden_framing": [
+        "嘴部入画",
+        "鼻子入画",
+        "眼睛入画",
+        "正面全脸",
+        "镜面反射露脸"
+      ],
+      "framing": "颈部",
+      "module": "WORN_DETAIL",
+      "module_label": "佩戴近景",
+      "observation_job": "链条弧度、吊坠落点与锁骨的关系",
+      "product_state": "ALREADY_WORN",
+      "quantity_rule": "颈部近景的裁切范围不改变授权数量与佩戴位置；画面里可见的部分不代表链条层数或吊坠个数，分镜与文案都不得推断。",
+      "state_boundary": "已完成佩戴，本镜只做局部微转；不生成复杂扣合、穿刺、夹取或摘戴过程",
+      "structure_role": "",
+      "unit_id": "CU_01",
+      "unit_index": 1,
+      "view_label": "佩戴近景",
+      "view_scope": "BODY_ZONE_CLOSE",
+      "visible_quantity_rule": "本镜的裁切范围只决定画面里实际可见的部分；不要求扩大取景后出现完整的链条或吊坠，也不得据此推断未入画部分的层数、件数或扣头结构。"
+    },
+    {
+      "action": "同一领口与少量肩部小幅变化，展示项链与领口的整体比例",
+      "action_boundary": [
+        "展示摘下或戴上的过程",
+        "拉动链条",
+        "扣合或展示搭扣",
+        "快速甩动",
+        "展示未确认的链层数或扣头结构"
+      ],
+      "allowed_framing": [
+        "领口上方与少量肩部",
+        "项链与当前实际领口的整体比例"
+      ],
+      "body_zone": "NECK",
+      "carrier_mode": "WEARER_ACTIVE",
+      "continuity_group": "CU_02",
+      "duration_seconds": 3,
+      "edit_before": "DIRECT_CUT",
+      "evidence_refs": [
+        "CLM_7d8f19b9add241df71ffd734",
+        "CLM_f75c6926a6be9a21a5daace7",
+        "CLM_2f1ec268ad60ae38d9abbbdd"
+      ],
+      "face_policy": "NO_FACE",
+      "forbidden_framing": [
+        "嘴部入画",
+        "鼻子入画",
+        "眼睛入画",
+        "正面全脸",
+        "镜面反射露脸"
+      ],
+      "framing": "颈部",
+      "module": "WORN_RELATION",
+      "module_label": "佩戴关系",
+      "observation_job": "项链与当前实际领口的整体比例",
+      "product_state": "ALREADY_WORN",
+      "quantity_rule": "颈部近景的裁切范围不改变授权数量与佩戴位置；画面里可见的部分不代表链条层数或吊坠个数，分镜与文案都不得推断。",
+      "state_boundary": "已完成佩戴，本镜用同一佩戴部位与局部衣物或发型交代搭配关系；不重复佩戴近景的观察任务",
+      "structure_role": "",
+      "unit_id": "CU_02",
+      "unit_index": 2,
+      "view_label": "佩戴关系",
+      "view_scope": "BODY_ZONE_RELATION",
+      "visible_quantity_rule": "本镜的裁切范围只决定画面里实际可见的部分；不要求扩大取景后出现完整的链条或吊坠，也不得据此推断未入画部分的层数、件数或扣头结构。"
+    },
+    {
+      "action": "手指稳定承托吊坠，链条自然铺落，小幅转动展示已确认的正面细节",
+      "action_boundary": [
+        "展示摘下或戴上的过程",
+        "拉动链条",
+        "扣合或展示搭扣",
+        "快速甩动",
+        "展示未确认的链层数或扣头结构"
+      ],
+      "allowed_framing": [
+        "手指与商品本体的承托关系",
+        "手部少量入画，商品是清楚主体",
+        "商品正面与侧面轮廓"
+      ],
+      "body_zone": "",
+      "carrier_mode": "HAND_ONLY",
+      "continuity_group": "CU_03",
+      "duration_seconds": 4,
+      "edit_before": "DIRECT_CUT",
+      "evidence_refs": [
+        "CLM_7d8f19b9add241df71ffd734",
+        "CLM_f75c6926a6be9a21a5daace7",
+        "CLM_2f1ec268ad60ae38d9abbbdd"
+      ],
+      "face_policy": "NO_FACE",
+      "forbidden_framing": [
+        "脸与头部入画",
+        "正面全脸",
+        "镜面反射露脸",
+        "佩戴部位入画",
+        "全身穿搭展示"
+      ],
+      "framing": "",
+      "module": "HANDHELD_PRODUCT",
+      "module_label": "手持商品",
+      "observation_job": "掌心承托下已确认吊坠的正面轮廓与表面细节",
+      "product_state": "HELD",
+      "quantity_rule": "颈部近景的裁切范围不改变授权数量与佩戴位置；画面里可见的部分不代表链条层数或吊坠个数，分镜与文案都不得推断。",
+      "state_boundary": "商品已经拿稳，本镜只做小幅转动与角度调整；不要求现场摘戴、扣合、穿刺或夹取",
+      "structure_role": "",
+      "unit_id": "CU_03",
+      "unit_index": 3,
+      "view_label": "手与商品",
+      "view_scope": "HAND_AND_PRODUCT",
+      "visible_quantity_rule": "本镜只说明画面里当前实际可见的商品部分；不因手持裁切推断件数、左右方式或任何未入画的部件"
+    },
+    {
+      "action": "项链静置于哑光托盘上，克制的同侧机位变化展示链条布局与吊坠轮廓",
+      "action_boundary": [
+        "展示摘下或戴上的过程",
+        "拉动链条",
+        "扣合或展示搭扣",
+        "快速甩动",
+        "展示未确认的链层数或扣头结构"
+      ],
+      "allowed_framing": [
+        "商品与冻结台面的接触关系",
+        "商品独立成主体",
+        "克制的同侧机位变化"
+      ],
+      "body_zone": "",
+      "carrier_mode": "STATIC_PRODUCT",
+      "continuity_group": "CU_04",
+      "duration_seconds": 4,
+      "edit_before": "DIRECT_CUT",
+      "evidence_refs": [
+        "CLM_7d8f19b9add241df71ffd734",
+        "CLM_f75c6926a6be9a21a5daace7",
+        "CLM_2f1ec268ad60ae38d9abbbdd"
+      ],
+      "face_policy": "NO_FACE",
+      "forbidden_framing": [
+        "人物、脸与身体入画",
+        "手或手臂入画",
+        "佩戴部位入画",
+        "镜面反射露脸"
+      ],
+      "framing": "",
+      "module": "STATIC_PRODUCT",
+      "module_label": "商品静物",
+      "observation_job": "哑光托盘上完整链条布局与吊坠轮廓",
+      "product_state": "RESTING_ON_SURFACE",
+      "quantity_rule": "颈部近景的裁切范围不改变授权数量与佩戴位置；画面里可见的部分不代表链条层数或吊坠个数，分镜与文案都不得推断。",
+      "state_boundary": "商品自然静置于冻结台面，本镜只做克制的机位与角度变化；不继承任何佩戴部位入画要求",
+      "structure_role": "",
+      "unit_id": "CU_04",
+      "unit_index": 4,
+      "view_label": "商品与台面",
+      "view_scope": "PRODUCT_AND_SURFACE",
+      "visible_quantity_rule": "本镜只说明台面上实际可见的商品部分；不因静物裁切推断件数或任何未入画的部件"
+    }
+  ],
+  "category_zone": "NECK",
+  "content_theme": {
+    "approved_claim_refs": [
+      "CLM_7d8f19b9add241df71ffd734",
+      "CLM_f75c6926a6be9a21a5daace7",
+      "CLM_2f1ec268ad60ae38d9abbbdd"
+    ],
+    "argument_id": "TESTSET_VAL_54C0BF5061D7",
+    "candidate_role": "PRIMARY",
+    "evidence_refs": [
+      "CLM_7d8f19b9add241df71ffd734",
+      "CLM_f75c6926a6be9a21a5daace7",
+      "CLM_2f1ec268ad60ae38d9abbbdd"
+    ],
+    "parent_theme_id": "ARGUMENT_TESTSET_VAL_54C0BF5061D7",
+    "theme_id": "ARGUMENT_TESTSET_VAL_54C0BF5061D7",
+    "thesis": "字母H吊坠辨识度高",
+    "thesis_input_gap": "",
+    "thesis_source": "SPINE_CORE_BUYING_REASON",
+    "thesis_source_ref": "bundle.semantic_spine_contract.script_thesis.core_buying_reason"
+  },
+  "cut_policy": {
+    "allow_direct_cut_between_states": true,
+    "allow_in_shot_state_change": false,
+    "note": "允许 DIRECT_CUT 做佩戴-手持-静物-佩戴的展示蒙太奇；同一连续镜头内不允许物理状态瞬间转移，也不生成摘戴过程。"
+  },
+  "difference_report": {
+    "comparison_scope": "CANDIDATE_ONLY",
+    "counts_as_independent": true,
+    "counts_as_theme": false,
+    "counts_as_variant": false,
+    "difference_dimensions": [],
+    "difference_summary": "本批与历史中暂无同类混合候选可比对",
+    "history_compared": 0,
+    "history_incomplete": 0,
+    "nearest_script_id": "",
+    "order_only": false,
+    "review_status": "DISTINCT_THEME",
+    "signature_version": "mixed-signature-v1"
+  },
+  "environment_recipe": {
+    "environment": "单一方向的暖中性侧窗光、克制的米白或其它已配置的低饱和色衣物、哑光托盘；保留接触阴影、皮肤与织物纹理",
+    "goal": "金属不过曝、保留可见的明暗层次与商品原色；暖背景不得改变商品本身的颜色",
+    "label": "暖中性侧窗光",
+    "recipe_version": 1
+  },
+  "environment_recipe_id": "NMX_WARM_NEUTRAL_WINDOW_V1",
+  "environment_recipe_version": 1,
+  "execution_profile": "ACCESSORY_MIXED_TEMPLATE_V1",
+  "face_policy": "NO_FACE",
+  "fallback_observation": "只展示参考图已知的轮廓、颜色与表面纹理；不展示未确认的链层数、吊坠个数或扣头结构",
+  "feature_profile": "NECKLACE_MIXED_V1",
+  "feature_version": 1,
+  "final_shot_signature": {
+    "product_fact": {
+      "claims": [
+        "clm2f1ec268ad60ae38d9abbbdd",
+        "clm7d8f19b9add241df71ffd734",
+        "clmf75c6926a6be9a21a5daace7"
+      ],
+      "digest": "0670923b3488a66de645",
+      "evidence": [
+        "clm2f1ec268ad60ae38d9abbbdd",
+        "clm7d8f19b9add241df71ffd734",
+        "clmf75c6926a6be9a21a5daace7"
+      ],
+      "note": "商品事实轴：只回答用了哪些商品事实，不参与主题语义判定",
+      "observations": [
+        "佩戴落点与当前实际领口的关系",
+        "已确认吊坠的正面轮廓与已有纹样",
+        "链条可见的弧度与走向"
+      ],
+      "source_refs": {
+        "claims": "content_theme.approved_claim_refs",
+        "evidence": "content_theme.evidence_refs",
+        "structure": "structure_facts",
+        "verified_parts": "structure_facts（三态：VERIFIED/ABSENT/UNKNOWN）"
+      },
+      "structure": {
+        "has_band_arch": "ABSENT",
+        "has_chain": "UNKNOWN",
+        "has_clasp": "UNKNOWN",
+        "has_ear_clip": "ABSENT",
+        "has_elastic_band": "ABSENT",
+        "has_hinge_or_spring": "ABSENT",
+        "has_open_band": "ABSENT",
+        "has_pendant": "UNKNOWN",
+        "has_piercing_post": "ABSENT",
+        "has_pin_shaft": "ABSENT",
+        "has_ribbon_bow": "ABSENT",
+        "has_rigid_ring": "ABSENT",
+        "has_teeth_or_jaw": "ABSENT"
+      },
+      "verified_parts": {
+        "has_band_arch": "ABSENT",
+        "has_chain": "UNKNOWN",
+        "has_clasp": "UNKNOWN",
+        "has_ear_clip": "ABSENT",
+        "has_elastic_band": "ABSENT",
+        "has_hinge_or_spring": "ABSENT",
+        "has_open_band": "ABSENT",
+        "has_pendant": "UNKNOWN",
+        "has_piercing_post": "ABSENT",
+        "has_pin_shaft": "ABSENT",
+        "has_ribbon_bow": "ABSENT",
+        "has_rigid_ring": "ABSENT",
+        "has_teeth_or_jaw": "ABSENT"
+      }
+    },
+    "semantic": {
+      "audience_question": "",
+      "claims": [
+        "clm2f1ec268ad60ae38d9abbbdd",
+        "clm7d8f19b9add241df71ffd734",
+        "clmf75c6926a6be9a21a5daace7"
+      ],
+      "core_value": "字母H吊坠辨识度高",
+      "digest": "8294016aa97c23a48b37",
+      "evidence": [
+        "clm2f1ec268ad60ae38d9abbbdd",
+        "clm7d8f19b9add241df71ffd734",
+        "clmf75c6926a6be9a21a5daace7"
+      ],
+      "input_gap": "AUDIENCE_QUESTION_UNAVAILABLE",
+      "observations": [
+        "佩戴落点与当前实际领口的关系",
+        "已确认吊坠的正面轮廓与已有纹样",
+        "链条可见的弧度与走向"
+      ],
+      "product_fact_digest_source": "mixed_product_fact_signature",
+      "proposition": "字母H吊坠辨识度高",
+      "theme_label": "ARGUMENT_TESTSET_VAL_54C0BF5061D7"
+    },
+    "signature_version": "mixed-signature-v1",
+    "surface": {
+      "audio_route": "VOICEOVER_POST",
+      "cut_policy": {
+        "allow_direct_cut_between_states": "True",
+        "allow_in_shot_state_change": "",
+        "note": "允许 DIRECT_CUT 做佩戴-手持-静物-佩戴的展示蒙太奇；同一连续镜头内不允许物理状态瞬间转移，也不生成摘戴过程。"
+      },
+      "digest": "d94581a734a237ce0c54",
+      "environment_recipe_id": "NMX_WARM_NEUTRAL_WINDOW_V1",
+      "environment_recipe_version": 1,
+      "recipe_label": "暖中性侧窗光",
+      "total_duration_seconds": 15
+    },
+    "visual": {
+      "digest": "1b95a329c9ad8bef2a8b",
+      "face_policy": "NO_FACE",
+      "shots": [
+        {
+          "action": "颈部下段与锁骨小幅自然变化展示链条弧度与吊坠的落点",
+          "action_boundary": [
+            "展示摘下或戴上的过程",
+            "展示未确认的链层数或扣头结构",
+            "快速甩动",
+            "扣合或展示搭扣",
+            "拉动链条"
+          ],
+          "allowed_framing": [
+            "链条弧度与吊坠落点的关系",
+            "颈部下段与锁骨近景"
+          ],
+          "body_zone": "NECK",
+          "carrier_mode": "WEARER_ACTIVE",
+          "forbidden_framing": [
+            "嘴部入画",
+            "正面全脸",
+            "眼睛入画",
+            "镜面反射露脸",
+            "鼻子入画"
+          ],
+          "framing": "颈部",
+          "is_opening": true,
+          "module": "WORN_DETAIL",
+          "observation_job": "链条弧度吊坠落点与锁骨的关系",
+          "opening_job": "链条弧度吊坠落点与锁骨的关系",
+          "product_state": "ALREADY_WORN",
+          "unit_id": "CU_01",
+          "view_scope": "BODY_ZONE_CLOSE"
+        },
+        {
+          "action": "同一领口与少量肩部小幅变化展示项链与领口的整体比例",
+          "action_boundary": [
+            "展示摘下或戴上的过程",
+            "展示未确认的链层数或扣头结构",
+            "快速甩动",
+            "扣合或展示搭扣",
+            "拉动链条"
+          ],
+          "allowed_framing": [
+            "项链与当前实际领口的整体比例",
+            "领口上方与少量肩部"
+          ],
+          "body_zone": "NECK",
+          "carrier_mode": "WEARER_ACTIVE",
+          "forbidden_framing": [
+            "嘴部入画",
+            "正面全脸",
+            "眼睛入画",
+            "镜面反射露脸",
+            "鼻子入画"
+          ],
+          "framing": "颈部",
+          "is_opening": false,
+          "module": "WORN_RELATION",
+          "observation_job": "项链与当前实际领口的整体比例",
+          "opening_job": "",
+          "product_state": "ALREADY_WORN",
+          "unit_id": "CU_02",
+          "view_scope": "BODY_ZONE_RELATION"
+        },
+        {
+          "action": "手指稳定承托吊坠链条自然铺落小幅转动展示已确认的正面细节",
+          "action_boundary": [
+            "展示摘下或戴上的过程",
+            "展示未确认的链层数或扣头结构",
+            "快速甩动",
+            "扣合或展示搭扣",
+            "拉动链条"
+          ],
+          "allowed_framing": [
+            "商品正面与侧面轮廓",
+            "手指与商品本体的承托关系",
+            "手部少量入画商品是清楚主体"
+          ],
+          "body_zone": "",
+          "carrier_mode": "HAND_ONLY",
+          "forbidden_framing": [
+            "佩戴部位入画",
+            "全身穿搭展示",
+            "正面全脸",
+            "脸与头部入画",
+            "镜面反射露脸"
+          ],
+          "framing": "",
+          "is_opening": false,
+          "module": "HANDHELD_PRODUCT",
+          "observation_job": "掌心承托下已确认吊坠的正面轮廓与表面细节",
+          "opening_job": "",
+          "product_state": "HELD",
+          "unit_id": "CU_03",
+          "view_scope": "HAND_AND_PRODUCT"
+        },
+        {
+          "action": "项链静置于哑光托盘上克制的同侧机位变化展示链条布局与吊坠轮廓",
+          "action_boundary": [
+            "展示摘下或戴上的过程",
+            "展示未确认的链层数或扣头结构",
+            "快速甩动",
+            "扣合或展示搭扣",
+            "拉动链条"
+          ],
+          "allowed_framing": [
+            "克制的同侧机位变化",
+            "商品与冻结台面的接触关系",
+            "商品独立成主体"
+          ],
+          "body_zone": "",
+          "carrier_mode": "STATIC_PRODUCT",
+          "forbidden_framing": [
+            "人物脸与身体入画",
+            "佩戴部位入画",
+            "手或手臂入画",
+            "镜面反射露脸"
+          ],
+          "framing": "",
+          "is_opening": false,
+          "module": "STATIC_PRODUCT",
+          "observation_job": "哑光托盘上完整链条布局与吊坠轮廓",
+          "opening_job": "",
+          "product_state": "RESTING_ON_SURFACE",
+          "unit_id": "CU_04",
+          "view_scope": "PRODUCT_AND_SURFACE"
+        }
+      ],
+      "signature_kind": "PLANNED",
+      "template_id": "NMX_01_WEAR_DETAIL_STATIC",
+      "verified_parts": {
+        "has_band_arch": "ABSENT",
+        "has_chain": "UNKNOWN",
+        "has_clasp": "UNKNOWN",
+        "has_ear_clip": "ABSENT",
+        "has_elastic_band": "ABSENT",
+        "has_hinge_or_spring": "ABSENT",
+        "has_open_band": "ABSENT",
+        "has_pendant": "UNKNOWN",
+        "has_piercing_post": "ABSENT",
+        "has_pin_shaft": "ABSENT",
+        "has_ribbon_bow": "ABSENT",
+        "has_rigid_ring": "ABSENT",
+        "has_teeth_or_jaw": "ABSENT"
+      }
+    }
+  },
+  "global_carrier": "MIXED",
+  "local_body_style_ref": "",
+  "necklace_contract": {
+    "chain_identity": {
+      "product_identity_ref": "1731275706716555867",
+      "source": "PRODUCT_IDENTITY_REF"
+    },
+    "eligibility_evidence_refs": [
+      {
+        "part": "has_chain",
+        "ref": "1731275706716555867",
+        "required": "VERIFIED",
+        "source": "APPROVED_ANCHORS",
+        "state": "VERIFIED"
+      },
+      {
+        "part": "has_pendant",
+        "ref": "1731275706716555867",
+        "required": "VERIFIED",
+        "source": "APPROVED_ANCHORS",
+        "state": "VERIFIED"
+      },
+      {
+        "part": "layer_count",
+        "ref": "1731275706716555867",
+        "required": 1,
+        "source": "STRUCTURE_COUNTS",
+        "state": "1"
+      },
+      {
+        "part": "pendant_count",
+        "ref": "1731275706716555867",
+        "required": 1,
+        "source": "STRUCTURE_COUNTS",
+        "state": "1"
+      }
+    ],
+    "feature_profile": "NECKLACE_MIXED_V1",
+    "feature_version": 1,
+    "interaction_mode": "NONE",
+    "pendant_identity": {
+      "product_identity_ref": "1731275706716555867",
+      "source": "PRODUCT_IDENTITY_REF"
+    },
+    "profile_config_hash": "d405e0c3933770bfe13f9f91b94a6b3b19b87987684ca48f53077a3675da14be",
+    "subtype": "SINGLE_LAYER_SINGLE_PENDANT",
+    "wearing_relation": {
+      "adornment_state": "ALREADY_WORN",
+      "source": "TEMPLATE_CONTRACT"
+    }
+  },
+  "observation_focus": [
+    "链条可见的弧度与走向",
+    "已确认吊坠的正面轮廓与已有纹样",
+    "佩戴落点与当前实际领口的关系"
+  ],
+  "part_gated_actions": [],
+  "physical_family": "NECK_CHAIN_WITH_PENDANT",
+  "product_identity_ref": "1731275706716555867",
+  "profile_config_hash": "d405e0c3933770bfe13f9f91b94a6b3b19b87987684ca48f53077a3675da14be",
+  "schema_version": "accessory-mixed-template-v1",
+  "source_mode": "AUTHORED_TEMPLATE",
+  "structure_facts": {
+    "has_band_arch": "ABSENT",
+    "has_chain": "UNKNOWN",
+    "has_clasp": "UNKNOWN",
+    "has_ear_clip": "ABSENT",
+    "has_elastic_band": "ABSENT",
+    "has_hinge_or_spring": "ABSENT",
+    "has_open_band": "ABSENT",
+    "has_pendant": "UNKNOWN",
+    "has_piercing_post": "ABSENT",
+    "has_pin_shaft": "ABSENT",
+    "has_ribbon_bow": "ABSENT",
+    "has_rigid_ring": "ABSENT",
+    "has_teeth_or_jaw": "ABSENT"
+  },
+  "template_display_name": "佩戴细节优先",
+  "template_id": "NMX_01_WEAR_DETAIL_STATIC",
+  "template_version": 1,
+  "total_duration_seconds": 15
+}

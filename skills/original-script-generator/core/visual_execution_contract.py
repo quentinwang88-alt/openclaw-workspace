@@ -374,6 +374,234 @@ def finalize_visual_execution_contract(
 
 ACCESSORY_MIXED_VISUAL_CONTRACT_VERSION = "accessory-mixed-visual-contract-v1"
 
+#: The one profile that owns a *frozen* per-shot contract of its own.
+#:
+#: Every other accessory family describes its lighting and framing from the
+#: shared `accessory_mixed_templates.json`, which is the live configuration.  A
+#: necklace task freezes its own `environment_recipe` and its own resolved
+#: per-shot `allowed_framing` / `forbidden_framing` into the mixed contract, so
+#: reading the shared config for it asks a question about *another* document.
+NECKLACE_V1_FEATURE_PROFILE = "NECKLACE_MIXED_V1"
+
+#: Non-operative observations: worth telling a reader, never a reason to call a
+#: contract incomplete.  Kept apart from ``gaps`` so "the label is missing" and
+#: "the framing is missing" cannot be confused by whoever reads this later.
+FROZEN_PROJECTION_STATUS_COMPLETE = "COMPLETE"
+FROZEN_PROJECTION_STATUS_INCOMPLETE = "INCOMPLETE"
+
+
+def _necklace_frozen_visual_contract(
+    *,
+    frozen: Mapping[str, Any],
+    zone: str,
+    presentation_mode: str,
+    capture_mode: str,
+    requested_recipe_id: str,
+    worn_allowed: Any,
+    worn_forbidden: Any,
+    consistency: Any,
+    authenticity: Any,
+) -> Dict[str, Any]:
+    """Lighting and framing read off the frozen necklace contract, gaps included.
+
+    F2 (review 2026-09-20): this branch used to call ``get_environment_recipe``
+    and ``load_mixed_template_definition`` -- both of which answer from the
+    *current* configuration.  A necklace recipe id does not exist in the shared
+    accessory recipe table (it lives in the necklace config), so the lookup
+    raised, the projection fell back to ``{}``, and the model was handed
+    ``recipe_id: NMX_WARM_NEUTRAL_WINDOW_V1`` with **no** environment, goal or
+    label text at all -- while the blueprint two fields away quoted the frozen
+    recipe verbatim.  One input, two different surfaces and light directions.
+    The framing had the same shape of failure: ``category_rules`` has no ``NECK``
+    zone, so ``allowed_framing`` / ``forbidden_framing`` came out empty even
+    though the frozen contract carries a resolved framing list per shot.
+
+    So this branch reads nothing but the frozen contract.  Where the frozen data
+    is genuinely absent it says so -- ``frozen_projection.gaps`` names each
+    missing item and the status flips to ``INCOMPLETE``.  It never backfills a
+    historical task from today's config, because that would describe a film that
+    was frozen against a different document.
+    """
+
+    recipe = frozen.get("environment_recipe")
+    recipe = recipe if isinstance(recipe, Mapping) else {}
+    block = frozen.get("necklace_contract")
+    block = block if isinstance(block, Mapping) else {}
+
+    frozen_recipe_id = _text(frozen.get("environment_recipe_id"))
+    recipe_version = recipe.get("recipe_version")
+    if recipe_version in (None, ""):
+        recipe_version = frozen.get("environment_recipe_version")
+
+    label = _text(recipe.get("label"))
+    environment = _text(recipe.get("environment"))
+    goal = _text(recipe.get("goal"))
+
+    allowed = list(worn_allowed(frozen) or [])
+    forbidden = list(worn_forbidden(frozen) or [])
+    units = [unit for unit in (frozen.get("capture_units") or []) if isinstance(unit, Mapping)]
+    worn_units = [unit for unit in units if _is_worn_unit(unit, zone)]
+
+    gaps: list = []
+    if not frozen_recipe_id:
+        gaps.append(
+            {
+                "field": "environment_recipe_id",
+                "reason": "冻结合同没有记录光影配方 id，无法确认这一版用的是哪套光影",
+            }
+        )
+    if not environment or not goal:
+        gaps.append(
+            {
+                "field": "environment_recipe",
+                "reason": (
+                    "冻结合同的 environment_recipe 缺少 environment/goal，"
+                    "光影与商品原色约束无法还原；不从当前配置补写"
+                ),
+            }
+        )
+    if not units:
+        gaps.append(
+            {
+                "field": "capture_units",
+                "reason": "冻结合同没有逐镜执行单元，无法还原任何一镜的取景边界",
+            }
+        )
+    elif not worn_units:
+        gaps.append(
+            {
+                "field": "capture_units[body_zone=%s]" % zone,
+                "reason": "冻结合同里没有佩戴镜，颈部取景边界无从汇总",
+            }
+        )
+    elif not allowed or not forbidden:
+        gaps.append(
+            {
+                "field": "capture_units[].allowed_framing/forbidden_framing",
+                "reason": "佩戴镜的取景边界为空，等于没有约束",
+            }
+        )
+    if not _text(block.get("profile_config_hash")):
+        gaps.append(
+            {
+                "field": "necklace_contract.profile_config_hash",
+                "reason": "冻结合同没有 profile_config_hash，无法确认与哪一版项链配置一致",
+            }
+        )
+
+    notes: list = []
+    if not _text(frozen.get("zone_label")):
+        # Only a display label; the operative framing text names 颈部 itself.
+        notes.append(
+            "冻结合同未记录 zone_label（仅展示用标签），未从当前配置补写"
+        )
+    if _text(requested_recipe_id) and _text(requested_recipe_id) != frozen_recipe_id:
+        notes.append(
+            "调用方传入的 environment_recipe_id（%s）与冻结合同（%s）不一致，"
+            "已采用冻结合同" % (_text(requested_recipe_id), frozen_recipe_id or "空")
+        )
+
+    return {
+        "schema_version": ACCESSORY_MIXED_VISUAL_CONTRACT_VERSION,
+        "feature_scope": "ACCESSORY_MIXED_TEMPLATE",
+        "visual_finish_profile": VISUAL_FINISH_PROFILE,
+        "presentation_mode": _text(presentation_mode),
+        "capture_mode": _text(capture_mode),
+        "authorities": {
+            "product_integrity": "HARD_EXISTING_IDENTITY_LOCK",
+            "lighting_recipe": "FROZEN_PER_VIDEO",
+            # The per-shot boundaries are the authority here, not a zone rule
+            # read from the live config: only the worn shots carry the neck
+            # framing, and the hand-held / static shots keep their own.
+            "framing_zone": "FROZEN_PER_SHOT",
+            "capture_texture": "SOFT",
+            "evidence": "REFERENCE_LIMITED",
+        },
+        "lighting_recipe": {
+            "recipe_id": frozen_recipe_id,
+            "recipe_version": recipe_version,
+            "label": label,
+            "environment": environment,
+            "goal": goal,
+            "keep_constant": list((consistency or {}).get("keep_constant") or []),
+            "allowed_variation": list((consistency or {}).get("allowed_variation") or []),
+            "forbidden": list((consistency or {}).get("forbidden") or []),
+        },
+        "framing_zone": {
+            "zone": zone,
+            "zone_label": _text(frozen.get("zone_label")),
+            "allowed_framing": allowed,
+            "forbidden_framing": forbidden,
+            "instruction": (
+                "同一条视频使用同一套环境配方：光向、白平衡、肤色与主要背景材质保持一致；"
+                "允许正常角度变化引起的合理高光变化。"
+            ),
+            # Which shots the two arrays above describe.  Stated so nobody reads
+            # the neck requirement as applying to the hand-held or static shots.
+            "applies_to": "佩戴镜（module=WORN_DETAIL/WORN_RELATION）",
+            "unit_framing": [
+                {
+                    "unit_id": _text(unit.get("unit_id")),
+                    "module": _text(unit.get("module")),
+                    "module_label": _text(unit.get("module_label")),
+                    "carrier_mode": _text(unit.get("carrier_mode")),
+                    "body_zone": _text(unit.get("body_zone")),
+                    "face_policy": _text(unit.get("face_policy")),
+                    "allowed_framing": list(unit.get("allowed_framing") or []),
+                    "forbidden_framing": list(unit.get("forbidden_framing") or []),
+                }
+                for unit in units
+            ],
+        },
+        "authenticity": {
+            "reference_limited": _text((authenticity or {}).get("reference_limited")),
+            "no_fabricated_material": _text(
+                (authenticity or {}).get("no_fabricated_material")
+            ),
+            "relative_only": _text((authenticity or {}).get("relative_only")),
+            "pairing_authority": _text((authenticity or {}).get("pairing_authority")),
+        },
+        "diagnostics_policy": {
+            "mode": "SOFT_ONLY",
+            "may_block_generation": False,
+            "may_trigger_retry": False,
+        },
+        # What this projection was built from, and what it could not find.  A
+        # reader must be able to tell "the frozen contract said nothing here"
+        # from "the frozen contract said this".
+        "frozen_projection": {
+            "feature_profile": NECKLACE_V1_FEATURE_PROFILE,
+            "template_id": _text(frozen.get("template_id")),
+            "template_version": frozen.get("template_version"),
+            "feature_version": frozen.get("feature_version"),
+            "profile_config_hash": _text(block.get("profile_config_hash")),
+            "environment_recipe_id": frozen_recipe_id,
+            "environment_recipe_version": recipe_version,
+            "worn_unit_ids": [_text(unit.get("unit_id")) for unit in worn_units],
+            "status": (
+                FROZEN_PROJECTION_STATUS_INCOMPLETE
+                if gaps
+                else FROZEN_PROJECTION_STATUS_COMPLETE
+            ),
+            "gaps": gaps,
+            "notes": notes,
+        },
+    }
+
+
+def _is_worn_unit(unit: Mapping[str, Any], zone: str) -> bool:
+    """Whether one frozen capture unit puts the product on the wearer's body.
+
+    The hand-held and static units carry an empty ``body_zone``, so the zone
+    itself is the signal; ``carrier_mode`` is the fallback for a contract that
+    omitted it.
+    """
+
+    body_zone = _text(unit.get("body_zone"))
+    if body_zone:
+        return body_zone == _text(zone)
+    return _text(unit.get("carrier_mode")).startswith("WEARER")
+
 
 def build_accessory_mixed_visual_contract(
     *,
@@ -398,6 +626,10 @@ def build_accessory_mixed_visual_contract(
     surfaces and light directions.  ``frozen_contract`` also keeps a task frozen:
     once a contract exists, the ``..._MIXED_TEMPLATE_V1_ENABLED`` switch must not
     be able to flip a re-run back to the legacy contract.
+
+    F2: for ``NECKLACE_MIXED_V1`` the *whole* projection comes off the frozen
+    contract -- see :func:`_necklace_frozen_visual_contract`.  Everything else
+    still reads the shared configuration, unchanged.
     """
 
     frozen = frozen_contract if isinstance(frozen_contract, Mapping) else {}
@@ -407,6 +639,8 @@ def build_accessory_mixed_visual_contract(
             get_environment_recipe,
             load_mixed_template_definition,
             resolve_mixed_zone,
+            worn_body_forbidden_framing,
+            worn_body_framing,
         )
     except Exception:  # noqa: BLE001 - never break the legacy contract path
         return {}
@@ -422,6 +656,22 @@ def build_accessory_mixed_visual_contract(
         return {}
 
     definition = load_mixed_template_definition()
+    consistency = definition.get("consistency_rules") or {}
+    authenticity = definition.get("authenticity_and_evidence_rules") or {}
+
+    if _text(frozen.get("feature_profile")) == NECKLACE_V1_FEATURE_PROFILE:
+        return _necklace_frozen_visual_contract(
+            frozen=frozen,
+            zone=zone,
+            presentation_mode=presentation_mode,
+            capture_mode=capture_mode,
+            requested_recipe_id=environment_recipe_id,
+            worn_allowed=worn_body_framing,
+            worn_forbidden=worn_body_forbidden_framing,
+            consistency=consistency,
+            authenticity=authenticity,
+        )
+
     rules = (definition.get("category_rules") or {}).get(zone)
     rules = rules if isinstance(rules, Mapping) else {}
     recipe_id = (
@@ -433,8 +683,6 @@ def build_accessory_mixed_visual_contract(
         recipe = get_environment_recipe(recipe_id)
     except ValueError:
         recipe = {}
-    consistency = definition.get("consistency_rules") or {}
-    authenticity = definition.get("authenticity_and_evidence_rules") or {}
     return {
         "schema_version": ACCESSORY_MIXED_VISUAL_CONTRACT_VERSION,
         "feature_scope": "ACCESSORY_MIXED_TEMPLATE",

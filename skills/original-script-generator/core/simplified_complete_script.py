@@ -2658,6 +2658,15 @@ def _model_visible_creative_seed(seed: Dict[str, Any]) -> Dict[str, Any]:
     # same instruction under another name, so keep them for lineage only.
     visual_saliency.pop("opening_focus", None)
     visual_contract.pop("opening_scene_projection", None)
+    # ``frozen_projection`` is the necklace branch's bookkeeping about *which*
+    # frozen document this contract was read from: the template revision, the
+    # config hash, and a ``gaps`` list naming anything the frozen contract did
+    # not carry.  It belongs to the reviewer, not to the writer -- and an
+    # incomplete one is actively harmful here, because a gap reads "佩戴镜的
+    # 取景边界为空，等于没有约束" and would invite the model to invent the
+    # framing the missing data was supposed to constrain.  Only the necklace
+    # branch emits this key, so the pop is a no-op for every other category.
+    visual_contract.pop("frozen_projection", None)
     capture_contract = (
         visible.get("capture_rhythm_contract")
         if isinstance(visible.get("capture_rhythm_contract"), dict)

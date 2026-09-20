@@ -1,0 +1,43 @@
+{
+  "_comment": "四类旧配饰（耳饰/手链/戒指/发饰）的真实冻结合同，取自隔离生产副本 original_content_item，按非项链分支实际会读的键裁剪：category_zone / environment_recipe_id / feature_profile。出处行见 _provenance。全量未裁剪版本的四类对照见证据脚本 run_6/necklace_v1_c5_evidence/zero_behaviour_change.py。",
+  "_provenance": {
+    "EAR": {
+      "batch_item_id": "OCI_64E9A8D9D59CD7E3C7DE",
+      "script_id": "SCRIPT_050ABC195D0873BD48AA"
+    },
+    "FINGER": {
+      "batch_item_id": "OCI_26411410890208D0ABA7",
+      "script_id": "SCRIPT_ED5D2B38DCE8494A8D03"
+    },
+    "HAIR": {
+      "batch_item_id": "OCI_D1B5DDF3D17F7ABC57AC",
+      "script_id": "SCRIPT_44F408CDCD6AEF611BDA"
+    },
+    "WRIST": {
+      "batch_item_id": "OCI_3BC3BFC65FF9F59D7783",
+      "script_id": "SCRIPT_B99EEBD65DED815C1932"
+    }
+  },
+  "contracts": {
+    "EAR": {
+      "category_zone": "EAR",
+      "environment_recipe_id": "WINDOW_LIGHT_WOOD",
+      "feature_profile": null
+    },
+    "FINGER": {
+      "category_zone": "FINGER",
+      "environment_recipe_id": "WINDOW_LIGHT_WOOD",
+      "feature_profile": null
+    },
+    "HAIR": {
+      "category_zone": "HAIR",
+      "environment_recipe_id": "WINDOW_LIGHT_WOOD",
+      "feature_profile": null
+    },
+    "WRIST": {
+      "category_zone": "WRIST",
+      "environment_recipe_id": "WINDOW_LIGHT_WOOD",
+      "feature_profile": null
+    }
+  }
+}

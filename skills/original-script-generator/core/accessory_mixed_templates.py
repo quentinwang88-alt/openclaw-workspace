@@ -661,13 +661,30 @@ def worn_body_framing(contract: Mapping[str, Any] | None) -> List[str]:
     its own wrist framing instead of an ear.
     """
 
+    return _worn_union(contract, "allowed_framing")
+
+
+def worn_body_forbidden_framing(contract: Mapping[str, Any] | None) -> List[str]:
+    """Body-zone *ban* union across the two worn modules -- the mirror of the above.
+
+    Kept separate from the hand-held / static modules' own bans on purpose.  A
+    static shot's "手或手臂入画" is not a face rule, and folding the two sets
+    together is what let a bracelet be described in ear words; the same mistake
+    in the other direction would put the neck's framing requirement onto every
+    shot of the film.
+    """
+
+    return _worn_union(contract, "forbidden_framing")
+
+
+def _worn_union(contract: Mapping[str, Any] | None, key: str) -> List[str]:
     out: List[str] = []
     for unit in (contract or {}).get("capture_units") or []:
         if not isinstance(unit, Mapping):
             continue
-        if _text(unit.get("module")) not in {"WORN_DETAIL", "WORN_RELATION"}:
+        if _text(unit.get("module")) not in WORN_MODULES:
             continue
-        for item in unit.get("allowed_framing") or []:
+        for item in unit.get(key) or []:
             text = _text(item)
             if text and text not in out:
                 out.append(text)
