@@ -176,15 +176,21 @@ class ProductionScriptFeishuTest(unittest.TestCase):
                 target_client=client,
             )
 
-        # The two counters added by the execution-validation gate are part of the
-        # returned summary now; the workflow columns must still be untouched
-        # because a projection without an audit is not a conflict.
+        # The counters added by the execution-validation gate *and* by the
+        # delivery-snapshot gate are part of the returned summary now.  Both are
+        # zero here for the same reason: this projection carries no audit and no
+        # necklace contract, so there is nothing to block and nothing to record.
+        # The workflow columns must still be untouched, because a projection
+        # without an audit is not a conflict.
         self.assertEqual(
             {
                 "created": 0,
                 "updated": 1,
                 "skipped": 0,
                 "execution_blocked": 0,
+                "snapshot_written": 0,
+                "snapshot_blocked": 0,
+                "snapshot_errors": {},
                 "render_validation_schema": "mixed-render-validation-v1",
             },
             result,

@@ -315,6 +315,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         items=storage.get_items(batch.batch_id),
                         target_client=client,
                         product_images=(),
+                        storage=storage,
                     ),
                 }
             )

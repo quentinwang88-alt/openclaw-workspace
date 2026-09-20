@@ -54,6 +54,9 @@ UGC_NATIVE_PROFILE = "ugc_native_v1"
 # and has to be re-checked rather than inheriting the old PASS.
 #: v5：【整片语义主线】的两行改为各自判定 —— 表达口径收窄后只剩一行时不再整块丢弃。
 SCRIPT_RENDERER_VERSION = "production-script-renderer-v5-speakable-semantic-mainline"
+DELIVERY_SNAPSHOT_SCHEMA_VERSION = "necklace-delivery-snapshot-v1"
+DELIVERY_SNAPSHOT_FIELD = "delivery_snapshot"
+
 # Persisted shape of the execution audit.  Versioned separately from the
 # renderer: the audit schema can gain fields without implying the prompt changed
 # (and therefore without invalidating an existing ``PASS``).
@@ -2682,6 +2685,74 @@ def _unchanged_report(text: str) -> CompactionReport:
         applied=False,
         over_limit=False,
     )
+
+
+def _source_content_hash(item: Any) -> str:
+    """Digest of the inputs this render consumed, and nothing else.
+
+    Covers the script body/brief that was rendered and the frozen direction
+    package it was rendered from.  Deliberately excludes the projection, the
+    snapshot and every timestamp: this exists so a consumer can tell "the same
+    frozen source" from "somebody moved the source under this delivery".
+    """
+
+    import hashlib
+
+    result = load_item_result(item)
+    payload = {
+        "script": _dict(result.get("script")),
+        "frozen_direction_package": _json_dict(
+            getattr(item, "frozen_direction_package_json", "")
+        ),
+    }
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def build_delivery_snapshot(
+    *, projection: Dict[str, Any], item: Any, created_at: str = ""
+) -> Dict[str, Any]:
+    """The text this export actually published, bound to the audit of that text.
+
+    F4 (review 2026-09-20): the export re-renders the prompt and audits it, puts
+    the fresh verdict in the 飞书 columns -- and left ``result_json`` untouched.
+    The consumer therefore read the *generation-time* verdict forever, while the
+    table showed the current one, so a re-export after a renderer fix
+    (``v1 FAIL`` -> ``v2 PASS`` is the real case) could never terminate.
+
+    ``{}`` for anything that is not ``NECKLACE_MIXED_V1``: this round adds the
+    field for one profile only, so every other category's stored payload stays
+    byte-identical.  The snapshot is built from the *same* checked projection
+    that produces the 飞书 fields, so the text in the table and the text in the
+    snapshot cannot drift apart.
+    """
+
+    from core.necklace_mixed_profile import NECKLACE_MIXED_V1_PROFILE
+
+    contract = _frozen_mixed_contract_for_item(item)
+    if _text(contract.get("feature_profile"), "") != NECKLACE_MIXED_V1_PROFILE:
+        return {}
+    block = _dict(contract.get("necklace_contract"))
+    return {
+        "schema_version": DELIVERY_SNAPSHOT_SCHEMA_VERSION,
+        "batch_item_id": _text(getattr(item, "batch_item_id", ""), ""),
+        # The *internal* id, which is what the frozen table's own column holds;
+        # ``projection["script_id"]`` is the public one the table column shows.
+        "internal_script_id": _text(getattr(item, "script_id", ""), ""),
+        "complete_script_id": _text(projection.get("script_id"), ""),
+        "feature_profile": NECKLACE_MIXED_V1_PROFILE,
+        "frozen_contract_hash": _text(block.get("profile_config_hash"), ""),
+        "source_content_hash": _source_content_hash(item),
+        "prompt_text": _text(projection.get("video_prompt"), ""),
+        "render_validation": _dict(projection.get(RENDER_VALIDATION_FIELD)),
+        "created_at": created_at or _snapshot_now(),
+    }
+
+
+def _snapshot_now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def build_production_projection(*, batch: Any, item: Any) -> Dict[str, Any]:

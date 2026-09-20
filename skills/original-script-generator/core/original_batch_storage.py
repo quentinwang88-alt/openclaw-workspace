@@ -5,7 +5,7 @@ import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.original_batch_models import (
     BatchRecord,
@@ -496,6 +496,96 @@ class BatchStorage:
                 "SET stage_checkpoint_json=?, updated_at=? WHERE batch_item_id=?",
                 (payload, _now(), batch_item_id),
             )
+
+    def merge_item_result_section(
+        self,
+        batch_item_id: str,
+        section: str,
+        value: Any,
+        *,
+        expect: Optional[Callable[[Dict[str, Any]], bool]] = None,
+        expect_reason: str = "",
+    ) -> Dict[str, Any]:
+        """Merge one top-level key into ``result_json``, and nothing else.
+
+        The export path needs to record what it actually handed the operator
+        without disturbing anything the execution path wrote.  Replacing the
+        whole column is not an option -- it would drop the stage checkpoint
+        (``update_item_checkpoint`` writes that column's sibling), the model
+        lineage and any concurrent writer's field -- so this reads, merges and
+        writes back only ``result_json``, leaving status, error columns and
+        timestamps-of-record alone.
+
+        Concurrency is handled by compare-and-swap on the previous text rather
+        than by a version column, which would have needed a migration: the
+        ``UPDATE`` only matches when ``result_json`` is still byte-identical to
+        what was read, so a writer that got there first turns this into
+        ``RESULT_CHANGED_CONCURRENTLY`` instead of being silently overwritten.
+        ``expect`` is the caller's own precondition (e.g. "the stored text is
+        still the one I rendered"); failing it leaves the row untouched.
+
+        Returns ``{"ok", "reason", "previous", "written"}``.  It never raises
+        for a rejected merge -- the caller decides what a failure means.
+        """
+
+        import json as _json
+
+        # ``with connection`` would commit on the way out but not close, and this
+        # runs once per exported row -- so it closes explicitly.  Every early
+        # return happens before the commit, which is what leaves the row exactly
+        # as it was when the merge is refused.
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT result_json FROM original_content_item WHERE batch_item_id=?",
+                (batch_item_id,),
+            ).fetchone()
+            if row is None:
+                return {
+                    "ok": False,
+                    "reason": "ITEM_NOT_FOUND",
+                    "previous": None,
+                    "written": None,
+                }
+            previous_text = str(row["result_json"] or "")
+            try:
+                payload = _json.loads(previous_text or "{}")
+            except ValueError:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {"previous_result_json": previous_text}
+            previous_value = payload.get(section)
+            if expect is not None and not expect(payload):
+                return {
+                    "ok": False,
+                    "reason": expect_reason or "PRECONDITION_FAILED",
+                    "previous": previous_value,
+                    "written": None,
+                }
+            merged = dict(payload)
+            merged[section] = value
+            written = _json.dumps(merged, ensure_ascii=False, default=str)
+            cursor = conn.execute(
+                "UPDATE original_content_item SET result_json=?, updated_at=? "
+                "WHERE batch_item_id=? AND COALESCE(result_json, '')=?",
+                (written, _now(), batch_item_id, previous_text),
+            )
+            if cursor.rowcount != 1:
+                return {
+                    "ok": False,
+                    "reason": "RESULT_CHANGED_CONCURRENTLY",
+                    "previous": previous_value,
+                    "written": None,
+                }
+            conn.commit()
+        finally:
+            conn.close()
+        return {
+            "ok": True,
+            "reason": "",
+            "previous": previous_value,
+            "written": written,
+        }
 
     def _row_to_item(self, row: Any) -> PlanItem:
         d = dict(row.items() if hasattr(row, "items") else zip(row.keys(), row))

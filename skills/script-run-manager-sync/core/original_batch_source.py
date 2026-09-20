@@ -61,12 +61,19 @@ ORIGINAL_BATCH_SOURCE_FIELD_ALIASES: Dict[str, List[str]] = {
 POOL_SOURCES = {"成功脚本复刻", "原创生成", "视频复刻", "人工编写"}
 
 
-def _necklace_handoff_reason(*, script_id: str, prompt: str) -> str:
+def _necklace_handoff_reason(
+    *, script_id: str, prompt: str, batch_item_id: str = "", product_type: str = ""
+) -> str:
     """Section 8's necklace-only gate: a per-row reason, or ``""``.
 
     The final consumer has to verify a NECKLACE_MIXED_V1 row against the frozen
-    source rather than against an editable table marker.  A row that is not
-    identified as necklace V1 returns ``""``.
+    source rather than against an editable table marker.  A row that resolves to
+    something other than necklace V1 returns ``""``.
+
+    Every identifier the workbench can offer is passed through.  The gate looks
+    the row up by all of them unconditionally -- the delivered prompt's shot
+    headers carry narrative roles in production, so anything that waited for the
+    text to look like a necklace never looked a real row up at all.
 
     The import is local and this is the *only* guard: the gate itself never
     raises and never touches another category, so a broken gate cannot become a
@@ -78,7 +85,50 @@ def _necklace_handoff_reason(*, script_id: str, prompt: str) -> str:
         from core.necklace_handoff import check_necklace_handoff
     except Exception:  # noqa: BLE001 - an absent gate must not block other categories
         return ""
-    return check_necklace_handoff(script_id=script_id, prompt=prompt) or ""
+    return (
+        check_necklace_handoff(
+            script_id=script_id,
+            prompt=prompt,
+            batch_item_id=batch_item_id,
+            product_type=product_type,
+        )
+        or ""
+    )
+
+
+def _prime_necklace_identity_lookup(records: Sequence[TableRecord], mapping: Dict[str, Optional[str]]) -> None:
+    """Answer the whole round's identity questions in one pass.
+
+    The frozen table has no index on ``script_id`` and none on the public id
+    inside ``result_json``, so a per-row lookup would rescan it once per row.
+    A sync round already holds every row it is about to judge, so it can pay one
+    query per ``_PRIME_CHUNK`` identifiers instead.
+
+    The memo is cleared first: it is scoped to this round, and a negative answer
+    cached before a re-export would otherwise keep refusing a row that has since
+    been fixed.
+    """
+
+    try:
+        from core.necklace_handoff import (
+            prime_necklace_identity_lookup,
+            reset_necklace_handoff_cache,
+        )
+    except Exception:  # noqa: BLE001 - an absent gate must not block other categories
+        return
+    reset_necklace_handoff_cache()
+    keys: List[str] = []
+    for record in records:
+        fields = record.fields
+        for key in ("script_id", "batch_item_id"):
+            column = mapping.get(key)
+            if not column:
+                continue
+            value = normalize_text(fields.get(column))
+            if value and value not in keys:
+                keys.append(value)
+    if keys:
+        prime_necklace_identity_lookup(keys)
 
 
 def _pool_policy(fields: Dict[str, Any], mapping: Dict[str, Optional[str]], script_id: str) -> dict:
@@ -186,6 +236,10 @@ def build_original_batch_sync_tasks(
     errors: Optional[Dict[str, str]] = None,
 ) -> List[ScriptSyncTask]:
     tasks: List[ScriptSyncTask] = []
+    # One identity pass for the whole round, before any row is judged.  Scoped
+    # here rather than in the gate so a re-export between two rounds can never
+    # be answered from the previous round's memo.
+    _prime_necklace_identity_lookup(records, mapping)
     for record in records:
         if record_id and record.record_id != record_id:
             continue
@@ -218,7 +272,18 @@ def build_original_batch_sync_tasks(
             # reason.  Refusing here means: no target task, the source checkbox
             # is left alone, and nothing is regenerated -- fixing the script and
             # re-exporting lets the row continue normally.
-            necklace_reason = _necklace_handoff_reason(script_id=script_id, prompt=prompt)
+            necklace_reason = _necklace_handoff_reason(
+                script_id=script_id,
+                prompt=prompt,
+                batch_item_id=(
+                    normalize_text(fields.get(mapping.get("batch_item_id")))
+                    if mapping.get("batch_item_id") else ""
+                ),
+                product_type=(
+                    normalize_text(fields.get(mapping.get("product_type")))
+                    if mapping.get("product_type") else ""
+                ),
+            )
             if necklace_reason:
                 raise ValueError(necklace_reason)
         except ValueError as exc:

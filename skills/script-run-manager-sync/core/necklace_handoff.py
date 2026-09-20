@@ -31,13 +31,30 @@ Read-only by construction
   ``ORIGINAL_SCRIPT_GENERATOR_DATABASE_URL`` is set in production: that variable
   governs ``PipelineStorage``, while ``BatchStorage`` -- the only writer of
   ``original_content_item``, the table read here -- always opens the SQLite
-  file.  A genuinely unreadable frozen source is still reported rather than
-  guessed at, and the prompt-signature tripwire keeps the ``NECKLACE_MIXED_V1``
-  rows that *look* like necklace films out of production instead of letting
-  them through unverified.
+  file.  A genuinely unreadable frozen source is reported as such rather than
+  guessed at.
 
-Nothing in here changes the behaviour of any other category: a row that is not
-identified as ``NECKLACE_MIXED_V1`` returns an empty verdict.
+Identity, and what is *not* identity (round 2, 2026-09-20)
+---------------------------------------------------------
+The first revision consulted the prompt's shot-header modules **before** it
+would look the row up by its public id, so a real delivered film -- whose
+headers carry narrative roles (``HOOK``/``PROOF``/``ENDING``), never module
+names -- missed the fallback and was admitted unverified.  Identity is now
+resolved from the workbench's own identifiers only: the internal ``script_id``
+column, the public ``complete_script_id`` inside ``result_json`` and the
+``batch_item_id``.  All three are queried **unconditionally**, and the
+shot-header signature is demoted to a diagnostic that can only ever hold a row
+back.
+
+The lookup also reports *which* of four things happened -- ``FOUND``,
+``NOT_FOUND``, ``SOURCE_UNAVAILABLE``, ``AMBIGUOUS`` -- because a single
+``None`` used to read "no such row", "cannot read the database at all" and
+"several rows disagree" as "confirmed not a necklace", which is the one
+conclusion none of them supports.
+
+Nothing in here changes the behaviour of any other category: a row that is
+resolved to something other than ``NECKLACE_MIXED_V1`` returns an empty
+verdict, exactly as before.
 """
 from __future__ import annotations
 
@@ -58,10 +75,18 @@ __all__ = [
     "NECKLACE_HANDOFF_LOCAL_PROMPT_HASH_LENGTH",
     "NECKLACE_HANDOFF_TEMPLATE_ID",
     "NECKLACE_HANDOFF_ERRORS",
+    "NECKLACE_DELIVERY_SNAPSHOT_SCHEMA",
+    "DELIVERY_SNAPSHOT_KEY",
+    "NECKLACE_LOOKUP_FOUND",
+    "NECKLACE_LOOKUP_NOT_FOUND",
+    "NECKLACE_LOOKUP_SOURCE_UNAVAILABLE",
+    "NECKLACE_LOOKUP_AMBIGUOUS",
+    "NECKLACE_LOOKUP_STATUSES",
     "default_necklace_db_path",
     "necklace_v1_prompt_signature",
-    "load_necklace_frozen_identity",
-    "load_necklace_frozen_identity_by_public_id",
+    "necklace_product_type_declared",
+    "resolve_necklace_frozen_identity",
+    "prime_necklace_identity_lookup",
     "reset_necklace_handoff_cache",
     "check_necklace_handoff",
 ]
@@ -116,6 +141,20 @@ NECKLACE_HANDOFF_AUDIT_MISSING = "NECKLACE_HANDOFF_AUDIT_MISSING"
 NECKLACE_HANDOFF_STALE_LOCAL_VERSION = "NECKLACE_HANDOFF_STALE_LOCAL_VERSION"
 NECKLACE_HANDOFF_AUDIT_FAILED = "NECKLACE_HANDOFF_AUDIT_FAILED"
 NECKLACE_HANDOFF_VERSION_MISMATCH = "NECKLACE_HANDOFF_VERSION_MISMATCH"
+# Round 2: the frozen identity no longer carries the delivered text by itself --
+# the *snapshot* written by the current exporter does, and the consumer reads
+# that.  A row whose only audit is the one written at generation time cannot be
+# judged: re-rendering produces a new verdict (v1 FAIL -> v2 PASS is a real and
+# expected case) and only the exporter can record which text that verdict was
+# about.  ``SNAPSHOT_MISMATCH`` covers a snapshot that exists but does not
+# describe *this* row, script and frozen source.
+NECKLACE_HANDOFF_SNAPSHOT_MISSING = "NECKLACE_HANDOFF_SNAPSHOT_MISSING"
+NECKLACE_HANDOFF_SNAPSHOT_MISMATCH = "NECKLACE_HANDOFF_SNAPSHOT_MISMATCH"
+# The frozen source itself could not be read, or several rows match and they do
+# not agree.  Neither is evidence of anything, so neither may be read as "not a
+# necklace row".
+NECKLACE_HANDOFF_SOURCE_UNAVAILABLE = "NECKLACE_HANDOFF_SOURCE_UNAVAILABLE"
+NECKLACE_HANDOFF_SOURCE_AMBIGUOUS = "NECKLACE_HANDOFF_SOURCE_AMBIGUOUS"
 
 NECKLACE_HANDOFF_ERRORS: Tuple[str, ...] = (
     NECKLACE_HANDOFF_UNVERIFIED,
@@ -124,7 +163,40 @@ NECKLACE_HANDOFF_ERRORS: Tuple[str, ...] = (
     NECKLACE_HANDOFF_STALE_LOCAL_VERSION,
     NECKLACE_HANDOFF_AUDIT_FAILED,
     NECKLACE_HANDOFF_VERSION_MISMATCH,
+    NECKLACE_HANDOFF_SNAPSHOT_MISSING,
+    NECKLACE_HANDOFF_SNAPSHOT_MISMATCH,
+    NECKLACE_HANDOFF_SOURCE_UNAVAILABLE,
+    NECKLACE_HANDOFF_SOURCE_AMBIGUOUS,
 )
+
+# --- Delivery snapshot ------------------------------------------------------
+# ``core.production_script_renderer.build_delivery_snapshot`` (generator side)
+# writes this under ``result_json["delivery_snapshot"]`` on export.  It is the
+# one place where "the text the operator can see in the table" and "the verdict
+# the current renderer reached about it" are stored together; the older
+# ``result_json["render_validation"]`` stays where it is as lineage, but it
+# describes the *generation-time* render and can be several revisions behind.
+NECKLACE_DELIVERY_SNAPSHOT_SCHEMA = "necklace-delivery-snapshot-v1"
+DELIVERY_SNAPSHOT_KEY = "delivery_snapshot"
+
+# --- Identity lookup outcomes ----------------------------------------------
+# Four outcomes, not one ``None``.
+NECKLACE_LOOKUP_FOUND = "FOUND"
+NECKLACE_LOOKUP_NOT_FOUND = "NOT_FOUND"
+NECKLACE_LOOKUP_SOURCE_UNAVAILABLE = "SOURCE_UNAVAILABLE"
+NECKLACE_LOOKUP_AMBIGUOUS = "AMBIGUOUS"
+NECKLACE_LOOKUP_STATUSES: Tuple[str, ...] = (
+    NECKLACE_LOOKUP_FOUND,
+    NECKLACE_LOOKUP_NOT_FOUND,
+    NECKLACE_LOOKUP_SOURCE_UNAVAILABLE,
+    NECKLACE_LOOKUP_AMBIGUOUS,
+)
+
+#: 产品类型 values that *claim* the necklace profile.  A claim is not evidence:
+#: it is never used to admit a row, cannot turn a historical necklace into a V1
+#: row, and is consulted only while the frozen identity is unresolved -- in
+#: which case the row is held back rather than waved through.
+_NECKLACE_DECLARED_TOKENS: Tuple[str, ...] = ("项链", "necklace")
 
 MIXED_TEMPLATE_CONTRACT_KEY = "mixed_template_contract"
 
@@ -134,10 +206,33 @@ _SHOT_HEADER_RE = re.compile(
     r"^【(?:拍摄片段|连续内容段|片段)\d{2}｜[^｜]+｜(?P<role>[^】]*)】$"
 )
 
-# Per-process memo, keyed by (database, lookup key).  ``run_pipeline`` rebuilds
-# a single row at a time in a few places, and the original-script table has no
-# index on ``script_id``, so a repeated lookup would otherwise rescan the table.
-_IDENTITY_CACHE: Dict[Tuple[str, str], Optional[Dict[str, Any]]] = {}
+# Selects the row by any of the three identifiers the workbench can hand us.
+# ``json_valid`` guards the JSON extraction: one malformed ``result_json``
+# anywhere in the table would otherwise abort the whole query.
+_ROW_COLUMNS = "batch_item_id, script_id, status, result_json"
+_ROW_PREDICATE = (
+    "batch_item_id = ? OR script_id = ? "
+    "OR (json_valid(result_json) "
+    "    AND json_extract(result_json, '$.script.complete_script_id') = ?)"
+)
+_ROW_SQL = (
+    f"SELECT {_ROW_COLUMNS} FROM original_content_item WHERE {_ROW_PREDICATE}"
+)
+
+# One query per this many keys when a whole sync round is primed at once.  Keeps
+# the placeholder count far below SQLite's ``SQLITE_MAX_VARIABLE_NUMBER``.
+_PRIME_CHUNK = 120
+
+# Per-process memo of *single-key* lookups, keyed by (database, key).  The table
+# has no index on ``script_id`` or on the JSON public id, so a repeated lookup
+# would otherwise rescan it.
+#
+# Scope: one sync round, not one process.  ``prime_necklace_identity_lookup`` and
+# ``build_original_batch_sync_tasks`` clear it at the start of a round, because a
+# negative answer cached before a re-export would keep refusing a row that has
+# since been fixed -- the exact "re-export forever" loop this round exists to
+# remove.
+_CANDIDATE_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
 
 def _text(value: Any) -> str:
@@ -165,9 +260,14 @@ def _dict(value: Any) -> Dict[str, Any]:
 
 
 def reset_necklace_handoff_cache() -> None:
-    """Drop the per-process identity memo (tests and long-lived workers)."""
+    """Drop the per-round identity memo (tests, and the sync runner).
 
-    _IDENTITY_CACHE.clear()
+    Called at the start of every sync round: a *negative* or stale answer must
+    not outlive the round that produced it, or a row that has been re-exported
+    would keep being refused by a cached verdict from before the re-export.
+    """
+
+    _CANDIDATE_CACHE.clear()
 
 
 def default_necklace_db_path() -> Path:
@@ -197,8 +297,11 @@ def default_necklace_db_path() -> Path:
 def necklace_v1_prompt_signature(prompt: Any) -> Tuple[str, ...]:
     """The ordered module list of a delivered prompt, or ``()``.
 
-    Read off the per-shot header lines.  A tripwire only: it can hold a row
-    back, never admit one, so it is deliberately not treated as identity.
+    Diagnostic only.  It is **not** a lookup condition and it cannot admit a
+    row: the delivered headers carry narrative roles (``HOOK``/``PROOF``/
+    ``ENDING``) in production, so in practice this returns ``()`` for every real
+    film -- which is exactly why the identity query must not wait for it.  Where
+    it is still consulted, it can only hold a row back.
     """
 
     modules: List[str] = []
@@ -211,6 +314,19 @@ def necklace_v1_prompt_signature(prompt: Any) -> Tuple[str, ...]:
             if module and module not in modules:
                 modules.append(module)
     return tuple(modules)
+
+
+def necklace_product_type_declared(product_type: Any) -> bool:
+    """Whether the row's 产品类型 column *claims* the necklace profile.
+
+    A claim, never a verdict.  Used for one purpose: when the frozen identity
+    cannot be resolved, a row that claims to be a necklace is held back instead
+    of being waved through as "probably not our business".  It can not admit a
+    row, and it deliberately can not promote a historical necklace to V1.
+    """
+
+    text = _text(product_type).lower()
+    return any(token in text for token in _NECKLACE_DECLARED_TOKENS)
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
@@ -276,107 +392,333 @@ def _identity_from_result_json(result_json: Any) -> Optional[Dict[str, Any]]:
         "profile_config_hash": _text(block.get("profile_config_hash")),
         "complete_script_id": _text(script.get("complete_script_id")),
         "render_validation": _dict(result.get("render_validation")),
+        # The export-time authority (round 2).  Generation time cannot produce
+        # it: only the exporter knows which text it actually handed the table.
+        "delivery_snapshot": _dict(result.get(DELIVERY_SNAPSHOT_KEY)),
     }
 
 
-def load_necklace_frozen_identity(
-    script_id: str, *, db_path: Optional[Path] = None
-) -> Optional[Dict[str, Any]]:
-    """The frozen identity behind ``script_id``, or ``None`` when unavailable.
+def _identity_from_row(row: Any) -> Optional[Dict[str, Any]]:
+    identity = _identity_from_result_json(row["result_json"])
+    if identity is None:
+        return None
+    identity["batch_item_id"] = _text(row["batch_item_id"])
+    identity["row_status"] = _text(row["status"])
+    return identity
 
-    ``None`` means "this consumer could not read the frozen source" -- an
-    unreadable database and a genuinely absent row are deliberately the same
-    answer, because neither supports a verdict about the delivered prompt.
+
+def _row_keys(row: Any, identity: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Every identifier this row answers to."""
+
+    keys = [_text(row["batch_item_id"]), _text(row["script_id"])]
+    if identity is not None:
+        keys.append(_text(identity.get("complete_script_id")))
+    return [key for key in keys if key]
+
+
+def _cache_key(path: Any, key: str) -> Tuple[str, str]:
+    return (str(path), f"k:{key}")
+
+
+def _query_rows(path: Path, keys: Sequence[str]) -> Tuple[Optional[List[Any]], str]:
+    """``(rows, error)`` -- one query for all ``keys``.
+
+    ``error`` non-empty means the *source itself* could not be read, which is
+    reported to the caller as ``SOURCE_UNAVAILABLE`` and never as "no match".
     """
 
-    script_id = _text(script_id)
-    if not script_id:
-        return None
-    path = db_path if db_path is not None else default_necklace_db_path()
-    # ``script_id`` may be the internal batch id or the public
-    # ``complete_script_id``; cache the two lookups separately.
-    for cache_key, query in (
-        (
-            f"script_id:SCRIPT_READY:{script_id}",
-            "SELECT result_json FROM original_content_item "
-            "WHERE script_id=? AND status='SCRIPT_READY' "
-            "ORDER BY updated_at DESC LIMIT 1",
-        ),
-        (
-            f"script_id:any:{script_id}",
-            "SELECT result_json FROM original_content_item "
-            "WHERE script_id=? ORDER BY updated_at DESC LIMIT 1",
-        ),
-    ):
-        identity = _cached_identity(path, cache_key, query, (script_id,))
-        if identity is not None:
-            return identity
-    return None
-
-
-def load_necklace_frozen_identity_by_public_id(
-    script_id: str, *, db_path: Optional[Path] = None
-) -> Optional[Dict[str, Any]]:
-    """Second chance for the workbench-facing ``complete_script_id``.
-
-    Expensive (the table has no index on the public id), so it is only reached
-    for a prompt that already looks like a necklace film.
-    """
-
-    script_id = _text(script_id)
-    if not script_id:
-        return None
-    path = db_path if db_path is not None else default_necklace_db_path()
-    cache_key = f"complete_script_id:{script_id}"
-    if _cache_key(path, cache_key) in _IDENTITY_CACHE:
-        return _IDENTITY_CACHE[_cache_key(path, cache_key)]
-    found: Optional[Dict[str, Any]] = None
+    clauses = " OR ".join([f"({_ROW_PREDICATE})"] * len(keys))
+    sql = (
+        f"SELECT {_ROW_COLUMNS} FROM original_content_item WHERE {clauses}"
+    )
+    params: List[Any] = []
+    for key in keys:
+        params.extend([key, key, key])
+    connection: Optional[sqlite3.Connection] = None
     try:
-        with _connect(path) as connection:
-            rows = connection.execute(
-                "SELECT result_json FROM original_content_item "
-                "WHERE status='SCRIPT_READY' AND result_json IS NOT NULL "
-                "ORDER BY updated_at DESC"
-            ).fetchall()
+        connection = _connect(path)
+        return list(connection.execute(sql, params).fetchall()), ""
+    except sqlite3.Error as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+    finally:
+        # ``with connection`` commits and rolls back but does **not** close, so
+        # a round of a few hundred rows would leak one file handle per query.
+        if connection is not None:
+            connection.close()
+
+
+def _candidate_bucket() -> Dict[str, Any]:
+    return {"candidates": [], "seen": []}
+
+
+def _collect_candidate(bucket: Dict[str, Any], identity: Dict[str, Any]) -> None:
+    marker = _text(identity.get("batch_item_id")) or (
+        f"?{len(bucket['candidates'])}"
+    )
+    if marker in bucket["seen"]:
+        return
+    bucket["seen"].append(marker)
+    bucket["candidates"].append(identity)
+
+
+def _ready_identity(row: Any) -> Optional[Dict[str, Any]]:
+    """The identity of a row that actually delivered a script, else ``None``."""
+
+    if _text(row["status"]) != "SCRIPT_READY":
+        # A row that never reached SCRIPT_READY holds no delivered script, so it
+        # is not the frozen identity behind a delivered prompt.
+        return None
+    return _identity_from_row(row)
+
+
+def prime_necklace_identity_lookup(
+    keys: Iterable[Any], *, db_path: Optional[Path] = None
+) -> int:
+    """Resolve every identifier in ``keys`` in as few queries as possible.
+
+    A sync round knows all of its rows up front, so it can pay one query per
+    ``_PRIME_CHUNK`` identifiers instead of one per row.  Returns the number of
+    identifiers actually queried; identifiers already answered in this round are
+    skipped, and an unreadable source returns ``-1`` so the caller can report
+    ``SOURCE_UNAVAILABLE`` rather than a false "no match".
+    """
+
+    path = db_path if db_path is not None else default_necklace_db_path()
+    wanted: List[str] = []
+    for raw in keys or ():
+        key = _text(raw)
+        if key and key not in wanted:
+            wanted.append(key)
+    pending = [
+        key for key in wanted if _cache_key(path, key) not in _CANDIDATE_CACHE
+    ]
+    if not pending:
+        return 0
+    queried = 0
+    for start in range(0, len(pending), _PRIME_CHUNK):
+        chunk = pending[start : start + _PRIME_CHUNK]
+        rows, error = _query_rows(path, chunk)
+        if error:
+            return -1
+        buckets: Dict[str, Dict[str, Any]] = {
+            key: _candidate_bucket() for key in chunk
+        }
         for row in rows:
-            identity = _identity_from_result_json(row["result_json"])
-            if identity and identity.get("complete_script_id") == script_id:
-                found = identity
-                break
-    except sqlite3.Error:
-        found = None
-    _IDENTITY_CACHE[_cache_key(path, cache_key)] = found
-    return found
+            identity = _ready_identity(row)
+            if identity is None:
+                continue
+            for key in _row_keys(row, identity):
+                bucket = buckets.get(key)
+                if bucket is not None:
+                    _collect_candidate(bucket, identity)
+        for key in chunk:
+            _CANDIDATE_CACHE[_cache_key(path, key)] = {
+                "error": "",
+                "candidates": buckets[key]["candidates"],
+            }
+            queried += 1
+    return queried
 
 
-def _cache_key(path: Path, cache_key: str) -> Tuple[str, str]:
-    return (str(path), cache_key)
+def resolve_necklace_frozen_identity(
+    *,
+    script_id: str = "",
+    batch_item_id: str = "",
+    db_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Resolve the frozen identity behind a workbench row.
 
+    Returns ``{"status", "identity", "matches", "detail", "conflict_is_necklace"}``
+    where ``status`` is one of the four ``NECKLACE_LOOKUP_*`` outcomes.
 
-def _cached_identity(
-    path: Path, cache_key: str, query: str, params: Tuple[Any, ...]
-) -> Optional[Dict[str, Any]]:
-    key = _cache_key(path, cache_key)
-    if key in _IDENTITY_CACHE:
-        return _IDENTITY_CACHE[key]
-    found: Optional[Dict[str, Any]] = None
-    try:
-        with _connect(path) as connection:
-            row = connection.execute(query, params).fetchone()
-        if row is not None:
-            found = _identity_from_result_json(row["result_json"])
-    except sqlite3.Error:
-        found = None
-    _IDENTITY_CACHE[key] = found
-    return found
+    The internal ``script_id`` and the public ``complete_script_id`` are both
+    queried, **unconditionally** -- never gated on what the prompt text looks
+    like.  ``batch_item_id``, when the table carries it, narrows the answer to
+    one item.  Several matching rows that disagree are reported as
+    ``AMBIGUOUS``; "most recently updated" is not a tie-break, because silently
+    picking one would let two different frozen sources answer for one delivered
+    text.
+    """
+
+    path = db_path if db_path is not None else default_necklace_db_path()
+    keys: List[str] = []
+    for raw in (_text(script_id), _text(batch_item_id)):
+        if raw and raw not in keys:
+            keys.append(raw)
+    if not keys:
+        return {
+            "status": NECKLACE_LOOKUP_NOT_FOUND,
+            "identity": None,
+            "matches": [],
+            "detail": "该行没有脚本ID与批次ItemID，无法定位冻结来源",
+            "conflict_is_necklace": False,
+        }
+    queried = prime_necklace_identity_lookup(keys, db_path=path)
+    if queried < 0:
+        # Re-probe once for the operator-facing reason; the failure itself is
+        # never memoised, so this is a fresh read and not a cached verdict.
+        _rows, error = _query_rows(path, keys[:1])
+        return {
+            "status": NECKLACE_LOOKUP_SOURCE_UNAVAILABLE,
+            "identity": None,
+            "matches": [],
+            "detail": error or "冻结来源无法读取",
+            "conflict_is_necklace": False,
+        }
+
+    candidates: List[Dict[str, Any]] = []
+    matched: List[str] = []
+    for key in keys:
+        entry = _CANDIDATE_CACHE.get(_cache_key(path, key)) or {}
+        for identity in entry.get("candidates") or []:
+            marker = _text(identity.get("batch_item_id")) or _text(
+                identity.get("complete_script_id")
+            )
+            if marker in matched:
+                continue
+            matched.append(marker)
+            candidates.append(identity)
+
+    if not candidates:
+        return {
+            "status": NECKLACE_LOOKUP_NOT_FOUND,
+            "identity": None,
+            "matches": [],
+            "detail": (
+                f"按 script_id/batch_item_id({'/'.join(keys)}) 在冻结来源里找不到 "
+                "SCRIPT_READY 条目"
+            ),
+            "conflict_is_necklace": False,
+        }
+
+    target_item = _text(batch_item_id)
+    if target_item:
+        narrowed = [
+            identity
+            for identity in candidates
+            if _text(identity.get("batch_item_id")) == target_item
+        ]
+        if narrowed:
+            candidates = narrowed
+            matched = [target_item]
+
+    if len(candidates) > 1:
+        return {
+            "status": NECKLACE_LOOKUP_AMBIGUOUS,
+            "identity": None,
+            "matches": matched,
+            "detail": (
+                f"{len(candidates)} 个冻结条目同时命中 "
+                f"({'、'.join(matched)})，无法确定这条交付文本属于哪一个"
+            ),
+            "conflict_is_necklace": any(
+                identity.get("is_necklace_v1") for identity in candidates
+            ),
+        }
+    identity = candidates[0]
+    return {
+        "status": NECKLACE_LOOKUP_FOUND,
+        "identity": identity,
+        "matches": matched,
+        "detail": "",
+        "conflict_is_necklace": bool(identity.get("is_necklace_v1")),
+    }
 
 
 def _verify(identity: Dict[str, Any], prompt: Any) -> str:
-    validation = _dict(identity.get("render_validation"))
+    """Judge the row against the *latest delivery snapshot*, or refuse.
+
+    Round 1 read ``result_json["render_validation"]`` -- the verdict written at
+    **generation** time.  That verdict is about a render that may no longer be
+    the one on the row: re-exporting produces a fresh audit (v1 ``FAIL`` -> v2
+    ``PASS`` is the real case that exposed this) and the table text is updated
+    while the stored audit is not.  The consumer then demanded a re-export that
+    could never satisfy it.
+
+    So the authority is the snapshot the exporter writes *after* it renders the
+    text it is about to publish.  Without one there is nothing that ties the
+    text on the row to any verdict, and this consumer refuses rather than
+    inventing a ``PASS``: the fix is a deterministic re-export, which writes the
+    snapshot.
+    """
+
+    snapshot = _dict(identity.get("delivery_snapshot"))
+    if not snapshot:
+        return (
+            f"{NECKLACE_HANDOFF_SNAPSHOT_MISSING}:冻结身份里没有最新交付快照"
+            "（delivery_snapshot），无法确认表内文本就是通过当前检查的那一版；"
+            "请重新导出后再同步"
+        )
+    if _text(snapshot.get("schema_version")) != NECKLACE_DELIVERY_SNAPSHOT_SCHEMA:
+        return (
+            f"{NECKLACE_HANDOFF_SNAPSHOT_MISMATCH}:交付快照版本为 "
+            f"{_text(snapshot.get('schema_version')) or '空'}，本消费者只认 "
+            f"{NECKLACE_DELIVERY_SNAPSHOT_SCHEMA}；请重新导出后再同步"
+        )
+    if _text(snapshot.get("feature_profile")) != NECKLACE_HANDOFF_PROFILE:
+        return (
+            f"{NECKLACE_HANDOFF_SNAPSHOT_MISMATCH}:交付快照的 feature_profile 为 "
+            f"{_text(snapshot.get('feature_profile')) or '空'}，与冻结身份的 "
+            f"{NECKLACE_HANDOFF_PROFILE} 不一致；请重新导出后再同步"
+        )
+    # Same item, same script, same frozen source.  Any disagreement means the
+    # snapshot describes a different delivery, so it is not evidence about this
+    # row -- and picking the snapshot anyway would let one row's PASS cover
+    # another row's text.
+    for field, label in (
+        ("batch_item_id", "批次ItemID"),
+        ("complete_script_id", "公开脚本ID"),
+    ):
+        snapshot_value = _text(snapshot.get(field))
+        identity_value = _text(identity.get(field))
+        if snapshot_value and identity_value and snapshot_value != identity_value:
+            return (
+                f"{NECKLACE_HANDOFF_SNAPSHOT_MISMATCH}:交付快照的{label}为 "
+                f"{snapshot_value}，与冻结身份的 {identity_value} 不是同一条；"
+                "请重新导出后再同步"
+            )
+    frozen_hash = _text(identity.get("profile_config_hash"))
+    snapshot_frozen = _text(snapshot.get("frozen_contract_hash"))
+    if not snapshot_frozen or (frozen_hash and snapshot_frozen != frozen_hash):
+        return (
+            f"{NECKLACE_HANDOFF_SNAPSHOT_MISMATCH}:交付快照的冻结合同 hash 为 "
+            f"{snapshot_frozen or '空'}，冻结身份为 {frozen_hash or '空'}，"
+            "两者不是同一次冻结；请重新导出后再同步"
+        )
+
+    audited_text = _text(snapshot.get("prompt_text"))
+    if not audited_text:
+        return (
+            f"{NECKLACE_HANDOFF_SNAPSHOT_MISMATCH}:交付快照没有记录实际导出的完整"
+            "提示词，无法确认表内文本；请重新导出后再同步"
+        )
+    if _prompt_hash(prompt) != _prompt_hash(audited_text):
+        current = _prompt_hash(prompt)
+        return (
+            f"{NECKLACE_HANDOFF_PROMPT_CHANGED}:当前提示词与通过检查的交付文本不一致"
+            f"（当前 {current} / 快照 {_prompt_hash(audited_text)}）；不生成目标任务，"
+            "请修正并重新导出"
+        )
+    return _verify_validation(
+        identity, _dict(snapshot.get("render_validation")), audited_text
+    )
+
+
+def _verify_validation(
+    identity: Dict[str, Any], validation: Dict[str, Any], audited_text: str
+) -> str:
+    """The two-layer audit check, bound to ``audited_text``.
+
+    ``audited_text`` -- not the row text -- is what the hashes inside the
+    validation must match.  The row text has already been shown to be the same
+    string, so this is what makes the PASS an assertion about *this* delivery
+    rather than about a render that happened to share a hash prefix.
+    """
+
     audit = validation.get("necklace_audit")
     if not isinstance(audit, dict) or not audit:
         return (
-            f"{NECKLACE_HANDOFF_AUDIT_MISSING}:冻结身份里没有项链 V1 的最终提示词检查，"
+            f"{NECKLACE_HANDOFF_AUDIT_MISSING}:交付快照里没有项链 V1 的最终提示词检查，"
             "无法确认这条稿是通过新版项链检查的；请重新导出后再同步"
         )
     audit = dict(audit)
@@ -392,27 +734,26 @@ def _verify(identity: Dict[str, Any], prompt: Any) -> str:
     frozen_hash = _text(validation.get("prompt_hash"))
     if not frozen_hash:
         return (
-            f"{NECKLACE_HANDOFF_PROMPT_CHANGED}:冻结身份没有记录最终提示词 hash，"
-            "无法确认当前文本就是通过检查的那一版"
+            f"{NECKLACE_HANDOFF_PROMPT_CHANGED}:交付快照没有记录最终提示词 hash，"
+            "无法确认快照文本就是通过检查的那一版"
         )
-    delivered_hash = _prompt_hash(prompt)
-    if delivered_hash != frozen_hash:
+    if _prompt_hash(audited_text) != frozen_hash:
         return (
-            f"{NECKLACE_HANDOFF_PROMPT_CHANGED}:当前提示词与通过检查的文本不一致"
-            f"（当前 {delivered_hash} / 冻结 {frozen_hash}）；不生成目标任务，"
-            "请修正并重新导出"
+            f"{NECKLACE_HANDOFF_SNAPSHOT_MISMATCH}:交付快照内记录的共享 hash 与快照"
+            f"文本不一致（文本 {_prompt_hash(audited_text)} / 记录 {frozen_hash}）；"
+            "快照已损坏，请重新导出"
         )
     # The necklace layer binds the text with its own digest; both layers have to
-    # be pointing at the string that is on the row right now.
-    if _text(audit.get("prompt_hash")) != _local_prompt_hash(prompt):
+    # be pointing at the string the snapshot carries.
+    if _text(audit.get("prompt_hash")) != _local_prompt_hash(audited_text):
         return (
-            f"{NECKLACE_HANDOFF_PROMPT_CHANGED}:项链检查绑定的交付文本与当前行不一致"
-            "（项链检查未覆盖当前这一版文本）；不生成目标任务，请修正并重新导出"
+            f"{NECKLACE_HANDOFF_SNAPSHOT_MISMATCH}:项链检查绑定的交付文本与快照文本"
+            "不一致（项链检查未覆盖快照里这一版文本）；请重新导出"
         )
 
     if _text(validation.get("status")) == "FAIL" or _text(audit.get("status")) == "FAIL":
         return (
-            f"{NECKLACE_HANDOFF_AUDIT_FAILED}:冻结身份记录该行最终提示词检查为 FAIL；"
+            f"{NECKLACE_HANDOFF_AUDIT_FAILED}:交付快照记录该行最终提示词检查为 FAIL；"
             "已知冲突未修正前不生成目标任务"
         )
 
@@ -464,22 +805,29 @@ def check_necklace_handoff(
     *,
     script_id: str,
     prompt: Any,
+    batch_item_id: str = "",
+    product_type: str = "",
     db_path: Optional[Path] = None,
 ) -> str:
     """``""`` when the row may continue, otherwise the per-row refusal reason.
 
     Never raises.  A failure of the gate itself must not turn into a new failure
     mode for the other categories, and it must not silently admit a necklace
-    film either -- so a crash refuses only the prompts that carry the necklace
-    shot signature and leaves every other row exactly as it was.
+    film either -- so a crash holds back the rows that carry a necklace signal
+    (the shot signature, or a 产品类型 that claims 项链) and leaves every other
+    row exactly as it was.
     """
 
     try:
         return _check_necklace_handoff(
-            script_id=script_id, prompt=prompt, db_path=db_path
+            script_id=script_id,
+            prompt=prompt,
+            batch_item_id=batch_item_id,
+            product_type=product_type,
+            db_path=db_path,
         )
     except Exception as exc:  # noqa: BLE001 - see the docstring
-        if necklace_v1_prompt_signature(prompt) != NECKLACE_HANDOFF_SHOT_SIGNATURE:
+        if not _carries_necklace_signal(prompt=prompt, product_type=product_type):
             return ""
         return (
             f"{NECKLACE_HANDOFF_UNVERIFIED}:项链交接检查无法执行"
@@ -487,40 +835,91 @@ def check_necklace_handoff(
         )
 
 
+def _carries_necklace_signal(*, prompt: Any, product_type: Any) -> bool:
+    """Whether the row gives any reason to think it may be a necklace V1 film.
+
+    Both signals are refusal-side only.  Neither can admit a row, and the
+    signature is deliberately *not* an identity query condition -- in production
+    the delivered headers carry narrative roles, so it is normally empty.
+    """
+
+    return (
+        necklace_v1_prompt_signature(prompt) == NECKLACE_HANDOFF_SHOT_SIGNATURE
+        or necklace_product_type_declared(product_type)
+    )
+
+
 def _check_necklace_handoff(
     *,
     script_id: str,
     prompt: Any,
+    batch_item_id: str = "",
+    product_type: str = "",
     db_path: Optional[Path] = None,
 ) -> str:
-    """Only rows the frozen source identifies as necklace V1 are judged at all.
+    """Resolve the identity first, then judge -- never the other way round.
 
-    Rows whose delivered prompt carries the necklace shot signature while the
-    frozen source cannot be read are refused as unverified.  Everything else,
-    including every other category, keeps the existing sync behaviour.
+    The identity query runs for **every** row, whatever its prompt looks like:
+    the delivered headers do not name modules, so gating the public-id lookup on
+    the prompt signature meant real necklace rows were never looked up at all
+    and were admitted unverified.
+
+    Everything that cannot be resolved to a definite non-necklace answer, on a
+    row that claims to be a necklace, is refused.  A row that resolves to
+    something other than necklace V1 keeps the existing sync behaviour, which is
+    also how the historical (pre-V1) necklace batches stay unaffected.
     """
 
-    looks_like_necklace = (
-        necklace_v1_prompt_signature(prompt) == NECKLACE_HANDOFF_SHOT_SIGNATURE
+    signature_only = necklace_v1_prompt_signature(prompt) == (
+        NECKLACE_HANDOFF_SHOT_SIGNATURE
     )
-    identity = load_necklace_frozen_identity(script_id, db_path=db_path)
-    if identity is None and looks_like_necklace:
-        identity = load_necklace_frozen_identity_by_public_id(
-            script_id, db_path=db_path
-        )
-    if identity is None:
-        if not looks_like_necklace:
+    declared = necklace_product_type_declared(product_type)
+    resolution = resolve_necklace_frozen_identity(
+        script_id=script_id, batch_item_id=batch_item_id, db_path=db_path
+    )
+    status = _text(resolution.get("status"))
+    identity = resolution.get("identity")
+
+    if status == NECKLACE_LOOKUP_SOURCE_UNAVAILABLE:
+        if not (declared or signature_only):
             return ""
         return (
-            f"{NECKLACE_HANDOFF_UNVERIFIED}:该行提示词带 {NECKLACE_HANDOFF_PROFILE} "
-            f"镜头签名，但按 script_id（{_text(script_id)}）读不到冻结身份，"
-            "无法核对最终提示词 hash 与渲染版本；不生成目标任务"
+            f"{NECKLACE_HANDOFF_SOURCE_UNAVAILABLE}:无法读取冻结来源，读不到这条稿的"
+            f"身份，也就无法核对最终提示词 hash 与渲染版本"
+            f"（{_text(resolution.get('detail'))}）；不生成目标任务"
         )
+    if status == NECKLACE_LOOKUP_AMBIGUOUS:
+        if not (declared or resolution.get("conflict_is_necklace")):
+            return ""
+        return (
+            f"{NECKLACE_HANDOFF_SOURCE_AMBIGUOUS}:冻结来源里有多个条目同时命中"
+            f"（{_text(resolution.get('detail'))}）；无法确定这条交付文本属于哪一个，"
+            "不生成目标任务"
+        )
+    if status == NECKLACE_LOOKUP_NOT_FOUND or identity is None:
+        if declared:
+            return (
+                f"{NECKLACE_HANDOFF_UNVERIFIED}:该行产品类型声明为项链，但按 "
+                f"script_id（{_text(script_id)}）"
+                f"{'/批次ItemID（' + _text(batch_item_id) + '）' if _text(batch_item_id) else ''}"
+                f"读不到冻结身份（{_text(resolution.get('detail'))}）；"
+                "不生成目标任务，请核对冻结来源或重新导出"
+            )
+        if signature_only:
+            return (
+                f"{NECKLACE_HANDOFF_UNVERIFIED}:该行提示词带 {NECKLACE_HANDOFF_PROFILE} "
+                f"镜头签名，但按 script_id（{_text(script_id)}）读不到冻结身份，"
+                "无法核对最终提示词 hash 与渲染版本；不生成目标任务"
+            )
+        return ""
     if not identity.get("is_necklace_v1"):
-        if not looks_like_necklace:
-            return ""
-        return (
-            f"{NECKLACE_HANDOFF_UNVERIFIED}:该行提示词带 {NECKLACE_HANDOFF_PROFILE} "
-            "镜头签名，但冻结身份里没有项链 V1 合同；不生成目标任务"
-        )
+        if signature_only:
+            return (
+                f"{NECKLACE_HANDOFF_UNVERIFIED}:该行提示词带 {NECKLACE_HANDOFF_PROFILE} "
+                "镜头签名，但冻结身份里没有项链 V1 合同；不生成目标任务"
+            )
+        # Resolved, and it is not this profile: the historical necklace batches
+        # and every other category keep the sync behaviour they had.
+        return ""
     return _verify(identity, prompt)
+

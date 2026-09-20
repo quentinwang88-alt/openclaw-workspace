@@ -8,9 +8,12 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from core.bitable import FeishuBitableClient, TaskRecord, extract_attachments
 from core.product_type_resolution import load_type_registry, normalize_product_type
 from core.production_script_renderer import (
+    DELIVERY_SNAPSHOT_FIELD,
     RENDER_VALIDATION_FIELD,
     RENDER_VALIDATION_SCHEMA_VERSION,
+    build_delivery_snapshot,
     build_production_projection,
+    load_item_result,
     render_validation_block_reason,
     render_validation_blocks_delivery,
 )
@@ -19,6 +22,14 @@ from core.production_script_renderer import (
 # contract".  Kept as a literal so an operator can filter the sheet on it.
 EXECUTION_VALIDATION_BLOCKED_STATUS = "执行校验未通过"
 EXECUTION_VALIDATION_BLOCKED_FIRST_FRAME = "执行校验未通过"
+
+# A necklace V1 export has to publish *and record* the same text.  If the record
+# cannot be written, the sheet is not touched either: a table that shows a
+# PASS the frozen source knows nothing about is precisely the inconsistency this
+# round removes.
+SNAPSHOT_STORAGE_UNAVAILABLE = "SNAPSHOT_STORAGE_UNAVAILABLE:未提供批次存储，无法记录交付快照"
+SNAPSHOT_ITEM_ID_MISSING = "SNAPSHOT_ITEM_ID_MISSING:条目缺少 batch_item_id，无法回存交付快照"
+SNAPSHOT_PERSIST_FAILED = "SNAPSHOT_PERSIST_FAILED:交付快照写入失败"
 
 
 
@@ -588,6 +599,42 @@ def projection_to_feishu_fields(
     return {key: value for key, value in values.items() if value not in (None, "")}
 
 
+def _persist_delivery_snapshot(
+    storage: Any, item: Any, snapshot: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Record the snapshot next to the result it describes.  Never raises."""
+
+    if storage is None:
+        return {"ok": False, "reason": SNAPSHOT_STORAGE_UNAVAILABLE}
+    batch_item_id = str(getattr(item, "batch_item_id", "") or "").strip()
+    if not batch_item_id:
+        return {"ok": False, "reason": SNAPSHOT_ITEM_ID_MISSING}
+    expected_script = _dict_like(load_item_result(item).get("script"))
+    try:
+        merge = storage.merge_item_result_section(
+            batch_item_id,
+            DELIVERY_SNAPSHOT_FIELD,
+            snapshot,
+            expect=lambda payload: _dict_like(payload.get("script")) == expected_script,
+            expect_reason=(
+                f"{SNAPSHOT_PERSIST_FAILED}:条目内容在本轮导出期间被其他进程改写，"
+                "未覆盖其 result_json"
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 - reported, never escalated
+        return {"ok": False, "reason": f"{SNAPSHOT_PERSIST_FAILED}:{type(exc).__name__}: {exc}"}
+    if not merge.get("ok"):
+        reason = str(merge.get("reason") or "")
+        if reason.startswith(SNAPSHOT_PERSIST_FAILED):
+            return merge
+        return {"ok": False, "reason": f"{SNAPSHOT_PERSIST_FAILED}:{reason}"}
+    return merge
+
+
+def _dict_like(value: Any) -> Dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
 def export_ready_batch(
     *,
     batch: Any,
@@ -595,6 +642,7 @@ def export_ready_batch(
     target_client: FeishuBitableClient,
     product_images: Sequence[Dict[str, Any]] = (),
     store_id: str = "",
+    storage: Any = None,
 ) -> Dict[str, int]:
     existing_records = target_client.list_records(page_size=100)
     existing_by_script_id = _fields_by_script_id(existing_records)
@@ -603,6 +651,8 @@ def export_ready_batch(
     updated = 0
     skipped = 0
     execution_blocked = 0
+    snapshot_written = 0
+    snapshot_errors: Dict[str, str] = {}
     f = PRODUCTION_SCRIPT_FIELD_NAMES
 
     workflow_fields = {
@@ -629,6 +679,22 @@ def export_ready_batch(
         if not script_id:
             skipped += 1
             continue
+        # ── 交付快照先落库，再写飞书（F4）───────────────────────────────
+        # The projection *is* the checked render: one render, one audit, and the
+        # 飞书 fields are built from it below.  Persisting it first is what makes
+        # the table and the frozen source agree from then on; if the write fails
+        # the row is left exactly as it was, checkbox included.
+        # ``{}`` for anything that is not necklace V1, so every other category
+        # takes the same path it took before this round.
+        snapshot = build_delivery_snapshot(projection=projection, item=item)
+        if snapshot:
+            merge = _persist_delivery_snapshot(storage, item, snapshot)
+            if not merge.get("ok"):
+                snapshot_errors[
+                    str(getattr(item, "batch_item_id", "") or script_id)
+                ] = str(merge.get("reason") or SNAPSHOT_PERSIST_FAILED)
+                continue
+            snapshot_written += 1
         batch_id = str(projection.get("batch_id") or "").strip()
         batch_item_id = str(projection.get("batch_item_id") or "").strip()
         existing_record = (
@@ -692,6 +758,12 @@ def export_ready_batch(
         # whose prompt contradicts its own contract is not producible content,
         # so it must be deducted rather than folded into the created/updated tally.
         "execution_blocked": execution_blocked,
+        # A necklace row whose delivery snapshot could not be recorded was not
+        # written to the sheet at all -- counting it as created/updated would
+        # claim a hand-off that the frozen source cannot back up.
+        "snapshot_written": snapshot_written,
+        "snapshot_blocked": len(snapshot_errors),
+        "snapshot_errors": snapshot_errors,
         "render_validation_schema": RENDER_VALIDATION_SCHEMA_VERSION,
     }
 

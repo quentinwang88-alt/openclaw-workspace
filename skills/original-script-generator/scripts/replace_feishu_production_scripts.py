@@ -313,6 +313,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 target_client=client,
                 product_images=product_images.get(batch.product_code, []),
                 store_id=store_ids.get(batch.product_code, ""),
+                storage=storage,
             )
             for key in export_totals:
                 export_totals[key] += int(summary.get(key) or 0)

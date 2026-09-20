@@ -132,6 +132,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             items=items,
             target_client=script_client,
             product_images=images,
+            storage=storage,
         )
         for key in ("created", "updated", "skipped"):
             totals[key] += int(summary.get(key) or 0)

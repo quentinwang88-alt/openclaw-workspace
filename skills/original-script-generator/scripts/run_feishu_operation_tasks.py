@@ -261,6 +261,7 @@ def _export_ready_and_update_operation(
     task: dict,
     batch,
     items,
+    storage=None,
 ) -> dict:
     transferred_images = transfer_attachments(
         operation_client,
@@ -273,6 +274,7 @@ def _export_ready_and_update_operation(
         target_client=script_client,
         product_images=transferred_images,
         store_id=task["store_id"],
+        storage=storage,
     )
     final_status = _operation_status_for_batch(batch)
     summary = _batch_summary_text(batch, export_summary)
@@ -761,6 +763,7 @@ def main() -> int:
                         task=task,
                         batch=batch,
                         items=items,
+                        storage=storage,
                     )
                     print(
                         f"导出已完成脚本: {task_id} | batch={batch.batch_id} | "
@@ -857,6 +860,7 @@ def main() -> int:
                 task=task,
                 batch=batch,
                 items=items,
+                storage=storage,
             )
             print(
                 f"完成: {task_id} | "

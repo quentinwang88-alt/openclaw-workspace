@@ -143,6 +143,7 @@ def main() -> int:
                 items=storage.get_items(batch_id),
                 target_client=_client(DEFAULT_SCRIPT_URL),
                 product_images=(),
+                storage=storage,
             )
         summaries.append(
             {
