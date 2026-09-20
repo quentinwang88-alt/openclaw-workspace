@@ -854,6 +854,29 @@ def plan_th_choice_batch(
                 item["copy_source"] = "travel_topic_model"
                 item["topic_zh"] = str(value.get("topic_zh") or "")
                 item["template_review_status"] = "DRAFT_TRAVEL_TOPIC"
+                # 修复二（2026-09-20）：教程结构是渲染输入源——每篇独立的
+                # 页级 text/色卡/画面证据随条目冻结（pages 优先模型结构，
+                # 缺失由 narrative 回装）；旧主题无该键，行为不变。
+                narrative = (
+                    value.get("narrative")
+                    if isinstance(value.get("narrative"), Mapping) else None)
+                model_pages = [
+                    dict(page) for page in model_copy.get("pages") or []
+                    if isinstance(page, Mapping)]
+                if narrative or model_pages:
+                    if narrative:
+                        item["narrative"] = dict(narrative)
+                        if not model_pages:
+                            model_pages = [
+                                {"key_point_zh": page.get("key_point") or "",
+                                 "visual_basis_zh": page.get("visual_basis") or "",
+                                 "kicker": (page.get("text") or {}).get("kicker", ""),
+                                 "headline": (page.get("text") or {}).get("headline", ""),
+                                 "body": (page.get("text") or {}).get("body", ""),
+                                 "color_chips": page.get("color_chips") or []}
+                                for page in narrative.get("pages") or []]
+                    if len(model_pages) == 4:
+                        item["copy"]["pages"] = model_pages
             elif travel_flow:
                 template_copy = _travel_template_copy(
                     record_id=record_id, index=index, templates=copy_templates,

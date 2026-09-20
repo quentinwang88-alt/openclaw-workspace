@@ -417,16 +417,40 @@ class PhotoPackageExporter:
                 ),
             )
             if str(template.get("overlay_style") or "") == "structured_v1":
-                from services.photo_structured_layout import render_structured_page
+                from services.photo_structured_layout import (
+                    render_structured_page, render_structured_page_v2,
+                )
                 render_template = template
                 if str(spec.get("layout") or "") == "grid_2x2":
                     # F4（§7.2）：四宫格图片区缩至 80% 后，封面文字必须
-                    # 绑定到底部 20% 文字区（不压人物），仅该 layout 覆盖
-                    render_template = {**dict(template), "text_position": "bottom"}
-                renderer_pages.append(render_structured_page(
-                    image, str(spec.get("overlay_text") or ""), render_template,
-                    index=index, cover_index=cover_index, total=expected_count,
-                ))
+                    # 绑定到底部 20% 文字区（不压人物），仅该 layout 覆盖。
+                    # 模板优化 C：文字适配也用同一真实区域——默认 34% 画高
+                    # 允许文字向上侵入图片区（评审§4 边界风险），收窄到
+                    # 20% 减去底部边距。
+                    render_template = {
+                        **dict(template), "text_position": "bottom",
+                        "zone_height_ratio": 0.17,
+                    }
+                # 修复二/三（2026-09-20）：教程页级结构（page_text）存在时
+                # 走 v2 信息布局（配色侧栏／底部解释区）；旧任务保持
+                # parse_page_spec 字符串路径，逐字不变。
+                page_text = (
+                    spec.get("page_text")
+                    if isinstance(spec.get("page_text"), Mapping) else None)
+                if page_text and str(page_text.get("headline") or "").strip():
+                    page_payload = {
+                        "text": page_text,
+                        "color_chips": list(spec.get("color_chips") or []),
+                    }
+                    renderer_pages.append(render_structured_page_v2(
+                        image, page_payload, render_template,
+                        index=index, cover_index=cover_index, total=expected_count,
+                    ))
+                else:
+                    renderer_pages.append(render_structured_page(
+                        image, str(spec.get("overlay_text") or ""), render_template,
+                        index=index, cover_index=cover_index, total=expected_count,
+                    ))
             else:
                 _draw_overlay(
                     image, str(spec.get("overlay_text") or ""), template,

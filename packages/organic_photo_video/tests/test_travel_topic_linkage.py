@@ -849,3 +849,160 @@ class GuideTopicEntryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GuideStructuredPagesTest(unittest.TestCase):
+    """修复二/三：教程结构是真正的渲染输入（每篇独立、字段贯穿到渲染器）。"""
+
+    CONTRACT = {"moments": [
+        {"key": m, "label_zh": m, "evidence_zh": "e", "label_th": "t",
+         "forbidden_footwear_types": []}
+        for m in ("old_town_walk", "cafe_visit", "evening_stroll",
+                  "airport_departure")
+    ]}
+
+    def structured_payload(self, kind_topic):
+        copy = {
+            "place_localized": "โตเกียว" if kind_topic is GUIDE_TRAVEL_TOPIC else "",
+            "title": "ไอเดียแต่งตัวเที่ยวโตเกียว" if kind_topic is GUIDE_TRAVEL_TOPIC else "จับคู่สีให้ลุคดูเบา",
+            "caption": "แคปชัน",
+            "hashtags": ["#ทริป"],
+            "slide_texts": ["หน้าปก\nคำถาม", "วิธีที่ 1 — เหตุผล", "วิธีที่ 2 — เหตุผล", "วิธีที่ 3 — เหตุผล"],
+            "pages": [
+                {"key_point_zh": "封面", "visual_basis_zh": "完整示例", "kicker": "โตเกียว",
+                 "headline": "หน้าปก", "body": "คำถาม", "color_chips": []},
+                {"key_point_zh": "浅色衔接", "visual_basis_zh": "内搭真实露出",
+                 "kicker": "", "headline": "ต่อสีอ่อน", "body": "เหตุผล 1",
+                 "color_chips": [{"name_zh": "奶白", "hex": "#F2EDE4", "role": "top_inner"}]},
+                {"key_point_zh": "明暗对比", "visual_basis_zh": "深浅分区清晰",
+                 "kicker": "", "headline": "ตัดสว่างเข้ม", "body": "เหตุผล 2",
+                 "color_chips": [{"name_zh": "深靛蓝", "hex": "#2E4057", "role": "bottom"}]},
+                {"key_point_zh": "局部呼应", "visual_basis_zh": "鞋与外套同色",
+                 "kicker": "", "headline": "ย้ำสีเฉพาะจุด", "body": "เหตุผล 3",
+                 "color_chips": [{"name_zh": "棕色", "hex": "#8B5E3C", "role": "shoes"}]},
+            ],
+        }
+        looks = [
+            {"role": f"look_{letter}", "travel_moment": moment,
+             "scene_prompt": f"场景{letter}", "weather_logic": "室内外过渡",
+             "display_label": "", "footwear_type": "SNEAKER",
+             "outerwear": f"外套{letter}", "top_inner": f"内搭{letter}",
+             "bottom": f"下装{letter}", "shoes": f"鞋{letter}",
+             "outerwear_type": "", "bottom_type": ""}
+            for letter, moment in zip("abcd", (
+                "old_town_walk", "cafe_visit", "evening_stroll", "airport_departure"))
+        ]
+        return {"travel_variables": {}, "posts": [{
+            "content_angle_zh": "角度", "scene_zh": "s", "palette_zh": "p",
+            "background_prompt": "", "style_modifier": "",
+            "topic_zh": "怎么搭？", "copy": copy, "looks": looks,
+        }]}
+
+    def normalize(self, payload, topic):
+        return PhotoReferenceVisionService(root=Path("/tmp"))._normalize_travel_plan(
+            payload, self.CONTRACT, 1, travel_topic=topic)
+
+    def test_normalize_builds_v2_structure_per_post(self):
+        plan, errors = self.normalize(self.structured_payload(GUIDE_COLOR_TOPIC), GUIDE_COLOR_TOPIC)
+        self.assertEqual(errors, [], errors)
+        narrative = plan.get("narrative_plan") or {}
+        self.assertEqual(narrative.get("version"), 2)
+        self.assertEqual(narrative.get("layout_hint"), "color_sidebar")
+        pages = narrative.get("pages") or []
+        self.assertEqual(len(pages), 4)
+        self.assertEqual(pages[1]["text"]["headline"], "ต่อสีอ่อน")
+        self.assertEqual(pages[1]["visual_basis"], "内搭真实露出")
+        self.assertEqual(pages[1]["color_chips"][0]["hex"], "#F2EDE4")
+        # 每篇独立：posts[0] 自带 narrative
+        post_narrative = plan["posts"][0].get("narrative") or {}
+        self.assertEqual(post_narrative.get("version"), 2)
+        self.assertEqual(len(post_narrative.get("pages") or []), 4)
+
+    def test_normalize_falls_back_to_slide_split_without_model_pages(self):
+        payload = guide_travel_payload()
+        plan, errors = self.normalize(payload, GUIDE_TRAVEL_TOPIC)
+        self.assertEqual(errors, [], errors)
+        pages = (plan.get("narrative_plan") or {}).get("pages") or []
+        self.assertEqual(len(pages), 4)
+        # 无模型结构时 headline 从 slide 回装、layout 是攻略底部解释区
+        self.assertTrue(any(page["text"]["headline"] for page in pages))
+        self.assertEqual(plan["narrative_plan"].get("layout_hint"), "explain_bottom")
+        self.assertTrue(all(page["color_chips"] == [] for page in pages))
+
+    def test_plan_item_carries_pages_and_per_post_narrative(self):
+        from services.photo_content_planner import plan_th_choice_batch
+        plan0, _ = self.normalize(self.structured_payload(GUIDE_COLOR_TOPIC), GUIDE_COLOR_TOPIC)
+        profile = {
+            "analysis_method": "doubao_seed_2_1",
+            "presentation_type": "SCENE_MODEL",
+            "planning_flow": "travel_two_step",
+            "travel_topic": GUIDE_COLOR_TOPIC,
+            "recommended_sets": plan0["posts"],
+        }
+        plan = plan_th_choice_batch(
+            record_id="rec-struct", recipe_id="PHOTO_TH_TRAVEL_OUTFIT_V2",
+            theme=resolve_photo_theme("配色教程"), reference_mode="STYLE",
+            count=1, style_profile=profile, travel_contract=self.CONTRACT,
+        )
+        item = plan["items"][0]
+        self.assertEqual(len(item["copy"].get("pages") or []), 4)
+        self.assertEqual(item["copy"]["pages"][1]["color_chips"][0]["role"], "top_inner")
+        self.assertEqual((item.get("narrative") or {}).get("layout_hint"), "color_sidebar")
+
+    def test_build_theme_copy_carries_structured_pages(self):
+        from services.feishu_workflow import build_travel_topic
+        from services.photo_theme import build_theme_copy
+        plan0, _ = self.normalize(self.structured_payload(GUIDE_COLOR_TOPIC), GUIDE_COLOR_TOPIC)
+        variation = {
+            "planning_flow": "travel_two_step",
+            "copy": dict(plan0["posts"][0]["copy"]),
+        }
+        copy = build_theme_copy(
+            resolve_photo_theme("配色教程"), [], variation,
+            expression_mode="PRACTICAL_GUIDE")
+        pages = copy.get("pages") or []
+        self.assertEqual(len(pages), 4)
+        self.assertEqual(pages[2]["color_chips"][0]["name_zh"], "深靛蓝")
+
+    def test_renderer_v2_color_sidebar_and_bottom_zone(self):
+        from PIL import Image
+        from services.photo_structured_layout import (
+            render_structured_page_v2, STRUCTURED_RENDERER_V2_VERSION,
+        )
+        import json as _json
+        template = _json.loads(
+            (Path(__file__).resolve().parents[1]
+             / "config/layouts/PHOTO_STRUCTURED_CLEAN_V1.json").read_text("utf-8")
+        )["render_options"]
+        source = Image.new("RGB", (1080, 1920), "#C9B48A")
+
+        color_page = {
+            "text": {"kicker": "โตเกียว", "headline": "ต่อสีอ่อน", "body": "เหตุผล"},
+            "color_chips": [{"name_zh": "奶白", "hex": "#F2EDE4", "role": "top_inner"},
+                            {"name_zh": "深靛蓝", "hex": "#2E4057", "role": "bottom"}],
+        }
+        image = source.copy()
+        info = render_structured_page_v2(
+            image, color_page, template, index=2, cover_index=1, total=4)
+        self.assertEqual(info["renderer"], STRUCTURED_RENDERER_V2_VERSION)
+        self.assertEqual(info["layout_kind"], "color_sidebar")
+        main_x2 = info["zones"]["main"][2]
+        # 侧栏存在程序色块：深靛蓝示意色出现在右侧栏区域
+        side = image.crop((main_x2 + 10, 0, image.width, image.height))
+        colors = side.getcolors(maxcolors=200000) or []
+        self.assertTrue(any(
+            abs(rgb[0] - 0x2E) < 12 and abs(rgb[1] - 0x40) < 12 and abs(rgb[2] - 0x57) < 12
+            for _, rgb in colors), "侧栏应包含深靛蓝示意色块")
+
+        guide_page = {
+            "text": {"kicker": "", "headline": "ชั้นในบาง ถอดง่าย", "body": "เหตุผล"},
+            "color_chips": [],
+        }
+        image2 = source.copy()
+        info2 = render_structured_page_v2(
+            image2, guide_page, template, index=3, cover_index=1, total=4)
+        self.assertEqual(info2["layout_kind"], "explain_bottom")
+        main_h = info2["zones"]["main"][3]
+        # 图片区未被文字侵入：解释区顶部之前保持原图底色带
+        band = image2.crop((0, main_h - 8, image2.width, main_h - 1)).convert("L")
+        self.assertGreaterEqual(band.getextrema()[0], 120, "解释区上方不应有深色文字")

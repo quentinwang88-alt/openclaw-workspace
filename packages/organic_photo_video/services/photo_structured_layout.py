@@ -349,3 +349,185 @@ def _draw_scrim(image: Image.Image, *, top_zone: bool, top: int, bottom: int,
     image.alpha = None  # 保持 RGB 画布；合成走 RGBA 蒙版
     composed = Image.alpha_composite(image.convert("RGBA"), overlay)
     image.paste(composed.convert("RGB"), (0, 0))
+
+
+# ---------------------------------------------------------------------------
+# structured_v2：讲解教程信息布局（模板优化修复三，2026-09-20）
+# ---------------------------------------------------------------------------
+
+STRUCTURED_RENDERER_V2_VERSION = "structured_v2"
+
+#: color_chips 的 role → 中文标签（与 look 冻结字段一致）。
+CHIP_ROLE_LABELS = {
+    "outerwear": "外套", "top_inner": "内搭", "bottom": "下装",
+    "shoes": "鞋履", "accessories": "围巾",
+}
+
+
+def _contain(image: Image.Image, box: tuple[int, int, int, int]) -> Image.Image:
+    """整图等比缩放放进目标区域（contain），保留人物/商品/鞋脚不裁切。"""
+    x, y, w, h = box
+    scale = min(w / image.width, h / image.height)
+    resized = image.resize(
+        (max(1, round(image.width * scale)), max(1, round(image.height * scale))),
+        Image.LANCZOS)
+    return resized, x + (w - resized.width) // 2, y + (h - resized.height) // 2
+
+
+def _zone_fit_lines(text: str, font, *, max_width, max_height, spacing, draw):
+    """按区域尺寸换行并逐级降字号；返回 (lines, font) 或 None（放不下）。"""
+    lines = _fit_block([text], font, max_width=max_width, draw=draw)
+    height = sum((font.size + spacing) * len(block) for block in [lines])
+    return lines if height <= max_height else None
+
+
+def render_structured_page_v2(
+    image: Image.Image, page: Mapping[str, Any], template: Mapping[str, Any], *,
+    index: int = 1, cover_index: int = 1, total: int = 1,
+) -> Dict[str, Any]:
+    """讲解教程页：主图区＋程序文字/色卡区（一图一解释，文字不压证据）。
+
+    两种信息布局由内容决定（修复三 §5）：
+    - ``color_chips`` 非空（配色教程）：主图占宽约七成，右侧配色侧栏
+      （示意色块＋中文颜色名＋对应单品＋一句解释）。
+    - 否则（旅行攻略/温度指南）：主图占高约七成四，底部独立解释区
+      （kicker＋headline＋body），图片区与文字区不重叠。
+
+    色块由程序按冻结 color_chips 绘制，是本篇搭配示意，不伪装实测色值。
+    """
+    text = dict(page.get("text") or {})
+    chips = [dict(chip) for chip in page.get("color_chips") or []
+             if isinstance(chip, Mapping) and str(chip.get("hex") or "").startswith("#")]
+    layout_kind = "color_sidebar" if chips else "explain_bottom"
+    style = str(template.get("structured_style") or "clean")
+    if style not in STRUCTURED_STYLES:
+        raise StructuredLayoutError(f"unsupported structured_style: {style}")
+
+    width, height = image.width, image.height
+    background = str(template.get("background") or "#FAF8F4")
+    canvas = Image.new("RGB", (width, height), background)
+    draw = ImageDraw.Draw(canvas)
+    min_size = int(template.get("min_font_size") or 24)
+    spacing = int(template.get("line_spacing") or 10)
+    regular_candidates = list(template.get("font_candidates") or [])
+    bold_candidates = list(template.get("font_candidates_bold") or regular_candidates)
+    headline_color = str(template.get("headline_text_color") or "#1F1F1F")
+    body_color = str(template.get("body_text_color") or "#3D3D3D")
+    kicker_color = str(template.get("kicker_text_color") or "#6B6B6B")
+
+    if layout_kind == "color_sidebar":
+        main_ratio = float(template.get("guide_main_width_ratio") or 0.70)
+        main_w = round(width * main_ratio)
+        fitted, mx, my = _contain(image, (0, 0, main_w, height))
+        canvas.paste(fitted, (mx, my))
+        # 分隔线沿用账号中性背景上的低调竖线
+        draw.rectangle([main_w - 2, 0, main_w - 1, height], fill=kicker_color)
+        side_x = main_w + round(width * 0.03)
+        side_w = width - side_x - round(width * 0.03)
+        pad = round(width * 0.02)
+        y = round(height * 0.08)
+        kicker = str(text.get("kicker") or "").strip()
+        if kicker:
+            k_font = _resolve_font(regular_candidates, max(min_size, 26))
+            draw.text((side_x, y), kicker[:36], font=k_font, fill=kicker_color)
+            y += k_font.size + spacing * 2
+        headline = str(text.get("headline") or "").strip()
+        body = str(text.get("body") or "").strip()
+        # 侧栏文字：先 headline（粗体），后 body，最后色卡；逐级降字号装进侧栏。
+        for scale_step in range(0, 31, 2):
+            scale = 1 - scale_step / 100
+            h_font = _resolve_font(
+                bold_candidates, max(min_size, round((template.get("headline_font_size") or 44) * scale * 0.8)))
+            b_font = _resolve_font(
+                regular_candidates, max(min_size, round((template.get("body_font_size") or 32) * scale * 0.8)))
+            h_lines = _fit_block([headline], h_font, max_width=side_w - pad, draw=draw) if headline else []
+            b_lines = _fit_block([body], b_font, max_width=side_w - pad, draw=draw) if body else []
+            chip_font = _resolve_font(regular_candidates, max(min_size, 26))
+            label_font = _resolve_font(regular_candidates, max(min_size, 20))
+            block_h = (sum(len(h_lines) and (h_font.size + spacing) * len(h_lines) or 0 for _ in [0])
+                       + (h_font.size + spacing) * len(h_lines)
+                       + (b_font.size + spacing) * len(b_lines))
+            chip_block_h = len(chips) * (max(48, chip_font.size + 10) + spacing * 2) + spacing * 3
+            if y + block_h + chip_block_h <= height * 0.94:
+                break
+        for line in h_lines:
+            draw.text((side_x, y), line, font=h_font, fill=headline_color)
+            y += h_font.size + spacing
+        y += spacing
+        for line in b_lines:
+            draw.text((side_x, y), line, font=b_font, fill=body_color)
+            y += b_font.size + spacing
+        y += spacing * 2
+        swatch = max(40, min(56, round(side_w * 0.18)))
+        for chip in chips:
+            hex_value = str(chip.get("hex"))
+            name = str(chip.get("name_zh") or "")[:10]
+            role = CHIP_ROLE_LABELS.get(str(chip.get("role") or ""), "")
+            draw.rounded_rectangle(
+                [side_x, y, side_x + swatch, y + swatch], radius=8, fill=hex_value,
+                outline="#D8D2C8", width=1)
+            draw.text((side_x + swatch + pad, y + 2), name, font=chip_font,
+                      fill=headline_color)
+            if role:
+                draw.text((side_x + swatch + pad, y + chip_font.size + 6), role,
+                          font=label_font, fill=body_color)
+            y += swatch + spacing * 2
+        image.paste(canvas, (0, 0))
+        return {
+            "renderer": STRUCTURED_RENDERER_V2_VERSION,
+            "style": style, "page_kind": "cover" if index == cover_index else "detail",
+            "layout_kind": layout_kind,
+            "zones": {"main": [0, 0, main_w, height], "text": [side_x, 0, width - side_x, height]},
+            "color_chips": chips,
+        }
+
+    # explain_bottom：主图区（高 ~74%）＋底部独立解释区
+    main_ratio = float(template.get("guide_main_height_ratio") or 0.74)
+    main_h = round(height * main_ratio)
+    fitted, mx, my = _contain(image, (0, 0, width, main_h))
+    canvas.paste(fitted, (mx, my))
+    zone_y = main_h
+    zone_h = height - zone_y
+    # 区域底色：与画布同底、顶部一条细分隔线，不整块黑底盖鞋靴
+    draw.rectangle([0, zone_y, width, zone_y + 1], fill=kicker_color)
+    margin_x = int(template.get("padding_x") or round(width * 0.07))
+    max_width = width - margin_x * 2
+    kicker = str(text.get("kicker") or "").strip()
+    headline = str(text.get("headline") or "").strip()
+    body = str(text.get("body") or "").strip()
+    y = zone_y + round(zone_h * 0.14)
+    for scale_step in range(0, 31, 2):
+        scale = 1 - scale_step / 100
+        k_font = _resolve_font(
+            regular_candidates, max(min_size, round((template.get("kicker_font_size") or 30) * scale)))
+        h_font = _resolve_font(
+            bold_candidates, max(min_size, round((template.get("headline_font_size") or 52) * scale * 0.9)))
+        b_font = _resolve_font(
+            regular_candidates, max(min_size, round((template.get("body_font_size") or 36) * scale * 0.9)))
+        k_lines = _fit_block([kicker], k_font, max_width=max_width, draw=draw) if kicker else []
+        h_lines = _fit_block([headline], h_font, max_width=max_width, draw=draw) if headline else []
+        b_lines = _fit_block([body], b_font, max_width=max_width, draw=draw) if body else []
+        block_h = ((k_font.size + spacing) * len(k_lines)
+                   + (h_font.size + spacing) * len(h_lines)
+                   + (b_font.size + spacing) * len(b_lines))
+        if y + block_h <= height - round(zone_h * 0.1):
+            break
+    else:
+        raise StructuredLayoutError(
+            "structured v2 guide text cannot fit the explanation zone at minimum font size; "
+            "consider a copy revision instead of dropping text")
+    for lines, font, color in (
+            (k_lines, k_font, kicker_color),
+            (h_lines, h_font, headline_color),
+            (b_lines, b_font, body_color)):
+        for line in lines:
+            draw.text((margin_x, y), line, font=font, fill=color)
+            y += font.size + spacing
+    image.paste(canvas, (0, 0))
+    return {
+        "renderer": STRUCTURED_RENDERER_V2_VERSION,
+        "style": style,
+        "page_kind": "cover" if index == cover_index else "detail",
+        "layout_kind": layout_kind,
+        "zones": {"main": [0, 0, width, main_h], "text": [0, zone_y, width, height]},
+    }

@@ -213,6 +213,68 @@ def _hash(value: Any) -> str:
     ).encode("utf-8")).hexdigest()
 
 
+#: 配色教程 color_chips 允许的单品角色（与 look 冻结字段一一对应）。
+GUIDE_CHIP_ROLES = ("outerwear", "top_inner", "bottom", "shoes", "accessories")
+
+
+def _guide_chip(raw: Any) -> Optional[dict[str, str]]:
+    """归一化一块配色示意色：{name_zh, hex, role}；不合法返回 None。"""
+    if not isinstance(raw, Mapping):
+        return None
+    role = str(raw.get("role") or "").strip().lower()
+    if role not in GUIDE_CHIP_ROLES:
+        return None
+    name = str(raw.get("name_zh") or "").strip()
+    hex_value = str(raw.get("hex") or "").strip()
+    if not name or not (hex_value.startswith("#") and 4 <= len(hex_value) <= 9):
+        return None
+    return {"name_zh": name[:12], "hex": hex_value[:9], "role": role}
+
+
+def _guide_structured_pages(*, kind: str, copy: Mapping[str, Any],
+                            slides: Sequence[str]) -> list[dict[str, Any]]:
+    """把讲解文案组装成 4 页结构（修复二）：每页 text/kv/画面证据/色卡。
+
+    首选模型结构化 ``copy.pages``（headline/body/kicker/color_chips/
+    key_point_zh/visual_basis_zh）；模型没给时从 slide_texts 按分隔符回装
+    headline/body（兼容投影），中文要点与画面证据退化为空串——渲染器对
+    空字段有兜底，不再把「结构缺失」变成整篇失败。
+    """
+    model_pages = [p for p in (copy.get("pages") or [])
+                   if isinstance(p, Mapping)]
+    pages: list[dict[str, Any]] = []
+    for idx in range(4):
+        slide = slides[idx] if idx < len(slides) else ""
+        model_page = model_pages[idx] if idx < len(model_pages) else {}
+        headline = str(model_page.get("headline") or "").strip()
+        body = str(model_page.get("body") or "").strip()
+        if not headline and slide:
+            for sep in ("\n", "—", "–", "：", ":"):
+                if sep in slide:
+                    head, _, rest = slide.partition(sep)
+                    headline, body = head.strip(), (body or rest.strip())
+                    break
+            else:
+                headline = slide.strip()
+        chips_raw = model_page.get("color_chips") or []
+        chips = ([chip for chip in (_guide_chip(item) for item in chips_raw)
+                  if chip][:3]
+                 if kind == "color_tutorial" else [])
+        pages.append({
+            "page_index": idx + 1,
+            "source_role": f"look_{chr(97 + idx)}",
+            "key_point": str(model_page.get("key_point_zh") or "")[:40],
+            "visual_basis": str(model_page.get("visual_basis_zh") or "")[:80],
+            "text": {
+                "kicker": str(model_page.get("kicker") or "")[:40],
+                "headline": headline[:40],
+                "body": body[:90],
+            },
+            "color_chips": chips,
+        })
+    return pages
+
+
 def _vision_failure_detail(response: Any) -> str:
     """把失败响应的关键事实带进报错，避免只有一句泛化文案无法定位。"""
     try:
@@ -2049,6 +2111,15 @@ class PhotoReferenceVisionService:
                         else "DRAFT_TRAVEL_TOPIC"
                     ),
                 }
+                # 修复二：模型结构化 pages（headline/body/色卡/画面证据）
+                # 随文案冻结——它是渲染器 v2 的输入源；降级重建时丢弃，
+                # 由 narrative 从 slide_texts 回装。
+                _model_pages = [
+                    dict(item) for item in (copy_block.get("pages") or [])
+                    if isinstance(item, Mapping)]
+                if (guide_topic_active and not post.get("copy_degraded")
+                        and len(_model_pages) == 4):
+                    post["copy"]["pages"] = _model_pages
             posts.append(post)
         if errors:
             return {}, errors
@@ -2064,9 +2135,10 @@ class PhotoReferenceVisionService:
         if isinstance(raw.get("color_grading_plan"), Mapping):
             plan["color_grading_plan"] = _normalize_color_grading_plan(
                 raw.get("color_grading_plan"))
-        # B3（§B1/B3）：讲解主题在 plan 里补 narrative_plan——
-        # 从模型响应的 posts + slide_texts 构建（问题/takeaways/页职责）。
-        # 旧主题不加键，行为不变。
+        # B3+B4（模板优化修复二）：讲解主题在 plan 里补 narrative_plan——
+        # 问题/takeaways/页职责 + 每页结构化文字（headline/body/color_chips）
+        # 与画面证据（visual_basis）。结构化字段是渲染输入源；slide_texts
+        # 只是兼容投影。旧主题不加键，行为不变。
         from services.photo_content_planner import is_guide_theme
         if is_guide_theme(travel_topic or {}):
             theme_key = str((travel_topic or {}).get("theme_key") or "")
@@ -2090,17 +2162,36 @@ class PhotoReferenceVisionService:
                 if len(takeaways) >= 3:
                     break
             plan["narrative_plan"] = {
-                "version": 1,
+                "version": 2,
                 "kind": kind,
+                "layout_hint": ("color_sidebar" if kind == "color_tutorial"
+                                else "explain_bottom"),
                 "question_zh": question,
                 "takeaways": takeaways[:3],
-                "pages": [
-                    {"page_index": idx + 1, "source_role": f"look_{chr(97 + idx)}",
-                     "page_text": slides[idx] if idx < len(slides) else ""}
-                    for idx in range(min(4, max(4, len(slides))))
-                ],
+                "pages": _guide_structured_pages(
+                    kind=kind, copy=first.get("copy") or {},
+                    slides=slides),
                 "reference_basis": "",
             }
+
+            def _post_narrative(post):
+                post_copy = dict(post.get("copy") or {})
+                post_slides = [str(v) for v in post_copy.get("slide_texts") or []]
+                return {
+                    "version": 2,
+                    "kind": kind,
+                    "layout_hint": ("color_sidebar" if kind == "color_tutorial"
+                                    else "explain_bottom"),
+                    "question_zh": str(post.get("topic_zh") or question)[:200],
+                    "takeaways": takeaways[:3],
+                    "pages": _guide_structured_pages(
+                        kind=kind, copy=post_copy, slides=post_slides),
+                    "reference_basis": "",
+                }
+
+            # 每篇独立：多套任务各帖携带自己的叙事结构（不共享 posts[0]）。
+            for post in posts:
+                post["narrative"] = _post_narrative(post)
         return plan, []
 
     @staticmethod
@@ -2309,6 +2400,13 @@ class PhotoReferenceVisionService:
                 "地点名，如东京→โตเกียว），place_localized 填该地点名；未填写地点"
                 "时 place_localized 留空；" if guide_is_travel else
                 "place_localized 留空；")
+            guide_kind_chips_rule = (
+                "color_chips 给出该页画面中 2-3 个关键单品的示意色"
+                "（name_zh 用中文颜色名，hex 用 #RRGGBB 示意值，role 填该颜色"
+                "对应的单品角色 outerwear/top_inner/bottom/shoes/accessories，"
+                "颜色必须取自该页实际穿搭，不得照抄与本商品无关的参考色）"
+                if not guide_is_travel else
+                "color_chips 留空数组")
             topic_block = (
                 "\n【旅行主题联动｜讲解教程】主题：{label}；地点：{place}；"
                 "规划重点：{focus}\n"
@@ -2317,18 +2415,30 @@ class PhotoReferenceVisionService:
                 "讲解内容与穿搭方法）；travel_moment 仍从枚举选择，鞋履步行实用性"
                 "规则继续生效；\n"
                 "- 每页画面展示该页讲解的方法本身（部位衔接/层次/配色关系），"
-                "读者遮住文字也能看出方法差异。\n"
+                "读者遮住文字也能看出方法差异；每套 look 的画面必须真实呈现该页"
+                "visual_basis_zh 描述的证据（如讲内搭就露出内搭、讲鞋口就呈现"
+                "裤脚与鞋口衔接）。\n"
                 "\n【发布文案（讲解教程必须生成）】以四套 Look 为依据，同时输出：\n"
                 '{{"topic_zh":"中文选题（一句话说清本篇回答的问题）",'
                 '"copy":{{"place_localized":"","title":"当地语言发布标题",'
                 '"caption":"当地语言发布正文","hashtags":["当地语言标签"],'
                 '"slide_texts":["两行短封面：第一行主题钩子，第二行本篇问题",'
                 '"页2要点 — 一句当地语言解释","页3要点 — 一句当地语言解释",'
-                '"页4要点 — 一句当地语言解释与收藏提示"]}}}}\n'
-                "文案要求：slide_texts 必须 4 条，顺序为封面+第2/3/4页；每页标题是"
-                "本页方法要点（如「裤脚与鞋的衔接」「浅色衔接降低对比」），不是造型"
-                "名称；禁止选择 A/B/C/D 投票 CTA，第 4 页结尾用总结或收藏提示；"
-                "caption 给读者一句可执行的结论，每条建议必须与画面和规划的服装相符。\n"
+                '"页4要点 — 一句当地语言解释与收藏提示"],'
+                '"pages":[{{"key_point_zh":"本页中文要点（方法名）",'
+                '"visual_basis_zh":"本页画面必须提供的证据（中文，具体到部位/层次/颜色关系）",'
+                '"kicker":"当地语言短引子（封面用，内页空串）",'
+                '"headline":"当地语言页标题（本页方法名，简短）",'
+                '"body":"当地语言一句解释",'
+                '"color_chips":[{{"name_zh":"中文颜色名","hex":"#RRGGBB",'
+                '"role":"outerwear|top_inner|bottom|shoes|accessories"}}]}}]}}}}\n'
+                "文案要求：slide_texts 必须 4 条，顺序为封面+第2/3/4页；pages 同样"
+                "必须 4 条且与 slide_texts、look_a..look_d 一一对应（第1条=封面页）；"
+                "每页 headline 是本页方法要点（如「裤脚与鞋的衔接」「浅色衔接降低"
+                "对比」），不是造型名称；headline+body 的信息必须与对应 slide_text "
+                "一致；{chips_rule}；禁止选择 A/B/C/D 投票 CTA，第 4 页结尾用总结"
+                "或收藏提示；caption 给读者一句可执行的结论，每条建议必须与画面和"
+                "规划的服装相符。\n"
                 "标题规则（最重要）：{place_rule}title 围绕本篇回答的一个具体穿搭/配色"
                 "问题（一句说清读者能学会什么），不能退化成“4 套穿搭”罗列。\n"
             ).format(
@@ -2336,6 +2446,7 @@ class PhotoReferenceVisionService:
                 place=str(topic.get("place") or "未指定（不猜测具体地名）"),
                 focus=str(topic.get("planning_focus") or ""),
                 place_rule=guide_place_rule,
+                chips_rule=guide_kind_chips_rule,
             )
         elif topic_theme_type:
             # 表达模式只有这一份逐页文案合同（2026-09-15 收敛）：每种表达输出
@@ -2447,7 +2558,7 @@ class PhotoReferenceVisionService:
             # 教程：基础 JSON 示例与讲解合同一致（4 条页文案、无 A/B/C/D），
             # 避免示例与教程块冲突把模型带回 5 条投票格式（降级根因）。
             topic_schema = (
-                '{{"travel_variables":{{}},"posts":[{{"content_angle_zh":"","scene_zh":"","palette_zh":"","background_prompt":"","style_modifier":"","topic_zh":"中文选题（一句话说清本篇回答的问题）","copy":{{"place_localized":"","title":"当地语言发布标题","caption":"当地语言发布正文","hashtags":["当地语言标签"],"slide_texts":["两行短封面：第一行主题钩子，第二行本篇问题","页2要点 — 一句当地语言解释","页3要点 — 一句当地语言解释","页4要点 — 一句当地语言解释与收藏提示"]}},"looks":[\n'
+                '{{"travel_variables":{{}},"posts":[{{"content_angle_zh":"","scene_zh":"","palette_zh":"","background_prompt":"","style_modifier":"","topic_zh":"中文选题（一句话说清本篇回答的问题）","copy":{{"place_localized":"","title":"当地语言发布标题","caption":"当地语言发布正文","hashtags":["当地语言标签"],"slide_texts":["两行短封面：第一行主题钩子，第二行本篇问题","页2要点 — 一句当地语言解释","页3要点 — 一句当地语言解释","页4要点 — 一句当地语言解释与收藏提示"],"pages":[{{"key_point_zh":"","visual_basis_zh":"","kicker":"","headline":"","body":"","color_chips":[]}}]}},"looks":[\n'
                 '{{"role":"look_a","travel_moment":"old_town_walk","scene_prompt":"中文场景描述","weather_logic":"中文逻辑（无具体温度）","display_label":"","footwear_type":"SNEAKER","background_feature_zh":"该场景延续的参考背景特征","outfit_reference_indices":[],"styling_intent":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":""}},\n'
                 '{{"role":"look_b","travel_moment":"shopping_day","scene_prompt":"","weather_logic":"","display_label":"","footwear_type":"LOAFER","background_feature_zh":"","outfit_reference_indices":[],"styling_intent":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":""}},\n'
                 '{{"role":"look_c","travel_moment":"cafe_visit","scene_prompt":"","weather_logic":"","display_label":"","footwear_type":"LOW_HEEL","background_feature_zh":"","outfit_reference_indices":[],"styling_intent":"","outerwear":"","top_inner":"","bottom":"","shoes":"","outerwear_type":"","bottom_type":""}},\n'

@@ -495,6 +495,9 @@ def build_theme_copy(
     # （封面+A/B/C/D）同样放行——此前只认 5 条，教程的 4 页文案在这里被丢弃、
     # 回退投票组装，正是成片仍带「เลือก A B C」的最后一公里。
     if len(topic_slides) in (4, 5) and all(topic_slides):
+        planned_pages = [
+            dict(page) for page in planned_copy.get("pages") or []
+            if isinstance(page, Mapping)]
         return normalize_publish_copy({
             "copy_policy_version": 2,
             "place_localized": str(planned_copy.get("place_localized") or ""),
@@ -505,6 +508,12 @@ def build_theme_copy(
                 for value in (planned_copy.get("hashtags") or fallback["hashtags"])
             ],
             "slide_texts": topic_slides,
+            # 修复二：教程页级结构（headline/body/kicker/色卡/画面证据）
+            # 随发布文案一起冻结——它是渲染器 v2 的输入源；slide_texts 只是
+            # 兼容投影。仅当 pages 数与 slide 投影一致时透传。
+            **({"pages": planned_pages}
+               if planned_pages and len(planned_pages) == len(topic_slides)
+               else {}),
             "language_review_status": str(
                 planned_copy.get("language_review_status") or "DRAFT_TRAVEL_TOPIC"),
             **({"language_review": dict(planned_copy["language_review"])}

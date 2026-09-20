@@ -186,6 +186,10 @@ class PhotoReusePlannerService:
                 if any(value < 1 or value > len(assets) for value in source_slots):
                     raise PhotoPlannerError("card source_roles must reference available looks")
                 source_ids = [assets[value - 1]["asset_id"] for value in source_slots]
+                # 修复二：教程页级结构随页冻结（text=headline/body/kicker，
+                # color_chips=配色示意色）——渲染器 v2 的输入源；旧任务的页
+                # 没有这些键，slide 保持原样（字符串 overlay 路径不变）。
+                page_text = page.get("text") if isinstance(page.get("text"), Mapping) else None
                 slides.append({
                     "slot_index": index,
                     "slot_role": f"slide_{index}",
@@ -193,6 +197,12 @@ class PhotoReusePlannerService:
                     "source_refs": source_ids,
                     "source_slots": source_slots,
                     "overlay_text": slide_texts[index - 1] if index <= len(slide_texts) else "",
+                    **({"page_text": {
+                        key: str(page_text.get(key) or "")
+                        for key in ("kicker", "headline", "body")}}
+                       if page_text else {}),
+                    **({"color_chips": [dict(chip) for chip in page.get("color_chips") or []]}
+                       if page.get("color_chips") else {}),
                     "layout_snapshot": {
                         "template_id": template_id, "template_version": template_version,
                         "layout": str(page.get("layout") or "single"),

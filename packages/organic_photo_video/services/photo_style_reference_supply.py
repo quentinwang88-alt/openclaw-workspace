@@ -513,10 +513,25 @@ class PhotoStyleReferenceSupplyService:
                 repair_note = repair_notes.get(role, "")
                 if repair_note:
                     plan_shot["purpose"] = _with_repair_note(plan_shot["purpose"], repair_note)
+                # 修复二（2026-09-20）：教程页的画面证据编译进生图请求——
+                # 讲内搭就露出内搭、讲鞋口就呈现裤脚与鞋口衔接，不能只写
+                # 在摘要里。每篇条目的 narrative 按页（look 角色）匹配。
+                _narrative_pages = (
+                    (variation.get("narrative") or {}).get("pages")
+                    if isinstance(variation.get("narrative"), Mapping) else None) or ()
+                _visual_basis = next((
+                    str(page.get("visual_basis") or "").strip()
+                    for page in _narrative_pages
+                    if str(page.get("source_role") or "") == str(role)
+                    and str(page.get("visual_basis") or "").strip()), "")
                 outfit_state = {
                     "top_inner": look["top_inner"], "bottom": look["bottom"],
                     "shoes": look["shoes"], "style_direction": "；".join(filter(None, [
                         str(theme["visual_brief"]), str(variation.get("style_modifier") or ""),
+                        (
+                            "本页讲解画面证据：" + _visual_basis
+                            if _visual_basis else ""
+                        ),
                         (
                             "穿搭比例与下装鞋履衔接："
                             + str(look.get("styling_intent") or "")

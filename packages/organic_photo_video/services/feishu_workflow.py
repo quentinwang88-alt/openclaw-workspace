@@ -2505,6 +2505,33 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                                 request = requests[index - 1] = (
                                     apply_travel_single_cover(
                                         request, allow_four_slide_copy=True))
+                                # 修复二（2026-09-20）：页级结构挂进内容卡——
+                                # copy.pages（text/color_chips/画面证据）按页序
+                                # 写入折叠后的 4 页内容卡；渲染器 v2 由此取输入，
+                                # 中文回写与检查同源。旧任务无 pages 键则跳过。
+                                _struct_pages = [
+                                    dict(page) for page in
+                                    (request.get("copy") or {}).get("pages") or []
+                                    if isinstance(page, Mapping)]
+                                card_pages = (
+                                    (request.get("content_card") or {}).get("pages")
+                                    or [])
+                                if (len(_struct_pages) == 4
+                                        and len(card_pages) == 4):
+                                    for _pi, _sp in enumerate(_struct_pages):
+                                        card_pages[_pi]["text"] = {
+                                            key: str(
+                                                (_sp.get("text") or {}).get(key) or "")
+                                            for key in ("kicker", "headline", "body")}
+                                        _chips = [
+                                            chip for chip in _sp.get("color_chips") or []
+                                            if isinstance(chip, Mapping)]
+                                        if _chips:
+                                            card_pages[_pi]["color_chips"] = _chips
+                                    request["request_sha256"] = fingerprint({
+                                        key: value for key, value in request.items()
+                                        if key != "request_sha256"})
+                                    validate_frozen_request(request)
                         request["theme_brief"] = {
                             **dict(variation_theme), "reference_mode": reference_mode,
                             "reference_count": len(reference_attachments),
