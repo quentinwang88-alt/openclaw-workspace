@@ -679,6 +679,8 @@ class GuideTopicEntryTest(unittest.TestCase):
         self.assertIn("一页一方法", prompt)
         self.assertIn("slide_texts 必须 4 条", prompt)
         self.assertIn("禁止选择 A/B/C/D 投票 CTA", prompt)
+        # 商品颜色权威（2026-09-20 真实样片：浅蓝变体被文案写成红棕）
+        self.assertIn("商品参考图为唯一权威", prompt)
         # 公共合同保留（F2）：JSON 结构与旅行变量合同不丢
         self.assertIn("travel_moment", prompt)
         self.assertIn("scene_prompt", prompt)
