@@ -475,6 +475,30 @@ def is_guide_theme(theme: Mapping[str, Any]) -> bool:
     return str(theme.get("theme_key") or "") in GUIDE_THEME_KEYS
 
 
+def resolve_guide_execution(
+    *, theme: Mapping[str, Any], expression_mode: Any = "",
+) -> str:
+    """集中解析一条任务的内容执行类型（复审 F3）。
+
+    返回：``travel_guide`` ／ ``color_tutorial`` ／ ``temperature_guide`` ／
+    ``""``（展示型，非讲解）。规则：
+    - 旅行攻略、配色教程按主题直接判定；
+    - 温度主题在「无显式表达（默认实用指南）」或「显式 PRACTICAL_GUIDE」
+      时进入讲解结构（temperature_guide）；显式 STYLE_INSPIRATION 保持
+      展示型多套比较；
+    - 独立冷热切换三态流程不在本函数管辖（它有自己的主题键与流程）。
+    """
+    theme_key = str(theme.get("theme_key") or "")
+    if theme_key == "TRAVEL_STYLING_GUIDE":
+        return "travel_guide"
+    if theme_key == "COLOR_TUTORIAL":
+        return "color_tutorial"
+    expression = str(expression_mode or "").strip()
+    if theme_key == "TEMPERATURE" and expression in ("", "PRACTICAL_GUIDE"):
+        return "temperature_guide"
+    return ""
+
+
 def _load_guide_policy() -> Dict[str, Any]:
     import json as _json
     path = Path(__file__).resolve().parents[1] / "config" / "photo_planning_policies" / "TH_GUIDE_TUTORIAL_V1.json"

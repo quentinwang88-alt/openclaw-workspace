@@ -218,7 +218,12 @@ GUIDE_CHIP_ROLES = ("outerwear", "top_inner", "bottom", "shoes", "accessories")
 
 
 def _guide_chip(raw: Any) -> Optional[dict[str, str]]:
-    """归一化一块配色示意色：{name_zh, hex, role}；不合法返回 None。"""
+    """归一化一块配色示意色：{label_zh, name_zh, hex, role}；不合法返回 None。
+
+    复审 F4：``label_zh`` 是该颜色的**实际单品短名**（冻结后作为色卡可见
+    标签的翻译来源），不再由渲染器按 role 猜（此前 accessories 一律写成
+    「围巾」，真实内容是粉色袜子时标签错误）。
+    """
     if not isinstance(raw, Mapping):
         return None
     role = str(raw.get("role") or "").strip().lower()
@@ -228,7 +233,11 @@ def _guide_chip(raw: Any) -> Optional[dict[str, str]]:
     hex_value = str(raw.get("hex") or "").strip()
     if not name or not (hex_value.startswith("#") and 4 <= len(hex_value) <= 9):
         return None
-    return {"name_zh": name[:12], "hex": hex_value[:9], "role": role}
+    label = str(raw.get("label_zh") or "").strip()[:16]
+    return {
+        "name_zh": name[:12], "hex": hex_value[:9], "role": role,
+        **({"label_zh": label} if label else {}),
+    }
 
 
 def _guide_structured_pages(*, kind: str, copy: Mapping[str, Any],
@@ -1719,7 +1728,7 @@ class PhotoReferenceVisionService:
         posts = list(travel_plan.get("posts") or [])[:count]
         sets = []
         for post in posts:
-            sets.append({
+            entry = {
                 "content_angle_zh": post.get("content_angle_zh"),
                 "scene_zh": post.get("scene_zh"),
                 "palette_zh": post.get("palette_zh"),
@@ -1728,7 +1737,14 @@ class PhotoReferenceVisionService:
                 "looks": list(post.get("looks") or []),
                 "copy": dict(post.get("copy") or {}),
                 "topic_zh": str(post.get("topic_zh") or ""),
-            })
+            }
+            # 复审 F1（2026-09-20）：每篇叙事结构（含页画面证据）必须随
+            # profile 投影进入计划条目与供图——此前丢失导致"本页讲解画面
+            # 证据"通道在真实生图为空（recvvK1eGxPvNm 实测）。旧主题无该
+            # 键，投影字节不变。
+            if isinstance(post.get("narrative"), Mapping):
+                entry["narrative"] = dict(post["narrative"])
+            sets.append(entry)
         profile = {
             **{key: value for key, value in dict(analysis).items()
                if key not in {"schema_version"}},
@@ -2008,11 +2024,19 @@ class PhotoReferenceVisionService:
                         adapter=None, look=normalized_look, product_snapshot=product,
                     )
                 normalized_looks.append(normalized_look)
-            from services.photo_content_planner import is_guide_theme as _guide_topic
+            from services.photo_content_planner import (
+                is_guide_theme as _guide_topic, resolve_guide_execution,
+            )
+            # 复审 F3：温度主题带 expression_mode 时也进讲解判定——
+            # resolve_guide_execution 集中裁决（temperature_guide/
+            # travel_guide/color_tutorial/展示型）。
+            guide_kind = resolve_guide_execution(
+                theme=travel_topic or {},
+                expression_mode=str((travel_topic or {}).get("expression_mode") or ""),
+            ) if travel_topic else ""
             topic_active = bool(travel_topic and (
-                travel_topic.get("theme_type") or _guide_topic(travel_topic)))
-            guide_topic_active = bool(
-                travel_topic and _guide_topic(travel_topic))
+                travel_topic.get("theme_type") or guide_kind))
+            guide_topic_active = bool(guide_kind)
             if (len(plan_moments) == len(ROLES)
                     and len(set(plan_moments)) != len(ROLES) and not topic_active):
                 errors.append(f"第 {post_index} 篇四个 travel_moment 必须互不相同")
@@ -2139,11 +2163,13 @@ class PhotoReferenceVisionService:
         # 问题/takeaways/页职责 + 每页结构化文字（headline/body/color_chips）
         # 与画面证据（visual_basis）。结构化字段是渲染输入源；slide_texts
         # 只是兼容投影。旧主题不加键，行为不变。
-        from services.photo_content_planner import is_guide_theme
-        if is_guide_theme(travel_topic or {}):
-            theme_key = str((travel_topic or {}).get("theme_key") or "")
-            kind = ("travel_guide" if theme_key == "TRAVEL_STYLING_GUIDE"
-                    else "color_tutorial")
+        from services.photo_content_planner import (
+            is_guide_theme, resolve_guide_execution,
+        )
+        kind = resolve_guide_execution(
+            theme=travel_topic or {},
+            expression_mode=str((travel_topic or {}).get("expression_mode") or ""))
+        if kind:
             first = posts[0] if posts else {}
             copy = dict(first.get("copy") or {})
             slides = [str(v) for v in copy.get("slide_texts") or []]
@@ -2234,12 +2260,12 @@ class PhotoReferenceVisionService:
     def _guide_plan_prompt_block(
         *, theme, content_requirement="", account_positioning="",
     ):
-        """B2: 讲解主题的专属规则块——新主题返回规则文本，旧主题返回空。"""
-        from services.photo_content_planner import is_guide_theme
-        if not is_guide_theme(theme):
+        """B2: 讲解主题的专属规则块——讲解执行返回规则文本，展示型返回空。"""
+        from services.photo_content_planner import resolve_guide_execution
+        kind = resolve_guide_execution(
+            theme=theme, expression_mode=str(theme.get("expression_mode") or ""))
+        if not kind:
             return ""
-        theme_key = str(theme.get("theme_key") or "")
-        kind = "travel_guide" if theme_key == "TRAVEL_STYLING_GUIDE" else "color_tutorial"
         if kind == "travel_guide":
             rules = (
                 "【讲解模式：旅行穿搭攻略】\\n"
@@ -2251,6 +2277,18 @@ class PhotoReferenceVisionService:
                 "5. 不使用选择A/B/C/D或裤子还是裙子的默认CTA；结尾用总结或收藏提示。\\n"
                 "6. 允许同人物同色调同场景稳定，变化集中在讲解内容。\\n"
                 "7. 指定商品的颜色以商品参考图为唯一权威；问题、建议与页文案不得把商品描述成其他颜色。")
+        elif kind == "temperature_guide":
+            rules = (
+                "【讲解模式：温度指南】\\n"
+                "本篇不是投票/四选一内容，是按本篇温度条件逐页回答穿脱问题的指南。规则：\\n"
+                "1. 先确定本篇温度/温差条件（来自运营显式输入；只有相对条件时用"
+                "「早晚偏凉、室内偏暖」式表述，不编造具体温度数字）。\\n"
+                "2. 每页回答一个条件问题：外套脱下后穿什么、出门加哪一层、"
+                "腿部覆盖与鞋履怎么安排等；页短标题=条件短句。\\n"
+                "3. 四套造型=同一条件下的完整示例与逐项回答；第4套收束+总结。\\n"
+                "4. 不使用选择A/B/C/D或裤子还是裙子的默认CTA。\\n"
+                "5. 画面必须真实呈现该页回答（讲脱外套就敞开或搭臂，讲内搭"
+                "就露出内搭）。")
         else:
             rules = (
                 "【讲解模式：配色教程】\\n"
@@ -2320,10 +2358,15 @@ class PhotoReferenceVisionService:
         topic = dict(travel_topic or {})
         product = dict(product_context or {})
         topic_theme_type = str(topic.get("theme_type") or "")
-        from services.photo_content_planner import is_guide_theme as _topic_is_guide
-        topic_guide = _topic_is_guide(topic)
         positioning = str(account_positioning or "").strip()
         expression = str(expression_mode or "").strip()
+        from services.photo_content_planner import (
+            is_guide_theme as _topic_is_guide, resolve_guide_execution,
+        )
+        # 复审 F3：讲解判定统一走 resolve_guide_execution——温度主题
+        # （默认实用表达/显式 PRACTICAL_GUIDE）也进入讲解文案合同。
+        topic_guide = bool(resolve_guide_execution(
+            theme=topic, expression_mode=expression))
         baseline = str(account_visual_baseline or "").strip()
         outfit_indices = list(
             (dict(analysis).get("outfit_reference") or {}).get("indices") or []
@@ -2430,7 +2473,9 @@ class PhotoReferenceVisionService:
                 '"kicker":"当地语言短引子（封面用，内页空串）",'
                 '"headline":"当地语言页标题（本页方法名，简短）",'
                 '"body":"当地语言一句解释",'
-                '"color_chips":[{{"name_zh":"中文颜色名","hex":"#RRGGBB",'
+                '"color_chips":[{{"label_zh":"该颜色的实际单品短名（中文，'
+                '如「粉色袜子」「奶白针织内搭」）","name_zh":"中文颜色名",'
+                '"hex":"#RRGGBB",'
                 '"role":"outerwear|top_inner|bottom|shoes|accessories"}}]}}]}}}}\n'
                 "文案要求：slide_texts 必须 4 条，顺序为封面+第2/3/4页；pages 同样"
                 "必须 4 条且与 slide_texts、look_a..look_d 一一对应（第1条=封面页）；"

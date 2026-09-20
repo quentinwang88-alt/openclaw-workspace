@@ -585,8 +585,14 @@ class NativePhotoProductionFlow:
         vision = self.vision_service
         if vision is None:
             vision = PhotoReferenceVisionService(root=self.output_root)
+        # 复审 F2：QA 与渲染读同一份文字——pages 存在时按它的投影校验
+        # （渲染器 v2 画的就是投影结果），不再校验被淘汰的旧 slide_texts。
+        from services.copy_translation import pages_to_slide_texts
+        projected = pages_to_slide_texts(manifest.get("copy") or {})
         expected_texts = [
-            str(text) for text in (manifest.get("copy") or {}).get("slide_texts") or []
+            str(text) for text in (
+                projected if projected is not None
+                else (manifest.get("copy") or {}).get("slide_texts") or [])
         ]
         slides = list(manifest.get("slides") or [])
         role_order = (

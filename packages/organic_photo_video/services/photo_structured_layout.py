@@ -433,31 +433,58 @@ def render_structured_page_v2(
         side_x = main_w + round(width * 0.03)
         side_w = width - side_x - round(width * 0.03)
         pad = round(width * 0.02)
-        y = round(height * 0.08)
+        y = round(height * 0.06)
         kicker = str(text.get("kicker") or "").strip()
-        if kicker:
-            k_font = _resolve_font(regular_candidates, max(min_size, 26))
-            draw.text((side_x, y), kicker[:36], font=k_font, fill=kicker_color)
-            y += k_font.size + spacing * 2
         headline = str(text.get("headline") or "").strip()
         body = str(text.get("body") or "").strip()
-        # 侧栏文字：先 headline（粗体），后 body，最后色卡；逐级降字号装进侧栏。
-        for scale_step in range(0, 31, 2):
+        # 复审 F4：所有可见文字共用真实 bbox 测宽换行＋有限缩字；缩字耗尽
+        # 显式报错（不静默截断绘制溢出）。HEX 只进 manifest 审计不展示。
+        chip_label_max = side_w - pad - max(40, min(56, round(side_w * 0.18))) - pad
+        chip_names = []
+        for chip in chips:
+            label = str(chip.get("label_zh") or chip.get("label") or "").strip()
+            if not label:
+                role_label = CHIP_ROLE_LABELS_TH.get(
+                    str(chip.get("role") or ""), "")
+                label = role_label or str(chip.get("role") or "")
+            chip_names.append(label)
+        for scale_step in range(0, 41, 2):
             scale = 1 - scale_step / 100
+            k_font = _resolve_font(
+                regular_candidates, max(min_size, round(30 * scale)))
             h_font = _resolve_font(
-                bold_candidates, max(min_size, round((template.get("headline_font_size") or 44) * scale * 0.8)))
+                bold_candidates,
+                max(min_size, round((template.get("headline_font_size") or 44) * scale * 0.85)))
             b_font = _resolve_font(
-                regular_candidates, max(min_size, round((template.get("body_font_size") or 32) * scale * 0.8)))
-            h_lines = _fit_block([headline], h_font, max_width=side_w - pad, draw=draw) if headline else []
-            b_lines = _fit_block([body], b_font, max_width=side_w - pad, draw=draw) if body else []
-            chip_font = _resolve_font(regular_candidates, max(min_size, 26))
-            label_font = _resolve_font(regular_candidates, max(min_size, 20))
-            block_h = (sum(len(h_lines) and (h_font.size + spacing) * len(h_lines) or 0 for _ in [0])
+                regular_candidates,
+                max(min_size, round((template.get("body_font_size") or 32) * scale * 0.85)))
+            chip_font = _resolve_font(regular_candidates, max(min_size, round(28 * scale)))
+            k_lines = _fit_block([kicker], k_font, max_width=side_w, draw=draw) if kicker else []
+            h_lines = _fit_block([headline], h_font, max_width=side_w, draw=draw) if headline else []
+            b_lines = _fit_block([body], b_font, max_width=side_w, draw=draw) if body else []
+            chip_line_groups = [
+                _fit_block([label], chip_font, max_width=chip_label_max, draw=draw)
+                for label in chip_names]
+            swatch = max(40, min(56, round(side_w * 0.18)))
+            chip_line_h = chip_font.size + spacing
+            block_h = ((k_font.size + spacing) * len(k_lines)
                        + (h_font.size + spacing) * len(h_lines)
                        + (b_font.size + spacing) * len(b_lines))
-            chip_block_h = len(chips) * (max(48, chip_font.size + 10) + spacing * 2) + spacing * 3
-            if y + block_h + chip_block_h <= height * 0.94:
+            chip_block_h = sum(
+                len(lines) * chip_line_h for lines in chip_line_groups) \
+                + len(chips) * (spacing + swatch // 4)
+            if y + block_h + chip_block_h <= height * 0.95:
                 break
+        else:
+            raise StructuredLayoutError(
+                "structured v2 color sidebar cannot fit text at minimum font size; "
+                "consider a copy revision instead of overflowing")
+        # 主问题升为主标题（kicker 只承载短信息）：kicker 小字在上，
+        # headline 大字紧随。
+        for line in k_lines:
+            draw.text((side_x, y), line, font=k_font, fill=kicker_color)
+            y += k_font.size + spacing
+        y += spacing
         for line in h_lines:
             draw.text((side_x, y), line, font=h_font, fill=headline_color)
             y += h_font.size + spacing
@@ -466,21 +493,17 @@ def render_structured_page_v2(
             draw.text((side_x, y), line, font=b_font, fill=body_color)
             y += b_font.size + spacing
         y += spacing * 2
-        swatch = max(40, min(56, round(side_w * 0.18)))
-        for chip in chips:
+        for chip, lines in zip(chips, chip_line_groups):
             hex_value = str(chip.get("hex"))
-            role_label = CHIP_ROLE_LABELS_TH.get(
-                str(chip.get("role") or ""), "")
             draw.rounded_rectangle(
                 [side_x, y, side_x + swatch, y + swatch], radius=8, fill=hex_value,
                 outline="#D8D2C8", width=1)
-            # 可见文字只用发布语言标签；中文颜色名进 manifest 审计。
-            if role_label:
-                draw.text((side_x + swatch + pad, y + 2), role_label,
-                          font=chip_font, fill=headline_color)
-            draw.text((side_x + swatch + pad, y + chip_font.size + 6),
-                      hex_value.upper(), font=label_font, fill=body_color)
-            y += swatch + spacing * 2
+            # 可见文字=冻结的真实单品标签（发布语言）；name_zh/hex 进 manifest。
+            for li, line in enumerate(lines):
+                draw.text((side_x + swatch + pad,
+                           y + li * chip_line_h + (swatch - chip_line_h * len(lines)) // 2 + 2),
+                          line, font=chip_font, fill=headline_color)
+            y += max(swatch, len(lines) * chip_line_h) + spacing
         image.paste(canvas, (0, 0))
         return {
             "renderer": STRUCTURED_RENDERER_V2_VERSION,

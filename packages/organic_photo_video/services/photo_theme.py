@@ -498,6 +498,13 @@ def build_theme_copy(
         planned_pages = [
             dict(page) for page in planned_copy.get("pages") or []
             if isinstance(page, Mapping)]
+        # 复审 F2（2026-09-20）：pages 是最终文字唯一权威。冻结点把
+        # pages 确定性投影覆盖 slide_texts——渲染、最终页 QA、中文翻译、
+        # 缓存指纹全部同源；旧无 pages 任务投影为 None，保持原 slide。
+        from services.copy_translation import pages_to_slide_texts
+        projected_slides = pages_to_slide_texts({"pages": planned_pages})
+        if projected_slides is not None and len(projected_slides) == len(topic_slides):
+            topic_slides = projected_slides
         return normalize_publish_copy({
             "copy_policy_version": 2,
             "place_localized": str(planned_copy.get("place_localized") or ""),

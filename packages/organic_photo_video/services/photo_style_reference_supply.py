@@ -49,17 +49,22 @@ def _product_qa_context(product: Mapping[str, Any] | None) -> dict[str, Any]:
     的商品参考图说"这是商品参考图"，否则等于只声称有商品而实际没检查。
     """
     product = dict(product or {})
+    # 复审 F5（2026-09-20）：任务类目必须显式保留——自由围巾（无商品编码）
+    # 的 QA 上下文只有 task_category_key，被白名单删掉后 required_item_visible
+    # 永远不启用。仍以 product_id 判断是否有指定商品。
+    product_context: dict[str, Any] = {
+        key: product.get(key)
+        for key in ("product_id", "product_name", "category",
+                    "reference_pack_id", "reference_pack_version",
+                    "task_category_key")
+        if product.get(key) not in (None, "")
+    }
     return {
         "product_reference_paths": [
             str(value) for value in product.get("reference_images") or []
             if Path(str(value)).is_file()
         ],
-        "product_context": {
-            key: product.get(key)
-            for key in ("product_id", "product_name", "category",
-                        "reference_pack_id", "reference_pack_version")
-            if product.get(key) not in (None, "")
-        },
+        "product_context": product_context,
     }
 
 

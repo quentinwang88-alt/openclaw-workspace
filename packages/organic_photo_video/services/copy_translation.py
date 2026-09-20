@@ -23,13 +23,49 @@ class CopyTranslationError(RuntimeError):
 TRANSLATABLE_KEYS = ("title", "caption", "hashtags", "slide_texts")
 
 
+def pages_to_slide_texts(copy_block: Mapping[str, Any]) -> List[str] | None:
+    """把结构化 pages 确定性投影成 slide_texts（复审 F2）。
+
+    教程的 pages（kicker/headline/body/色卡）是最终文字唯一权威；投影规则：
+    kicker 与 headline 同页 → 「kicker\\nheadline」；否则 headline，缺
+    headline 用 body，末页无 CTA 时不追加。无 pages 返回 None（旧任务保持
+    原 slide_texts 不变）。
+    """
+    pages = [page for page in copy_block.get("pages") or []
+             if isinstance(page, Mapping)]
+    if not pages:
+        return None
+    projected = []
+    for page in pages:
+        text = page.get("text") if isinstance(page.get("text"), Mapping) else page
+        kicker = str(text.get("kicker") or "").strip()
+        headline = str(text.get("headline") or "").strip()
+        body = str(text.get("body") or "").strip()
+        lines = [line for line in (kicker, headline or body) if line]
+        projected.append("\n".join(lines))
+    return projected if all(projected) else None
+
+
+def _authoritative_copy(copy_block: Mapping[str, Any]) -> Dict[str, Any]:
+    """pages 存在时以投影结果覆盖 slide_texts（同源保证），否则原样返回。"""
+    projected = pages_to_slide_texts(copy_block)
+    if projected is None:
+        return dict(copy_block)
+    canonical = dict(copy_block)
+    canonical["slide_texts"] = projected
+    return canonical
+
+
 def copy_fingerprint(copy_block: Mapping[str, Any]) -> str:
-    """发布文案指纹：修订任何发布文字都会改变指纹并触发重译。"""
-    canonical = {
-        key: copy_block.get(key)
-        for key in TRANSLATABLE_KEYS
-    }
-    payload = json.dumps(canonical, ensure_ascii=False, sort_keys=True)
+    """发布文案指纹：修订任何发布文字都会改变指纹并触发重译。
+
+    复审 F2：pages 存在时先投影成 slide_texts 再取指纹——只改 pages.body
+    也会改变指纹、触发重译（此前投影缺失导致缓存不失效、中文缺页上文字）。
+    """
+    canonical = _authoritative_copy(copy_block)
+    payload = json.dumps(
+        {key: canonical.get(key) for key in TRANSLATABLE_KEYS},
+        ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
 
@@ -63,11 +99,13 @@ class CopyTranslationService:
     # ------------------------------------------------------------------
     def translate(self, copy_block: Mapping[str, Any], *,
                   source_locale: str = "th-TH") -> Dict[str, Any]:
-        fingerprint = copy_fingerprint(copy_block)
+        # 复审 F2：pages 存在时翻译它的投影（headline\\nbody 同源），缓存
+        # 指纹同源——pages 改文即触发重译。
+        source = _authoritative_copy(copy_block or {})
+        fingerprint = copy_fingerprint(source)
         cached = self._read_cache(fingerprint)
         if cached is not None:
             return cached
-        source = dict(copy_block or {})
         slide_count = len(list(source.get("slide_texts") or []))
         prompt = self._prompt(source, source_locale=source_locale)
         client = self._ensure_client()

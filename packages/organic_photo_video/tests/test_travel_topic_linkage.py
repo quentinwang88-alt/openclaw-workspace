@@ -1116,3 +1116,151 @@ class CardTextMountTest(unittest.TestCase):
         self.assertFalse(should_v2)
         page_text2 = {"kicker": "", "headline": "ต่อสีอ่อน", "body": "x"}
         self.assertTrue(bool(str(page_text2.get("headline") or "").strip()))
+
+
+class VisualBasisProjectionTest(unittest.TestCase):
+    """复审 F1：画面证据必须穿过真实投影链进生图请求。
+
+    normalize → build_travel_style_profile → plan_th_choice_batch →
+    供给侧 outfit_state。此前 build_travel_style_profile 丢 post.narrative，
+    "本页讲解画面证据"通道在真实生图为空（recvvK1eGxPvNm 实测）。"""
+
+    CONTRACT = {"moments": [
+        {"key": m, "label_zh": m, "evidence_zh": "e", "label_th": "t",
+         "forbidden_footwear_types": []}
+        for m in ("old_town_walk", "cafe_visit", "evening_stroll",
+                  "airport_departure")
+    ]}
+
+    def test_projection_keeps_narrative_and_evidence_reaches_request(self):
+        from collections.abc import Mapping
+        from services.photo_reference_vision import (
+            PhotoReferenceVisionService, _guide_structured_pages,
+        )
+        from services.photo_content_planner import plan_th_choice_batch
+
+        topic = dict(GUIDE_COLOR_TOPIC)
+        payload = guide_travel_payload()
+        # 模型结构化 pages（真实生产会带）：visual_basis 从这里进 narrative
+        payload["posts"][0]["copy"]["pages"] = [
+            {"key_point_zh": "封面", "visual_basis_zh": "完整示例一套",
+             "kicker": "", "headline": "หน้าปก", "body": "คำถาม", "color_chips": []},
+            {"key_point_zh": "浅色衔接", "visual_basis_zh": "内搭真实露出",
+             "kicker": "", "headline": "ต่อสีอ่อน", "body": "เหตุผล 1", "color_chips": []},
+            {"key_point_zh": "明暗对比", "visual_basis_zh": "深浅分区清晰",
+             "kicker": "", "headline": "ตัดสว่างเข้ม", "body": "เหตุผล 2", "color_chips": []},
+            {"key_point_zh": "局部呼应", "visual_basis_zh": "鞋与外套同色",
+             "kicker": "", "headline": "ย้ำสีเฉพาะจุด", "body": "เหตุผล 3", "color_chips": []},
+        ]
+        plan, errors = PhotoReferenceVisionService(
+            root=Path("/tmp"))._normalize_travel_plan(
+            payload, self.CONTRACT, 1, travel_topic=topic)
+        self.assertEqual(errors, [], errors)
+        self.assertIn("narrative", plan["posts"][0])
+
+        # 真实投影（不手工拼 recommended_sets）
+        profile = PhotoReferenceVisionService.build_travel_style_profile(
+            {"schema_version": "x"}, plan, count=1)
+        sets = profile.get("recommended_sets") or []
+        self.assertTrue(sets, "投影后必须有 recommended_sets")
+        self.assertIn("narrative", sets[0],
+                      "复审 F1：build_travel_style_profile 必须保留 post.narrative")
+        pages = (sets[0]["narrative"] or {}).get("pages") or []
+        self.assertTrue(any(
+            str(page.get("visual_basis") or "").strip() for page in pages),
+            "narrative.pages 必须带画面证据")
+
+        profile["travel_topic"] = dict(topic)
+        plan_batch = plan_th_choice_batch(
+            record_id="rec-evidence", recipe_id="PHOTO_TH_TRAVEL_OUTFIT_V2",
+            theme=resolve_photo_theme("配色教程"), reference_mode="STYLE",
+            count=1, style_profile=profile, travel_contract=self.CONTRACT,
+        )
+        item = plan_batch["items"][0]
+        item_pages = (item.get("narrative") or {}).get("pages") or []
+        self.assertTrue(item_pages, "计划条目必须携带 narrative")
+        evidence = next(
+            (str(page.get("visual_basis") or "") for page in item_pages
+             if str(page.get("source_role") or "") == "look_b"
+             and str(page.get("visual_basis") or "").strip()), "")
+        self.assertTrue(evidence, "look_b 页必须有画面证据")
+
+        # 供给侧同源读取（与 photo_style_reference_supply 相同取值逻辑）
+        narrative_pages = (
+            (item.get("narrative") or {}).get("pages")
+            if isinstance(item.get("narrative"), Mapping) else None) or ()
+        found = next(
+            (str(page.get("visual_basis") or "").strip()
+             for page in narrative_pages
+             if str(page.get("source_role") or "") == "look_b"
+             and str(page.get("visual_basis") or "").strip()), "")
+        self.assertEqual(found, evidence)
+
+
+class TemperatureGuideStructureTest(unittest.TestCase):
+    """复审 F3：温度主题（默认实用表达）进讲解结构——4页/pages/narrative，
+    layout=explain_bottom；显式 STYLE_INSPIRATION 保持展示型。"""
+
+    CONTRACT = {"moments": [
+        {"key": m, "label_zh": m, "evidence_zh": "e", "label_th": "t",
+         "forbidden_footwear_types": []}
+        for m in ("old_town_walk", "cafe_visit", "evening_stroll",
+                  "airport_departure")
+    ]}
+    TEMP_TOPIC = {
+        "theme_type": "TEMPERATURE", "theme_version": 1,
+        "theme_key": "TEMPERATURE",
+        "theme_label_zh": "旅行·温度穿搭",
+        "planning_focus": "温度条件下的层搭",
+        "topic_patterns": [], "body_copy_focus": "", "cta_patterns": [],
+        "place": "首尔", "temperature_band": "", "content_requirement": "",
+    }
+
+    def payload_with_pages(self):
+        payload = guide_travel_payload()
+        payload["posts"][0]["copy"]["pages"] = [
+            {"key_point_zh": "封面", "visual_basis_zh": "完整示例",
+             "kicker": "", "headline": "หน้าปก", "body": "คำถาม", "color_chips": []},
+            {"key_point_zh": "脱外套", "visual_basis_zh": "外套搭臂",
+             "kicker": "", "headline": "ถอดแจ็กเก็ต", "body": "เหตุผล", "color_chips": []},
+            {"key_point_zh": "加一层", "visual_basis_zh": "外层可见",
+             "kicker": "", "headline": "ชั้นนอก", "body": "เหตุผล", "color_chips": []},
+            {"key_point_zh": "腿脚", "visual_basis_zh": "下装鞋履可见",
+             "kicker": "", "headline": "ขาและรองเท้า", "body": "เหตุผล", "color_chips": []},
+        ]
+        return payload
+
+    def test_temperature_default_expression_builds_guide_structure(self):
+        plan, errors = PhotoReferenceVisionService(
+            root=Path("/tmp"))._normalize_travel_plan(
+            self.payload_with_pages(), self.CONTRACT, 1,
+            travel_topic=self.TEMP_TOPIC)
+        self.assertEqual(errors, [], errors)
+        narrative = plan.get("narrative_plan") or {}
+        self.assertEqual(narrative.get("kind"), "temperature_guide")
+        self.assertEqual(narrative.get("layout_hint"), "explain_bottom")
+        self.assertEqual(len(narrative.get("pages") or []), 4)
+        self.assertEqual(len(plan["posts"][0]["copy"]["slide_texts"]), 4)
+        # 显式 STYLE_INSPIRATION：温度保持展示型（5条投票，无narrative）
+        inspired_topic = {
+            **self.TEMP_TOPIC, "expression_mode": "STYLE_INSPIRATION",
+            "place": ""}
+        showcase = guide_travel_payload()
+        showcase["posts"][0]["copy"] = {
+            **showcase["posts"][0]["copy"], "place_localized": ""}
+        plan2, errors2 = PhotoReferenceVisionService(
+            root=Path("/tmp"))._normalize_travel_plan(
+            showcase, self.CONTRACT, 1, travel_topic=inspired_topic)
+        self.assertEqual(errors2, [], errors2)
+        self.assertNotIn("narrative_plan", plan2)
+        self.assertNotIn("narrative", plan2["posts"][0])
+
+    def test_rule_block_has_temperature_kind(self):
+        prompt = PhotoReferenceVisionService._guide_plan_prompt_block(
+            theme=self.TEMP_TOPIC)
+        self.assertIn("讲解模式：温度指南", prompt)
+        self.assertIn("不编造具体温度数字", prompt)
+        # 显式灵感：无规则块
+        empty = PhotoReferenceVisionService._guide_plan_prompt_block(
+            theme={**self.TEMP_TOPIC, "expression_mode": "STYLE_INSPIRATION"})
+        self.assertEqual(empty, "")

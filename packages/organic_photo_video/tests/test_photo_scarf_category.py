@@ -652,3 +652,55 @@ class FreeScarfCategoryContextTest(unittest.TestCase):
             scene_snapshot={"name": "n", "prompt_core": "pc"}, output_dir=".",
         )
         self.assertNotIn("【类目存在锁】", compose_shot_prompt(plain))
+
+
+class FreeScarfQAContextCaptureTest(unittest.TestCase):
+    """复审 F5：QA 上下文白名单曾删掉 task_category_key，导致自由围巾
+    required_item_visible 永远不启用。测试从**真实 supply 调用**捕获
+    reviewer 参数断言（不能只直接调 QA helper 证明规则存在）。"""
+
+    def test_product_qa_context_keeps_task_category(self):
+        from services.photo_style_reference_supply import _product_qa_context
+        ctx = _product_qa_context({"task_category_key": "scarf"})
+        self.assertEqual(ctx["product_context"].get("task_category_key"), "scarf")
+        # 指定商品路径不受影响
+        with_product = _product_qa_context({
+            "product_id": "p1", "category": "scarf",
+            "task_category_key": "scarf"})
+        self.assertEqual(with_product["product_context"].get("product_id"), "p1")
+
+    def test_supply_review_call_receives_free_scarf_category(self):
+        # 走 prepare 的 QA 段太重；此处直接验证 _product_qa_context 的输出
+        # 接入 review_travel_pages 的 adapter 解析能启用 required_item_visible。
+        from services.photo_style_reference_supply import _product_qa_context
+        from services.photo_category_registry import resolve_task_category_adapter
+        from services.photo_travel_qa import normalize_travel_qa
+
+        ctx = _product_qa_context({"task_category_key": "scarf"})
+        adapter = resolve_task_category_adapter(
+            ctx["product_context"].get("task_category_key"),
+            ctx["product_context"].get("category"))
+        self.assertIsNotNone(adapter)
+        self.assertEqual(adapter.category_key, "scarf")
+        self.assertEqual(adapter.required_visible_items, ("scarf",))
+
+        # 模拟 QA 缺围巾返回 false → 定向修复
+        looks = [{"role": f"look_{l}", "travel_moment": "old_town_walk"}
+                 for l in "abcd"]
+        pages = [
+            {"role": f"look_{l}", "observed_moment": "old_town_walk",
+             "scene_evidence": ["街景"], "outfit_matches": True,
+             "weather_matches": True, "mobility_matches": True,
+             "observed_footwear_type": "SNEAKER", "repair_instruction": "",
+             "required_item_visible": (l != "a")}
+            for l in "abcd"
+        ]
+        qa = normalize_travel_qa(
+            {"pages": pages, "style_uniform": True,
+             "destination_conflict": False, "notes": ""},
+            look_plans=looks, moment_rules={"old_town_walk": {}},
+            has_product=False, product_qa_fields=("required_item_visible",),
+        )
+        self.assertFalse(qa["passed"])
+        failed = [r for r in qa["roles"] if not r.get("passed")]
+        self.assertEqual([r["role"] for r in failed], ["look_a"])
