@@ -2451,7 +2451,22 @@ class PhotoReferenceVisionService:
         elif topic_theme_type:
             # 表达模式只有这一份逐页文案合同（2026-09-15 收敛）：每种表达输出
             # 一致的规则，不再出现「基础规则+后置覆盖」两份可能冲突的合同。
-            if expression == "PRACTICAL_GUIDE":
+            if topic_theme_type == "TEMPERATURE" and not expression:
+                # 模板优化修复四（§6）：温度指南默认实用指南——逐页回答
+                # 穿脱/覆盖/层次条件，不再默认裤裙投票。显式「搭配灵感」
+                # 继续走下方 STYLE_INSPIRATION 多套展示分支。
+                per_page_rule = (
+                    "A-C 每页回答本篇温度/温差条件下的一个具体穿法问题——例如"
+                    "外套脱下后穿什么、出门加哪一层、腿部覆盖与鞋履怎么安排；"
+                    "页文案=「条件短句 — 一句穿着理由」，一行写完")
+                final_page_rule = (
+                    "第 5 页固定两行，第一行是按温差调整的总结短句，第二行 CTA "
+                    "可以是收藏或提问，不用 A/B/C/D 投票")
+                caption_rule = (
+                    "caption 交代本篇条件（如早晚偏凉、室内偏暖）与穿脱原则；"
+                    "温度数字只在运营显式提供温度档时出现，缺省时只写相对条件，"
+                    "不得编造具体温度或天气事实")
+            elif expression == "PRACTICAL_GUIDE":
                 per_page_rule = (
                     "A-C 每页写「当地语言造型短名称 — 一句具体穿搭理由」，一行写完、"
                     "理由简短可扫读，不编造英文杂志式名称；caption 承担 Look A 的详细理由"
@@ -2507,7 +2522,9 @@ class PhotoReferenceVisionService:
                 '"copy":{{"place_localized":"目标市场常用地点名","title":"当地语言发布标题","caption":"当地语言发布正文",'
                 '"hashtags":["当地语言标签"],"slide_texts":["两行短封面","A · 当地语言短名称","B · 当地语言短名称","C · 当地语言短名称","D · 当地语言短名称\\n完整选择 CTA"]}}}}\n'
                 "文案要求：title、caption、封面必须由同一个具体选题驱动。title 用地点加一个明确的穿搭问题或利益点，"
-                "不能退化成‘某地 4 套穿搭’；{caption_rule}。"
+                "不能退化成‘某地 4 套穿搭’；本篇的选择轴取决于四套的实际差异（颜色与环境、轮廓、"
+                "用途或场景），只有四套确实主要在比较裤装与裙装时才用「裤子还是裙子」式问题，"
+                "不要每篇都收敛到该问法；{caption_rule}。"
                 "只有当四张最终画面都明确支持某种审美风格时，title/caption 才能写法式、学院风等风格名。"
                 "slide_texts 只用于图片排版，必须短、完整、易扫读。slide_texts 必须 5 条且顺序为封面+A/B/C/D："
                 "封面固定两层信息，第一行是 place_localized，第二行是与 topic_zh 对应的短钩子；{per_page_rule}；"

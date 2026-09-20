@@ -2544,7 +2544,9 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                                 "temperature_context": dict(travel_topic.get("temperature_context") or {}),
                                 **({"travel_country": str(travel_topic.get("travel_country") or travel_country or "")}
                                    if (travel_topic.get("travel_country") or travel_country) else {}),
-                            } if theme and theme.get("travel_theme_type") else {}),
+                            } if theme and (
+                                theme.get("travel_theme_type")
+                                or travel_topic) else {}),
                         }
                         if account_brief is not None:
                             # 本篇实际使用的账号配置快照：主题来源、表达模式、

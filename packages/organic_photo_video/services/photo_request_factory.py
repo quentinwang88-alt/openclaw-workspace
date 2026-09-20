@@ -402,6 +402,26 @@ class PhotoRequestFactory:
                     f"｜场景/配色：{variation.get('scene_zh') or '自动'} / "
                     f"{variation.get('palette_zh') or '自动'}"
                 )
+            # 模板优化修复四（§7 摘要）：教程行（带页级结构）显示本篇真实
+            # 问题与逐页方法，不再显示配方的投票卡问题/比较依据。
+            guide_pages = [
+                dict(page) for page in
+                (request.get("copy") or {}).get("pages") or []
+                if isinstance(page, Mapping)]
+            if guide_pages and str(theme.get("topic_zh") or ""):
+                methods = "／".join(
+                    str(page.get("key_point_zh") or "")[:16]
+                    for page in guide_pages if str(page.get("key_point_zh") or "").strip())
+                entries.append(
+                    f"{index}. 主题：{theme.get('label_zh') or card.get('summary_zh') or request.get('profile_label', request['profile_id'])}"
+                    f"{variation_text}"
+                    f"｜本篇问题：{theme.get('topic_zh')}"
+                    f"｜本篇方法：{methods or '见逐页'}"
+                    f"｜逐页：{pages or '未说明'}"
+                    f"｜素材：{request['asset_set_key']} V{request['asset_set_version']}"
+                    f"｜{language}"
+                )
+                continue
             entries.append(
                 f"{index}. 主题：{theme.get('label_zh') or card.get('summary_zh') or request.get('profile_label', request['profile_id'])}"
                 f"{variation_text}"

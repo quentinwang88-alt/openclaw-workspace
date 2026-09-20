@@ -1006,3 +1006,83 @@ class GuideStructuredPagesTest(unittest.TestCase):
         # 图片区未被文字侵入：解释区顶部之前保持原图底色带
         band = image2.crop((0, main_h - 8, image2.width, main_h - 1)).convert("L")
         self.assertGreaterEqual(band.getextrema()[0], 120, "解释区上方不应有深色文字")
+
+
+class TemperatureConditionGuideTest(unittest.TestCase):
+    """修复四（§6）：温度主题默认实用指南，逐页回答穿脱条件；无数字不编造。"""
+
+    CONTRACT = {"moments": [
+        {"key": m, "label_zh": m, "evidence_zh": "e", "label_th": "t",
+         "forbidden_footwear_types": []}
+        for m in ("old_town_walk", "cafe_visit", "evening_stroll",
+                  "airport_departure")
+    ]}
+    TEMP_TOPIC = {
+        "theme_type": "TEMPERATURE", "theme_version": 1,
+        "theme_label_zh": "旅行·温度穿搭", "planning_focus": "温度条件下的层搭",
+        "topic_patterns": [], "body_copy_focus": "", "cta_patterns": [],
+        "place": "首尔", "temperature_band": "", "content_requirement": "",
+    }
+
+    def prompt(self, topic, expression=""):
+        return PhotoReferenceVisionService._travel_plan_prompt(
+            analysis={}, travel_contract=self.CONTRACT, variables={},
+            content_requirement="", count=1, travel_topic=topic,
+            expression_mode=expression)
+
+    def test_temperature_without_expression_defaults_to_condition_guide(self):
+        prompt = self.prompt(self.TEMP_TOPIC)
+        self.assertIn("外套脱下后穿什么", prompt)
+        self.assertIn("不得编造具体温度", prompt)
+        self.assertIn("不用 A/B/C/D 投票", prompt)
+
+    def test_temperature_explicit_inspiration_keeps_showcase(self):
+        prompt = self.prompt(self.TEMP_TOPIC, expression="STYLE_INSPIRATION")
+        self.assertIn("当地语言造型短名称", prompt)
+        self.assertNotIn("外套脱下后穿什么", prompt)
+
+    def test_showcase_axis_variety_rule(self):
+        prompt = self.prompt({
+            "theme_type": "CHECK_IN", "theme_version": 1,
+            "theme_label_zh": "旅行·打卡穿搭", "planning_focus": "打卡",
+            "topic_patterns": [], "body_copy_focus": "", "cta_patterns": [],
+            "place": "东京", "temperature_band": "", "content_requirement": "",
+        })
+        self.assertIn("选择轴取决于四套的实际差异", prompt)
+        self.assertIn("确实主要在比较裤装与裙装", prompt)
+
+
+class GuideSummaryTest(unittest.TestCase):
+    """修复四（§7 摘要）：教程行显示本篇问题与方法，不显示投票卡问题。"""
+
+    def test_summary_uses_narrative_question_for_guide_rows(self):
+        from services.photo_request_factory import PhotoRequestFactory
+        request = {
+            "profile_id": "p1", "profile_label": "TH旅行",
+            "recipe_id": "PHOTO_TH_TRAVEL_OUTFIT_V2",
+            "asset_set_key": "k", "asset_set_version": 1,
+            "copy": {
+                "slide_texts": ["s1", "s2", "s3", "s4"],
+                "pages": [
+                    {"key_point_zh": "封面", "headline": "h", "body": "b"},
+                    {"key_point_zh": "浅色衔接", "headline": "h", "body": "b"},
+                    {"key_point_zh": "明暗对比", "headline": "h", "body": "b"},
+                    {"key_point_zh": "局部呼应", "headline": "h", "body": "b"},
+                ],
+            },
+            "theme_brief": {
+                "label_zh": "配色教程", "topic_zh": "棕外套怎么配色不沉闷？",
+                "batch_variation": {"angle_zh": "角度", "scene_zh": "纯色"},
+            },
+            "content_card": {"pages": [
+                {"index": 1, "purpose_zh": "封面"},
+                {"index": 2, "purpose_zh": "方法1"},
+                {"index": 3, "purpose_zh": "方法2"},
+                {"index": 4, "purpose_zh": "方法3"},
+            ]},
+        }
+        summary = PhotoRequestFactory.summary([request])
+        self.assertIn("本篇问题：棕外套怎么配色不沉闷？", summary)
+        self.assertIn("本篇方法：封面／浅色衔接／明暗对比／局部呼应", summary)
+        self.assertNotIn("用户问题", summary)
+        self.assertNotIn("选择", summary.split("本篇问题")[0])
