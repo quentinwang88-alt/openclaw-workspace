@@ -434,22 +434,205 @@ def _evidence_refs(product_evidence: Mapping[str, Any] | None) -> List[Dict[str,
     return []
 
 
-def _count_of(counts: Mapping[str, Any] | None, key: str) -> Optional[int]:
-    """Read an integer count, or ``None`` when it is simply not established.
+# ---------------------------------------------------------------------------
+# Count evidence (F3)
+# ---------------------------------------------------------------------------
+# A count is a *claim*, and a claim needs a source and a polarity.  The judge
+# used to ask "does the word 双层 appear anywhere in the approved anchor text?",
+# which reads a negation as an affirmation: "不是单层" contains 单层 and was
+# therefore admitted as a *single-layer* necklace.  That is the dangerous
+# direction -- it lets a multi-layer product into the single-layer contract.
+#
+# Each count now carries local evidence shaped as the review asked for:
+#
+#     value      明确正整数或 null
+#     status     VERIFIED / UNKNOWN / CONFLICT
+#     source_ref 结构化字段路径或硬锚点位置
+#     source_text 支持该数量的原句
+#     polarity   AFFIRMED / NEGATED / UNCERTAIN
+#
+# ``polarity`` is decided *locally* -- the marker has to sit immediately next to
+# the term it applies to -- so one 不是 at the far end of a sentence cannot
+# invalidate every count in the paragraph.
+#
+# ``term`` and ``candidates`` are extra: the first says which spelling produced
+# the count, the second names both sides of a conflict.  A reviewer can then
+# open the anchor text and see the sentence instead of trusting a bare integer.
 
-    ``None`` is the whole point: "no source said how many layers" must not be
-    readable as "there is one layer".
+COUNT_STATUS_VERIFIED = "VERIFIED"
+COUNT_STATUS_UNKNOWN = "UNKNOWN"
+COUNT_STATUS_CONFLICT = "CONFLICT"
+
+COUNT_POLARITY_AFFIRMED = "AFFIRMED"
+COUNT_POLARITY_NEGATED = "NEGATED"
+COUNT_POLARITY_UNCERTAIN = "UNCERTAIN"
+
+#: What the judge reports as a count's provenance.  ``UNSOURCED`` is the point:
+#: a bare integer handed in by a caller is never dressed up as
+#: ``STRUCTURE_COUNTS`` evidence it does not have.  A number nobody sourced is
+#: reported as a number nobody sourced.
+COUNT_SOURCE_ANCHOR_FIELD = "ANCHOR_CARD_FIELD"
+COUNT_SOURCE_ANCHOR_TEXT = "ANCHOR_TEXT"
+COUNT_SOURCE_UNSOURCED = "UNSOURCED"
+
+#: Markers that *end* exactly where the counted term begins.  Multi-character
+#: on purpose: a bare 不 would fire on 不错 / 不少, so only real negations are
+#: listed, and adjacency keeps "非常规双层" from being read as a negation.
+_COUNT_NEGATION_MARKERS: Tuple[str, ...] = (
+    "不是",
+    "并非",
+    "而不是",
+    "并不是",
+    "不为",
+    "不属于",
+    "算不上",
+    "不算",
+    "没有",
+    "无",
+    "未",
+    "非",
+)
+
+#: Checked before the negations above: they answer a different question ("we do
+#: not know" rather than "it is not"), and a hedge must not be read as a denial
+#: -- nor as an affirmation.
+_COUNT_UNCERTAINTY_MARKERS: Tuple[str, ...] = (
+    "不能确认",
+    "无法确认",
+    "不能确定",
+    "无法确定",
+    "不能认定",
+    "无法判断",
+    "无法辨别",
+    "尚不清楚",
+    "不得而知",
+    "不确定",
+    "看不清",
+)
+
+
+def _strict_positive_int(raw: Any) -> Optional[int]:
+    """A strictly positive integer, or ``None`` when the literal is not one.
+
+    ``int(1.8)`` is 1, so a bare ``int()`` silently truncates a decimal into a
+    plausible-looking count.  ``True`` is even worse: it *is* an ``int`` in
+    Python, so a JSON ``true`` used to arrive at the judge as the count 1.
+    Both are refused here, along with zero, negatives and anything non-numeric.
+    """
+
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw if raw > 0 else None
+    if isinstance(raw, float):
+        if raw != raw or raw in (float("inf"), float("-inf")):
+            return None
+        # An integral float states the value exactly; a decimal would be a
+        # truncation, and a truncated count is a guessed count.
+        return int(raw) if raw > 0 and raw.is_integer() else None
+    if isinstance(raw, str):
+        text = raw.strip()
+        return int(text) if text.isdigit() and int(text) > 0 else None
+    return None
+
+
+def _unknown_count_evidence(key: str, *, ref: str = "", text: str = "") -> Dict[str, Any]:
+    return {
+        "value": None,
+        "status": COUNT_STATUS_UNKNOWN,
+        "source_ref": ref or f"counts.{key}",
+        "source_text": _text(text),
+        "polarity": COUNT_POLARITY_UNCERTAIN,
+        "term": "",
+        "candidates": [],
+    }
+
+
+def _count_provenance_label(evidence: Mapping[str, Any] | None) -> str:
+    """Name where a count came from, without inventing a source."""
+
+    ref = _text((evidence or {}).get("source_ref"))
+    if ref.startswith("anchor_card."):
+        return COUNT_SOURCE_ANCHOR_FIELD
+    if ref.startswith("hard_anchors"):
+        return COUNT_SOURCE_ANCHOR_TEXT
+    return COUNT_SOURCE_UNSOURCED
+
+
+def _looks_like_count_evidence(value: Any) -> bool:
+    """Whether a mapping is one count's local evidence rather than a count."""
+
+    return isinstance(value, Mapping) and _text(value.get("status")) in {
+        COUNT_STATUS_VERIFIED,
+        COUNT_STATUS_UNKNOWN,
+        COUNT_STATUS_CONFLICT,
+    }
+
+
+def _normalise_count_evidence(recorded: Mapping[str, Any]) -> Dict[str, Any]:
+    """A copy with every field present, so callers never see a ragged shape."""
+
+    return {
+        "value": recorded.get("value"),
+        "status": _text(recorded.get("status")),
+        "source_ref": _text(recorded.get("source_ref")),
+        "source_text": _text(recorded.get("source_text")),
+        "polarity": _text(recorded.get("polarity")) or COUNT_POLARITY_UNCERTAIN,
+        "term": _text(recorded.get("term")),
+        "candidates": [dict(item) for item in (recorded.get("candidates") or [])],
+    }
+
+
+def _count_evidence_of(counts: Mapping[str, Any] | None, key: str) -> Dict[str, Any]:
+    """Read one count's evidence out of a ``counts`` mapping.
+
+    Three shapes arrive here.  The necklace profile produces the evidence itself
+    and stores it beside the legacy integer (``{key}_count_evidence``); a caller
+    may hand in the evidence map straight from
+    :func:`resolve_necklace_count_evidence` (``{key: evidence}``); and a caller
+    may still hand in the legacy bare integer, which stays readable at the
+    boundary but is labelled ``UNSOURCED`` rather than being given provenance it
+    never had.
     """
 
     if not isinstance(counts, Mapping):
-        return None
-    raw = counts.get(key)
-    if raw is None or raw == "":
-        return None
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return None
+        return _unknown_count_evidence(key)
+
+    for holder in (f"{key}_count_evidence", f"{key}_evidence"):
+        recorded = counts.get(holder)
+        if _looks_like_count_evidence(recorded):
+            return _normalise_count_evidence(recorded)
+
+    inline = counts.get(key)
+    if _looks_like_count_evidence(inline):
+        return _normalise_count_evidence(inline)
+
+    if key not in counts:
+        return _unknown_count_evidence(key)
+
+    value = _strict_positive_int(counts.get(key))
+    if value is None:
+        # An illegal literal is not a count, and it is not a silent zero either.
+        return _unknown_count_evidence(
+            key, ref=f"counts.{key}", text=_text(counts.get(key))
+        )
+
+    legacy_source = _text(counts.get(f"{key}_source"))
+    if legacy_source.startswith("ANCHOR_TEXT"):
+        source_ref = "hard_anchors"
+    elif legacy_source.startswith("ANCHOR_CARD_FIELD"):
+        source_ref = f"anchor_card.{key}"
+    else:
+        source_ref = f"counts.{key}"
+    return {
+        "value": value,
+        "status": COUNT_STATUS_VERIFIED,
+        "source_ref": source_ref,
+        "source_text": legacy_source,
+        "polarity": COUNT_POLARITY_AFFIRMED,
+        "term": "",
+        "candidates": [],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -468,6 +651,12 @@ def _count_of(counts: Mapping[str, Any] | None, key: str) -> Optional[int]:
 # a coiled chain in a photo is not evidence of several layers.  An unstated
 # count stays ``None`` and the judge reports ``UNKNOWN`` and refuses -- never a
 # guessed 1.
+#
+# F3 adds one more separation on top: a count is read as a *local assertion*
+# with a polarity, not as a keyword hit.  "有吊坠" proves a pendant exists and
+# says nothing about how many, and "不是双层" is a denial of two layers rather
+# than a statement of two.  Both facts are recorded on the evidence so the
+# refusal (or the admission) can be audited sentence by sentence.
 
 
 def resolve_necklace_part_evidence(
@@ -514,57 +703,234 @@ def resolve_necklace_part_evidence(
     }
 
 
-def _declared_count(
-    anchor_card: Mapping[str, Any] | None,
-    keys: Sequence[str],
-) -> Optional[int]:
-    """Read an explicit structured count, or ``None`` when it is not stated."""
+def _polarity_at(text: str, start: int, term: str) -> str:
+    """Whether the term at ``start`` is affirmed, negated or hedged.
 
-    card = anchor_card if isinstance(anchor_card, Mapping) else {}
-    for key in keys:
-        raw = card.get(key)
-        if raw is None or raw == "":
-            continue
-        try:
-            value = int(raw)
-        except (TypeError, ValueError):
-            continue
-        if value > 0:
-            return value
-    return None
-
-
-def _count_from_anchor_text(
-    anchor_texts: Iterable[Any] | None,
-    term_groups: Mapping[str, Any] | None,
-) -> Tuple[Optional[int], str]:
-    """Read an *explicitly stated* count out of the approved anchor text.
-
-    Returns ``(count, matched_term)``.  Groups are scanned from the largest
-    count down, so a "双层" statement can never be read as a single layer just
-    because a one-layer spelling also appears somewhere in the same text.
+    Only *adjacent* markers count.  A negation three characters upstream (or a
+    clause later) belongs to a different object, and treating it as applying
+    here is how "不是银色的，单层链条" would lose its single-layer reading.
     """
 
-    texts = [_text(item) for item in (anchor_texts or []) if _text(item)]
-    blob = "；".join(texts)
-    if not blob or not isinstance(term_groups, Mapping):
-        return None, ""
+    head = text[:start]
+    tail = text[start + len(term):]
+    for marker in _COUNT_UNCERTAINTY_MARKERS:
+        if head.endswith(marker) or tail.startswith(marker):
+            return COUNT_POLARITY_UNCERTAIN
+    for marker in _COUNT_NEGATION_MARKERS:
+        if head.endswith(marker):
+            return COUNT_POLARITY_NEGATED
+    return COUNT_POLARITY_AFFIRMED
 
-    groups: List[Tuple[int, List[str]]] = []
-    for label, terms in term_groups.items():
-        try:
-            count = int(_text(label))
-        except (TypeError, ValueError):
+
+def _count_assertions(
+    texts: Sequence[str],
+    term_groups: Mapping[str, Any] | None,
+) -> List[Dict[str, Any]]:
+    """Every counted term the approved anchor text states, with its polarity.
+
+    Every occurrence is recorded rather than only the largest, because the
+    question is no longer "which number is biggest" but "what does the text
+    actually claim", and a text can claim two different things.
+    """
+
+    if not isinstance(term_groups, Mapping):
+        return []
+
+    assertions: List[Dict[str, Any]] = []
+    for index, raw_text in enumerate(texts):
+        text = _text(raw_text)
+        if not text:
             continue
-        terms_list = [_text(term) for term in (terms or []) if _text(term)]
-        if terms_list:
-            groups.append((count, terms_list))
+        for label, terms in term_groups.items():
+            try:
+                value = int(_text(label))
+            except (TypeError, ValueError):
+                continue
+            for raw_term in terms or []:
+                term = _text(raw_term)
+                if not term:
+                    continue
+                start = text.find(term)
+                while start != -1:
+                    assertions.append(
+                        {
+                            "value": value,
+                            "term": term,
+                            "polarity": _polarity_at(text, start, term),
+                            "source_ref": f"hard_anchors[{index}]",
+                            "source_text": text,
+                        }
+                    )
+                    start = text.find(term, start + 1)
+    return assertions
 
-    for count, terms_list in sorted(groups, key=lambda item: -item[0]):
-        for term in terms_list:
-            if term in blob:
-                return count, term
-    return None, ""
+
+def _one_count_evidence(
+    *,
+    card: Mapping[str, Any],
+    texts: Sequence[str],
+    key: str,
+    terms: Mapping[str, Any] | None,
+) -> Dict[str, Any]:
+    """One field's count, read from the structured field and the anchor text."""
+
+    field_value = None
+    field_key = ""
+    field_raw: Any = ""
+    for candidate in (key, f"structure_{key}"):
+        if candidate not in card:
+            continue
+        value = _strict_positive_int(card.get(candidate))
+        if value is not None:
+            field_value, field_key, field_raw = value, candidate, card.get(candidate)
+            break
+
+    assertions = _count_assertions(texts, terms)
+    affirmed: List[Tuple[int, Dict[str, Any]]] = []
+    negated_values = set()
+    for item in assertions:
+        if item["polarity"] == COUNT_POLARITY_AFFIRMED:
+            if item["value"] not in [value for value, _ in affirmed]:
+                affirmed.append((item["value"], item))
+        elif item["polarity"] == COUNT_POLARITY_NEGATED:
+            negated_values.add(item["value"])
+
+    affirmed_values = {value for value, _ in affirmed}
+
+    def conflict(candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return {
+            "value": None,
+            "status": COUNT_STATUS_CONFLICT,
+            "source_ref": " + ".join(item["source_ref"] for item in candidates),
+            "source_text": " ｜ ".join(
+                item["source_text"] for item in candidates if item["source_text"]
+            ),
+            "polarity": COUNT_POLARITY_UNCERTAIN,
+            "term": "",
+            "candidates": candidates,
+        }
+
+    if len(affirmed_values) > 1 or (affirmed_values & negated_values):
+        # The text claims two different numbers for one field (or claims and
+        # retracts the same one).  Which the product is cannot be decided here,
+        # so it is reported as a conflict instead of being resolved by an
+        # ordering rule nobody can see.
+        return conflict(
+            [
+                {
+                    "value": value,
+                    "source_ref": item["source_ref"],
+                    "source_text": item["source_text"],
+                    "term": item["term"],
+                }
+                for value, item in affirmed
+            ]
+        )
+
+    text_value = affirmed[0][0] if affirmed else None
+    text_item = affirmed[0][1] if affirmed else None
+
+    if field_value is not None:
+        if text_value is not None and text_value != field_value:
+            # §4.6: a structured field and an affirmative anchor must not be
+            # silently ranked.  Keeping the conflict is what stops "字段为1、
+            # 锚点明确双层" from shipping as a single-layer film.
+            return conflict(
+                [
+                    {
+                        "value": field_value,
+                        "source_ref": f"anchor_card.{field_key}",
+                        "source_text": _text(field_raw),
+                        "term": "",
+                    },
+                    {
+                        "value": text_value,
+                        "source_ref": text_item["source_ref"],
+                        "source_text": text_item["source_text"],
+                        "term": text_item["term"],
+                    },
+                ]
+            )
+        return {
+            "value": field_value,
+            "status": COUNT_STATUS_VERIFIED,
+            "source_ref": f"anchor_card.{field_key}",
+            "source_text": _text(field_raw),
+            "polarity": COUNT_POLARITY_AFFIRMED,
+            "term": "",
+            "candidates": [],
+        }
+
+    if text_value is not None:
+        return {
+            "value": text_value,
+            "status": COUNT_STATUS_VERIFIED,
+            "source_ref": text_item["source_ref"],
+            "source_text": text_item["source_text"],
+            "polarity": COUNT_POLARITY_AFFIRMED,
+            "term": text_item["term"],
+            "candidates": [],
+        }
+
+    # Nothing affirmatively states a count.  Distinguish "the text talked about
+    # it and denied it" from "the text said nothing": a reviewer needs to see
+    # that 不是双层 was *read*, not missed.
+    if assertions and all(
+        item["polarity"] == COUNT_POLARITY_NEGATED for item in assertions
+    ):
+        polarity = COUNT_POLARITY_NEGATED
+    else:
+        polarity = COUNT_POLARITY_UNCERTAIN
+    first = assertions[0] if assertions else {}
+    return {
+        "value": None,
+        "status": COUNT_STATUS_UNKNOWN,
+        "source_ref": _text(first.get("source_ref")),
+        "source_text": _text(first.get("source_text")),
+        "polarity": polarity,
+        "term": _text(first.get("term")),
+        "candidates": [],
+    }
+
+
+def resolve_necklace_count_evidence(
+    *,
+    anchor_card: Mapping[str, Any] | None = None,
+    anchor_texts: Iterable[Any] | None = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Local evidence for each structure count, keyed by count field.
+
+    Reads only the two shapes §4.1 allows: the anchor card's structured field
+    (with its field path as ``source_ref``) and the *approved* hard anchors
+    (with the anchor index).  A title or a display anchor never takes part --
+    ``anchor_evidence_texts`` is the filter, and it excludes display anchors by
+    construction, so omitting ``anchor_texts`` reads the card's approved
+    anchors rather than reading nothing.
+    """
+
+    rule = necklace_v1_eligibility_rule()
+    card = anchor_card if isinstance(anchor_card, Mapping) else {}
+    if anchor_texts is None:
+        from core.accessory_mixed_templates import anchor_evidence_texts
+
+        anchor_texts = anchor_evidence_texts(card)
+    texts = [_text(item) for item in (anchor_texts or []) if _text(item)]
+
+    return {
+        key: _one_count_evidence(
+            card=card, texts=texts, key=key, terms=rule.get(term_field)
+        )
+        for key, term_field in (
+            (
+                _text(rule.get("layer_count_key")) or "layer_count",
+                "layer_count_terms",
+            ),
+            (
+                _text(rule.get("pendant_count_key")) or "pendant_count",
+                "pendant_count_terms",
+            ),
+        )
+    }
 
 
 def resolve_necklace_structure_counts(
@@ -574,29 +940,39 @@ def resolve_necklace_structure_counts(
 ) -> Dict[str, Any]:
     """Layer / pendant counts, each carrying the source it was read from.
 
-    The trailing ``*_source`` keys are what make the number reviewable: a
-    reviewer can open the anchor card and see the exact field or phrase the
-    count came from instead of trusting a bare integer.
+    Two representations, on purpose.  ``{key}`` stays a bare integer when the
+    count is ``VERIFIED`` so existing callers keep working unchanged; the
+    trailing ``*_source`` keys make the number reviewable; and
+    ``{key}_count_evidence`` carries the full local evidence -- value, status,
+    source, sentence and polarity -- which is what the judge actually reads.
+    A count that is not established gets no bare integer at all.
+
+    When ``anchor_texts`` is omitted the card's own *approved* anchors are read
+    (``anchor_evidence_texts``, which excludes display anchors).  Asking "what
+    counts does this card support?" and getting ``UNKNOWN`` back because the
+    caller did not also pass the card's own text would be a trap, not a
+    safeguard.
     """
 
     rule = necklace_v1_eligibility_rule()
     card = anchor_card if isinstance(anchor_card, Mapping) else {}
+    evidence = resolve_necklace_count_evidence(
+        anchor_card=card, anchor_texts=anchor_texts
+    )
 
     out: Dict[str, Any] = {}
-    for key, term_field in (
-        (_text(rule.get("layer_count_key")) or "layer_count", "layer_count_terms"),
-        (_text(rule.get("pendant_count_key")) or "pendant_count", "pendant_count_terms"),
+    for key in (
+        _text(rule.get("layer_count_key")) or "layer_count",
+        _text(rule.get("pendant_count_key")) or "pendant_count",
     ):
-        value = _declared_count(card, (key, f"structure_{key}"))
-        source = "ANCHOR_CARD_FIELD" if value is not None else ""
-        if value is None:
-            value, matched = _count_from_anchor_text(
-                anchor_texts, rule.get(term_field)
-            )
-            source = f"ANCHOR_TEXT:{matched}" if value is not None else ""
-        if value is not None:
-            out[key] = value
-            out[f"{key}_source"] = source
+        item = evidence[key]
+        if item["status"] == COUNT_STATUS_VERIFIED and item["value"] is not None:
+            out[key] = item["value"]
+            if _text(item.get("term")):
+                out[f"{key}_source"] = f"ANCHOR_TEXT:{item['term']}"
+            else:
+                out[f"{key}_source"] = COUNT_SOURCE_ANCHOR_FIELD
+        out[f"{key}_count_evidence"] = item
     return out
 
 
@@ -648,11 +1024,17 @@ def judge_necklace_eligibility(
     """Judge single-layer / single-pendant eligibility from instance evidence.
 
     Returns ``{"eligible", "reason", "evidence_refs", "layer_count",
-    "pendant_count", "unresolved"}``.  Nothing is inferred from the product
-    name: chain and pendant must be *confirmed*, and both counts must have a
-    traceable source.  Anything unestablished is reported as ``UNKNOWN`` and
-    refuses the profile -- an explicit, reviewable refusal instead of a coin
-    flip that later ships three stacked layers under a "single layer" contract.
+    "pendant_count", "layer_count_evidence", "pendant_count_evidence",
+    "unresolved"}``.  Nothing is inferred from the product name: chain and
+    pendant must be *confirmed*, and both counts must have a traceable source.
+    Anything unestablished is reported as ``UNKNOWN`` and refuses the profile --
+    an explicit, reviewable refusal instead of a coin flip that later ships
+    three stacked layers under a "single layer" contract.
+
+    A count that two sources disagree about is reported as ``CONFLICT`` and also
+    refuses.  Resolving it by precedence would look identical in the output to
+    having a single agreeing source, which is exactly the kind of quiet
+    promotion this judge exists to prevent.
     """
 
     rule = necklace_v1_eligibility_rule()
@@ -687,30 +1069,49 @@ def judge_necklace_eligibility(
     max_layers = int(rule.get("max_layer_count") or 1)
     max_pendants = int(rule.get("max_pendant_count") or 1)
 
-    layer_count = _count_of(counts, layer_key)
-    pendant_count = _count_of(counts, pendant_key)
-    refs.append({
-        "part": "layer_count",
-        "state": EVIDENCE_UNKNOWN if layer_count is None else str(layer_count),
-        "required": max_layers,
-        "source": "STRUCTURE_COUNTS",
-        "ref": _text(evidence_ref),
-    })
-    refs.append({
-        "part": "pendant_count",
-        "state": EVIDENCE_UNKNOWN if pendant_count is None else str(pendant_count),
-        "required": max_pendants,
-        "source": "STRUCTURE_COUNTS",
-        "ref": _text(evidence_ref),
-    })
-    if layer_count is None:
-        unresolved.append("layer_count:UNKNOWN")
-    elif layer_count != max_layers:
-        unresolved.append(f"layer_count:{layer_count}")
-    if pendant_count is None:
-        unresolved.append("pendant_count:UNKNOWN")
-    elif pendant_count != max_pendants:
-        unresolved.append(f"pendant_count:{pendant_count}")
+    layer_evidence = _count_evidence_of(counts, layer_key)
+    pendant_evidence = _count_evidence_of(counts, pendant_key)
+
+    for key, evidence, maximum in (
+        (layer_key, layer_evidence, max_layers),
+        (pendant_key, pendant_evidence, max_pendants),
+    ):
+        value = evidence.get("value")
+        if evidence["status"] == COUNT_STATUS_CONFLICT:
+            state = COUNT_STATUS_CONFLICT
+        elif value is None:
+            state = EVIDENCE_UNKNOWN
+        else:
+            state = str(value)
+        refs.append({
+            "part": key,
+            "state": state,
+            "required": maximum,
+            # The provenance is read off the evidence, so a bare integer with
+            # no recorded source reports ``UNSOURCED`` instead of borrowing a
+            # ``STRUCTURE_COUNTS`` label it never earned.
+            "source": _count_provenance_label(evidence),
+            "ref": _text(evidence_ref),
+            "polarity": _text(evidence.get("polarity")),
+            "term": _text(evidence.get("term")),
+            "source_text": _text(evidence.get("source_text")),
+            "source_ref": _text(evidence.get("source_ref")),
+        })
+
+    layer_count = layer_evidence.get("value")
+    pendant_count = pendant_evidence.get("value")
+
+    for key, evidence, maximum in (
+        (layer_key, layer_evidence, max_layers),
+        (pendant_key, pendant_evidence, max_pendants),
+    ):
+        if evidence["status"] == COUNT_STATUS_CONFLICT:
+            # A conflict is not a value and must not be resolved by precedence.
+            unresolved.append(f"{key}:{COUNT_STATUS_CONFLICT}")
+        elif evidence.get("value") is None:
+            unresolved.append(f"{key}:UNKNOWN")
+        elif evidence["value"] != maximum:
+            unresolved.append(f"{key}:{evidence['value']}")
 
     if unresolved:
         return {
@@ -719,6 +1120,8 @@ def judge_necklace_eligibility(
             "evidence_refs": refs,
             "layer_count": layer_count,
             "pendant_count": pendant_count,
+            "layer_count_evidence": layer_evidence,
+            "pendant_count_evidence": pendant_evidence,
             "unresolved": unresolved,
         }
     return {
@@ -727,6 +1130,8 @@ def judge_necklace_eligibility(
         "evidence_refs": refs,
         "layer_count": layer_count,
         "pendant_count": pendant_count,
+        "layer_count_evidence": layer_evidence,
+        "pendant_count_evidence": pendant_evidence,
         "unresolved": [],
     }
 
@@ -1307,7 +1712,18 @@ __all__ = [
     "select_necklace_template_id",
     "select_necklace_environment_recipe_id",
     "build_necklace_profile_overlay",
+    "resolve_necklace_count_evidence",
+    "resolve_necklace_structure_counts",
     "judge_necklace_eligibility",
+    "COUNT_STATUS_VERIFIED",
+    "COUNT_STATUS_UNKNOWN",
+    "COUNT_STATUS_CONFLICT",
+    "COUNT_POLARITY_AFFIRMED",
+    "COUNT_POLARITY_NEGATED",
+    "COUNT_POLARITY_UNCERTAIN",
+    "COUNT_SOURCE_ANCHOR_FIELD",
+    "COUNT_SOURCE_ANCHOR_TEXT",
+    "COUNT_SOURCE_UNSOURCED",
     "resolve_necklace_v1_scope",
     "build_necklace_contract_block",
     "attach_necklace_contract",
