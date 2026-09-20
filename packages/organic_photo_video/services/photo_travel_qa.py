@@ -25,6 +25,9 @@ FAILURE_WEATHER_MISMATCH = "WEATHER_MISMATCH"
 FAILURE_MOBILITY_MISMATCH = "MOBILITY_MISMATCH"
 FAILURE_PERSON_DISASTER = "PERSON_DISASTER"
 FAILURE_UNKNOWN_SCENE = "UNKNOWN_SCENE"
+#: 修复一（2026-09-20）：无商品编码的类目存在契约（自由围巾）——
+#: 画面中类目要求单品完全缺失＝定向重生，不算 MINOR。
+FAILURE_REQUIRED_ITEM_MISSING = "REQUIRED_ITEM_MISSING"
 QA_SCHEMA_INCOMPLETE = "QA_SCHEMA_INCOMPLETE"
 
 FOOTWEAR_TYPES = (
@@ -47,6 +50,8 @@ PRODUCT_QA_FAILURE_FIELDS = {
     "edge_or_fringe_matches": FAILURE_OUTFIT_MISMATCH,
     "length_volume_plausible": FAILURE_OUTFIT_MISMATCH,
     "face_unobscured": FAILURE_PERSON_DISASTER,
+    # 修复一：自由类目单品存在观察（无商品编码的围巾等）
+    "required_item_visible": FAILURE_REQUIRED_ITEM_MISSING,
 }
 
 #: Repair wording per blocked product field, so a targeted regeneration states
@@ -59,6 +64,7 @@ PRODUCT_QA_REPAIR_ZH = {
     "edge_or_fringe_matches": "指定商品的边缘或流苏结构与参考图不符，必须按参考图恢复",
     "length_volume_plausible": "指定商品的长度与体积感与参考图明显不符，必须按参考图恢复",
     "face_unobscured": "指定商品遮挡了人物面部，必须重新生成并露出面部",
+    "required_item_visible": "类目要求的围巾等单品在画面中缺失，必须重新生成并让该单品清晰可见",
 }
 
 
@@ -163,10 +169,12 @@ def normalize_travel_qa(
         product_ok = _require_bool(page, "product_matches", role) if has_product else True
         # 类目声明的逐项商品质检（review 修复 P0-3）：任一为 false 即确定性
         # 失败，不因 outfit_severity 降级。字段由适配器声明，womenswear 为空。
+        # 修复一：无商品的自由类目行同样走这里（声明的是
+        # required_item_visible 类存在观察，不是商品身份）。
         product_qa: dict[str, bool] = {}
         product_qa_failure = ""
         product_qa_repair = ""
-        if has_product and product_qa_fields:
+        if product_qa_fields:
             # 只取「声明了失败语义」的字段：适配器的 qa_fields 里还含 role /
             # product_matches / repair_instruction 这类非布尔或已判定字段。
             for field, code in PRODUCT_QA_FAILURE_FIELDS.items():

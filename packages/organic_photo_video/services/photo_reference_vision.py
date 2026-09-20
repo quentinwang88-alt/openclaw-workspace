@@ -727,7 +727,8 @@ class PhotoReferenceVisionService:
             "notes": str(raw.get("notes") or ""), "model": self.model,
             "provider_used": provider_used,
             "role_findings": self._normalize_role_findings(
-                raw, generated_roles, product_specified=bool(product_context),
+                raw, generated_roles,
+                product_specified=bool(str(dict(product_context or {}).get("product_id") or "")),
             ),
             "model_routing": {
                 "provider_used": provider_used,
@@ -1137,11 +1138,29 @@ class PhotoReferenceVisionService:
         contract = dict(travel_contract or {})
         # 类目适配器声明本类目的逐项商品质检字段（review 修复 P0-3）。未注册
         # 类目或 womenswear（qa_fields 为空）时全部退化为历史行为。
-        from services.photo_category_registry import adapter_for_product_category
-        adapter = adapter_for_product_category(
-            dict(product_context or {}).get("category"))
-        qa_fields = tuple(getattr(adapter, "qa_fields", ()) or ())
-        qa_rules = tuple(getattr(adapter, "qa_rules", ()) or ())
+        # 修复一（2026-09-20）：无商品编码时按任务类目解析（自由围巾→SCARF），
+        # 并用轻量「类目存在」观察字段（required_item_visible）替代商品身份
+        # 逐项判定——没有商品就没有身份可比，但围巾必须可辨认。
+        from services.photo_category_registry import resolve_task_category_adapter
+        _qa_ctx = dict(product_context or {})
+        adapter = resolve_task_category_adapter(
+            _qa_ctx.get("task_category_key"), _qa_ctx.get("category"))
+        if adapter is not None and not str(_qa_ctx.get("product_id") or ""):
+            if adapter.required_visible_items:
+                _free_labels = "、".join(
+                    adapter.required_visible_labels_zh
+                    or adapter.required_visible_items)
+                qa_fields = ("required_item_visible",)
+                qa_rules = (
+                    f"画面中必须能辨认出{_free_labels}（搭在颈部/肩部、手持或明显佩戴）；"
+                    f"完全缺失或被外套头发完全遮挡时 required_item_visible=false",
+                )
+            else:
+                qa_fields = ()
+                qa_rules = ()
+        else:
+            qa_fields = tuple(getattr(adapter, "qa_fields", ()) or ())
+            qa_rules = tuple(getattr(adapter, "qa_rules", ()) or ())
         base_outfit_keys = ("outerwear", "top_inner", "bottom", "shoes")
         main_slot = str(getattr(adapter, "main_product_slot", "") or "")
         extra_slots = (main_slot,) if main_slot and main_slot not in base_outfit_keys else ()
@@ -1178,12 +1197,15 @@ class PhotoReferenceVisionService:
             max_tokens=2600, prefer="fast",
         )
         raw = parse_vision_envelope(response)
+        # 修复一：has_product 按 product_id 判定——product_context 现在可能
+        # 只带 task_category_key（自由围巾），不能据此认为有指定商品。
+        _has_product = bool(str(dict(product_context or {}).get("product_id") or ""))
         try:
             return normalize_travel_qa(
                 raw, look_plans=look_plans,
                 moment_rules=moment_rules_from_contract(contract),
                 footwear_types=FOOTWEAR_TYPES,
-                has_product=bool(product_context), travel_place=travel_place,
+                has_product=_has_product, travel_place=travel_place,
                 product_qa_fields=qa_fields, fixed_background=fixed_background,
             )
         except TravelSemanticQAError as first_error:
@@ -1204,7 +1226,7 @@ class PhotoReferenceVisionService:
                     raw_retry, look_plans=look_plans,
                     moment_rules=moment_rules_from_contract(contract),
                     footwear_types=FOOTWEAR_TYPES,
-                    has_product=bool(product_context), travel_place=travel_place,
+                    has_product=_has_product, travel_place=travel_place,
                     product_qa_fields=qa_fields,
                 )
             except TravelSemanticQAError as second_error:
@@ -1814,6 +1836,18 @@ class PhotoReferenceVisionService:
                                locale_pack: Mapping[str, Any] = None):
         if not isinstance(raw, Mapping):
             return {}, ["输出不是 JSON 对象"]
+        # 修复一：无商品编码时按任务类目收紧 look 必填字段——围巾类目每个
+        # look 的 accessories（围巾设定）必填，缺失走既有 revise 链补齐。
+        _ctx = dict(product_context or {})
+        _require_accessories = False
+        if not str(_ctx.get("product_id") or ""):
+            from services.photo_category_registry import (
+                resolve_task_category_adapter,
+            )
+            _cat_adapter = resolve_task_category_adapter(
+                _ctx.get("task_category_key"), _ctx.get("category"))
+            _require_accessories = bool(
+                _cat_adapter is not None and _cat_adapter.required_visible_items)
         moments = {str(item.get("key") or ""): item for item in travel_contract.get("moments") or []}
         # Audited moment labels come from the Locale Pack when one is bound; the
         # legacy ``label_th`` table is read through the same resolver otherwise,
@@ -1844,7 +1878,8 @@ class PhotoReferenceVisionService:
                 if moment not in moments:
                     errors.append(f"第 {post_index} 篇 {look.get('role')} 的 travel_moment 不在枚举内：{moment or '缺失'}")
                     continue
-                for field in ("scene_prompt", "weather_logic", "outerwear", "top_inner", "bottom", "shoes"):
+                for field in ("scene_prompt", "weather_logic", "outerwear", "top_inner", "bottom", "shoes") + (
+                        ("accessories",) if _require_accessories else ()):
                     if not str(look.get(field) or "").strip():
                         errors.append(f"第 {post_index} 篇 {look.get('role')} 缺少 {field}")
                 signature = "|".join(str(look.get(key) or "") for key in ("outerwear", "top_inner", "bottom", "shoes"))
@@ -2154,6 +2189,28 @@ class PhotoReferenceVisionService:
             list(travel_contract.get("moments") or []),
             key=lambda item: str(item.get("key") or "") == "airport_departure",
         )
+        # 修复一（2026-09-20）：无商品编码时按任务类目解析类目存在契约
+        # （VN围巾旅行→SCARF_V1），不得静默回落女装语义。
+        category_presence_block = ""
+        _ctx = dict(product_context or {})
+        if not str(_ctx.get("product_id") or ""):
+            from services.photo_category_registry import (
+                resolve_task_category_adapter,
+            )
+            _cat_adapter = resolve_task_category_adapter(
+                _ctx.get("task_category_key"), _ctx.get("category"))
+            if _cat_adapter is not None and _cat_adapter.required_visible_items:
+                _labels = "、".join(
+                    _cat_adapter.required_visible_labels_zh
+                    or _cat_adapter.required_visible_items)
+                category_presence_block = (
+                    f"\n【类目存在要求（{_labels}）】本任务类目为{_labels}内容，"
+                    f"未指定具体商品：四个 look 都必须规划{_labels}，写入每个 look 的"
+                    " accessories 字段（中文描述颜色/花纹/材质观感/围法）；四套 look 优先"
+                    f"复用同一条{_labels}设定（同颜色同花纹），变化围法与搭配方式；"
+                    f"内容要求明确为多种{_labels}选择展示时可每套不同。"
+                    f"画面中{_labels}必须可辨认，不得被外套或头发完全遮挡。\n"
+                )
         # Label values always come through the locale layer.  With no pack bound
         # this reads the legacy ``label_th`` table and keeps the exact Thai
         # prompt wording; a bound pack switches to neutral wording so a VN task
@@ -2418,7 +2475,7 @@ class PhotoReferenceVisionService:
 【指定商品】{json.dumps(product, ensure_ascii=False) if product else '无；可自由规划完整穿搭'}
 【运营补充要求】{content_requirement or '无'}{account_block}
 【旅行场景枚举（travel_moment 只能取以下 key{moment_rule}）】
-{moments_text}{fixed_backdrop_block}{topic_block}{sensitivity_block}{expression_copy_block}{grading_block}
+{moments_text}{category_presence_block}{fixed_backdrop_block}{topic_block}{sensitivity_block}{expression_copy_block}{grading_block}
 规则：
 1. 每篇 looks 必须是有序 look_a..look_d；{same_moment_rule}
 2. {difference_rule}
@@ -2531,7 +2588,7 @@ pages 必须完整覆盖且只覆盖 {list(roles)}，不得输出 Markdown。"""
                   "遮挡人物面部，一律按失败处理。"
             )
         return f"""你是旅行图文逐页语义质检员。{product_clause}后 {image_count} 张是按顺序对应下列页面计划的生成图。穿搭灵感不要求同款。
-指定商品：{json.dumps(dict(product_context or {}), ensure_ascii=False) if product_context else '无'}
+指定商品：{json.dumps({k: v for k, v in dict(product_context or {}).items() if k != 'task_category_key'}, ensure_ascii=False) if str(dict(product_context or {}).get('product_id') or '') else '无；本类目要求见【类目存在要求】' if dict(product_context or {}).get('task_category_key') else '无'}
 指定旅行地点：{travel_place or '无具体地点'}
 【页面计划（按生成图顺序）】{plans_text}{identity_clause}
 逐页检查并只返回 JSON（本阶段图片没有叠加文字，不要评价标题或文字渲染）：
@@ -2709,7 +2766,7 @@ person_flags 说明（只报告明显情况，轻微偏差一律 false）：face
 业务类目：{category_key}
 固定主题：{theme.get('label_zh') or theme.get('theme_key')}
 运营补充要求：{content_requirement or '无'}
-指定商品：{json.dumps(dict(product_context or {}), ensure_ascii=False) if product_context else '无'}
+指定商品：{json.dumps({k: v for k, v in dict(product_context or {}).items() if k != 'task_category_key'}, ensure_ascii=False) if str(dict(product_context or {}).get('product_id') or '') else '无；本类目要求见【类目存在要求】' if dict(product_context or {}).get('task_category_key') else '无'}
 需要规划：{count} 篇，每篇按 {role_sequence} 的顺序输出完整穿搭。
 如有指定商品，每个角色必须保留该商品，只借鉴参考图的其他搭配关系；参考图中的同类单品不能替换指定商品。
 

@@ -23,9 +23,23 @@ def _product_adapter(product: Mapping[str, Any] | None):
 
     未被任何适配器认领的类目（wig、空类目）回退 ``WOMENSWEAR_V1``：这张表历史
     上服务所有商品，回退才能保证这些商品的输出与 Phase 3 之前逐字一致。
+
+    修复一（2026-09-20）：商品为空/未认领时，读 workflow 注入的
+    ``task_category_key``（预设/配方类目）——无商品编码的 VN 围巾任务由此
+    落在 SCARF_V1（类目存在契约）而不是回落女装。
     """
     token = str((product or {}).get("category") or "").lower()
-    return adapter_for_product_category(token) or WOMENSWEAR_V1
+    found = adapter_for_product_category(token)
+    if found:
+        return found
+    task_token = str((product or {}).get("task_category_key") or "").strip().lower()
+    if task_token:
+        from services.photo_category_registry import get_photo_category_adapter
+        try:
+            return get_photo_category_adapter(task_token)
+        except Exception:  # noqa: BLE001 - 未注册任务类目＝旧回退
+            pass
+    return WOMENSWEAR_V1
 
 
 def _product_qa_context(product: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -536,6 +550,11 @@ class PhotoStyleReferenceSupplyService:
                     # 把商品冻结在该槽位。声明 outerwear 主槽位的类目（womenswear）
                     # 永远走不到这里，故 TH V2 输出不变。
                     outfit_state[target_slot] = "指定商品，以商品参考图的颜色、版型和结构为准"
+                # 修复一：自由类目单品（无商品编码的围巾等）随 look 冻结进
+                # 生图穿搭状态——规划侧已按类目要求为每套 look 写了 accessories。
+                free_accessories = str(look.get("accessories") or "").strip()
+                if free_accessories and "accessories" not in outfit_state:
+                    outfit_state["accessories"] = free_accessories
                 return ShotGenerationRequest(
                     task_id=f"photo_style_{self._safe(record_id)}",
                     slot_index=index, slot_role="full_look",

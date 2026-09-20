@@ -467,3 +467,188 @@ class ThScarfDecouplingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FreeScarfCategoryContextTest(unittest.TestCase):
+    """修复一（2026-09-20 模板优化）：无商品编码的围巾任务类目契约贯通。
+
+    评审实锤（行269 recvvcD2x9br89）：VN围巾旅行无商品 → 供给/规划/QA 全部
+    回落女装语义，Look A 无围巾。修复后任务类目接管；TH 女装与 MX 假发
+    逐字不变。"""
+
+    def test_required_visible_items_declared_on_scarf_only(self):
+        self.assertEqual(SCARF_V1.required_visible_items, ("scarf",))
+        self.assertEqual(WOMENSWEAR_V1.required_visible_items, ())
+
+    def test_task_category_adapter_resolution_priority_and_conflict(self):
+        from services.photo_category_registry import (
+            resolve_task_category_adapter,
+        )
+        # 商品优先（指定商品路径不变）
+        self.assertEqual(
+            resolve_task_category_adapter("scarf", "scarf").category_key, "scarf")
+        # 无商品：任务类目接管——不再回落女装
+        self.assertEqual(
+            resolve_task_category_adapter("scarf", None).category_key, "scarf")
+        # 无商品 + 未注册任务类目（wig）→ None（旧行为）
+        self.assertIsNone(resolve_task_category_adapter("wig", None))
+        self.assertIsNone(resolve_task_category_adapter("", None))
+        # 商品与任务矛盾 → 付费生成前报错
+        with self.assertRaisesRegex(ValueError, "不一致"):
+            resolve_task_category_adapter("scarf", "outerwear")
+
+    def test_travel_prompt_requires_accessories_for_free_scarf(self):
+        from services.photo_reference_vision import PhotoReferenceVisionService
+        contract = {"moments": [
+            {"key": m, "label_zh": m, "evidence_zh": "e", "label_th": "t",
+             "forbidden_footwear_types": []}
+            for m in ("old_town_walk", "cafe_visit")
+        ]}
+        prompt = PhotoReferenceVisionService._travel_plan_prompt(
+            analysis={}, travel_contract=contract, variables={},
+            content_requirement="", count=1,
+            product_context={"task_category_key": "scarf"})
+        self.assertIn("【类目存在要求（围巾）】", prompt)
+        self.assertIn("accessories 字段", prompt)
+        self.assertIn("复用同一条围巾设定", prompt)
+        # 指定围巾商品：走商品身份路径，不出自由类目块
+        product_prompt = PhotoReferenceVisionService._travel_plan_prompt(
+            analysis={}, travel_contract=contract, variables={},
+            content_requirement="", count=1,
+            product_context={"product_id": "p1", "category": "scarf",
+                             "task_category_key": "scarf"})
+        self.assertNotIn("【类目存在要求", product_prompt)
+        # 女装任务：无类目块，提示词不变
+        plain = PhotoReferenceVisionService._travel_plan_prompt(
+            analysis={}, travel_contract=contract, variables={},
+            content_requirement="", count=1)
+        self.assertNotIn("【类目存在要求", plain)
+
+    def test_normalize_requires_accessories_for_free_scarf_looks(self):
+        from services.photo_reference_vision import PhotoReferenceVisionService
+        contract = {"moments": [
+            {"key": m, "label_zh": m, "evidence_zh": "e", "label_th": "t",
+             "forbidden_footwear_types": []}
+            for m in ("old_town_walk", "cafe_visit", "evening_stroll",
+                      "airport_departure")
+        ]}
+
+        def looks(with_accessories):
+            moments = ("old_town_walk", "cafe_visit", "evening_stroll",
+                       "airport_departure")
+            return [
+                {"role": f"look_{letter}", "travel_moment": moment,
+                 "scene_prompt": f"场景{letter}", "weather_logic": "室内外过渡",
+                 "display_label": "", "footwear_type": "SNEAKER",
+                 "outerwear": f"外套{letter}", "top_inner": f"内搭{letter}",
+                 "bottom": f"下装{letter}", "shoes": f"鞋{letter}",
+                 "outerwear_type": "", "bottom_type": "",
+                 **({"accessories": "米灰色羊绒围巾松绕一圈"}
+                    if with_accessories else {})}
+                for letter, moment in zip("abcd", moments)
+            ]
+
+        payload = {"posts": [{"content_angle_zh": "x", "scene_zh": "s",
+                              "palette_zh": "p", "background_prompt": "",
+                              "style_modifier": "", "looks": looks(True)}]}
+        plan, errors = PhotoReferenceVisionService(
+            root=Path("/tmp"))._normalize_travel_plan(
+            payload, contract, 1,
+            product_context={"task_category_key": "scarf"})
+        self.assertEqual(errors, [], errors)
+        self.assertTrue(all(
+            str(look.get("accessories") or "") for look in plan["posts"][0]["looks"]))
+
+        missing = {"posts": [{"content_angle_zh": "x", "scene_zh": "s",
+                              "palette_zh": "p", "background_prompt": "",
+                              "style_modifier": "",
+                              "looks": looks(False)}]}
+        _, errors = PhotoReferenceVisionService(
+            root=Path("/tmp"))._normalize_travel_plan(
+            missing, contract, 1,
+            product_context={"task_category_key": "scarf"})
+        self.assertTrue(any("accessories" in e for e in errors), errors)
+
+        # 女装/无任务类目：accessories 仍可选（旧行为）
+        _, errors_legacy = PhotoReferenceVisionService(
+            root=Path("/tmp"))._normalize_travel_plan(
+            missing, contract, 1, product_context={})
+        self.assertFalse(any("accessories" in e for e in errors_legacy))
+
+    def test_free_scarf_qa_uses_presence_observation_not_product_identity(self):
+        from services.photo_travel_qa import (
+            FAILURE_REQUIRED_ITEM_MISSING, normalize_travel_qa,
+        )
+
+        def pages(visible):
+            return [
+                {"role": f"look_{letter}", "observed_moment": "old_town_walk",
+                 "scene_evidence": ["街景", "人物全身"],
+                 "outfit_matches": True, "weather_matches": True,
+                 "mobility_matches": True, "observed_footwear_type": "SNEAKER",
+                 "repair_instruction": "",
+                 **({"required_item_visible": visible})}
+                for letter in "abcd"
+            ]
+
+        moment_rules = {"old_town_walk": {}}
+        look_plans = [
+            {"role": f"look_{letter}", "travel_moment": "old_town_walk"}
+            for letter in "abcd"
+        ]
+        ok = normalize_travel_qa(
+            {"pages": pages(True), "style_uniform": True,
+             "destination_conflict": False, "notes": ""},
+            look_plans=look_plans, moment_rules=moment_rules,
+            has_product=False, product_qa_fields=("required_item_visible",),
+        )
+        self.assertTrue(ok["passed"], [r.get("failure_code") for r in ok["roles"]])
+
+        bad = normalize_travel_qa(
+            {"pages": pages(False), "style_uniform": True,
+             "destination_conflict": False, "notes": ""},
+            look_plans=look_plans, moment_rules=moment_rules,
+            has_product=False, product_qa_fields=("required_item_visible",),
+        )
+        self.assertFalse(bad["passed"])
+        self.assertTrue(all(
+            role.get("failure_code") == FAILURE_REQUIRED_ITEM_MISSING
+            for role in bad["roles"]))
+        self.assertIn("围巾", bad["roles"][0].get("repair") or bad["roles"][0].get("repair_instruction") or "")
+
+    def test_supply_adapter_falls_back_to_task_category(self):
+        from services.photo_style_reference_supply import _product_adapter
+        self.assertEqual(_product_adapter({"task_category_key": "scarf"}).category_key,
+                         "scarf")
+        # 旧调用兼容：空 dict 仍回退女装
+        self.assertEqual(_product_adapter({}).category_key, "womenswear")
+        # 未注册任务类目回退女装（wig 走自己的 planner，不经此路径）
+        self.assertEqual(_product_adapter({"task_category_key": "wig"}).category_key,
+                         "womenswear")
+
+    def test_generator_free_category_presence_lock(self):
+        request = ShotGenerationRequest(
+            task_id="t-free-scarf", slot_index=1, slot_role="full_look",
+            shot_version=1,
+            plan_shot={"purpose": "生成 look_a 完整穿搭"},
+            product={"task_category_key": "scarf"},
+            persona_snapshot={}, look_snapshot={"recipe": {}},
+            scene_snapshot={"name": "n", "prompt_core": "pc"}, output_dir=".",
+            outfit_state={"outerwear": "米色大衣",
+                          "accessories": "酒红色羊毛围巾绕颈一圈"},
+        )
+        prompt = compose_shot_prompt(request)
+        self.assertIn("【类目存在锁】", prompt)
+        self.assertIn("围巾", prompt)
+        self.assertIn("配饰：酒红色羊毛围巾绕颈一圈", prompt)
+        # 无类目要求时提示词不变
+        plain = ShotGenerationRequest(
+            task_id="t-plain", slot_index=1, slot_role="full_look",
+            shot_version=1,
+            plan_shot={"purpose": "生成 look_a 完整穿搭",
+                       "outfit_state": {"outerwear": "米色大衣"}},
+            product={},
+            persona_snapshot={}, look_snapshot={"recipe": {}},
+            scene_snapshot={"name": "n", "prompt_core": "pc"}, output_dir=".",
+        )
+        self.assertNotIn("【类目存在锁】", compose_shot_prompt(plain))

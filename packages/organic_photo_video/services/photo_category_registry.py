@@ -87,6 +87,15 @@ class PhotoCategoryAdapter:
     #: Extra generator-prompt lines that lock the product into the frame.
     #: Empty for womenswear, so the shipped prompt is untouched there.
     presence_lock_lines: Tuple[str, ...] = ()
+    #: 类目存在保障（2026-09-20 模板优化修复一）：没有指定商品时，本类目
+    #: 每页画面也必须出现的可见单品 token。与 ``required_product_roles``
+    #: 分工：后者保障**指定商品**的身份；前者保障**类目本身**存在——
+    #: "VN围巾旅行无商品编码也必须有围巾" 的契约载体。空元组＝无要求
+    #: （womenswear/wig 旧行为不变）。
+    required_visible_items: Tuple[str, ...] = ()
+    #: ``required_visible_items`` 对应的中文标签（与 token 一一对应），
+    #: 用于规划/QA/生图提示词的类目存在表述。
+    required_visible_labels_zh: Tuple[str, ...] = ()
 
 
 #: Product fields copied into ``look["target_product"]``.
@@ -226,6 +235,9 @@ SCARF_V1 = PhotoCategoryAdapter(
         "围巾的颜色、图案家族、材质观感、边缘或流苏结构与长度体积感必须与商品参考图一致。",
         "围巾可搭在颈部或肩部，但不得遮挡人物面部，不得改变脸型或拉伸颈部比例。",
     ),
+    # 无商品编码的自由围巾生产：类目本身要求每页可辨认围巾（修复一）。
+    required_visible_items=("scarf",),
+    required_visible_labels_zh=("围巾",),
 )
 
 
@@ -272,6 +284,36 @@ def adapter_for_product_category(product_category: Any) -> Optional[PhotoCategor
     """
     token = str(product_category or "").strip().lower()
     return _PRODUCT_CATEGORY_INDEX.get(token) if token else None
+
+
+def resolve_task_category_adapter(
+    task_category_key: Any, product_category: Any = None,
+) -> Optional[PhotoCategoryAdapter]:
+    """解析一条任务的有效类目适配器（修复一：类目上下文集中解析一次）。
+
+    优先级：商品类目 > 任务/配方类目 > None（调用方保持旧行为）。
+
+    - 商品类目已注册时以商品为准（指定商品的路径不变）；
+    - 商品为空/未注册时，任务类目接管——"VN围巾旅行无商品编码"由此落在
+      SCARF_V1 而不是回落 womenswear；
+    - 两侧都解析出**已注册但不同**的适配器时抛 ``ValueError``（商品类别
+      与任务类别矛盾，必须在付费生成前处理，而不是静默选边）；
+    - 任务类目未注册（如 wig 预设的 ``wig``）返回 None，调用方走旧行为。
+    """
+    product_adapter = adapter_for_product_category(product_category)
+    task_token = str(task_category_key or "").strip().lower()
+    if not task_token:
+        return product_adapter
+    try:
+        task_adapter = get_photo_category_adapter(task_token)
+    except UnknownPhotoCategoryError:
+        return product_adapter
+    if product_adapter is not None and product_adapter.category_key != task_adapter.category_key:
+        raise ValueError(
+            f"商品类别（{product_category}→{product_adapter.category_key}）与任务类目"
+            f"（{task_token}→{task_adapter.category_key}）不一致；请修正商品编码或预设类目"
+        )
+    return product_adapter or task_adapter
 
 
 def resolve_product_slot(

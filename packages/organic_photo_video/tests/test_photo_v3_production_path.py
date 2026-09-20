@@ -717,7 +717,10 @@ class ScarfQaContractRuntimeTest(unittest.TestCase):
         self.assertEqual(len(self.qa_fields), 10)
         self.assertTrue(self.qa_rules)
         # Only the adapter's declared product fields are failure-bearing.
-        self.assertTrue(set(PRODUCT_QA_FAILURE_FIELDS).issubset(set(self.qa_fields)))
+        # 修复一（2026-09-20）：required_item_visible 是无商品编码的
+        # 「类目存在」观察字段（自由围巾专用），不属于商品身份契约。
+        failure_fields = set(PRODUCT_QA_FAILURE_FIELDS) - {"required_item_visible"}
+        self.assertTrue(failure_fields.issubset(set(self.qa_fields)))
 
     def test_qa_prompt_carries_the_scarf_checks_and_not_womenswear(self):
         prompt = PhotoReferenceVisionService._travel_qa_prompt(
@@ -750,7 +753,8 @@ class ScarfQaContractRuntimeTest(unittest.TestCase):
         for page in result["roles"]:
             self.assertTrue(page["passed"], page["role"])
             self.assertEqual(
-                set(page["product_qa"]), set(PRODUCT_QA_FAILURE_FIELDS))
+                set(page["product_qa"]),
+                set(PRODUCT_QA_FAILURE_FIELDS) - {"required_item_visible"})
 
     def test_missing_scarf_fails_the_page_and_asks_for_regeneration(self):
         """The behaviour the generic 配饰-is-MINOR rule used to swallow."""

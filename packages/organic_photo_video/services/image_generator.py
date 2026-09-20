@@ -376,10 +376,25 @@ def compose_shot_prompt(request: ShotGenerationRequest) -> str:
 
     product_category = str(product.get("category") or "").strip().lower()
     product_label = resolve_product_display_label(product_category)
+    # 修复一：是否"有指定商品"按 product_id 判定——product dict 可能只带
+    # task_category_key（自由围巾），不得按真值误判成有商品。
+    has_product = bool(str(product.get("product_id") or "").strip())
     # Phase 3：类目适配器可以声明额外的"商品必须在场"指令（如围巾不得缺失、
     # 不得换款、不得遮脸）。未声明该字段的类目（womenswear）拿到空元组，
     # 提示词逐字不变。
     product_adapter = adapter_for_product_category(product_category)
+    if product_adapter is None:
+        # 修复一（2026-09-20）：无商品/未认领类目时读任务类目（workflow 注入），
+        # 自由围巾等类目存在锁由此生效。
+        task_token = str(product.get("task_category_key") or "").strip().lower()
+        if task_token:
+            from services.photo_category_registry import (
+                UnknownPhotoCategoryError, get_photo_category_adapter,
+            )
+            try:
+                product_adapter = get_photo_category_adapter(task_token)
+            except UnknownPhotoCategoryError:
+                product_adapter = None
     presence_lock_lines = (
         tuple(product_adapter.presence_lock_lines)
         if product_adapter is not None else ()
@@ -420,7 +435,7 @@ def compose_shot_prompt(request: ShotGenerationRequest) -> str:
             "",
             "【平铺展示合同】" if flat_lay else "【人物身份锁】",
         ])
-        if product:
+        if has_product:
             lines.extend([
                 "",
                 "【指定商品身份锁】",
@@ -440,11 +455,24 @@ def compose_shot_prompt(request: ShotGenerationRequest) -> str:
             "保持参考图中的颜色、版型、衣长、领型、前襟和袖口结构；禁止替换成相似款或重新设计。",
             "忽略商品参考图中的模特、脸、妆发、姿态、滤镜与背景。",
         ])
-        if product and presence_lock_lines:
+        if has_product and presence_lock_lines:
             lines.extend(presence_lock_lines)
         lines.extend([
             "",
             "【人物身份锁】",
+        ])
+    if (not has_product) and product_adapter is not None and product_adapter.required_visible_items:
+        # 修复一类目存在锁（2026-09-20）：无指定商品时类目本身要求的可见
+        # 单品（自由围巾）不得缺失；款式/颜色按冻结穿搭描述执行。
+        labels = "、".join(
+            product_adapter.required_visible_labels_zh
+            or product_adapter.required_visible_items)
+        lines.extend([
+            "",
+            "【类目存在锁】",
+            f"本页画面必须出现可辨认的{labels}（按当前穿搭状态里的配饰描述执行）；"
+            "完全缺失或被外套/头发完全遮挡视为失败。",
+            f"{labels}可搭在颈部、肩部或手持；不得遮挡人物面部。",
         ])
     facts = product_facts.get("facts") or {}
     known_facts = [
@@ -566,7 +594,7 @@ def compose_shot_prompt(request: ShotGenerationRequest) -> str:
     elif style_reference:
         lines.append(
             "严格执行本页冻结穿搭；借鉴选中穿搭参考的比例、层次、配色关系和穿法，"
-            "不要求同款。" + ("指定商品必须保持不变。" if product else "")
+            "不要求同款。" + ("指定商品必须保持不变。" if has_product else "")
         )
     elif recipe_execution.get("transform_mode") == "controlled_outfit_change":
         allowed = outfit_state.get("change_permissions") or []

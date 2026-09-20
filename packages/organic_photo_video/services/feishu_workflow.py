@@ -1692,6 +1692,33 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                 reference_attachments = list(reference_context.reference_attachments)
                 style_product = reference_context.product_snapshot
                 product_context = reference_context.product_context
+                # ---- 类目上下文集中解析（模板优化修复一，2026-09-20）----
+                # 任务/配方类目决定"本篇应出现什么"；商品决定"什么需要保真"。
+                # 无商品编码时不得静默回落女装——VN围巾旅行由此保住围巾契约。
+                from services.photo_category_registry import (
+                    resolve_task_category_adapter,
+                )
+                try:
+                    _task_adapter = resolve_task_category_adapter(
+                        preset.get("category_key"),
+                        style_product.get("category") if style_product else None,
+                    )
+                except ValueError as exc:
+                    raise FeishuWorkflowError(str(exc)) from exc
+                if (_task_adapter is not None
+                        and not str((style_product or {}).get("category") or "").strip()
+                        and _task_adapter.category_key != "womenswear"):
+                    # 只有"解析结果会不同于旧回退（womenswear）"时才注入
+                    # task_category_key：女装/假发/指定商品任务的冻结契约与
+                    # 输入指纹逐字不变。
+                    style_product = {
+                        **dict(style_product or {}),
+                        "task_category_key": _task_adapter.category_key,
+                    }
+                    product_context = {
+                        **dict(product_context or {}),
+                        "task_category_key": _task_adapter.category_key,
+                    }
             # ---- 外部自动供稿门禁（Phase 1 来源分流）：付费生成前反查合同 ----
             source_tag = text_value(record.fields.get(FIELD_SOURCE_TAG))
             external_auto_supply = str(source_tag or "").startswith("auto_supply|")
