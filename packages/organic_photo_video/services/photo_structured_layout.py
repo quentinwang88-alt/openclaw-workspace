@@ -363,6 +363,14 @@ CHIP_ROLE_LABELS = {
     "shoes": "鞋履", "accessories": "围巾",
 }
 
+#: role → 发布语言（泰语）标签：色卡旁的可见文字用受众语言；name_zh
+#: 只进 manifest 供中文审计，不上面（Sarabun 无 CJK 字形，且泰语受众
+#: 不应看到中文标签）。
+CHIP_ROLE_LABELS_TH = {
+    "outerwear": "แจ็กเก็ต", "top_inner": "เสื้อใน", "bottom": "กางเกง/กระโปรง",
+    "shoes": "รองเท้า", "accessories": "ผ้าพันคอ",
+}
+
 
 def _contain(image: Image.Image, box: tuple[int, int, int, int]) -> Image.Image:
     """整图等比缩放放进目标区域（contain），保留人物/商品/鞋脚不裁切。"""
@@ -461,16 +469,17 @@ def render_structured_page_v2(
         swatch = max(40, min(56, round(side_w * 0.18)))
         for chip in chips:
             hex_value = str(chip.get("hex"))
-            name = str(chip.get("name_zh") or "")[:10]
-            role = CHIP_ROLE_LABELS.get(str(chip.get("role") or ""), "")
+            role_label = CHIP_ROLE_LABELS_TH.get(
+                str(chip.get("role") or ""), "")
             draw.rounded_rectangle(
                 [side_x, y, side_x + swatch, y + swatch], radius=8, fill=hex_value,
                 outline="#D8D2C8", width=1)
-            draw.text((side_x + swatch + pad, y + 2), name, font=chip_font,
-                      fill=headline_color)
-            if role:
-                draw.text((side_x + swatch + pad, y + chip_font.size + 6), role,
-                          font=label_font, fill=body_color)
+            # 可见文字只用发布语言标签；中文颜色名进 manifest 审计。
+            if role_label:
+                draw.text((side_x + swatch + pad, y + 2), role_label,
+                          font=chip_font, fill=headline_color)
+            draw.text((side_x + swatch + pad, y + chip_font.size + 6),
+                      hex_value.upper(), font=label_font, fill=body_color)
             y += swatch + spacing * 2
         image.paste(canvas, (0, 0))
         return {
