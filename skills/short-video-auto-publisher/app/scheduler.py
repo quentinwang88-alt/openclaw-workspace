@@ -512,6 +512,27 @@ def filter_candidates_for_account(
     return kept, stats
 
 
+def _profile_has_content_config(profile_json: str) -> bool:
+    """profile 是否带真实内容配置（2026-09-20）。
+
+    ``build_photo_content_profile`` 对任何行都至少写出 schema_version 与
+    photo_claim_scope；只有这两样＝运营未配置，不能当作有效候选。
+    """
+    if not profile_json:
+        return False
+    try:
+        payload = json.loads(profile_json)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return any(
+        key not in ("schema_version", "photo_claim_scope")
+        for key, value in payload.items()
+        if value not in ("", None, [], {})
+    )
+
+
 def sync_accounts(records: Iterable[Any], mapping: Dict[str, Optional[str]], db: AutoPublishDB) -> int:
     account_rows: Dict[str, List[Dict[str, Any]]] = {}
     binding_rows: Dict[str, List[Dict[str, Any]]] = {}
@@ -582,11 +603,14 @@ def sync_accounts(records: Iterable[Any], mapping: Dict[str, Optional[str]], db:
             (row for row in rows if row["publish_channel"] == "CreatOK"),
             preferred,
         )
-        # 内容定位跨通道共享：取第一个非空 profile / scope。冲突（两个非空且
-        # 不同）时保留第一个非空值——发布仍可用，OPV 侧解析时会给出唯一来源。
+        # 内容定位跨通道共享：取第一个**有内容配置**的 profile / scope。冲突
+        # （两个非空且不同）时保留第一个非空值——发布仍可用，OPV 侧解析时会
+        # 给出唯一来源。注意 2026-09-20 修复：只带 claim_scope 的 profile 不算
+        # "已配置"——每个账号表行都会生成它，若按非空判断，排在前面的一行
+        # 空白配置会永久遮住后面配置齐全的行（wn0didnad6 实测）。
         photo_profile = next(
             (row["photo_content_profile"] for row in rows
-             if row.get("photo_content_profile")),
+             if _profile_has_content_config(row.get("photo_content_profile"))),
             "",
         )
         photo_scope = next(

@@ -2446,3 +2446,38 @@ class DryRunUnifiedInterfaceTest(unittest.TestCase):
         )
         task_id = DryRunPublishAdapter().create_publish_task(request)
         self.assertTrue(task_id.startswith("dryrun-"))
+
+    def test_sync_accounts_prefers_configured_profile_over_blank_twin_row(self) -> None:
+        """同账号两行（一空一实）时，内容配置取配置齐全的行（2026-09-20）。
+
+        只带 schema_version + photo_claim_scope 的 profile 不算"已配置"——
+        否则排在前面的空白行会永久遮住后面配置齐全的行（wn0didnad6 实测，
+        默认主题/供给策略全被吞掉）。"""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = AutoPublishDB(Path(temp_dir) / "accounts.sqlite3")
+            field_names = [
+                "账号ID", "账号名称", "店铺ID", "账号状态", "发布渠道",
+                "默认主题", "图文内容策略", "图文自动化模式", "自动供稿预设",
+            ]
+            records = [
+                # 空白行排在前面（API 返回顺序）
+                DummyRecord("rec-blank", {
+                    "账号ID": "acct_demo", "账号名称": "示例", "店铺ID": "THFZ01",
+                    "账号状态": "可用", "发布渠道": "neobund.ai",
+                }),
+                DummyRecord("rec-configured", {
+                    "账号ID": "acct_demo", "账号名称": "示例", "店铺ID": "THFZ01",
+                    "账号状态": "可用", "发布渠道": "neobund.ai",
+                    "默认主题": "配色教程", "图文内容策略": "定位优先",
+                    "图文自动化模式": "自动生产", "自动供稿预设": "图文｜TH｜旅行穿搭",
+                }),
+            ]
+            mapping = resolve_field_mapping(field_names, ACCOUNT_FIELD_ALIASES)
+            sync_accounts(records, mapping, db)
+            account = db.get_account_config("acct_demo")
+
+        profile = json.loads(account["photo_content_profile_json"])
+        self.assertEqual(profile.get("default_theme"), "配色教程")
+        self.assertEqual(profile.get("expression_mode"), "PRACTICAL_GUIDE")
+        self.assertEqual(
+            (profile.get("photo_supply_policy") or {}).get("automation"), "自动生产")
