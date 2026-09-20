@@ -1086,3 +1086,33 @@ class GuideSummaryTest(unittest.TestCase):
         self.assertIn("本篇方法：封面／浅色衔接／明暗对比／局部呼应", summary)
         self.assertNotIn("用户问题", summary)
         self.assertNotIn("选择", summary.split("本篇问题")[0])
+
+
+class CardTextMountTest(unittest.TestCase):
+    """真实跑测修正（2026-09-20）：copy.pages 是平面结构，挂载进内容卡时
+    必须读到 headline/body（此前误读嵌套 text 子对象写空串，渲染守卫回落
+    旧排版——wn0didnad6 recvvJSMD20x1f 成片未走色卡侧栏的根因）。"""
+
+    def test_flat_pages_mount_headline_into_card(self):
+        from collections.abc import Mapping
+        flat_page = {
+            "key_point_zh": "浅色衔接", "visual_basis_zh": "内搭露出",
+            "kicker": "", "headline": "ต่อสีอ่อน", "body": "เหตุผล",
+            "color_chips": [{"name_zh": "奶白", "hex": "#EEEBDD", "role": "top_inner"}],
+        }
+        # 模拟挂载逻辑（与 feishu_workflow 一致）
+        _text_source = (
+            flat_page.get("text")
+            if isinstance(flat_page.get("text"), Mapping) else flat_page)
+        mounted = {key: str((_text_source or {}).get(key) or "")
+                   for key in ("kicker", "headline", "body")}
+        self.assertEqual(mounted["headline"], "ต่อสีอ่อน")
+        self.assertEqual(mounted["body"], "เหตุผล")
+
+    def test_renderer_guard_requires_nonempty_headline(self):
+        # 守卫语义：headline 为空 → 回落旧渲染（不能因空串静默走 v2）
+        page_text = {"kicker": "", "headline": "", "body": ""}
+        should_v2 = bool(str(page_text.get("headline") or "").strip())
+        self.assertFalse(should_v2)
+        page_text2 = {"kicker": "", "headline": "ต่อสีอ่อน", "body": "x"}
+        self.assertTrue(bool(str(page_text2.get("headline") or "").strip()))

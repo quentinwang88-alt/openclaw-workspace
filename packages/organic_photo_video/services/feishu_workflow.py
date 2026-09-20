@@ -2519,9 +2519,18 @@ class FeishuTaskWorkflow(FeishuV2Mixin):
                                 if (len(_struct_pages) == 4
                                         and len(card_pages) == 4):
                                     for _pi, _sp in enumerate(_struct_pages):
+                                        # pages 字段是模型输出的平面结构
+                                        # （headline/body/kicker 直接在页上，
+                                        # 2026-09-20 真实跑测修正——此前误读
+                                        # 嵌套的 _sp["text"] 子对象，写进内容卡
+                                        # 的全是空串，渲染器守卫回落旧排版）。
+                                        _text_source = (
+                                            _sp.get("text")
+                                            if isinstance(_sp.get("text"), Mapping)
+                                            else _sp)
                                         card_pages[_pi]["text"] = {
                                             key: str(
-                                                (_sp.get("text") or {}).get(key) or "")
+                                                (_text_source or {}).get(key) or "")
                                             for key in ("kicker", "headline", "body")}
                                         _chips = [
                                             chip for chip in _sp.get("color_chips") or []
