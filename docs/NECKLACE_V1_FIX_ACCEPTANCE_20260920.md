@@ -166,14 +166,27 @@
 - 项链相关：`test_necklace_handoff`(63)、`test_delivery_snapshot`(19)、`test_necklace_count_evidence`(52)、`test_necklace_frozen_visual_projection`(41)、`test_necklace_mixed_integration`(60)、`test_necklace_mixed_profile`(49)、`test_necklace_profile_isolation`(23)、`test_accessory_mixed_integration`(89)、`test_accessory_mixed_templates`(78)、`test_category_execution_adapter`(34)、`test_visual_execution_contract`(8)、`test_production_script_renderer`(41)、`test_simplified_complete_script`(58)、`test_production_script_feishu`(14)、`test_video_prompt_compaction`(42)。以上条数逐项取自 C 后回归日志，非估算。
 - 生产库指纹：
   - `longform_original_video.sqlite3` = `6e150904fab2fa1dc172941e72de9876`、`short_video_auto_publish.sqlite3` = `2a2ff0f5a93447e3e00a5ecb849fcc69` —— 全程稳定，两次回归窗口内均报 `[未变]`。
-  - `original_script_generator.sqlite3` —— 本轮**开始时**的基线是 `e3191fcffcad8ed1cb9bcaf5d7a5d262`，且 B 后回归窗口内报 `[未变]`。但它在 B 后与 C 后两次回归**之间**变成了 `16bfb598cadf9d0d74c6ff9be30707c7`；事后取证确认是并发的一次飞书真实跑批写的（见下节），不是本轮的测试。C 后回归以 `16bfb59…` 为窗口基线，同样报 `[未变]`。**本记录发布时的当前值是 `16bfb598cadf9d0d74c6ff9be30707c7`**，引用时请用这个值，不要把 `e3191f…` 当成"现在还是它"。
-- 回归日志：`full_regression_after_b.log`、`full_regression_after_c.log`（在 `run_6/necklace_v1_c5_evidence/out/`）。
+  - `original_script_generator.sqlite3` —— 本轮**开始时**的基线是 `e3191fcffcad8ed1cb9bcaf5d7a5d262`，且 B 后回归窗口内报 `[未变]`。但它在 B 后与 C 后两次回归**之间**变成了 `16bfb598cadf9d0d74c6ff9be30707c7`；事后取证确认是并发的一次飞书真实跑批写的（见下节）。**该库没有稳定的"当前值"可引用**：它既有常规并发生产写入方，字节又会因 WAL 检查点在无业务变化时被重写（见下节第二步）。引用时请写"哪个窗口的基线"，不要写"现在是 X"。
+- 回归日志：`full_regression_after_b.log`、`full_regression_after_c.log`、`full_regression_after_guard_upgrade.log`（都在 `run_6/necklace_v1_c5_evidence/out/`）。第三份是**把守卫升级为业务指纹口径之后**再跑的一次全量回归：**94/94、两侧非零退出 0**。
 
-### 运行台的一处误判（已修，供下轮注意）
+### 运行台的一处误判（已修；真因有两层，供下轮注意）
 
-C 包第一次全量回归报"隔离失败"：生产库 `original_script_generator.sqlite3` 在运行窗口内变化。核查后**不是我们的测试写的**，而是一次同时进行的**飞书真实跑批**：新批次 `OCB_F865585281E69A3EBE22`（`request_id=OP_FEISHU_39F81AFAE5FDCE358F23`、`workflow_type=ORIGINAL_SCRIPT`、`execution_mode=PLAN_ONLY`、`product_type=耳饰`、`target_country=越南`、请求 5 条计划 3 条）在 10:17:28 → 10:17:34 一次性写完即停。生产库里 197 个批次有 103 个来自 `OP_FEISHU_`，这是常规生产入口。
+C 包第一次全量回归报"隔离失败"：生产库 `original_script_generator.sqlite3` 在运行窗口内变化。查下去发现**两个独立问题叠加**，只解释其中一个都不够。
 
-守卫漏检的原因：空闲探测只采样 4 秒，对**偶发**写入方天然漏检；事后 0/6/12 秒确认时写入方已经停止，于是外部写入被误判成我们的越界。已给 `wp0/run_isolated_tests.sh` 加上**归属取证**：一旦发现变化，就把最近写入批次／行的 `request_id`、`product_type`、`target_country`、时间戳打出来（读只读副本，不触碰原库）。指纹只能发现"有人写了"，不能说明"是谁写的"——这一步把两者分开。
+**第一步 · 确实有别人在写。** 一次同时进行的**飞书真实跑批**：批次 `OCB_F865585281E69A3EBE22`（`request_id=OP_FEISHU_39F81AFAE5FDCE358F23`、`workflow_type=ORIGINAL_SCRIPT`、`execution_mode=PLAN_ONLY`、`product_type=耳饰`、`target_country=越南`、请求 5 条计划 3 条）在 10:17:28 → 10:17:34 一次性写完即停。生产库里 197 个批次有 103 个来自 `OP_FEISHU_` —— 这是**常规生产入口**，不是异常。守卫原来的空闲探测只采样 4 秒，对**偶发**写入方天然漏检，于是外部写入被误判成我们的越界。
+
+**第二步 · 但"指纹变了"本身就不等于"有业务写入"（这才是关键）。** 该库 `journal_mode=wal`：生产进程打开/关闭连接会触发**检查点**，把 `-wal` 合并进主库并重排页面 —— **字节变了，业务数据没变**。实测：在业务内容完全不变的情况下（`original_content_batch`=197 / `original_content_item`=713 / `creative_pattern_usage`=643，三张表的 `max(created_at)` 都停在 10:17:28）主库 md5 **连续变了两次**（`e3191f…` → `7fd58d4…` → `9301a88…`）。这解释了为什么"事后 0/6/12 秒确认都稳定"仍会报红 —— 那个稳定**不代表我们写的**，只代表检查点做完了。
+（顺带**证伪**一条旧观察：`short_video_auto_publish.sqlite3` 曾被记为"有常驻写入方、约 10 秒一变"。实测该库的字节与业务指纹在 36 秒内都静止 —— 那是时段性现象，不是库的属性。）
+
+**修法**（`wp0/run_isolated_tests.sh`）：新增 `business_fingerprint()` —— 逐表取 `(行数, max(created_at|updated_at))` 拼成摘要。
+- **字节与业务同时变化**才算隔离失败；只字节变 = 检查点，打印说明后放行。
+- 空闲探测的"外部写入方"判定也从"字节变"改成"**业务**变"。
+- 业务确实变了时才做**归属取证**：打印最近 `original_content_batch` 行的 `request_id` / `product_type` / `target_country` / `created_at`，并附逐表业务指纹明细（读只读副本，不触碰原库）。
+- 只读连接打开主库**不会改主库**（实测：打开前后 md5 相同），所以读原库是安全的。
+
+**验证**：升级后重跑全量回归 → **94/94、两侧非零退出 0、守卫全绿**（`full_regression_after_guard_upgrade.log`）。
+
+**可推广的判据**：任何"文件摘要即证据"的守卫，先问一句 **"这份文件的字节会不会在没有业务变化时被重写？"** —— WAL 检查点 / `VACUUM` / 重打包 / 缓存清理都属于这类。指纹只能回答"有人写了"，业务指纹才能回答"数据是否真的变了"，归属取证才能回答"是谁写的"。
 
 ## 真实样本与未覆盖项
 
