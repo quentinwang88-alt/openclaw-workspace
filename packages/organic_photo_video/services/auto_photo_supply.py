@@ -24,7 +24,7 @@ import re
 import os
 from dataclasses import dataclass, field
 from datetime import date as _date
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from services.material_adapter import (
     Candidate,
@@ -1063,15 +1063,10 @@ class AutoPhotoSupply:
                 # 语义采用页 = 终选选中页（有图模式）或所有有摘要的页（零图模式）
                 if selected_seqs and seq not in selected_seqs:
                     continue
-                # 指定商品时过滤同槽位品类（F3.2：覆盖页摘要）
-                if product_snapshot:
-                    p_name = str(product_snapshot.get("product_name") or "")
-                    p_cat = str(product_snapshot.get("category") or "")
-                    outerwear_words = ("外套", "开衫", "卫衣", "毛衣", "衬衫",
-                                       "夹克", "大衣", "风衣", "羽绒服", "棉服",
-                                       "羊羔毛", "蓬松", "针织")
-                    if p_cat == "outerwear" and any(w in summary for w in outerwear_words):
-                        continue
+                # 方案 P2-3：指定商品时**不再整页删除**——摘要出现「外套」
+                # 等词不代表整页是商品页（可能是讲解页顺带提到）。改为保留
+                # 页摘要、由规划端按商品快照覆盖槽位描述（商品身份由商品
+                # 参考图权威保障，方法/配色讲解不因关键词消失）。
                 reference_pages.append(f"p{seq}:{summary}")
         contract["reference_basis"] = "; ".join(reference_pages)[:2000]
 
@@ -1300,14 +1295,25 @@ class AutoPhotoSupply:
                 lines.append(f"参考搭配要点（文字化借鉴）：{core}"
                              + (f"；{relations}" if relations else ""))
             # C（§Phase C）：逐页讲解摘要——参考素材每页讲了什么方法/论点，
-            # 传给规划做 narrative 依据（v3 pages[].outfit_summary）
+            # 传给规划做 narrative 依据（v3 pages[].outfit_summary）。
+            # 方案 P2-3：消费**终选实际选中页**（selection.pages），不再固定
+            # 取前四页——选中第 5、6 页时规划真正采用这两页的讲解；终选未
+            # 给页序（如 narrative_only 全页可用）时回退全部有摘要页。
+            selected_seqs = {
+                int(p.get("seq") or 0) for p in (selection.pages or [])
+                if isinstance(p, Mapping)} if hasattr(selection, "pages") else set()
             page_notes = []
-            for pg in (analysis.get("pages") or [])[:4]:
+            for pg in (analysis.get("pages") or []):
+                seq = int((pg or {}).get("seq") or 0)
                 summary = str((pg or {}).get("outfit_summary") or "").strip()
-                if summary:
-                    page_notes.append(summary)
+                if not summary:
+                    continue
+                if selected_seqs and seq not in selected_seqs:
+                    continue
+                page_notes.append(f"p{seq}:{summary}")
             if page_notes:
-                lines.append(f"参考逐页讲解（可借鉴的方法/顺序）：{'；'.join(page_notes)}")
+                lines.append("参考选中页讲解（本次实际采用的页与方法）："
+                             + "；".join(page_notes))
         country = str(destination.get("country") or "")
         place = str(destination.get("place") or "")
         if country or place:

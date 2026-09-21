@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from services.material_source import MaterialPackage
 
@@ -70,6 +70,29 @@ THEME_SELECTION_STRATEGIES: Dict[str, Dict[str, Any]] = {
         "fallback": ["全身照清晰即可借鉴比例"],
         "forbidden": ["编造显高数值"],
     },
+    # ---- 模板优化方案 P2-1（2026-09-20）：新教程/环境主题的选材策略 ----
+    # 只影响初筛软排序与终选 prompt 文案；不新增模型调用、不建标签表。
+    "配色教程": {
+        "prefer_structures": ["comparison", "independent_collection"],
+        "needs": ["配色关系或配色方法可解释（公式/对照/拆解）"],
+        "prefer": ["配色公式、颜色对照、讲解结构清楚（为什么这样配）"],
+        "fallback": ["单套搭配可取其配色关系，方法解释自建"],
+        "forbidden": ["改变指定商品颜色"],
+    },
+    "旅行·穿搭攻略": {
+        "prefer_structures": ["layered", "same_item_multiway"],
+        "needs": ["问题—方法—示例的讲解结构"],
+        "prefer": ["一页一方法、部位/层次讲解清楚（裤脚与鞋、内外搭衔接等）"],
+        "fallback": ["普通街拍可借鉴方法，讲解自建"],
+        "forbidden": ["把展示合集冒充方法教程"],
+    },
+    "旅行·环境协调": {
+        "prefer_structures": [],
+        "needs": ["穿搭与背景/场景的颜色和气质关系"],
+        "prefer": ["人物与环境颜色协调、场景气质统一（街道/咖啡店/建筑）"],
+        "fallback": ["干净背景的搭配可借鉴配色关系"],
+        "forbidden": ["复制错误目的地"],
+    },
 }
 
 DEFAULT_STRATEGY = {
@@ -91,6 +114,67 @@ def strategy_for(theme: str) -> Dict[str, Any]:
         if key in theme or theme in key:
             return value
     return DEFAULT_STRATEGY
+
+
+#: 方案 P2-1：主题 → 初筛软排序的关键词组（命中分析缓存的标题/选题/
+#: 搭配关系文字时加分）。软信号：只影响同质量候选的先后，不硬排除。
+#: 消费现有分析字段，不要求运营打标签、不新增模型调用。
+THEME_RANK_KEYWORDS: Dict[str, tuple] = {
+    "配色教程": (("配色", "公式", "拆解", "教程", "对照", "颜色搭配"), 1.0),
+    "旅行·穿搭攻略": (("方法", "技巧", "攻略", "教程", "公式", "怎么穿"), 1.0),
+    "旅行·环境协调": (("街拍", "城市", "咖啡", "背景", "环境", "街頭", "街道"), 0.75),
+    "旅行·拍照穿搭": (("拍照", "出片", "构图", "上镜", "机位"), 1.0),
+    "旅行·配色参考": (("配色", "颜色", "色系", "撞色", "同色系"), 1.0),
+    "一衣多穿": (("一衣多穿", "多穿", "一件", "多种搭", "一件多搭"), 0.8),
+    "旅行·温度穿搭": (("叠穿", "层次", "layer", "穿脱", "温差"), 0.75),
+}
+
+
+def theme_rank_bonus(theme: str, analysis: Mapping[str, Any],
+                     title: str) -> tuple:
+    """按主题关键词给候选软加分；返回 (加分, 理由)。"""
+    keywords = THEME_RANK_KEYWORDS.get(theme)
+    if not keywords:
+        return 0.0, ""
+    words, weight = keywords
+    haystack = " ".join((
+        title or "",
+        str(analysis.get("note_topic") or ""),
+        str(analysis.get("outfit_relations") or ""),
+    ))
+    hit = next((word for word in words if word and word in haystack), "")
+    if hit:
+        return weight, f"主题相关词命中（{hit}）"
+    return 0.0, ""
+
+
+#: 方案 P2-2：程序类目 → 素材分析中常见中文单品名（标准化匹配）。
+#: 优先复用类目适配器语义；这里只补「程序类目 ↔ 中文叫法」的映射。
+CATEGORY_ITEM_ALIASES: Dict[str, tuple] = {
+    "outerwear": ("外套", "大衣", "夹克", "羽绒", "棉服", "开衫", "披肩"),
+    "scarf": ("围巾", "丝巾", "方巾", "脖套"),
+    "top": ("上衣", "针织", "毛衣", "T恤", "衬衫", "打底"),
+    "bottom": ("裤子", "牛仔裤", "半身裙", "长裙", "短裙", "阔腿裤"),
+    "dress": ("连衣裙", "长裙"),
+    "shoes": ("鞋", "靴", "乐福", "运动鞋", "玛丽珍"),
+}
+
+
+def category_matches_core_items(category: str, core_text: str) -> Optional[str]:
+    """程序类目是否命中核心单品文字；返回命中的别名或 None。
+
+    与旧 `category in core_text` 的区别：中文素材 rarely 写「outerwear」，
+    实际写「外套/大衣/羽绒…」——别名映射让围巾/外套任务的初筛真正命中。
+    """
+    token = str(category or "").strip().lower()
+    if not token or not core_text:
+        return None
+    if token in core_text:
+        return token
+    for alias in CATEGORY_ITEM_ALIASES.get(token, ()):
+        if alias in core_text:
+            return alias
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -280,12 +364,20 @@ def narrow_candidates(
                 str((item or {}).get("item") or "")
                 for item in (analysis.get("core_items") or [])
             )
-            if product_category and product_category in core_text:
+            # 方案 P2-2：程序类目 × 中文单品名标准化匹配（outerwear→外套…）
+            matched_alias = category_matches_core_items(product_category, core_text)
+            if matched_alias:
                 score += 2.5
-                reasons.append("核心单品含本篇商品品类")
+                reasons.append(f"核心单品含本篇商品品类（{matched_alias}）")
             elif core_text:
                 score -= 0.5  # 不硬排除：品类表达可能不同，交由 Doubao 终判
                 reasons.append("核心单品未见本篇商品品类（待模型终判）")
+
+        # 方案 P2-1：主题关键词软排序（标题/选题/搭配关系命中）
+        bonus, bonus_reason = theme_rank_bonus(theme, analysis, package.title)
+        if bonus:
+            score += bonus
+            reasons.append(bonus_reason)
 
         if package.review_status == "selected":
             score += 1.5
