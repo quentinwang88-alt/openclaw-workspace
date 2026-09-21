@@ -704,3 +704,21 @@ class FreeScarfQAContextCaptureTest(unittest.TestCase):
         self.assertFalse(qa["passed"])
         failed = [r for r in qa["roles"] if not r.get("passed")]
         self.assertEqual([r["role"] for r in failed], ["look_a"])
+
+    def test_free_scarf_context_not_treated_as_specified_product(self):
+        from services.photo_style_reference_supply import _product_qa_context
+        """方案 P3-2：自由围巾的 QA 上下文（只有 task_category_key）在
+        review_travel_pages / review_alignment 的判定里都不是「指定商品」
+        ——has_product / product_specified 一律按 product_id 判定。"""
+        ctx = _product_qa_context({"task_category_key": "scarf"})
+        product_context = ctx["product_context"]
+        has_product = bool(str(dict(product_context).get("product_id") or ""))
+        self.assertFalse(has_product)
+        product_specified = bool(
+            str(dict(product_context).get("product_id") or ""))
+        self.assertFalse(product_specified)
+        # 指定围巾商品：两条判定都为 True
+        ctx2 = _product_qa_context({
+            "product_id": "p9", "category": "scarf",
+            "task_category_key": "scarf"})
+        self.assertTrue(bool(str(ctx2["product_context"].get("product_id") or "")))

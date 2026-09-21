@@ -925,6 +925,12 @@ class AutoPhotoSupply:
 
         # Phase 1.1（方案 §1.1）：主题先定，选址跟着主题走。
         # 具体旅行主题（旅行·打卡穿搭等）必须有地点；无可用地点不建行。
+        # 方案 P3-1：跨市场回退消除——参考推导的预设只允许落在**本账号
+        # 市场**的预设；VN 账号推导不出 VN 预设时暂停该篇并记缺口，绝不
+        # 把 VN 围巾塞进 TH 女装/TH 四选一。
+        market = str(binding.target_country or "").strip().upper()
+        market_preset_by_market = {"TH": "图文｜TH｜旅行穿搭", "VN": "图文｜VN｜围巾旅行"}
+        market_preset = market_preset_by_market.get(market, "")
         theme_value = default_theme or ""   # "自动"已在入口归一
         theme_derived_note = ""
         effective_preset = preset
@@ -932,6 +938,17 @@ class AutoPhotoSupply:
             structure = str(main_analysis.get("set_structure") or "")
             topic_blob = f"{source_topic}{selection.rationale}"
             travelish = any(k in topic_blob for k in ("旅行", "旅游", "出游"))
+            if market and market_preset and preset != market_preset and preset.startswith("图文｜TH｜"):
+                # 账号配置的预设与账号市场不一致（如 VN 账号被配成 TH 预设）
+                # ——配置错误，暂停并记录，不静默纠正也不跨市场执行。
+                self.ledger.record_gap(
+                    scope=f"supply:{binding.account_id}",
+                    reason="preset_market_mismatch",
+                    detail=(f"账号市场 {market} 与自动供稿预设「{preset}」不一致；"
+                            "请在账号管理表修正自动供稿预设"))
+                plan.status = "skipped_no_preset"
+                plan.detail = f"预设市场与账号市场（{market}）不一致，暂停该账号"
+                return plan
             if structure == "same_item_multiway" and product_code:
                 theme_value = "一衣多穿"
                 theme_derived_note = "内容方向以参考素材为基准（同件多搭结构：主题=一衣多穿）｜"
@@ -944,6 +961,17 @@ class AutoPhotoSupply:
                 if band_source not in ("显式参数", "冻结合同"):
                     band = None
             else:
+                if market != "TH":
+                    # 参考推导的非旅行结构只有 TH 通用预设可用；非 TH 市场
+                    # 无匹配预设＝系统配置缺口，暂停记录（不变成 TH 女装）。
+                    self.ledger.record_gap(
+                        scope=f"supply:{binding.account_id}",
+                        reason="no_market_preset_for_derived_theme",
+                        detail=(f"市场 {market} 无参考推导主题可用的生产预设"
+                                f"（推导主题={_nontravel_theme(source_topic)}）"))
+                    plan.status = "skipped_no_preset"
+                    plan.detail = f"市场 {market} 缺少非旅行结构的可用预设，暂停"
+                    return plan
                 effective_preset = GENERIC_CHOICE_PRESET
                 theme_value = _nontravel_theme(source_topic)
                 theme_derived_note = (
