@@ -442,11 +442,13 @@ def render_structured_page_v2(
         chip_label_max = side_w - pad - max(40, min(56, round(side_w * 0.18))) - pad
         chip_names = []
         for chip in chips:
-            label = str(chip.get("label_zh") or chip.get("label") or "").strip()
+            # 方案 P1-3：可见标签=当地语言 label（模型按合同给出，缺明确
+            # 单品名时已是中性类别词）；缺 label 时按 role 取中性类别词
+            # 兜底（不能把所有 accessories 写成围巾）。
+            label = str(chip.get("label") or "").strip()
             if not label:
-                role_label = CHIP_ROLE_LABELS_TH.get(
-                    str(chip.get("role") or ""), "")
-                label = role_label or str(chip.get("role") or "")
+                label = CHIP_ROLE_LABELS_TH.get(
+                    str(chip.get("role") or ""), str(chip.get("role") or ""))
             chip_names.append(label)
         for scale_step in range(0, 41, 2):
             scale = 1 - scale_step / 100

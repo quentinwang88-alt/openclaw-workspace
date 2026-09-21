@@ -478,23 +478,29 @@ def is_guide_theme(theme: Mapping[str, Any]) -> bool:
 def resolve_guide_execution(
     *, theme: Mapping[str, Any], expression_mode: Any = "",
 ) -> str:
-    """集中解析一条任务的内容执行类型（复审 F3）。
+    """集中解析一条任务的内容执行类型（复审 F3 + 方案 P1-2）。
 
     返回：``travel_guide`` ／ ``color_tutorial`` ／ ``temperature_guide`` ／
     ``""``（展示型，非讲解）。规则：
     - 旅行攻略、配色教程按主题直接判定；
-    - 温度主题在「无显式表达（默认实用指南）」或「显式 PRACTICAL_GUIDE」
-      时进入讲解结构（temperature_guide）；显式 STYLE_INSPIRATION 保持
-      展示型多套比较；
+    - 温度判定同时看 ``theme_key``（TEMPERATURE）与
+      ``travel_theme_type``（温度穿搭经 resolve_photo_theme 落在
+      COOL_WEATHER_TRAVEL + TEMPERATURE，两条键都不漏）；
+    - 「无显式表达（默认实用指南）」或「显式 PRACTICAL_GUIDE」进入讲解
+      结构（temperature_guide）；显式 STYLE_INSPIRATION 保持展示型多套
+      比较；
     - 独立冷热切换三态流程不在本函数管辖（它有自己的主题键与流程）。
     """
     theme_key = str(theme.get("theme_key") or "")
+    theme_type = str(
+        theme.get("travel_theme_type") or theme.get("theme_type") or "")
     if theme_key == "TRAVEL_STYLING_GUIDE":
         return "travel_guide"
     if theme_key == "COLOR_TUTORIAL":
         return "color_tutorial"
     expression = str(expression_mode or "").strip()
-    if theme_key == "TEMPERATURE" and expression in ("", "PRACTICAL_GUIDE"):
+    is_temperature = theme_key == "TEMPERATURE" or theme_type == "TEMPERATURE"
+    if is_temperature and expression in ("", "PRACTICAL_GUIDE"):
         return "temperature_guide"
     return ""
 

@@ -220,9 +220,10 @@ GUIDE_CHIP_ROLES = ("outerwear", "top_inner", "bottom", "shoes", "accessories")
 def _guide_chip(raw: Any) -> Optional[dict[str, str]]:
     """归一化一块配色示意色：{label_zh, name_zh, hex, role}；不合法返回 None。
 
-    复审 F4：``label_zh`` 是该颜色的**实际单品短名**（冻结后作为色卡可见
-    标签的翻译来源），不再由渲染器按 role 猜（此前 accessories 一律写成
-    「围巾」，真实内容是粉色袜子时标签错误）。
+    复审 F4 + 方案 P1-3：``label`` 是色卡可见标签（**当地语言**，渲染直接
+    使用，避免 Sarabun 缺字方框）；``label_zh`` 是中文名（中文回写与审计）。
+    缺明确单品名时模型按合同给中性类别词——渲染器不再按 role 猜（此前
+    accessories 一律写成「围巾」，真实内容是粉色袜子时标签错误）。
     """
     if not isinstance(raw, Mapping):
         return None
@@ -233,10 +234,12 @@ def _guide_chip(raw: Any) -> Optional[dict[str, str]]:
     hex_value = str(raw.get("hex") or "").strip()
     if not name or not (hex_value.startswith("#") and 4 <= len(hex_value) <= 9):
         return None
-    label = str(raw.get("label_zh") or "").strip()[:16]
+    label = str(raw.get("label") or "").strip()[:24]
+    label_zh = str(raw.get("label_zh") or "").strip()[:16]
     return {
         "name_zh": name[:12], "hex": hex_value[:9], "role": role,
-        **({"label_zh": label} if label else {}),
+        **({"label": label} if label else {}),
+        **({"label_zh": label_zh} if label_zh else {}),
     }
 
 
@@ -2473,8 +2476,11 @@ class PhotoReferenceVisionService:
                 '"kicker":"当地语言短引子（封面用，内页空串）",'
                 '"headline":"当地语言页标题（本页方法名，简短）",'
                 '"body":"当地语言一句解释",'
-                '"color_chips":[{{"label_zh":"该颜色的实际单品短名（中文，'
-                '如「粉色袜子」「奶白针织内搭」）","name_zh":"中文颜色名",'
+                '"color_chips":[{{"label":"该颜色对应单品的**当地语言**短名'
+                '（画在色卡旁，如泰语「ถุงเท้าสีชมพู」「ผ้าคลุมสีครีม」；没有明确'
+                '单品名时用当地语言中性类别词，如「เสื้อใน」「กางเกง」），'
+                '"label_zh":"该单品的中文名（中文回写与审计用，如「粉色袜子」）",'
+                '"name_zh":"中文颜色名",'
                 '"hex":"#RRGGBB",'
                 '"role":"outerwear|top_inner|bottom|shoes|accessories"}}]}}]}}}}\n'
                 "文案要求：slide_texts 必须 4 条，顺序为封面+第2/3/4页；pages 同样"

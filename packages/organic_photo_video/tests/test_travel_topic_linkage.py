@@ -1031,10 +1031,16 @@ class TemperatureConditionGuideTest(unittest.TestCase):
             expression_mode=expression)
 
     def test_temperature_without_expression_defaults_to_condition_guide(self):
+        # 方案 P1-2：温度默认表达进讲解教程合同（4页 pages），规则块带
+        # 温度专属规则；显式灵感仍走展示分支。
         prompt = self.prompt(self.TEMP_TOPIC)
-        self.assertIn("外套脱下后穿什么", prompt)
-        self.assertIn("不得编造具体温度", prompt)
-        self.assertIn("不用 A/B/C/D 投票", prompt)
+        self.assertIn("讲解教程", prompt)
+        self.assertIn("slide_texts 必须 4 条", prompt)
+        # 温度专属规则块
+        rule_block = PhotoReferenceVisionService._guide_plan_prompt_block(
+            theme=self.TEMP_TOPIC)
+        self.assertIn("外套脱下后穿什么", rule_block)
+        self.assertIn("不编造具体温度数字", rule_block)
 
     def test_temperature_explicit_inspiration_keeps_showcase(self):
         prompt = self.prompt(self.TEMP_TOPIC, expression="STYLE_INSPIRATION")
@@ -1254,6 +1260,29 @@ class TemperatureGuideStructureTest(unittest.TestCase):
         self.assertEqual(errors2, [], errors2)
         self.assertNotIn("narrative_plan", plan2)
         self.assertNotIn("narrative", plan2["posts"][0])
+
+    def test_real_theme_resolution_routes_temperature_guide(self):
+        # 方案 P1-2：验收必须走真实链路 resolve_photo_theme →
+        # build_travel_topic → resolve_guide_execution，不能手工构造键。
+        from services.feishu_workflow import build_travel_topic
+        from services.photo_content_planner import resolve_guide_execution as _rge
+        theme = resolve_photo_theme("旅行·温度穿搭")
+        self.assertEqual(theme["theme_key"], "COOL_WEATHER_TRAVEL")
+        self.assertEqual(theme["travel_theme_type"], "TEMPERATURE")
+        self.assertEqual(
+            _rge(theme=theme, expression_mode=""),
+            "temperature_guide")
+        self.assertEqual(
+            _rge(theme=theme, expression_mode="PRACTICAL_GUIDE"),
+            "temperature_guide")
+        self.assertEqual(
+            _rge(theme=theme, expression_mode="STYLE_INSPIRATION"),
+            "")
+        topic = build_travel_topic(theme=theme, travel_place="首尔",
+                                   travel_variables={})
+        self.assertEqual(
+            _rge(theme=topic, expression_mode=""),
+            "temperature_guide")
 
     def test_rule_block_has_temperature_kind(self):
         prompt = PhotoReferenceVisionService._guide_plan_prompt_block(

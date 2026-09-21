@@ -23,26 +23,47 @@ class CopyTranslationError(RuntimeError):
 TRANSLATABLE_KEYS = ("title", "caption", "hashtags", "slide_texts")
 
 
-def pages_to_slide_texts(copy_block: Mapping[str, Any]) -> List[str] | None:
-    """把结构化 pages 确定性投影成 slide_texts（复审 F2）。
+def visible_page_text(page: Mapping[str, Any]) -> str:
+    """提取一页的**全部可见文字**（复审方案 P1-1）。
 
-    教程的 pages（kicker/headline/body/色卡）是最终文字唯一权威；投影规则：
-    kicker 与 headline 同页 → 「kicker\\nheadline」；否则 headline，缺
-    headline 用 body，末页无 CTA 时不追加。无 pages 返回 None（旧任务保持
-    原 slide_texts 不变）。
+    按渲染顺序：kicker → headline → body → 色卡可见标签（label_zh 的
+    对应发布语言在渲染端取自 label/label_local；此处并入 label 兜底与
+    label_zh 中文审计——翻译与核对需要全量，不塞回旧短标题布局）。
+
+    ``headline or body`` 的旧写法会把正文吞掉：本页有 headline 也有 body
+    时两段都是可见文字，必须都返回。
+    """
+    text = page.get("text") if isinstance(page.get("text"), Mapping) else page
+    parts: List[str] = []
+    for key in ("kicker", "headline", "body"):
+        value = str(text.get(key) or "").strip()
+        if value:
+            parts.append(value)
+    chips = [chip for chip in page.get("color_chips") or []
+             if isinstance(chip, Mapping)]
+    for chip in chips:
+        # 可见标签：发布语言 label 优先；label_zh 是中文审计，也进全量文字
+        # （中文回写需要它；指纹对 label_zh 敏感——改标签即重译）。
+        label = str(chip.get("label") or "").strip()
+        label_zh = str(chip.get("label_zh") or "").strip()
+        if label:
+            parts.append(label)
+        if label_zh and label_zh != label:
+            parts.append(label_zh)
+    return "\n".join(parts)
+
+
+def pages_to_slide_texts(copy_block: Mapping[str, Any]) -> List[str] | None:
+    """把结构化 pages 确定性投影成可见文字页（复审 F2 + 方案 P1-1）。
+
+    每页 = visible_page_text（kicker/headline/body/色卡标签全量，按渲染
+    顺序）；无 pages 返回 None（旧任务保持原 slide_texts 不变）。
     """
     pages = [page for page in copy_block.get("pages") or []
              if isinstance(page, Mapping)]
     if not pages:
         return None
-    projected = []
-    for page in pages:
-        text = page.get("text") if isinstance(page.get("text"), Mapping) else page
-        kicker = str(text.get("kicker") or "").strip()
-        headline = str(text.get("headline") or "").strip()
-        body = str(text.get("body") or "").strip()
-        lines = [line for line in (kicker, headline or body) if line]
-        projected.append("\n".join(lines))
+    projected = [visible_page_text(page) for page in pages]
     return projected if all(projected) else None
 
 
