@@ -136,35 +136,51 @@ def _break_allowed(text: str, position: int) -> bool:
 
 def wrap_text(text: str, font: ImageFont.FreeTypeFont, *, max_width: int,
               draw: ImageDraw.ImageDraw) -> List[str]:
-    """按宽度断行：空格优先，长泰文串按安全字符位断；不拆组合字符。"""
+    """按宽度断行：空格优先，长泰文串按安全字符位断；不拆组合字符。
+
+    测宽用 ``textbbox``（墨迹边界）而非 ``textlength``（advance 宽度）：
+    泰文组合字符与部分字形 advance 小于实际墨迹，按 textlength 断行会
+    得到超出画布的行（真实跑测 QA text_clipped，右侧栏 P1-P4）。
+    max_width 语义为**相对绘制起点**的可用宽度，与 bbox 的 [0]-based
+    墨迹右缘对齐。
+    """
     text = str(text or "").strip()
     if not text:
         return []
     max_width = max(24, int(max_width))
-    if draw.textlength(text, font=font) <= max_width:
+
+    def _ink_width(candidate: str) -> int:
+        bbox = draw.textbbox((0, 0), candidate, font=font, anchor="la")
+        return bbox[2] - bbox[0]
+
+    if _ink_width(text) <= max_width:
         return [text]
     lines: List[str] = []
     current = ""
     for token in text.split(" "):
         candidate = f"{current} {token}".strip()
-        if draw.textlength(candidate, font=font) <= max_width or not current:
-            if not current and draw.textlength(token, font=font) > max_width:
-                # 单个无空格长串（泰文常态）：按安全字符位细断。
-                chunk = ""
-                for i, char in enumerate(token):
-                    probe = chunk + char
-                    if (draw.textlength(probe, font=font) > max_width
-                            and chunk and _break_allowed(probe, len(chunk))):
-                        lines.append(chunk)
-                        chunk = char
-                    else:
-                        chunk = probe
-                current = chunk
-            else:
-                current = candidate
-        else:
-            lines.append(current)
+        if _ink_width(candidate) <= max_width:
+            current = candidate
+            continue
+        # 当前 token 放不进行尾：先把 current 收行。
+        lines.append(current)
+        current = ""
+        if _ink_width(token) <= max_width:
             current = token
+            continue
+        # 单个无空格长串（泰文常态）：按安全字符位细断。修正（2026-09-21
+        # QA text_clipped）：旧实现只在 token 是行首时才细断——行中的长
+        # token 会整行塞入导致超宽越界。现在 token 超宽一律细断。
+        chunk = ""
+        for i, char in enumerate(token):
+            probe = chunk + char
+            if (_ink_width(probe) > max_width
+                    and chunk and _break_allowed(probe, len(chunk))):
+                lines.append(chunk)
+                chunk = char
+            else:
+                chunk = probe
+        current = chunk
     if current:
         lines.append(current)
     return [line for line in lines if line]
@@ -431,7 +447,12 @@ def render_structured_page_v2(
         # 分隔线沿用账号中性背景上的低调竖线
         draw.rectangle([main_w - 2, 0, main_w - 1, height], fill=kicker_color)
         side_x = main_w + round(width * 0.03)
-        side_w = width - side_x - round(width * 0.03)
+        # 复审跑测修正（QA text_clipped 实测）：wrap/fit 的 max_width 是
+        # 从 x=0 起算的墨迹上限，绘制起点却是 side_x——直接用 side_w 会让
+        # 每行右探 side_x（≈108px）越出画布。可用宽度按「安全右缘-侧栏
+        # 起点」计算。
+        safe_right = width - round(width * 0.03)
+        side_w = safe_right - side_x
         pad = round(width * 0.02)
         y = round(height * 0.06)
         kicker = str(text.get("kicker") or "").strip()
@@ -472,9 +493,13 @@ def render_structured_page_v2(
             block_h = ((k_font.size + spacing) * len(k_lines)
                        + (h_font.size + spacing) * len(h_lines)
                        + (b_font.size + spacing) * len(b_lines))
+            # 复审跑测修正：块间 2 次 spacing + chips 前 2 次 spacing 也是
+            # 实际占高；漏算 ~30px 导致末行贴边被裁（QA text_clipped）。
+            inter_block = spacing * 3
             chip_block_h = sum(
                 len(lines) * chip_line_h for lines in chip_line_groups) \
-                + len(chips) * (spacing + swatch // 4)
+                + len(chips) * (spacing + max(0, swatch - chip_line_h)) \
+                + inter_block
             if y + block_h + chip_block_h <= height * 0.95:
                 break
         else:
