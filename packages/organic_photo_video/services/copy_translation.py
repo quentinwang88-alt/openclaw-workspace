@@ -24,14 +24,16 @@ TRANSLATABLE_KEYS = ("title", "caption", "hashtags", "slide_texts")
 
 
 def visible_page_text(page: Mapping[str, Any]) -> str:
-    """提取一页的**全部可见文字**（复审方案 P1-1）。
+    """提取一页的**可见文字**（复审方案 P1-1 + 真实跑测修正）。
 
-    按渲染顺序：kicker → headline → body → 色卡可见标签（label_zh 的
-    对应发布语言在渲染端取自 label/label_local；此处并入 label 兜底与
-    label_zh 中文审计——翻译与核对需要全量，不塞回旧短标题布局）。
-
+    按渲染顺序：kicker → headline → body → 色卡**发布语言标签**（label）。
     ``headline or body`` 的旧写法会把正文吞掉：本页有 headline 也有 body
     时两段都是可见文字，必须都返回。
+
+    ``label_zh`` 是中文审计字段，渲染端**不画**（Sarabun 无 CJK 字形），
+    因此不进可见投影——否则 slide_texts 会带中文、被发布语言纯度校验
+    拦截（recvvPdIqkOoWG 实测）。中文回写走逐字段翻译链，label_zh 由
+    manifest 携带供审计。
     """
     text = page.get("text") if isinstance(page.get("text"), Mapping) else page
     parts: List[str] = []
@@ -42,14 +44,9 @@ def visible_page_text(page: Mapping[str, Any]) -> str:
     chips = [chip for chip in page.get("color_chips") or []
              if isinstance(chip, Mapping)]
     for chip in chips:
-        # 可见标签：发布语言 label 优先；label_zh 是中文审计，也进全量文字
-        # （中文回写需要它；指纹对 label_zh 敏感——改标签即重译）。
         label = str(chip.get("label") or "").strip()
-        label_zh = str(chip.get("label_zh") or "").strip()
         if label:
             parts.append(label)
-        if label_zh and label_zh != label:
-            parts.append(label_zh)
     return "\n".join(parts)
 
 
@@ -81,12 +78,21 @@ def copy_fingerprint(copy_block: Mapping[str, Any]) -> str:
     """发布文案指纹：修订任何发布文字都会改变指纹并触发重译。
 
     复审 F2：pages 存在时先投影成 slide_texts 再取指纹——只改 pages.body
-    也会改变指纹、触发重译（此前投影缺失导致缓存不失效、中文缺页上文字）。
+    也会改变指纹、触发重译。色卡 label_zh（中文审计字段）同样并入指纹：
+    修改标签即重译中文回写；但它**不进** slide 投影（渲染不画中文）。
     """
     canonical = _authoritative_copy(copy_block)
     payload = json.dumps(
         {key: canonical.get(key) for key in TRANSLATABLE_KEYS},
         ensure_ascii=False, sort_keys=True)
+    label_zh_signature = [
+        str((chip or {}).get("label_zh") or "")
+        for page in (copy_block or {}).get("pages") or []
+        if isinstance(page, Mapping)
+        for chip in (page.get("color_chips") or [])
+        if isinstance(chip, Mapping)
+    ]
+    payload += json.dumps(label_zh_signature, ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
 

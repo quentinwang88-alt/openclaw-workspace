@@ -2439,8 +2439,14 @@ class PhotoReferenceVisionService:
             # F1/F2 真实入口收口：教程主题的文案合同——一页一方法、4 页、
             # 无投票 CTA。与公共 JSON 结构、商品/旅行变量合同并存；guide
             # 规则块在提示尾部追加问题定义与建议分配，不与本块冲突。
-            guide_is_travel = (
-                str(topic.get("theme_key") or "") == "TRAVEL_STYLING_GUIDE")
+            # 方案 P1-2 真实链路修正：温度主题（travel_theme_type=
+            # TEMPERATURE）也要求地点（SCENE/PHOTO 类旅行语义相同）——
+            # 此前只认 TRAVEL_STYLING_GUIDE，温度走了「留空」分支而地点
+            # 结构校验又要求包含 place_localized，自相矛盾两次校验失败
+            # （样片 recvvPdTajO5T7 实测）。
+            guide_is_travel = bool(
+                str(topic.get("theme_key") or "") == "TRAVEL_STYLING_GUIDE"
+                or str(topic.get("place") or "").strip())
             guide_place_rule = (
                 "填写了地点时 title 与封面必须包含 place_localized（目标市场常用"
                 "地点名，如东京→โตเกียว），place_localized 填该地点名；未填写地点"
